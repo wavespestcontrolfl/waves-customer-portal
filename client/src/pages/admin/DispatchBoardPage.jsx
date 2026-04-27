@@ -3,9 +3,10 @@
  * directly; delegates state to useDispatchBoard() and rendering to
  * the dispatch component family.
  *
- * Phase 2 v1 scope. Out of scope: drag-to-reassign, color borders on
- * roster cards (green/amber/red on schedule), revenue/KPI strips,
- * mobile responsiveness, tech drawer.
+ * Phase 2 scope shipped: roster + map + action queue + job drawer +
+ * tech drawer. Out of scope (still): drag-to-reassign, color borders
+ * on roster cards (green/amber/red), revenue/KPI strips, mobile
+ * responsiveness.
  *
  * Tier 1 V2 styling.
  */
@@ -16,6 +17,7 @@ import TechRosterPane from '../../components/dispatch/TechRosterPane';
 import DispatchMap from '../../components/dispatch/DispatchMap';
 import ActionQueuePane from '../../components/dispatch/ActionQueuePane';
 import JobDrawer from '../../components/dispatch/JobDrawer';
+import TechDrawer from '../../components/dispatch/TechDrawer';
 
 export default function DispatchBoardPage() {
   const {
@@ -45,6 +47,11 @@ export default function DispatchBoardPage() {
   const handleCloseJob = useCallback(
     () => setSelectedJobId(null),
     [setSelectedJobId]
+  );
+
+  const handleCloseTech = useCallback(
+    () => setSelectedTechId(null),
+    [setSelectedTechId]
   );
 
   if (loading) {
@@ -85,6 +92,7 @@ export default function DispatchBoardPage() {
         right={<ActionQueuePane />}
       />
       <JobDrawer jobId={selectedJobId} onClose={handleCloseJob} />
+      <TechDrawer techId={selectedTechId} onClose={handleCloseTech} />
     </>
   );
 }

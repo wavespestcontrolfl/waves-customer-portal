@@ -787,6 +787,118 @@ router.get('/jobs/:id', requireAdmin, async (req, res, next) => {
   }
 });
 
+// GET /api/admin/dispatch/techs/:id — tech drawer hydration.
+//
+// Returns tech basics + current tech_status + today's route (one row
+// per scheduled_services for tech_id today, ET) + roll-up counts
+// (completed / total / open tech_late).
+//
+// Mirrors GET /jobs/:id in shape: richer than a broadcast, on-demand,
+// admin-only via requireAdmin. Surfaces the dispatcher's "is this
+// tech on track today" question without having to scan the map +
+// roster + action queue.
+//
+// Address is normalized identically to /board and /jobs/:id so the
+// drawer's route list looks the same as the rest of the dispatch
+// surfaces. Customer last name is included (full, not initial) since
+// this is an admin-authenticated GET — same scope decision as
+// /jobs/:id.
+router.get('/techs/:id', requireAdmin, async (req, res, next) => {
+  try {
+    const tech = await db('technicians as t')
+      .leftJoin('tech_status as ts', 't.id', 'ts.tech_id')
+      .where('t.id', req.params.id)
+      .first(
+        't.id', 't.name', 't.role', 't.phone', 't.email', 't.active',
+        'ts.status', 'ts.lat', 'ts.lng', 'ts.current_job_id',
+        'ts.updated_at as status_updated_at'
+      );
+    if (!tech) return res.status(404).json({ error: 'Tech not found' });
+
+    // Anchor the route to "today in ET" so a dispatcher in Bradenton
+    // sees the same day boundary as the detector cron + /board.
+    const today = (await db.raw(
+      `SELECT (NOW() AT TIME ZONE 'America/New_York')::date AS d`
+    )).rows[0].d;
+
+    const routeRows = await db('scheduled_services as s')
+      .leftJoin('customers as c', 's.customer_id', 'c.id')
+      .where('s.technician_id', tech.id)
+      .where('s.scheduled_date', today)
+      .orderBy('s.window_start', 'asc')
+      .select(
+        's.id as job_id',
+        's.status',
+        's.service_type',
+        's.scheduled_date',
+        's.window_start',
+        's.window_end',
+        'c.first_name as cust_first_name',
+        'c.last_name as cust_last_name',
+        'c.address_line1',
+        'c.address_line2',
+        'c.city',
+        'c.state',
+        'c.zip'
+      );
+
+    const completed = routeRows.filter((r) => r.status === 'completed').length;
+    const total = routeRows.length;
+
+    // Open tech_late alerts scoped to this tech today. Used as the
+    // headline "N late" stat in the drawer header. Counts any
+    // unresolved tech_late where tech_id matches; the partial unique
+    // index keeps this O(open-rows-for-tech).
+    const lateRow = await db('dispatch_alerts')
+      .where({ type: 'tech_late', tech_id: tech.id })
+      .whereNull('resolved_at')
+      .count({ count: '*' })
+      .first();
+
+    function normalizeAddress(r) {
+      const line1 = r.address_line1 || '';
+      const line2 = r.address_line2 ? ` ${r.address_line2}` : '';
+      const cityState = r.city ? `, ${r.city}` : '';
+      const stateZip = r.state ? `, ${r.state}${r.zip ? ` ${r.zip}` : ''}` : '';
+      return `${line1}${line2}${cityState}${stateZip}`.trim();
+    }
+
+    return res.json({
+      id: tech.id,
+      name: tech.name,
+      role: tech.role || 'technician',
+      phone: tech.phone || null,
+      email: tech.email || null,
+      active: tech.active,
+      status: tech.status || 'idle',
+      current_job_id: tech.current_job_id || null,
+      lat: tech.lat == null ? null : Number(tech.lat),
+      lng: tech.lng == null ? null : Number(tech.lng),
+      status_updated_at: tech.status_updated_at || null,
+      today: {
+        scheduled_date: today,
+        completed,
+        total,
+        late_count: Number(lateRow?.count) || 0,
+      },
+      route: routeRows.map((r) => ({
+        job_id: r.job_id,
+        customer_first_name: r.cust_first_name,
+        customer_last_name: r.cust_last_name,
+        address: normalizeAddress(r),
+        service_type: r.service_type || null,
+        scheduled_date: r.scheduled_date,
+        window_start: r.window_start || null,
+        window_end: r.window_end || null,
+        status: r.status,
+      })),
+    });
+  } catch (err) {
+    logger.error(`[dispatch/techs/:id] hydration failed: ${err.message}`);
+    next(err);
+  }
+});
+
 // GET /api/admin/dispatch/alerts — action queue read endpoint.
 //
 // Returns dispatch_alerts rows enriched with tech_name + customer
