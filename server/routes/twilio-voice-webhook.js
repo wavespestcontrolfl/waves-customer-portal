@@ -419,7 +419,10 @@ router.post('/call-status', async (req, res) => {
         }),
       });
 
-      require('../services/conversations').recordTouchpoint({
+      // Touchpoint is best-effort enrichment — fire-and-forget so a slow
+      // unified-messages write can't block Twilio's webhook timeout. Failures
+      // are logged with CallSid for recovery, not silently swallowed.
+      void require('../services/conversations').recordTouchpoint({
         customerId: customer?.id,
         channel: 'voice',
         ourEndpointId: ourEndpoint,
@@ -433,7 +436,9 @@ router.post('/call-status', async (req, res) => {
           domain: numberConfig?.domain || null,
           source: 'status_callback',
         },
-      }).catch(() => {});
+      }).catch((err) => {
+        logger.error(`recordTouchpoint failed for CallSid=${CallSid}: ${err.message}`);
+      });
     });
 
     res.sendStatus(200);
