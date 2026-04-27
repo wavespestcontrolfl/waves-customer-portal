@@ -157,6 +157,10 @@ export function ComposeView() {
 
   // AI modal
   const [aiOpen, setAiOpen] = useState(false);
+  // Last template the operator chose (via the Template button row OR the
+  // AI Draft modal). Plumbed into /draft-ai so AI drafts land in the
+  // selected template's structure + voice.
+  const [selectedTemplate, setSelectedTemplate] = useState(null);
 
   const segmentFilter = useMemo(() => {
     if (segmentMode === 'all') return null;
@@ -190,6 +194,7 @@ export function ComposeView() {
     if (!t) return;
     if (htmlBody && !confirm('Replace the current HTML body with this template?')) return;
     setHtmlBody(t.html);
+    setSelectedTemplate(key === 'blank' ? null : key);
   };
 
   const saveDraft = async () => {
@@ -260,16 +265,17 @@ export function ComposeView() {
     setScheduleAt('');
   };
 
-  const handleAiDraft = async ({ prompt, audience, tone, includeCTA }) => {
+  const handleAiDraft = async ({ prompt, template, audience, tone, includeCTA }) => {
     const res = await adminFetch('/admin/newsletter/draft-ai', {
       method: 'POST',
-      body: JSON.stringify({ prompt, audience, tone, includeCTA }),
+      body: JSON.stringify({ prompt, template, audience, tone, includeCTA }),
     });
     const d = res.draft || {};
     if (d.subject) setSubject(d.subject);
     if (d.previewText) setPreviewText(d.previewText);
     if (d.htmlBody) setHtmlBody(d.htmlBody);
     if (d.textBody) setTextBody(d.textBody);
+    if (template) setSelectedTemplate(template);
     setAiOpen(false);
     setStatus('AI draft inserted. Review before saving.');
   };
@@ -475,26 +481,37 @@ export function ComposeView() {
         )}
       </div>
 
-      {aiOpen && <AiDraftModal onClose={() => setAiOpen(false)} onDraft={handleAiDraft} />}
+      {aiOpen && (
+        <AiDraftModal
+          initialTemplate={selectedTemplate}
+          onClose={() => setAiOpen(false)}
+          onDraft={handleAiDraft}
+        />
+      )}
     </Card>
   );
 }
 
 // ── AI draft modal ────────────────────────────────────────────────
 
-function AiDraftModal({ onClose, onDraft }) {
+function AiDraftModal({ initialTemplate, onClose, onDraft }) {
   const [prompt, setPrompt] = useState('');
+  const [template, setTemplate] = useState(initialTemplate || '');
   const [audience, setAudience] = useState('Existing Waves customers');
   const [tone, setTone] = useState('Neighborly, owner-operator');
   const [includeCTA, setIncludeCTA] = useState(true);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState('');
 
+  // Templates eligible for AI drafting — every TEMPLATES entry except
+  // 'blank', which has no structure for Claude to follow.
+  const draftableTemplates = TEMPLATES.filter((t) => t.key !== 'blank');
+
   const run = async () => {
     if (prompt.trim().length < 8) { setErr('Describe the newsletter (at least 8 characters)'); return; }
     setLoading(true); setErr('');
     try {
-      await onDraft({ prompt, audience, tone, includeCTA });
+      await onDraft({ prompt, template: template || null, audience, tone, includeCTA });
     } catch (e) {
       setErr(e.message);
       setLoading(false);
@@ -518,6 +535,23 @@ function AiDraftModal({ onClose, onDraft }) {
             className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
             placeholder="e.g. Spring uptick in no-see-ums and what homeowners can do this week. Want to mention our mosquito service as a soft CTA."
           />
+        </div>
+
+        <div>
+          <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">Template (optional)</label>
+          <select
+            value={template}
+            onChange={(e) => setTemplate(e.target.value)}
+            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
+          >
+            <option value="">Free-form (no template)</option>
+            {draftableTemplates.map((t) => (
+              <option key={t.key} value={t.key}>{t.label}</option>
+            ))}
+          </select>
+          <p className="text-11 text-ink-tertiary mt-1">
+            Picks a structure + voice for Claude to draft into. Defaults to whatever you last clicked above.
+          </p>
         </div>
 
         <div className="grid grid-cols-2 gap-3">

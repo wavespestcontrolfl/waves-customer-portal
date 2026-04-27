@@ -310,13 +310,18 @@ router.post('/segment-preview', async (req, res, next) => {
 });
 
 // POST /api/admin/newsletter/draft-ai — Claude drafts a newsletter
-// Body: { prompt, audience?, tone?, includeCTA? }
+// Body: { prompt, template?, audience?, tone?, includeCTA? }
+//   template: one of 'weekend' | 'pest_concern' | 'local_spotlight'
+//             | 'service_promo' (or omitted for free-form). Maps to a
+//             structure + voice block that's appended to the system
+//             prompt — the templates themselves live in
+//             client/src/pages/admin/NewsletterTabs.jsx.
 router.post('/draft-ai', async (req, res) => {
   try {
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
       return res.status(400).json({ error: 'Anthropic API not configured' });
     }
-    const { prompt, audience, tone, includeCTA } = req.body;
+    const { prompt, template, audience, tone, includeCTA } = req.body;
     if (!prompt || prompt.trim().length < 8) {
       return res.status(400).json({ error: 'prompt required (min 8 chars)' });
     }
@@ -326,6 +331,48 @@ router.post('/draft-ai', async (req, res) => {
     // Ground the draft in SWFL season + local community — this is a
     // neighborhood newsletter, not a generic pest-industry blast.
     const month = new Date().toLocaleString('en-US', { month: 'long', timeZone: 'America/New_York' });
+
+    // Per-template structure + voice guidance — kept in sync with the
+    // TEMPLATES array in client/src/pages/admin/NewsletterTabs.jsx.
+    // The client's templates seed the Compose textarea; this guidance
+    // tells Claude to draft into the same structure when the operator
+    // picks a template + clicks AI Draft.
+    const TEMPLATE_GUIDANCE = {
+      weekend: `
+TEMPLATE: Weekend Lineup
+- Lead with an emoji + a punchy, FOMO-friendly weekend headline (think "Your No-Lame-Plans Weekend Starts Here", not "Weekly Update").
+- Open with a casual, irreverent hook (1-2 sentences).
+- Body: 3-5 SWFL events. Each event uses <h2>[Event name]</h2> followed by <p><strong>[City] · [Day, time]</strong> — [one or two sentences on why it's worth going]</p>.
+- Optional final section <h2>One more thing</h2> with a soft pest/lawn tie-in if it fits naturally.
+- Sign off "— The Waves crew" (not "Waves Pest Control").
+- Tone is neighborly + slightly irreverent; this format is the highest-engagement one historically.`,
+
+      pest_concern: `
+TEMPLATE: Pest / Lawn Concern
+- Lead with an emoji + concern headline (e.g., "🦟 Mosquitoes are back across SWFL").
+- <h2>Why now</h2> — 1-2 sentences on weather/season/lifecycle trigger.
+- <h2>Signs to watch for</h2> — <ul><li> with 3-5 specific, visible signs.
+- <h2>What to do this week</h2> — 2-3 sentences of practical homeowner advice + soft Waves mention. Don't oversell.
+- Sign off "Stay ahead of it, — The Waves crew".`,
+
+      local_spotlight: `
+TEMPLATE: Local Spotlight
+- Lead with an emoji + food/shop/lifestyle hook.
+- Open: 1-2 sentences framing the rundown ("built from what our techs and neighbors are talking about").
+- Body: 3-4 spots. Each uses <h2>[Spot name]</h2> followed by <p><strong>[Neighborhood / city]</strong> — [1-2 sentences on why to visit. Drop a vibe or a specific dish]</p>.
+- Sign off with a casual closer like "Tell 'em Waves sent you. — The Waves crew".`,
+
+      service_promo: `
+TEMPLATE: Service Promo
+- Lead with an emoji + a clear, direct offer headline (no clickbait — say the dollar value or % off).
+- Open: 1-2 sentences naming the offer, audience, and expiration date.
+- <h2>The deal</h2> — exact offer, eligibility, dollar value.
+- <h2>What's included</h2> — <ul><li> 3-4 inclusions.
+- <h2>How to claim</h2> — clear next step (reply, call) and expiration.
+- This is a promotional template — DO end with a clear CTA regardless of the includeCTA setting.
+- Sign off "— The Waves crew".`,
+    };
+    const templateGuidance = TEMPLATE_GUIDANCE[template] || '';
 
     const systemPrompt = `You draft email newsletters for Waves Pest Control, a family-owned pest control + lawn care company in Southwest Florida (SWFL). Core service area: Bradenton, Parrish, Palmetto, Sarasota, Venice, North Port, Lakewood Ranch.
 
@@ -372,6 +419,10 @@ FORMAT (HTML body):
 - Sign off from "Waves Pest Control" (or a team member if the prompt names one)
 - NO unsubscribe footer (appended automatically)
 - NO <html>/<head>/<body> wrapper — just the content markup
+${templateGuidance ? `
+
+WHEN A TEMPLATE IS SELECTED, FOLLOW ITS STRUCTURE + VOICE OVER THE GENERIC FORMAT ABOVE:
+${templateGuidance}` : ''}
 
 Return STRICT JSON with these keys:
 {
