@@ -16,10 +16,15 @@
  *   - Address is not stripped of unit/apt because unit/apt lives on
  *     customers.address_line2, which we never return. Only
  *     address_line1 (street) goes out.
- *   - Completion summary joins are best-effort — service_records is
- *     matched by (customer_id, service_date, service_type) since
- *     there's no direct FK from scheduled_services → service_records
- *     on the schema today.
+ *   - Completion summary joins use the scheduled_service_id FK on
+ *     service_records (migration 20260427000007). Same canonical path
+ *     the tech-track upload route uses — guarantees we surface the
+ *     photos that belong to *this* visit, not a different same-day
+ *     visit for the same customer.
+ *   - Service photos are read-time presigned via PhotoService inside
+ *     this trusted token-scoped boundary. We never store presigned
+ *     URLs in service_photos.s3_url (they'd expire); s3_key is the
+ *     canonical column tech-track.js writes to.
  */
 const express = require('express');
 const router = express.Router();
@@ -27,6 +32,14 @@ const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
+const PhotoService = require('../services/photos');
+
+// Customer track page TTL — long enough that the page can be left open
+// on a phone for a tech's full visit window without 403'ing on photo
+// thumbnails, short enough that a leaked URL doesn't have indefinite
+// reach. resolveTechPhotoUrl defaults to 900 (15min); we match it here
+// so a single page-load presigns the whole bundle on one cadence.
+const SERVICE_PHOTO_TTL_SECONDS = 15 * 60;
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
@@ -81,16 +94,15 @@ async function buildSummary(service) {
     logger.warn(`[track-public] invoice lookup failed: ${err.message}`);
   }
 
-  // Service record — best-effort match on customer + date + type.
+  // Service record — direct lookup by scheduled_service_id FK
+  // (migration 20260427000007). Same path tech-track.js uses for
+  // photo upload, so customer view + tech upload always resolve to
+  // the same row even when a customer has two same-day visits.
   let serviceReportToken = null;
   let photos = [];
   try {
     const record = await db('service_records')
-      .where({
-        customer_id: service.customer_id,
-        service_date: service.scheduled_date,
-        service_type: service.service_type,
-      })
+      .where({ scheduled_service_id: service.id })
       .orderBy('created_at', 'desc')
       .first('id', 'report_view_token');
     serviceReportToken = record?.report_view_token || null;
@@ -99,8 +111,21 @@ async function buildSummary(service) {
         .where({ service_record_id: record.id })
         .orderBy('sort_order', 'asc')
         .limit(6)
-        .select('s3_url');
-      photos = photoRows.map((p) => p.s3_url).filter(Boolean);
+        .select('s3_key');
+      // Presign each photo on read inside this trusted (token-scoped)
+      // boundary. tech-track.js writes only to s3_key — s3_url is the
+      // legacy column and is null in practice, which is why the
+      // customer track page was rendering an empty photo array even
+      // for completed visits with photos attached.
+      photos = (await Promise.all(photoRows.map(async (p) => {
+        if (!p.s3_key) return null;
+        try {
+          return await PhotoService.getViewUrl(p.s3_key, SERVICE_PHOTO_TTL_SECONDS);
+        } catch (err) {
+          logger.warn(`[track-public] presign failed for ${p.s3_key}: ${err.message}`);
+          return null;
+        }
+      }))).filter(Boolean);
     }
   } catch (err) {
     logger.warn(`[track-public] service_records lookup failed: ${err.message}`);
