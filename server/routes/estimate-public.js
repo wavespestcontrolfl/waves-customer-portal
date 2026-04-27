@@ -248,12 +248,13 @@ function computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTo
 const PERKS = [
   'Priority scheduling — you jump the queue',
   'Re-service between visits at no charge',
-  'Locked-in pricing for 24 months',
+  'Locked-in pricing for 12 months',
   'Free annual termite inspection',
   '15% off any one-time treatment',
   'Senior / military / first-responder discount stacking',
   'One point of contact — no call-center runaround',
   'Text your tech directly for quick questions',
+  'Customer portal for service history, invoices, and payments',
   'Owner-operator accountability on every visit',
 ];
 
