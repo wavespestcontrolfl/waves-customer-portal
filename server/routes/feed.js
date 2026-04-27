@@ -4,6 +4,7 @@ const xml2js = require('xml2js');
 const rateLimit = require('express-rate-limit');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
+const { getPublishedPosts } = require('../services/newsletter-feed');
 
 router.use(authenticate);
 
@@ -155,23 +156,12 @@ router.get('/blog', async (req, res, next) => {
 });
 
 // =========================================================================
-// GET /api/feed/newsletter — Beehiiv newsletter
+// GET /api/feed/newsletter — sent campaigns from newsletter_sends
+// (Beehiiv-imported historical posts + in-house pipeline sends, unified)
 // =========================================================================
 router.get('/newsletter', async (req, res, next) => {
   try {
-    const data = await fetchWithCache('newsletter', 'https://rss.beehiiv.com/feeds/PKlbF8uD3m.xml');
-    const items = parseItems(data?.rss?.channel);
-
-    const posts = items.slice(0, 6).map(item => ({
-      title: item.title || '',
-      link: safeLink(item.link) || '',
-      pubDate: item.pubDate || '',
-      description: stripHtml(item.description || '').slice(0, 200),
-      image: extractImage(item),
-      source: 'newsletter',
-      sourceName: 'Waves Newsletter',
-    }));
-
+    const posts = await getPublishedPosts({ limit: 6 });
     res.json({ posts });
   } catch (err) { next(err); }
 });

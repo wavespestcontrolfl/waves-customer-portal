@@ -156,6 +156,9 @@ app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }), requir
 // SendGrid event webhook verifies an ECDSA signature over the raw body — same reason, mount BEFORE json parser.
 // The route attaches its own express.raw() so it only consumes the raw body for its own path.
 app.use('/api/webhooks/sendgrid', require('./routes/webhooks-sendgrid'));
+// Resend event webhook (placeholder — wired for migration). Same raw-body
+// reason as SendGrid; verifies a Svix HMAC-SHA256 signature.
+app.use('/api/webhooks/resend', require('./routes/webhooks-resend'));
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
