@@ -153,6 +153,12 @@ function buildEventPrompt(event) {
     `- ${event.title}`,
     `- ${dateLabel}${cityLabel ? ` · ${cityLabel}` : ''}${event.venueName ? ` · ${event.venueName}` : ''}`,
   ];
+  // Include venueAddress when populated by the P3b leg 3 normalizer.
+  // Helps Claude write specific where-to-find-it copy ("Bayfront Park,
+  // 5 Bayfront Dr, Sarasota — free parking on Tamiami") instead of
+  // generic ("at the Sarasota waterfront"). Some events have venueName
+  // but no address (yet) → omit this line in that case.
+  if (event.venueAddress) lines.push(`- Address: ${event.venueAddress}`);
   if (desc) lines.push(`- ${desc}`);
   if (event.eventUrl) lines.push(`- ${event.eventUrl}`);
   lines.push('');
