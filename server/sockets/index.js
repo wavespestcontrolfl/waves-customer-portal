@@ -22,7 +22,15 @@
  *                          broadcasts on every job status transition for
  *                          a job belonging to that customer. Staff do
  *                          NOT join customer rooms — they get the same
- *                          data via dispatch:job_update (separate PR).
+ *                          data via dispatch:job_update.
+ *
+ *                          Two userTypes can join customer:<id>:
+ *                            - 'customer'        — full-portal JWT session
+ *                            - 'customer-track'  — public TrackPage
+ *                                                  authenticated via
+ *                                                  scheduled_services.
+ *                                                  track_view_token (no
+ *                                                  JWT). Read-only.
  *
  * CORS origins read from server/config/cors-origins.js — same source
  * the Express CORS middleware uses. Don't redefine the list here.
@@ -67,10 +75,12 @@ function attachSockets(httpServer) {
     // comment for why.
     if (socket.userType === 'admin' || socket.userType === 'technician') {
       socket.join('dispatch:admins');
-    } else if (socket.userType === 'customer') {
+    } else if (socket.userType === 'customer' || socket.userType === 'customer-track') {
       // Customer joins exactly one room: their own. socket.userId
-      // came from socket auth's verified DB lookup, so a forged
-      // customer_id can't be used to join someone else's room.
+      // came from socket auth's verified DB lookup (or, for
+      // customer-track, the track_view_token resolution), so a
+      // forged customer_id can't be used to join someone else's
+      // room.
       socket.join(`customer:${socket.userId}`);
     }
 

@@ -1,10 +1,25 @@
 import Icon from '../components/Icon';
 import { COLORS } from '../theme-brand';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
+import { io } from 'socket.io-client';
 import BrandFooter from '../components/BrandFooter';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+
+// Same shape as useDispatchBoard's socketOrigin helper. If API_BASE
+// is a relative path, return undefined → io() defaults to same-origin
+// (works in production + Vite dev with the /socket.io ws proxy). If
+// API_BASE is a full URL, return its origin so the socket handshake
+// hits the same backend the HTTP fetches do.
+function socketOrigin() {
+  if (!API_BASE || API_BASE.startsWith('/')) return undefined;
+  try {
+    return new URL(API_BASE).origin;
+  } catch {
+    return undefined;
+  }
+}
 
 const FONT_BODY = "'Inter', system-ui, sans-serif";
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
@@ -353,33 +368,72 @@ export default function TrackPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
-  const fetchedRef = useRef(false);
 
-  useEffect(() => {
-    if (fetchedRef.current) return;
-    fetchedRef.current = true;
-
-    fetch(`${API_BASE}/public/track/${token}`)
-      .then((r) => {
-        if (r.status === 404) {
-          setNotFound(true);
-          setLoading(false);
-          return null;
-        }
-        return r.json();
-      })
-      .then((body) => {
-        if (body) setData(body);
-        setLoading(false);
-      })
-      .catch(() => {
+  // Refetch the public track endpoint. Used both for the initial mount
+  // and as the wake-up handler when a customer:job_update broadcast
+  // lands on the socket. The broadcast payload is intentionally narrow
+  // (PII boundary in services/job-status.js — job_id, status, eta,
+  // tech_id, tech_first_name, updated_at) and the page renders a much
+  // richer state object (window, property, vehicle, summary,
+  // cancellation, etc.). Refetching gives us the full state without
+  // having to merge a narrow payload into a rich UI.
+  const fetchTrack = useCallback(async () => {
+    try {
+      const r = await fetch(`${API_BASE}/public/track/${token}`);
+      if (r.status === 404) {
         setNotFound(true);
-        setLoading(false);
-      });
-
-    // Phase 2: setInterval(fetchTrack, (data?.meta?.pollIntervalSeconds || 30) * 1000)
-    // to refresh vehicle position + state transitions live.
+        return;
+      }
+      const body = await r.json();
+      if (body) setData(body);
+    } catch {
+      // Don't clobber an existing render on a transient network blip;
+      // the next broadcast (or page refresh) will recover.
+    }
   }, [token]);
+
+  // Initial fetch on mount.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      await fetchTrack();
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [fetchTrack]);
+
+  // Live socket subscription. Authenticates with the public track
+  // token (PR adding socket auth's trackToken path); server resolves
+  // it to a customer_id and joins the socket to customer:<id>.
+  // Receives customer:job_update broadcasts whenever any job belonging
+  // to this customer transitions; we just refetch on each.
+  //
+  // Filtering by job_id on the client is possible (the broadcast
+  // payload carries job_id) but in practice a customer rarely has
+  // multiple active jobs, and a spurious refetch is cheap. Skip the
+  // filter for v1.
+  //
+  // Best-effort: if the socket can't connect (network issue, server
+  // restart, etc.), the user still gets the initial fetch's data and
+  // a refresh restores live updates. We don't surface socket errors
+  // to the UI.
+  useEffect(() => {
+    if (!token || notFound) return undefined;
+    const origin = socketOrigin();
+    const socket = origin
+      ? io(origin, { auth: { trackToken: token }, transports: ['websocket', 'polling'], reconnection: true })
+      : io({ auth: { trackToken: token }, transports: ['websocket', 'polling'], reconnection: true });
+
+    function handleJobUpdate() {
+      fetchTrack();
+    }
+    socket.on('customer:job_update', handleJobUpdate);
+
+    return () => {
+      socket.off('customer:job_update', handleJobUpdate);
+      socket.disconnect();
+    };
+  }, [token, notFound, fetchTrack]);
 
   if (loading) return <Page><SkeletonCard /></Page>;
   if (notFound || !data) return <Page><NotFoundCard /></Page>;

@@ -1,72 +1,90 @@
 /**
- * Socket.io connection auth — bridges the two existing JWT shapes from
- * server/middleware/auth.js (customers, decoded.customerId) and
- * server/middleware/admin-auth.js (techs + admins,
- * decoded.technicianId). Either shape verifies against the same secret
- * (config.jwt.secret), so we run jwt.verify once and branch on which
- * claim is present.
+ * Socket.io connection auth — bridges THREE token shapes:
+ *   1. JWT with decoded.customerId  — full-customer-portal session
+ *   2. JWT with decoded.technicianId — staff (admin or technician)
+ *   3. Public track token            — customer arrives via SMS link to
+ *                                       /track/:token, no JWT. Looks up
+ *                                       scheduled_services.track_view_token,
+ *                                       validates expiry, derives the
+ *                                       customer_id, and treats the
+ *                                       socket as a (read-only)
+ *                                       customer-track session that
+ *                                       joins customer:<customer_id>.
  *
  * Token transport (in priority order):
- *   1. socket.handshake.auth.token  — preferred, set by client
- *      via io(url, { auth: { token } })
- *   2. socket.handshake.headers.authorization  — Bearer fallback for
- *      older clients reusing their HTTP auth header
+ *   1. socket.handshake.auth.token       — JWT (customer or staff)
+ *   2. socket.handshake.auth.trackToken  — public track token
+ *   3. socket.handshake.headers.authorization  — Bearer JWT fallback
  *
  * Outcomes:
  *   - missing token        → reject with code AUTH_FAILED
- *   - invalid signature    → reject with code AUTH_FAILED
- *   - expired              → reject with code TOKEN_EXPIRED
- *   - decoded customerId   → socket.userType='customer',
- *                            socket.userId=customerId
- *   - decoded technicianId → DB lookup; if technicians row exists,
- *                            is active, and role still matches the
- *                            JWT claim, set socket.userType=role
- *                            and socket.userId=technicianId; otherwise
- *                            reject with IDENTITY_REVOKED
- *   - decoded but no claim → reject with code AUTH_FAILED
+ *   - JWT invalid          → reject with code AUTH_FAILED
+ *   - JWT expired          → reject with code TOKEN_EXPIRED
+ *   - JWT customerId       → DB lookup; active customer → join
+ *                            customer:<id>; otherwise IDENTITY_REVOKED
+ *   - JWT technicianId     → DB lookup; active staff with matching role
+ *                            → join dispatch:admins; otherwise
+ *                            IDENTITY_REVOKED
+ *   - trackToken           → DB lookup on track_view_token; if found,
+ *                            not expired, and the linked customer is
+ *                            active → join customer:<id> (matching the
+ *                            same room the public GET data backs).
+ *                            Otherwise reject with TRACK_TOKEN_INVALID.
+ *
+ * Why a track-token path:
+ *   PRs #328 / #329 / #330 emit customer:job_update on every status
+ *   change. The TrackPage (a public page that customers reach via SMS
+ *   link, with no login) needs a way to subscribe so its UI updates
+ *   in real time. JWT auth doesn't fit — the customer hasn't signed
+ *   in. The public GET endpoint already trusts the token to read the
+ *   row; the socket path mirrors that trust shape.
+ *
+ *   Read-only: track-token sockets join the customer's room only.
+ *   They don't get any other authorization. The token's expiry is the
+ *   gate for how long the live channel stays open.
  *
  * Why a staff DB lookup at connect (changed from foundation PR #279):
- *   The original foundation deferred the technicians lookup — verify
- *   the JWT, attach userType, move on. Symmetric with customers; saved
- *   a query per reconnect. That was fine when sockets had no event
- *   handlers and emitted nothing.
- *
- *   PR #284 introduces dispatch:tech_status broadcasting to a
- *   staff-only room. Admin tokens are signed with expiresIn '12h'
- *   (server/routes/admin-auth.js). Without a freshness check, a
- *   technician deactivated mid-shift, or anyone whose role was
- *   downgraded, can stay subscribed to live tech locations + customer
- *   job IDs for up to 12h. HTTP admin routes already 401 in that
- *   window because admin-auth.js does the DB lookup per request;
- *   Socket.io must do the same at the gate or the channel leaks.
- *
- *   Customer rooms (customer:<id>) arrived alongside customer:job_update.
- *   The customer path now does its own DB lookup against the customers
- *   table for the active flag, mirroring the staff freshness check.
- *   Same closed-fail posture on DB error.
+ *   The original foundation deferred the technicians lookup. PR #284
+ *   added dispatch:admins broadcasts and 12h JWT expiry made stale
+ *   tokens too risky — a deactivated tech could stay subscribed up to
+ *   12h. HTTP admin routes already 401 in that window because
+ *   admin-auth.js does the DB lookup per request; Socket.io must do
+ *   the same at the gate. Customer rooms get the same freshness check.
  *
  * Role downgrade is checked too: if the JWT claims role='admin' but
- * the DB row says role='technician' (demoted), we reject. The JWT's
- * role claim drove the original branch; the DB is the source of truth
- * post-issuance.
+ * the DB row says role='technician' (demoted), we reject.
  *
  * Errors emit Socket.io connect_error so the client can distinguish
- * "your token expired, refresh it" from "the server is down" — that
- * matters for the customer live tracker UX in particular.
+ * "your token expired, refresh it" from "the server is down."
  */
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const db = require('../models/db');
 const logger = require('../services/logger');
 
-function extractToken(socket) {
-  const authToken = socket.handshake.auth && socket.handshake.auth.token;
-  if (authToken) return authToken;
+// Track tokens are 64-char lowercase hex — generated as
+// encode(gen_random_bytes(32), 'hex') in
+// server/models/migrations/20260422000009_scheduled_services_tracking.js
+// and matched by server/routes/track-public.js's TOKEN_RE. Keeping
+// a copy here means a malformed string never hits the DB.
+//
+// (Prior version of this regex used 32 chars — Codex P1 on PR #332.
+//  In prod every real token would have been rejected with
+//  TRACK_TOKEN_INVALID and the customer-track socket would have
+//  silently failed to connect.)
+const TRACK_TOKEN_RE = /^[a-f0-9]{64}$/;
 
-  const header = socket.handshake.headers && socket.handshake.headers.authorization;
-  if (header && header.startsWith('Bearer ')) return header.slice(7);
-
-  return null;
+function extractAuth(socket) {
+  const handshake = socket.handshake || {};
+  const auth = handshake.auth || {};
+  const headers = handshake.headers || {};
+  const trackToken = auth.trackToken || null;
+  const jwtToken =
+    auth.token ||
+    (headers.authorization && headers.authorization.startsWith('Bearer ')
+      ? headers.authorization.slice(7)
+      : null);
+  return { jwtToken, trackToken };
 }
 
 function rejectionError(message, code) {
@@ -80,14 +98,50 @@ function rejectionError(message, code) {
 }
 
 async function socketAuth(socket, next) {
-  const token = extractToken(socket);
-  if (!token) {
+  const { jwtToken, trackToken } = extractAuth(socket);
+
+  // Track-token path: public TrackPage. Doesn't go through jwt.verify;
+  // the token is opaque + non-JWT (random hex) and is matched against
+  // scheduled_services.track_view_token. Successful match resolves to
+  // a customer_id that the socket joins as customer:<id>.
+  if (trackToken) {
+    if (!TRACK_TOKEN_RE.test(trackToken)) {
+      return next(rejectionError('Invalid track token', 'TRACK_TOKEN_INVALID'));
+    }
+    let row;
+    try {
+      row = await db('scheduled_services as s')
+        .leftJoin('customers as c', 's.customer_id', 'c.id')
+        .where('s.track_view_token', trackToken)
+        .first('s.id', 's.customer_id', 's.track_token_expires_at', 'c.active');
+    } catch (err) {
+      logger.error(`[socket-auth] track-token lookup failed: ${err.message}`);
+      return next(rejectionError('Authentication backend unavailable', 'AUTH_FAILED'));
+    }
+    if (!row) {
+      return next(rejectionError('Invalid track token', 'TRACK_TOKEN_INVALID'));
+    }
+    if (row.track_token_expires_at && new Date(row.track_token_expires_at) < new Date()) {
+      return next(rejectionError('Track token expired', 'TRACK_TOKEN_EXPIRED'));
+    }
+    if (row.active === false) {
+      // Inactive customer: still let the GET endpoint return data on
+      // an active job's token, but don't grant a real-time channel.
+      return next(rejectionError('Identity revoked', 'IDENTITY_REVOKED'));
+    }
+    socket.userType = 'customer-track';
+    socket.userId = row.customer_id;
+    socket.trackJobId = row.id;
+    return next();
+  }
+
+  if (!jwtToken) {
     return next(rejectionError('Authentication required', 'AUTH_FAILED'));
   }
 
   let decoded;
   try {
-    decoded = jwt.verify(token, config.jwt.secret);
+    decoded = jwt.verify(jwtToken, config.jwt.secret);
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
       return next(rejectionError('Token expired', 'TOKEN_EXPIRED'));
