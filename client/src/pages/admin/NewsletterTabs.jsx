@@ -328,6 +328,10 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
     // next modal opens defaulting to no template.
     setSelectedTemplate(template || null);
     setAiOpen(false);
+    // Clear the event-seeded prompt on success too (mirror of the
+    // onClose handler). Otherwise the next "Draft with AI" toolbar
+    // click would prefill with the stale event seed.
+    setAiInitialPrompt('');
     setStatus('AI draft inserted. Review before saving.');
   };
 
