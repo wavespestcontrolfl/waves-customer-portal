@@ -2,6 +2,14 @@
 
 > Step 1 deliverable for the mobile-first admin overhaul. No code changes in this PR — just the snapshot of where the admin portal stands today on a phone, and where it falls down. PR #2 (shell + sticky action bars) and PR #3 (Square-style list & detail treatments) follow.
 
+> **Historical snapshot — pre-V1→V2 migration.** This audit was taken on
+> 2026-04-18 while V1 admin pages were still flag-gated alongside their V2
+> counterparts. The V1↔V2 page pairs referenced below (`DashboardPage` /
+> `CustomersPage` / `EstimatePage` / `SchedulePage` / `CommunicationsPage`)
+> have since been retired — V2 is the only path. Read this file as an
+> audit artifact, not a current-state document. See PRs #297, #302, #304,
+> and #305 for the migration history.
+
 Audit date: **2026-04-18**
 Scope: every route mounted under `/admin/*` in `client/src/App.jsx`.
 Viewport reference: iPhone 13/14/15 (`390px` wide), iPhone SE (`375px` wide).

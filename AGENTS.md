@@ -140,12 +140,18 @@ finding and warns on P1. Reviewers must return JSON matching
   `false` on API error). Adding `|| true`, `?? true`, `localStorage`
   overrides, or env bypasses is P1 (P0 if it auto-exposes a V2 admin
   page with broken data wiring to all users).
-- **Don't delete V1 components or named exports while V2 is flag-gated.**
-  The flags `dashboard-v2`, `dispatch-v2`, `customers-v2`, `estimates-v2`,
-  `comms-v2`, and `mobile-shell-v2` still serve V1 to flag-off users.
-  Removing a V1 component file, named export, or prop while the flag is
-  live breaks them.
-- **Style-system mixing inside one file.** Per `CLAUDE.md`, V1/Tier-2
+- **Don't delete the named-export utilities that V2 still consumes.**
+  `client/src/pages/admin/SchedulePage.jsx`, `CustomersPage.jsx`,
+  `EstimatePage.jsx`, and `CommunicationsPage.jsx` are retained as
+  shared-utility modules after the V1→V2 migration. Their named exports
+  (`CompletionPanel` / `RescheduleModal` / `EditServiceModal` /
+  `ProtocolPanel` / `MONTH_NAMES` / `STAGES` / `STAGE_MAP` /
+  `KANBAN_STAGES` / `LEAD_SOURCES` / `CustomerMap` /
+  `CustomerIntelligenceTab` / `STATUS_CONFIG` / `PIPELINE_FILTERS` /
+  `DECLINE_REASONS` / `classifyEstimate` / `getUrgencyIndicator` /
+  `detectCompetitor` / `ALL_NUMBERS` / `NUMBER_LABEL_MAP`) are imported
+  by V2 pages — touching them is a coordinated change.
+- **Style-system mixing inside one file.** Per `CLAUDE.md`, Tier-2
   pages use the `D` palette + inline styles; Tier-1 V2 pages use Tailwind
   + `components/ui` primitives. A file that imports from `components/ui/*`
   and also defines a `D = { … }` palette object is mixing systems.
@@ -229,7 +235,7 @@ finding and warns on P1. Reviewers must return JSON matching
   `invoices.token` and never expires or burns — customers share receipt
   links with bookkeepers months later.
 - **Design tokens.** Two systems coexist by file:
-  - **Legacy / V1 / Tier-2:** inline styles + `D` dark palette
+  - **Legacy / Tier-2:** inline styles + `D` dark palette
     (`bg #0f1923`, `card #1e293b`, `border #334155`, `teal #0ea5e9`,
     `green #10b981`, `amber #f59e0b`, `red #ef4444`, `purple #a855f7`,
     `text #e2e8f0`, `muted #94a3b8`). Fonts: DM Sans, JetBrains Mono,

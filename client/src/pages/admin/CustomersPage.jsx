@@ -911,10 +911,10 @@ function CustomerMap({ customers: _ignored, onSelect }) {
 }
 
 
-// Named exports so CustomersPageV2 can reuse V1 sub-panels (Pipeline / Map /
-// AI Advisor) without duplicating code. The V2 page restyles only the
-// Directory view + header chrome + QuickAddModal; Pipeline/Health/Intelligence
-// stay V1 until PR #4b/#4d.
+// Named exports consumed by CustomersPageV2 (the V1 page itself was
+// retired in the V1→V2 migration). These sub-panels and constants are
+// the public API of this shared-utility module — touching them needs
+// care.
 export {
   STAGES,
   STAGE_MAP,
