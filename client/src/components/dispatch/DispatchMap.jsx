@@ -9,11 +9,33 @@
  *     tech.id (deterministic hash → palette). Click → setSelectedTechId.
  *   - <Marker> per job with valid lat/lng → "job" pin colored by the
  *     assigned technician_id (matches the tech truck color so unassigned
- *     jobs render in a neutral gray). Click → console.log(job.id) for
- *     the v1; the per-job drawer is a separate PR.
+ *     jobs render in a neutral gray). Click → onSelectJob(job.id) opens
+ *     the JobDrawer; drag onto a tech roster card → reassign.
  *
  * Selected tech receives a thicker stroke + halo to match the highlight
  * on the corresponding <TechCard>.
+ *
+ * Drag-to-reassign:
+ *   Job markers are draggable. On dragend we hit-test the drop point
+ *   against React DOM tech cards via document.elementFromPoint, walk
+ *   up to find a [data-tech-card-id] ancestor, and (if found) call
+ *   onJobDropOnTech(jobId, techId). That handler in DispatchBoardPage
+ *   PUTs /api/admin/dispatch/jobs/:id/assign — the existing assignment
+ *   endpoint from PR #320. Drop outside any card is a no-op; React
+ *   re-renders the marker at its original position because we never
+ *   mutate job.lat/lng here.
+ *
+ *   Why not @dnd-kit: Google Maps markers render outside React's tree
+ *   (they're WebGL/canvas managed by the Maps SDK), so @dnd-kit's
+ *   sensors + collision detection don't apply. The native
+ *   marker.draggable + DOM hit-test is the only path that bridges the
+ *   two trees.
+ *
+ *   Snap-back: we never write the dragged coords anywhere; the marker
+ *   visually moves during drag (Maps SDK behavior), then on the next
+ *   React render it returns to job.lat/lng. The dispatch:job_update
+ *   broadcast from a successful PUT will re-color the pin via the new
+ *   technician_id without changing position.
  *
  * API key: pulled from VITE_GOOGLE_MAPS_API_KEY (server-controlled env,
  * already used by the customer tracker + AddressAutocomplete). The
@@ -73,7 +95,14 @@ function svgPin(color, isSelected = false, isTruck = false) {
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
 }
 
-export default function DispatchMap({ techs, jobs, selectedTechId, onSelectTech, onSelectJob }) {
+export default function DispatchMap({
+  techs, jobs, selectedTechId, onSelectTech, onSelectJob,
+  // Drag-to-reassign hooks (optional; if omitted, markers render
+  // non-draggable). DispatchBoardPage owns the drag state.
+  onJobDragStart,
+  onJobDragEnd,
+  onJobDropOnTech,
+}) {
   const { isLoaded, loadError } = useJsApiLoader({
     id: 'google-map-script',
     googleMapsApiKey: MAPS_KEY,
@@ -100,6 +129,49 @@ export default function DispatchMap({ techs, jobs, selectedTechId, onSelectTech,
     },
     [onSelectJob]
   );
+
+  // Hit-test the drop point against React DOM tech cards. Walks up
+  // from the topmost element under (clientX, clientY) looking for an
+  // ancestor with [data-tech-card-id]. Returns the tech id, or null
+  // if the drop landed outside any card.
+  //
+  // Uses native MouseEvent coords (e.domEvent.clientX/clientY) because
+  // Google Maps' internal MapMouseEvent wraps the native event but
+  // doesn't expose the .closest() helper we need on its own coords.
+  const handleJobDragEnd = useCallback(
+    (job, e) => {
+      try {
+        const x = e?.domEvent?.clientX;
+        const y = e?.domEvent?.clientY;
+        if (typeof x !== 'number' || typeof y !== 'number') {
+          if (onJobDragEnd) onJobDragEnd(job.id, null);
+          return;
+        }
+        const el = document.elementFromPoint(x, y);
+        const card = el?.closest('[data-tech-card-id]');
+        const techId = card?.getAttribute('data-tech-card-id') || null;
+        if (techId && onJobDropOnTech) {
+          onJobDropOnTech(job.id, techId);
+        }
+        if (onJobDragEnd) onJobDragEnd(job.id, techId);
+      } catch {
+        if (onJobDragEnd) onJobDragEnd(job.id, null);
+      }
+    },
+    [onJobDragEnd, onJobDropOnTech]
+  );
+
+  const handleJobDragStart = useCallback(
+    (job) => {
+      if (onJobDragStart) onJobDragStart(job.id);
+    },
+    [onJobDragStart]
+  );
+
+  // Drag is offered only when DispatchBoardPage wires the callback.
+  // Lets us keep the read-only consumers of this component (if any
+  // ever appear) from getting accidentally draggable markers.
+  const dragEnabled = typeof onJobDropOnTech === 'function';
 
   if (loadError) {
     return (
@@ -151,7 +223,10 @@ export default function DispatchMap({ techs, jobs, selectedTechId, onSelectTech,
                 url: svgPin(colorForTech(job.technician_id), false, false),
               }}
               title={`${job.customer_name} — ${job.service_type || 'service'}`}
+              draggable={dragEnabled}
               onClick={() => handleJobClick(job.id)}
+              onDragStart={dragEnabled ? () => handleJobDragStart(job) : undefined}
+              onDragEnd={dragEnabled ? (e) => handleJobDragEnd(job, e) : undefined}
             />
           ) : null
         )}
