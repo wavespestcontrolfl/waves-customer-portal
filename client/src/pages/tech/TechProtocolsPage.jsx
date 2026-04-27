@@ -21,8 +21,9 @@
 //     pests in season. Useful but redundant with the photo filter.
 //   - Programs (/programs) and product labels — deep drilldowns that
 //     deserve their own surface.
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { etParts } from '../../lib/timezone';
 
 const DARK = {
   bg: '#0f1923',
@@ -59,46 +60,64 @@ export default function TechProtocolsPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState('');
 
-  const fetchTab = useCallback(async () => {
+  // AbortController-scoped fetch — overlapping tab/filter switches on
+  // a slow mobile network can resolve out of order; abort the prior
+  // request before issuing a new one so an older response can't
+  // overwrite items the user has since switched away from.
+  useEffect(() => {
+    const ctrl = new AbortController();
     setLoading(true);
     setErr('');
-    try {
-      const token = localStorage.getItem('adminToken');
-      const headers = { Authorization: `Bearer ${token}` };
+    (async () => {
+      try {
+        const token = localStorage.getItem('adminToken');
+        const headers = { Authorization: `Bearer ${token}` };
 
-      let path;
-      if (activeTab === 'photos') {
-        // /photos/relevant filters by service line + month; /photos
-        // returns the full unfiltered list. Use whichever matches the
-        // tech's filter chip selection.
-        path = serviceFilter
-          ? `/api/admin/protocols/photos/relevant?serviceType=${encodeURIComponent(serviceFilter)}`
-          : `/api/admin/protocols/photos`;
-      } else if (activeTab === 'scripts') {
-        path = serviceFilter
-          ? `/api/admin/protocols/scripts?service_line=${encodeURIComponent(serviceFilter)}`
-          : `/api/admin/protocols/scripts`;
-      } else {
-        path = serviceFilter
-          ? `/api/admin/protocols/equipment?service_line=${encodeURIComponent(serviceFilter)}`
-          : `/api/admin/protocols/equipment`;
-      }
+        let path;
+        if (activeTab === 'photos') {
+          // /photos/relevant filters by service line + month; /photos
+          // returns the full unfiltered list. Use whichever matches the
+          // tech's filter chip selection.
+          //
+          // ET month explicitly: server defaults month to
+          // `new Date().getMonth() + 1` which is UTC on Railway. In
+          // ET evenings near month boundaries that drifts forward and
+          // the ID guide returns the wrong month's seasonal set.
+          if (serviceFilter) {
+            const month = etParts().month;
+            path = `/api/admin/protocols/photos/relevant?serviceType=${encodeURIComponent(serviceFilter)}&month=${month}`;
+          } else {
+            path = `/api/admin/protocols/photos`;
+          }
+        } else if (activeTab === 'scripts') {
+          path = serviceFilter
+            ? `/api/admin/protocols/scripts?service_line=${encodeURIComponent(serviceFilter)}`
+            : `/api/admin/protocols/scripts`;
+        } else {
+          path = serviceFilter
+            ? `/api/admin/protocols/equipment?service_line=${encodeURIComponent(serviceFilter)}`
+            : `/api/admin/protocols/equipment`;
+        }
 
-      const res = await fetch(`${API}${path}`, { headers });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || `HTTP ${res.status}`);
+        const res = await fetch(`${API}${path}`, { headers, signal: ctrl.signal });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        if (ctrl.signal.aborted) return;
+        setItems(data.photos || data.scripts || data.checklists || []);
+      } catch (e) {
+        // Aborted requests reach this branch; suppress them — the
+        // newer request's pending state is what should win.
+        if (e.name === 'AbortError') return;
+        setErr(e.message || 'Failed to load');
+        setItems([]);
       }
-      const data = await res.json();
-      setItems(data.photos || data.scripts || data.checklists || []);
-    } catch (e) {
-      setErr(e.message || 'Failed to load');
-      setItems([]);
-    }
-    setLoading(false);
+      if (!ctrl.signal.aborted) setLoading(false);
+    })();
+    return () => ctrl.abort();
   }, [activeTab, serviceFilter]);
-
-  useEffect(() => { fetchTab(); }, [fetchTab]);
 
   return (
     <div style={{ maxWidth: 480, margin: '0 auto' }}>
