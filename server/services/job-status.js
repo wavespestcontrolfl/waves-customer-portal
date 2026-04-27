@@ -42,6 +42,15 @@
  *   track-transitions.markEnRoute. fromStatus is required (Codex P1
  *   on #290) — null was a footgun that bypassed the guard.
  *
+ * Auto-resolve tech_late on terminal-ish transitions:
+ *   When toStatus is in TECH_LATE_AUTO_RESOLVE_STATUSES (on_site,
+ *   completed, cancelled, skipped), any open tech_late alert for the
+ *   job is resolved inside the SAME trx via resolveAlert(trx). The
+ *   dispatch:alert_resolved broadcast chains on the same commit,
+ *   so the Action Queue card disappears for every connected
+ *   dispatcher the instant the tech is marked on_site (etc.). If the
+ *   outer transition rolls back, the alert resolution rolls back too.
+ *
  * ============================================================
  * PII BOUNDARY — READ THIS BEFORE MODIFYING THE CUSTOMER PAYLOAD
  * ============================================================
@@ -108,10 +117,31 @@
 const db = require('../models/db');
 const { getIo } = require('../sockets');
 const logger = require('./logger');
+const { resolveAlert } = require('./dispatch-alerts');
 
 const CUSTOMER_EVENT = 'customer:job_update';
 const ADMIN_EVENT = 'dispatch:job_update';
 const ADMIN_ROOM = 'dispatch:admins';
+
+// Statuses where any open tech_late alert for the job becomes
+// meaningless and should be auto-cleared:
+//   - on_site:   tech actually arrived; "running behind" is moot
+//   - completed: job finished (with or without a prior on_site step)
+//   - cancelled: job is off the route entirely
+//   - skipped:   tech intentionally bypassed; not "late" anymore
+//
+// Excluded:
+//   - rescheduled: ambiguous — the row may pick up a new window where
+//     a fresh tech_late would fire; auto-clearing the old one risks
+//     hiding a still-valid signal. Dispatchers can resolve manually.
+//   - en_route:   tech started driving but hasn't arrived; still
+//     "late" until on_site.
+const TECH_LATE_AUTO_RESOLVE_STATUSES = new Set([
+  'on_site',
+  'completed',
+  'cancelled',
+  'skipped',
+]);
 
 function customerRoom(customerId) {
   return `customer:${customerId}`;
@@ -252,6 +282,26 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
       to_status: toStatus,
       transitioned_by: transitionedBy || null,
     });
+
+    // Auto-resolve any open tech_late alerts when the transition
+    // makes the "running late" signal obsolete. Same trx — if the
+    // outer transition rolls back, the alert resolution rolls back
+    // with it. resolveAlert defers its dispatch:alert_resolved
+    // broadcast to commit and suppresses on rollback (PR #311).
+    //
+    // The partial unique index idx_dispatch_alerts_tech_late_one_unresolved
+    // guarantees ≤ 1 unresolved tech_late per job, but the loop is
+    // general — if an inline detector ever drops the index it still
+    // works.
+    if (TECH_LATE_AUTO_RESOLVE_STATUSES.has(toStatus)) {
+      const openAlerts = await t('dispatch_alerts')
+        .where({ type: 'tech_late', job_id: jobId })
+        .whereNull('resolved_at')
+        .select('id');
+      for (const { id } of openAlerts) {
+        await resolveAlert({ id, resolvedBy: transitionedBy, trx: t });
+      }
+    }
 
     return buildPayloads(t, jobId, fromStatus, toStatus, transitionedBy);
   }
