@@ -283,10 +283,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       try {
         const LimitChecker = require('../services/application-limits');
         const { createAlert } = require('../services/dispatch-alerts');
+        // svc.scheduled_date can land as either a JS Date (node-pg's
+        // default DATE parser) or a 'YYYY-MM-DD' string depending on
+        // the upstream query path. checkLimits feeds proposedDate into
+        // getYearStart() / etParts() which call Intl.DateTimeFormat —
+        // a string crashes with RangeError: Invalid time value, and
+        // because this whole block is best-effort the completion would
+        // silently skip MOA alerts. Normalize to a Date upfront.
+        // T12:00:00 keeps us well clear of tz-boundary corner cases.
+        // Codex P1 on PR #324.
+        const proposedDate = svc.scheduled_date instanceof Date
+          ? svc.scheduled_date
+          : new Date(`${svc.scheduled_date}T12:00:00`);
         const alertedMoa = new Set();
         for (const p of products) {
           if (!p.productId) continue;
-          const result = await LimitChecker.checkLimits(svc.customer_id, p.productId, svc.scheduled_date);
+          const result = await LimitChecker.checkLimits(svc.customer_id, p.productId, proposedDate);
           // checkLimits returns blocks (hard_block severity) and
           // warnings (warn/info severity). We surface BOTH for MOA
           // violations — operationally the difference is that hard
