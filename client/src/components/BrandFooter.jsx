@@ -1,4 +1,5 @@
 import { COLORS as B, FONTS } from '../theme-brand';
+import NewsletterSignup from './NewsletterSignup';
 
 export default function BrandFooter({ borderColor, variant }) {
   const onDark = variant === 'dark';
@@ -25,6 +26,17 @@ export default function BrandFooter({ borderColor, variant }) {
       borderTop: `1px solid ${borderColor || defaultBorder}`,
     }}>
       <div style={{ fontSize: 13, fontWeight: 700, color: headingColor, fontFamily: FONTS.heading, marginBottom: 10 }}>🌊 Stay in the loop</div>
+
+      <div style={{ marginBottom: 16 }}>
+        <NewsletterSignup
+          variant={onDark ? 'dark' : 'light'}
+          source="footer"
+          heading={null}
+          blurb={null}
+          compact
+        />
+      </div>
+
       <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginBottom: 12 }}>
         {socials.map(s => (
           <a key={s.name} href={s.url} target="_blank" rel="noopener noreferrer" title={s.name} aria-label={s.name} style={{

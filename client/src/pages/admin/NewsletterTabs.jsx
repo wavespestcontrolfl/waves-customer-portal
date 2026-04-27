@@ -184,6 +184,13 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
   // Segment
   const [segmentMode, setSegmentMode] = useState('all');   // all | customers | leads | custom
   const [segmentSources, setSegmentSources] = useState([]);
+  // Tags filter — additive on top of the audience mode (e.g. "Customers
+  // only AND tagged 'platinum-tier'"). Maps to f.tags on the server, which
+  // matches against newsletter_subscribers.tags (JSONB array) via the
+  // ?| operator. Free-form so operators can use whatever taxonomy fits
+  // the campaign — the column is JSONB with no enum.
+  const [segmentTags, setSegmentTags] = useState([]);
+  const [tagDraft, setTagDraft] = useState('');
 
   // Schedule
   const [scheduleAt, setScheduleAt] = useState('');
@@ -217,13 +224,18 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
   }, [pendingEvent]);
 
   const segmentFilter = useMemo(() => {
-    if (segmentMode === 'all') return null;
     const f = {};
     if (segmentMode === 'customers') f.customersOnly = true;
     if (segmentMode === 'leads') f.leadsOnly = true;
-    if (segmentSources.length) f.sources = segmentSources;
+    // Source chips are only visible in 'custom' mode — scope the filter
+    // to that mode so a stale segmentSources selection doesn't leak
+    // through after the operator switches back to "All active" /
+    // "Customers only" / "Leads only". Tags remain additive across all
+    // modes by design.
+    if (segmentMode === 'custom' && segmentSources.length) f.sources = segmentSources;
+    if (segmentTags.length) f.tags = segmentTags;
     return Object.keys(f).length ? f : null;
-  }, [segmentMode, segmentSources]);
+  }, [segmentMode, segmentSources, segmentTags]);
 
   useEffect(() => {
     adminFetch('/admin/newsletter/subscribers?status=active&limit=1')
@@ -440,7 +452,7 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
           </div>
           {segmentMode === 'custom' && (
             <div className="flex flex-wrap gap-1.5">
-              {['website', 'booking', 'checkout', 'quote', 'import', 'manual'].map((src) => {
+              {['website', 'booking', 'checkout', 'quote', 'import', 'manual', 'footer', 'portal_learn'].map((src) => {
                 const on = segmentSources.includes(src);
                 return (
                   <button
@@ -458,6 +470,43 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
               })}
             </div>
           )}
+
+          <div className="mt-3">
+            <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+              Tags <span className="normal-case tracking-normal text-ink-tertiary">(optional, additive)</span>
+            </label>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {segmentTags.map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => setSegmentTags((cur) => cur.filter((x) => x !== t))}
+                  className="h-7 px-2.5 text-11 rounded-full bg-zinc-900 text-white border-hairline border-zinc-900 u-focus-ring"
+                  title="Click to remove"
+                >{t} ×</button>
+              ))}
+              <input
+                type="text"
+                value={tagDraft}
+                onChange={(e) => setTagDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ',') {
+                    e.preventDefault();
+                    const v = tagDraft.trim().toLowerCase();
+                    if (v && !segmentTags.includes(v)) setSegmentTags((cur) => [...cur, v]);
+                    setTagDraft('');
+                  } else if (e.key === 'Backspace' && !tagDraft && segmentTags.length) {
+                    setSegmentTags((cur) => cur.slice(0, -1));
+                  }
+                }}
+                placeholder={segmentTags.length ? 'add another…' : 'e.g. platinum-tier, hurricane-prep'}
+                className="h-7 flex-1 min-w-[160px] bg-white border-hairline border-zinc-300 rounded-full px-3 text-11 text-zinc-900 placeholder:text-ink-tertiary focus:outline-none focus:border-zinc-900"
+              />
+            </div>
+            <div className="text-11 text-ink-tertiary mt-1">
+              Press Enter or comma to add. Matches subscribers tagged with ANY of the listed tags.
+            </div>
+          </div>
         </div>
 
         <div className="grid grid-cols-2 gap-3">
