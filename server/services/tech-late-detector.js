@@ -12,13 +12,23 @@
  *   15–29 min  → warn
  *   ≥ 30 min   → critical
  *
- * Idempotency: skip jobs that already have an unresolved tech_late
- * alert. The partial index `idx_dispatch_alerts_unresolved` plus the
- * `WHERE a.type = 'tech_late' AND a.job_id = ...` filter keeps the
- * NOT EXISTS subquery cheap. No in-place updates — alerts are
- * append-only. After the dispatcher resolves a warn, if the job is
- * still late on the next tick a fresh critical fires; that's the
- * intended escalation path, not a missed-tick.
+ * Idempotency is enforced at TWO layers, on purpose:
+ *   1. Read-side NOT EXISTS in the SELECT — drops 99% of duplicate
+ *      candidates before we ever attempt an INSERT. Cheap; uses
+ *      idx_dispatch_alerts_unresolved.
+ *   2. DB-level partial unique index
+ *      idx_dispatch_alerts_tech_late_one_unresolved (migration
+ *      20260427000001) — closes the race window where two concurrent
+ *      ticks (e.g. old + new container during a Railway zero-downtime
+ *      deploy) both pass NOT EXISTS and both call createAlert. The
+ *      losing INSERT throws unique_violation (23505), we catch it
+ *      and treat it as a clean skip — the winning tick already
+ *      broadcast the alert.
+ *
+ * No in-place updates — alerts are append-only. After the dispatcher
+ * resolves a warn, if the job is still late on the next tick a fresh
+ * critical fires; that's the intended escalation path, not a
+ * missed-tick.
  *
  * Why scope to today + yesterday in ET?
  *   - "Today's route" is the actual operational window. A job
@@ -42,10 +52,10 @@ const { createAlert } = require('./dispatch-alerts');
 // In-process mutex matches dashboard-alerts-cron.js. node-cron fires
 // regardless of whether the prior tick finished, and the detector
 // query + per-row createAlert chain can take a few seconds on a
-// busy day. Without the gate, two ticks could both pass the
-// NOT EXISTS check for the same job and double-insert. Single-replica
-// deploy makes a process-local flag enough; if Railway scales out,
-// swap to a pg_advisory_lock keyed on a fixed bigint.
+// busy day. The mutex prevents a slow tick + the next scheduled tick
+// from racing inside ONE Node process. Cross-process races (Railway's
+// zero-downtime deploy overlap, or future multi-replica scaling) are
+// covered by the partial unique index — see header.
 let isRunning = false;
 
 async function runTechLateCheck() {
@@ -95,6 +105,7 @@ async function runInner() {
   }
 
   let created = 0;
+  let suppressed = 0;
   for (const row of rows) {
     const delayMin = Math.floor(Number(row.delay_minutes) || 0);
     const severity = delayMin >= 30 ? 'critical' : 'warn';
@@ -112,15 +123,25 @@ async function runInner() {
       });
       created += 1;
     } catch (err) {
+      // 23505 = unique_violation. The partial unique index
+      // idx_dispatch_alerts_tech_late_one_unresolved fires when
+      // another process (concurrent deploy overlap, second worker)
+      // already inserted an unresolved tech_late for this job
+      // between our NOT EXISTS read and our insert. The winning
+      // tick already broadcast — we silently no-op.
+      if (err && err.code === '23505') {
+        suppressed += 1;
+        continue;
+      }
       // One bad row shouldn't poison the rest. Log and continue.
       logger.error(`[tech-late-detector] createAlert failed for job ${row.job_id}: ${err.message}`);
     }
   }
 
-  if (created > 0) {
-    logger.info(`[tech-late-detector] created ${created} tech_late alert(s)`);
+  if (created > 0 || suppressed > 0) {
+    logger.info(`[tech-late-detector] created ${created} tech_late alert(s)${suppressed ? ` (${suppressed} suppressed by unique index — concurrent race)` : ''}`);
   }
-  return { created, scanned: rows.length };
+  return { created, suppressed, scanned: rows.length };
 }
 
 module.exports = { runTechLateCheck };
