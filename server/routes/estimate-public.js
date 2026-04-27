@@ -255,6 +255,7 @@ const PERKS = [
   'One point of contact — no call-center runaround',
   'Text your tech directly for quick questions',
   'Customer portal for service history, invoices, and payments',
+  'Billed after each visit via autopay — or pre-pay up front if you prefer',
   'Owner-operator accountability on every visit',
 ];
 
