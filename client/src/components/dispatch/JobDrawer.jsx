@@ -111,14 +111,21 @@ export default function JobDrawer({ jobId, onClose }) {
   // Re-fetch on every open or jobId change. A drawer that was open
   // and then re-opened on the same job should still show fresh data
   // — the pin click might've happened minutes after a status change.
+  //
+  // Clear `job` AND `error` synchronously on selection change so the
+  // drawer doesn't render the previous job's data + action buttons
+  // during the new fetch's in-flight window. On slow networks the
+  // dispatcher could otherwise click "Mark En Route" while the
+  // header still shows the prior customer, and the click would
+  // submit the stale job.id (Codex P1 #2 on PR #303). With `job`
+  // null, the body falls through to the "Loading job…" branch and
+  // the footer (`{job && (canMarkEnRoute || canMarkOnSite) && ...}`)
+  // doesn't render at all — no stale buttons exist to click.
   useEffect(() => {
     currentIdRef.current = jobId;
-    if (jobId) {
-      fetchJob(jobId);
-    } else {
-      setJob(null);
-      setError(null);
-    }
+    setJob(null);
+    setError(null);
+    if (jobId) fetchJob(jobId);
   }, [jobId, fetchJob]);
 
   const handleStatus = useCallback(
