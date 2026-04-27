@@ -11,6 +11,7 @@
 import { useEffect, useState } from 'react';
 import BrandFooter from '../components/BrandFooter';
 import NewsletterSignup from '../components/NewsletterSignup';
+import Icon from '../components/Icon';
 import { COLORS as B, FONTS } from '../theme-brand';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -29,10 +30,10 @@ function safeRenderLink(href) {
 }
 
 const VALUE_PROPS = [
-  { emoji: '📅', label: "Local SWFL events", body: "Bradenton, Sarasota, Lakewood Ranch, Venice — what's worth your weekend." },
-  { emoji: '🦟', label: "Seasonal pest alerts", body: 'When mosquito season ramps, when termites swarm, when palmetto bugs come indoors.' },
-  { emoji: '🌱', label: 'Lawn-care timing', body: "St. Augustine, Bahia, chinch bug season, nitrogen-blackout months — straight from the truck." },
-  { emoji: '🎁', label: 'Subscriber-only deals', body: 'The occasional discount we only run for folks on the list.' },
+  { icon: 'calendar', label: "Local SWFL events", body: "Bradenton, Sarasota, Lakewood Ranch, Venice — what's worth your weekend." },
+  { icon: 'bug', label: "Seasonal pest alerts", body: 'When mosquito season ramps, when termites swarm, when palmetto bugs come indoors.' },
+  { icon: 'leaf', label: 'Lawn-care timing', body: "St. Augustine, Bahia, chinch bug season, nitrogen-blackout months — straight from the truck." },
+  { icon: 'gift', label: 'Subscriber-only deals', body: 'The occasional discount we only run for folks on the list.' },
 ];
 
 function Hero() {
@@ -54,7 +55,7 @@ function Hero() {
             background: 'rgba(255,255,255,0.15)',
             color: B.yellow,
             fontFamily: FONTS.ui,
-            fontSize: 11,
+            fontSize: 14,
             fontWeight: 700,
             letterSpacing: '0.12em',
             textTransform: 'uppercase',
@@ -107,7 +108,7 @@ function Hero() {
             style={{
               marginTop: 12,
               fontFamily: FONTS.body,
-              fontSize: 11,
+              fontSize: 14,
               color: 'rgba(255,255,255,0.65)',
               letterSpacing: '0.04em',
               textTransform: 'uppercase',
@@ -155,7 +156,9 @@ function ValueProps() {
                 padding: '20px 18px',
               }}
             >
-              <div style={{ fontSize: 28, marginBottom: 10 }}>{v.emoji}</div>
+              <div style={{ marginBottom: 10, color: B.wavesBlue }}>
+                <Icon name={v.icon} size={28} strokeWidth={1.75} />
+              </div>
               <div
                 style={{
                   fontFamily: FONTS.heading,
@@ -220,7 +223,7 @@ function PastIssue({ post }) {
         <div
           style={{
             fontFamily: FONTS.body,
-            fontSize: 13,
+            fontSize: 14,
             color: B.slate600,
             lineHeight: 1.55,
             marginBottom: 8,
@@ -237,7 +240,7 @@ function PastIssue({ post }) {
         <div
           style={{
             fontFamily: FONTS.body,
-            fontSize: 11,
+            fontSize: 14,
             color: B.grayMid,
             textTransform: 'uppercase',
             letterSpacing: '0.05em',
@@ -306,7 +309,7 @@ function PastIssues() {
           A taste of what lands in your inbox.
         </p>
         {loading ? (
-          <div style={{ textAlign: 'center', color: B.grayMid, padding: 24, fontSize: 13 }}>Loading…</div>
+          <div style={{ textAlign: 'center', color: B.grayMid, padding: 24, fontSize: 14 }}>Loading…</div>
         ) : (
           <div
             style={{

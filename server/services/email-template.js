@@ -120,8 +120,75 @@ function plainText(lines) {
   return lines.filter(Boolean).join('\n');
 }
 
+/**
+ * Newsletter / automation chrome wrapper. Unlike wrapEmail() (which is
+ * tightly templated for transactional content — heading + intro +
+ * lines + CTA), this wrapper takes operator-written HTML body and
+ * surrounds it with brand chrome only. Used by both
+ * newsletter-sender.js (campaign sends) and automation-runner.js
+ * (drip sequence sends) so every customer-facing email shares the
+ * same Waves identity.
+ *
+ * @param {{
+ *   body: string,                  // operator HTML — inserted as-is
+ *   unsubscribeUrl?: string,       // pre-resolved URL OR a SendGrid
+ *                                  // substitution token. When omitted
+ *                                  // the footer skips the unsub line
+ *                                  // (e.g. automations where SendGrid
+ *                                  // ASM groups handle unsub natively
+ *                                  // via the List-Unsubscribe header).
+ *   preheader?: string,            // hidden inbox preview text
+ *   footerNote?: string,           // optional small print under unsub
+ * }} opts
+ */
+function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote } = {}) {
+  const safeBody = body || '';
+  const unsubLine = unsubscribeUrl
+    ? `<a href="${unsubscribeUrl}" style="color:${MUTED};text-decoration:underline;">Unsubscribe</a> · `
+    : '';
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Waves Pest Control</title>
+</head>
+<body style="margin:0;padding:0;background:${SAND};font-family:Inter,Arial,sans-serif;color:${BODY};">
+  ${preheader ? `<div style="display:none;max-height:0;overflow:hidden;color:${SAND};">${preheader}</div>` : ''}
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:${SAND};">
+    <tr><td align="center" style="padding:24px 12px;">
+      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:640px;background:${CARD};border-radius:16px;overflow:hidden;box-shadow:0 10px 24px rgba(27,44,91,.08);">
+        <tr><td style="background:${NAVY};padding:20px 24px;text-align:center;">
+          <a href="https://wavespestcontrol.com" style="text-decoration:none;display:inline-block;">
+            <img src="https://portal.wavespestcontrol.com/waves-logo.png" alt="Waves Pest Control &amp; Lawn Care" width="120" height="120" style="display:inline-block;width:120px;height:120px;max-width:120px;border:0;outline:none;" />
+          </a>
+          <div style="margin-top:8px;font-family:Inter,Arial,sans-serif;font-size:11px;letter-spacing:0.18em;text-transform:uppercase;color:${GOLD};font-weight:700;">
+            The Waves Newsletter
+          </div>
+        </td></tr>
+        <tr><td style="padding:28px 28px 8px 28px;font-family:Inter,Arial,sans-serif;font-size:15px;line-height:1.6;color:${BODY};">
+          ${safeBody}
+        </td></tr>
+        <tr><td align="center" style="background:${SAND};padding:18px 24px 22px 24px;border-top:1px solid ${RULE};">
+          <div style="font-family:Inter,Arial,sans-serif;font-size:12px;line-height:1.6;color:${MUTED};text-align:center;">
+            ${unsubLine}<a href="https://wavespestcontrol.com" style="color:${MUTED};text-decoration:underline;">wavespestcontrol.com</a> · <a href="tel:+19412975749" style="color:${MUTED};text-decoration:none;">(941) 297-5749</a>
+          </div>
+          <div style="margin-top:6px;font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};text-align:center;">
+            Waves Pest Control, LLC · Bradenton, FL · FL License #JB351547
+          </div>
+          ${footerNote ? `<div style="margin-top:8px;font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};text-align:center;">${footerNote}</div>` : ''}
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
 module.exports = {
   wrapEmail,
+  wrapNewsletter,
   ctaButton,
   currency,
   formatDate,

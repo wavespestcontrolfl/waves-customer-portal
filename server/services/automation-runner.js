@@ -16,6 +16,7 @@
 const db = require('../models/db');
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
+const { wrapNewsletter } = require('./email-template');
 
 function substitute(text, customer) {
   if (!text) return text;
@@ -130,12 +131,24 @@ async function sendStep(enrollmentId, { testRecipient } = {}) {
   };
 
   const subject = substitute(step.subject || `(${template.name})`, personal);
-  const html = substitute(step.html_body || '', personal);
+  const rawHtml = substitute(step.html_body || '', personal);
   const text = substitute(step.text_body || '', personal);
 
   const asmGroupId = template.asm_group === 'newsletter'
     ? (parseInt(process.env.SENDGRID_ASM_GROUP_NEWSLETTER) || null)
     : (parseInt(process.env.SENDGRID_ASM_GROUP_SERVICE) || null);
+
+  // Wrap operator-written body in branded chrome (same template the
+  // newsletter campaigns use). For the unsubscribe URL we pass
+  // SendGrid's per-send ASM substitution token — SendGrid replaces it
+  // with a per-recipient suppression-group unsubscribe URL when
+  // asm.group_id is set on the send.
+  const html = rawHtml
+    ? wrapNewsletter({
+        body: rawHtml,
+        unsubscribeUrl: asmGroupId ? '<%asm_group_unsubscribe_raw_url%>' : null,
+      })
+    : '';
 
   const recipient = testRecipient || enrollment.email;
 

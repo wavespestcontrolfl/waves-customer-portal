@@ -203,30 +203,6 @@ function unsubscribeUrl(unsubscribeToken) {
 }
 
 /**
- * Inject an unsubscribe footer into HTML body. Operator's body should NOT
- * include its own unsubscribe text — this keeps it consistent.
- *
- * Uses {{unsubscribe_url}} as the placeholder so SendGrid's substitution
- * fills it in per recipient. For the test-send path (no substitution), the
- * caller passes a real URL and we just inline it.
- */
-function injectUnsubscribeFooter(html, { realUrl } = {}) {
-  const url = realUrl || '{{unsubscribe_url}}';
-  const footer = `
-    <div style="margin-top:32px; padding-top:16px; border-top:1px solid #e5e7eb; font-size:12px; color:#6b7280; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
-      <p style="margin:0 0 4px;">Waves Pest Control &amp; Lawn Care · Bradenton, FL</p>
-      <p style="margin:0;">
-        <a href="${url}" style="color:#6b7280; text-decoration:underline;">Unsubscribe from this list</a>
-      </p>
-    </div>
-  `;
-  if (html && html.includes('</body>')) {
-    return html.replace('</body>', `${footer}</body>`);
-  }
-  return (html || '') + footer;
-}
-
-/**
  * Send a transactional email via a SendGrid dynamic template. Preferred path
  * for operational emails (invoice receipts, appointment reminders, review
  * requests, post-service surveys) so copy can be edited in the SendGrid
@@ -296,7 +272,6 @@ module.exports = {
   sendTemplated,
   sendBroadcast,
   unsubscribeUrl,
-  injectUnsubscribeFooter,
   newsletterGroupId,
   serviceGroupId,
 };
