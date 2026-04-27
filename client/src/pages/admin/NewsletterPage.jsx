@@ -1,19 +1,27 @@
 // client/src/pages/admin/NewsletterPage.jsx
 //
-// Top-level newsletter dashboard — first-class admin page under the Marketing
-// sidebar group. Shell only in this PR; sub-routes for Posts / Subscribers /
-// Automations / Events Queue wire up in follow-ups. Existing NewsletterTabV2
-// (Compose + History + Subscribers) still renders under Communications until
-// we migrate the backend references.
+// Top-level newsletter dashboard — first-class admin page under the
+// Marketing sidebar group. Five tabs:
+//   - Dashboard     stats + sample events + quick actions + recent posts
+//   - Compose       draft + send a newsletter
+//   - History       past sends
+//   - Subscribers   list + manage
+//   - Automations   drip + trigger flows
 //
-// Vision: draft newsletters from local SWFL events (agent-discovered or
-// RSS-ingested), auto-generate copy, publish, distribute to social.
+// Per-tab URL state via ?tab=dashboard|compose|history|subscribers|automations
+// so a refresh or a shared link lands on the right view. Default = dashboard.
+//
+// Compose / History / Subscribers render named exports from
+// ./NewsletterTabs (formerly NewsletterTabV2 — consolidated under
+// /admin/newsletter when newsletter-v1 was rolled out). Automations
+// renders EmailAutomationsPanelV2 directly.
 
-import React, { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { useFeatureFlag } from '../../hooks/useFeatureFlag';
+import React, { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Badge, Button, Card, CardBody, cn } from '../../components/ui';
 import { Mail, Users, Zap, Calendar, FileText, TrendingUp, Sparkles, Plus, Upload } from 'lucide-react';
+import { ComposeView, HistoryView, SubscribersView } from './NewsletterTabs';
+import EmailAutomationsPanelV2 from './EmailAutomationsPanelV2';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -31,6 +39,14 @@ function adminFetch(path, options = {}) {
     return data;
   });
 }
+
+const TABS = [
+  { key: 'dashboard', label: 'Dashboard' },
+  { key: 'compose', label: 'Compose' },
+  { key: 'history', label: 'History' },
+  { key: 'subscribers', label: 'Subscribers' },
+  { key: 'automations', label: 'Automations' },
+];
 
 function StatTile({ icon: Icon, label, value, sub }) {
   return (
@@ -108,7 +124,7 @@ function EventCard({ event }) {
   );
 }
 
-function QuickActions() {
+function QuickActions({ onSelectTab }) {
   return (
     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
       <Card className="cursor-pointer hover:bg-zinc-50 transition-colors">
@@ -126,25 +142,26 @@ function QuickActions() {
         </CardBody>
       </Card>
 
-      <Card className="cursor-pointer hover:bg-zinc-50 transition-colors">
+      <Card className="cursor-pointer hover:bg-zinc-50 transition-colors" onClick={() => onSelectTab('compose')}>
         <CardBody>
           <div className="flex items-center gap-2 mb-2">
             <FileText size={18} strokeWidth={1.75} className="text-zinc-900" />
             <span className="text-14 font-medium text-ink-primary">Compose manually</span>
           </div>
           <div className="text-12 text-ink-tertiary">
-            Start a blank draft in the existing composer.
+            Start a blank draft in the composer.
           </div>
-          <Link
-            to="/admin/communications?tab=newsletter"
-            className="inline-block mt-3 text-12 font-medium text-zinc-900 underline underline-offset-2"
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onSelectTab('compose'); }}
+            className="inline-block mt-3 text-12 font-medium text-zinc-900 underline underline-offset-2 bg-transparent border-0 p-0 cursor-pointer"
           >
             Open composer →
-          </Link>
+          </button>
         </CardBody>
       </Card>
 
-      <Card className="cursor-pointer hover:bg-zinc-50 transition-colors">
+      <Card className="cursor-pointer hover:bg-zinc-50 transition-colors" onClick={() => onSelectTab('subscribers')}>
         <CardBody>
           <div className="flex items-center gap-2 mb-2">
             <Upload size={18} strokeWidth={1.75} className="text-zinc-900" />
@@ -153,12 +170,13 @@ function QuickActions() {
           <div className="text-12 text-ink-tertiary">
             Bulk import from a CSV (one-time migration from Beehiiv, etc.).
           </div>
-          <Link
-            to="/admin/communications?tab=newsletter"
-            className="inline-block mt-3 text-12 font-medium text-zinc-900 underline underline-offset-2"
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onSelectTab('subscribers'); }}
+            className="inline-block mt-3 text-12 font-medium text-zinc-900 underline underline-offset-2 bg-transparent border-0 p-0 cursor-pointer"
           >
             Go to subscribers →
-          </Link>
+          </button>
         </CardBody>
       </Card>
     </div>
@@ -214,8 +232,7 @@ function RecentPosts({ posts, loading }) {
   );
 }
 
-export default function NewsletterPage() {
-  const flagReady = useFeatureFlag('newsletter-v1');
+function DashboardView({ onSelectTab }) {
   const [stats, setStats] = useState({ subscribers: null, lastOpenRate: null, scheduledCount: null });
   const [recentPosts, setRecentPosts] = useState([]);
   const [loadingPosts, setLoadingPosts] = useState(true);
@@ -231,41 +248,8 @@ export default function NewsletterPage() {
     return () => { ignore = true; };
   }, []);
 
-  if (!flagReady) {
-    return (
-      <div>
-        <h1 className="text-28 font-normal tracking-h1 text-ink-primary mb-5">Newsletter</h1>
-        <Card>
-          <CardBody>
-            <div className="text-14 text-ink-primary mb-1">Not available</div>
-            <div className="text-13 text-ink-tertiary">
-              The Newsletter dashboard is in limited rollout. Enable the <code>newsletter-v1</code> flag to continue.
-            </div>
-          </CardBody>
-        </Card>
-      </div>
-    );
-  }
-
   return (
     <div>
-      {/* Title + Create */}
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
-        <div>
-          <h1 className="text-28 font-normal tracking-h1 text-ink-primary">Newsletter</h1>
-          <div className="text-13 text-ink-tertiary mt-1">
-            Draft from local SWFL events, publish, distribute.
-          </div>
-        </div>
-        <Link
-          to="/admin/communications?tab=newsletter"
-          className="inline-flex items-center gap-1.5 h-10 px-3 rounded-full bg-zinc-900 text-white text-12 font-medium uppercase tracking-label u-focus-ring hover:bg-zinc-800 no-underline"
-        >
-          <Plus size={14} strokeWidth={2} aria-hidden />
-          New draft
-        </Link>
-      </div>
-
       {/* Stats strip */}
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-6">
         <StatTile
@@ -294,7 +278,7 @@ export default function NewsletterPage() {
           title="Quick start"
           hint="Three ways to get a draft going"
         />
-        <QuickActions />
+        <QuickActions onSelectTab={onSelectTab} />
       </div>
 
       {/* Upcoming events queue — placeholder data until agent + RSS land */}
@@ -314,30 +298,33 @@ export default function NewsletterPage() {
         <SectionHeader
           title="Recent posts"
           action={(
-            <Link
-              to="/admin/communications?tab=newsletter&subtab=history"
-              className="text-12 font-medium text-zinc-900 underline underline-offset-2"
+            <button
+              type="button"
+              onClick={() => onSelectTab('history')}
+              className="text-12 font-medium text-zinc-900 underline underline-offset-2 bg-transparent border-0 p-0 cursor-pointer"
             >
               View all →
-            </Link>
+            </button>
           )}
         />
         <RecentPosts posts={recentPosts} loading={loadingPosts} />
       </div>
 
-      {/* Sub-page tiles — Automations + Events queue stubs */}
+      {/* Sub-page tiles — Automations + Distribution */}
       <div className="mb-6">
-        <SectionHeader title="Manage" hint="Sub-sections land in follow-up PRs" />
+        <SectionHeader title="Manage" hint="Jump straight to a section" />
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <Card>
+          <Card
+            className="cursor-pointer hover:bg-zinc-50 transition-colors"
+            onClick={() => onSelectTab('automations')}
+          >
             <CardBody>
               <div className="flex items-center gap-2 mb-2">
                 <Zap size={18} strokeWidth={1.75} className="text-zinc-900" />
                 <span className="text-14 font-medium text-ink-primary">Automations</span>
-                <Badge tone="neutral">Preview</Badge>
               </div>
               <div className="text-12 text-ink-tertiary">
-                Automated flows like Referral Nudge, Payment Failed, New Appointment Booked. Ships after the agent-discovery PR.
+                Automated flows like Referral Nudge, Payment Failed, New Appointment Booked.
               </div>
             </CardBody>
           </Card>
@@ -355,6 +342,69 @@ export default function NewsletterPage() {
           </Card>
         </div>
       </div>
+    </div>
+  );
+}
+
+export default function NewsletterPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab = useMemo(() => {
+    const requested = searchParams.get('tab');
+    return TABS.find((t) => t.key === requested)?.key || 'dashboard';
+  }, [searchParams]);
+
+  const setTab = (next) => {
+    const newParams = new URLSearchParams(searchParams);
+    if (next === 'dashboard') newParams.delete('tab');
+    else newParams.set('tab', next);
+    setSearchParams(newParams, { replace: true });
+  };
+
+  return (
+    <div>
+      {/* Title + Create */}
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+        <div>
+          <h1 className="text-28 font-normal tracking-h1 text-ink-primary">Newsletter</h1>
+          <div className="text-13 text-ink-tertiary mt-1">
+            Draft from local SWFL events, publish, distribute.
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => setTab('compose')}
+          className="inline-flex items-center gap-1.5 h-10 px-3 rounded-full bg-zinc-900 text-white text-12 font-medium uppercase tracking-label u-focus-ring hover:bg-zinc-800 border-0 cursor-pointer"
+        >
+          <Plus size={14} strokeWidth={2} aria-hidden />
+          New draft
+        </button>
+      </div>
+
+      {/* Tab nav */}
+      <div className="flex gap-1.5 flex-wrap mb-5">
+        {TABS.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            onClick={() => setTab(t.key)}
+            className={cn(
+              'h-8 px-3 text-11 uppercase font-medium tracking-label rounded-sm border-hairline u-focus-ring transition-colors',
+              tab === t.key
+                ? 'bg-zinc-900 text-white border-zinc-900'
+                : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50',
+            )}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Tab content */}
+      {tab === 'dashboard' && <DashboardView onSelectTab={setTab} />}
+      {tab === 'compose' && <ComposeView />}
+      {tab === 'history' && <HistoryView />}
+      {tab === 'subscribers' && <SubscribersView />}
+      {tab === 'automations' && <EmailAutomationsPanelV2 />}
     </div>
   );
 }

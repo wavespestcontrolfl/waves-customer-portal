@@ -1,9 +1,9 @@
 /**
  * Admin newsletter routes — subscribers + campaigns.
  *
- * Mounted at /api/admin/newsletter. Feature-gated client-side via the
- * `newsletter-v1` feature flag; the routes themselves don't gate because
- * the flag existence on client is enough and Virginia/Waves are both admin.
+ * Mounted at /api/admin/newsletter. Newsletter is rolled out and
+ * always-on for admins; the only gate is the standard admin auth
+ * applied at router.use() below.
  *
  * See docs/design/DECISIONS.md (PR 5) for the scope.
  */

@@ -1,14 +1,15 @@
-// client/src/pages/admin/NewsletterTabV2.jsx
-// PR 5 — In-house newsletter composer. Replaces Beehiiv.
-// Four sub-views: Compose · History · Subscribers · Automations.
-// Feature-gated via `newsletter-v1`; this file is only rendered when the
-// flag is on (gating happens at the parent tab-list level).
+// client/src/pages/admin/NewsletterTabs.jsx
+//
+// In-house newsletter composer (replaces Beehiiv). Exposes the three
+// content views (Compose / History / Subscribers) as named exports so
+// NewsletterPage.jsx can host them as tabs alongside its Dashboard
+// tab. The Automations tab is wired separately via
+// EmailAutomationsPanelV2 — imported directly by NewsletterPage.
 
 import React, {
   useState, useEffect, useCallback, useMemo,
 } from 'react';
 import { Badge, Button, Card, cn } from '../../components/ui';
-import EmailAutomationsPanelV2 from './EmailAutomationsPanelV2';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -25,13 +26,6 @@ function adminFetch(path, options = {}) {
     return data;
   });
 }
-
-const SUB_TABS = [
-  { key: 'compose', label: 'Compose' },
-  { key: 'history', label: 'History' },
-  { key: 'subscribers', label: 'Subscribers' },
-  { key: 'automations', label: 'Automations' },
-];
 
 // Starter HTML templates. Operator picks one → seeds the HTML body textarea.
 // Deliberately minimal markup — SendGrid footer is appended automatically.
@@ -116,40 +110,9 @@ const TEMPLATES = [
   },
 ];
 
-export default function NewsletterTabV2() {
-  const [view, setView] = useState('compose');
-
-  return (
-    <div className="space-y-4">
-      <div className="flex gap-1.5 flex-wrap">
-        {SUB_TABS.map((t) => (
-          <button
-            key={t.key}
-            type="button"
-            onClick={() => setView(t.key)}
-            className={cn(
-              'h-8 px-3 text-11 uppercase font-medium tracking-label rounded-sm border-hairline u-focus-ring transition-colors',
-              view === t.key
-                ? 'bg-zinc-900 text-white border-zinc-900'
-                : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50',
-            )}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      {view === 'compose' && <ComposeView />}
-      {view === 'history' && <HistoryView />}
-      {view === 'subscribers' && <SubscribersView />}
-      {view === 'automations' && <EmailAutomationsPanelV2 />}
-    </div>
-  );
-}
-
 // ── Compose ────────────────────────────────────────────────────────
 
-function ComposeView() {
+export function ComposeView() {
   const [draftId, setDraftId] = useState(null);
   const [subject, setSubject] = useState('');
   const [subjectB, setSubjectB] = useState('');
@@ -575,7 +538,7 @@ function AiDraftModal({ onClose, onDraft }) {
 
 // ── History ────────────────────────────────────────────────────────
 
-function HistoryView() {
+export function HistoryView() {
   const [sends, setSends] = useState([]);
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
@@ -703,7 +666,7 @@ function Stat({ label, value, alert }) {
 
 // ── Subscribers ───────────────────────────────────────────────────
 
-function SubscribersView() {
+export function SubscribersView() {
   const [subs, setSubs] = useState([]);
   const [counts, setCounts] = useState({});
   const [filter, setFilter] = useState('active');
