@@ -117,19 +117,31 @@ async function normalizeRow(row) {
   }
 
   // Stage 2: geocode pass (only if address is set and lat/lng missing)
+  let geocodeAttempted = false;
+  let geocodeSucceeded = false;
   if (row.venue_address && (row.geo_lat == null || row.geo_lng == null)) {
+    geocodeAttempted = true;
     geocodeCalled = true;
     const geo = await geocodeAddress(row.venue_address);
     if (geo) {
       updates.geo_lat = geo.lat;
       updates.geo_lng = geo.lng;
+      geocodeSucceeded = true;
     }
   }
 
-  // Always set normalized_at — even if Claude returned both nulls
-  // or geocode failed. The dashboard can still show what we have;
-  // operator clears the column to force a retry.
-  updates.normalized_at = db.fn.now();
+  // Set normalized_at unless geocoding was attempted and returned null.
+  // geocodeAddress() returns null indistinguishably for transient API
+  // failures, missing GOOGLE_API_KEY, AND legitimate "no match" — so
+  // marking the row done in any of those cases would hide recoverable
+  // work after an outage or config fix (codex P2 on PR #337).
+  // Trade-off: a permanently-hopeless address gets re-attempted every
+  // cron run, bounded by MAX_BATCH * geocode-cost (~$0.005 each), so
+  // worst case is a few cents/day until operator manually marks it
+  // done via UPDATE events_raw SET normalized_at = NOW() WHERE id=...
+  if (!geocodeAttempted || geocodeSucceeded) {
+    updates.normalized_at = db.fn.now();
+  }
   updates.updated_at = db.fn.now();
   await db('events_raw').where({ id: row.id }).update(updates);
 
