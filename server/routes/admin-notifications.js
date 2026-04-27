@@ -181,6 +181,94 @@ router.put('/read-all', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/notifications/diagnose — one-shot delivery health check
+// for the current admin. Returns each checkpoint in the trigger pipeline
+// so we can pinpoint why a given user is missing notifications without
+// digging through six separate queries by hand.
+router.get('/diagnose', async (req, res, next) => {
+  try {
+    const userId = req.technicianId;
+    const report = { userId, checks: {} };
+
+    // 1. VAPID env present (push silently no-ops without these)
+    report.checks.vapid = {
+      ok: Boolean(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY),
+      publicKeyPresent: Boolean(process.env.VAPID_PUBLIC_KEY),
+      privateKeyPresent: Boolean(process.env.VAPID_PRIVATE_KEY),
+    };
+
+    // 2. web-push module loadable
+    let webpushLoaded = false;
+    try { require('web-push'); webpushLoaded = true; } catch { /* optional */ }
+    report.checks.webPushModule = { ok: webpushLoaded };
+
+    // 3. technicians.active — the trigger loop skips inactive users entirely
+    try {
+      const tech = await db('technicians').where({ id: userId }).first();
+      report.checks.technicianActive = {
+        ok: Boolean(tech && tech.active),
+        active: tech ? tech.active : null,
+        name: tech ? tech.name : null,
+      };
+    } catch (err) {
+      report.checks.technicianActive = { ok: false, error: err.message };
+    }
+
+    // 4. push_subscriptions — auto-deactivated rows (410/404) are a common cause
+    try {
+      const subs = await db('push_subscriptions').where({ admin_user_id: userId });
+      const active = subs.filter((s) => s.active).length;
+      report.checks.pushSubscriptions = {
+        ok: active > 0,
+        total: subs.length,
+        active,
+        inactive: subs.length - active,
+      };
+    } catch (err) {
+      report.checks.pushSubscriptions = { ok: false, error: err.message };
+    }
+
+    // 5. notification_preferences — rows with bell/push disabled silently suppress
+    try {
+      const prefs = await db('notification_preferences').where({ admin_user_id: userId });
+      const disabled = prefs.filter((p) => !p.bell_enabled || !p.push_enabled);
+      report.checks.preferences = {
+        ok: disabled.length === 0,
+        totalRows: prefs.length,
+        disabledTriggers: disabled.map((p) => ({
+          trigger_key: p.trigger_key,
+          bell_enabled: p.bell_enabled,
+          push_enabled: p.push_enabled,
+          sound_enabled: p.sound_enabled,
+        })),
+      };
+    } catch (err) {
+      report.checks.preferences = { ok: false, error: err.message };
+    }
+
+    // 6. Recent bell writes (sanity: is anything landing at all?)
+    try {
+      const recent = await db('notifications')
+        .where({ recipient_type: 'admin' })
+        .where('created_at', '>', db.raw("NOW() - INTERVAL '24 hours'"))
+        .count('* as c')
+        .first();
+      report.checks.recentBellWrites = {
+        ok: parseInt(recent.c, 10) > 0,
+        last24h: parseInt(recent.c, 10),
+      };
+    } catch (err) {
+      report.checks.recentBellWrites = { ok: false, error: err.message };
+    }
+
+    report.summary = Object.entries(report.checks)
+      .filter(([, v]) => v.ok === false)
+      .map(([k]) => k);
+
+    res.json(report);
+  } catch (err) { next(err); }
+});
+
 // PUT /api/admin/notifications/:id/read — mark one as read.
 // Live alert IDs (prefixed `live:<alertId>`) record a per-admin
 // dismissal at the alert's current count. The dismissal expires after
