@@ -96,6 +96,22 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 5AM — Newsletter event normalization (P3b leg 3). One hour
+  // after ingestion so newly-pulled rows get Claude venue extraction +
+  // Google geocoding in the same day. Capped at 50 rows per run so the
+  // Claude API spend is bounded (~$1/day).
+  // =========================================================================
+  cron.schedule('0 5 * * *', async () => {
+    logger.info('Running: Newsletter event normalization');
+    try {
+      const EventNormalizer = require('./event-normalizer');
+      await EventNormalizer.normalizeBatch();
+    } catch (err) {
+      logger.error(`Event normalization failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY MIN — Newsletter scheduled sends (dispatches any whose scheduled_for
   // has passed). Intentionally high-frequency so "send at 8:00am" fires close
   // to the minute. Per-tick work is a single indexed query on newsletter_sends.
