@@ -275,7 +275,10 @@ export function ComposeView() {
     if (d.previewText) setPreviewText(d.previewText);
     if (d.htmlBody) setHtmlBody(d.htmlBody);
     if (d.textBody) setTextBody(d.textBody);
-    if (template) setSelectedTemplate(template);
+    // Always sync — `template` is null when operator picks "Free-form" in
+    // the modal, and we want that to clear the prior selection so the
+    // next modal opens defaulting to no template.
+    setSelectedTemplate(template || null);
     setAiOpen(false);
     setStatus('AI draft inserted. Review before saving.');
   };
