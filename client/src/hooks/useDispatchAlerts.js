@@ -64,7 +64,26 @@ export function useDispatchAlerts() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         if (cancelled) return;
-        setAlerts(Array.isArray(data.alerts) ? data.alerts : []);
+        const fetched = Array.isArray(data.alerts) ? data.alerts : [];
+        // Merge with current state instead of overwriting. The socket
+        // subscription mounts concurrently with this fetch, so a
+        // dispatch:alert broadcast can land while the GET is in
+        // flight. If we just setAlerts(fetched), that broadcast's
+        // row gets dropped — the GET response was generated from an
+        // earlier DB snapshot. Codex P1 on PR #306.
+        //
+        // Dedupe by id. Hydration row wins on conflict because it
+        // carries enriched fields (tech_name, customer, address) that
+        // the bare broadcast row doesn't have. Live rows whose ids
+        // aren't in the hydration response are preserved as-is.
+        setAlerts((prev) => {
+          const byId = new Map();
+          for (const a of prev) byId.set(a.id, a);
+          for (const a of fetched) byId.set(a.id, a);
+          return Array.from(byId.values()).sort(
+            (a, b) => new Date(b.created_at) - new Date(a.created_at)
+          );
+        });
         setLoading(false);
       } catch (err) {
         if (cancelled) return;
