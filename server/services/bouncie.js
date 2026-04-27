@@ -302,6 +302,54 @@ class BouncieService {
   }
 
   /**
+   * Calculate ETA from explicit from-coords to a customer address.
+   * Used by the customer track endpoint, which has the tech's coords
+   * already from tech_status and shouldn't pick "the running vehicle".
+   * Uses Google Distance Matrix API if available, falls back to haversine.
+   * @returns { etaMinutes, distanceMiles, source } or null if from-coords missing
+   */
+  async calculateETAFromCoords(fromLat, fromLng, customerLat, customerLng) {
+    if (fromLat == null || fromLng == null) return null;
+    if (customerLat == null || customerLng == null) return null;
+
+    const googleKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
+    if (googleKey) {
+      try {
+        const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${fromLat},${fromLng}&destinations=${customerLat},${customerLng}&key=${googleKey}&units=imperial`;
+        const res = await fetch(url);
+        if (res.ok) {
+          const data = await res.json();
+          const element = data.rows?.[0]?.elements?.[0];
+          if (element?.status === 'OK') {
+            // Nullish-only fallback: a valid duration/distance of 0
+            // (tech effectively at the destination right before the
+            // en_route → on_property flip) must surface as ~0, not as
+            // the 15-min default. Fall through to haversine only when
+            // the API genuinely omits the value.
+            const durationSec = element.duration?.value;
+            const distanceMeters = element.distance?.value;
+            if (durationSec != null) {
+              const distanceMi = distanceMeters != null
+                ? Math.round(distanceMeters / 1609.34 * 10) / 10
+                : null;
+              return { etaMinutes: Math.round(durationSec / 60), distanceMiles: distanceMi, source: 'google' };
+            }
+          }
+        }
+      } catch { /* fall through to haversine */ }
+    }
+
+    const R = 3959;
+    const dLat = (customerLat - fromLat) * Math.PI / 180;
+    const dLng = (customerLng - fromLng) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(fromLat * Math.PI / 180) * Math.cos(customerLat * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+    const dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    const roadDist = dist * 1.4;
+    const etaMin = Math.round((roadDist / 30) * 60);
+    return { etaMinutes: Math.max(1, etaMin), distanceMiles: Math.round(roadDist * 10) / 10, source: 'haversine' };
+  }
+
+  /**
    * Calculate ETA from current vehicle location to a customer address.
    * Uses Google Distance Matrix API if available, falls back to haversine.
    * @returns { etaMinutes, distanceMiles, source }

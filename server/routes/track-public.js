@@ -3,10 +3,11 @@
  *
  * No auth. Token is the only gate; rate-limit mitigates brute force.
  *
- * Response shape mirrors the Phase 1 spec. vehicle is always null here
- * (Phase 2 adds the live GPS read). meta.pollIntervalSeconds is 0 for
- * Phase 1 since the page has no live data yet; Phase 2 will flip to
- * 10–60s once the map ships.
+ * Response shape mirrors the Phase 1 spec, with the Phase 2 vehicle
+ * field populated when track_state === 'en_route' (live tech coords +
+ * ETA from tech_status, sourced from Bouncie). meta.pollIntervalSeconds
+ * is 30 while en_route so the customer page can refresh ETA/last-seen
+ * without socket churn; 0 in every other state.
  *
  * Design notes worth keeping:
  *   - 404 is reserved for token-not-found and expired tokens. Every
@@ -33,6 +34,17 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const PhotoService = require('../services/photos');
+const BouncieService = require('../services/bouncie');
+
+// If tech_status hasn't been pinged in this long, surface coords but
+// flag stale so the UI can soften the "live" framing. 5 min covers
+// brief Bouncie webhook gaps without showing a long-stale dot.
+const STALE_VEHICLE_MS = 5 * 60 * 1000;
+
+// Polling cadence for the customer track page while tech is en-route.
+// Socket broadcasts handle state transitions; this poll only refreshes
+// vehicle coords + ETA between transitions.
+const EN_ROUTE_POLL_SECONDS = 30;
 
 // Customer track page TTL — long enough that the page can be left open
 // on a phone for a tech's full visit window without 403'ing on photo
@@ -79,6 +91,48 @@ function durationMinutes(windowStart, windowEnd) {
   const [eh, em] = String(windowEnd).split(':').map(Number);
   if ([sh, sm, eh, em].some(Number.isNaN)) return null;
   return (eh * 60 + em) - (sh * 60 + sm);
+}
+
+async function buildVehicle(service) {
+  // Phase 2: live tech location + ETA from tech_status. Returns null
+  // if either the tech's last GPS ping is missing or the property
+  // doesn't have a geocode — TrackPage falls back to a no-map en-route
+  // card in either case. Never throws — Distance Matrix outages or DB
+  // hiccups degrade to null silently.
+  if (!service.technician_id) return null;
+  if (service.latitude == null || service.longitude == null) return null;
+
+  let ts;
+  try {
+    ts = await db('tech_status')
+      .where({ tech_id: service.technician_id })
+      .first('lat', 'lng', 'updated_at');
+  } catch (err) {
+    logger.warn(`[track-public] tech_status lookup failed: ${err.message}`);
+    return null;
+  }
+  if (!ts || ts.lat == null || ts.lng == null) return null;
+
+  const lat = parseFloat(ts.lat);
+  const lng = parseFloat(ts.lng);
+  const propLat = parseFloat(service.latitude);
+  const propLng = parseFloat(service.longitude);
+  const lastReportedAt = ts.updated_at;
+  const stale = lastReportedAt
+    ? (Date.now() - new Date(lastReportedAt).getTime()) > STALE_VEHICLE_MS
+    : true;
+
+  let etaMinutes = null;
+  let etaSource = null;
+  try {
+    const eta = await BouncieService.calculateETAFromCoords(lat, lng, propLat, propLng);
+    etaMinutes = eta?.etaMinutes ?? null;
+    etaSource = eta?.source ?? null;
+  } catch (err) {
+    logger.warn(`[track-public] ETA calc failed: ${err.message}`);
+  }
+
+  return { lat, lng, lastReportedAt, stale, etaMinutes, etaSource };
 }
 
 async function buildSummary(service) {
@@ -223,13 +277,15 @@ router.get('/:token', async (req, res, next) => {
         type: row.service_type,
         estimatedDurationMin: durationMinutes(row.window_start, row.window_end),
       },
-      vehicle: null,
+      vehicle: row.track_state === 'en_route' ? await buildVehicle(row) : null,
       summary: row.track_state === 'complete' ? await buildSummary(row) : null,
       cancellation: row.track_state === 'cancelled'
         ? { reason: row.cancellation_reason || null, cancelledAt: row.cancelled_at }
         : null,
       customerFirstName: row.cust_first_name || null,
-      meta: { pollIntervalSeconds: 0 },
+      meta: {
+        pollIntervalSeconds: row.track_state === 'en_route' ? EN_ROUTE_POLL_SECONDS : 0,
+      },
     };
 
     res.json(response);
