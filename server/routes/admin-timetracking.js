@@ -580,7 +580,17 @@ router.get('/analytics/comparison', async (req, res, next) => {
 router.get('/technicians', async (req, res, next) => {
   try {
     const techs = await db('technicians').orderBy('active', 'desc').orderBy('name');
-    res.json({ technicians: techs });
+    // Presign photo_s3_key into avatar_url for the response. After
+    // PR #344 photo uploads write only photo_s3_key (no row-level URL
+    // baked in); consumers (TeamTab list, dispatch board /board)
+    // resolve to a fresh presigned URL inside their own auth boundary.
+    // This route is admin-authed so presigning is safe.
+    const { resolveTechPhotoUrl } = require('../services/tech-photo');
+    const enriched = await Promise.all(techs.map(async (t) => ({
+      ...t,
+      avatar_url: await resolveTechPhotoUrl(t.photo_s3_key, t.avatar_url),
+    })));
+    res.json({ technicians: enriched });
   } catch (err) { next(err); }
 });
 
@@ -670,10 +680,15 @@ router.post(
 
       logger.info(`[team] Uploaded photo for ${tech.name}: ${key}`);
 
-      res.json({
-        success: true,
-        technician: await db('technicians').where({ id: tech.id }).first(),
-      });
+      // Return the row with avatar_url presigned from the new
+      // photo_s3_key — same shape as GET /technicians, so the
+      // client can render the new photo immediately without a
+      // follow-up GET.
+      const updated = await db('technicians').where({ id: tech.id }).first();
+      const { resolveTechPhotoUrl } = require('../services/tech-photo');
+      updated.avatar_url = await resolveTechPhotoUrl(updated.photo_s3_key, updated.avatar_url);
+
+      res.json({ success: true, technician: updated });
     } catch (err) {
       logger.error(`[team] Tech photo upload failed: ${err.message}`);
       next(err);
