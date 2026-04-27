@@ -109,7 +109,7 @@ export default function NewsletterArchivePage() {
           to="/newsletter"
           style={{
             fontFamily: FONTS.ui,
-            fontSize: 13,
+            fontSize: 14,
             fontWeight: 800,
             letterSpacing: '0.04em',
             textTransform: 'uppercase',
