@@ -546,4 +546,80 @@ router.post('/import-beehiiv', async (req, res) => {
   }
 });
 
+// GET /api/admin/newsletter/events — upcoming events from events_raw,
+// for the NewsletterPage Dashboard tiles. Query params:
+//   days     — forward window in days (default 14, max 90)
+//   limit    — max rows (default 12, max 50)
+//   city     — optional city filter (matches events_raw.city case-insensitive)
+//
+// Sorted: dated events ascending by start_at first, then dateless
+// (NULL start_at) at the bottom by pulled_at desc. Joins event_sources
+// to surface the source name + the source's coverage_geo[0] as a
+// fallback "region" when events_raw.city is null.
+router.get('/events', async (req, res, next) => {
+  try {
+    const days = Math.min(90, Math.max(1, Number(req.query.days) || 14));
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 12));
+    const city = req.query.city ? String(req.query.city).toLowerCase() : null;
+
+    const cutoffMs = Date.now() + days * 24 * 60 * 60 * 1000;
+    const cutoff = new Date(cutoffMs);
+
+    let q = db('events_raw as e')
+      .leftJoin('event_sources as s', 's.id', 'e.source_id')
+      .select(
+        'e.id',
+        'e.title',
+        'e.description',
+        'e.start_at',
+        'e.end_at',
+        'e.venue_name',
+        'e.city',
+        'e.event_url',
+        'e.image_url',
+        'e.categories',
+        'e.pulled_at',
+        's.name as source_name',
+        's.coverage_geo as source_coverage_geo',
+      )
+      // Drop events that already happened more than 2h ago (in case the
+      // cron hasn't pruned them yet — same logic as ingestion's recap drop).
+      .where(function () {
+        this.whereNull('e.start_at').orWhere('e.start_at', '>=', new Date(Date.now() - 2 * 60 * 60 * 1000));
+      })
+      // Forward window cap so the dashboard never shows events 3 months out.
+      .where(function () {
+        this.whereNull('e.start_at').orWhere('e.start_at', '<=', cutoff);
+      });
+
+    if (city) {
+      q = q.whereRaw('LOWER(e.city) = ?', [city]);
+    }
+
+    const rows = await q
+      .orderByRaw('e.start_at IS NULL') // false (dated) before true (dateless)
+      .orderBy('e.start_at', 'asc')
+      .orderBy('e.pulled_at', 'desc')
+      .limit(limit);
+
+    const events = rows.map((r) => ({
+      id: r.id,
+      title: r.title,
+      description: r.description,
+      startAt: r.start_at,
+      endAt: r.end_at,
+      venueName: r.venue_name,
+      city: r.city || (Array.isArray(r.source_coverage_geo) ? r.source_coverage_geo[0] : null),
+      eventUrl: r.event_url,
+      imageUrl: r.image_url,
+      categories: r.categories || [],
+      sourceName: r.source_name,
+    }));
+
+    res.json({ events, count: events.length, days, limit });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;

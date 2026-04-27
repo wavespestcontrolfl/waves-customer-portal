@@ -75,47 +75,60 @@ function SectionHeader({ title, hint, action }) {
   );
 }
 
-// Placeholder events — Phase 2 wires to rss_events / agent_events tables.
-const SAMPLE_EVENTS = [
-  {
-    id: 'e1',
-    title: 'Lakewood Ranch 4th of July Parade',
-    source: 'Lakewood Ranch Town Hall events feed',
-    date: '2026-07-04',
-    angle: 'Pre-parade mosquito prep checklist — before-and-after yards',
-  },
-  {
-    id: 'e2',
-    title: 'Chinch bug pressure peak — Manatee County',
-    source: 'Agent · pest-pressure calendar',
-    date: '2026-06-15',
-    angle: 'Flotation-test how-to + tech-captured field video from Parrish',
-  },
-  {
-    id: 'e3',
-    title: 'Sarasota Red Tide advisory lifted',
-    source: 'FWC monitoring feed',
-    date: '2026-05-01',
-    angle: 'Outdoor-dining season = mosquito/ant season — service promo',
-  },
-];
+// Allowlist URL protocols on the render side too — events_raw rows
+// pre-dating the ingestion-side validation could still contain a
+// `javascript:` URL, and rendering that into <a href> would execute
+// on click. Server already filters at ingestion (event-ingestion.js
+// safeHttpUrl); this is the second layer.
+function safeHttpUrl(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
 
+// Renders one ingested event from /admin/newsletter/events. Shape:
+//   { id, title, description, startAt, endAt, venueName, city,
+//     eventUrl, imageUrl, categories, sourceName }
+// startAt + city + sourceName + description may be null for some
+// feeds — render gracefully.
 function EventCard({ event }) {
-  const d = new Date(event.date + 'T12:00:00');
-  const dateLabel = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  const dateLabel = event.startAt
+    ? new Date(event.startAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+    : 'Ongoing';
+  const cityLabel = event.city ? event.city.replace(/(?:^|\s)\S/g, (s) => s.toUpperCase()) : null;
+  const sourceLabel = (event.sourceName || '').split('·')[0].trim().slice(0, 18) || 'Source';
+  const safeUrl = safeHttpUrl(event.eventUrl);
   return (
     <div className="bg-white border-hairline border-zinc-200 rounded-sm p-3 flex flex-col gap-2">
       <div className="flex items-start justify-between gap-2">
         <div className="flex-1 min-w-0">
           <div className="text-13 font-medium text-ink-primary truncate">{event.title}</div>
-          <div className="text-11 text-ink-tertiary mt-0.5 u-nums">{dateLabel}</div>
+          <div className="text-11 text-ink-tertiary mt-0.5 u-nums">
+            {dateLabel}{cityLabel ? ` · ${cityLabel}` : ''}
+          </div>
         </div>
-        <Badge tone="neutral">{event.source.split('·')[0].trim().slice(0, 14)}</Badge>
+        <Badge tone="neutral">{sourceLabel}</Badge>
       </div>
-      <div className="text-12 text-ink-secondary leading-snug">{event.angle}</div>
+      {event.description && (
+        <div className="text-12 text-ink-secondary leading-snug line-clamp-2">{event.description}</div>
+      )}
       <div className="flex justify-end gap-2 mt-1">
-        <Button variant="ghost" size="sm" disabled title="Wire-up pending">Dismiss</Button>
-        <Button variant="primary" size="sm" disabled title="Wire-up pending">
+        {safeUrl && (
+          <a
+            href={safeUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center text-12 font-medium text-zinc-700 hover:text-zinc-900 underline underline-offset-2"
+          >
+            View source ↗
+          </a>
+        )}
+        <Button variant="primary" size="sm" disabled title="Wire-up pending — P3 follow-up">
           <Sparkles size={12} strokeWidth={1.75} className="mr-1" />
           Draft newsletter
         </Button>
@@ -236,6 +249,8 @@ function DashboardView({ onSelectTab }) {
   const [stats, setStats] = useState({ subscribers: null, lastOpenRate: null, scheduledCount: null });
   const [recentPosts, setRecentPosts] = useState([]);
   const [loadingPosts, setLoadingPosts] = useState(true);
+  const [events, setEvents] = useState([]);
+  const [loadingEvents, setLoadingEvents] = useState(true);
 
   useEffect(() => {
     let ignore = false;
@@ -245,6 +260,9 @@ function DashboardView({ onSelectTab }) {
     adminFetch('/admin/newsletter/posts?limit=5')
       .then((d) => { if (!ignore) { setRecentPosts(d.posts || []); setLoadingPosts(false); } })
       .catch(() => { if (!ignore) setLoadingPosts(false); });
+    adminFetch('/admin/newsletter/events?days=14&limit=12')
+      .then((d) => { if (!ignore) { setEvents(d.events || []); setLoadingEvents(false); } })
+      .catch(() => { if (!ignore) setLoadingEvents(false); });
     return () => { ignore = true; };
   }, []);
 
@@ -281,16 +299,30 @@ function DashboardView({ onSelectTab }) {
         <QuickActions onSelectTab={onSelectTab} />
       </div>
 
-      {/* Upcoming events queue — placeholder data until agent + RSS land */}
+      {/* Upcoming events — pulled from event_sources via the daily
+          ingestion cron (server/services/event-ingestion.js). P3a ships
+          RSS-only; iCal + scrape land in P3b. */}
       <div className="mb-6">
         <SectionHeader
           title="Upcoming events worth writing about"
-          hint="Agent-surfaced SWFL events. Event discovery is Phase 2."
-          action={<Badge tone="neutral">Preview</Badge>}
+          hint="Pulled from local SWFL feeds (Tampa.gov, Bay News 9, Manatee Chamber, Sarasota Magazine, The Gabber, Lakewood Ranch). Refreshes daily 4am ET."
         />
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          {SAMPLE_EVENTS.map((e) => <EventCard key={e.id} event={e} />)}
-        </div>
+        {loadingEvents ? (
+          <div className="text-13 text-ink-tertiary p-3">Loading events…</div>
+        ) : events.length === 0 ? (
+          <Card>
+            <CardBody className="text-center">
+              <div className="text-14 text-ink-primary mb-1">No upcoming events</div>
+              <div className="text-13 text-ink-tertiary">
+                The next ingestion run is at 4am ET. Sources can be inspected in the event_sources table.
+              </div>
+            </CardBody>
+          </Card>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {events.map((e) => <EventCard key={e.id} event={e} />)}
+          </div>
+        )}
       </div>
 
       {/* Recent posts */}
