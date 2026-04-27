@@ -227,7 +227,12 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
     const f = {};
     if (segmentMode === 'customers') f.customersOnly = true;
     if (segmentMode === 'leads') f.leadsOnly = true;
-    if (segmentSources.length) f.sources = segmentSources;
+    // Source chips are only visible in 'custom' mode — scope the filter
+    // to that mode so a stale segmentSources selection doesn't leak
+    // through after the operator switches back to "All active" /
+    // "Customers only" / "Leads only". Tags remain additive across all
+    // modes by design.
+    if (segmentMode === 'custom' && segmentSources.length) f.sources = segmentSources;
     if (segmentTags.length) f.tags = segmentTags;
     return Object.keys(f).length ? f : null;
   }, [segmentMode, segmentSources, segmentTags]);
