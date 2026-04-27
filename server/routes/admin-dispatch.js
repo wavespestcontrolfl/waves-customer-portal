@@ -400,13 +400,60 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
-    // Update scheduled_service
-    await db('scheduled_services').where({ id: svc.id }).update({
-      status: 'completed', actual_end_time: db.fn.now(),
-      service_time_minutes: svc.actual_start_time ? Math.round((Date.now() - new Date(svc.actual_start_time)) / 60000) : null,
-    });
+    // Status flip + audit row + lifecycle timestamps. Migrated to
+    // services/job-status.js#transitionJobStatus (third call site,
+    // after PRs #328 / #329). Same pattern: trx wraps the audit row
+    // + lifecycle update + the canonical sole-writer call. Atomic
+    // guard rejects on fromStatus race (409). Auto-resolve of
+    // overdue-family alerts + customer:job_update + dispatch:job_update
+    // broadcasts come for free post-commit.
+    //
+    // Scope kept narrow: service_record + service_products + MOA
+    // detector still run BEFORE this block, as they did pre-migration.
+    // A pre-existing orphan-record concern (if status flip fails after
+    // those inserts, the service_record stays around without a
+    // matching status) is tangential and would need a wider trx; not
+    // doing it here to keep this PR minimal.
+    const fromStatus = svc.status;
+    const { transitionJobStatus } = require('../services/job-status');
+    try {
+      await db.transaction(async (trx) => {
+        // Legacy audit row INSIDE the trx — race rejection rolls it
+        // back too (PR #328 / #329 pattern; phantom rows on 409
+        // would otherwise mismatch scheduled_services.status and
+        // job_status_history).
+        await trx('service_status_log').insert({
+          scheduled_service_id: svc.id, status: 'completed', changed_by: req.technicianId,
+        });
 
-    await db('service_status_log').insert({ scheduled_service_id: svc.id, status: 'completed', changed_by: req.technicianId });
+        // Lifecycle timestamps the route owns. transitionJobStatus
+        // owns status + updated_at; we own actual_end_time +
+        // service_time_minutes. No constraint conflict — separate
+        // columns on the same row.
+        const lifecycleUpdates = {
+          actual_end_time: trx.fn.now(),
+          service_time_minutes: svc.actual_start_time
+            ? Math.round((Date.now() - new Date(svc.actual_start_time)) / 60000)
+            : null,
+        };
+        await trx('scheduled_services').where({ id: svc.id }).update(lifecycleUpdates);
+
+        await transitionJobStatus({
+          jobId: svc.id,
+          fromStatus,
+          toStatus: 'completed',
+          transitionedBy: req.technicianId,
+          trx,
+        });
+      });
+    } catch (err) {
+      if (err && err.message && err.message.includes('not in state')) {
+        return res.status(409).json({
+          error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
+        });
+      }
+      throw err;
+    }
 
     // Customer-visible track_state → 'complete' so /track/:token renders the
     // summary card. track_state is owned by services/track-transitions.js.
