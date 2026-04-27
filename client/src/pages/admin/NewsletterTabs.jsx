@@ -28,6 +28,11 @@ function adminFetch(path, options = {}) {
 }
 
 // Starter HTML templates. Operator picks one → seeds the HTML body textarea.
+// Voice + structure modeled on the Beehiiv-era newsletter history (Weekend
+// Lineup was ~60% of sends and the highest-engagement format; Pest/Lawn
+// Concern is the educational evergreen). Headlines are deliberately
+// placeholder-y so the operator (or AI Draft) can rewrite them per send —
+// the value here is the structure + voice cues, not literal headlines.
 // Deliberately minimal markup — SendGrid footer is appended automatically.
 const TEMPLATES = [
   {
@@ -36,77 +41,93 @@ const TEMPLATES = [
     html: '',
   },
   {
-    key: 'monthly',
-    label: 'Monthly update',
-    html: `<h1>Your Waves monthly update</h1>
-<p>Hi neighbor — quick update from the Waves team on what's going on around Southwest Florida this month.</p>
+    key: 'weekend',
+    label: 'Weekend Lineup',
+    html: `<h1>🎉 [Punchy weekend headline — e.g., "Your No-Lame-Plans Weekend Starts Here"]</h1>
+<p>What's good, neighbor — here's what's hitting around Southwest Florida this weekend. Pick one (or three) and get out of the house.</p>
 
-<h2>What we're watching</h2>
-<p>[Short paragraph — the pest or lawn concern that's hitting our service calls hardest right now.]</p>
+<h2>[Event 1 name]</h2>
+<p><strong>[City] · [Day, time]</strong> — [One or two sentences on why it's worth going. Keep it casual, drop a vibe.]</p>
 
-<h2>Tip of the month</h2>
-<p>[One practical thing a homeowner can do this week — 2-3 sentences.]</p>
+<h2>[Event 2 name]</h2>
+<p><strong>[City] · [Day, time]</strong> — [Why-go blurb.]</p>
 
-<h2>What's new at Waves</h2>
-<p>[Team news, new service, new territory, or a milestone.]</p>
+<h2>[Event 3 name]</h2>
+<p><strong>[City] · [Day, time]</strong> — [Why-go blurb.]</p>
 
-<p>Questions? Just reply to this email — it goes to our team.</p>
-<p>— Waves Pest Control</p>`,
+<h2>[Optional event 4 / 5]</h2>
+<p><strong>[City] · [Day, time]</strong> — [Why-go blurb.]</p>
+
+<h2>One more thing</h2>
+<p>[Optional pest/lawn tie-in — e.g., "If your yard's looking rough before guests come over, we've got a same-week slot." Drop this section if you'd rather keep it pure events.]</p>
+
+<p>Have a good one out there.</p>
+<p>— The Waves crew</p>`,
   },
   {
-    key: 'seasonal',
-    label: 'Seasonal pest alert',
-    html: `<h1>[Pest name] are showing up across SWFL</h1>
-<p>Heads up — we've seen a noticeable uptick in [pest] activity across [city / region] this past week. Here's what to know and what to do.</p>
+    key: 'pest_concern',
+    label: 'Pest / Lawn Concern',
+    html: `<h1>🦟 [Concern + region — e.g., "Mosquitoes are back across SWFL"]</h1>
+<p>Heads up — we've been getting [a lot] more calls about [pest / issue] this past week than usual. Here's what's going on and what to do.</p>
 
 <h2>Why now</h2>
-<p>[One short paragraph: weather, lifecycle, sandy-soil angle, etc.]</p>
+<p>[One or two sentences: weather, life cycle, sandy-soil angle, recent rain — whatever the trigger is.]</p>
 
 <h2>Signs to watch for</h2>
 <ul>
-  <li>[Sign 1]</li>
+  <li>[Sign 1 — make it specific and visible]</li>
   <li>[Sign 2]</li>
   <li>[Sign 3]</li>
+  <li>[Sign 4 — optional]</li>
 </ul>
 
-<h2>What to do</h2>
-<p>[2-3 sentences of practical advice. Then soft mention of Waves being available if they want help.]</p>
+<h2>What to do this week</h2>
+<p>[2-3 sentences of practical advice a homeowner can do today. Then a soft mention of Waves if they want help — don't oversell.]</p>
 
-<p>— Waves Pest Control</p>`,
+<p>Stay ahead of it,</p>
+<p>— The Waves crew</p>`,
   },
   {
-    key: 'announcement',
-    label: 'Service announcement',
-    html: `<h1>[Announcement headline]</h1>
-<p>We've got an update to share with our customers — [one-sentence summary].</p>
+    key: 'local_spotlight',
+    label: 'Local Spotlight',
+    html: `<h1>🍽️ [Food / spot / lifestyle hook — e.g., "Fresh bites we're hitting this month"]</h1>
+<p>Quick rundown of [restaurants / shops / spots] worth a stop around Southwest Florida — built from what our techs and neighbors are actually talking about.</p>
 
-<h2>What's changing</h2>
-<p>[Clear, plain-language paragraph.]</p>
+<h2>[Spot 1 name]</h2>
+<p><strong>[Neighborhood / city]</strong> — [Why it's worth a visit. 1-2 sentences max. Drop a vibe or a specific dish.]</p>
 
-<h2>What it means for you</h2>
-<p>[How it affects existing customers. Be direct.]</p>
+<h2>[Spot 2 name]</h2>
+<p><strong>[Neighborhood / city]</strong> — [Why-visit blurb.]</p>
 
-<h2>Questions?</h2>
-<p>Reply to this email or give us a call — we'd rather over-communicate than leave you guessing.</p>
+<h2>[Spot 3 name]</h2>
+<p><strong>[Neighborhood / city]</strong> — [Why-visit blurb.]</p>
 
-<p>— Waves Pest Control</p>`,
+<h2>[Optional spot 4]</h2>
+<p><strong>[Neighborhood / city]</strong> — [Why-visit blurb.]</p>
+
+<p>Tell 'em Waves sent you.</p>
+<p>— The Waves crew</p>`,
   },
   {
-    key: 'roundup',
-    label: 'Blog roundup',
-    html: `<h1>This month on the Waves blog</h1>
-<p>A quick roundup of what we published — in case any of it is useful to you this month.</p>
+    key: 'service_promo',
+    label: 'Service Promo',
+    html: `<h1>🎉 [Offer headline — clear and direct, e.g., "$150 off a full-yard treatment, this week only"]</h1>
+<p>Quick one — we're running a [offer summary] for [audience: existing customers / new SWFL homeowners / etc.] through [expiration date].</p>
 
-<h2><a href="https://www.wavespestcontrol.com/[slug-1]">[Post title 1]</a></h2>
-<p>[1-2 sentence teaser.]</p>
+<h2>The deal</h2>
+<p>[One or two sentences: exact offer, eligibility, dollar value.]</p>
 
-<h2><a href="https://www.wavespestcontrol.com/[slug-2]">[Post title 2]</a></h2>
-<p>[1-2 sentence teaser.]</p>
+<h2>What's included</h2>
+<ul>
+  <li>[Inclusion 1]</li>
+  <li>[Inclusion 2]</li>
+  <li>[Inclusion 3]</li>
+</ul>
 
-<h2><a href="https://www.wavespestcontrol.com/[slug-3]">[Post title 3]</a></h2>
-<p>[1-2 sentence teaser.]</p>
+<h2>How to claim</h2>
+<p>Reply to this email or call us before [expiration date]. We'll lock it in same day.</p>
 
-<p>— Waves Pest Control</p>`,
+<p>— The Waves crew</p>`,
   },
 ];
 
