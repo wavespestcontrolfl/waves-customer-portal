@@ -617,6 +617,70 @@ router.put('/technicians/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /technicians/:id/photo — upload tech profile photo.
+//
+// Multipart upload. Stores the binary in S3 at
+// tech-photos/<technician_id>/<timestamp>-<safename> and sets
+// technicians.photo_s3_key (canonical S3 reference).
+//
+// Read pattern: consumers (track-public.js, documents.js,
+// review-request.js) presign technicians.photo_s3_key on demand
+// at the trusted-context boundary they already authenticate. There
+// is NO public unauthenticated proxy — adding one would put a new
+// route outside AGENTS.md's allowed-list of public-by-token routes
+// (P0; Codex caught this on PR #344). UUIDs are not secrets —
+// booking responses already expose technician_id to unauth callers.
+//
+// photo_url is left untouched. It coexists as a fallback for
+// techs whose photo lives at an external URL (e.g., Google Business
+// profile). Read sites use photo_s3_key first, fall back to
+// photo_url.
+//
+// Re-uploading a photo for the same tech overwrites photo_s3_key
+// (old S3 object stays orphaned — cleanup is a separate concern).
+//
+// Lazy multer init: defining the route requires `upload`, which is
+// declared further down the file (with the company-documents block).
+// Reuse it inline below — same multer instance, same 25 MB cap.
+const PHOTO_PREFIX = 'tech-photos/';
+router.post(
+  '/technicians/:id/photo',
+  (req, res, next) => upload.single('photo')(req, res, next),
+  async (req, res, next) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'No file provided' });
+      if (!config.s3?.bucket) return res.status(500).json({ error: 'S3 not configured' });
+
+      const tech = await db('technicians').where({ id: req.params.id }).first('id', 'name');
+      if (!tech) return res.status(404).json({ error: 'Technician not found' });
+
+      const safeName = req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const key = `${PHOTO_PREFIX}${tech.id}/${Date.now()}-${safeName}`;
+      await s3.send(new PutObjectCommand({
+        Bucket: config.s3.bucket,
+        Key: key,
+        Body: req.file.buffer,
+        ContentType: req.file.mimetype,
+      }));
+
+      await db('technicians').where({ id: tech.id }).update({
+        photo_s3_key: key,
+        updated_at: new Date(),
+      });
+
+      logger.info(`[team] Uploaded photo for ${tech.name}: ${key}`);
+
+      res.json({
+        success: true,
+        technician: await db('technicians').where({ id: tech.id }).first(),
+      });
+    } catch (err) {
+      logger.error(`[team] Tech photo upload failed: ${err.message}`);
+      next(err);
+    }
+  }
+);
+
 // DELETE /technicians/:id — hard delete the technician row.
 // If related records exist (time entries, assignments) the DB FK
 // will error; the client surfaces that message.
