@@ -374,13 +374,56 @@ router.post('/outbound-connect', async (req, res) => {
 // =========================================================================
 router.post('/call-status', async (req, res) => {
   try {
-    const { CallSid, CallStatus, CallDuration } = req.body;
+    const { CallSid, CallStatus, CallDuration, From, To, Direction } = req.body;
 
-    await db('call_log').where('twilio_call_sid', CallSid).update({
-      status: CallStatus,
-      duration_seconds: parseInt(CallDuration || 0),
-      updated_at: new Date(),
-    });
+    const existing = await db('call_log').where('twilio_call_sid', CallSid).first();
+
+    if (existing) {
+      await db('call_log').where('twilio_call_sid', CallSid).update({
+        status: CallStatus,
+        duration_seconds: parseInt(CallDuration || existing.duration_seconds || 0),
+        updated_at: new Date(),
+      });
+    } else {
+      // Studio Flow bypassed /voice — insert from status-callback fields.
+      const numberConfig = TWILIO_NUMBERS.findByNumber(To);
+      const isOutbound = Direction === 'outbound-api' || Direction === 'outbound-dial';
+      const customer = From && !isOutbound
+        ? await db('customers').where({ phone: From }).first()
+        : null;
+
+      await db('call_log').insert({
+        customer_id: customer?.id || null,
+        direction: isOutbound ? 'outbound' : 'inbound',
+        from_phone: From,
+        to_phone: To,
+        twilio_call_sid: CallSid,
+        status: CallStatus,
+        duration_seconds: parseInt(CallDuration || 0),
+        metadata: JSON.stringify({
+          location: numberConfig?.label || 'unknown',
+          numberType: numberConfig?.type || 'unknown',
+          domain: numberConfig?.domain || null,
+          source: 'status_callback',
+        }),
+      });
+
+      require('../services/conversations').recordTouchpoint({
+        customerId: customer?.id,
+        channel: 'voice',
+        ourEndpointId: To,
+        contactPhone: customer ? null : From,
+        direction: isOutbound ? 'outbound' : 'inbound',
+        authorType: isOutbound ? 'admin' : 'customer',
+        twilioSid: CallSid,
+        metadata: {
+          location: numberConfig?.label || 'unknown',
+          numberType: numberConfig?.type || 'unknown',
+          domain: numberConfig?.domain || null,
+          source: 'status_callback',
+        },
+      }).catch(() => {});
+    }
 
     res.sendStatus(200);
   } catch (err) {
