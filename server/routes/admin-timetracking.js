@@ -617,6 +617,76 @@ router.put('/technicians/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /technicians/:id/photo — upload tech profile photo.
+//
+// Multipart upload. Stores the binary in S3 at
+// tech-photos/<technician_id>/<timestamp>-<safename>, sets
+// technicians.photo_s3_key (canonical S3 reference) and
+// technicians.photo_url (stable same-origin proxy at
+// /api/public/tech-photo/:technicianId — see routes/public-tech-photo.js).
+//
+// Why a stable proxy URL instead of a presigned S3 URL stored on the
+// row: the customer tracker (track-public.js) and document renderers
+// (documents.js) read photo_url verbatim. A presigned URL would
+// expire and break the rendered <img>. The proxy resolves to a fresh
+// presigned URL on every request, so photos work indefinitely while
+// the bucket stays private.
+//
+// Re-uploading a photo for the same tech overwrites photo_s3_key
+// (old S3 object stays orphaned — cleanup is a separate concern).
+// photo_url stays the same since it's keyed off technician_id.
+//
+// Lazy multer init: defining the route requires `upload`, which is
+// declared further down the file (with the company-documents block).
+// Reuse it inline below — same multer instance, same 25 MB cap. If
+// 25 MB is too large for profile photos in practice (most are < 1 MB),
+// future tightening can move the multer cap to per-route.
+const PHOTO_PREFIX = 'tech-photos/';
+router.post(
+  '/technicians/:id/photo',
+  (req, res, next) => upload.single('photo')(req, res, next),
+  async (req, res, next) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'No file provided' });
+      if (!config.s3?.bucket) return res.status(500).json({ error: 'S3 not configured' });
+
+      const tech = await db('technicians').where({ id: req.params.id }).first('id', 'name');
+      if (!tech) return res.status(404).json({ error: 'Technician not found' });
+
+      const safeName = req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const key = `${PHOTO_PREFIX}${tech.id}/${Date.now()}-${safeName}`;
+      await s3.send(new PutObjectCommand({
+        Bucket: config.s3.bucket,
+        Key: key,
+        Body: req.file.buffer,
+        ContentType: req.file.mimetype,
+      }));
+
+      // Build the same-origin proxy URL. clientUrl is the canonical
+      // public host (see config). Using an absolute URL (vs. relative)
+      // so PDF document renderers (documents.js) that don't know the
+      // current request origin can still resolve the image.
+      const proxyUrl = `${(config.clientUrl || '').replace(/\/$/, '')}/api/public/tech-photo/${tech.id}`;
+
+      await db('technicians').where({ id: tech.id }).update({
+        photo_s3_key: key,
+        photo_url: proxyUrl,
+        updated_at: new Date(),
+      });
+
+      logger.info(`[team] Uploaded photo for ${tech.name}: ${key}`);
+
+      res.json({
+        success: true,
+        technician: await db('technicians').where({ id: tech.id }).first(),
+      });
+    } catch (err) {
+      logger.error(`[team] Tech photo upload failed: ${err.message}`);
+      next(err);
+    }
+  }
+);
+
 // DELETE /technicians/:id — hard delete the technician row.
 // If related records exist (time entries, assignments) the DB FK
 // will error; the client surfaces that message.
