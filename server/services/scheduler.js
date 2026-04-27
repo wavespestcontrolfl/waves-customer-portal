@@ -1142,6 +1142,23 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 5 MIN — Unassigned-overdue detector (second alert generator)
+  //
+  // Same shape as tech-late-detector but scopes to jobs with
+  // technician_id IS NULL. Fires unassigned_overdue alerts when an
+  // unassigned job's window_start (in ET) has passed by ≥ 15 min
+  // and the job is still pre-terminal. Severity bands: 15–29 → warn,
+  // ≥ 30 → critical. Partial unique index closes the cross-process
+  // race (migration 20260427000003).
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const { runUnassignedOverdueCheck } = require('./unassigned-overdue-detector');
+      await runUnassignedOverdueCheck();
+    } catch (err) {
+      logger.error(`[unassigned-overdue-detector] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   logger.info('Scheduled jobs initialized');
 }
 
