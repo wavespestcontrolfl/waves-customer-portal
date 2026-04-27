@@ -19,7 +19,7 @@
  * Tier 1 V2 styling: Sheet primitive, Card / Button / Badge from
  * components/ui, zinc ramp.
  */
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   Sheet,
   SheetHeader,
@@ -76,6 +76,15 @@ export default function JobDrawer({ jobId, onClose }) {
   const [error, setError] = useState(null);
   const [busyAction, setBusyAction] = useState(null);
 
+  // Race guard: tracks the currently-selected jobId. If the dispatcher
+  // closes one drawer and quickly opens another (or just clicks pin A
+  // → pin B), an in-flight A response could land after B's selection
+  // and overwrite the B drawer with stale A data. Worse, the action
+  // buttons would target the wrong service. Guard at every state-
+  // applying boundary by checking the ref before setJob/setError.
+  // Codex P1 on PR #303.
+  const currentIdRef = useRef(null);
+
   const fetchJob = useCallback(async (id) => {
     setLoading(true);
     setError(null);
@@ -85,11 +94,17 @@ export default function JobDrawer({ jobId, onClose }) {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
+      // Selection changed while we were fetching — drop this response.
+      if (currentIdRef.current !== id) return;
       setJob(data);
     } catch (err) {
+      if (currentIdRef.current !== id) return;
       setError(err.message || 'Failed to load job');
     } finally {
-      setLoading(false);
+      // Only clear the loading flag if we're still on the same job —
+      // a stale loading=false would briefly flash empty before the
+      // newer fetch completes.
+      if (currentIdRef.current === id) setLoading(false);
     }
   }, []);
 
@@ -97,17 +112,29 @@ export default function JobDrawer({ jobId, onClose }) {
   // and then re-opened on the same job should still show fresh data
   // — the pin click might've happened minutes after a status change.
   useEffect(() => {
-    if (jobId) fetchJob(jobId);
-    else setJob(null);
+    currentIdRef.current = jobId;
+    if (jobId) {
+      fetchJob(jobId);
+    } else {
+      setJob(null);
+      setError(null);
+    }
   }, [jobId, fetchJob]);
 
   const handleStatus = useCallback(
     async (nextStatus) => {
       if (!job || busyAction) return;
       setBusyAction(nextStatus);
+      // Capture the job.id at action time so a concurrent selection
+      // change doesn't redirect the PUT to a different service. The
+      // PUT is intentionally NOT aborted on selection change — the
+      // user has already acted; the action commits server-side. We
+      // just don't apply the response into a drawer that's now
+      // showing a different job.
+      const targetJobId = job.id;
       try {
         const res = await fetch(
-          `${API_BASE}/admin/dispatch/${job.id}/status`,
+          `${API_BASE}/admin/dispatch/${targetJobId}/status`,
           {
             method: 'PUT',
             headers: adminAuthHeaders(),
@@ -115,9 +142,16 @@ export default function JobDrawer({ jobId, onClose }) {
           }
         );
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        await fetchJob(job.id);
+        // Only refetch into the drawer if the user is still on the
+        // same job. Otherwise the dispatch:job_update broadcast will
+        // refresh the relevant pin/card without our help.
+        if (currentIdRef.current === targetJobId) {
+          await fetchJob(targetJobId);
+        }
       } catch (err) {
-        setError(err.message || 'Status update failed');
+        if (currentIdRef.current === targetJobId) {
+          setError(err.message || 'Status update failed');
+        }
       } finally {
         setBusyAction(null);
       }
