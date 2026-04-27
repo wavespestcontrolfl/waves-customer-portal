@@ -158,11 +158,19 @@ export default function TechHomePage() {
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       const msg = data.alreadyEnRoute ? 'Already en route' : 'Marked en route';
       setEnRouteState({ pendingId: null, message: msg, isError: false });
+      // Belt + suspenders refresh: the dispatch:job_update broadcast
+      // is the primary path, but if the socket is mid-reconnect the
+      // event can be missed, leaving the card stale. A retry then
+      // hits the idempotent alreadyEnRoute branch on the server,
+      // which does NOT re-broadcast (no status transition occurred),
+      // so the stale card would persist until a manual reload. An
+      // explicit fetch closes that drift window.
+      fetchSchedule();
       setTimeout(() => setEnRouteState((s) => s.message === msg ? { pendingId: null, message: '', isError: false } : s), 3000);
     } catch (err) {
       setEnRouteState({ pendingId: null, message: err.message || 'Failed to mark en route', isError: true });
     }
-  }, [enRouteState.pendingId]);
+  }, [enRouteState.pendingId, fetchSchedule]);
 
   // Live updates via Socket.io. Tech JWTs auth into the same
   // dispatch:admins room as admins (server/sockets/index.js), so the
