@@ -676,4 +676,95 @@ router.get('/board', requireAdmin, async (req, res, next) => {
   }
 });
 
+// GET /api/admin/dispatch/jobs/:id — drawer hydration.
+//
+// Richer payload than dispatch:job_update (the broadcast event):
+// includes the full customer last name + phone + email so the
+// dispatcher can identify "whose house" at a glance and call them
+// without leaving the drawer. Same admin-only scope as /board.
+//
+// Distinct from the broadcast event because:
+//   - Broadcasts must stay narrow (re-render the roster + map without
+//     a refetch); the drawer is on-demand and can carry richer data
+//     that the user explicitly opened.
+//   - Customer last name was redacted from dispatch:job_update because
+//     a stale broadcast on a customer:* room could leak it; the drawer
+//     fetches over an admin-authenticated GET so the same constraint
+//     doesn't apply.
+//
+// Admin-only via requireAdmin (same as /board).
+router.get('/jobs/:id', requireAdmin, async (req, res, next) => {
+  try {
+    const row = await db('scheduled_services as s')
+      .leftJoin('technicians as t', 's.technician_id', 't.id')
+      .innerJoin('customers as c', 's.customer_id', 'c.id')
+      .where('s.id', req.params.id)
+      .first(
+        's.id as job_id',
+        's.customer_id',
+        's.technician_id as tech_id',
+        's.status',
+        's.service_type',
+        's.scheduled_date',
+        's.window_start',
+        's.window_end',
+        's.notes',
+        's.internal_notes',
+        's.lat as svc_lat',
+        's.lng as svc_lng',
+        's.updated_at',
+        't.name as tech_full_name',
+        'c.first_name as cust_first_name',
+        'c.last_name as cust_last_name',
+        'c.phone as cust_phone',
+        'c.email as cust_email',
+        'c.address_line1',
+        'c.address_line2',
+        'c.city',
+        'c.state',
+        'c.zip',
+        'c.latitude as cust_lat',
+        'c.longitude as cust_lng'
+      );
+
+    if (!row) return res.status(404).json({ error: 'Job not found' });
+
+    // Same address normalization as /board so client renders are
+    // consistent across the two surfaces.
+    const line1 = row.address_line1 || '';
+    const line2 = row.address_line2 ? ` ${row.address_line2}` : '';
+    const cityState = row.city ? `, ${row.city}` : '';
+    const stateZip = row.state ? `, ${row.state}${row.zip ? ` ${row.zip}` : ''}` : '';
+    const address = `${line1}${line2}${cityState}${stateZip}`.trim();
+
+    const lat = row.svc_lat == null ? (row.cust_lat == null ? null : Number(row.cust_lat)) : Number(row.svc_lat);
+    const lng = row.svc_lng == null ? (row.cust_lng == null ? null : Number(row.cust_lng)) : Number(row.svc_lng);
+
+    return res.json({
+      id: row.job_id,
+      customer_id: row.customer_id,
+      customer_first_name: row.cust_first_name,
+      customer_last_name: row.cust_last_name,   // full last name OK on admin GET
+      customer_phone: row.cust_phone || null,
+      customer_email: row.cust_email || null,
+      address,
+      lat,
+      lng,
+      tech_id: row.tech_id || null,
+      tech_full_name: row.tech_full_name || null,
+      status: row.status,
+      service_type: row.service_type || null,
+      scheduled_date: row.scheduled_date,
+      window_start: row.window_start || null,
+      window_end: row.window_end || null,
+      notes: row.notes || null,
+      internal_notes: row.internal_notes || null,
+      updated_at: row.updated_at,
+    });
+  } catch (err) {
+    logger.error(`[dispatch/jobs/:id] hydration failed: ${err.message}`);
+    next(err);
+  }
+});
+
 module.exports = router;

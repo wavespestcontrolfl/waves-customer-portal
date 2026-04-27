@@ -5,7 +5,7 @@
  *
  * Phase 2 v1 scope. Out of scope: drag-to-reassign, color borders on
  * roster cards (green/amber/red on schedule), revenue/KPI strips,
- * mobile responsiveness, tech drawer, job drawer.
+ * mobile responsiveness, tech drawer.
  *
  * Tier 1 V2 styling.
  */
@@ -15,6 +15,7 @@ import DispatchBoardLayout from '../../components/dispatch/DispatchBoardLayout';
 import TechRosterPane from '../../components/dispatch/TechRosterPane';
 import DispatchMap from '../../components/dispatch/DispatchMap';
 import ActionQueuePane from '../../components/dispatch/ActionQueuePane';
+import JobDrawer from '../../components/dispatch/JobDrawer';
 
 export default function DispatchBoardPage() {
   const {
@@ -23,15 +24,27 @@ export default function DispatchBoardPage() {
     jobsById,
     selectedTechId,
     setSelectedTechId,
+    selectedJobId,
+    setSelectedJobId,
     loading,
     error,
   } = useDispatchBoard();
 
   // Stable callback so memoized <TechCard> doesn't see a new prop on
   // every parent render.
-  const handleSelect = useCallback(
+  const handleSelectTech = useCallback(
     (id) => setSelectedTechId((cur) => (cur === id ? null : id)),
     [setSelectedTechId]
+  );
+
+  const handleSelectJob = useCallback(
+    (id) => setSelectedJobId(id),
+    [setSelectedJobId]
+  );
+
+  const handleCloseJob = useCallback(
+    () => setSelectedJobId(null),
+    [setSelectedJobId]
   );
 
   if (loading) {
@@ -50,24 +63,28 @@ export default function DispatchBoardPage() {
   }
 
   return (
-    <DispatchBoardLayout
-      left={
-        <TechRosterPane
-          techs={techs}
-          jobsById={jobsById}
-          selectedTechId={selectedTechId}
-          onSelect={handleSelect}
-        />
-      }
-      center={
-        <DispatchMap
-          techs={techs}
-          jobs={jobs}
-          selectedTechId={selectedTechId}
-          onSelectTech={handleSelect}
-        />
-      }
-      right={<ActionQueuePane />}
-    />
+    <>
+      <DispatchBoardLayout
+        left={
+          <TechRosterPane
+            techs={techs}
+            jobsById={jobsById}
+            selectedTechId={selectedTechId}
+            onSelect={handleSelectTech}
+          />
+        }
+        center={
+          <DispatchMap
+            techs={techs}
+            jobs={jobs}
+            selectedTechId={selectedTechId}
+            onSelectTech={handleSelectTech}
+            onSelectJob={handleSelectJob}
+          />
+        }
+        right={<ActionQueuePane />}
+      />
+      <JobDrawer jobId={selectedJobId} onClose={handleCloseJob} />
+    </>
   );
 }

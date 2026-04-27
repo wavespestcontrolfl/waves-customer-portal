@@ -73,7 +73,7 @@ function svgPin(color, isSelected = false, isTruck = false) {
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
 }
 
-export default function DispatchMap({ techs, jobs, selectedTechId, onSelectTech }) {
+export default function DispatchMap({ techs, jobs, selectedTechId, onSelectTech, onSelectJob }) {
   const { isLoaded, loadError } = useJsApiLoader({
     id: 'google-map-script',
     googleMapsApiKey: MAPS_KEY,
@@ -94,12 +94,12 @@ export default function DispatchMap({ techs, jobs, selectedTechId, onSelectTech 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [techs.length === 0 && jobs.length === 0]);
 
-  const handleJobClick = useCallback((jobId) => {
-    // v1: drawer is a separate PR. Just console.log for now per spec.
-    // Future: lift this up via an onSelectJob prop.
-    // eslint-disable-next-line no-console
-    console.log('[dispatch-board] job pin clicked', jobId);
-  }, []);
+  const handleJobClick = useCallback(
+    (jobId) => {
+      if (onSelectJob) onSelectJob(jobId);
+    },
+    [onSelectJob]
+  );
 
   if (loadError) {
     return (

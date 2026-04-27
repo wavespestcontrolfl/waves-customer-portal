@@ -59,6 +59,7 @@ export function useDispatchBoard() {
   const [techsMap, setTechsMap] = useState(() => new Map());
   const [jobs, setJobs] = useState([]);
   const [selectedTechId, setSelectedTechId] = useState(null);
+  const [selectedJobId, setSelectedJobId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -187,6 +188,8 @@ export function useDispatchBoard() {
     jobsById,
     selectedTechId,
     setSelectedTechId,
+    selectedJobId,
+    setSelectedJobId,
     loading,
     error,
   };
