@@ -98,6 +98,7 @@ export default function TechHomePage() {
   const [loading, setLoading] = useState(true);
   const [showCreateProject, setShowCreateProject] = useState(false);
   const [photoTarget, setPhotoTarget] = useState(null); // { id, customerName }
+  const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const techName = localStorage.getItem('techName') || localStorage.getItem('adminName') || 'Tech';
   const firstName = techName.split(' ')[0];
 
@@ -122,6 +123,40 @@ export default function TechHomePage() {
   useEffect(() => {
     fetchSchedule();
   }, [fetchSchedule]);
+
+  // Mark En Route — POST /api/tech/services/:id/en-route. The server
+  // owns the source-status gate (pending/confirmed/rescheduled, plus
+  // an idempotent en_route re-tap) and broadcasts dispatch:job_update
+  // post-commit, which our socket listener catches to refetch the
+  // schedule. We don't need to mutate `schedule` here.
+  //
+  // Errors we surface inline rather than a global toast:
+  //   - 403 (not assigned)            — defensive; routing prevents this
+  //   - 404 (service vanished)        — race window during cancellation
+  //   - 409 (terminal status / drift) — the server message is already
+  //                                     user-friendly ("Cannot mark
+  //                                     en-route from status 'completed'")
+  // Success message auto-clears after 3s; the schedule refresh from
+  // the broadcast typically replaces "Pending" with "En route" in the
+  // status pill before the timeout fires.
+  const handleEnRoute = useCallback(async (serviceId) => {
+    if (!serviceId || enRouteState.pendingId) return;
+    setEnRouteState({ pendingId: serviceId, message: '', isError: false });
+    try {
+      const token = localStorage.getItem('adminToken');
+      const res = await fetch(`${API}/api/tech/services/${serviceId}/en-route`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      const msg = data.alreadyEnRoute ? 'Already en route' : 'Marked en route';
+      setEnRouteState({ pendingId: null, message: msg, isError: false });
+      setTimeout(() => setEnRouteState((s) => s.message === msg ? { pendingId: null, message: '', isError: false } : s), 3000);
+    } catch (err) {
+      setEnRouteState({ pendingId: null, message: err.message || 'Failed to mark en route', isError: true });
+    }
+  }, [enRouteState.pendingId]);
 
   // Live updates via Socket.io. Tech JWTs auth into the same
   // dispatch:admins room as admins (server/sockets/index.js), so the
@@ -269,8 +304,24 @@ export default function TechHomePage() {
               if (addr) window.open(`https://maps.google.com/?q=${encodeURIComponent(addr)}`, '_blank');
             }} />
             <ActionBtn label="Protocol" icon="📖" onClick={() => navigate('/tech/protocols')} />
-            <ActionBtn label="En Route" icon="🚗" primary onClick={() => {}} />
+            <ActionBtn
+              label={enRouteState.pendingId === nextStop.id ? 'Sending…' : 'En Route'}
+              icon="🚗"
+              primary
+              disabled={enRouteState.pendingId === nextStop.id || nextStop.status === 'en_route'}
+              onClick={() => handleEnRoute(nextStop.id)}
+            />
           </div>
+          {enRouteState.message && (
+            <div style={{
+              marginTop: 10, fontSize: 12, padding: '6px 10px', borderRadius: 6,
+              background: enRouteState.isError ? '#ef444422' : '#22c55e22',
+              border: `1px solid ${enRouteState.isError ? '#ef4444' : '#22c55e'}`,
+              color: enRouteState.isError ? '#ef4444' : '#22c55e',
+            }}>
+              {enRouteState.message}
+            </div>
+          )}
         </div>
       ) : (
         <div style={{
@@ -381,9 +432,9 @@ function StatCard({ label, value, color }) {
   );
 }
 
-function ActionBtn({ label, icon, primary, onClick }) {
+function ActionBtn({ label, icon, primary, onClick, disabled }) {
   return (
-    <button onClick={onClick} style={{
+    <button onClick={onClick} disabled={disabled} style={{
       flex: 1,
       padding: '8px 4px',
       borderRadius: 8,
@@ -392,7 +443,8 @@ function ActionBtn({ label, icon, primary, onClick }) {
       color: primary ? '#fff' : DARK.text,
       fontSize: 12,
       fontWeight: 600,
-      cursor: 'pointer',
+      cursor: disabled ? 'wait' : 'pointer',
+      opacity: disabled ? 0.6 : 1,
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
