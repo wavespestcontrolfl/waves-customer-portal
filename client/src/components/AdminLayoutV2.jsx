@@ -1,9 +1,11 @@
 /*
  * AdminLayoutV2 — Square Dashboard-inspired light admin shell.
  *
- * Gated behind the `admin-shell-v2` feature flag. V1 AdminLayout remains
- * the default for flag-off users; see DECISIONS.md entry dated 2026-04-18
- * for the palette/typography rationale (warm stone, not clinical zinc).
+ * The default admin shell for all users (V1 AdminLayout + AdminLayoutGate
+ * were deleted in the V1→V2 migration). See DECISIONS.md entry dated
+ * 2026-04-18 for the palette/typography rationale (warm stone, not
+ * clinical zinc). The `admin-shell-v2` className below is kept as a
+ * stable selector for theme-square.css — it is no longer a flag.
  *
  * Consumes only the CSS custom properties defined in theme-square.css —
  * no inline hex values. When the tech-portal dark variant lands, it can

@@ -1,17 +1,14 @@
 // client/src/pages/admin/CustomersPage.jsx
 //
-// V1 admin Customers page (rendered when customers-v2 flag = false) PLUS
-// the canonical home for several reusable panels exported by name and
-// reused inside CustomersPageV2 until those panels get individually
-// reskinned:
+// Shared-utility module for the V2 admin Customers surface. The V1 page
+// component was deleted in the V1→V2 migration; this file is retained
+// only for named exports consumed by CustomersPageV2:
 //   - CustomerMap                 (lat/lng pins of the directory)
-//   - CustomerHealthSection       (also exported separately from
-//                                   CustomerHealthTabs.jsx)
 //   - CustomerIntelligenceTab     (AI Advisor)
-//   - STAGE_MAP, KANBAN_STAGES,
-//     LEAD_SOURCES, STAGES         (shared pipeline-stage definitions)
+//   - STAGES / STAGE_MAP / KANBAN_STAGES / LEAD_SOURCES / TIER_COLORS
+//   - PipelineColumn              (legacy named export)
 //
-// Endpoints (same as V2 — strict parity):
+// Endpoints these helpers are wired against (kept in sync with V2):
 //   GET    /admin/customers
 //   POST   /admin/customers
 //   PUT    /admin/customers/:id
@@ -19,21 +16,16 @@
 //   GET    /admin/customers/pipeline/view
 //
 // Audit focus:
-// - V1-only styling (D palette, inline styles) is intentionally
-//   preserved for flag-off users — don't flag this as drift.
-// - Reusable exports: any change here affects V2 too. The named
-//   exports above are the public API; touching them needs care.
+// - Reusable exports: any change here affects V2. The named exports
+//   above are the public API; touching them needs care.
 // - CustomerMap: confirm graceful behavior when a customer has no
 //   lat/lng (RentCast-skipped, brand-new builds). Don't render
 //   off-map pins.
-// - Pipeline kanban drag-drop: ensure a stage change PUT failure
-//   reverts the local move so the UI doesn't lie about backend state.
 // - STAGE_MAP / KANBAN_STAGES export shape: any consumer (V2,
 //   LeadsTabs, IB tools) reads from these. Adding/renaming a stage
 //   is a coordinated change.
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import Customer360Profile from '../../components/admin/Customer360Profile';
 import CallBridgeLink from '../../components/admin/CallBridgeLink';
 import HorizontalScroll from '../../components/HorizontalScroll';
 import useIsMobile from '../../hooks/useIsMobile';
