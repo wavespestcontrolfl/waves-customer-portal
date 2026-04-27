@@ -19,7 +19,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Badge, Button, Card, CardBody, cn } from '../../components/ui';
-import { Mail, Users, Zap, Calendar, FileText, TrendingUp, Sparkles, Plus, Upload } from 'lucide-react';
+import { Mail, Users, Zap, Calendar, FileText, TrendingUp, Sparkles, Plus, Upload, MapPin } from 'lucide-react';
 import { ComposeView, HistoryView, SubscribersView } from './NewsletterTabs';
 import EmailAutomationsPanelV2 from './EmailAutomationsPanelV2';
 
@@ -92,10 +92,10 @@ function safeHttpUrl(raw) {
 }
 
 // Renders one ingested event from /admin/newsletter/events. Shape:
-//   { id, title, description, startAt, endAt, venueName, city,
-//     eventUrl, imageUrl, categories, sourceName }
-// startAt + city + sourceName + description may be null for some
-// feeds — render gracefully.
+//   { id, title, description, startAt, endAt, venueName, venueAddress,
+//     city, geoLat, geoLng, eventUrl, imageUrl, categories, sourceName }
+// startAt + city + sourceName + description + venue fields may be
+// null for some feeds — render gracefully.
 function EventCard({ event, onDraft }) {
   const dateLabel = event.startAt
     ? new Date(event.startAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
@@ -103,6 +103,17 @@ function EventCard({ event, onDraft }) {
   const cityLabel = event.city ? event.city.replace(/(?:^|\s)\S/g, (s) => s.toUpperCase()) : null;
   const sourceLabel = (event.sourceName || '').split('·')[0].trim().slice(0, 18) || 'Source';
   const safeUrl = safeHttpUrl(event.eventUrl);
+
+  // Map deep-link. Prefer geocoded lat/lng (precise) over the raw
+  // venue_address string fallback (Google still resolves it server-side
+  // but precision is better with coords). Only render the link when at
+  // least one of those is present.
+  const mapUrl = (event.geoLat != null && event.geoLng != null)
+    ? `https://www.google.com/maps?q=${encodeURIComponent(`${event.geoLat},${event.geoLng}`)}`
+    : event.venueAddress
+      ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(event.venueAddress)}`
+      : null;
+
   return (
     <div className="bg-white border-hairline border-zinc-200 rounded-sm p-3 flex flex-col gap-2">
       <div className="flex items-start justify-between gap-2">
@@ -114,10 +125,29 @@ function EventCard({ event, onDraft }) {
         </div>
         <Badge tone="neutral">{sourceLabel}</Badge>
       </div>
+      {(event.venueName || event.venueAddress) && (
+        <div className="flex items-start gap-1.5 text-11 text-ink-tertiary leading-snug">
+          <MapPin size={11} strokeWidth={1.75} aria-hidden className="mt-0.5 flex-shrink-0" />
+          <div className="min-w-0">
+            {event.venueName && <div className="text-ink-secondary truncate">{event.venueName}</div>}
+            {event.venueAddress && <div className="truncate">{event.venueAddress}</div>}
+          </div>
+        </div>
+      )}
       {event.description && (
         <div className="text-12 text-ink-secondary leading-snug line-clamp-2">{event.description}</div>
       )}
       <div className="flex justify-end gap-2 mt-1">
+        {mapUrl && (
+          <a
+            href={mapUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center text-12 font-medium text-zinc-700 hover:text-zinc-900 underline underline-offset-2"
+          >
+            View on map ↗
+          </a>
+        )}
         {safeUrl && (
           <a
             href={safeUrl}
