@@ -62,11 +62,17 @@ const config = require('../config');
 const db = require('../models/db');
 const logger = require('../services/logger');
 
-// Track tokens are 32-character hex strings — matches the format used
-// by /api/public/track/:token (see server/routes/track-public.js's
-// TOKEN_RE). Keeping a copy here means a malformed string never hits
-// the DB.
-const TRACK_TOKEN_RE = /^[a-f0-9]{32}$/i;
+// Track tokens are 64-char lowercase hex — generated as
+// encode(gen_random_bytes(32), 'hex') in
+// server/models/migrations/20260422000009_scheduled_services_tracking.js
+// and matched by server/routes/track-public.js's TOKEN_RE. Keeping
+// a copy here means a malformed string never hits the DB.
+//
+// (Prior version of this regex used 32 chars — Codex P1 on PR #332.
+//  In prod every real token would have been rejected with
+//  TRACK_TOKEN_INVALID and the customer-track socket would have
+//  silently failed to connect.)
+const TRACK_TOKEN_RE = /^[a-f0-9]{64}$/;
 
 function extractAuth(socket) {
   const handshake = socket.handshake || {};
