@@ -80,6 +80,22 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 4AM — Newsletter event ingestion (P3a). Pulls every enabled
+  // RSS source from event_sources, upserts into events_raw. Daily cadence
+  // (vs weekly with the newsletter draft) so events added 6 days before
+  // a Friday send still make it into the dashboard tiles.
+  // =========================================================================
+  cron.schedule('0 4 * * *', async () => {
+    logger.info('Running: Newsletter event ingestion');
+    try {
+      const EventIngestion = require('./event-ingestion');
+      await EventIngestion.ingestAllEnabledSources();
+    } catch (err) {
+      logger.error(`Event ingestion failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY MIN — Newsletter scheduled sends (dispatches any whose scheduled_for
   // has passed). Intentionally high-frequency so "send at 8:00am" fires close
   // to the minute. Per-tick work is a single indexed query on newsletter_sends.
