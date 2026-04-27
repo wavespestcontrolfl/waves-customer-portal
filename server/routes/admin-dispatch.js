@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { resolveLocation } = require('../config/locations');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
@@ -531,6 +531,149 @@ router.get('/reschedules/log', async (req, res, next) => {
       },
     });
   } catch (err) { next(err); }
+});
+
+// GET /api/admin/dispatch/board — phase 2 dispatch board v1 hydration.
+// Returns techs (left-pane roster) + today's jobs (map pins). Single
+// payload to avoid a flash of stale state on the map. Real-time updates
+// from there ride dispatch:tech_status broadcasts (PR #284); the client
+// uses the `jobs` array as a lookup table for current_job_id → address.
+//
+// Filter rules (per phase 2 brief):
+//   - techs[]:  technicians.role IN ('admin','technician') AND active=TRUE,
+//               must have a tech_status row with updated_at >= NOW()-24h
+//               (rolling window, not midnight ET — avoids the "tech pinged
+//               at 11:50pm last night, card disappears at midnight" gap).
+//   - jobs[]:   all scheduled_services WHERE scheduled_date = today (ET),
+//               regardless of assignment, so unassigned pins still show
+//               on the map in a neutral color.
+//
+// Address is normalized into a single string at this layer — clients
+// don't see the schema's composable shape (address_line1/line2/city/
+// state/zip). If the address representation changes later, only this
+// endpoint touches it.
+//
+// Admin-only — requireAdmin (not requireTechOrAdmin) per the brief.
+router.get('/board', requireAdmin, async (req, res, next) => {
+  try {
+    const today = etDateString();
+
+    const techRows = await db.raw(
+      `
+      SELECT
+        t.id,
+        t.name,
+        t.avatar_url,
+        t.role,
+        ts.status,
+        ts.lat,
+        ts.lng,
+        ts.current_job_id,
+        ts.updated_at,
+        COALESCE(today_agg.total, 0)     AS today_total,
+        COALESCE(today_agg.completed, 0) AS today_completed
+      FROM technicians t
+      INNER JOIN tech_status ts ON ts.tech_id = t.id
+      LEFT JOIN (
+        SELECT
+          technician_id,
+          COUNT(*) AS total,
+          COUNT(*) FILTER (WHERE status = 'completed') AS completed
+        FROM scheduled_services
+        WHERE scheduled_date = ?
+          AND technician_id IS NOT NULL
+        GROUP BY technician_id
+      ) today_agg ON today_agg.technician_id = t.id
+      WHERE t.role IN ('admin','technician')
+        AND t.active = TRUE
+        AND ts.updated_at >= NOW() - INTERVAL '24 hours'
+      ORDER BY t.name
+      `,
+      [today]
+    );
+
+    const jobRows = await db.raw(
+      `
+      SELECT
+        s.id,
+        s.technician_id,
+        s.customer_id,
+        COALESCE(s.lat, c.lat) AS lat,
+        COALESCE(s.lng, c.lng) AS lng,
+        s.status,
+        s.service_type,
+        s.scheduled_date,
+        s.window_start,
+        s.window_end,
+        c.first_name,
+        c.last_name,
+        c.address_line1,
+        c.address_line2,
+        c.city,
+        c.state,
+        c.zip
+      FROM scheduled_services s
+      INNER JOIN customers c ON c.id = s.customer_id
+      WHERE s.scheduled_date = ?
+      ORDER BY s.window_start NULLS LAST, c.last_name
+      `,
+      [today]
+    );
+
+    const techs = (techRows.rows || []).map((r) => ({
+      id: r.id,
+      name: r.name,
+      avatar_url: r.avatar_url || null,
+      role: r.role,
+      status: r.status,
+      lat: r.lat == null ? null : Number(r.lat),
+      lng: r.lng == null ? null : Number(r.lng),
+      current_job_id: r.current_job_id || null,
+      updated_at: r.updated_at,
+      today_total: parseInt(r.today_total, 10) || 0,
+      today_completed: parseInt(r.today_completed, 10) || 0,
+    }));
+
+    const jobs = (jobRows.rows || []).map((r) => {
+      // Address normalization at the API boundary. Clients render this
+      // string directly; the schema's address_line1/line2/city/state/zip
+      // shape stays internal.
+      const line1 = r.address_line1 || '';
+      const line2 = r.address_line2 ? ` ${r.address_line2}` : '';
+      const cityState = r.city ? `, ${r.city}` : '';
+      const stateZip = r.state ? `, ${r.state}${r.zip ? ` ${r.zip}` : ''}` : '';
+      const address = `${line1}${line2}${cityState}${stateZip}`.trim();
+
+      // Customer name: first name + last initial, e.g. "Sarah M."
+      // Admin-channel safe (this is the dispatch board, not customer-
+      // facing) but truncated keeps map pin tooltips readable. Last
+      // name stays in detail-view fetches.
+      const lastInitial = r.last_name ? r.last_name.trim().charAt(0).toUpperCase() : '';
+      const customer_name = lastInitial
+        ? `${r.first_name} ${lastInitial}.`
+        : (r.first_name || '');
+
+      return {
+        id: r.id,
+        technician_id: r.technician_id || null,
+        customer_id: r.customer_id,
+        customer_name,
+        address,
+        lat: r.lat == null ? null : Number(r.lat),
+        lng: r.lng == null ? null : Number(r.lng),
+        status: r.status,
+        service_type: r.service_type || null,
+        scheduled_date: r.scheduled_date,
+        window_start: r.window_start || null,
+        window_end: r.window_end || null,
+      };
+    });
+
+    res.json({ techs, jobs });
+  } catch (err) {
+    logger.error(`[dispatch/board] hydration failed: ${err.message}`);
+    next(err);
+  }
 });
 
 module.exports = router;

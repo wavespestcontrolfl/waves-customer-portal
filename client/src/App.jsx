@@ -35,7 +35,7 @@ import TechLayout from './components/TechLayout';
 import InstallPrompt from './components/InstallPrompt';
 import AdminDashboardGate from './pages/admin/DashboardGate';
 import AdminReviewsPage from './pages/admin/ReviewsPage';
-import AdminDispatchGate from './pages/admin/DispatchGate';
+import AdminDispatchPage from './pages/admin/AdminDispatchPage';
 import AdminInventoryPage from './pages/admin/InventoryPage';
 import AdminRevenuePage from './pages/admin/RevenuePage';
 import AdminCommunicationsPage from './pages/admin/CommunicationsGate';
@@ -186,8 +186,13 @@ export default function App() {
             <Route path="dashboard" element={<AdminDashboardGate />} />
             <Route path="customers" element={<AdminCustomersPage />} />
             <Route path="estimates" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading estimator...</div>}><AdminEstimatePage /></Suspense>} />
-            <Route path="schedule" element={<AdminDispatchGate />} />
-            <Route path="dispatch" element={<Navigate to="/admin/schedule" replace />} />
+            {/* /admin/dispatch is now the canonical dispatcher surface
+                — Board tab (phase 2 v1) + Schedule tab (existing
+                DispatchPageV2). /admin/schedule still works (redirects
+                to the Schedule tab) so existing bookmarks and internal
+                links aren't broken. */}
+            <Route path="dispatch" element={<AdminDispatchPage />} />
+            <Route path="schedule" element={<Navigate to="/admin/dispatch?tab=schedule" replace />} />
             <Route path="revenue" element={<Navigate to="/admin/dashboard" replace />} />
             <Route path="communications" element={<AdminCommunicationsPage />} />
             <Route path="reviews" element={<AdminReviewsPage />} />
