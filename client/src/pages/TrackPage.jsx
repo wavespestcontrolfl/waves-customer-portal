@@ -1,9 +1,12 @@
 import Icon from '../components/Icon';
-import { COLORS } from '../theme-brand';
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { COLORS, FONTS, GOLD_CTA } from '../theme-brand';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { io } from 'socket.io-client';
+import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
 import BrandFooter from '../components/BrandFooter';
+
+const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -77,12 +80,50 @@ function useElapsed(fromIso) {
   return text;
 }
 
+// ── Helpers (en-route map + ETA) ─────────────────────────────────
+function distanceMiles(a, b) {
+  if (!a || !b) return null;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const R = 3958.8;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const x = Math.sin(dLat / 2) ** 2 + Math.sin(dLng / 2) ** 2 * Math.cos(lat1) * Math.cos(lat2);
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
+
+function statusFromDistance(miles) {
+  if (miles == null) return { label: 'On the way', color: COLORS.wavesBlue };
+  if (miles < 0.3) return { label: 'Arriving now', color: COLORS.green };
+  if (miles < 3) return { label: 'Nearby', color: COLORS.wavesBlue };
+  return { label: 'On the way', color: COLORS.wavesBlue };
+}
+
+function useLastUpdated(iso) {
+  const [text, setText] = useState('');
+  useEffect(() => {
+    if (!iso) return;
+    const tick = () => {
+      const sec = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+      if (sec < 10) setText('Updated just now');
+      else if (sec < 60) setText(`Updated ${sec}s ago`);
+      else if (sec < 3600) setText(`Updated ${Math.floor(sec / 60)} min ago`);
+      else setText(`Updated ${Math.floor(sec / 3600)}h ago`);
+    };
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => clearInterval(id);
+  }, [iso]);
+  return text;
+}
+
 // ── UI primitives ────────────────────────────────────────────────
 function Page({ children }) {
   return (
     <div style={{
       minHeight: '100vh',
-      background: COLORS.offWhite,
+      background: COLORS.sand,
       fontFamily: FONT_BODY,
       color: COLORS.navy,
       display: 'flex',
@@ -92,6 +133,168 @@ function Page({ children }) {
         {children}
       </div>
       <BrandFooter />
+    </div>
+  );
+}
+
+function StatusPill({ label, color }) {
+  return (
+    <div style={{
+      display: 'inline-block',
+      fontSize: 11, fontWeight: 700,
+      letterSpacing: '0.1em', textTransform: 'uppercase',
+      color, background: `${color}1A`,
+      padding: '6px 12px', borderRadius: 9999,
+    }}>
+      <span style={{
+        display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
+        background: color, marginRight: 8, verticalAlign: 'middle',
+      }} />
+      {label}
+    </div>
+  );
+}
+
+function EtaHero({ minutes, techFirst, source }) {
+  const isNow = minutes != null && minutes < 1;
+  const display = minutes == null ? '—' : isNow ? 'Now' : `${minutes}`;
+  const showUnit = !isNow && minutes != null;
+  return (
+    <div style={{ marginTop: 16 }}>
+      <div style={{ fontSize: 16, color: COLORS.textBody, marginBottom: 4 }}>
+        {techFirst} arrives in
+      </div>
+      <div style={{
+        fontFamily: FONTS.display,
+        fontSize: 'clamp(56px, 14vw, 88px)',
+        fontWeight: 700, color: COLORS.blueDeeper,
+        lineHeight: 1, letterSpacing: '0.02em',
+        display: 'flex', alignItems: 'baseline', gap: 12,
+      }}>
+        <span>{display}</span>
+        {showUnit ? (
+          <span style={{
+            fontSize: 22, color: COLORS.textCaption,
+            fontFamily: FONTS.body, fontWeight: 600, letterSpacing: '0.02em',
+          }}>min</span>
+        ) : null}
+      </div>
+      {source === 'haversine' ? (
+        <div style={{ fontSize: 13, color: COLORS.textCaption, marginTop: 6 }}>
+          Estimated based on distance
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TrackerMap({ tech, property }) {
+  const { isLoaded, loadError } = useJsApiLoader({
+    id: 'waves-track-map',
+    googleMapsApiKey: MAPS_KEY,
+  });
+  const center = useMemo(() => ({
+    lat: (tech.lat + property.lat) / 2,
+    lng: (tech.lng + property.lng) / 2,
+  }), [tech, property]);
+
+  if (!MAPS_KEY || loadError) {
+    return (
+      <div style={{
+        marginTop: 20, height: 200, borderRadius: 16,
+        background: `linear-gradient(135deg, ${COLORS.blueSurface} 0%, ${COLORS.blueLight} 100%)`,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        border: `1px dashed ${COLORS.grayLight}`,
+        fontSize: 14, color: COLORS.textCaption,
+        textAlign: 'center', padding: 24,
+      }}>
+        Live map unavailable.
+      </div>
+    );
+  }
+
+  if (!isLoaded) {
+    return <div style={{ marginTop: 20, height: 320, borderRadius: 16, background: COLORS.offWhite }} />;
+  }
+
+  return (
+    <div style={{
+      borderRadius: 16, overflow: 'hidden', marginTop: 20,
+      boxShadow: '0 2px 12px rgba(15, 23, 42, 0.08)',
+    }}>
+      <GoogleMap
+        center={center}
+        zoom={12}
+        mapContainerStyle={{ width: '100%', height: 320 }}
+        options={{
+          disableDefaultUI: true, zoomControl: true,
+          gestureHandling: 'cooperative', clickableIcons: false,
+          styles: [
+            { featureType: 'poi', stylers: [{ visibility: 'off' }] },
+            { featureType: 'transit', stylers: [{ visibility: 'off' }] },
+          ],
+        }}
+        onLoad={(map) => {
+          const bounds = new window.google.maps.LatLngBounds();
+          bounds.extend(tech);
+          bounds.extend(property);
+          map.fitBounds(bounds, 80);
+        }}
+      >
+        <Marker
+          position={tech}
+          icon={{
+            path: window.google.maps.SymbolPath.CIRCLE,
+            scale: 11, fillColor: COLORS.wavesBlue, fillOpacity: 1,
+            strokeColor: COLORS.white, strokeWeight: 4,
+          }}
+          title="Your Waves tech"
+          zIndex={2}
+        />
+        <Marker
+          position={property}
+          icon={{
+            path: 'M -10,4 L -10,-4 L 0,-12 L 10,-4 L 10,4 Z',
+            scale: 1, fillColor: COLORS.blueDeeper, fillOpacity: 1,
+            strokeColor: COLORS.white, strokeWeight: 2,
+          }}
+          title="Your property"
+          zIndex={1}
+        />
+      </GoogleMap>
+    </div>
+  );
+}
+
+function PrepChecklist() {
+  const [open, setOpen] = useState(false);
+  const items = ['Gates unlocked', 'Pets inside or secured', 'Sprinklers off until tonight'];
+  return (
+    <div style={{
+      marginTop: 16, padding: '14px 18px', background: COLORS.white,
+      borderRadius: 12, border: `1px solid ${COLORS.slate200}`,
+    }}>
+      <button
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        style={{
+          width: '100%', display: 'flex', justifyContent: 'space-between',
+          alignItems: 'center', background: 'none', border: 'none',
+          cursor: 'pointer', fontFamily: FONT_BODY, fontSize: 16,
+          fontWeight: 600, color: COLORS.blueDeeper, padding: 0,
+        }}
+      >
+        <span>Quick prep</span>
+        <span style={{ fontSize: 14, color: COLORS.textCaption }}>{open ? '▴' : '▾'}</span>
+      </button>
+      {open ? (
+        <ul style={{
+          margin: '12px 0 0', paddingLeft: 22, fontSize: 15,
+          color: COLORS.textBody, lineHeight: 1.7,
+        }}>
+          {items.map((t) => <li key={t}>{t}</li>)}
+        </ul>
+      ) : null}
     </div>
   );
 }
@@ -202,17 +405,62 @@ function ScheduledCard({ data }) {
 
 function EnRouteCard({ data }) {
   const techFirst = data.tech?.firstName || 'Your technician';
+  const v = data.vehicle;
+  const property = data.property?.lat != null
+    ? { lat: data.property.lat, lng: data.property.lng }
+    : null;
+  const techCoords = v?.lat != null ? { lat: v.lat, lng: v.lng } : null;
+
+  const miles = techCoords && property ? distanceMiles(techCoords, property) : null;
+  const status = statusFromDistance(miles);
+  const lastUpdated = useLastUpdated(v?.lastReportedAt);
+
   return (
-    <Card accent={COLORS.wavesBlue}>
-      <div style={{ fontSize: 14, color: COLORS.wavesBlue, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600 }}>
-        On the way
-      </div>
-      <TechBlock tech={data.tech} size="lg" />
-      <div style={{ fontSize: 22, fontWeight: 600, marginTop: 20, lineHeight: 1.3 }}>
-        {techFirst} is on the way.
-      </div>
-      <ServiceMeta data={data} />
-    </Card>
+    <>
+      <Card accent={status.color}>
+        <StatusPill label={status.label} color={status.color} />
+        <EtaHero minutes={v?.etaMinutes} techFirst={techFirst} source={v?.etaSource} />
+
+        {techCoords && property ? (
+          <>
+            <TrackerMap tech={techCoords} property={property} />
+            {lastUpdated ? (
+              <div style={{
+                fontSize: 13, color: COLORS.textCaption,
+                marginTop: 10, textAlign: 'right',
+              }}>
+                {lastUpdated}{v?.stale ? ' · GPS reconnecting' : ''}
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <div style={{
+            marginTop: 20, padding: 14, background: COLORS.blueSurface,
+            borderRadius: 10, fontSize: 14, color: COLORS.textBody,
+          }}>
+            {techFirst} is on the way. We'll update once GPS reconnects.
+          </div>
+        )}
+
+        <div style={{
+          marginTop: 24, paddingTop: 20,
+          borderTop: `1px solid ${COLORS.offWhite}`,
+        }}>
+          <TechBlock tech={data.tech} size="lg" />
+        </div>
+
+        <ServiceMeta data={data} />
+
+        <a
+          href={`sms:${WAVES_PHONE_TEL}`}
+          style={{ ...GOLD_CTA, width: '100%', marginTop: 20, boxSizing: 'border-box' }}
+        >
+          TEXT WAVES
+        </a>
+      </Card>
+
+      <PrepChecklist />
+    </>
   );
 }
 
@@ -434,6 +682,17 @@ export default function TrackPage() {
       socket.disconnect();
     };
   }, [token, notFound, fetchTrack]);
+
+  // Server-driven polling cadence. While en-route the response sets
+  // pollIntervalSeconds=30 so we refresh vehicle coords + ETA between
+  // the larger socket-driven state transitions; every other state
+  // returns 0, which disables the interval entirely.
+  useEffect(() => {
+    const sec = data?.meta?.pollIntervalSeconds || 0;
+    if (!sec || notFound) return undefined;
+    const id = setInterval(fetchTrack, sec * 1000);
+    return () => clearInterval(id);
+  }, [data?.meta?.pollIntervalSeconds, fetchTrack, notFound]);
 
   if (loading) return <Page><SkeletonCard /></Page>;
   if (notFound || !data) return <Page><NotFoundCard /></Page>;
