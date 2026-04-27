@@ -133,7 +133,34 @@ const TEMPLATES = [
 
 // ── Compose ────────────────────────────────────────────────────────
 
-export function ComposeView() {
+// Format an ingested event into a concise AI Draft prompt seed. Keeps
+// the operator-facing prompt short — Claude handles the voice + the
+// extra padding events. Strips obvious HTML from descriptions since
+// some RSS feeds embed markup in the contentSnippet/summary fields.
+function buildEventPrompt(event) {
+  if (!event) return '';
+  const dateLabel = event.startAt
+    ? new Date(event.startAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+    : 'Ongoing';
+  const cityLabel = event.city ? event.city.replace(/(?:^|\s)\S/g, (s) => s.toUpperCase()) : null;
+  const desc = (event.description || '')
+    .replace(/<[^>]*>/g, ' ') // strip HTML
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 280);
+  const lines = [
+    `Anchor this Weekend Lineup on this event:`,
+    `- ${event.title}`,
+    `- ${dateLabel}${cityLabel ? ` · ${cityLabel}` : ''}${event.venueName ? ` · ${event.venueName}` : ''}`,
+  ];
+  if (desc) lines.push(`- ${desc}`);
+  if (event.eventUrl) lines.push(`- ${event.eventUrl}`);
+  lines.push('');
+  lines.push('Pad with 2-3 other typical SWFL weekend activities for the same window.');
+  return lines.join('\n');
+}
+
+export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
   const [draftId, setDraftId] = useState(null);
   const [subject, setSubject] = useState('');
   const [subjectB, setSubjectB] = useState('');
@@ -161,6 +188,27 @@ export function ComposeView() {
   // AI Draft modal). Plumbed into /draft-ai so AI drafts land in the
   // selected template's structure + voice.
   const [selectedTemplate, setSelectedTemplate] = useState(null);
+  // Initial prompt seed for the AI Draft modal. Set when an event was
+  // handed off from DashboardView's "Draft newsletter" click; cleared
+  // after the modal opens (so reopening from the regular button isn't
+  // re-seeded).
+  const [aiInitialPrompt, setAiInitialPrompt] = useState('');
+
+  // Consume pendingEvent on mount (or whenever a new one arrives via
+  // tab switch). Apply the Weekend Lineup template so the body is
+  // pre-seeded, then auto-open the AI Draft modal with the event-shaped
+  // prompt. Acknowledge consumption so NewsletterPage clears the
+  // handoff state.
+  useEffect(() => {
+    if (!pendingEvent) return;
+    const weekend = TEMPLATES.find((t) => t.key === 'weekend');
+    if (weekend) setHtmlBody(weekend.html);
+    setSelectedTemplate('weekend');
+    setAiInitialPrompt(buildEventPrompt(pendingEvent));
+    setAiOpen(true);
+    if (onPendingEventConsumed) onPendingEventConsumed();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingEvent]);
 
   const segmentFilter = useMemo(() => {
     if (segmentMode === 'all') return null;
@@ -280,6 +328,10 @@ export function ComposeView() {
     // next modal opens defaulting to no template.
     setSelectedTemplate(template || null);
     setAiOpen(false);
+    // Clear the event-seeded prompt on success too (mirror of the
+    // onClose handler). Otherwise the next "Draft with AI" toolbar
+    // click would prefill with the stale event seed.
+    setAiInitialPrompt('');
     setStatus('AI draft inserted. Review before saving.');
   };
 
@@ -487,7 +539,8 @@ export function ComposeView() {
       {aiOpen && (
         <AiDraftModal
           initialTemplate={selectedTemplate}
-          onClose={() => setAiOpen(false)}
+          initialPrompt={aiInitialPrompt}
+          onClose={() => { setAiOpen(false); setAiInitialPrompt(''); }}
           onDraft={handleAiDraft}
         />
       )}
@@ -497,8 +550,8 @@ export function ComposeView() {
 
 // ── AI draft modal ────────────────────────────────────────────────
 
-function AiDraftModal({ initialTemplate, onClose, onDraft }) {
-  const [prompt, setPrompt] = useState('');
+function AiDraftModal({ initialTemplate, initialPrompt, onClose, onDraft }) {
+  const [prompt, setPrompt] = useState(initialPrompt || '');
   const [template, setTemplate] = useState(initialTemplate || '');
   const [audience, setAudience] = useState('Existing Waves customers');
   const [tone, setTone] = useState('Neighborly, owner-operator');

@@ -96,7 +96,7 @@ function safeHttpUrl(raw) {
 //     eventUrl, imageUrl, categories, sourceName }
 // startAt + city + sourceName + description may be null for some
 // feeds — render gracefully.
-function EventCard({ event }) {
+function EventCard({ event, onDraft }) {
   const dateLabel = event.startAt
     ? new Date(event.startAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
     : 'Ongoing';
@@ -128,7 +128,13 @@ function EventCard({ event }) {
             View source ↗
           </a>
         )}
-        <Button variant="primary" size="sm" disabled title="Wire-up pending — P3 follow-up">
+        <Button
+          variant="primary"
+          size="sm"
+          onClick={onDraft || undefined}
+          disabled={!onDraft}
+          title={onDraft ? 'Switch to Compose with this event pre-loaded for AI Draft' : 'Wire-up pending'}
+        >
           <Sparkles size={12} strokeWidth={1.75} className="mr-1" />
           Draft newsletter
         </Button>
@@ -245,7 +251,7 @@ function RecentPosts({ posts, loading }) {
   );
 }
 
-function DashboardView({ onSelectTab }) {
+function DashboardView({ onSelectTab, onDraftFromEvent }) {
   const [stats, setStats] = useState({ subscribers: null, lastOpenRate: null, scheduledCount: null });
   const [recentPosts, setRecentPosts] = useState([]);
   const [loadingPosts, setLoadingPosts] = useState(true);
@@ -320,7 +326,9 @@ function DashboardView({ onSelectTab }) {
           </Card>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            {events.map((e) => <EventCard key={e.id} event={e} />)}
+            {events.map((e) => (
+              <EventCard key={e.id} event={e} onDraft={onDraftFromEvent ? () => onDraftFromEvent(e) : null} />
+            ))}
           </div>
         )}
       </div>
@@ -385,12 +393,26 @@ export default function NewsletterPage() {
     return TABS.find((t) => t.key === requested)?.key || 'dashboard';
   }, [searchParams]);
 
+  // Cross-tab handoff for "Draft newsletter" clicks on EventCard.
+  // DashboardView calls onDraftFromEvent(event) → we stash the event +
+  // switch to the Compose tab. ComposeView consumes pendingDraftEvent
+  // on mount (applies the Weekend Lineup template + opens the AI Draft
+  // modal pre-filled with the event facts), then clears it via
+  // clearPendingDraftEvent so reopening Compose later doesn't re-fire.
+  const [pendingDraftEvent, setPendingDraftEvent] = useState(null);
+
   const setTab = (next) => {
     const newParams = new URLSearchParams(searchParams);
     if (next === 'dashboard') newParams.delete('tab');
     else newParams.set('tab', next);
     setSearchParams(newParams, { replace: true });
   };
+
+  const onDraftFromEvent = (event) => {
+    setPendingDraftEvent(event);
+    setTab('compose');
+  };
+  const clearPendingDraftEvent = () => setPendingDraftEvent(null);
 
   return (
     <div>
@@ -432,8 +454,8 @@ export default function NewsletterPage() {
       </div>
 
       {/* Tab content */}
-      {tab === 'dashboard' && <DashboardView onSelectTab={setTab} />}
-      {tab === 'compose' && <ComposeView />}
+      {tab === 'dashboard' && <DashboardView onSelectTab={setTab} onDraftFromEvent={onDraftFromEvent} />}
+      {tab === 'compose' && <ComposeView pendingEvent={pendingDraftEvent} onPendingEventConsumed={clearPendingDraftEvent} />}
       {tab === 'history' && <HistoryView />}
       {tab === 'subscribers' && <SubscribersView />}
       {tab === 'automations' && <EmailAutomationsPanelV2 />}
