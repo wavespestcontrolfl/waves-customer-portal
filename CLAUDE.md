@@ -19,7 +19,7 @@ Three interfaces:
 
 ## Tech Stack
 
-- **Frontend:** React 18 + Vite. **Dual style system** — legacy inline styles + `D` palette for V1 / Tier 2 pages; Tailwind + `components/ui` primitives for Tier 1 V2 pages. Match what the file you're editing already uses; don't mix them inside a single component.
+- **Frontend:** React 18 + Vite. **Dual style system** — legacy inline styles + `D` palette for Tier 2 pages and the residual shared-export modules; Tailwind + `components/ui` primitives for Tier 1 (now-default) admin pages. Match what the file you're editing already uses; don't mix them inside a single component.
 - **Backend:** Express + Node.js, Knex.js
 - **Database:** PostgreSQL on Railway
 - **Payments:** Stripe (Payment Element — card/Apple Pay/Google Pay/ACH)
@@ -46,33 +46,25 @@ Three interfaces:
 8. **Stripe is the payment processor. Square is fully phased out.** Do not reference Square in new code.
 9. **All automation and site infra is native.** Do not reference Zapier, Make, Elementor, NitroPack, RankMath, or any external automation/CMS tool in new code.
 
-## Active initiative: Admin UI redesign (Tier 1)
+## Admin UI: V2 is the default
 
 Authoritative specs:
 - `docs/design/waves-portal-ui-redesign-spec.md` — full monochrome admin spec
 - `docs/design/waves-customer-facing-design-brief.md` — customer-surface warm tone (do NOT apply admin spec to customer surfaces)
 - `docs/design/DECISIONS.md` — architectural decisions log + full PR history; append new entries at bottom, never edit old ones
 
-Tier 1 scope (full redesign): Dashboard, Dispatch (absorbs Schedule), Customers + Detail, Estimates + `/new`, Communications. Everything else = Tier 2 token pass only. `/tech` Home, Intelligence Bar, and customer-facing surfaces are out of scope.
+The Tier 1 V2 redesign for Dashboard, Customers + Detail, Estimates + `/new`, Communications, and the admin shell has shipped and is now the default for everyone. The V1 page components, the corresponding per-flag gates (`DashboardGate` / `CustomersGate` / `EstimatesGate` / `CommunicationsGate` / `AdminLayoutGate`), and the V1-only `MobileAdminShell` have been deleted. `/admin/dashboard|customers|estimates|communications` route directly to `*PageV2` and the admin shell is `AdminLayoutV2`.
 
-**Current V2 state (all flag-gated; toggle per-user at `/admin/_design-system/flags`):**
+**Dispatch is intentionally still gated.** `DispatchGate.jsx` and the V1 `SchedulePage` default export remain in place while in-flight dispatch work continues. The gate already only renders `DispatchPageV2` (no V1 fallback), so this is a no-op for users; the V1 page body is held until the dispatch workstream finishes and the file is safe to gut alongside the others.
 
-| Flag | Gate → Page |
-|---|---|
-| `dashboard-v2` | DashboardGate → DashboardPageV2 |
-| `dispatch-v2` | DispatchGate → DispatchPageV2 (board + week/month + protocols + IB surfaces) |
-| `customers-v2` | CustomersGate → CustomersPageV2 (directory + pipeline + Customer360ProfileV2) |
-| `estimates-v2` | EstimatesGate → EstimatesPageV2 (+ EstimateToolViewV2 + EstimateModalsV2) |
-| `comms-v2` | CommunicationsGate → CommunicationsPageV2 (all 6 tabs V2) |
-| `mobile-shell-v2` | MobileAdminShell below 768px (bottom tab bar + StickyActionBar) |
+**Retained V1 modules (named-export only, no V1 page route):** `SchedulePage.jsx` (still has its V1 default until dispatch work lands), `CustomersPage.jsx`, `EstimatePage.jsx`, `CommunicationsPage.jsx` are kept as shared-utility modules — they still export constants and sub-components consumed by V2 (`CompletionPanel` / `RescheduleModal` / `EditServiceModal` / `ProtocolPanel` / `MONTH_NAMES` / `STAGES` / `STAGE_MAP` / `KANBAN_STAGES` / `LEAD_SOURCES` / `CustomerMap` / `CustomerIntelligenceTab` / `STATUS_CONFIG` / `PIPELINE_FILTERS` / `DECLINE_REASONS` / `classifyEstimate` / `getUrgencyIndicator` / `detectCompetitor` / `ALL_NUMBERS` / `NUMBER_LABEL_MAP`). For Customers/Estimates/Communications, the `export default function ...Page()` component has been gone from each.
 
-**Rules for Tier 1 V2 work:**
+**Rules for Tier 1 V2 work (still in effect):**
 - Visual-refresh PRs are **strict 1:1** on data, endpoints, metrics, and behavior. Content changes and visual changes never share a PR.
-- V1 components stay exported for flag-off users — **do not delete** them or their named exports.
 - Use `components/ui` primitives + Tailwind zinc ramp + `border-hairline` chrome.
 - `alert-fg` (red) is reserved for genuine alerts only — never decoration.
 
-**Feature flag system:** `useFeatureFlag('<key>')` from `client/src/hooks/useFeatureFlag.js`. DB-backed via `user_feature_flags` table, session-cached in memory, fails closed (returns `false` if API unreachable). No localStorage persistence, no percentage rollouts, no environment variants — the schema is intentionally minimal.
+**Feature flag system:** `useFeatureFlag('<key>')` from `client/src/hooks/useFeatureFlag.js`. DB-backed via `user_feature_flags` table, session-cached in memory, fails closed (returns `false` if API unreachable). No localStorage persistence, no percentage rollouts, no environment variants — the schema is intentionally minimal. The retired V2 keys (`dashboard-v2`, `customers-v2`, `estimates-v2`, `comms-v2`, `mobile-shell-v2`, `admin-shell-v2`) are no longer read by the client; stale rows in `user_feature_flags` are inert. `dispatch-v2` is also no longer read — `DispatchGate` was already V2-only — but it remains in the registry until the dispatch workstream completes its own V1 deletion.
 
 Full per-PR detail (endpoints touched, subcomponents shipped, alert-fg rules per page): `docs/design/DECISIONS.md`.
 
