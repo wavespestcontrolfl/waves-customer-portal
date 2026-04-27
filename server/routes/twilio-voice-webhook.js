@@ -374,12 +374,79 @@ router.post('/outbound-connect', async (req, res) => {
 // =========================================================================
 router.post('/call-status', async (req, res) => {
   try {
-    const { CallSid, CallStatus, CallDuration } = req.body;
+    const { CallSid, CallStatus, CallDuration, From, To, Direction } = req.body;
 
-    await db('call_log').where('twilio_call_sid', CallSid).update({
-      status: CallStatus,
-      duration_seconds: parseInt(CallDuration || 0),
-      updated_at: new Date(),
+    await db.transaction(async (trx) => {
+      // Serialize per-CallSid so overlapping Twilio retries can't both
+      // miss `existing` and double-insert. Released at commit/rollback.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CallSid]);
+
+      const existing = await trx('call_log').where('twilio_call_sid', CallSid).first();
+
+      if (existing) {
+        await trx('call_log').where('twilio_call_sid', CallSid).update({
+          status: CallStatus,
+          duration_seconds: parseInt(CallDuration || existing.duration_seconds || 0),
+          updated_at: new Date(),
+        });
+        return;
+      }
+
+      // Outbound calls always insert via admin-communications.js's originator —
+      // its parent-leg `To` is the admin phone (Adam), not the customer, so
+      // synthesizing a row from those fields would key the call to the wrong
+      // contact. If the row is missing here, the originator's insert failed
+      // upstream; log and skip rather than pollute communications history.
+      const isOutbound = Direction === 'outbound-api' || Direction === 'outbound-dial';
+      if (isOutbound) {
+        logger.warn(
+          `Outbound status_callback with no call_log row CallSid=${CallSid} — originator did not insert; skipping fallback insert`
+        );
+        return;
+      }
+
+      // Inbound fallback: Studio Flow bypassed /voice — insert from status-callback fields.
+      const numberConfig = TWILIO_NUMBERS.findByNumber(To);
+      const customer = From
+        ? await trx('customers').where({ phone: From }).first()
+        : null;
+
+      await trx('call_log').insert({
+        customer_id: customer?.id || null,
+        direction: 'inbound',
+        from_phone: From,
+        to_phone: To,
+        twilio_call_sid: CallSid,
+        status: CallStatus,
+        duration_seconds: parseInt(CallDuration || 0),
+        metadata: JSON.stringify({
+          location: numberConfig?.label || 'unknown',
+          numberType: numberConfig?.type || 'unknown',
+          domain: numberConfig?.domain || null,
+          source: 'status_callback',
+        }),
+      });
+
+      // Touchpoint is best-effort enrichment — fire-and-forget so a slow
+      // unified-messages write can't block Twilio's webhook timeout. Failures
+      // are logged with CallSid for recovery, not silently swallowed.
+      void require('../services/conversations').recordTouchpoint({
+        customerId: customer?.id,
+        channel: 'voice',
+        ourEndpointId: To,
+        contactPhone: customer ? null : From,
+        direction: 'inbound',
+        authorType: 'customer',
+        twilioSid: CallSid,
+        metadata: {
+          location: numberConfig?.label || 'unknown',
+          numberType: numberConfig?.type || 'unknown',
+          domain: numberConfig?.domain || null,
+          source: 'status_callback',
+        },
+      }).catch((err) => {
+        logger.error(`recordTouchpoint failed for CallSid=${CallSid}: ${err.message}`);
+      });
     });
 
     res.sendStatus(200);
