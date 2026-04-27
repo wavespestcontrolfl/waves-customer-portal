@@ -66,7 +66,24 @@ function parseDateOrNull(raw) {
     if (Number.isNaN(d.getTime())) return null;
     return d;
   } catch {
-    return d ?? null;
+    // `d` is scoped to the try block — return null directly so a single
+    // malformed feed date doesn't fail the whole source ingestion run.
+    return null;
+  }
+}
+
+// Allowlist URL protocols. RSS data is external/untrusted; rendering a
+// `javascript:` (or `data:`, etc.) URL into an <a href> would execute on
+// click. Apply at ingestion boundary so bad URLs never reach the DB,
+// AND at render boundary on the client (defense in depth).
+function safeHttpUrl(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return u.toString();
+  } catch {
+    return null;
   }
 }
 
@@ -113,8 +130,10 @@ async function pullRssSource(source) {
     const externalId = externalIdFor(item);
     const title = (item.title || '(untitled)').slice(0, 512);
     const description = item.contentSnippet || item.content || item.summary || null;
-    const eventUrl = item.link || null;
-    const imageUrl = item.enclosure?.url || item['itunes:image']?.href || null;
+    // Reject non-http(s) URLs at the ingestion boundary so a compromised
+    // RSS feed can't seed `javascript:` (or other) links into the DB.
+    const eventUrl = safeHttpUrl(item.link);
+    const imageUrl = safeHttpUrl(item.enclosure?.url || item['itunes:image']?.href);
     const categories = Array.isArray(item.categories) && item.categories.length
       ? JSON.stringify(item.categories.map(String))
       : null;

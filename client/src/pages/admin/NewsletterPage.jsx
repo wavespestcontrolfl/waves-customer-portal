@@ -75,6 +75,22 @@ function SectionHeader({ title, hint, action }) {
   );
 }
 
+// Allowlist URL protocols on the render side too — events_raw rows
+// pre-dating the ingestion-side validation could still contain a
+// `javascript:` URL, and rendering that into <a href> would execute
+// on click. Server already filters at ingestion (event-ingestion.js
+// safeHttpUrl); this is the second layer.
+function safeHttpUrl(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
 // Renders one ingested event from /admin/newsletter/events. Shape:
 //   { id, title, description, startAt, endAt, venueName, city,
 //     eventUrl, imageUrl, categories, sourceName }
@@ -86,6 +102,7 @@ function EventCard({ event }) {
     : 'Ongoing';
   const cityLabel = event.city ? event.city.replace(/(?:^|\s)\S/g, (s) => s.toUpperCase()) : null;
   const sourceLabel = (event.sourceName || '').split('·')[0].trim().slice(0, 18) || 'Source';
+  const safeUrl = safeHttpUrl(event.eventUrl);
   return (
     <div className="bg-white border-hairline border-zinc-200 rounded-sm p-3 flex flex-col gap-2">
       <div className="flex items-start justify-between gap-2">
@@ -101,9 +118,9 @@ function EventCard({ event }) {
         <div className="text-12 text-ink-secondary leading-snug line-clamp-2">{event.description}</div>
       )}
       <div className="flex justify-end gap-2 mt-1">
-        {event.eventUrl && (
+        {safeUrl && (
           <a
-            href={event.eventUrl}
+            href={safeUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center text-12 font-medium text-zinc-700 hover:text-zinc-900 underline underline-offset-2"
