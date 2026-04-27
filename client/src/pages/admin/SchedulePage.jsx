@@ -3269,3 +3269,484 @@ export function RecurringAlertsBanner() {
     </div>
   );
 }
+
+/* ── Main Schedule Page ───────────────────────────────── */
+
+/**
+ * @deprecated V1 SchedulePage. DispatchGate now always renders DispatchPageV2;
+ * this default export is no longer reached as a route. The named exports above
+ * (CompletionPanel, RescheduleModal, EditServiceModal, ProtocolPanel,
+ * MONTH_NAMES, PRODUCT_DESCRIPTIONS, TRACK_SAFETY_RULES,
+ * stripLegacyBoilerplate) are still consumed by V2 and ProtocolReferenceTabV2.
+ */
+export default function SchedulePage() {
+  const isMobile = useIsMobile();
+  const [activeTab, setActiveTab] = useState('board');
+  const [viewMode, setViewMode] = useState('day');
+  const [date, setDate] = useState(etDateString(new Date()));
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [products, setProducts] = useState([]);
+  const [completingService, setCompletingService] = useState(null);
+  const [rescheduleService, setRescheduleService] = useState(null);
+  const [editingService, setEditingService] = useState(null);
+  const [protocolService, setProtocolService] = useState(null);
+  const [showNewAppt, setShowNewAppt] = useState(false);
+  const [newAppt, setNewAppt] = useState({ customerId: '', customerSearch: '', customerResults: [], serviceType: 'Pest Control', windowStart: '09:00', windowEnd: '11:00', notes: '' });
+  const [savingAppt, setSavingAppt] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState('');
+
+  const syncDispatchAI = async () => {
+    setSyncing(true);
+    setSyncMsg('');
+    try {
+      const res = await fetch(`${API_BASE}/dispatch/sync`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date }),
+      });
+      const d = await res.json();
+      setSyncMsg(`Synced ${d.bridge?.synced || 0} jobs from schedule`);
+      setTimeout(() => setSyncMsg(''), 5000);
+    } catch {
+      setSyncMsg('Sync failed');
+    }
+    setSyncing(false);
+  };
+
+  const fetchSchedule = useCallback((d) => {
+    setLoading(true);
+    setError(null);
+    Promise.all([
+      adminFetch(`/admin/schedule?date=${d}`),
+      adminFetch('/admin/dispatch/products/catalog'),
+    ])
+      .then(([scheduleData, catalogData]) => {
+        setData(scheduleData);
+        setProducts(catalogData.products || []);
+        setLoading(false);
+      })
+      .catch(e => {
+        setError(e.message);
+        setLoading(false);
+      });
+  }, []);
+
+  useEffect(() => {
+    fetchSchedule(date);
+  }, [date, fetchSchedule]);
+
+  const handleStatusChange = useCallback((serviceId, newStatus) => {
+    setData(prev => {
+      if (!prev) return prev;
+      const updatedServices = prev.services.map(s =>
+        s.id === serviceId
+          ? { ...s, status: newStatus, statusLog: [...(s.statusLog || []), { status: newStatus, at: new Date().toISOString() }] }
+          : s
+      );
+      const updatedTechSummary = prev.techSummary.map(tech => ({
+        ...tech,
+        services: tech.services.map(s =>
+          s.id === serviceId
+            ? { ...s, status: newStatus, statusLog: [...(s.statusLog || []), { status: newStatus, at: new Date().toISOString() }] }
+            : s
+        ),
+        completedServices: tech.services.filter(s =>
+          s.id === serviceId ? newStatus === 'completed' : s.status === 'completed'
+        ).length,
+      }));
+      return { ...prev, services: updatedServices, techSummary: updatedTechSummary };
+    });
+  }, []);
+
+  const handleComplete = useCallback((service) => {
+    setCompletingService(service);
+  }, []);
+
+  const handleCompleteSubmit = useCallback(async (serviceId, body) => {
+    const r = await adminFetch(`/admin/dispatch/${serviceId}/complete`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    handleStatusChange(serviceId, 'completed');
+    return r;
+  }, [handleStatusChange]);
+
+  const handleDelete = useCallback(async (service) => {
+    const name = service.customerName || service.customer_name || 'this customer';
+    if (!window.confirm(`Delete service for ${name}?\n\nThis will cancel the scheduled service.`)) return;
+    try {
+      await adminFetch(`/admin/schedule/${service.id}/status`, {
+        method: 'PUT',
+        body: JSON.stringify({ status: 'cancelled' }),
+      });
+      // Remove from local state
+      setData(prev => {
+        if (!prev) return prev;
+        const updatedServices = prev.services.filter(s => s.id !== service.id);
+        const updatedTechSummary = prev.techSummary.map(tech => ({
+          ...tech,
+          services: tech.services.filter(s => s.id !== service.id),
+          totalServices: tech.services.filter(s => s.id !== service.id).length,
+        }));
+        return { ...prev, services: updatedServices, techSummary: updatedTechSummary };
+      });
+    } catch (err) {
+      alert('Failed to delete service: ' + err.message);
+    }
+  }, []);
+
+  const handlePanelClose = useCallback((wasCompleted) => {
+    setCompletingService(null);
+  }, []);
+
+  function shiftDate(dir) {
+    const d = new Date(date + 'T12:00:00');
+    if (viewMode === 'day') d.setDate(d.getDate() + dir);
+    else if (viewMode === 'week') d.setDate(d.getDate() + dir * 7);
+    else d.setMonth(d.getMonth() + dir);
+    setDate(etDateString(d));
+  }
+
+  if (loading) return <div style={{ color: D.muted, padding: 60, textAlign: 'center', fontSize: 15 }}>Loading schedule...</div>;
+  if (error) return <div style={{ color: D.red, padding: 60, textAlign: 'center' }}>Failed to load schedule: {error}</div>;
+  if (!data) return null;
+
+  const services = data.services || [];
+  const techSummary = data.techSummary || [];
+  const unassigned = data.unassigned || [];
+  const technicians = data.technicians || [];
+  const zoneColors = data.zoneColors || {};
+  const zoneLabels = data.zoneLabels || {};
+
+  const totalCount = services.length;
+  const completedCount = services.filter(s => s.status === 'completed').length;
+  const skippedCount = services.filter(s => s.status === 'skipped').length;
+  const remainingCount = totalCount - completedCount - skippedCount;
+
+  // Header stats: estimated time + revenue
+  const AVG_SERVICE_MIN = 35;
+  const estTotalMin = totalCount * AVG_SERVICE_MIN;
+  const estTotalHrs = Math.floor(estTotalMin / 60);
+  const estTotalMinRemainder = estTotalMin % 60;
+  const estRemainingMin = remainingCount * AVG_SERVICE_MIN;
+  const estFinishTime = (() => {
+    const now = new Date();
+    const finish = new Date(now.getTime() + estRemainingMin * 60000);
+    return finish.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+  })();
+  const estRevenue = (() => {
+    const total = services.reduce((sum, s) => sum + (s.price || 125), 0);
+    return total;
+  })();
+
+  // Today's Focus alerts
+  const unassignedCount = unassigned.length;
+  const newCustomers = services.filter(s => !s.lastServiceDate);
+  const weatherData = data.weather || {};
+  const rainProbability = weatherData.rainProbability ?? weatherData.rain_probability ?? null;
+  const windSpeed = weatherData.windSpeed ?? weatherData.wind_speed ?? null;
+  const weatherTemp = weatherData.temp ?? weatherData.temperature ?? null;
+  const hasRainAlert = rainProbability != null && rainProbability > 40;
+  const hasFocusAlerts = unassignedCount > 0 || newCustomers.length > 0 || hasRainAlert;
+
+  const SCHEDULE_TABS = [
+    { id: 'board', label: 'Board' },
+    { id: 'protocols', label: 'Protocols' },
+    { id: 'match', label: 'Tech Match' },
+    { id: 'csr', label: 'CSR Booking' },
+    { id: 'revenue', label: 'Job Scores' },
+    { id: 'insights', label: 'Insights' },
+  ];
+
+  return (
+    <div>
+      <style>{`
+        @keyframes statusPulse {
+          0%, 100% { box-shadow: 0 0 0 0 ${D.teal}44; }
+          50% { box-shadow: 0 0 0 6px ${D.teal}00; }
+        }
+        @keyframes slideIn {
+          from { transform: translateX(100%); }
+          to { transform: translateX(0); }
+        }
+      `}</style>
+
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
+        <div>
+          <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: '0 0 4px' }}>Schedule & Dispatch</h1>
+          {/* Date nav */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6, justifyContent: 'space-between', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+              <button onClick={() => shiftDate(-1)} style={navBtnStyle} title="Previous">&#9664;</button>
+              <span style={{ fontSize: 14, fontWeight: 600, color: D.text, minWidth: isMobile ? 0 : 220, textAlign: 'center', flex: isMobile ? 1 : undefined }}>
+                {viewMode === 'day' ? formatDateDisplay(date)
+                  : viewMode === 'week' ? (() => {
+                      const d = new Date(date + 'T12:00:00');
+                      const end = new Date(d); end.setDate(end.getDate() + 6);
+                      return `${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
+                    })()
+                  : new Date(date + 'T12:00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+                }
+              </span>
+              <button onClick={() => shiftDate(1)} style={navBtnStyle} title="Next">&#9654;</button>
+              {!isToday(date) && (
+                <button onClick={() => setDate(etDateString(new Date()))} style={{
+                  ...navBtnStyle, fontSize: 12, padding: '4px 12px', width: 'auto',
+                }}>Today</button>
+              )}
+            </div>
+            <ViewModeSelector viewMode={viewMode} onViewModeChange={(m) => { setViewMode(m); if (m === 'day') setActiveTab('board'); }} />
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+          {viewMode === 'day' && activeTab === 'board' && (
+            <>
+              <div style={{
+                display: 'flex', gap: 12, alignItems: 'center', fontSize: 13, color: D.muted,
+                background: D.card, padding: '8px 16px', borderRadius: 10, border: `1px solid ${D.border}`,
+                flexWrap: 'wrap',
+              }}>
+                <span><strong style={{ color: D.heading }}>{totalCount}</strong> services</span>
+                <span><strong style={{ color: D.green }}>{completedCount}</strong> done</span>
+                <span><strong style={{ color: D.amber }}>{remainingCount}</strong> left</span>
+                <span style={{ borderLeft: `1px solid ${D.border}`, paddingLeft: 12 }}>
+                  ~{estTotalHrs}h{estTotalMinRemainder > 0 ? `${estTotalMinRemainder}m` : ''} total
+                </span>
+                <span>ETA <strong style={{ color: D.teal }}>{estFinishTime}</strong></span>
+                <span style={{ borderLeft: `1px solid ${D.border}`, paddingLeft: 12 }}>
+                  <strong style={{ color: D.green }}>${estRevenue.toLocaleString()}</strong> revenue
+                </span>
+              </div>
+              <button onClick={() => setShowNewAppt(!showNewAppt)} style={{
+                ...btnBase, background: D.green, color: '#fff', fontSize: 13, height: 38,
+              }}>+ New Appointment</button>
+            </>
+          )}
+          {viewMode === 'day' && activeTab !== 'board' && (
+            <button onClick={syncDispatchAI} disabled={syncing} style={{
+              padding: '6px 14px', borderRadius: 8, border: `1px solid ${D.border}`,
+              background: 'transparent', color: D.muted, fontSize: 13, cursor: 'pointer',
+              opacity: syncing ? 0.5 : 1,
+            }}>
+              {syncing ? 'Syncing...' : '↻ Sync AI Data'}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {syncMsg && <div style={{ fontSize: 12, color: D.muted, marginBottom: 8 }}>{syncMsg}</div>}
+
+      {/* New Appointment Modal */}
+      {showNewAppt && <CreateAppointmentModal defaultDate={date} onClose={() => setShowNewAppt(false)} onCreated={(appt) => { setShowNewAppt(false); fetchSchedule(appt.scheduledDate || date); }} />}
+
+      {/* Week / Month calendar views */}
+      {viewMode === 'week' && <WeekView startDate={date} onDateClick={(d) => { setDate(d); setViewMode('day'); }} />}
+      {viewMode === 'month' && <MonthView date={date} onDateClick={(d) => { setDate(d); setViewMode('day'); }} />}
+
+      {/* Tabs — day view only */}
+      {viewMode === 'day' && <div style={{ marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}` }}>
+        <HorizontalScroll gap={4} edgeBleed={4} style={{ paddingBottom: 0 }}>
+          {SCHEDULE_TABS.map(t => (
+            <button key={t.id} onClick={() => setActiveTab(t.id)} style={{
+              padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer',
+              fontSize: 13, fontWeight: 500, whiteSpace: 'nowrap', flexShrink: 0, minHeight: 44,
+              background: activeTab === t.id ? D.teal : 'transparent',
+              color: activeTab === t.id ? D.white : D.muted,
+              transition: 'all 0.15s',
+            }}>
+              {t.label}
+            </button>
+          ))}
+        </HorizontalScroll>
+      </div>}
+
+      {/* Recurring plan alerts */}
+      {viewMode === 'day' && <RecurringAlertsBanner />}
+
+      {/* ── Protocol Reference ── */}
+      {viewMode === 'day' && activeTab === 'protocols' && <ProtocolReferenceTab />}
+
+      {/* ── AI Dispatch Panels ── */}
+      {viewMode === 'day' && activeTab === 'match' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading...</div>}><TechMatchPanel /></Suspense>}
+      {viewMode === 'day' && activeTab === 'csr' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading...</div>}><CSRPanel /></Suspense>}
+      {viewMode === 'day' && activeTab === 'revenue' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading...</div>}><RevenuePanel date={date} /></Suspense>}
+      {viewMode === 'day' && activeTab === 'insights' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading...</div>}><InsightsPanel /></Suspense>}
+
+      {/* ── Board Tab Content ── */}
+      {viewMode === 'day' && activeTab === 'board' && <>
+
+      {/* Today's Focus summary */}
+      {hasFocusAlerts && (
+        <div style={{
+          background: D.amber + '12', borderRadius: 10, padding: '12px 18px', marginBottom: 12,
+          border: `1px solid ${D.amber}33`, display: 'flex', flexDirection: 'column', gap: 6,
+        }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: D.amber, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+            Today's Focus
+          </div>
+          {unassignedCount > 0 && (
+            <div style={{ fontSize: 13, color: D.red, fontWeight: 600 }}>
+              {unassignedCount} service{unassignedCount > 1 ? 's' : ''} unassigned — assign techs
+            </div>
+          )}
+          {newCustomers.length > 0 && (
+            <div style={{ fontSize: 13, color: D.teal, fontWeight: 600 }}>
+              {newCustomers.length} new customer{newCustomers.length > 1 ? 's' : ''} today (first visit)
+            </div>
+          )}
+          {hasRainAlert && (
+            <div style={{ fontSize: 13, color: D.amber, fontWeight: 600 }}>
+              Rain expected ({rainProbability}% chance) — monitor spray conditions
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Weather bar */}
+      <div style={{
+        background: D.card, borderRadius: 10, padding: '10px 18px', marginBottom: 20,
+        border: `1px solid ${D.border}`, fontSize: 13, color: D.text,
+        display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap',
+      }}>
+        <span>{weatherTemp ?? 82}{'\u00B0'}F</span>
+        {windSpeed != null && <span>{windSpeed}mph</span>}
+        {rainProbability != null && <span>{rainProbability}% rain</span>}
+        <span style={{
+          color: (rainProbability != null && rainProbability > 50) || (windSpeed != null && windSpeed > 15) ? D.red : D.green,
+          fontWeight: 700,
+        }}>
+          SPRAY: {(rainProbability != null && rainProbability > 50) || (windSpeed != null && windSpeed > 15) ? 'HOLD' : 'GO'}
+        </span>
+      </div>
+
+      {/* Tech sections */}
+      {techSummary.map(tech => (
+        <TechSection
+          key={tech.technicianId}
+          tech={tech}
+          zoneColors={zoneColors}
+          zoneLabels={zoneLabels}
+          onStatusChange={handleStatusChange}
+          onComplete={handleComplete}
+          onReschedule={svc => setRescheduleService(svc)}
+          onDelete={handleDelete}
+          onProtocol={svc => setProtocolService(svc)}
+          onEdit={svc => setEditingService(svc)}
+        />
+      ))}
+
+      {/* Unassigned section */}
+      {unassigned.length > 0 && (
+        <div style={{ marginBottom: 20 }}>
+          <div style={{
+            background: D.red + '18', borderRadius: 12, border: `1px solid ${D.red}44`,
+            padding: '14px 18px', marginBottom: 12,
+            fontSize: 16, fontWeight: 700, color: D.red,
+          }}>
+            Unassigned ({unassigned.length})
+          </div>
+          <div style={{ paddingLeft: 20 }}>
+            {unassigned.map(svc => (
+              <div key={svc.id}>
+                <div style={{ marginBottom: 8 }}>
+                  <select onChange={async (e) => {
+                    if (!e.target.value) return;
+                    try {
+                      await adminFetch(`/admin/schedule/${svc.id}/assign`, {
+                        method: 'PUT',
+                        body: JSON.stringify({ technicianId: e.target.value }),
+                      });
+                      fetchSchedule(date);
+                    } catch (err) { alert('Assign failed: ' + err.message); }
+                  }} defaultValue="" style={{
+                    width: '100%', padding: '10px 14px', borderRadius: 10,
+                    background: D.input, color: D.text, border: `1px solid ${D.amber}`,
+                    fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                  }}>
+                    <option value="">Assign to technician...</option>
+                    {technicians.map(t => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <ServiceCard
+                  service={svc}
+                  zoneColors={zoneColors}
+                  onStatusChange={handleStatusChange}
+                  onComplete={handleComplete}
+                  onReschedule={svc2 => setRescheduleService(svc2)}
+                  onDelete={handleDelete}
+                  onProtocol={svc2 => setProtocolService(svc2)}
+                  onEdit={svc2 => setEditingService(svc2)}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Empty state */}
+      {techSummary.length === 0 && unassigned.length === 0 && (
+        <div style={{ color: D.muted, textAlign: 'center', padding: 60, fontSize: 15 }}>
+          No services scheduled for {formatDateDisplay(date)}.
+        </div>
+      )}
+
+      </>}
+
+      {/* Completion Panel */}
+      {completingService && (
+        <CompletionPanel
+          service={completingService}
+          products={products}
+          onClose={handlePanelClose}
+          onSubmit={handleCompleteSubmit}
+        />
+      )}
+
+      {/* Reschedule Modal */}
+      {rescheduleService && (
+        <RescheduleModal
+          service={rescheduleService}
+          onClose={() => setRescheduleService(null)}
+          onRescheduled={() => {
+            setRescheduleService(null);
+            fetchSchedule(date);
+          }}
+        />
+      )}
+
+      {/* Edit Service Modal */}
+      {editingService && (
+        <EditServiceModal
+          service={editingService}
+          technicians={technicians}
+          onClose={() => setEditingService(null)}
+          onSaved={() => {
+            setEditingService(null);
+            fetchSchedule(date);
+          }}
+        />
+      )}
+
+      {/* Protocol Panel */}
+      {protocolService && (
+        <ProtocolPanel
+          service={protocolService}
+          onClose={() => setProtocolService(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+const navBtnStyle = {
+  width: 32, height: 32, borderRadius: 8, border: `1px solid ${D.border}`,
+  background: D.card, color: D.text, fontSize: 14, cursor: 'pointer',
+  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+};

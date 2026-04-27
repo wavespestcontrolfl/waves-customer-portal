@@ -35,6 +35,7 @@ function adminFetch(path, init) {
 }
 
 const KNOWN_FLAGS = [
+  'dispatch-v2',
   'newsletter-v1',
   'ff_customer_login_v2',
   'ff_customer_pay_v2',
