@@ -84,6 +84,12 @@ function getGreeting() {
 // messaging surface. Dropped from QUICK_ACTIONS until that feature
 // actually exists. Quick Invoice still routes to /tech (no-op) but
 // stays as a known stub the team has discussed building.
+// Mirrors server-side PRE_EN_ROUTE in tech-track.js. Tapping outside
+// these states is guaranteed to 409, so disable the button rather
+// than letting it look tappable. Re-tap on en_route is also locked
+// (server treats it idempotently, but no point looking enabled).
+const EN_ROUTE_ELIGIBLE = new Set(['pending', 'confirmed', 'rescheduled']);
+
 const QUICK_ACTIONS = [
   { icon: '📅', label: "Today's Route", path: '/tech' },
   { icon: '📋', label: 'Field Estimator', path: '/tech/estimate' },
@@ -308,7 +314,7 @@ export default function TechHomePage() {
               label={enRouteState.pendingId === nextStop.id ? 'Sending…' : 'En Route'}
               icon="🚗"
               primary
-              disabled={enRouteState.pendingId === nextStop.id || nextStop.status === 'en_route'}
+              disabled={enRouteState.pendingId === nextStop.id || !EN_ROUTE_ELIGIBLE.has(nextStop.status || 'pending')}
               onClick={() => handleEnRoute(nextStop.id)}
             />
           </div>
