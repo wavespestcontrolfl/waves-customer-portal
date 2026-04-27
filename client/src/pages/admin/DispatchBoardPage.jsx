@@ -84,6 +84,14 @@ export default function DispatchBoardPage() {
   // outcome (success refetches via broadcast; miss is a no-op).
   const [draggingJobId, setDraggingJobId] = useState(null);
   const [assignError, setAssignError] = useState(null);
+  // Bumped after a successful drag-reassign of the job currently
+  // open in JobDrawer. The drawer's own state is independent of the
+  // board's jobs[] array, so the dispatch:job_update broadcast that
+  // re-colors the pin doesn't refresh the drawer. Bumping this
+  // counter makes JobDrawer refetch /jobs/:id so the displayed
+  // assignee tracks the new tech without close/reopen.
+  // Codex P2 on PR #327.
+  const [drawerRefetchSignal, setDrawerRefetchSignal] = useState(0);
 
   const handleJobDragStart = useCallback((jobId) => {
     setDraggingJobId(jobId);
@@ -113,10 +121,18 @@ export default function DispatchBoardPage() {
         const body = await res.json().catch(() => null);
         throw new Error(body?.error || `HTTP ${res.status}`);
       }
+      // If the drawer is open on the same job we just reassigned,
+      // bump its refetch signal so it re-pulls the enriched job
+      // detail and shows the new assignee. The board pin re-colors
+      // via dispatch:job_update broadcast (PR #322), but the drawer
+      // owns its own /jobs/:id state and isn't on that broadcast.
+      if (jobId === selectedJobId) {
+        setDrawerRefetchSignal((c) => c + 1);
+      }
     } catch (err) {
       setAssignError(err.message || 'Reassignment failed');
     }
-  }, []);
+  }, [selectedJobId]);
 
   if (loading) {
     return (
@@ -169,7 +185,11 @@ export default function DispatchBoardPage() {
         }
         right={<ActionQueuePane />}
       />
-      <JobDrawer jobId={selectedJobId} onClose={handleCloseJob} />
+      <JobDrawer
+        jobId={selectedJobId}
+        onClose={handleCloseJob}
+        refetchSignal={drawerRefetchSignal}
+      />
       <TechDrawer techId={selectedTechId} onClose={handleCloseTech} />
     </>
   );

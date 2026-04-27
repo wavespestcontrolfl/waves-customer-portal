@@ -11,6 +11,13 @@
  *   Active-tech list (GET /api/admin/dispatch/technicians) fetched
  *   once on first open and cached across opens.
  *
+ *   refetchSignal prop: parent bumps a monotonic counter when an
+ *   external action (drag-to-reassign on the map, etc.) changes the
+ *   currently-open job. We re-fetch in place — no setJob(null) clear
+ *   — so the user sees the assignee update without a "Loading…"
+ *   flicker. Initial value 0 is ignored to avoid a redundant fetch
+ *   on mount (the jobId-change effect already does the first fetch).
+ *
  * Actions:
  *   - PUT /api/admin/dispatch/:id/status with { status: 'en_route' |
  *     'on_site' }. Re-fetches the job into the drawer on success.
@@ -77,7 +84,7 @@ function formatWindow(start, end) {
   return s || e;
 }
 
-export default function JobDrawer({ jobId, onClose }) {
+export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
   const [job, setJob] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -169,6 +176,22 @@ export default function JobDrawer({ jobId, onClose }) {
     setAssignError(null);
     if (jobId) fetchJob(jobId);
   }, [jobId, fetchJob]);
+
+  // External refetch trigger (e.g., drag-to-reassign on the map fired
+  // for the same job that's currently open in this drawer). The page
+  // bumps refetchSignal after a successful PUT; we re-fetch without
+  // the synchronous setJob(null) clear that the jobId-change effect
+  // does — re-rendering "Loading…" mid-drag would feel janky. The
+  // user just sees the assignment update in place when the new
+  // payload lands. Codex P2 on PR #327.
+  useEffect(() => {
+    if (jobId && refetchSignal > 0) {
+      fetchJob(jobId);
+    }
+    // jobId deliberately excluded — re-running on jobId change is
+    // covered by the effect above and would cause double-fetches.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refetchSignal]);
 
   // Fetch active techs once on first open. The list rarely changes
   // mid-session, so caching it across opens is fine. The current
