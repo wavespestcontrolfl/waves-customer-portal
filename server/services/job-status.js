@@ -42,6 +42,15 @@
  *   track-transitions.markEnRoute. fromStatus is required (Codex P1
  *   on #290) — null was a footgun that bypassed the guard.
  *
+ * Auto-resolve tech_late on terminal-ish transitions:
+ *   When toStatus is in TECH_LATE_AUTO_RESOLVE_STATUSES (on_site,
+ *   completed, cancelled, skipped), any open tech_late alert for the
+ *   job is resolved inside the SAME trx via resolveAlert(trx). The
+ *   dispatch:alert_resolved broadcast chains on the same commit,
+ *   so the Action Queue card disappears for every connected
+ *   dispatcher the instant the tech is marked on_site (etc.). If the
+ *   outer transition rolls back, the alert resolution rolls back too.
+ *
  * ============================================================
  * PII BOUNDARY — READ THIS BEFORE MODIFYING THE CUSTOMER PAYLOAD
  * ============================================================
@@ -108,6 +117,7 @@
 const db = require('../models/db');
 const { getIo } = require('../sockets');
 const logger = require('./logger');
+const { autoResolveTechLateForJob } = require('./dispatch-alerts');
 
 const CUSTOMER_EVENT = 'customer:job_update';
 const ADMIN_EVENT = 'dispatch:job_update';
@@ -251,6 +261,17 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
       from_status: fromStatus,
       to_status: toStatus,
       transitioned_by: transitionedBy || null,
+    });
+
+    // Auto-resolve any open tech_late alerts when the transition
+    // makes the "running late" signal obsolete. Same trx — if the
+    // outer transition rolls back, the alert resolution rolls back
+    // with it. The helper internally calls resolveAlert(trx), which
+    // defers the dispatch:alert_resolved broadcast to commit and
+    // suppresses on rollback (PR #311). No-op for non-terminal
+    // toStatus, so safe to call unconditionally.
+    await autoResolveTechLateForJob({
+      jobId, resolvedBy: transitionedBy, trx: t, toStatus,
     });
 
     return buildPayloads(t, jobId, fromStatus, toStatus, transitionedBy);

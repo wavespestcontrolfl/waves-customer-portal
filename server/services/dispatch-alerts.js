@@ -211,9 +211,68 @@ function emitResolved(row) {
   });
 }
 
+// Statuses where any open tech_late alert for the job becomes
+// meaningless and should be auto-cleared:
+//   - on_site:   tech actually arrived; "running behind" is moot
+//   - completed: job finished (with or without a prior on_site step)
+//   - cancelled: job is off the route entirely
+//   - skipped:   tech intentionally bypassed; not "late" anymore
+//
+// Excluded:
+//   - rescheduled: ambiguous — the row may pick up a new window where
+//     a fresh tech_late would fire; auto-clearing the old one risks
+//     hiding a still-valid signal. Dispatchers can resolve manually.
+//   - en_route:   tech started driving but hasn't arrived; still
+//     "late" until on_site.
+const TECH_LATE_AUTO_RESOLVE_STATUSES = new Set([
+  'on_site',
+  'completed',
+  'cancelled',
+  'skipped',
+]);
+
+/**
+ * Resolve every open tech_late alert for a job when the job's new
+ * status makes the "running late" signal obsolete. Used by:
+ *   1. services/job-status.js#transitionJobStatus — the new
+ *      sole-writer pattern (uses caller's trx for atomic resolve).
+ *   2. routes/admin-dispatch.js PUT /:serviceId/status — the legacy
+ *      direct-UPDATE route still in production. Invokes this helper
+ *      with no trx since the legacy route doesn't transact its
+ *      writes; resolveAlert owns its own trx scope per alert.
+ *
+ * Either path: each unresolved row goes through resolveAlert, which
+ * handles the dispatch:alert_resolved broadcast (deferred on commit
+ * if a trx is passed, inline otherwise) and the partial-unique-index
+ * 23505 race protection.
+ *
+ * No-op for any toStatus not in TECH_LATE_AUTO_RESOLVE_STATUSES,
+ * which makes it safe to call unconditionally on every status write.
+ *
+ * @returns {Promise<{resolved: number}>}
+ */
+async function autoResolveTechLateForJob({ jobId, resolvedBy, trx, toStatus } = {}) {
+  if (!jobId || !TECH_LATE_AUTO_RESOLVE_STATUSES.has(toStatus)) {
+    return { resolved: 0 };
+  }
+  const t = trx || db;
+  const openAlerts = await t('dispatch_alerts')
+    .where({ type: 'tech_late', job_id: jobId })
+    .whereNull('resolved_at')
+    .select('id');
+  let resolved = 0;
+  for (const { id } of openAlerts) {
+    const row = await resolveAlert({ id, resolvedBy, trx });
+    if (row) resolved += 1;
+  }
+  return { resolved };
+}
+
 module.exports = {
   createAlert,
   resolveAlert,
+  autoResolveTechLateForJob,
+  TECH_LATE_AUTO_RESOLVE_STATUSES,
   EVENT,
   EVENT_RESOLVED,
   ROOM,

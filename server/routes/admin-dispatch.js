@@ -162,6 +162,26 @@ router.put('/:serviceId/status', async (req, res, next) => {
     }
     await db('scheduled_services').where({ id: svc.id }).update(updates);
 
+    // Auto-resolve any open tech_late dispatch_alerts for this job
+    // when the new status makes the "running late" signal obsolete
+    // (on_site / completed / cancelled / skipped). The helper is a
+    // no-op for any other toStatus, so it's safe to call
+    // unconditionally. Wrapped in try/catch because this route doesn't
+    // transact its writes — a phantom auto-resolve failure should log
+    // and continue, not fail the whole status change. Status update
+    // already committed; track-transitions + activity_log + the
+    // success response should still happen.
+    try {
+      const { autoResolveTechLateForJob } = require('../services/dispatch-alerts');
+      await autoResolveTechLateForJob({
+        jobId: svc.id,
+        resolvedBy: req.technicianId,
+        toStatus: status,
+      });
+    } catch (e) {
+      logger.error(`[admin-dispatch] auto-resolve tech_late failed: ${e.message}`);
+    }
+
     // Customer-visible track_state is owned by services/track-transitions.js.
     // Legacy `status` column write above stays for back-compat; the helper
     // owns track_state, lifecycle timestamps, and the en-route SMS fire.
