@@ -136,9 +136,39 @@ router.patch('/:serviceId/note', async (req, res, next) => {
 });
 
 // PUT /api/admin/dispatch/:serviceId/status
+//
+// First call site to migrate to services/job-status.js#transitionJobStatus
+// — the canonical sole-writer for scheduled_services.status. Behavior
+// changes vs. the prior direct-UPDATE flow:
+//
+//   1. Atomic guard: the UPDATE is filtered by `WHERE status =
+//      fromStatus`, so a concurrent transition between our SELECT
+//      and our UPDATE rejects with 0-rowcount → throws → 409. Legacy
+//      route was last-write-wins.
+//   2. job_status_history insert lands inside the same trx as the
+//      status flip (was: never written by this route).
+//   3. Auto-resolve of open tech_late / unassigned_overdue alerts is
+//      now atomic with the status change, not best-effort outside
+//      the trx. Same trx commits or rolls back together.
+//   4. customer:job_update + dispatch:job_update broadcasts now fire
+//      on every status change through this route (post-commit, via
+//      transitionJobStatus). Was: not emitted from here at all. The
+//      customer's track page now updates live, and other dispatcher
+//      tabs re-render via dispatch:job_update (PR #322 listener).
+//   5. actual_start_time / actual_end_time / service_time_minutes
+//      land inside the same trx as the status flip (was: same UPDATE
+//      statement; semantically equivalent).
+//
+// What stays the same:
+//   - service_status_log INSERT (legacy audit table; not migrating
+//     its schema in this PR).
+//   - track-transitions.markEnRoute / markComplete / cancel (track_state
+//     is a separate customer-visible state machine; en_route still
+//     fires the tracking-link SMS via that helper).
+//   - activity_log INSERT (admin-side audit, distinct table).
 router.put('/:serviceId/status', async (req, res, next) => {
   try {
-    const { status, notes, lat, lng } = req.body;
+    const { status: toStatus, notes, lat, lng } = req.body;
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
@@ -147,63 +177,80 @@ router.put('/:serviceId/status', async (req, res, next) => {
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
-    // Log status change
+    // Log status change to legacy audit table outside the trx (compat —
+    // service_status_log is consumed by the tech portal + reporting;
+    // not migrating its schema here).
     await db('service_status_log').insert({
-      scheduled_service_id: svc.id, status, changed_by: req.technicianId, lat, lng, notes,
+      scheduled_service_id: svc.id, status: toStatus, changed_by: req.technicianId, lat, lng, notes,
     });
 
-    const updates = { status };
-    if (status === 'on_site') updates.actual_start_time = db.fn.now();
-    if (status === 'completed') {
-      updates.actual_end_time = db.fn.now();
-      if (svc.actual_start_time) {
-        updates.service_time_minutes = Math.round((Date.now() - new Date(svc.actual_start_time)) / 60000);
-      }
-    }
-    await db('scheduled_services').where({ id: svc.id }).update(updates);
-
-    // Auto-resolve any open overdue-family dispatch_alerts
-    // (tech_late + unassigned_overdue) for this job when the new
-    // status makes the "running late" signal obsolete (on_site /
-    // completed / cancelled / skipped). The helper is a no-op for
-    // any other toStatus, so it's safe to call unconditionally.
-    // Wrapped in try/catch because this route doesn't transact its
-    // writes — a phantom auto-resolve failure should log and
-    // continue, not fail the whole status change. Status update
-    // already committed; track-transitions + activity_log + the
-    // success response should still happen.
+    const fromStatus = svc.status;
+    const { transitionJobStatus } = require('../services/job-status');
     try {
-      const { autoResolveOverdueAlertsForJob } = require('../services/dispatch-alerts');
-      await autoResolveOverdueAlertsForJob({
-        jobId: svc.id,
-        resolvedBy: req.technicianId,
-        toStatus: status,
+      await db.transaction(async (trx) => {
+        // Lifecycle timestamps live on the same row as status; flip
+        // them inside the same trx so a rollback also rolls back the
+        // timestamp change. transitionJobStatus owns the status +
+        // updated_at columns (atomic guard); we own the actual_*
+        // columns (no constraint conflict).
+        const lifecycleUpdates = {};
+        if (toStatus === 'on_site') lifecycleUpdates.actual_start_time = trx.fn.now();
+        if (toStatus === 'completed') {
+          lifecycleUpdates.actual_end_time = trx.fn.now();
+          if (svc.actual_start_time) {
+            lifecycleUpdates.service_time_minutes = Math.round(
+              (Date.now() - new Date(svc.actual_start_time)) / 60000
+            );
+          }
+        }
+        if (Object.keys(lifecycleUpdates).length > 0) {
+          await trx('scheduled_services').where({ id: svc.id }).update(lifecycleUpdates);
+        }
+
+        // Status flip + atomic guard + job_status_history INSERT +
+        // overdue-alert auto-resolve, all inside this trx. Broadcasts
+        // (customer:job_update, dispatch:job_update, dispatch:alert_resolved)
+        // chain on trx.executionPromise — fire post-commit, suppressed
+        // on rollback.
+        await transitionJobStatus({
+          jobId: svc.id,
+          fromStatus,
+          toStatus,
+          transitionedBy: req.technicianId,
+          trx,
+        });
       });
-    } catch (e) {
-      logger.error(`[admin-dispatch] auto-resolve overdue alerts failed: ${e.message}`);
+    } catch (err) {
+      // transitionJobStatus throws when fromStatus mismatch — surface
+      // as 409 so the client can refetch and retry. Other errors
+      // bubble to the outer next(err).
+      if (err && err.message && err.message.includes('not in state')) {
+        return res.status(409).json({
+          error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
+        });
+      }
+      throw err;
     }
 
     // Customer-visible track_state is owned by services/track-transitions.js.
-    // Legacy `status` column write above stays for back-compat; the helper
-    // owns track_state, lifecycle timestamps, and the en-route SMS fire.
-    // Removed the inline sendSMS block that lived here — the helper calls
-    // TwilioService.sendTechEnRoute with the track-link body, and the legacy
-    // message would have been duplicative.
-    if (status === 'en_route') {
+    // The status update above is the operational source-of-truth on
+    // scheduled_services; this helper owns track_state, lifecycle
+    // timestamps for the customer tracker, and the en-route SMS fire.
+    if (toStatus === 'en_route') {
       try {
         await trackTransitions.markEnRoute(svc.id, {
           actorType: 'admin',
           actorId: req.technicianId,
         });
       } catch (e) { logger.error(`[admin-dispatch] markEnRoute failed: ${e.message}`); }
-    } else if (status === 'completed') {
+    } else if (toStatus === 'completed') {
       try {
         await trackTransitions.markComplete(svc.id, {
           actorType: 'admin',
           actorId: req.technicianId,
         });
       } catch (e) { logger.error(`[admin-dispatch] markComplete failed: ${e.message}`); }
-    } else if (status === 'cancelled') {
+    } else if (toStatus === 'cancelled') {
       try {
         await trackTransitions.cancel(svc.id, {
           reason: notes || null,
@@ -214,8 +261,8 @@ router.put('/:serviceId/status', async (req, res, next) => {
 
     await db('activity_log').insert({
       admin_user_id: req.technicianId, customer_id: svc.customer_id,
-      action: status === 'completed' ? 'service_completed' : 'status_changed',
-      description: `${svc.tech_name} marked ${svc.service_type} as ${status} for ${svc.first_name}`,
+      action: toStatus === 'completed' ? 'service_completed' : 'status_changed',
+      description: `${svc.tech_name} marked ${svc.service_type} as ${toStatus} for ${svc.first_name}`,
     });
 
     res.json({ success: true });
