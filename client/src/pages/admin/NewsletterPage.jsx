@@ -281,17 +281,25 @@ function DashboardView({ onSelectTab, onDraftFromEvent }) {
     adminFetch('/admin/newsletter/subscribers?limit=1')
       .then((d) => { if (!ignore) setStats((s) => ({ ...s, subscribers: d.counts?.active ?? null })); })
       .catch(() => {});
-    // /sends is the campaign list; we derive Recent posts (top 5),
-    // Last open rate (most recent sent row), and Scheduled count
-    // (rows with status=scheduled) from the same response.
+    // /sends returns the recent campaign list (capped at 500) plus an
+    // uncapped status breakdown in `counts` — use `counts.scheduled`
+    // for the queued-sends tile so we don't undercount when historical
+    // rows push scheduled drafts past the row cap. Recent posts (top 5)
+    // and Last open rate (most recent sent) come from the rows.
     adminFetch('/admin/newsletter/sends')
       .then((d) => {
         if (ignore) return;
         const sends = d.sends || [];
         setRecentPosts(sends.slice(0, 5));
-        const lastSent = sends.find((s) => s.status === 'sent' && s.delivered_count > 0);
-        const lastOpenRate = lastSent ? lastSent.opened_count / lastSent.delivered_count : null;
-        const scheduledCount = sends.filter((s) => s.status === 'scheduled').length;
+        // Most recent sent row, regardless of delivered_count — a send
+        // to an empty segment can land with delivered_count=0, and the
+        // tile should reflect the *true* latest send (rendering '—'
+        // when there's nothing to compute), not skip to an older one.
+        const lastSent = sends.find((s) => s.status === 'sent');
+        const lastOpenRate = (lastSent && lastSent.delivered_count > 0)
+          ? lastSent.opened_count / lastSent.delivered_count
+          : null;
+        const scheduledCount = d.counts?.scheduled ?? 0;
         setStats((s) => ({ ...s, lastOpenRate, scheduledCount }));
         setLoadingPosts(false);
       })
