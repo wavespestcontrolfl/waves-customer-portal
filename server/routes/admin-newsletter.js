@@ -131,7 +131,16 @@ router.get('/sends', async (req, res, next) => {
       .select('newsletter_sends.*', 'technicians.name as created_by_name')
       .orderByRaw('COALESCE(newsletter_sends.sent_at, newsletter_sends.created_at) DESC')
       .limit(500);
-    res.json({ sends: rows });
+
+    // Uncapped status breakdown so callers (e.g. the Dashboard's Scheduled
+    // tile) don't have to derive counts from the 500-row payload.
+    const countRows = await db('newsletter_sends')
+      .select('status')
+      .count('* as count')
+      .groupBy('status');
+    const counts = Object.fromEntries(countRows.map((r) => [r.status, Number(r.count)]));
+
+    res.json({ sends: rows, counts });
   } catch (err) { next(err); }
 });
 
