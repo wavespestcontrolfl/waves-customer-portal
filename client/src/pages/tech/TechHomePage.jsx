@@ -45,6 +45,7 @@ import { useNavigate } from 'react-router-dom';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
 import CreateProjectModal from '../../components/tech/CreateProjectModal';
+import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
 import { etDateString } from '../../lib/timezone';
 
 const DARK = {
@@ -93,6 +94,7 @@ export default function TechHomePage() {
   const [schedule, setSchedule] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showCreateProject, setShowCreateProject] = useState(false);
+  const [photoTarget, setPhotoTarget] = useState(null); // { id, customerName }
   const techName = localStorage.getItem('techName') || localStorage.getItem('adminName') || 'Tech';
   const firstName = techName.split(' ')[0];
 
@@ -278,12 +280,84 @@ export default function TechHomePage() {
         </div>
       )}
 
+      {/* Today's Services — full list with Photos affordance per row.
+          Photos button hits POST /api/tech/services/:id/photos which
+          requires the service to be completed (server returns 409
+          otherwise; the modal surfaces that inline). Visible for all
+          statuses so techs can review/manage photos on any of their
+          day's stops, not just the next one. */}
+      {!loading && schedule.length > 0 && (
+        <>
+          <h2 style={{
+            fontSize: 14, fontWeight: 700, color: DARK.muted, margin: '20px 0 10px',
+            fontFamily: "'Montserrat', sans-serif", textTransform: 'uppercase', letterSpacing: 1,
+          }}>Today's Services</h2>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+            {schedule.map((s) => (
+              <ServiceRow
+                key={s.id}
+                service={s}
+                onPhotos={() => setPhotoTarget({
+                  id: s.id,
+                  customerName: s.customer_name || s.customerName || 'Customer',
+                })}
+              />
+            ))}
+          </div>
+        </>
+      )}
+
       {showCreateProject && (
         <CreateProjectModal
           onClose={() => setShowCreateProject(false)}
           onCreated={() => setShowCreateProject(false)}
         />
       )}
+
+      {photoTarget && (
+        <TechServicePhotosModal
+          serviceId={photoTarget.id}
+          customerName={photoTarget.customerName}
+          onClose={() => setPhotoTarget(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function ServiceRow({ service, onPhotos }) {
+  const status = service.status || 'pending';
+  const statusColor = {
+    completed: '#22c55e',
+    on_site: DARK.teal,
+    en_route: '#f59e0b',
+    skipped: '#94a3b8',
+  }[status] || DARK.muted;
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 10,
+      background: DARK.card, border: `1px solid ${DARK.border}`,
+      borderRadius: 10, padding: '10px 12px',
+    }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <p style={{
+          margin: 0, fontSize: 14, fontWeight: 600, color: DARK.text,
+          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        }}>
+          {service.customer_name || service.customerName || 'Customer'}
+        </p>
+        <p style={{ margin: '2px 0 0', fontSize: 11, color: statusColor, textTransform: 'capitalize' }}>
+          {status.replace(/_/g, ' ')}
+          {service.scheduled_time && <span style={{ color: DARK.muted }}> · {service.scheduled_time}</span>}
+        </p>
+      </div>
+      <button onClick={onPhotos} style={{
+        padding: '6px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+        border: `1px solid ${DARK.border}`, background: 'transparent',
+        color: DARK.teal, cursor: 'pointer',
+      }}>
+        📷 Photos
+      </button>
     </div>
   );
 }
