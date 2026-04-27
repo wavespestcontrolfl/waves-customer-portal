@@ -10,10 +10,16 @@
  *   may have moved the world while the drawer was closed.
  *
  * Race-safety:
- *   currentIdRef tracks the selected tech id; every async branch
- *   (fetch resolve / catch / finally) checks it before applying state.
- *   On selection change we synchronously clear `tech` and `error` so
- *   the body falls through to the "Loading…" branch instead of
+ *   Per-request sequence token (fetchSeqRef). Every fetch increments
+ *   the ref and captures its own seq; only the request whose seq
+ *   still matches fetchSeqRef.current is allowed to apply state. This
+ *   covers two race patterns:
+ *     1. Cross-tech: A → B reopen before A's fetch resolves
+ *     2. Same-tech: A → close → A again before first fetch resolves
+ *   An id-only guard catches (1) but not (2) — Codex P2 on PR #315.
+ *
+ *   On selection change we ALSO synchronously clear `tech` and `error`
+ *   so the body falls through to the "Loading…" branch instead of
  *   rendering stale data — same pattern as JobDrawer (Codex P1 #303).
  *
  * Tier 1 V2 styling: Sheet + Card / Badge / Button primitives, zinc
@@ -110,9 +116,14 @@ export default function TechDrawer({ techId, onClose }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  const currentIdRef = useRef(null);
+  // Monotonic sequence token. Each fetch increments and captures its
+  // own seq; only the request whose seq still matches fetchSeqRef
+  // .current is allowed to commit state. See Race-safety in the
+  // header for the two patterns this covers.
+  const fetchSeqRef = useRef(0);
 
   const fetchTech = useCallback(async (id) => {
+    const seq = ++fetchSeqRef.current;
     setLoading(true);
     setError(null);
     try {
@@ -121,18 +132,22 @@ export default function TechDrawer({ techId, onClose }) {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      if (currentIdRef.current !== id) return;
+      if (fetchSeqRef.current !== seq) return;
       setTech(data);
     } catch (err) {
-      if (currentIdRef.current !== id) return;
+      if (fetchSeqRef.current !== seq) return;
       setError(err.message || 'Failed to load tech');
     } finally {
-      if (currentIdRef.current === id) setLoading(false);
+      if (fetchSeqRef.current === seq) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    currentIdRef.current = techId;
+    // Bump the seq on every selection change so any in-flight fetch
+    // becomes stale and won't apply state — even if the new techId
+    // equals the old one (same-tech reopen). The next fetchTech call
+    // bumps it again.
+    fetchSeqRef.current += 1;
     setTech(null);
     setError(null);
     if (techId) fetchTech(techId);
