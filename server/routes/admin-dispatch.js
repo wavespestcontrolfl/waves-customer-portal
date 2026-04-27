@@ -1017,6 +1017,154 @@ router.get('/alerts', requireAdmin, async (req, res, next) => {
 //   - row exists and is resolved → 200 with the existing row, no
 //     second broadcast (cards on other clients already removed)
 //   - row missing                → 404
+// GET /api/admin/dispatch/technicians — active-technician list for
+// the JobDrawer assignment dropdown.
+//
+// Distinct from /board's tech list, which filters to "active in the
+// last 24h" so unassigned techs don't clutter the map. For
+// assignment we want EVERY active tech, including ones who haven't
+// pinged today.
+router.get('/technicians', requireAdmin, async (req, res, next) => {
+  try {
+    const techs = await db('technicians')
+      .where({ active: true })
+      .select('id', 'name', 'role')
+      .orderBy('name', 'asc');
+    res.json({ technicians: techs });
+  } catch (err) {
+    logger.error(`[dispatch/technicians] list failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// PUT /api/admin/dispatch/jobs/:id/assign — change a job's assigned
+// technician. Body: { technicianId } where technicianId is either a
+// technicians.id UUID or null (to unassign).
+//
+// Used by JobDrawer's assignment dropdown. Future drag-to-reassign
+// (drag a job pin onto a tech card) will call the same endpoint.
+//
+// Validation:
+//   - job exists
+//   - job is not in a terminal state (completed/cancelled/skipped) —
+//     reassigning a finished job is meaningless and would silently
+//     no-op the operational signal
+//   - technicianId, if non-null, references an ACTIVE technician
+//
+// Side effects on success:
+//   - scheduled_services.technician_id updated
+//   - if going from null → assigned tech, any open
+//     unassigned_overdue alert for this job auto-resolves via
+//     resolveAlert (broadcast suppressed if rollback). Same trx.
+//   - dispatch:job_update broadcast to dispatch:admins so other
+//     dispatchers' boards re-render the pin's color + roster
+//     attribution. Customer-room broadcasts are NOT emitted (no
+//     customer-visible state change).
+router.put('/jobs/:id/assign', requireAdmin, async (req, res, next) => {
+  try {
+    const rawTechId = req.body ? req.body.technicianId : undefined;
+    if (rawTechId !== null && typeof rawTechId !== 'string') {
+      return res.status(400).json({ error: 'technicianId must be a UUID string or null' });
+    }
+    const newTechId = rawTechId || null;
+
+    const job = await db('scheduled_services').where({ id: req.params.id }).first();
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    if (['completed', 'cancelled', 'skipped'].includes(job.status)) {
+      return res.status(409).json({
+        error: `Cannot reassign a ${job.status} job`,
+      });
+    }
+
+    if (newTechId) {
+      const tech = await db('technicians').where({ id: newTechId }).first();
+      if (!tech) return res.status(400).json({ error: 'Unknown technician' });
+      if (!tech.active) return res.status(400).json({ error: 'Technician is inactive' });
+    }
+
+    // No-op: avoid re-broadcasting + re-running auto-resolve when the
+    // dispatcher saves without changing anything.
+    if ((job.technician_id || null) === newTechId) {
+      return res.json({ job: { ...job, technician_id: newTechId } });
+    }
+
+    const fromTechId = job.technician_id || null;
+
+    // Trx scope: status update + auto-resolve (if applicable). The
+    // dispatch-alerts helper's emit chains on trx.executionPromise, so
+    // alert_resolved broadcasts fire post-commit and are suppressed on
+    // rollback.
+    let updatedRow;
+    await db.transaction(async (trx) => {
+      [updatedRow] = await trx('scheduled_services')
+        .where({ id: req.params.id })
+        .update({ technician_id: newTechId, updated_at: trx.fn.now() })
+        .returning('*');
+
+      // null → tech: the unassigned_overdue alert is moot. We don't
+      // touch tech_late here — the late condition is on the JOB's
+      // window, not the tech, so reassigning between techs leaves
+      // tech_late open until the job actually lands on_site.
+      if (!fromTechId && newTechId) {
+        const { resolveAlert } = require('../services/dispatch-alerts');
+        const openAlerts = await trx('dispatch_alerts')
+          .where({ type: 'unassigned_overdue', job_id: req.params.id })
+          .whereNull('resolved_at')
+          .select('id');
+        for (const { id } of openAlerts) {
+          await resolveAlert({ id, resolvedBy: req.technicianId, trx });
+        }
+      }
+    });
+
+    // Best-effort dispatch:job_update broadcast. Mirror's transitionJobStatus's
+    // adminPayload shape so future client listeners can treat both the
+    // status-transition and assign paths uniformly.
+    try {
+      const { getIo } = require('../sockets');
+      const io = getIo();
+      if (io) {
+        const enriched = await db('scheduled_services as s')
+          .leftJoin('technicians as t', 's.technician_id', 't.id')
+          .leftJoin('customers as c', 's.customer_id', 'c.id')
+          .where('s.id', req.params.id)
+          .first(
+            's.id as job_id', 's.customer_id', 's.technician_id as tech_id',
+            's.status', 's.service_type', 's.scheduled_date',
+            's.window_start', 's.window_end', 's.notes', 's.internal_notes',
+            's.updated_at', 't.name as tech_full_name', 'c.first_name as cust_first_name'
+          );
+        if (enriched) {
+          io.to('dispatch:admins').emit('dispatch:job_update', {
+            job_id: enriched.job_id,
+            customer_id: enriched.customer_id,
+            cust_first_name: enriched.cust_first_name,
+            status: enriched.status,
+            from_status: enriched.status, // metadata-only change
+            tech_id: enriched.tech_id,
+            tech_full_name: enriched.tech_full_name,
+            service_type: enriched.service_type,
+            scheduled_date: enriched.scheduled_date,
+            window_start: enriched.window_start,
+            window_end: enriched.window_end,
+            notes: enriched.notes,
+            internal_notes: enriched.internal_notes,
+            transitioned_by: req.technicianId,
+            updated_at: enriched.updated_at,
+          });
+        }
+      }
+    } catch (e) {
+      logger.error(`[dispatch/jobs/assign] broadcast failed: ${e.message}`);
+    }
+
+    res.json({ job: updatedRow });
+  } catch (err) {
+    logger.error(`[dispatch/jobs/assign] failed for ${req.params.id}: ${err.message}`);
+    next(err);
+  }
+});
+
 router.patch('/alerts/:id/resolve', requireAdmin, async (req, res, next) => {
   try {
     const { resolveAlert } = require('../services/dispatch-alerts');

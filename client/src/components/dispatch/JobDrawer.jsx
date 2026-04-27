@@ -1,23 +1,29 @@
 /**
  * <JobDrawer> — slide-in panel that opens when a job pin is clicked
- * on the dispatch map. Display + two status-transition actions (Mark
- * en route / Mark on site). Reschedule lives in the Schedule tab —
- * not duplicated here.
+ * on the dispatch map. Display + status-transition actions (Mark
+ * en route / Mark on site) + tech reassignment. Reschedule lives in
+ * the Schedule tab — not duplicated here.
  *
  * Hydration:
  *   GET /api/admin/dispatch/jobs/:id on open. Cached per id only via
  *   the parent's selectedJobId state — re-opens fetch fresh because
  *   broadcasts may have moved the world while the drawer was closed.
+ *   Active-tech list (GET /api/admin/dispatch/technicians) fetched
+ *   once on first open and cached across opens.
  *
  * Actions:
- *   PUT /api/admin/dispatch/:id/status with { status: 'en_route' | 'on_site' }
- *   On success, re-fetches the job so the displayed status reflects
- *   the change. The dispatch:job_update + dispatch:tech_status
- *   broadcasts will also fire from the server, so the roster + map
- *   update without a refresh.
+ *   - PUT /api/admin/dispatch/:id/status with { status: 'en_route' |
+ *     'on_site' }. Re-fetches the job into the drawer on success.
+ *   - PUT /api/admin/dispatch/jobs/:id/assign with { technicianId }
+ *     (nullable). Re-fetches on success. Server auto-resolves any
+ *     open unassigned_overdue alert when going null → tech, and
+ *     emits dispatch:job_update so other dispatchers' boards refresh.
+ *     Reassignment is disabled when the job is in a terminal state
+ *     (completed/cancelled/skipped); the server enforces the same
+ *     rule with 409.
  *
- * Tier 1 V2 styling: Sheet primitive, Card / Button / Badge from
- * components/ui, zinc ramp.
+ * Tier 1 V2 styling: Sheet primitive, Card / Button / Badge / Select
+ * from components/ui, zinc ramp.
  */
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
@@ -27,6 +33,7 @@ import {
   SheetFooter,
   Button,
   Badge,
+  Select,
   cn,
 } from '../ui';
 
@@ -75,6 +82,21 @@ export default function JobDrawer({ jobId, onClose }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [busyAction, setBusyAction] = useState(null);
+
+  // Active-tech list for the assignment dropdown. Fetched once on
+  // mount; same list applies regardless of which job the drawer
+  // shows. Cached in state to avoid refetching on every open. Empty
+  // on the first render — the dropdown gracefully shows just the
+  // current assignment until the list lands.
+  const [availableTechs, setAvailableTechs] = useState([]);
+  // Pending-but-unsaved assignment selection. null means "Unassigned",
+  // a UUID string means a specific tech. We track this separately so
+  // the user can change the dropdown and click Save (rather than
+  // auto-saving on every change, which is jarring + spawns one PUT
+  // per keystroke if the dropdown is keyboard-driven).
+  const [pendingTechId, setPendingTechId] = useState(undefined);
+  const [savingAssign, setSavingAssign] = useState(false);
+  const [assignError, setAssignError] = useState(null);
 
   // Two refs, two purposes:
   //
@@ -143,8 +165,72 @@ export default function JobDrawer({ jobId, onClose }) {
     currentIdRef.current = jobId;
     setJob(null);
     setError(null);
+    setPendingTechId(undefined);
+    setAssignError(null);
     if (jobId) fetchJob(jobId);
   }, [jobId, fetchJob]);
+
+  // Fetch active techs once on first open. The list rarely changes
+  // mid-session, so caching it across opens is fine. The current
+  // assignment dropdown gracefully falls back to "(Unassigned)" +
+  // the saved tech_full_name if this hasn't loaded yet.
+  useEffect(() => {
+    if (!jobId || availableTechs.length > 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/admin/dispatch/technicians`, {
+          headers: adminAuthHeaders(),
+        });
+        if (!res.ok) return; // best-effort; dropdown still shows current assignment
+        const data = await res.json();
+        if (cancelled) return;
+        setAvailableTechs(Array.isArray(data.technicians) ? data.technicians : []);
+      } catch {
+        /* swallow — dropdown degrades gracefully */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [jobId, availableTechs.length]);
+
+  const handleAssign = useCallback(async () => {
+    if (!job || pendingTechId === undefined || savingAssign) return;
+    if ((pendingTechId || null) === (job.tech_id || null)) {
+      // No actual change — clear the pending state without a PUT.
+      setPendingTechId(undefined);
+      return;
+    }
+    const targetJobId = job.id;
+    setSavingAssign(true);
+    setAssignError(null);
+    try {
+      const res = await fetch(
+        `${API_BASE}/admin/dispatch/jobs/${targetJobId}/assign`,
+        {
+          method: 'PUT',
+          headers: adminAuthHeaders(),
+          body: JSON.stringify({ technicianId: pendingTechId || null }),
+        }
+      );
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error || `HTTP ${res.status}`);
+      }
+      // Refetch into the drawer if still on the same job — same
+      // pattern as handleStatus. The dispatch:job_update broadcast
+      // will refresh other dispatchers' boards.
+      if (currentIdRef.current === targetJobId) {
+        setPendingTechId(undefined);
+        await fetchJob(targetJobId);
+      }
+    } catch (err) {
+      if (currentIdRef.current === targetJobId) {
+        setAssignError(err.message || 'Assignment failed');
+      }
+    } finally {
+      setSavingAssign(false);
+    }
+  }, [job, pendingTechId, savingAssign, fetchJob]);
 
   const handleStatus = useCallback(
     async (nextStatus) => {
@@ -240,11 +326,64 @@ export default function JobDrawer({ jobId, onClose }) {
             <Field label="Window">
               {formatWindow(job.window_start, job.window_end) || 'Anytime'}
             </Field>
-            <Field label="Tech">
-              {job.tech_full_name || (
-                <span className="text-ink-tertiary italic">Unassigned</span>
+            <div className="mb-3">
+              <div className="text-11 uppercase tracking-label font-medium text-ink-tertiary mb-1">
+                Tech
+              </div>
+              {/* Reassign-disabled when the job is in a terminal
+                  state. Server enforces the same rule (409); this
+                  is just to keep the affordance honest. */}
+              {['completed', 'cancelled', 'skipped'].includes(job.status) ? (
+                <div className="text-14 text-ink-primary">
+                  {job.tech_full_name || (
+                    <span className="text-ink-tertiary italic">Unassigned</span>
+                  )}
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <Select
+                    size="sm"
+                    className="flex-1"
+                    value={
+                      pendingTechId === undefined
+                        ? (job.tech_id || '')
+                        : (pendingTechId || '')
+                    }
+                    onChange={(e) => setPendingTechId(e.target.value || null)}
+                    disabled={savingAssign}
+                  >
+                    <option value="">Unassigned</option>
+                    {/* Make sure the currently-assigned tech is in
+                        the list even if availableTechs hasn't
+                        loaded yet, or the tech is now inactive. */}
+                    {job.tech_id &&
+                      !availableTechs.some((t) => t.id === job.tech_id) && (
+                        <option value={job.tech_id}>
+                          {job.tech_full_name || job.tech_id}
+                        </option>
+                      )}
+                    {availableTechs.map((t) => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
+                    ))}
+                  </Select>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={handleAssign}
+                    disabled={
+                      savingAssign ||
+                      pendingTechId === undefined ||
+                      (pendingTechId || null) === (job.tech_id || null)
+                    }
+                  >
+                    {savingAssign ? 'Saving…' : 'Save'}
+                  </Button>
+                </div>
               )}
-            </Field>
+              {assignError && (
+                <div className="text-12 text-alert-fg mt-1">{assignError}</div>
+              )}
+            </div>
             <Field label="Customer Phone">
               {job.customer_phone ? (
                 <a
