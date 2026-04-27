@@ -186,19 +186,32 @@ export function useDispatchBoard() {
         const idx = prev.findIndex((j) => j.id === payload.job_id);
         if (idx === -1) return prev;
         const next = prev.slice();
+        // Property-presence merge for nullable fields. `??` would drop
+        // an explicit `null` from the broadcast (e.g., a window
+        // intentionally cleared to "anytime") and keep the stale
+        // value — the in-check distinguishes "field absent" from
+        // "field present and null." Codex P2 on PR #322. The
+        // broadcast emitters in services/job-status.js and the
+        // assign route always include these keys, so the in-check is
+        // mostly a forward-compat guard, but it's the correct
+        // semantic.
+        function pick(field) {
+          return field in payload ? payload[field] : prev[idx][field];
+        }
         next[idx] = {
           ...prev[idx],
-          // Fields the broadcast can change. tech_id is stored as
-          // technician_id on the board row to match the /board shape.
-          technician_id: payload.tech_id || null,
-          status: payload.status,
-          service_type: payload.service_type ?? prev[idx].service_type,
-          scheduled_date: payload.scheduled_date ?? prev[idx].scheduled_date,
-          window_start: payload.window_start ?? prev[idx].window_start,
-          window_end: payload.window_end ?? prev[idx].window_end,
-          // Preserve the rest: customer_name, address, lat, lng,
-          // customer_id. The broadcast doesn't carry them; they don't
-          // change on a status/assign flip.
+          // tech_id (broadcast) → technician_id (board row shape).
+          // Always present in the broadcast; coerce undefined-as-null
+          // for safety even though it shouldn't happen.
+          technician_id: 'tech_id' in payload ? (payload.tech_id || null) : prev[idx].technician_id,
+          status: pick('status'),
+          service_type: pick('service_type'),
+          scheduled_date: pick('scheduled_date'),
+          window_start: pick('window_start'),
+          window_end: pick('window_end'),
+          // Preserved from prev: customer_name, address, lat, lng,
+          // customer_id, id. The broadcast doesn't carry them; they
+          // don't change on a status/assign flip.
         };
         return next;
       });
