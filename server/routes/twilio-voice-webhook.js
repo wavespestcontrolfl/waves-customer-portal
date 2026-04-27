@@ -376,23 +376,34 @@ router.post('/call-status', async (req, res) => {
   try {
     const { CallSid, CallStatus, CallDuration, From, To, Direction } = req.body;
 
-    const existing = await db('call_log').where('twilio_call_sid', CallSid).first();
+    await db.transaction(async (trx) => {
+      // Serialize per-CallSid so overlapping Twilio retries can't both
+      // miss `existing` and double-insert. Released at commit/rollback.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CallSid]);
 
-    if (existing) {
-      await db('call_log').where('twilio_call_sid', CallSid).update({
-        status: CallStatus,
-        duration_seconds: parseInt(CallDuration || existing.duration_seconds || 0),
-        updated_at: new Date(),
-      });
-    } else {
+      const existing = await trx('call_log').where('twilio_call_sid', CallSid).first();
+
+      if (existing) {
+        await trx('call_log').where('twilio_call_sid', CallSid).update({
+          status: CallStatus,
+          duration_seconds: parseInt(CallDuration || existing.duration_seconds || 0),
+          updated_at: new Date(),
+        });
+        return;
+      }
+
       // Studio Flow bypassed /voice — insert from status-callback fields.
       const numberConfig = TWILIO_NUMBERS.findByNumber(To);
       const isOutbound = Direction === 'outbound-api' || Direction === 'outbound-dial';
-      const customer = From && !isOutbound
-        ? await db('customers').where({ phone: From }).first()
+      // Outbound: From is our Twilio number, To is the customer.
+      // Inbound: From is the customer, To is our Twilio number.
+      const contactPhone = isOutbound ? To : From;
+      const ourEndpoint = isOutbound ? From : To;
+      const customer = contactPhone
+        ? await trx('customers').where({ phone: contactPhone }).first()
         : null;
 
-      await db('call_log').insert({
+      await trx('call_log').insert({
         customer_id: customer?.id || null,
         direction: isOutbound ? 'outbound' : 'inbound',
         from_phone: From,
@@ -411,8 +422,8 @@ router.post('/call-status', async (req, res) => {
       require('../services/conversations').recordTouchpoint({
         customerId: customer?.id,
         channel: 'voice',
-        ourEndpointId: To,
-        contactPhone: customer ? null : From,
+        ourEndpointId: ourEndpoint,
+        contactPhone: customer ? null : contactPhone,
         direction: isOutbound ? 'outbound' : 'inbound',
         authorType: isOutbound ? 'admin' : 'customer',
         twilioSid: CallSid,
@@ -423,7 +434,7 @@ router.post('/call-status', async (req, res) => {
           source: 'status_callback',
         },
       }).catch(() => {});
-    }
+    });
 
     res.sendStatus(200);
   } catch (err) {
