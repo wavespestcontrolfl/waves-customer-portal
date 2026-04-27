@@ -1,8 +1,7 @@
-// Public archive page for a single sent newsletter — rendered for
-// in-house pipeline sends that don't carry an external_web_url.
-// Linked from the /newsletter past-issues grid and the authenticated
-// Learn tab in PortalPage (via /api/feed/newsletter setting
-// link=/newsletter/archive/:id when no external URL exists).
+// Public archive page for a single sent newsletter. Linked from the
+// /newsletter past-issues grid and the authenticated Learn tab in
+// PortalPage (via /api/feed/newsletter, which sets
+// link=/newsletter/archive/:id for every sent campaign).
 //
 // The campaign body is operator-authored HTML. We render it inside a
 // sandboxed iframe (srcdoc) — no scripts, no plugins, popups allowed

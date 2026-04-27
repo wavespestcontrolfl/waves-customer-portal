@@ -174,7 +174,6 @@ router.get('/posts/:id', async (req, res) => {
       previewText: row.preview_text || null,
       htmlBody: row.html_body || '',
       sentAt: row.sent_at,
-      externalWebUrl: row.external_web_url || null,
     });
   } catch (err) {
     logger.error(`[newsletter] public post lookup failed: ${err.message}`);

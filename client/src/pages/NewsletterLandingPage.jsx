@@ -15,12 +15,11 @@ import { COLORS as B, FONTS } from '../theme-brand';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-// Belt-and-suspenders URL guard for past-issue cards. Server-side
-// already filters external_web_url to a host allowlist before emitting
-// it as `link`, but never trust input rendered into an href — a stale
-// or hostile row should fail closed here too. Returns the parsed URL
-// when it's http(s), otherwise null (PastIssue then renders an
-// unclickable card).
+// Belt-and-suspenders URL guard for past-issue cards. The server emits
+// `/newsletter/archive/:id` (relative path) for every send, but never
+// trust input rendered into an href — fail closed if `link` ever drifts
+// to a non-http(s) value. Returns the parsed URL when it's http(s),
+// otherwise null (PastIssue then renders an unclickable card).
 function safeRenderLink(href) {
   if (typeof href !== 'string' || !href) return null;
   try {
@@ -200,10 +199,8 @@ function PastIssue({ post }) {
     color: 'inherit',
     transition: 'border-color 150ms ease-out',
   };
-  // Beehiiv-imported rows link to the original Beehiiv archive URL;
-  // in-house sends link to /newsletter/archive/:id. Server emits both
-  // through a host-allowlist guard, but we re-validate here so a stale
-  // or hostile value fails closed at the render boundary.
+  // Server emits /newsletter/archive/:id for every send. We re-validate
+  // here as defense-in-depth — a stale or hostile value fails closed.
   const safeHref = safeRenderLink(post.link);
   const inner = (
     <>
