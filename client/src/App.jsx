@@ -119,6 +119,8 @@ const AdminMorePage = lazyWithRetry(() => import('./pages/admin/MorePage'));
 import BookingPage from './pages/BookingPage';
 const PublicBookingPage = lazyWithRetry(() => import('./pages/PublicBookingPage'));
 const QuotePage = lazyWithRetry(() => import('./pages/QuotePage'));
+const NewsletterLandingPage = lazyWithRetry(() => import('./pages/NewsletterLandingPage'));
+const NewsletterArchivePage = lazyWithRetry(() => import('./pages/NewsletterArchivePage'));
 const ButtonExamples = lazyWithRetry(() => import('./pages/ButtonExamples'));
 
 function ProtectedRoute({ children }) {
@@ -174,6 +176,8 @@ export default function App() {
           <Route path="/book" element={<Suspense fallback={<div style={{background:'#F5F1EB',minHeight:'100vh'}}/>}><PublicBookingPage /></Suspense>} />
           <Route path="/estimate" element={<Suspense fallback={<div style={{background:'#F1F5F9',minHeight:'100vh'}}/>}><QuotePage /></Suspense>} />
           <Route path="/quote" element={<Navigate to="/estimate" replace />} />
+          <Route path="/newsletter" element={<Suspense fallback={<div style={{background:'#1B2C5B',minHeight:'100vh'}}/>}><NewsletterLandingPage /></Suspense>} />
+          <Route path="/newsletter/archive/:id" element={<Suspense fallback={<div style={{background:'#FEF7E0',minHeight:'100vh'}}/>}><NewsletterArchivePage /></Suspense>} />
           <Route path="/button-examples" element={<Suspense fallback={<div style={{background:'#F1F5F9',minHeight:'100vh'}}/>}><ButtonExamples /></Suspense>} />
           <Route path="/book/:estimateToken" element={<BookingPage />} />
           <Route path="/admin/login" element={<AdminLoginPage />} />

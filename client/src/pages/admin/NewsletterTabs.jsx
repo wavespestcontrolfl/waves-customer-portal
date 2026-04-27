@@ -707,8 +707,6 @@ function AiDraftModal({ initialTemplate, initialPrompt, onClose, onDraft }) {
 export function HistoryView() {
   const [sends, setSends] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [importing, setImporting] = useState(false);
-  const [importMsg, setImportMsg] = useState('');
 
   const load = useCallback(() => {
     setLoading(true);
@@ -727,28 +725,11 @@ export function HistoryView() {
     } catch (e) { alert('Cancel failed: ' + e.message); }
   };
 
-  const importBeehiiv = async () => {
-    if (!confirm('Import all past newsletters from Beehiiv? Existing imported rows will be refreshed with the latest stats.')) return;
-    setImporting(true); setImportMsg('');
-    try {
-      const r = await adminFetch('/admin/newsletter/import-beehiiv', { method: 'POST' });
-      setImportMsg(`Imported ${r.imported} new · refreshed ${r.updated}`);
-      load();
-    } catch (e) { setImportMsg('Import failed: ' + e.message); }
-    finally { setImporting(false); }
-  };
-
   return (
     <Card className="p-5">
       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <h3 className="text-16 font-medium text-zinc-900">Past sends</h3>
-        <div className="flex items-center gap-2">
-          {importMsg && <span className="text-11 text-ink-secondary">{importMsg}</span>}
-          <Button onClick={importBeehiiv} variant="secondary" disabled={importing}>
-            {importing ? 'Importing…' : 'Import from Beehiiv'}
-          </Button>
-          <span className="text-11 text-ink-tertiary u-nums">{sends.length} campaign{sends.length === 1 ? '' : 's'}</span>
-        </div>
+        <span className="text-11 text-ink-tertiary u-nums">{sends.length} campaign{sends.length === 1 ? '' : 's'}</span>
       </div>
 
       {loading ? (
@@ -766,16 +747,7 @@ export function HistoryView() {
                     <span className="text-14 font-medium text-zinc-900 truncate">{s.subject}</span>
                     {s.subject_b && <Badge tone="muted">A/B</Badge>}
                     {s.segment_filter && <Badge tone="muted">Segmented</Badge>}
-                    {s.external_source === 'beehiiv' && <Badge tone="muted">Beehiiv</Badge>}
                     <StatusChip status={s.status} />
-                    {s.external_web_url && s.status !== 'draft' && (
-                      <a
-                        href={s.external_web_url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-11 text-ink-secondary hover:text-zinc-900 underline decoration-dotted"
-                      >View on web ↗</a>
-                    )}
                   </div>
                   <div className="text-11 text-ink-tertiary">
                     {s.created_by_name || 'Admin'} · {

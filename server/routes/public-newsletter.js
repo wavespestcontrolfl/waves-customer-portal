@@ -11,6 +11,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { getPublishedPosts } = require('../services/newsletter-feed');
 
 // POST /api/public/newsletter/unsubscribe/:token
 // RFC 8058 one-click: mail clients POST here with no auth + no form body.
@@ -135,6 +136,48 @@ router.post('/subscribe', async (req, res) => {
   } catch (err) {
     logger.error(`[newsletter] subscribe failed: ${err.message}`);
     res.status(500).json({ error: 'subscribe failed' });
+  }
+});
+
+// GET /api/public/newsletter/posts
+// Recent sent campaigns for the unauthenticated /newsletter landing
+// page. Reads from newsletter_sends — same source as the Learn-tab
+// /api/feed/newsletter endpoint, just without auth.
+router.get('/posts', async (req, res) => {
+  try {
+    const posts = await getPublishedPosts({ limit: 6 });
+    res.json({ posts });
+  } catch (err) {
+    logger.error(`[newsletter] public posts failed: ${err.message}`);
+    res.json({ posts: [] });
+  }
+});
+
+// GET /api/public/newsletter/posts/:id
+// Single sent campaign for the public /newsletter/archive/:id page.
+// Returns rendered html_body + metadata. Only sent rows are exposed —
+// drafts and scheduled rows 404 to avoid leaking unreleased content.
+router.get('/posts/:id', async (req, res) => {
+  try {
+    // Guard the UUID cast — Postgres rejects malformed values with 500.
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id);
+    if (!isUuid) return res.status(404).json({ error: 'not found' });
+
+    const row = await db('newsletter_sends')
+      .where({ id: req.params.id, status: 'sent' })
+      .first();
+    if (!row) return res.status(404).json({ error: 'not found' });
+
+    res.json({
+      id: row.id,
+      subject: row.subject,
+      previewText: row.preview_text || null,
+      htmlBody: row.html_body || '',
+      sentAt: row.sent_at,
+    });
+  } catch (err) {
+    logger.error(`[newsletter] public post lookup failed: ${err.message}`);
+    res.status(500).json({ error: 'lookup failed' });
   }
 });
 

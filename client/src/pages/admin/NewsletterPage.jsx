@@ -205,7 +205,7 @@ function QuickActions({ onSelectTab }) {
             <span className="text-14 font-medium text-ink-primary">Import subscribers</span>
           </div>
           <div className="text-12 text-ink-tertiary">
-            Bulk import from a CSV (one-time migration from Beehiiv, etc.).
+            Bulk import subscribers from a CSV.
           </div>
           <button
             type="button"
