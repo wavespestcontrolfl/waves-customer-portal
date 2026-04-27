@@ -337,12 +337,26 @@ const ReviewService = {
       .select('first_name', 'last_name', 'city', 'zip')
       .first();
 
-    // Tech photo
+    // Tech photo. Mirrors the pattern in track-public.js (#344) and
+    // admin-dispatch /board (#346): the canonical source is
+    // technicians.photo_s3_key (an S3 reference set by
+    // POST /api/admin/timetracking/technicians/:id/photo). Presign
+    // at response-build time inside this token-scoped getByToken
+    // call so newly-uploaded tech photos surface on review pages
+    // without expiring URLs baked into the row.
+    //
+    // Falls back to technicians.photo_url for legacy techs whose
+    // photo lives at an external host (e.g., Google Business),
+    // and beyond that to dispatch_technicians.photo_url (legacy
+    // table, may not exist on every deploy).
+    const { resolveTechPhotoUrl } = require('./tech-photo');
     let techPhoto = null;
     if (request.technician_id) {
-      const tech = await db('technicians').where({ id: request.technician_id }).select('photo_url').first();
-      techPhoto = tech?.photo_url || null;
-      // Also try dispatch_technicians
+      const tech = await db('technicians')
+        .where({ id: request.technician_id })
+        .select('photo_url', 'photo_s3_key')
+        .first();
+      techPhoto = await resolveTechPhotoUrl(tech?.photo_s3_key, tech?.photo_url);
       if (!techPhoto) {
         try {
           const dispatchTech = await db('dispatch_technicians')
