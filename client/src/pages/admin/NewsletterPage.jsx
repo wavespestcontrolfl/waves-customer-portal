@@ -144,23 +144,11 @@ function EventCard({ event, onDraft }) {
 }
 
 function QuickActions({ onSelectTab }) {
+  // "Draft from event" was retired — that workflow is the "Draft
+  // newsletter" button on each EventCard tile in the section below.
+  // Keep this grid 2-up.
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-      <Card className="cursor-pointer hover:bg-zinc-50 transition-colors">
-        <CardBody>
-          <div className="flex items-center gap-2 mb-2">
-            <Sparkles size={18} strokeWidth={1.75} className="text-zinc-900" />
-            <span className="text-14 font-medium text-ink-primary">Draft from event</span>
-          </div>
-          <div className="text-12 text-ink-tertiary">
-            Pick an upcoming SWFL event and let Claude draft the newsletter body from it.
-          </div>
-          <div className="mt-3">
-            <Badge tone="neutral">Coming soon</Badge>
-          </div>
-        </CardBody>
-      </Card>
-
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
       <Card className="cursor-pointer hover:bg-zinc-50 transition-colors" onClick={() => onSelectTab('compose')}>
         <CardBody>
           <div className="flex items-center gap-2 mb-2">
@@ -300,7 +288,7 @@ function DashboardView({ onSelectTab, onDraftFromEvent }) {
       <div className="mb-6">
         <SectionHeader
           title="Quick start"
-          hint="Three ways to get a draft going"
+          hint="Pick a starting point — or use the event tiles below for an event-anchored draft"
         />
         <QuickActions onSelectTab={onSelectTab} />
       </div>
