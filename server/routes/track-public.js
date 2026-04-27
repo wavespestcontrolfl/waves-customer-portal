@@ -24,8 +24,37 @@
 const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
+const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const db = require('../models/db');
+const config = require('../config');
 const logger = require('../services/logger');
+
+// S3 client for presigning technicians.photo_s3_key at response
+// time. 15 min TTL is plenty for a single page load — the browser
+// caches image bytes after the first hit. The customer's track_view_token
+// gates this whole route, so the presigned URL is only handed to a
+// client that already proved it knows the token.
+const s3 = new S3Client({
+  region: config.s3?.region,
+  credentials: config.s3?.accessKeyId
+    ? { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey }
+    : undefined,
+});
+
+async function resolveTechPhotoUrl(s3Key, fallbackUrl) {
+  if (!s3Key) return fallbackUrl || null;
+  if (!config.s3?.bucket) return fallbackUrl || null;
+  try {
+    return await getSignedUrl(s3, new GetObjectCommand({
+      Bucket: config.s3.bucket,
+      Key: s3Key,
+    }), { expiresIn: 15 * 60 });
+  } catch (err) {
+    logger.warn(`[track-public] presign failed for tech photo ${s3Key}: ${err.message}`);
+    return fallbackUrl || null;
+  }
+}
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
@@ -157,7 +186,8 @@ router.get('/:token', async (req, res, next) => {
         'c.latitude',
         'c.longitude',
         't.name as tech_name',
-        't.photo_url as tech_photo_url'
+        't.photo_url as tech_photo_url',
+        't.photo_s3_key as tech_photo_s3_key'
       );
 
     if (!row) return res.status(404).json({ error: 'Not found' });
@@ -165,12 +195,21 @@ router.get('/:token', async (req, res, next) => {
       return res.status(404).json({ error: 'Not found' });
     }
 
+    // Presign the tech's photo (if S3-managed) inside this trusted
+    // track-token boundary. Falls back to row.tech_photo_url for
+    // techs whose photo lives at an external URL (e.g., Google
+    // Business). Read-time presigning replaces the deleted public
+    // proxy from PR #344 (P0 fix per Codex).
+    const techPhotoUrl = row.technician_id
+      ? await resolveTechPhotoUrl(row.tech_photo_s3_key, row.tech_photo_url)
+      : null;
+
     const response = {
       state: row.track_state,
       tech: row.technician_id
         ? {
             firstName: firstNameOf(row.tech_name),
-            photoUrl: row.tech_photo_url || null,
+            photoUrl: techPhotoUrl,
             yearsWithWaves: null, // no hire_date column on technicians today
           }
         : null,

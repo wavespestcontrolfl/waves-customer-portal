@@ -620,27 +620,28 @@ router.put('/technicians/:id', async (req, res, next) => {
 // POST /technicians/:id/photo — upload tech profile photo.
 //
 // Multipart upload. Stores the binary in S3 at
-// tech-photos/<technician_id>/<timestamp>-<safename>, sets
-// technicians.photo_s3_key (canonical S3 reference) and
-// technicians.photo_url (stable same-origin proxy at
-// /api/public/tech-photo/:technicianId — see routes/public-tech-photo.js).
+// tech-photos/<technician_id>/<timestamp>-<safename> and sets
+// technicians.photo_s3_key (canonical S3 reference).
 //
-// Why a stable proxy URL instead of a presigned S3 URL stored on the
-// row: the customer tracker (track-public.js) and document renderers
-// (documents.js) read photo_url verbatim. A presigned URL would
-// expire and break the rendered <img>. The proxy resolves to a fresh
-// presigned URL on every request, so photos work indefinitely while
-// the bucket stays private.
+// Read pattern: consumers (track-public.js, documents.js,
+// review-request.js) presign technicians.photo_s3_key on demand
+// at the trusted-context boundary they already authenticate. There
+// is NO public unauthenticated proxy — adding one would put a new
+// route outside AGENTS.md's allowed-list of public-by-token routes
+// (P0; Codex caught this on PR #344). UUIDs are not secrets —
+// booking responses already expose technician_id to unauth callers.
+//
+// photo_url is left untouched. It coexists as a fallback for
+// techs whose photo lives at an external URL (e.g., Google Business
+// profile). Read sites use photo_s3_key first, fall back to
+// photo_url.
 //
 // Re-uploading a photo for the same tech overwrites photo_s3_key
 // (old S3 object stays orphaned — cleanup is a separate concern).
-// photo_url stays the same since it's keyed off technician_id.
 //
 // Lazy multer init: defining the route requires `upload`, which is
 // declared further down the file (with the company-documents block).
-// Reuse it inline below — same multer instance, same 25 MB cap. If
-// 25 MB is too large for profile photos in practice (most are < 1 MB),
-// future tightening can move the multer cap to per-route.
+// Reuse it inline below — same multer instance, same 25 MB cap.
 const PHOTO_PREFIX = 'tech-photos/';
 router.post(
   '/technicians/:id/photo',
@@ -662,15 +663,8 @@ router.post(
         ContentType: req.file.mimetype,
       }));
 
-      // Build the same-origin proxy URL. clientUrl is the canonical
-      // public host (see config). Using an absolute URL (vs. relative)
-      // so PDF document renderers (documents.js) that don't know the
-      // current request origin can still resolve the image.
-      const proxyUrl = `${(config.clientUrl || '').replace(/\/$/, '')}/api/public/tech-photo/${tech.id}`;
-
       await db('technicians').where({ id: tech.id }).update({
         photo_s3_key: key,
-        photo_url: proxyUrl,
         updated_at: new Date(),
       });
 
