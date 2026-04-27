@@ -6,6 +6,8 @@
  * Phase 2 v1 scope. Out of scope: drag-to-reassign, color borders on
  * roster cards (green/amber/red on schedule), revenue/KPI strips,
  * mobile responsiveness, tech drawer, job drawer.
+ *
+ * Tier 1 V2 styling.
  */
 import React, { useCallback } from 'react';
 import { useDispatchBoard } from '../../hooks/useDispatchBoard';
@@ -13,8 +15,6 @@ import DispatchBoardLayout from '../../components/dispatch/DispatchBoardLayout';
 import TechRosterPane from '../../components/dispatch/TechRosterPane';
 import DispatchMap from '../../components/dispatch/DispatchMap';
 import ActionQueuePane from '../../components/dispatch/ActionQueuePane';
-
-const D = { bg: '#0f1923', muted: '#94a3b8', alert: '#ef4444' };
 
 export default function DispatchBoardPage() {
   const {
@@ -36,14 +36,14 @@ export default function DispatchBoardPage() {
 
   if (loading) {
     return (
-      <div style={{ background: D.bg, color: D.muted, padding: 40, textAlign: 'center' }}>
+      <div className="bg-surface-page text-14 text-ink-tertiary p-10 text-center">
         Loading dispatch board…
       </div>
     );
   }
   if (error) {
     return (
-      <div style={{ background: D.bg, color: D.alert, padding: 40, textAlign: 'center' }}>
+      <div className="bg-surface-page text-14 text-alert-fg p-10 text-center">
         Failed to load dispatch board: {error}
       </div>
     );

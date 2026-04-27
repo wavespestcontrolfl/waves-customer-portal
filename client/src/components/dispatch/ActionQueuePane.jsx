@@ -10,41 +10,18 @@
  * If you find yourself adding any data-fetching or socket subscribing
  * to this component before that PR — stop. The action queue gets its
  * own scoped review pass.
+ *
+ * Tier 1 V2 styling.
  */
 import React from 'react';
 
-const D = {
-  bg: '#0f1923', border: '#334155', muted: '#64748b', heading: '#94a3b8',
-};
-
 export default function ActionQueuePane() {
   return (
-    <aside
-      style={{
-        width: 320,
-        flexShrink: 0,
-        background: D.bg,
-        borderLeft: `1px solid ${D.border}`,
-        padding: 16,
-        boxSizing: 'border-box',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 8,
-      }}
-    >
-      <h2
-        style={{
-          color: D.heading,
-          fontSize: 12,
-          fontWeight: 600,
-          letterSpacing: 1.5,
-          textTransform: 'uppercase',
-          margin: 0,
-        }}
-      >
+    <aside className="w-80 flex-shrink-0 bg-white border-l border-hairline border-zinc-200 p-4 flex flex-col gap-2">
+      <h2 className="text-12 uppercase tracking-label font-medium text-ink-secondary">
         Action Queue
       </h2>
-      <div style={{ color: D.muted, fontSize: 12 }}>
+      <div className="text-12 text-ink-tertiary">
         Reserved for dispatch:alert cards — separate PR.
       </div>
     </aside>

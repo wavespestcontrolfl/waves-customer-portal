@@ -6,27 +6,32 @@
  * while the dispatcher reassigns the job). Including it prevents a
  * class of stale-render bugs.
  *
- * Address truncation lives at this render layer, not at the API. The
- * `jobs` prop (full job records) is the lookup table for
- * current_job_id → address. Truncated to 28 chars on display.
- *
- * Click handler highlights the corresponding map marker via the
- * shared selectedTechId state in useDispatchBoard().
+ * Tier 1 V2 styling: Tailwind + components/ui primitives, light
+ * surface, zinc ramp, font weights 400/500 only, text-14 minimum.
+ * No D palette. See AGENTS.md / CLAUDE.md for the V2 contract.
  */
 import React from 'react';
+import { Card, cn } from '../ui';
 
-const STATUS_COLORS = {
-  en_route:    '#0ea5e9', // teal — moving
-  on_site:     '#10b981', // green — at customer
-  wrapping_up: '#a855f7', // purple — finishing
-  driving:     '#0ea5e9', // teal — same as en_route in v1
-  break:       '#94a3b8', // muted — off-task
-  idle:        '#64748b', // dim — no current activity
+// Status → color token mapping. Kept narrow: only the dot color
+// changes by status; surrounding text is always zinc. Avoids the
+// accent-soup that the V1 dark palette had.
+const STATUS_DOT = {
+  en_route:    'bg-waves-blue',
+  on_site:     'bg-waves-gold',
+  wrapping_up: 'bg-zinc-500',
+  driving:     'bg-waves-blue',
+  break:       'bg-zinc-400',
+  idle:        'bg-zinc-300',
 };
 
-const D = {
-  bg: '#0f1923', card: '#1e293b', border: '#334155',
-  text: '#e2e8f0', muted: '#94a3b8', heading: '#fff',
+const STATUS_TEXT = {
+  en_route:    'text-waves-blue-dark',
+  on_site:     'text-waves-gold',
+  wrapping_up: 'text-zinc-700',
+  driving:     'text-waves-blue-dark',
+  break:       'text-zinc-500',
+  idle:        'text-zinc-500',
 };
 
 function truncate(str, n) {
@@ -48,7 +53,8 @@ function streetOnly(fullAddress) {
 function TechCardImpl({ tech, jobs, selected, onSelect }) {
   const currentJob = tech.current_job_id ? jobs.get(tech.current_job_id) : null;
   const addressLine = currentJob ? truncate(streetOnly(currentJob.address), 28) : '—';
-  const statusColor = STATUS_COLORS[tech.status] || STATUS_COLORS.idle;
+  const dotColor = STATUS_DOT[tech.status] || STATUS_DOT.idle;
+  const statusTextColor = STATUS_TEXT[tech.status] || STATUS_TEXT.idle;
 
   const initials = (tech.name || '?')
     .split(/\s+/)
@@ -61,112 +67,66 @@ function TechCardImpl({ tech, jobs, selected, onSelect }) {
     <button
       type="button"
       onClick={() => onSelect(tech.id)}
-      style={{
-        all: 'unset',
-        display: 'block',
-        width: '100%',
-        boxSizing: 'border-box',
-        background: D.card,
-        border: `1px solid ${selected ? statusColor : D.border}`,
-        borderRadius: 10,
-        padding: 12,
-        marginBottom: 8,
-        cursor: 'pointer',
-        boxShadow: selected ? `0 0 0 2px ${statusColor}33` : 'none',
-        transition: 'border-color 0.15s, box-shadow 0.15s',
-      }}
+      className={cn(
+        'block w-full text-left mb-2 u-focus-ring rounded-md',
+        'transition-shadow',
+        selected && 'ring-2 ring-zinc-900 ring-offset-1'
+      )}
     >
-      <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-        {tech.avatar_url ? (
-          <img
-            src={tech.avatar_url}
-            alt=""
-            style={{
-              width: 36,
-              height: 36,
-              borderRadius: '50%',
-              objectFit: 'cover',
-              flexShrink: 0,
-            }}
-          />
-        ) : (
-          <div
-            aria-hidden
-            style={{
-              width: 36,
-              height: 36,
-              borderRadius: '50%',
-              background: '#334155',
-              color: D.text,
-              fontSize: 13,
-              fontWeight: 600,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              flexShrink: 0,
-            }}
-          >
-            {initials}
-          </div>
+      <Card
+        className={cn(
+          'cursor-pointer hover:bg-zinc-50',
+          selected && 'border-zinc-900'
         )}
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div
-            style={{
-              color: D.heading,
-              fontWeight: 600,
-              fontSize: 14,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {tech.name}
-          </div>
-          <div
-            style={{
-              color: statusColor,
-              fontSize: 11,
-              fontWeight: 600,
-              textTransform: 'uppercase',
-              letterSpacing: 0.5,
-              marginTop: 2,
-            }}
-          >
-            {tech.status || 'idle'}
+      >
+        <div className="flex items-center gap-3 px-3 pt-3">
+          {tech.avatar_url ? (
+            <img
+              src={tech.avatar_url}
+              alt=""
+              className="w-9 h-9 rounded-full object-cover flex-shrink-0"
+            />
+          ) : (
+            <div
+              aria-hidden
+              className="w-9 h-9 rounded-full bg-zinc-200 text-zinc-700 text-13 font-medium flex items-center justify-center flex-shrink-0"
+            >
+              {initials}
+            </div>
+          )}
+          <div className="flex-1 min-w-0">
+            <div className="text-14 font-medium text-ink-primary truncate">
+              {tech.name}
+            </div>
+            <div className={cn('flex items-center gap-1.5 mt-0.5')}>
+              <span className={cn('inline-block w-1.5 h-1.5 rounded-full', dotColor)} />
+              <span
+                className={cn(
+                  'text-11 uppercase tracking-label font-medium',
+                  statusTextColor
+                )}
+              >
+                {tech.status || 'idle'}
+              </span>
+            </div>
           </div>
         </div>
-      </div>
-      <div
-        style={{
-          color: D.muted,
-          fontSize: 12,
-          marginTop: 8,
-          fontFamily: "'JetBrains Mono', monospace",
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}
-        title={currentJob ? currentJob.address : ''}
-      >
-        {addressLine}
-      </div>
-      <div
-        style={{
-          color: D.text,
-          fontSize: 11,
-          marginTop: 6,
-          fontFamily: "'JetBrains Mono', monospace",
-        }}
-      >
-        {tech.today_completed} / {tech.today_total} jobs
-      </div>
+        <div
+          className="px-3 pt-2 text-12 text-ink-secondary truncate"
+          title={currentJob ? currentJob.address : ''}
+        >
+          {addressLine}
+        </div>
+        <div className="px-3 pt-1 pb-3 text-12 text-ink-tertiary">
+          {tech.today_completed} / {tech.today_total} jobs
+        </div>
+      </Card>
     </button>
   );
 }
 
 // React.memo with a custom equality fn. The triple [id, updated_at,
-// current_job_id] is the dirty key — see file header for why
-// current_job_id is a separate axis. If any external prop other than
+// current_job_id] is the dirty key. If any external prop other than
 // `tech` changes (selected, jobs reference, onSelect), we re-render
 // regardless via the secondary checks below.
 export default React.memo(TechCardImpl, (prev, next) => {

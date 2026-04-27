@@ -20,6 +20,9 @@
  * key MUST be HTTP-referrer restricted to the Waves portal domains in
  * the Google Cloud Console — that's the security boundary, not the
  * absence of the key from the bundle.
+ *
+ * Tier 1 V2 styling for chrome (loading / error states); the GoogleMap
+ * itself is a flex container with no V2 chrome.
  */
 import React, { useMemo, useCallback } from 'react';
 import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
@@ -30,20 +33,20 @@ const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
 // coords (first-load before any tech has pinged).
 const DEFAULT_CENTER = { lat: 27.4989, lng: -82.5748 };
 
-// Deterministic per-tech color palette. Uses a stable hash of tech.id
-// so the same tech gets the same color across reloads. Falls back to
-// neutral for jobs with no technician assigned.
+// Deterministic per-tech color palette — uses Waves brand + zinc
+// accents so the map ties visually to the rest of V2 chrome. Stable
+// hash of tech.id so the same tech gets the same color across reloads.
 const PALETTE = [
-  '#0ea5e9', // teal
-  '#a855f7', // purple
-  '#10b981', // green
-  '#f59e0b', // amber
-  '#ef4444', // red
-  '#3b82f6', // blue
-  '#ec4899', // pink
-  '#14b8a6', // cyan
+  '#0A7EC2', // waves-blue
+  '#065A8C', // waves-blue-dark
+  '#F0A500', // waves-gold
+  '#3F3F46', // zinc-700
+  '#71717A', // zinc-500
+  '#04395E', // waves-blue-deeper
+  '#52525B', // zinc-600
+  '#C0392B', // waves-red (reserve for high-attention; present here for diversity)
 ];
-const NEUTRAL = '#94a3b8';
+const NEUTRAL = '#A1A1AA'; // zinc-400 — unassigned jobs
 
 function hashId(id) {
   let h = 0;
@@ -60,7 +63,7 @@ function svgPin(color, isSelected = false, isTruck = false) {
   // Inline SVG so we don't ship marker images. Truck pins are diamond,
   // job pins are circles — gives an at-a-glance read of "tech is here"
   // vs "job is there" without legend.
-  const stroke = isSelected ? '#fff' : '#0f1923';
+  const stroke = isSelected ? '#18181B' : '#FFFFFF';
   const strokeWidth = isSelected ? 3 : 1.5;
   const size = isSelected ? 28 : 22;
   const shape = isTruck
@@ -100,21 +103,21 @@ export default function DispatchMap({ techs, jobs, selectedTechId, onSelectTech 
 
   if (loadError) {
     return (
-      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#ef4444', background: '#0f1923' }}>
+      <div className="flex-1 flex items-center justify-center text-14 text-alert-fg bg-surface-page">
         Failed to load Google Maps. Check VITE_GOOGLE_MAPS_API_KEY.
       </div>
     );
   }
   if (!isLoaded) {
     return (
-      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', background: '#0f1923' }}>
+      <div className="flex-1 flex items-center justify-center text-14 text-ink-tertiary bg-surface-page">
         Loading map…
       </div>
     );
   }
 
   return (
-    <div style={{ flex: 1, position: 'relative', minWidth: 0 }}>
+    <div className="flex-1 relative min-w-0">
       <GoogleMap
         mapContainerStyle={{ width: '100%', height: '100%' }}
         center={initialCenter}
