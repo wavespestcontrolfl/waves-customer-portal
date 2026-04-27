@@ -39,7 +39,8 @@
 // - Route refresh: when a service status changes, does the rest of
 //   the day's route re-fetch / re-render correctly? Stale rows are
 //   common here.
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { io } from 'socket.io-client';
 import { useNavigate } from 'react-router-dom';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
@@ -56,6 +57,20 @@ const DARK = {
 };
 
 const API = import.meta.env.VITE_API_URL || '';
+
+// Same socketOrigin shape as TrackPage / useDispatchBoard. Empty
+// string or relative path → undefined → io() defaults to same-origin
+// (works in production where SPA + API share a host, plus Vite dev
+// with the /socket.io ws proxy). Full URL → return its origin so the
+// socket handshake hits the same backend the HTTP fetches do.
+function socketOrigin() {
+  if (!API || API.startsWith('/')) return undefined;
+  try {
+    return new URL(API).origin;
+  } catch {
+    return undefined;
+  }
+}
 
 function getGreeting() {
   const h = new Date().getHours();
@@ -81,11 +96,7 @@ export default function TechHomePage() {
   const techName = localStorage.getItem('techName') || localStorage.getItem('adminName') || 'Tech';
   const firstName = techName.split(' ')[0];
 
-  useEffect(() => {
-    fetchSchedule();
-  }, []);
-
-  async function fetchSchedule() {
+  const fetchSchedule = useCallback(async () => {
     try {
       const token = localStorage.getItem('adminToken');
       const today = etDateString();
@@ -101,7 +112,46 @@ export default function TechHomePage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    fetchSchedule();
+  }, [fetchSchedule]);
+
+  // Live updates via Socket.io. Tech JWTs auth into the same
+  // dispatch:admins room as admins (server/sockets/index.js), so the
+  // dispatch:job_update broadcast fired post-commit by every status
+  // write (PRs #328 / #329 / #330 / #335) reaches us here. On any
+  // event we refetch the schedule — refresh shape is simpler than
+  // merging a narrow broadcast payload into our full row shape, and
+  // a same-tab "Mark En Route" tap doesn't double-render because
+  // we already setSchedule from its response.
+  //
+  // Filtering by tech_id on the client is possible (broadcast carries
+  // it), but reassignment FROM this tech to another would carry the
+  // NEW tech's id and we'd miss the un-assignment. Refetch
+  // unconditionally — cheap, correct.
+  //
+  // Cleanup: socket.off + socket.disconnect on unmount, matching the
+  // pattern in useDispatchAlerts / useDispatchBoard / TrackPage.
+  // Either alone leaks on every navigation away from the tech home.
+  useEffect(() => {
+    const token = localStorage.getItem('adminToken');
+    if (!token) return undefined;
+    const origin = socketOrigin();
+    const opts = { auth: { token }, transports: ['websocket', 'polling'], reconnection: true };
+    const socket = origin ? io(origin, opts) : io(opts);
+
+    function handleJobUpdate() {
+      fetchSchedule();
+    }
+    socket.on('dispatch:job_update', handleJobUpdate);
+
+    return () => {
+      socket.off('dispatch:job_update', handleJobUpdate);
+      socket.disconnect();
+    };
+  }, [fetchSchedule]);
 
   const completed = schedule.filter((s) => s.status === 'completed').length;
   const total = schedule.length;
