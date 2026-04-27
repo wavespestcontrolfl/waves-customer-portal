@@ -4,7 +4,7 @@
  *
  * Desktop: centered modal triggered by ⌘K / Ctrl+K from any admin page.
  * Mobile:  full-height bottom sheet triggered by the Sparkles button in
- *          MobileAdminShell's top bar. Also opens via ⌘K if a keyboard
+ *          the admin shell's top bar. Also opens via ⌘K if a keyboard
  *          is attached.
  *
  * Auto-detects which page you're on and loads the right context/tools.

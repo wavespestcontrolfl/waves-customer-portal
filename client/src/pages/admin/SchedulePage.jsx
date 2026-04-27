@@ -1,8 +1,9 @@
 // client/src/pages/admin/SchedulePage.jsx
 //
-// V1 admin Schedule page (/admin/schedule + /admin/dispatch behind the
-// V2 feature flag's "off" branch). Also serves as the shared module for
-// the inline modal/panel components reused by DispatchPageV2:
+// Shared-utility module for the V2 dispatch surface. The V1 page
+// component was retired in the dispatch V1→V2 migration; this file is
+// retained only for the inline modal/panel components consumed by
+// DispatchPageV2 + ProtocolReferenceTabV2:
 //   - CompletionPanel       — mark service complete + record products /
 //                             observations / labor minutes
 //   - RescheduleModal       — move an appointment to a new slot
@@ -11,8 +12,10 @@
 //   - ProtocolPanel         — surface the appropriate service protocol
 //                             (lawn / pest / tree-shrub / mosquito) for
 //                             the tech on-site
+//   - MONTH_NAMES, PRODUCT_DESCRIPTIONS, TRACK_SAFETY_RULES,
+//     stripLegacyBoilerplate (consumed by ProtocolReferenceTabV2)
 //
-// Endpoints:
+// Endpoints these helpers are wired against:
 //   GET   /admin/schedule/services?date=…
 //   PATCH /admin/services/:id
 //   POST  /admin/services/:id/complete
@@ -20,17 +23,14 @@
 //   GET   /admin/techs/availability
 //
 // Audit focus:
-// - The four exported sub-components are state-heavy and consumed by
-//   both V1 and V2 — confirm they don't carry hidden V1-only
-//   assumptions (e.g. relying on parent state shape) that break under V2.
+// - The four exported sub-components are state-heavy — confirm they
+//   don't carry hidden assumptions about a V1 page parent's state
+//   shape that break under V2's parent.
 // - CompletionPanel's products + observations submit creates the
 //   service_record + invoice line items — verify it's idempotent
 //   (operator double-clicks "Complete" should not double-bill).
 // - RescheduleModal's slot-conflict handling — what happens if the
 //   chosen slot is taken between modal open and submit?
-// - V1 calendar views (WeekView / MonthView) — confirm they're behind
-//   the dispatch-v2=off branch and not accidentally double-rendered
-//   alongside V2 content.
 import { useState, useEffect, useRef, useCallback } from 'react';
 
 import { etDateString } from '../../lib/timezone';

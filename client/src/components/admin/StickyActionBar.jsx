@@ -4,7 +4,9 @@ import { callViaBridge } from './CallBridgeLink';
 
 /**
  * Persistent bottom action bar for mobile admin detail views.
- * Renders above the MobileAdminShell's 56px tab bar → stack = 56 + 56 = 112px.
+ * Default offset is 56px above the bottom safe area — a holdover from
+ * the now-retired MobileAdminShell tab bar; left in place for layout
+ * continuity until the mobile shell is re-thought.
  * Only activates at viewport < 768px. Desktop continues using inline actions.
  *
  * Each action is a full-height equal-width column (not a pill) — icon 20px top,
@@ -15,8 +17,8 @@ import { callViaBridge } from './CallBridgeLink';
  * @param {Array} p.actions  array of action descriptors (see variants below)
  * @param {string} [p.className]
  * @param {boolean} [p.standalone=false]  true when rendered inside a full-screen
- *   overlay that covers the MobileAdminShell tab bar (e.g. Customer360Profile).
- *   Default stacks above the tab bar (bottom = 56px + safe area).
+ *   overlay (e.g. Customer360Profile). Drops the 56px holdover offset
+ *   and pins to the safe-area bottom directly.
  */
 export default function StickyActionBar({ actions, className, standalone = false }) {
   if (!actions?.length) return null;
