@@ -166,10 +166,21 @@ function ServiceForm({ svc, onSave, onCancel }) {
   );
 }
 
-function ServiceCard({ svc, expanded, onToggle, onUpdate }) {
+// Flat-list table row: thumbnail-less Name / Category / Billing /
+// Duration / Price / Active / Actions columns. Click the row (or the
+// chevron) to expand into the existing ServiceForm for inline editing —
+// same edit / delete behavior the previous card grid had.
+function ServiceRow({ svc, expanded, onToggle, onUpdate }) {
   const billingColor = billingColors[svc.billing_type] || '#64748b';
   const catColor = catColors[svc.category] || '#64748b';
-  const price = svc.base_price ? `$${Number(svc.base_price).toFixed(0)}` : '--';
+  const price = svc.base_price ? `$${Number(svc.base_price).toFixed(0)}` : '—';
+  const billingLabel = svc.billing_type === 'one_time' ? 'One-Time' : svc.billing_type === 'recurring' ? 'Recurring' : svc.billing_type || '—';
+  const catLabel = (CATEGORIES.find(c => c.value === svc.category) || {}).label || svc.category || '—';
+  const duration = svc.default_duration_minutes > 0 ? `${svc.default_duration_minutes} min` : '—';
+
+  const cellPad = '10px 12px';
+  const cellBase = { padding: cellPad, fontSize: 13, color: D.text, verticalAlign: 'middle' };
+  const cell = (extra = {}) => ({ ...cellBase, ...extra });
 
   const handleToggleActive = async (e) => {
     e.stopPropagation();
@@ -179,61 +190,71 @@ function ServiceCard({ svc, expanded, onToggle, onUpdate }) {
     } catch {}
   };
 
-  return (
-    <div style={{ ...sCard, opacity: svc.is_active ? 1 : 0.5, cursor: 'pointer', transition: 'border-color 0.2s', borderColor: expanded ? D.teal : D.border }} onClick={onToggle}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-          <span style={{ fontSize: 14, color: D.muted }}>{'>'}</span>
-          <div>
-            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{svc.name}</div>
-            <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
-              <span style={sBadge(catColor)}>{(CATEGORIES.find(c => c.value === svc.category) || {}).label || svc.category}</span>
-              <span style={sBadge(billingColor)}>{svc.billing_type === 'one_time' ? 'One-Time' : svc.billing_type === 'recurring' ? 'Recurring' : svc.billing_type}</span>
-              {svc.is_waveguard && <span style={sBadge(D.teal)}>WaveGuard</span>}
-            </div>
-          </div>
-        </div>
-        <div style={{ textAlign: 'right' }}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>{price}</div>
-          {svc.frequency && <div style={{ fontSize: 11, color: D.muted }}>{svc.frequency}</div>}
-          {svc.default_duration_minutes > 0 && <div style={{ fontSize: 11, color: D.muted }}>{svc.default_duration_minutes} min</div>}
-        </div>
-      </div>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, marginTop: 8 }}>
-        <button onClick={handleToggleActive} style={{ ...sBtn(svc.is_active ? D.green + '22' : D.red + '22', svc.is_active ? D.green : D.red), fontSize: 11, padding: '4px 10px' }}>
-          {svc.is_active ? 'Active' : 'Inactive'}
-        </button>
-        <button
-          onClick={async (e) => {
-            e.stopPropagation();
-            if (!window.confirm(`Delete "${svc.name}"?\n\nThis removes it from the service catalog. Past services already invoiced keep their history. You can't undo this.`)) return;
-            try {
-              await aFetch(`/admin/services/${svc.id}`, { method: 'DELETE' });
-              onUpdate();
-            } catch (err) {
-              window.alert('Delete failed: ' + (err?.message || 'unknown error'));
-            }
-          }}
-          style={{ ...sBtn(D.red + '15', D.red), fontSize: 11, padding: '4px 10px', border: `1px solid ${D.red}44` }}
-          title="Delete this service permanently"
-        >
-          Delete
-        </button>
-      </div>
+  const handleDelete = async (e) => {
+    e.stopPropagation();
+    if (!window.confirm(`Delete "${svc.name}"?\n\nThis removes it from the service catalog. Past services already invoiced keep their history. You can't undo this.`)) return;
+    try {
+      await aFetch(`/admin/services/${svc.id}`, { method: 'DELETE' });
+      onUpdate();
+    } catch (err) {
+      window.alert('Delete failed: ' + (err?.message || 'unknown error'));
+    }
+  };
 
+  return (
+    <>
+      <tr
+        onClick={onToggle}
+        style={{
+          cursor: 'pointer',
+          background: expanded ? '#FAFAFA' : svc.is_active ? D.white : '#F8F8F8',
+          opacity: svc.is_active ? 1 : 0.55,
+          borderTop: `1px solid ${D.border}`,
+        }}
+      >
+        <td style={cell({ width: 28, color: D.muted })}>{expanded ? '▾' : '▸'}</td>
+        <td style={cell({ fontWeight: 600, color: D.heading })}>
+          {svc.name}
+          {svc.is_waveguard && <span style={{ ...sBadge(D.teal), marginLeft: 8 }}>WaveGuard</span>}
+        </td>
+        <td style={cell()}><span style={sBadge(catColor)}>{catLabel}</span></td>
+        <td style={cell()}><span style={sBadge(billingColor)}>{billingLabel}</span></td>
+        <td style={cell({ color: D.muted })}>{svc.frequency || '—'}</td>
+        <td style={cell({ color: D.muted })}>{duration}</td>
+        <td style={cell({ fontWeight: 600, color: D.heading, textAlign: 'right' })}>{price}</td>
+        <td style={cell({ textAlign: 'center' })}>
+          <button
+            onClick={handleToggleActive}
+            style={{ ...sBtn(svc.is_active ? D.green + '22' : D.red + '22', svc.is_active ? D.green : D.red), fontSize: 11, padding: '4px 10px' }}
+          >
+            {svc.is_active ? 'Active' : 'Inactive'}
+          </button>
+        </td>
+        <td style={cell({ textAlign: 'right', whiteSpace: 'nowrap' })}>
+          <button
+            onClick={handleDelete}
+            style={{ ...sBtn(D.red + '15', D.red), fontSize: 11, padding: '4px 10px', border: `1px solid ${D.red}44` }}
+            title="Delete this service permanently"
+          >
+            Delete
+          </button>
+        </td>
+      </tr>
       {expanded && (
-        <div onClick={e => e.stopPropagation()}>
-          <ServiceForm
-            svc={svc}
-            onSave={async (data) => {
-              await aFetch(`/admin/services/${svc.id}`, { method: 'PUT', body: JSON.stringify(data) });
-              onUpdate();
-            }}
-            onCancel={onToggle}
-          />
-        </div>
+        <tr style={{ background: '#FAFAFA' }}>
+          <td colSpan={9} style={{ padding: '10px 12px 16px' }} onClick={(e) => e.stopPropagation()}>
+            <ServiceForm
+              svc={svc}
+              onSave={async (data) => {
+                await aFetch(`/admin/services/${svc.id}`, { method: 'PUT', body: JSON.stringify(data) });
+                onUpdate();
+              }}
+              onCancel={onToggle}
+            />
+          </td>
+        </tr>
       )}
-    </div>
+    </>
   );
 }
 
@@ -279,24 +300,18 @@ export default function ServiceLibraryPage() {
     { key: 'discounts', label: 'Discounts' },
   ];
 
-  // Group services by category for the catalog view
-  const servicesByCategory = (() => {
-    const groups = {};
-    for (const svc of services) {
-      const key = svc.category || 'other';
-      (groups[key] = groups[key] || []).push(svc);
-    }
-    // Keep category order consistent with the CATEGORIES filter list
-    const orderedKeys = CATEGORIES.filter(c => c.value && groups[c.value]).map(c => c.value);
-    for (const k of Object.keys(groups)) {
-      if (!orderedKeys.includes(k)) orderedKeys.push(k);
-    }
-    return orderedKeys.map(k => ({
-      key: k,
-      label: (CATEGORIES.find(c => c.value === k) || {}).label || k,
-      color: catColors[k] || '#64748b',
-      services: groups[k],
-    }));
+  // Flat sort by category (using the CATEGORIES filter order) then name —
+  // keeps related services adjacent without needing per-category headers.
+  const sortedServices = (() => {
+    const orderIdx = Object.fromEntries(
+      CATEGORIES.filter((c) => c.value).map((c, i) => [c.value, i]),
+    );
+    return [...services].sort((a, b) => {
+      const ai = orderIdx[a.category] ?? 999;
+      const bi = orderIdx[b.category] ?? 999;
+      if (ai !== bi) return ai - bi;
+      return (a.name || '').localeCompare(b.name || '');
+    });
   })();
 
   return (
@@ -356,32 +371,52 @@ export default function ServiceLibraryPage() {
             <ServiceForm svc={null} onSave={handleCreate} onCancel={() => setShowNew(false)} />
           )}
 
-          {/* Service Grid — grouped by category */}
-          {servicesByCategory.map(group => (
-            <div key={group.key} style={{ marginBottom: 20 }}>
-              <div style={{
-                display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10,
-                paddingBottom: 6, borderBottom: `2px solid ${group.color}33`,
-              }}>
-                <div style={{ width: 10, height: 10, borderRadius: 3, background: group.color }} />
-                <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>{group.label}</div>
-                <div style={{ fontSize: 12, color: D.muted }}>{group.services.length}</div>
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 12 }}>
-                {group.services.map(svc => (
-                  <ServiceCard
-                    key={svc.id}
-                    svc={svc}
-                    expanded={expandedId === svc.id}
-                    onToggle={() => { setExpandedId(expandedId === svc.id ? null : svc.id); setShowNew(false); }}
-                    onUpdate={() => { loadServices(); loadDropdown(); showToast('Service updated'); }}
-                  />
-                ))}
-              </div>
+          {/* Flat service table — single sortable list, no per-category sections. */}
+          {sortedServices.length > 0 ? (
+            <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, overflow: 'hidden' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'auto' }}>
+                <thead style={{ background: '#F8F8F8' }}>
+                  <tr>
+                    {[
+                      { label: '', w: 28 },
+                      { label: 'Name' },
+                      { label: 'Category' },
+                      { label: 'Billing' },
+                      { label: 'Frequency' },
+                      { label: 'Duration' },
+                      { label: 'Price', align: 'right' },
+                      { label: 'Status', align: 'center' },
+                      { label: '', align: 'right' },
+                    ].map((h, i) => (
+                      <th
+                        key={i}
+                        style={{
+                          padding: '10px 12px', fontSize: 11, fontWeight: 600,
+                          color: D.muted, textTransform: 'uppercase', letterSpacing: 0.4,
+                          textAlign: h.align || 'left',
+                          width: h.w || undefined,
+                          borderBottom: `1px solid ${D.border}`,
+                        }}
+                      >
+                        {h.label}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedServices.map((svc) => (
+                    <ServiceRow
+                      key={svc.id}
+                      svc={svc}
+                      expanded={expandedId === svc.id}
+                      onToggle={() => { setExpandedId(expandedId === svc.id ? null : svc.id); setShowNew(false); }}
+                      onUpdate={() => { loadServices(); loadDropdown(); showToast('Service updated'); }}
+                    />
+                  ))}
+                </tbody>
+              </table>
             </div>
-          ))}
-
-          {services.length === 0 && (
+          ) : (
             <div style={{ textAlign: 'center', padding: 40, color: D.muted }}>No services found. Adjust filters or add a new service.</div>
           )}
         </>
