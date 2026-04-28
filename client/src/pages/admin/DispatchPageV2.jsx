@@ -945,32 +945,38 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
   const useGridStats = isMultiDayView && !!gridStats;
   const statsAvailable = isDayView || useGridStats;
 
-  const AVG_SERVICE_MIN = 35;
-  const AVG_SERVICE_PRICE = 125;
-
   const totalCount = useGridStats ? gridStats.totalCount : services.length;
   const completedCount = useGridStats ? gridStats.completedCount : services.filter((s) => s.status === 'completed').length;
   const skippedCount = useGridStats ? gridStats.skippedCount : services.filter((s) => s.status === 'skipped').length;
   const remainingCount = useGridStats ? gridStats.remainingCount : (totalCount - completedCount - skippedCount);
 
-  const estTotalMin = totalCount * AVG_SERVICE_MIN;
+  // Totals reflect the actual planned figures on the visible services —
+  // no per-service averages or fallbacks. A service without a price /
+  // duration contributes 0 so 2 priced appts at $617 read as $617, not
+  // $617 plus a placeholder for every unpriced row.
+  const estTotalMin = useGridStats
+    ? (gridStats.totalMin || 0)
+    : services.reduce((sum, s) => sum + (typeof s.estimatedDuration === 'number' ? s.estimatedDuration : 0), 0);
   const estTotalHrs = Math.floor(estTotalMin / 60);
   const estTotalMinRemainder = estTotalMin % 60;
-  const estRemainingMin = remainingCount * AVG_SERVICE_MIN;
+  const estRemainingMin = useGridStats
+    ? (gridStats.remainingMin || 0)
+    : services.reduce((sum, s) => {
+        if (s.status === 'completed' || s.status === 'skipped') return sum;
+        return sum + (typeof s.estimatedDuration === 'number' ? s.estimatedDuration : 0);
+      }, 0);
   // ETA is "now + remaining time" — only meaningful when looking at a
   // single day; on multi-day views it's suppressed since the implied
-  // finish time spans days.
-  const estFinishTime = isDayView ? (() => {
+  // finish time spans days. Hide it when no remaining time is known so
+  // we don't render "ETA now".
+  const estFinishTime = isDayView && estRemainingMin > 0 ? (() => {
     const finish = new Date(Date.now() + estRemainingMin * 60000);
     return finish.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
   })() : null;
-  // Revenue: gridStats already sums per-service estimatedPrice with a
-  // fallback. For Day, sum from the single-day services with the same
-  // logic so the badge is accurate.
   const estRevenue = useGridStats
     ? gridStats.revenue
     : services.reduce(
-        (sum, s) => sum + (typeof s.estimatedPrice === 'number' ? s.estimatedPrice : AVG_SERVICE_PRICE),
+        (sum, s) => sum + (typeof s.estimatedPrice === 'number' ? s.estimatedPrice : 0),
         0,
       );
 
