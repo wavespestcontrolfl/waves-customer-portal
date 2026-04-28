@@ -39,7 +39,14 @@ const formatDay = formatETDay;
 const formatDate = formatETDate;
 const formatTime = formatETTime;
 
-// Per-component cleanup: strips trailing parenthetical and em/en-dash
+// Admin-disambiguation parentheticals only — frequency words ("Monthly",
+// "Bi-Monthly", "Semiannual"), interval phrases ("Every 6 Weeks"), and
+// term phrases ("10-Year Term"). Parens with semantic customer-facing
+// content like "(Termite Letter)" on WDO Inspection do NOT match and
+// stay intact in customer SMS.
+const ADMIN_PAREN_RE = /\s*\((?:[A-Z][a-z]+(?:-[A-Z][a-z]+)?|Every \d+ \w+|\d+-Year Term)\)/g;
+
+// Per-component cleanup: strips trailing admin-paren and em/en-dash
 // suffixes from a single service name. Only safe on one component at a
 // time (e.g. a single services.name value). Returns empty string on
 // falsy input so callers can filter empties out of joined output.
@@ -49,24 +56,23 @@ const formatTime = formatETTime;
 function smsServiceLabel(name) {
   if (!name) return '';
   return String(name)
+    .replace(ADMIN_PAREN_RE, '')
     .replace(/\s+[—–]\s+.+$/, '')
-    .replace(/\s*\([^)]*\)\s*$/, '')
     .trim();
 }
 
 // Defensive cleanup for already-stored appointment_reminders.service_type
-// values, which may be joined multi-service strings ("A & B") from the
-// newer multi-service flow OR legacy single-service strings from before.
-// Strips every "(...)" admin suffix globally — the catalog has no
-// non-suffix parens, so this is safe. Em/en-dash suffix is stripped
-// only at component boundaries (immediately before " & " or end-of-
-// string), so joined strings like "Rodent Sanitation — Heavy &
-// Mosquito Control" become "Rodent Sanitation & Mosquito Control"
-// without dropping the trailing component.
+// values, which may be joined multi-service strings ("A & B", Oxford
+// "A, B, and C") from the newer multi-service flow OR legacy single-
+// service strings from before. Strips admin parens globally and em/en-
+// dash suffixes only at component boundaries (immediately before " & ",
+// ", ", or end-of-string), so joined strings like "Rodent Sanitation
+// — Heavy & Mosquito Control" become "Rodent Sanitation & Mosquito
+// Control" without dropping the trailing component.
 function smsServiceLabelStored(name) {
   if (!name) return 'service';
   const cleaned = String(name)
-    .replace(/\s*\([^)]*\)/g, '')
+    .replace(ADMIN_PAREN_RE, '')
     .replace(/\s+[—–]\s+[^&,]+?(?=\s+&\s+|,\s+|\s*$)/g, '')
     .replace(/\s{2,}/g, ' ')
     .trim();
