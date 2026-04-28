@@ -442,21 +442,29 @@ function TimecardSignoffCard({ techName }) {
       const res = await fetch(`${API}/api/tech/timetracking/pending-signoff`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (!res.ok) { setWeekly(null); setPending(false); return; }
-      const data = await res.json();
-      setWeekly(data.weekly || null);
-      setWeekStart(data.weekStart || null);
-      setPending(data.pending === true);
-      // Functional setter so we don't depend on `signature` here —
-      // including it in the useCallback deps would cause this to
-      // re-run every time the input changes, refetching on each
-      // keystroke. Pre-fill from techName only if the field is still
-      // empty.
-      if (data.weekly) setSignature((s) => s || techName || '');
+      if (!res.ok) {
+        setWeekly(null);
+        setPending(false);
+      } else {
+        const data = await res.json();
+        setWeekly(data.weekly || null);
+        setWeekStart(data.weekStart || null);
+        setPending(data.pending === true);
+        // Functional setter so we don't depend on `signature` here —
+        // including it in the useCallback deps would cause this to
+        // re-run every time the input changes, refetching on each
+        // keystroke. Pre-fill from techName only if the field is still
+        // empty.
+        if (data.weekly) setSignature((s) => s || techName || '');
+      }
     } catch {
       setWeekly(null);
+    } finally {
+      // Always clear loading — a non-OK fetch used to early-return
+      // before this line, leaving loading stuck true and the card
+      // permanently null until a full page reload.
+      setLoading(false);
     }
-    setLoading(false);
   }, [techName]);
 
   useEffect(() => { load(); }, [load]);
