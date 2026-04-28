@@ -142,59 +142,29 @@ function CheckboxV2({ k, label }) {
   );
 }
 
-// H3 — section header within a Card (e.g. "Property Lookup", "Property Data").
-// Mobile: Square-style big bold non-uppercase; desktop: Montserrat 12/500 uppercase.
+// Section header within the Create Estimate form. Matches the
+// "Live Status" label style on TimeTrackingPage (15/600).
 function PanelTitle({ children, description }) {
   return (
     <>
-      <h3
-        className="md:hidden text-zinc-900 mt-0 mb-2"
-        style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.01em', lineHeight: 1.15 }}
-      >
+      <h3 className="text-zinc-900 mt-0 mb-3" style={{ fontSize: 15, fontWeight: 600 }}>
         {children}
       </h3>
       {description && (
-        <p className="md:hidden text-14 text-zinc-600 mb-5 leading-snug">{description}</p>
+        <p className="text-14 text-zinc-600 mb-5 leading-snug">{description}</p>
       )}
-      <h3
-        className="hidden md:block text-zinc-900 mt-0 pb-2.5 mb-4 border-b border-hairline border-zinc-200"
-        style={{
-          fontFamily: "'Montserrat', sans-serif",
-          fontSize: 12,
-          fontWeight: 500,
-          letterSpacing: '0.02em',
-        }}
-      >
-        {children}
-      </h3>
     </>
   );
 }
 
-// H4 — sub-group header inside the Services panel (Recurring / One-Time /
-// Lawn / Termite / Pest / Rodent). Same Montserrat 12/500 treatment as
-// PanelTitle so the whole Create Estimate form reads as one visual family.
+// Sub-group header inside the Services panel (Recurring / One-Time /
+// Lawn / Termite / Pest / Rodent). Matches PanelTitle so the whole
+// Create Estimate form reads as one visual family.
 function SubGroupLabel({ children, className }) {
   return (
-    <>
-      <h4
-        className={cn('md:hidden text-zinc-900 mt-5 mb-3', className)}
-        style={{ fontSize: 17, fontWeight: 700, letterSpacing: '-0.005em' }}
-      >
-        {children}
-      </h4>
-      <h4
-        className={cn('hidden md:block text-zinc-900 mt-4 mb-2 pb-1 border-b border-hairline border-zinc-200', className)}
-        style={{
-          fontFamily: "'Montserrat', sans-serif",
-          fontSize: 12,
-          fontWeight: 500,
-          letterSpacing: '0.02em',
-        }}
-      >
-        {children}
-      </h4>
-    </>
+    <h4 className={cn('text-zinc-900 mt-4 mb-2', className)} style={{ fontSize: 15, fontWeight: 600 }}>
+      {children}
+    </h4>
   );
 }
 
@@ -950,7 +920,7 @@ export default function EstimateToolViewV2({
           {/* ═══ LEFT COLUMN: FORM ═══ */}
           <div className="space-y-4">
             {/* Property Lookup */}
-            <Card className="p-5">
+            <div>
               <PanelTitle>Property Lookup</PanelTitle>
               <FieldV2 label="Address">
                 <input
@@ -1044,10 +1014,10 @@ export default function EstimateToolViewV2({
                   )}
                 </div>
               )}
-            </Card>
+            </div>
 
             {/* Property Data */}
-            <Card className="p-5">
+            <div>
               <PanelTitle>Property Data</PanelTitle>
               <FieldV2 label="Property Type">
                 <SelectV2 k="propertyType" options={[
@@ -1081,10 +1051,10 @@ export default function EstimateToolViewV2({
                   <FieldV2 label="Tree Count"><InputV2 k="treeCount" type="number" placeholder="Auto" /></FieldV2>
                 </>
               )}
-            </Card>
+            </div>
 
             {/* Property Features */}
-            <Card className="p-5">
+            <div>
               <PanelTitle>Property Features</PanelTitle>
               <div className="grid grid-cols-3 gap-3">
                 <FieldV2 label="Pool"><SelectV2 k="hasPool" options={[{ value: 'NO', label: 'No' }, { value: 'YES', label: 'Yes' }]} /></FieldV2>
@@ -1104,10 +1074,10 @@ export default function EstimateToolViewV2({
                 <FieldV2 label="After Hours"><SelectV2 k="isAfterHours" options={[{ value: 'NO', label: 'No — business hours' }, { value: 'YES', label: 'Yes — evenings/weekends/holidays' }]} /></FieldV2>
                 <FieldV2 label="Recurring Customer"><SelectV2 k="isRecurringCustomer" options={[{ value: 'NO', label: 'No — new customer' }, { value: 'YES', label: 'Yes — 15% off one-time' }]} /></FieldV2>
               </div>
-            </Card>
+            </div>
 
             {/* Services */}
-            <Card className="p-5">
+            <div>
               <PanelTitle>Services to Quote</PanelTitle>
 
               <SubGroupLabel>Recurring Programs</SubGroupLabel>
@@ -1149,7 +1119,7 @@ export default function EstimateToolViewV2({
 
               <SubGroupLabel>One-Time Services</SubGroupLabel>
 
-              <SubGroupLabel className="mt-3 text-ink-tertiary">Lawn</SubGroupLabel>
+              <SubGroupLabel className="mt-3">Lawn</SubGroupLabel>
               <CheckboxV2 k="svcOnetimeLawn" label="Lawn Treatment" />
               {form.svcOnetimeLawn && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
@@ -1171,7 +1141,7 @@ export default function EstimateToolViewV2({
               <CheckboxV2 k="svcDethatch" label="Dethatching" />
               <CheckboxV2 k="svcOverseed" label="Overseeding" />
 
-              <SubGroupLabel className="mt-3 text-ink-tertiary">Termite</SubGroupLabel>
+              <SubGroupLabel className="mt-3">Termite</SubGroupLabel>
               <CheckboxV2 k="svcTrenching" label="Termite Trenching" />
               <CheckboxV2 k="svcBoracare" label="Termite Attic Remediation" />
               {form.svcBoracare && (
@@ -1200,7 +1170,7 @@ export default function EstimateToolViewV2({
                 </div>
               )}
 
-              <SubGroupLabel className="mt-3 text-ink-tertiary">Pest</SubGroupLabel>
+              <SubGroupLabel className="mt-3">Pest</SubGroupLabel>
               <CheckboxV2 k="svcOnetimePest" label="Pest Treatment" />
               <CheckboxV2 k="svcOnetimeMosquito" label="Mosquito Treatment" />
               <CheckboxV2 k="svcFlea" label="Flea Treatment" />
@@ -1223,7 +1193,7 @@ export default function EstimateToolViewV2({
                 </div>
               )}
 
-              <SubGroupLabel className="mt-3 text-ink-tertiary">Rodent</SubGroupLabel>
+              <SubGroupLabel className="mt-3">Rodent</SubGroupLabel>
               <CheckboxV2 k="svcRodentTrap" label="Rodent Trapping" />
               <CheckboxV2 k="svcRodentSanitation" label="Rodent Sanitation" />
               <CheckboxV2 k="svcExclusion" label="Rodent Exclusion" />
@@ -1237,10 +1207,10 @@ export default function EstimateToolViewV2({
                   <FieldV2 label="Waive Inspection ($85)?"><SelectV2 k="exclWaive" options={[{ value: 'NO', label: 'No — charge $85' }, { value: 'YES', label: 'Yes — booking work' }]} /></FieldV2>
                 </div>
               )}
-            </Card>
+            </div>
 
             {/* Manual Discount */}
-            <Card className="p-5">
+            <div>
               <PanelTitle>Manual Discount (optional)</PanelTitle>
               <FieldV2 label="Preset">
                 <select
@@ -1291,7 +1261,7 @@ export default function EstimateToolViewV2({
               <div className="text-11 text-ink-tertiary mt-2">
                 Applies after WaveGuard bundle discount. Re-click Generate Estimate to recalculate.
               </div>
-            </Card>
+            </div>
 
             {/* Action buttons */}
             <div className="grid grid-cols-2 gap-3">
