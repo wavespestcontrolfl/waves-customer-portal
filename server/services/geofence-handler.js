@@ -590,21 +590,30 @@ async function maybeAutoFlipNextJob({ tech, exitedCustomer, activeTimer, eventTi
   // (notification_prefs.tech_en_route + sms_enabled gating lives in
   // sendTechEnRoute). A retap or concurrent flip lands as a no-op.
   let result = null;
+  let threw = null;
   try {
     result = await trackTransitions.markEnRoute(nextJob.id, { etaMinutes: null });
   } catch (err) {
+    threw = err;
     logger.error(`[geofence-handler] markEnRoute failed: ${err.message}`);
   }
 
+  // Only log the success action_taken when markEnRoute actually
+  // committed the flip. On throw or `ok: false` (cancelled, not found,
+  // race) log auto_flip_failed instead — that value is NOT in the
+  // isRecentAutoFlipForCustomer cooldown set, so a transient failure
+  // doesn't poison the next 30 minutes by suppressing retry. Audit
+  // log captures the full result/error for forensics either way.
+  const succeeded = !threw && result && result.ok === true;
   await matcher.logEvent({
     ...baseLog,
     matched_customer_id: nextJob.customer_id,
     matched_job_id: nextJob.id,
-    action_taken: 'auto_flip_en_route',
+    action_taken: succeeded ? 'auto_flip_en_route' : 'auto_flip_failed',
   });
   await auditLog.recordAuditEvent({
     actor_type: 'system:geofence-automation',
-    action: 'auto_flip_en_route',
+    action: succeeded ? 'auto_flip_en_route' : 'auto_flip_failed',
     resource_type: 'scheduled_service',
     resource_id: nextJob.id,
     metadata: {
@@ -614,6 +623,7 @@ async function maybeAutoFlipNextJob({ tech, exitedCustomer, activeTimer, eventTi
       next_customer_id: nextJob.customer_id,
       dwell_minutes: dwellMinutes,
       mark_en_route_result: result || null,
+      error: threw ? threw.message : null,
     },
   });
 }
