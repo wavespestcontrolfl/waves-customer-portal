@@ -74,61 +74,68 @@ export default function AdminDispatchPage() {
     tabRefs.current[nextKey]?.focus();
   };
 
+  // Shared tab pill — mirrors the Leads/Estimates/Create/Pricing pattern
+  // (EstimatesPageV2). ARIA roles + aria-selected are set directly here
+  // since we're not using the components/ui Tabs primitive.
+  const tabPill = (
+    <div
+      role="tablist"
+      aria-label="Dispatch view"
+      style={{
+        display: 'inline-flex',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        gap: 4,
+        background: '#F4F4F5',
+        borderRadius: 10,
+        padding: 4,
+        border: '1px solid #E4E4E7',
+      }}
+    >
+      {TAB_LIST.map((t) => {
+        const active = tab === t.key;
+        return (
+          <button
+            key={t.key}
+            id={`dispatch-tab-${t.key}`}
+            ref={(el) => { tabRefs.current[t.key] = el; }}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            aria-controls={`dispatch-tabpanel-${t.key}`}
+            tabIndex={active ? 0 : -1}
+            onClick={() => setTab(t.key)}
+            onKeyDown={onTabKeyDown}
+            style={{
+              padding: '10px 24px',
+              borderRadius: 8,
+              border: 'none',
+              cursor: 'pointer',
+              background: active ? '#18181B' : 'transparent',
+              color: active ? '#FFFFFF' : '#A1A1AA',
+              fontSize: 14,
+              fontWeight: 700,
+              transition: 'all 0.2s',
+              fontFamily: "'DM Sans', sans-serif",
+            }}
+          >
+            {t.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+
   return (
     <div className="flex flex-col bg-surface-page min-h-[calc(100vh-64px)]">
-      {/* Centered Pipeline-page tab strip — mirrors the
-          Leads/Estimates/Create/Pricing pill (EstimatesPageV2) so
-          the dispatcher's two top-level views read consistently with
-          the rest of the admin shell. ARIA roles + aria-selected are
-          set on the markup directly here since we're not using the
-          components/ui Tabs primitive. */}
+      {/* Tab pill renders here for both Board and Schedule. We previously
+          slotted it under DispatchPageV2's h1 on Schedule, but DispatchPageV2
+          is React.lazy — during the chunk-load window the slot doesn't exist,
+          which (a) leaves no Board/Schedule controls visible and (b) drops
+          keyboard focus on tab-arrow nav since the new pill DOM hasn't
+          mounted yet. Persistent top placement avoids both regressions. */}
       <div style={{ display: 'flex', justifyContent: 'center', padding: '12px 16px' }}>
-        <div
-          role="tablist"
-          aria-label="Dispatch view"
-          style={{
-            display: 'inline-flex',
-            flexWrap: 'wrap',
-            alignItems: 'center',
-            gap: 4,
-            background: '#F4F4F5',
-            borderRadius: 10,
-            padding: 4,
-            border: '1px solid #E4E4E7',
-          }}
-        >
-          {TAB_LIST.map((t) => {
-            const active = tab === t.key;
-            return (
-              <button
-                key={t.key}
-                id={`dispatch-tab-${t.key}`}
-                ref={(el) => { tabRefs.current[t.key] = el; }}
-                type="button"
-                role="tab"
-                aria-selected={active}
-                aria-controls={`dispatch-tabpanel-${t.key}`}
-                tabIndex={active ? 0 : -1}
-                onClick={() => setTab(t.key)}
-                onKeyDown={onTabKeyDown}
-                style={{
-                  padding: '10px 24px',
-                  borderRadius: 8,
-                  border: 'none',
-                  cursor: 'pointer',
-                  background: active ? '#18181B' : 'transparent',
-                  color: active ? '#FFFFFF' : '#A1A1AA',
-                  fontSize: 14,
-                  fontWeight: 700,
-                  transition: 'all 0.2s',
-                  fontFamily: "'DM Sans', sans-serif",
-                }}
-              >
-                {t.label}
-              </button>
-            );
-          })}
-        </div>
+        {tabPill}
       </div>
       <div
         role="tabpanel"

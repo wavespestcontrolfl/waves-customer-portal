@@ -1155,16 +1155,20 @@ export default function DispatchPageV2() {
       {/* Tabs bar — day view only. Mobile pills live above the date nav; desktop strip stays here. */}
       {viewMode === 'day' && (
         <>
-          {/* Desktop: full tab strip */}
-          <div className="hidden md:block mb-5 bg-white rounded-md p-1 border-hairline border-zinc-200">
-            <HorizontalScroll gap={4} edgeBleed={4} style={{ paddingBottom: 0 }}>
+          {/* Desktop: tab strip — same separate-pill style as ViewModeSelectorV2
+              (Day / 5-Day / Week / Month) so the two rows of selectors read
+              consistently. */}
+          <div className="hidden md:block mb-5">
+            <HorizontalScroll gap={6} edgeBleed={4} style={{ paddingBottom: 0 }}>
               {SCHEDULE_TABS.map((t) => (
                 <button
                   key={t.id}
                   onClick={() => setActiveTab(t.id)}
                   className={cn(
-                    'px-4 h-9 rounded-sm text-12 font-medium uppercase tracking-label whitespace-nowrap flex-shrink-0 u-focus-ring transition-colors',
-                    activeTab === t.id ? 'bg-zinc-900 text-white' : 'bg-transparent text-ink-secondary hover:bg-zinc-50'
+                    'h-8 px-3 text-11 uppercase font-medium tracking-label rounded-sm border-hairline whitespace-nowrap flex-shrink-0 u-focus-ring transition-colors',
+                    activeTab === t.id
+                      ? 'bg-zinc-900 text-white border-zinc-900'
+                      : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50'
                   )}
                 >
                   {t.label}
@@ -1259,7 +1263,7 @@ export default function DispatchPageV2() {
             const rp = rainProbability ?? 0;
             const weatherIcon = rp > 40 ? '🌧️' : rp > 15 ? '⛅' : '☀️';
             return (
-              <div className="-mx-4 md:-mx-6 mb-3 md:mb-4 bg-white border-y border-hairline border-zinc-200 px-4 md:px-6 py-2 flex items-center justify-center md:justify-start gap-2 text-12 text-zinc-700 overflow-x-auto whitespace-nowrap">
+              <div className="-mx-4 md:-mx-6 mb-3 md:mb-4 bg-white border-y border-hairline border-zinc-200 px-4 md:px-6 py-2 flex items-center justify-center gap-2 text-12 text-zinc-700 overflow-x-auto whitespace-nowrap">
                 <span className="text-16" aria-hidden="true">{weatherIcon}</span>
                 <span className="u-nums font-medium text-zinc-900">{weatherTemp ?? 82}°F</span>
                 {windSpeed != null && (
