@@ -9,6 +9,7 @@ const { deriveModifiers, deriveNotes, zoneMultiplier } = require('./modifiers');
 const {
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
+  priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
   priceTrenching, priceBoraCare, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceWDO, priceFlea,
@@ -351,16 +352,56 @@ function generateEstimate(input) {
     lineItems.push(result);
   }
   if (services.exclusion) {
+    // Auto-waive inspection fee when any rodent service is opted in
+    // alongside exclusion (trap, bait, sanitation). Only the rare
+    // standalone-inspection case still incurs the $125 fee.
+    const hasRodentServiceOptIn = !!(
+      services.rodentTrapping || services.rodentBait || services.sanitation
+    );
     const result = priceExclusion({
       simple: services.exclusion.simple || 0,
       moderate: services.exclusion.moderate || 0,
       advanced: services.exclusion.advanced || 0,
       waiveInspection: services.exclusion.waiveInspection || false,
+      hasServiceOptIn: hasRodentServiceOptIn,
       urgency: services.exclusion.urgency || 'ROUTINE',
       afterHours: services.exclusion.afterHours || false,
     });
     lineItems.push(result);
   }
+
+  // Rodent sanitation (bleach + wipe; tier = light/medium/heavy)
+  if (services.sanitation) {
+    const result = priceSanitation({
+      tier: services.sanitation.tier || 'medium',
+      atticSqFt: services.sanitation.atticSqFt || property.footprint,
+    });
+    lineItems.push(result);
+  }
+
+  // Additional trap follow-up visits beyond the 1 included in base trapping
+  if (services.rodentTrappingFollowups) {
+    const count = typeof services.rodentTrappingFollowups === 'number'
+      ? services.rodentTrappingFollowups
+      : (services.rodentTrappingFollowups.count || 0);
+    const result = priceRodentTrappingFollowups(count);
+    if (result) lineItems.push(result);
+  }
+
+  // Bait station setup fee — waived when any recurring plan is on the
+  // estimate; only fires if explicitly forced or no recurring services.
+  if (services.rodentBait) {
+    const hasAnyRecurring = !!(
+      services.pest || services.lawn || services.treeShrub ||
+      services.mosquito || services.termiteBait || services.rodentBait ||
+      services.palm
+    );
+    const setup = priceBaitSetup({
+      waived: hasAnyRecurring && !services.rodentBaitSetupForce,
+    });
+    if (setup.price > 0) lineItems.push(setup);
+  }
+
   // Rodent Guarantee fires automatically when BOTH trap + exclusion are present
   if (services.rodentTrapping && services.exclusion) {
     const exc = services.exclusion;
