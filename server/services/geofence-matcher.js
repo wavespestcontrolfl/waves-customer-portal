@@ -217,7 +217,11 @@ async function findNextScheduledJobForTech(techId, afterTime, excludeCustomerId 
     //  LIMIT 1
     let q = db('scheduled_services')
       .where({ technician_id: techId })
-      .whereNotIn('status', ['completed', 'cancelled'])
+      // 'skipped' is a terminal status (see migration 20260426000004)
+      // and admin-dispatch.js:1358 already excludes it from active-job
+      // queries. Mirroring that here so a manually-skipped appointment
+      // can never be re-flipped to en_route by auto-flip.
+      .whereNotIn('status', ['completed', 'cancelled', 'skipped'])
       .where('track_state', 'scheduled')
       .where(function () {
         this.where(function () {
