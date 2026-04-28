@@ -243,8 +243,8 @@ export function WeekViewV2({ startDate, onDateClick }) {
 
 // ─── MONTH VIEW ──────────────────────────────────────────────────
 
-// Square-style month-cell chip: solid blue pill with "time · customer"
-// stacked across the row. Mirrors the appointment-block palette in
+// Flat-blue month-cell chip: solid pill with "time · customer" stacked
+// across the row. Mirrors the appointment-block palette in
 // TimeGridDay/TimeGridDays so the calendar reads as one visual system.
 function MonthServiceChip({ service }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
@@ -262,7 +262,7 @@ function MonthServiceChip({ service }) {
         ? '#18181B'           // black — active here
         : service.status === 'skipped'
           ? null              // class handles alert-bg/alert-fg
-          : '#3B82F6';        // Square default
+          : '#3B82F6';        // default scheduled / confirmed fill
 
   return (
     <div
@@ -331,7 +331,7 @@ function MonthDayCell({ day, di, onDateClick }) {
         )}
       </div>
 
-      {/* Square-style chip stack — desktop only; mobile cells keep just the
+      {/* Flat-blue chip stack — desktop only; mobile cells keep just the
           day number + total. Chips show time + customer name on a solid
           blue pill, mirroring the swimlane block palette. */}
       <div className="hidden md:block space-y-1">
