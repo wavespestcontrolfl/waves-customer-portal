@@ -82,12 +82,12 @@ const STAGES = {
 };
 
 const SUP_RULES_DEFAULT = [
-  { id: 'reviewed_6m', label: 'Reviewed in last 6 months', desc: 'Skip customers who already left a review recently', enabled: true, icon: '✅' },
-  { id: 'asked_3x', label: 'Asked 3× with no response', desc: 'Stop asking after 3 unanswered requests', enabled: true, icon: '🔕' },
-  { id: 'open_complaint', label: 'Open complaint / unresolved issue', desc: 'Auto-suppress customers flagged with issues', enabled: true, icon: '⚠️' },
-  { id: 'collections', label: 'In collections flow', desc: 'Never ask for review during late-payment sequence', enabled: true, icon: '💳' },
-  { id: 'opted_out', label: 'Opted out / negative response', desc: 'Customer replied STOP or expressed refusal', enabled: true, icon: '🚫' },
-  { id: 'cooldown_30d', label: '30-day cooldown after ask', desc: 'Minimum gap between review requests', enabled: true, icon: '⏱️' },
+  { id: 'reviewed_6m', label: 'Reviewed in last 6 months', desc: 'Skip customers who already left a review recently', enabled: true },
+  { id: 'asked_3x', label: 'Asked 3× with no response', desc: 'Stop asking after 3 unanswered requests', enabled: true },
+  { id: 'open_complaint', label: 'Open complaint / unresolved issue', desc: 'Auto-suppress customers flagged with issues', enabled: true },
+  { id: 'collections', label: 'In collections flow', desc: 'Never ask for review during late-payment sequence', enabled: true },
+  { id: 'opted_out', label: 'Opted out / negative response', desc: 'Customer replied STOP or expressed refusal', enabled: true },
+  { id: 'cooldown_30d', label: '30-day cooldown after ask', desc: 'Minimum gap between review requests', enabled: true },
 ];
 
 const SEQUENCES = [
@@ -844,7 +844,6 @@ function SuppressionPage({ customers, supRules, setSupRules, updateCustomer, sho
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginTop: 10 }}>
           {supRules.map(r => (
             <div key={r.id} style={{ background: C.surface, border: `1px solid ${C.bdr}`, borderRadius: 12, padding: 12, display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-              <div style={{ fontSize: 18, flexShrink: 0 }}>{r.icon}</div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 2 }}>{r.label}</div>
                 <div style={{ fontSize: 10, color: C.t3 }}>{r.desc}</div>
