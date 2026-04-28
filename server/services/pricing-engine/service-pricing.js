@@ -619,23 +619,23 @@ function priceRodentTrappingFollowups(count = 1) {
   const perVisit = RODENT.trapping.followupRate;
   const packRate = RODENT.trapping.followup3PackRate;
 
-  let price;
-  let usePack = false;
-  if (n >= 3) {
-    usePack = true;
-    price = packRate + (n - 3) * perVisit;
-  } else {
-    price = n * perVisit;
-  }
+  // Apply the 3-pack discount to every full block of 3 visits, not just the
+  // first one. e.g., 6 visits = 2 packs ($490), not 1 pack + 3 singles ($530).
+  const packs = Math.floor(n / 3);
+  const remainder = n - packs * 3;
+  const usePack = packs > 0;
+  const price = packs * packRate + remainder * perVisit;
 
   return {
     service: 'rodent_trapping_followup',
     count: n,
     perVisit,
     usePack,
+    packs,
+    remainder,
     price,
     detail: usePack
-      ? `${n} follow-up${n === 1 ? '' : 's'} (3-pack + ${Math.max(0, n - 3)} extra)`
+      ? `${n} follow-up${n === 1 ? '' : 's'} (${packs}× 3-pack${remainder ? ` + ${remainder} extra` : ''})`
       : `${n} follow-up${n === 1 ? '' : 's'} @ $${perVisit}/ea`,
   };
 }

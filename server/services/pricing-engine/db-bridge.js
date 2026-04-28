@@ -146,6 +146,7 @@ async function syncConstantsFromDB(dbInstance) {
       if (rm.small) constants.RODENT.baitMonthly.small.monthly = r(rm.small);
       if (rm.medium) constants.RODENT.baitMonthly.medium.monthly = r(rm.medium);
       if (rm.large) constants.RODENT.baitMonthly.large.monthly = r(rm.large);
+      if (rm.visits_per_year) constants.RODENT.baitVisitsPerYear = Number(rm.visits_per_year);
     }
     if (config.rodent_trapping?.base) {
       constants.RODENT.trapping.base = r(config.rodent_trapping.base);
