@@ -71,6 +71,36 @@ function shiftPastWeekend(dateStr, skip, direction) {
   return d.toISOString().split('T')[0];
 }
 
+// Compute booster appointment dates for a recurring series. Booster months
+// are extra visits sprinkled on top of the base cadence (e.g. quarterly
+// pest + summer-month boosters). Returns YYYY-MM-DD strings within the
+// next `monthsAhead` months from the initial date, on the same day-of-
+// month as initial (clamped to each month's length).
+function computeBoosterDates(initialDateStr, boosterMonths, monthsAhead = 12) {
+  if (!Array.isArray(boosterMonths) || boosterMonths.length === 0) return [];
+  const safe = String(initialDateStr || '').split('T')[0];
+  const initial = new Date(safe + 'T12:00:00');
+  if (isNaN(initial.getTime())) return [];
+  const initialDay = initial.getDate();
+  const horizon = new Date(initial);
+  horizon.setMonth(horizon.getMonth() + monthsAhead);
+  const months = new Set(boosterMonths.map((m) => parseInt(m)).filter((m) => m >= 1 && m <= 12));
+  const dates = [];
+  // Walk month-by-month from the month AFTER the initial date.
+  let cursor = new Date(initial.getFullYear(), initial.getMonth() + 1, 1, 12, 0, 0);
+  while (cursor <= horizon) {
+    const month1to12 = cursor.getMonth() + 1;
+    if (months.has(month1to12)) {
+      const lastDayOfMonth = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0).getDate();
+      const day = Math.min(initialDay, lastDayOfMonth);
+      const d = new Date(cursor.getFullYear(), cursor.getMonth(), day, 12, 0, 0);
+      if (d > initial && d <= horizon) dates.push(d.toISOString().split('T')[0]);
+    }
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+  return dates;
+}
+
 // Apply a discount to a price. Returns the discounted price (>= 0).
 function applyDiscount(price, type, amount) {
   if (price == null || !type || amount == null || amount === '' || isNaN(Number(amount))) return price;
@@ -478,6 +508,7 @@ router.post('/', async (req, res, next) => {
       serviceType, timeWindow, notes, isRecurring, recurringPattern, recurringCount, recurringOngoing,
       recurringNth, recurringWeekday, recurringIntervalDays,
       skipWeekends, weekendShift,
+      boosterMonths,
       discountType, discountAmount,
       createInvoice,
       sendConfirmation, serviceId, serviceAddons, assignmentMode,
@@ -557,6 +588,10 @@ router.post('/', async (req, res, next) => {
         if (cols.recurring_interval_days && recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) insertData.recurring_interval_days = parseInt(recurringIntervalDays);
         if (cols.skip_weekends) insertData.skip_weekends = !!skipWeekends;
         if (cols.weekend_shift && skipWeekends) insertData.weekend_shift = weekendShift === 'back' ? 'back' : 'forward';
+        if (cols.booster_months && Array.isArray(boosterMonths) && boosterMonths.length > 0) {
+          const cleaned = Array.from(new Set(boosterMonths.map((m) => parseInt(m)).filter((m) => m >= 1 && m <= 12))).sort((a, b) => a - b);
+          if (cleaned.length > 0) insertData.booster_months = JSON.stringify(cleaned);
+        }
       }
       if (cols.discount_type && discountType) insertData.discount_type = discountType;
       if (cols.discount_amount && discountAmount != null && discountAmount !== '') insertData.discount_amount = Number(discountAmount);
@@ -611,6 +646,60 @@ router.post('/', async (req, res, next) => {
         await db('scheduled_services').insert(childData);
       }
      } catch (e) { logger.error(`[schedule] Recurring spawn failed (non-blocking): ${e.message}`); }
+    }
+
+    // Booster months — extra one-off visits on top of the base series
+    // (e.g. quarterly pest + summer-month boosters). Pre-seed the next 12
+    // months from the initial date; boosters share recurring_parent_id but
+    // are themselves is_recurring=false so the auto-extend path leaves
+    // them alone. A future cron can refresh year-2 boosters from
+    // parent.booster_months.
+    if (isRecurring && Array.isArray(boosterMonths) && boosterMonths.length > 0) {
+      try {
+        const cols = await db('scheduled_services').columnInfo();
+        const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
+        const cleaned = Array.from(new Set(boosterMonths.map((m) => parseInt(m)).filter((m) => m >= 1 && m <= 12))).sort((a, b) => a - b);
+        const dates = computeBoosterDates(scheduledDate, cleaned, 12);
+        for (const rawDate of dates) {
+          const boosterDate = shiftPastWeekend(rawDate, !!skipWeekends, shiftDir);
+          const boosterData = {
+            customer_id: customerId, technician_id: resolvedTechId,
+            scheduled_date: boosterDate,
+            window_start: windowStart, window_end: computedEnd,
+            service_type: serviceType, status: 'pending',
+            time_window: timeWindow, zone, estimated_duration_minutes: duration,
+            is_recurring: false,
+            recurring_parent_id: svc.id,
+            notes: combinedNotes,
+          };
+          if (cols.service_id && serviceId) boosterData.service_id = serviceId;
+          if (cols.estimated_price && finalPrice != null) boosterData.estimated_price = finalPrice;
+          if (cols.urgency) boosterData.urgency = urgency || 'routine';
+          if (cols.internal_notes && internalNotes) boosterData.internal_notes = internalNotes;
+          if (cols.skip_weekends) boosterData.skip_weekends = !!skipWeekends;
+          if (cols.weekend_shift && skipWeekends) boosterData.weekend_shift = shiftDir;
+          if (cols.discount_type && discountType) boosterData.discount_type = discountType;
+          if (cols.discount_amount && discountAmount != null && discountAmount !== '') boosterData.discount_amount = Number(discountAmount);
+          if (cols.create_invoice_on_complete) boosterData.create_invoice_on_complete = !!createInvoice;
+          const [boosterRow] = await db('scheduled_services').insert(boosterData).returning('*');
+
+          // Mirror the parent's add-ons onto the booster visit so a
+          // pest+rodent group's June booster also carries the rodent
+          // line. Non-blocking — if it fails the booster still exists.
+          if (Array.isArray(serviceAddons) && serviceAddons.length > 0 && boosterRow?.id) {
+            try {
+              for (const addon of serviceAddons) {
+                await db('scheduled_service_addons').insert({
+                  scheduled_service_id: boosterRow.id,
+                  service_id: addon.serviceId || null,
+                  service_name: addon.name || addon.serviceName,
+                  estimated_price: addon.price || null,
+                });
+              }
+            } catch (e) { logger.warn(`[schedule] Booster addon insert failed (non-blocking): ${e.message}`); }
+          }
+        }
+      } catch (e) { logger.error(`[schedule] Booster spawn failed (non-blocking): ${e.message}`); }
     }
 
     // Register for appointment reminders.
