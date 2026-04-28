@@ -164,6 +164,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [techs, setTechs] = useState([]);
   const [skipWeekends, setSkipWeekends] = useState(false);
   const [weekendShift, setWeekendShift] = useState('forward'); // 'forward' (Mon) | 'back' (Fri)
+  // Fixed-count recurring: '' (default) means ongoing/auto-extend; any
+  // integer >= 2 caps the series at that many visits. Applies to every
+  // recurring cadence group on this appointment, matching the prior
+  // single-form-level count semantics.
+  const [recurringCount, setRecurringCount] = useState('');
   const [discountType, setDiscountType] = useState('');
   const [discountAmount, setDiscountAmount] = useState('');
   const [discountPresets, setDiscountPresets] = useState([]);
@@ -455,8 +460,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           sendConfirmationSms: sendSms,
           isRecurring,
           recurringPattern: isRecurring ? group.cadence : undefined,
-          recurringCount: isRecurring ? 4 : undefined,
-          recurringOngoing: isRecurring ? true : undefined,
+          recurringCount: isRecurring
+            ? (parseInt(recurringCount) >= 2 ? parseInt(recurringCount) : 4)
+            : undefined,
+          recurringOngoing: isRecurring ? !(parseInt(recurringCount) >= 2) : undefined,
           recurringIntervalDays: isRecurring && group.cadence === 'custom' ? group.intervalDays : undefined,
           skipWeekends: isRecurring ? !!skipWeekends : undefined,
           weekendShift: isRecurring && skipWeekends ? weekendShift : undefined,
@@ -803,6 +810,24 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
               }}
             >+ Add another service</button>
+          )}
+
+          {/* Visit count — applies to every recurring cadence group on
+              this appointment. Empty = ongoing (auto-extends). A finite
+              number caps the series at that many visits. */}
+          {services.some((s) => s.cadence && s.cadence !== 'one_time') && (
+            <div style={{ borderTop: `1px solid ${D.border}`, marginTop: 12, paddingTop: 12 }}>
+              <label style={labelStyle}>Visits (leave blank for ongoing)</label>
+              <input
+                type="number"
+                min={2}
+                max={24}
+                value={recurringCount}
+                onChange={(e) => setRecurringCount(e.target.value)}
+                placeholder="Ongoing"
+                style={inputStyle}
+              />
+            </div>
           )}
         </div>
 

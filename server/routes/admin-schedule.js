@@ -1256,9 +1256,16 @@ router.put('/:id/status', async (req, res, next) => {
         const cols = await db('scheduled_services').columnInfo();
         const parent = await db('scheduled_services').where({ id: parentId }).first();
         if (parent && parent.is_recurring && parent.recurring_pattern) {
+          // pendingCount + latest must reflect the BASE recurring series
+          // only — boosters share recurring_parent_id but live on the
+          // calendar with is_recurring=false. Without this filter,
+          // future boosters inflate the count (blocking auto-extend) and
+          // a booster date can become "latest" so the next-quarterly math
+          // keys off the wrong row.
           const pendingCount = parseInt((await db('scheduled_services')
             .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
             .where('status', 'pending')
+            .where('is_recurring', true)
             .count('* as c').first())?.c || 0);
 
           const isOngoing = cols.recurring_ongoing ? !!parent.recurring_ongoing : false;
@@ -1267,6 +1274,7 @@ router.put('/:id/status', async (req, res, next) => {
             // Find latest visit (pending or completed) to calculate next date
             const latest = await db('scheduled_services')
               .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+              .where('is_recurring', true)
               .orderBy('scheduled_date', 'desc').first();
             if (latest) {
               const latestStr = String(latest.scheduled_date).split('T')[0];
