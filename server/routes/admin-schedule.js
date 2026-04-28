@@ -622,6 +622,14 @@ router.post('/', async (req, res, next) => {
       } catch (e) { logger.warn(`[schedule] Addon insert failed (non-blocking): ${e.message}`); }
     }
 
+    // Track all scheduled_date strings created for this parent series
+    // (parent itself, recurring children, AND boosters). Hoisted so the
+    // booster spawn block below can dedupe against base-series dates —
+    // certain cadence/month combos (e.g. monthly Jan 15 + April booster
+    // → Apr 15 already on the calendar) would otherwise double-book.
+    const seriesDates = new Set();
+    seriesDates.add(String(scheduledDate || '').split('T')[0]);
+
     // Create recurring instances (Ongoing mode still pre-seeds a 4-visit rolling window for UX)
     const plannedCount = isRecurring ? (recurringOngoing ? 4 : (recurringCount || 4)) : 0;
     if (isRecurring && recurringPattern && plannedCount > 1) {
@@ -629,12 +637,6 @@ router.post('/', async (req, res, next) => {
       const cols = await db('scheduled_services').columnInfo();
       const rOpts = { nth: recurringNth, weekday: recurringWeekday, intervalDays: recurringIntervalDays };
       const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
-      // Track child dates we've already inserted in this spawn — when
-      // skip-weekends collapses Sat+Sun onto the same shifted weekday
-      // (common with custom interval=1) we'd otherwise stack duplicate
-      // appointments at the same date/time.
-      const seenChildDates = new Set();
-      seenChildDates.add(String(scheduledDate || '').split('T')[0]);
       // Iterate by inserts, not by attempts: when skip-weekends collapses
       // consecutive recurrences onto the same shifted weekday (e.g. custom
       // interval=1 over Sat+Sun → Mon), we still need plannedCount-1 children
@@ -647,8 +649,8 @@ router.post('/', async (req, res, next) => {
         const rawNext = nextRecurringDate(scheduledDate, recurringPattern, attempt, rOpts);
         attempt++;
         const nextDateStr = shiftPastWeekend(rawNext, !!skipWeekends, shiftDir);
-        if (seenChildDates.has(nextDateStr)) continue;
-        seenChildDates.add(nextDateStr);
+        if (seriesDates.has(nextDateStr)) continue;
+        seriesDates.add(nextDateStr);
         const childData = {
           customer_id: customerId, technician_id: resolvedTechId,
           scheduled_date: nextDateStr,
@@ -704,6 +706,11 @@ router.post('/', async (req, res, next) => {
         const dates = computeBoosterDates(scheduledDate, cleaned, 12);
         for (const rawDate of dates) {
           const boosterDate = shiftPastWeekend(rawDate, !!skipWeekends, shiftDir);
+          // Skip if this date already has a row on the series (parent or
+          // recurring child). Common case: monthly Jan 15 → child Apr 15
+          // PLUS April booster → Apr 15 collision.
+          if (seriesDates.has(boosterDate)) continue;
+          seriesDates.add(boosterDate);
           const boosterData = {
             customer_id: customerId, technician_id: resolvedTechId,
             scheduled_date: boosterDate,
