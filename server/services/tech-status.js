@@ -161,14 +161,56 @@ async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph }) {
   });
   // trx committed by here.
 
+  // ETA enrichment: when the tech is en_route/driving toward an
+  // assigned current_job, look up the job's lat/lng (or the customer's
+  // geocoded address as fallback) and compute a haversine ETA.
+  // Matches the formula in admin-dispatch.js computeTechEta — keep
+  // them in sync if you change one. Failure paths return eta_minutes
+  // null; never block the ping broadcast on this enrichment.
+  let eta_minutes = null;
+  if (row && row.current_job_id && (row.status === 'en_route' || row.status === 'driving')) {
+    try {
+      const job = await db('scheduled_services as s')
+        .leftJoin('customers as c', 's.customer_id', 'c.id')
+        .where('s.id', row.current_job_id)
+        .first(
+          db.raw('COALESCE(s.lat, c.latitude) AS lat'),
+          db.raw('COALESCE(s.lng, c.longitude) AS lng')
+        );
+      if (job && job.lat != null && job.lng != null) {
+        eta_minutes = haversineEtaMinutes(
+          Number(row.lat), Number(row.lng),
+          Number(job.lat), Number(job.lng)
+        );
+      }
+    } catch (err) {
+      logger.warn(`[tech-status] ETA enrichment failed: ${err.message}`);
+    }
+  }
+
+  const enrichedRow = { ...row, eta_minutes };
+
   const io = getIo();
   if (io) {
-    io.to(ROOM).emit(EVENT, row);
+    io.to(ROOM).emit(EVENT, enrichedRow);
   } else {
     logger.warn('[tech-status] io not initialized; skipping ping broadcast');
   }
 
-  return row;
+  return enrichedRow;
+}
+
+// Haversine ETA in whole minutes — must match admin-dispatch.js
+// computeTechEta exactly. Road factor 1.4× at 30 mph; floored at 1.
+function haversineEtaMinutes(fromLat, fromLng, toLat, toLng) {
+  if ([fromLat, fromLng, toLat, toLng].some((v) => v == null || Number.isNaN(v))) return null;
+  const R = 3959;
+  const dLat = (toLat - fromLat) * Math.PI / 180;
+  const dLng = (toLng - fromLng) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(fromLat * Math.PI / 180) * Math.cos(toLat * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+  const distMi = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 1.4;
+  return Math.max(1, Math.round((distMi / 30) * 60));
 }
 
 module.exports = { upsertTechStatus, pingTechLocation, ROOM, EVENT };

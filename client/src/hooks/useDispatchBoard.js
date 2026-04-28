@@ -154,6 +154,7 @@ export function useDispatchBoard() {
             lat: payload.lat == null ? null : Number(payload.lat),
             lng: payload.lng == null ? null : Number(payload.lng),
             current_job_id: payload.current_job_id || null,
+            eta_minutes: payload.eta_minutes ?? null,
             updated_at: payload.updated_at,
             today_total: 0,
             today_completed: 0,
@@ -167,6 +168,7 @@ export function useDispatchBoard() {
           lat: payload.lat == null ? null : Number(payload.lat),
           lng: payload.lng == null ? null : Number(payload.lng),
           current_job_id: payload.current_job_id || null,
+          eta_minutes: payload.eta_minutes ?? null,
           updated_at: payload.updated_at,
         });
         return next;

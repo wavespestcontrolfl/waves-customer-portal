@@ -10,6 +10,30 @@ const { etDateString } = require('../utils/datetime-et');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 
+// Haversine ETA for the dispatch board tech cards. Returns a whole
+// number of minutes, or null when any input is missing or the tech is
+// not en route/driving. Internal tool — directional accuracy is enough
+// (±25%); avoid Distance Matrix calls on every poll/ping. Road factor
+// 1.4× at 30 mph average matches the haversine fallback in
+// services/bouncie.js. Floors to 1 min so a tech 100 ft away doesn't
+// render "0 min" while still moving.
+function computeTechEta(techRow, jobCoords) {
+  if (!techRow || !jobCoords) return null;
+  if (techRow.status !== 'en_route' && techRow.status !== 'driving') return null;
+  const fromLat = techRow.lat == null ? null : Number(techRow.lat);
+  const fromLng = techRow.lng == null ? null : Number(techRow.lng);
+  const toLat = jobCoords.lat == null ? null : Number(jobCoords.lat);
+  const toLng = jobCoords.lng == null ? null : Number(jobCoords.lng);
+  if ([fromLat, fromLng, toLat, toLng].some((v) => v == null || Number.isNaN(v))) return null;
+  const R = 3959;
+  const dLat = (toLat - fromLat) * Math.PI / 180;
+  const dLng = (toLng - fromLng) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(fromLat * Math.PI / 180) * Math.cos(toLat * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+  const distMi = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 1.4;
+  return Math.max(1, Math.round((distMi / 30) * 60));
+}
+
 async function renderTemplate(templateKey, vars, fallback) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
@@ -850,6 +874,18 @@ router.get('/board', requireAdmin, async (req, res, next) => {
     // Same pattern as track-public.js — see services/tech-photo.js.
     // Admin auth is the trusted-context boundary that keeps the
     // presigned URL out of unauth hands.
+    //
+    // ETA: when the tech is en_route or driving toward an assigned
+    // current_job, compute a haversine-based ETA in minutes (road
+    // factor 1.4× at 30 mph avg). Haversine instead of Distance
+    // Matrix because dispatch board hydration runs on every admin
+    // refresh + every Bouncie ping — Distance Matrix would burn
+    // quota for sub-percent accuracy gains. Internal tool, ±25%
+    // is fine. Omitted for on_site/idle/break states.
+    const jobsById = new Map();
+    for (const j of (jobRows.rows || [])) {
+      jobsById.set(j.id, { lat: j.lat, lng: j.lng });
+    }
     const techs = await Promise.all((techRows.rows || []).map(async (r) => ({
       id: r.id,
       name: r.name,
@@ -859,6 +895,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
       lat: r.lat == null ? null : Number(r.lat),
       lng: r.lng == null ? null : Number(r.lng),
       current_job_id: r.current_job_id || null,
+      eta_minutes: computeTechEta(r, jobsById.get(r.current_job_id)),
       updated_at: r.updated_at,
       today_total: parseInt(r.today_total, 10) || 0,
       today_completed: parseInt(r.today_completed, 10) || 0,
