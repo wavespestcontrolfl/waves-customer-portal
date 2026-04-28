@@ -884,15 +884,26 @@ router.get('/technicians/:id/earnings', requireAdmin, async (req, res, next) => 
       .where({ technician_id: tech.id })
       .where('work_date', '>=', from)
       .where('work_date', '<=', to)
-      .select('work_date', 'total_shift_minutes', 'overtime_minutes');
+      .select('work_date', 'total_shift_minutes', 'overtime_minutes', 'job_count');
 
     const totalMin = rows.reduce((s, r) => s + parseFloat(r.total_shift_minutes || 0), 0);
     const otMin = rows.reduce((s, r) => s + parseFloat(r.overtime_minutes || 0), 0);
     const regMin = Math.max(0, totalMin - otMin);
 
     const rate = parseFloat(tech.pay_rate) > 0 ? parseFloat(tech.pay_rate) : 35;
-    const regularPay = (regMin / 60) * rate;
-    const overtimePay = (otMin / 60) * rate * 1.5;
+    // Round line items to cents and reconcile gross from those rounded
+    // components so the response is internally self-consistent — the
+    // earnings modal renders reg + ot + gross side by side, and admins
+    // double-checking payroll should never see line items that don't
+    // sum to the displayed gross. computeDailySummary leaves zero rows
+    // in place after voids, so daysWorked filters on actual worked
+    // time too.
+    const regularPay = Number(((regMin / 60) * rate).toFixed(2));
+    const overtimePay = Number(((otMin / 60) * rate * 1.5).toFixed(2));
+    const grossPay = Number((regularPay + overtimePay).toFixed(2));
+    const daysWorked = rows.filter(r =>
+      parseFloat(r.total_shift_minutes || 0) > 0 || (r.job_count || 0) > 0
+    ).length;
 
     res.json({
       technicianId: tech.id,
@@ -904,10 +915,10 @@ router.get('/technicians/:id/earnings', requireAdmin, async (req, res, next) => 
       regularMinutes: regMin,
       overtimeMinutes: otMin,
       totalMinutes: totalMin,
-      regularPay: Number(regularPay.toFixed(2)),
-      overtimePay: Number(overtimePay.toFixed(2)),
-      grossPay: Number((regularPay + overtimePay).toFixed(2)),
-      daysWorked: rows.length,
+      regularPay,
+      overtimePay,
+      grossPay,
+      daysWorked,
     });
   } catch (err) { next(err); }
 });
