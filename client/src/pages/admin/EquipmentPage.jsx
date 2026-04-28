@@ -31,6 +31,11 @@ export default function EquipmentPage() {
 
   return (
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
+      <style>{`
+        @media (max-width: 640px) {
+          .equipment-tab-bar { justify-content: flex-start !important; }
+        }
+      `}</style>
       <div style={{ marginBottom: 20 }}>
         <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>
           <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Equipment & Job Costing</span>
@@ -38,19 +43,21 @@ export default function EquipmentPage() {
         </h1>
       </div>
 
-      <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', WebkitOverflowScrolling: 'touch', flexWrap: 'nowrap' }}>
-        {[
-          { key: 'equipment', label: 'Equipment' },
-          { key: 'tank-mixes', label: 'Tank Mixes' },
-          { key: 'job-costs', label: 'Job Costing' },
-          { key: 'maintenance', label: 'Maintenance' },
-        ].map(t => (
-          <button key={t.key} onClick={() => setTab(t.key)} style={{
-            padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
-            background: tab === t.key ? D.teal : 'transparent', color: tab === t.key ? D.white : D.muted,
-            whiteSpace: 'nowrap', flexShrink: 0, minHeight: 44,
-          }}>{t.label}</button>
-        ))}
+      <div className="equipment-tab-bar" style={{ display: 'flex', justifyContent: 'center', marginBottom: 20, overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, flexWrap: 'nowrap' }}>
+          {[
+            { key: 'equipment', label: 'Equipment' },
+            { key: 'tank-mixes', label: 'Tank Mixes' },
+            { key: 'job-costs', label: 'Job Costing' },
+            { key: 'maintenance', label: 'Maintenance' },
+          ].map(t => (
+            <button key={t.key} onClick={() => setTab(t.key)} style={{
+              padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
+              background: tab === t.key ? D.teal : 'transparent', color: tab === t.key ? D.white : D.muted,
+              whiteSpace: 'nowrap', flexShrink: 0, minHeight: 44,
+            }}>{t.label}</button>
+          ))}
+        </div>
       </div>
 
       {tab === 'equipment' && <EquipmentTab showToast={showToast} />}

@@ -66,17 +66,19 @@ export default function InventoryPage() {
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, flexWrap: 'wrap' }}>
-        {tabs.map(t => (
-          <button key={t.key} onClick={() => setTab(t.key)} style={{
-            padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
-            background: tab === t.key ? D.teal : 'transparent', color: tab === t.key ? D.white : D.muted,
-            display: 'flex', alignItems: 'center', gap: 6,
-          }}>
-            {t.label}
-            {t.badge > 0 && <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 10, background: `${D.amber}33`, color: D.amber, fontWeight: 700 }}>{t.badge}</span>}
-          </button>
-        ))}
+      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 20 }}>
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, flexWrap: 'wrap' }}>
+          {tabs.map(t => (
+            <button key={t.key} onClick={() => setTab(t.key)} style={{
+              padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
+              background: tab === t.key ? D.teal : 'transparent', color: tab === t.key ? D.white : D.muted,
+              display: 'flex', alignItems: 'center', gap: 6,
+            }}>
+              {t.label}
+              {t.badge > 0 && <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 10, background: `${D.amber}33`, color: D.amber, fontWeight: 700 }}>{t.badge}</span>}
+            </button>
+          ))}
+        </div>
       </div>
 
       {tab === 'products' && <ProductsTab showToast={showToast} filter={productFilter} onFilterChange={setProductFilter} />}

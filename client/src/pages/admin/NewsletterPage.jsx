@@ -473,7 +473,7 @@ export default function NewsletterPage() {
       </div>
 
       {/* Tab nav */}
-      <div className="flex gap-1.5 flex-wrap mb-5">
+      <div className="flex justify-center gap-1.5 flex-wrap mb-5">
         {TABS.map((t) => (
           <button
             key={t.key}
