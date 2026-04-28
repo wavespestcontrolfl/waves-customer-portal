@@ -14,9 +14,18 @@ const { etParts, etDateString, addETDays, parseETDateTime, etWeekStart } = requi
 // terminal lock; we don't reach into a locked row from here).
 async function clearTechSignoffForWeek(technicianId, workDate, trx) {
   if (!technicianId || !workDate) return;
-  const dateStr = typeof workDate === 'string'
-    ? workDate.split('T')[0]
-    : etDateString(new Date(workDate));
+  // Two input shapes:
+  //   - YYYY-MM-DD (work_date DATE column from daily summaries) — use as-is
+  //   - timestamp string or Date (clock_in TIMESTAMP from time_entries) —
+  //     convert through etDateString so we get the ET calendar date.
+  //     A naive split('T')[0] would treat 03:30 UTC (which is the prior
+  //     day in ET) as the same calendar day, clearing the wrong week.
+  let dateStr;
+  if (typeof workDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(workDate)) {
+    dateStr = workDate;
+  } else {
+    dateStr = etDateString(new Date(workDate));
+  }
   const weekStart = etWeekStart(parseETDateTime(`${dateStr}T12:00`));
   await (trx || db)('time_weekly_summary')
     .where({ technician_id: technicianId, week_start: weekStart })
