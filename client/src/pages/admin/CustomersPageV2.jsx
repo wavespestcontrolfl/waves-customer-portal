@@ -410,28 +410,51 @@ const VIEWS = [
 function ViewToggleV2({ view, onChange }) {
   return (
     // Hidden on mobile entirely — Directory is the only mobile view, no
-    // toggle needed. Desktop renders the pill strip as before.
-    <div className="hidden sm:inline-flex sm:w-auto bg-white border-hairline border-zinc-200 rounded-sm overflow-hidden">
-      {VIEWS.map((v) => {
-        const active = v.key === view;
-        return (
-          <button
-            key={v.key}
-            type="button"
-            onClick={() => onChange(v.key)}
-            className={cn(
-              'sm:flex-none u-label px-2 sm:px-3 h-11 sm:h-8 border-r-hairline border-zinc-200 last:border-r-0 transition-colors u-focus-ring',
-              v.desktopOnly && 'hidden md:inline-flex items-center justify-center',
-              v.mobileOnly && 'hidden',
-              active
-                ? 'bg-zinc-900 text-white'
-                : 'bg-white text-ink-secondary hover:bg-zinc-50'
-            )}
-          >
-            {v.label}
-          </button>
-        );
-      })}
+    // toggle needed. Desktop renders the Pipeline-page tab strip
+    // (Leads / Estimates / Create Estimate / Pricing Logic) shape:
+    // a zinc-100 framed segmented bar with title-case labels that flip
+    // to a solid black pill when active. Centered on the page.
+    <div className="hidden md:flex justify-center">
+      <div
+        className="inline-flex flex-wrap items-center"
+        style={{
+          gap: 4,
+          padding: 4,
+          background: '#F4F4F5',
+          borderRadius: 10,
+          border: '1px solid #E4E4E7',
+        }}
+      >
+        {VIEWS.map((v) => {
+          const active = v.key === view;
+          return (
+            <button
+              key={v.key}
+              type="button"
+              onClick={() => onChange(v.key)}
+              className={cn(
+                v.desktopOnly && 'hidden md:inline-flex items-center justify-center',
+                v.mobileOnly && 'hidden',
+                'u-focus-ring',
+              )}
+              style={{
+                padding: '10px 24px',
+                borderRadius: 8,
+                border: 'none',
+                cursor: 'pointer',
+                background: active ? '#18181B' : 'transparent',
+                color: active ? '#FFFFFF' : '#A1A1AA',
+                fontSize: 14,
+                fontWeight: 700,
+                transition: 'all 0.2s',
+                fontFamily: "'DM Sans', sans-serif",
+              }}
+            >
+              {v.label}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
