@@ -573,13 +573,14 @@ router.get('/:id', async (req, res, next) => {
     const c = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!c) return res.status(404).json({ error: 'Customer not found' });
 
-    const [tags, interactions, prefs, services, estimates, payments, scheduled, smsLog, healthScore, invoices, cards, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts] = await Promise.all([
+    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, smsLog, healthScore, invoices, cards, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts] = await Promise.all([
       db('customer_tags').where({ customer_id: c.id }).select('tag'),
       db('customer_interactions').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(30),
       db('property_preferences').where({ customer_id: c.id }).first(),
       db('service_records').where({ customer_id: c.id }).orderBy('service_date', 'desc').limit(20),
       db('estimates').where({ customer_id: c.id }).orderBy('created_at', 'desc'),
       db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', 'payment_methods.card_brand', 'payment_methods.last_four').orderBy('payment_date', 'desc').limit(20),
+      db('payments').where({ customer_id: c.id, status: 'paid' }).sum(db.raw('amount - COALESCE(refund_amount, 0) as net')).first().catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
       db('scheduled_services').where({ customer_id: c.id }).orderBy('scheduled_date').limit(10),
       db('sms_log').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(20),
       db('customer_health_scores').where({ customer_id: c.id }).orderBy('scored_at', 'desc').first().catch(e => { logger.warn(`[customers:${c.id}] health_scores: ${e.message}`); return null; }),
@@ -591,6 +592,27 @@ router.get('/:id', async (req, res, next) => {
       db('property_application_history').where({ customer_id: c.id }).orderBy('applied_at', 'desc').limit(10).catch(e => { logger.warn(`[customers:${c.id}] property_application_history: ${e.message}`); return []; }),
       db('customer_discounts').where({ 'customer_discounts.customer_id': c.id }).leftJoin('discounts', 'customer_discounts.discount_id', 'discounts.id').select('customer_discounts.*', 'discounts.name as discount_name', 'discounts.discount_type', 'discounts.amount as discount_value').catch(e => { logger.warn(`[customers:${c.id}] customer_discounts: ${e.message}`); return []; }),
     ]);
+
+    // The invoices table stores the billed amount as `total`; the frontend reads
+    // `amount_due`/`amount_paid`. Only collectible statuses contribute to
+    // amount_due — draft/void must not inflate Balance Owed (frontend filters
+    // by `status !== 'paid'`).
+    const COLLECTIBLE_STATUSES = new Set(['sent', 'viewed', 'overdue', 'paid']);
+    const mappedInvoices = (invoices || []).map(inv => {
+      const total = parseFloat(inv.total || 0);
+      const isPaid = inv.status === 'paid';
+      const isCollectible = COLLECTIBLE_STATUSES.has(inv.status);
+      return {
+        ...inv,
+        amount_due: isCollectible ? total : 0,
+        amount_paid: isPaid ? total : 0,
+      };
+    });
+    // Lifetime revenue is the net of all paid payments (Stripe + Zelle/manual),
+    // minus refunds. customers.lifetime_revenue isn't kept in sync, and summing
+    // paid-invoice totals from the limit(10) query above would underreport for
+    // long-tenured customers and miss off-gateway payments without invoices.
+    const lifetimeRevenue = parseFloat(paymentsTotal?.net || 0);
 
     res.json({
       customer: {
@@ -609,7 +631,7 @@ router.get('/:id', async (req, res, next) => {
         landingPageUrl: c.landing_page_url,
         assignedTo: c.assigned_to, lastContactDate: c.last_contact_date,
         nextFollowUp: c.next_follow_up_date, followUpNotes: c.follow_up_notes,
-        lifetimeRevenue: parseFloat(c.lifetime_revenue || 0),
+        lifetimeRevenue,
         annualValue: parseFloat(c.monthly_rate || 0) * 12,
         totalServices: c.total_services,
         referralCode: c.referral_code, crmNotes: c.crm_notes,
@@ -620,7 +642,7 @@ router.get('/:id', async (req, res, next) => {
       tags: tags.map(t => t.tag),
       interactions, preferences: prefs, services, estimates, payments, scheduled, smsLog,
       healthScore: healthScore || null,
-      invoices: invoices || [],
+      invoices: mappedInvoices,
       cards: cards || [],
       photos: photos || [],
       notificationPrefs: notificationPrefs || null,
