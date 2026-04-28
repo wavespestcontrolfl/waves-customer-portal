@@ -46,8 +46,8 @@ export default function MobileSettingsPage() {
       <h1
         className="text-zinc-900"
         style={{
-          fontSize: 34,
-          fontWeight: 700,
+          fontSize: 28,
+          fontWeight: 400,
           letterSpacing: '-0.015em',
           marginTop: 4,
           marginBottom: 16,
