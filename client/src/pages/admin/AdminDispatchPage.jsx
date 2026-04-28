@@ -123,6 +123,7 @@ export default function AdminDispatchPage() {
     <div
       role="tablist"
       aria-label="Dispatch view"
+      className="tab-pill-scroll-inner"
       style={{
         display: 'inline-flex',
         flexWrap: 'wrap',
@@ -231,7 +232,7 @@ export default function AdminDispatchPage() {
       </div>
 
       {/* Centered tab pill — page-level navigation, below the header. */}
-      <div className="px-4 md:px-6 pt-3 md:pt-4 pb-2 flex justify-center">
+      <div className="tab-pill-scroll px-4 md:px-6 pt-3 md:pt-4 pb-2 flex justify-center">
         {tabPill}
       </div>
       <div
