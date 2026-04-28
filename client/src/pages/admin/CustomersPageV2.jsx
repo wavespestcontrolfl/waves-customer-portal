@@ -396,9 +396,9 @@ function SortHeaderV2({ label, sortKey, currentSort, currentDir, onSort, classNa
 
 // --- View toggle (flat pill row, no emoji) ---
 // Mobile lands on Directory with no visible toggle (it's the only
-// mobile view). Desktop also defaults to Directory (Square-style
-// list-first), with Map / Pipeline / Health / AI Advisor as
-// secondary tabs in the pill strip.
+// mobile view). Desktop also defaults to Directory (list-first),
+// with Map / Pipeline / Health / AI Advisor as secondary tabs in
+// the pill strip.
 const VIEWS = [
   { key: 'directory', label: 'Directory', desktopOnly: true },
   { key: 'map', label: 'Map', desktopOnly: true },
@@ -483,8 +483,8 @@ export default function CustomersPageV2() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [searchParams] = useSearchParams();
-  // Default is Directory on both mobile and desktop (Square-style
-  // list-first). Explicit ?view=… URLs win — deep-links still work.
+  // Default is Directory on both mobile and desktop (list-first).
+  // Explicit ?view=… URLs win — deep-links still work.
   const [view, setView] = useState(() => {
     const raw = searchParams.get('view');
     if (raw) return raw;

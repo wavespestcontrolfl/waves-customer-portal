@@ -170,6 +170,11 @@ finding and warns on P1. Reviewers must return JSON matching
   Content / endpoint changes never share a PR with V2 visual changes.
 - **`alert-fg` (red) used as decoration in admin V2.** Per `CLAUDE.md`,
   it's reserved for genuine alerts only.
+  *Exception — Customers V2 status indicators (`/admin/customers` Directory +
+  Customer 360):* health rings (≥70 green / 40–69 amber / <40 red), tier
+  badges (Platinum/Gold/Silver/Bronze metals), and stage badge
+  (green for `active_customer`/`won`, red for everything else) are
+  intentionally color-coded for at-a-glance triage. Don't flag those.
 - **Twilio `From`/`MessagingServiceSid` hardcoded.** Numbers per GBP
   location come from config; hardcoded `+1…` literals in route code drift
   when numbers move.
