@@ -1329,8 +1329,9 @@ router.put('/:id/status', async (req, res, next) => {
               const rOpts = { nth: parent.recurring_nth, weekday: parent.recurring_weekday, intervalDays: parent.recurring_interval_days };
               const skipParent = cols.skip_weekends ? !!parent.skip_weekends : false;
               const dirParent = cols.weekend_shift ? (parent.weekend_shift === 'back' ? 'back' : 'forward') : 'forward';
-              // Pre-load every existing date on this series (base + boosters,
-              // pending or completed) so we can dedupe the auto-extend insert
+              // Pre-load every active date on this series (base + boosters,
+              // pending or completed — cancelled/rescheduled rows don't
+              // occupy a slot) so we can dedupe the auto-extend insert
               // against future booster rows that share recurring_parent_id.
               // Without this, ongoing+booster combos can double-book — e.g.
               // a Jan-anchored quarterly series with a January booster has a
@@ -1338,6 +1339,7 @@ router.put('/:id/status', async (req, res, next) => {
               // from latest=Oct 15 lands on the same Jan 15.
               const existingRows = await db('scheduled_services')
                 .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+                .whereNotIn('status', ['cancelled', 'rescheduled'])
                 .select('scheduled_date');
               const existingDates = new Set(existingRows
                 .map((r) => String(r.scheduled_date || '').split('T')[0])
@@ -2277,16 +2279,19 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
       } catch (e) { logger.warn(`[recurring-alerts] addon mirror failed (non-blocking): ${e.message}`); }
     };
 
-    // Pre-load every date already on this series (base recurring + boosters,
-    // pending or completed). Both extend and convert_ongoing dedupe against
-    // this so an extend computed forward from baseDateStr can't double-book
-    // a future booster — e.g. a Jan-anchored quarterly + January booster has
-    // a Jan 15 next-year row that would otherwise collide with the first
-    // extended visit.
+    // Pre-load every active date already on this series (base recurring +
+    // boosters, pending or completed — cancelled/rescheduled rows don't
+    // occupy a slot, so leaving them out lets the operator re-fill a gap
+    // created by a cancellation). Both extend and convert_ongoing dedupe
+    // against this so an extend computed forward from baseDateStr can't
+    // double-book a future booster — e.g. a Jan-anchored quarterly + January
+    // booster has a Jan 15 next-year row that would otherwise collide with
+    // the first extended visit.
     let seriesDateSeed;
     try {
       const allRows = await db('scheduled_services')
         .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+        .whereNotIn('status', ['cancelled', 'rescheduled'])
         .select('scheduled_date');
       seriesDateSeed = new Set(allRows
         .map((r) => String(r.scheduled_date || '').split('T')[0])
