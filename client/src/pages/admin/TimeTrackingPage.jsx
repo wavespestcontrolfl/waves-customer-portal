@@ -1701,8 +1701,17 @@ function DocumentsTab({ showToast }) {
                         <span style={sBadge(D.teal + '22', D.teal)}>{doc.technician_name}</span>
                       )}
                       {doc.expiration_date && (() => {
-                        const exp = new Date(doc.expiration_date);
-                        const days = Math.ceil((exp.getTime() - Date.now()) / 86400000);
+                        // expiration_date is a SQL DATE (YYYY-MM-DD).
+                        // new Date('2026-08-15') parses as UTC midnight,
+                        // which is the prior evening in ET — off-by-one
+                        // for the badge near midnight. Compare two
+                        // YYYY-MM-DD anchors at noon UTC so calendar-day
+                        // arithmetic stays clean across DST.
+                        const expStr = String(doc.expiration_date).split('T')[0];
+                        const todayStr = etDateString(new Date());
+                        const exp = new Date(`${expStr}T12:00:00Z`);
+                        const today = new Date(`${todayStr}T12:00:00Z`);
+                        const days = Math.round((exp.getTime() - today.getTime()) / 86400000);
                         const expired = days < 0;
                         const soon = !expired && days <= 30;
                         const color = expired ? D.red : soon ? D.amber : D.muted;

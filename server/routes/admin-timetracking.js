@@ -248,6 +248,13 @@ router.put('/entries/:id', async (req, res, next) => {
     const { clock_in, clock_out, entry_type, notes, edit_reason } = req.body;
     if (!edit_reason) return res.status(400).json({ error: 'edit_reason is required' });
 
+    // Capture the pre-edit clock_in so we can also invalidate the
+    // OLD week's sign-off when an admin moves an entry across week
+    // boundaries — both the source and destination weeks have changed
+    // totals, so neither tech attestation should survive.
+    const prior = await db('time_entries')
+      .where({ id: req.params.id })
+      .first('technician_id', 'clock_in');
     const updated = await timeTracking.adminEditEntry(req.params.id, {
       clock_in,
       clock_out,
@@ -258,6 +265,9 @@ router.put('/entries/:id', async (req, res, next) => {
     });
     if (updated && updated.technician_id) {
       await clearTechSignoffForWeek(updated.technician_id, updated.clock_in);
+      if (prior && prior.clock_in && String(prior.clock_in) !== String(updated.clock_in)) {
+        await clearTechSignoffForWeek(updated.technician_id, prior.clock_in);
+      }
     }
     res.json(updated);
   } catch (err) {

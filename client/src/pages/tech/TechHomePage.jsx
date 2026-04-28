@@ -471,11 +471,13 @@ function TimecardSignoffCard({ techName }) {
 
   if (loading) return null;
   if (!weekly) return null;
-  // Server is authoritative on whether sign-off is pending. If the
-  // endpoint says pending=false and the tech has already signed,
-  // render a quiet confirmation; if pending=false and not signed
-  // (the week is approved or otherwise not eligible), render nothing.
+  // Server is authoritative on whether sign-off is pending. pending
+  // is false for both "already signed" AND "already approved" — split
+  // those: approved weeks render nothing (the week is final, no need
+  // to surface anything to the tech), signed-but-not-yet-approved
+  // weeks render the green "awaiting" confirmation.
   if (!pending) {
+    if (weekly.status === 'approved') return null;
     if (weekly.tech_signed_at) {
       return (
         <div style={{
