@@ -1,5 +1,4 @@
 import { useState, useEffect, lazy, Suspense } from 'react';
-const BlogPage = lazy(() => import('./BlogPage'));
 const SEODashboardPage = lazy(() => import('./SEODashboardPage'));
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -50,7 +49,6 @@ const TABS = [
   { key: 'funnel', label: 'Funnel' },
   { key: 'analytics', label: 'Analytics' },
   { key: 'site-audit', label: 'Site Health' },
-  { key: 'blog', label: 'Blog Content' },
 ];
 
 const PRIMARY_DOMAIN = 'wavespestcontrol.com';
@@ -1101,7 +1099,6 @@ export default function SEOPage() {
       {tab === 'funnel' && <FunnelTab />}
       {tab === 'analytics' && <AnalyticsTab />}
       {tab === 'site-audit' && <SiteAuditTab />}
-      {tab === 'blog' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading content...</div>}><BlogPage domain={PRIMARY_DOMAIN} /></Suspense>}
     </div>
   );
 }
