@@ -1016,6 +1016,15 @@ async function ensureDocTable() {
       t.string('s3_key', 500).notNullable();
       t.uuid('uploaded_by');
       t.boolean('is_archived').defaultTo(false);
+      // Per-tech binding + expiration (added by migration
+      // 20260428000008). Mirror the columns here so a fresh env that
+      // auto-creates this table doesn't 500 on the GET /documents
+      // join below — the route now leftJoins technicians on
+      // company_documents.technician_id.
+      t.uuid('technician_id');
+      t.date('expiration_date');
+      t.index('technician_id');
+      t.index('expiration_date');
       t.timestamps(true, true);
     });
   }

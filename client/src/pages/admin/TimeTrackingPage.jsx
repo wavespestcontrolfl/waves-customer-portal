@@ -1548,6 +1548,17 @@ function DocumentsTab({ showToast }) {
   };
 
   const fmtDate = (d) => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+  // Render a SQL DATE column (YYYY-MM-DD) without the UTC-midnight day
+  // shift that hits Date-only strings in negative-offset timezones.
+  // Anchor at noon UTC and format in UTC so the calendar day stays
+  // intact regardless of the runtime tz.
+  const fmtYmdDate = (d) => {
+    if (!d) return '';
+    const ymd = String(d).split('T')[0];
+    return new Date(`${ymd}T12:00:00Z`).toLocaleDateString('en-US', {
+      month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC',
+    });
+  };
 
   if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading documents...</div>;
 
@@ -1717,7 +1728,7 @@ function DocumentsTab({ showToast }) {
                         const color = expired ? D.red : soon ? D.amber : D.muted;
                         return (
                           <span style={{ fontSize: 11, color, fontFamily: MONO }}>
-                            {expired ? 'Expired ' : 'Expires '}{fmtDate(doc.expiration_date)}
+                            {expired ? 'Expired ' : 'Expires '}{fmtYmdDate(doc.expiration_date)}
                             {expired ? ` (${Math.abs(days)}d ago)` : soon ? ` (${days}d)` : ''}
                           </span>
                         );
