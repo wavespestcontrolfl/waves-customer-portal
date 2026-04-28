@@ -111,6 +111,17 @@ function formatDateDisplay(dateStr) {
 
 const isToday = (dateStr) => isETTodayStr(dateStr);
 
+// "08:00", "09:30" → 90. Returns undefined for missing/malformed input so the
+// modal can fall back to the chosen service's default duration.
+function slotDurationMinutes(start, end) {
+  if (!start || !end) return undefined;
+  const sm = start.match(/^(\d{1,2}):(\d{2})/);
+  const em = end.match(/^(\d{1,2}):(\d{2})/);
+  if (!sm || !em) return undefined;
+  const minutes = (Number(em[1]) * 60 + Number(em[2])) - (Number(sm[1]) * 60 + Number(sm[2]));
+  return minutes > 0 ? minutes : undefined;
+}
+
 function sanitizeServiceTypeClient(serviceType) {
   if (!serviceType) return 'General Service';
   if (/^[A-Z0-9]{5,}$/.test(serviceType)) return 'General Service';
@@ -1071,6 +1082,7 @@ export default function DispatchPageV2() {
         <CreateAppointmentModal
           defaultDate={newApptDefaults?.date || date}
           defaultWindowStart={newApptDefaults?.windowStart}
+          defaultDurationMinutes={newApptDefaults?.durationMinutes}
           defaultTechId={newApptDefaults?.techId}
           defaultCustomer={newApptDefaults?.customer || null}
           onClose={() => { setShowNewAppt(false); setNewApptDefaults(null); }}
@@ -1103,8 +1115,8 @@ export default function DispatchPageV2() {
           refreshKey={scheduleRefreshKey}
           onEdit={(svc) => setEditingService(svc)}
           onChange={() => fetchSchedule(date)}
-          onCreateSlot={({ date: slotDate, windowStart }) => {
-            setNewApptDefaults({ date: slotDate, windowStart });
+          onCreateSlot={({ date: slotDate, windowStart, windowEnd }) => {
+            setNewApptDefaults({ date: slotDate, windowStart, durationMinutes: slotDurationMinutes(windowStart, windowEnd) });
             setShowNewAppt(true);
           }}
         />
@@ -1118,8 +1130,8 @@ export default function DispatchPageV2() {
           refreshKey={scheduleRefreshKey}
           onEdit={(svc) => setEditingService(svc)}
           onChange={() => fetchSchedule(date)}
-          onCreateSlot={({ date: slotDate, windowStart }) => {
-            setNewApptDefaults({ date: slotDate, windowStart });
+          onCreateSlot={({ date: slotDate, windowStart, windowEnd }) => {
+            setNewApptDefaults({ date: slotDate, windowStart, durationMinutes: slotDurationMinutes(windowStart, windowEnd) });
             setShowNewAppt(true);
           }}
         />
