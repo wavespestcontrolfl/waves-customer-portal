@@ -739,6 +739,7 @@ export default function DispatchPageV2() {
   const [protocolService, setProtocolService] = useState(null);
   const [showNewAppt, setShowNewAppt] = useState(false);
   const [newApptDefaults, setNewApptDefaults] = useState(null);
+  const [scheduleRefreshKey, setScheduleRefreshKey] = useState(0);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
   const [showMoreSheet, setShowMoreSheet] = useState(false);
@@ -1077,6 +1078,9 @@ export default function DispatchPageV2() {
             setShowNewAppt(false);
             setNewApptDefaults(null);
             fetchSchedule(appt.scheduledDate || date);
+            // TimeGridDays (week / 5-day) owns its own week-fetch — bump the
+            // key so it refetches and the just-created appointment shows up.
+            setScheduleRefreshKey((k) => k + 1);
           }}
         />
       )}
@@ -1096,6 +1100,7 @@ export default function DispatchPageV2() {
           dayCount={7}
           selectedDate={date}
           hideUnassignedRail={false}
+          refreshKey={scheduleRefreshKey}
           onEdit={(svc) => setEditingService(svc)}
           onChange={() => fetchSchedule(date)}
           onCreateSlot={({ date: slotDate, windowStart }) => {
@@ -1110,6 +1115,7 @@ export default function DispatchPageV2() {
           dayCount={5}
           selectedDate={date}
           hideUnassignedRail={isMobile}
+          refreshKey={scheduleRefreshKey}
           onEdit={(svc) => setEditingService(svc)}
           onChange={() => fetchSchedule(date)}
           onCreateSlot={({ date: slotDate, windowStart }) => {

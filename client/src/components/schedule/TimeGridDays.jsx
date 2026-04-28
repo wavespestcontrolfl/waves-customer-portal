@@ -496,6 +496,7 @@ export default function TimeGridDays({
   onChange,
   onDateClick,
   onCreateSlot,
+  refreshKey = 0, // bump to force a week-fetch refresh from the parent
   hideUnassignedRail = false,
 }) {
   const [data, setData] = useState(null);
@@ -513,7 +514,7 @@ export default function TimeGridDays({
     adminFetch(`/admin/schedule/week?start=${monday}`)
       .then((j) => { setData(j); setLoading(false); })
       .catch((err) => { console.error(err); setLoading(false); });
-  }, [monday]);
+  }, [monday, refreshKey]);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 
