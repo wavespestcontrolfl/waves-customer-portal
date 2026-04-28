@@ -442,7 +442,8 @@ export function calculateEstimate(inputs) {
     const palmPerApp = 55;
     const inja = ip * palmPerApp * 2, injMo = Math.round(inja / 12 * 100) / 100;
     R.injection = { palms: ip, ann: inja, mo: injMo, estimated: palmEstimated, pricePerPalm: palmPerApp };
-    wgServices.push({ name: 'Palm Injection', mo: injMo });
+    // Palm injection is excluded from WaveGuard percent discounts and does not
+    // count toward tier qualification — billed separately like rodent bait.
   }
 
   /* ── MOSQUITO ────────────────────────────────────────────── */
@@ -835,7 +836,8 @@ export function calculateEstimate(inputs) {
   if (R.lawn) { ac++; ra += R.lawn[2].ann; lineItems.push({ name: 'Lawn Care', ann: R.lawn[2].ann }); }
   if (R.pest) { ac++; ra += R.pest.ann; lineItems.push({ name: 'Pest Control', ann: R.pest.ann }); }
   if (R.ts) { ac++; ra += R.ts[1].ann; lineItems.push({ name: 'Tree & Shrub', ann: R.ts[1].ann }); }
-  if (R.injection) { ac++; ra += R.injection.ann; lineItems.push({ name: 'Palm Injection', ann: R.injection.ann }); }
+  // Palm Injection intentionally excluded from WaveGuard tier count + discounted total —
+  // not a qualifying service, not eligible for percent bundle discount.
   if (R.mq) {
     const ri = treeDensity === 'HEAVY' ? 2 : 1;
     if (R.mq[ri]) { ac++; ra += R.mq[ri].ann; lineItems.push({ name: 'Mosquito', ann: R.mq[ri].ann }); }
@@ -880,9 +882,11 @@ export function calculateEstimate(inputs) {
   ot = Math.round(ot * 100) / 100;
 
   const rba = R.rodBaitMo ? R.rodBaitMo * 12 : 0;
+  const palmAnn = R.injection ? R.injection.ann : 0;
+  const palmMo = R.injection ? R.injection.mo : 0;
   const totalOT = ot + tmInstall;
-  const y1 = Math.round((ad + rba + totalOT) * 100) / 100;
-  const y2 = Math.round((ad + rba + (R.trench ? 325 : 0)) * 100) / 100;
+  const y1 = Math.round((ad + rba + palmAnn + totalOT) * 100) / 100;
+  const y2 = Math.round((ad + rba + palmAnn + (R.trench ? 325 : 0)) * 100) / 100;
   const y2mo = Math.round(y2 / 12 * 100) / 100;
 
   return {
@@ -909,6 +913,8 @@ export function calculateEstimate(inputs) {
       discount: wd,
       savings: da,
       rodentBaitMo: R.rodBaitMo || 0,
+      palmInjectionMo: palmMo,
+      palmInjectionAnn: palmAnn,
       serviceCount: ac,
       // Tier commitment: if customer cancels services and drops below tier threshold,
       // downstream billing should reconcile to the new tier rate retroactively for that period.
