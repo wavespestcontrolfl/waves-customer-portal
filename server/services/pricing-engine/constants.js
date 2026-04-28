@@ -105,7 +105,9 @@ const PEST = {
     trees_light: -r(5),         // Same drift fix as shrubs_light.
     trees_moderate: r(5),
     trees_heavy: r(12),         // Was r(10). Slight increase for canopy spray coverage.
-    complexity_complex: r(8),   // Was r(5). Complex landscaping adds real navigation time.
+    complexity_simple: -r(5),   // Open turf, minimal beds — less perimeter to spray.
+    complexity_moderate: 0,     // Baseline.
+    complexity_complex: r(5),   // Symmetric ladder with simple/moderate. Was r(8).
     nearWater: r(5),            // Was 2.5.
     largeDriveway: r(5),        // Was 2.5.
   },

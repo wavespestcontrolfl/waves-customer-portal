@@ -211,7 +211,9 @@ export function calculateEstimate(inputs) {
   else addMod('pest', 'No/light trees: $0/visit', 0, 'info');
 
   // Complexity
-  if (landscapeComplexity === 'COMPLEX') addMod('pest', 'Complex landscape: +$8/visit', 8, 'up');
+  if (landscapeComplexity === 'COMPLEX') addMod('pest', 'Complex landscape: +$5/visit', 5, 'up');
+  else if (landscapeComplexity === 'MODERATE') addMod('pest', 'Moderate landscape: $0/visit', 0, 'info');
+  else if (landscapeComplexity === 'SIMPLE') addMod('pest', 'Simple landscape: -$5/visit', -5, 'down');
   else addMod('pest', `${landscapeComplexity || 'Simple'} landscape: $0/visit`, 0, 'info');
 
   // Water proximity
@@ -357,7 +359,8 @@ export function calculateEstimate(inputs) {
     else if (hasPool) adj += 5;
     if (treeDensity === 'MODERATE') adj += 5;
     else if (treeDensity === 'HEAVY') adj += 12;
-    if (landscapeComplexity === 'COMPLEX') adj += 8;
+    if (landscapeComplexity === 'COMPLEX') adj += 5;
+    else if (landscapeComplexity === 'SIMPLE') adj -= 5;
     if (nearWater && nearWater !== 'NONE' && nearWater !== 'NO' && nearWater !== false) adj += 5;
     if (hasLargeDriveway) adj += 5;
     if (indoor) adj += 15;
