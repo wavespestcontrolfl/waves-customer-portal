@@ -592,6 +592,18 @@ router.get('/:id', async (req, res, next) => {
       db('customer_discounts').where({ 'customer_discounts.customer_id': c.id }).leftJoin('discounts', 'customer_discounts.discount_id', 'discounts.id').select('customer_discounts.*', 'discounts.name as discount_name', 'discounts.discount_type', 'discounts.amount as discount_value').catch(e => { logger.warn(`[customers:${c.id}] customer_discounts: ${e.message}`); return []; }),
     ]);
 
+    // The invoices table stores the billed amount as `total`; the frontend reads
+    // `amount_due`/`amount_paid`. Map them here, and derive lifetime revenue from
+    // paid-invoice totals since customers.lifetime_revenue isn't kept in sync.
+    const mappedInvoices = (invoices || []).map(inv => {
+      const total = parseFloat(inv.total || 0);
+      const isPaid = inv.status === 'paid';
+      return { ...inv, amount_due: total, amount_paid: isPaid ? total : 0 };
+    });
+    const lifetimeRevenue = mappedInvoices
+      .filter(i => i.status === 'paid')
+      .reduce((s, i) => s + i.amount_paid, 0);
+
     res.json({
       customer: {
         id: c.id, firstName: c.first_name, lastName: c.last_name,
@@ -609,7 +621,7 @@ router.get('/:id', async (req, res, next) => {
         landingPageUrl: c.landing_page_url,
         assignedTo: c.assigned_to, lastContactDate: c.last_contact_date,
         nextFollowUp: c.next_follow_up_date, followUpNotes: c.follow_up_notes,
-        lifetimeRevenue: parseFloat(c.lifetime_revenue || 0),
+        lifetimeRevenue,
         annualValue: parseFloat(c.monthly_rate || 0) * 12,
         totalServices: c.total_services,
         referralCode: c.referral_code, crmNotes: c.crm_notes,
@@ -620,7 +632,7 @@ router.get('/:id', async (req, res, next) => {
       tags: tags.map(t => t.tag),
       interactions, preferences: prefs, services, estimates, payments, scheduled, smsLog,
       healthScore: healthScore || null,
-      invoices: invoices || [],
+      invoices: mappedInvoices,
       cards: cards || [],
       photos: photos || [],
       notificationPrefs: notificationPrefs || null,
