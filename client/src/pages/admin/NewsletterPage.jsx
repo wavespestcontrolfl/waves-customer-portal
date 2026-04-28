@@ -440,8 +440,9 @@ export default function NewsletterPage() {
   const [pendingDraftEvent, setPendingDraftEvent] = useState(null);
 
   // Tab-strip counts: history → sent campaigns, subscribers → active list.
-  // Fetched at the page level (independent of DashboardView) so they show
-  // immediately on whichever tab the user lands on.
+  // Fetched once on mount — tab switches don't refresh, since the underlying
+  // newsletter data doesn't change just because the user clicked a tab. Avoid
+  // re-hitting the 500-row /sends payload on every tab click.
   const [tabCounts, setTabCounts] = useState({ history: null, subscribers: null });
   useEffect(() => {
     let ignore = false;
@@ -452,7 +453,7 @@ export default function NewsletterPage() {
       .then((d) => { if (!ignore) setTabCounts((c) => ({ ...c, subscribers: d.counts?.active ?? null })); })
       .catch(() => {});
     return () => { ignore = true; };
-  }, [tab]);
+  }, []);
 
   const setTab = (next) => {
     const newParams = new URLSearchParams(searchParams);
