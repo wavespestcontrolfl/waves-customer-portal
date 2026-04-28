@@ -11,6 +11,8 @@ const db = require('../models/db');
 const logger = require('./logger');
 const matcher = require('./geofence-matcher');
 const timeTracking = require('./time-tracking');
+const trackTransitions = require('./track-transitions');
+const auditLog = require('./audit-log');
 
 let twilioService = null;
 function getTwilio() {
@@ -406,6 +408,201 @@ async function handleDeparture({ tech, customer, job, lat, lng, eventTime, imei,
     raw_payload: payload,
     event_timestamp: eventTime,
   });
+
+  // Auto-flip the next scheduled job to en_route when configured.
+  // Pass the dwell minutes from the timer we just stopped — that's
+  // our "tech actually serviced this customer" signal. Errors here
+  // never disrupt the EXIT processing above; auto-flip is best-effort.
+  const dwellMinutes = stopped && stopped.duration_minutes
+    ? Math.round(Number(stopped.duration_minutes))
+    : Math.round((eventTime - new Date(activeTimer.clock_in)) / 60000);
+  try {
+    await maybeAutoFlipNextJob({
+      tech,
+      exitedCustomer: customer,
+      eventTime,
+      lat,
+      lng,
+      imei,
+      payload,
+      dwellMinutes,
+    });
+  } catch (err) {
+    logger.error(`[geofence-handler] auto-flip failed: ${err.message}`);
+  }
+}
+
+// Auto-flip the tech's NEXT scheduled job to en_route, when the
+// system_settings toggle is on and every guardrail passes. This is
+// the only place that auto-fires the customer "Bryan is on the way"
+// SMS based on a GPS departure event. Every decision (skip or fire)
+// is written to geofence_events with a distinct action_taken value
+// for forensic post-mortems.
+//
+// Guardrails (all must pass — failing any one is logged + skipped):
+//   1. system_settings.geofence.auto_flip_on_departure = 'true'
+//   2. Active timer dwell ≥ auto_flip_dwell_minutes (default 10)
+//   3. A next scheduled job exists for this tech, customer != exited
+//   4. Next job's start is within auto_flip_horizon_hours (default 4)
+//   5. No prior auto-flip SMS to that customer in
+//      auto_flip_cooldown_minutes (default 30)
+//
+// Dry-run mode (auto_flip_dry_run=true, the launch default) skips
+// the markEnRoute() call but still writes the geofence_events row
+// with action_taken='auto_flip_dry_run' so we can observe what the
+// system WOULD have done before flipping the real switch.
+async function maybeAutoFlipNextJob({ tech, exitedCustomer, eventTime, lat, lng, imei, payload, dwellMinutes }) {
+  const enabled = await matcher.getAutoFlipOnDeparture();
+  if (!enabled) return;
+
+  const dryRun = await matcher.getAutoFlipDryRun();
+  const minDwell = await matcher.getAutoFlipDwellMinutes();
+  const horizonHours = await matcher.getAutoFlipHorizonHours();
+  const cooldownMin = await matcher.getAutoFlipCooldownMinutes();
+
+  const baseLog = {
+    bouncie_imei: imei,
+    technician_id: tech.id,
+    event_type: 'EXIT',
+    latitude: lat,
+    longitude: lng,
+    matched_customer_id: exitedCustomer.id,
+    raw_payload: payload,
+    event_timestamp: eventTime,
+  };
+
+  // Guardrail 2: minimum dwell at the customer just exited. Filters
+  // GPS jitter and brief stops (red light, bathroom, off-route lunch).
+  if (dwellMinutes != null && dwellMinutes < minDwell) {
+    await matcher.logEvent({
+      ...baseLog,
+      action_taken: 'auto_flip_skipped_dwell',
+    });
+    return;
+  }
+
+  // Guardrail 3: must have a next scheduled job for this tech that
+  // isn't the customer we just left.
+  const nextJob = await matcher.findNextScheduledJobForTech(
+    tech.id,
+    eventTime,
+    exitedCustomer.id
+  );
+  if (!nextJob) {
+    await matcher.logEvent({
+      ...baseLog,
+      action_taken: 'auto_flip_skipped_no_next_job',
+    });
+    return;
+  }
+
+  // Guardrail 4: next job's window_start is within the horizon. The
+  // window is stored as a TIME on a separate scheduled_date column;
+  // compose into a JS Date to compare against horizon hours from the
+  // departure timestamp.
+  const horizonMs = horizonHours * 60 * 60 * 1000;
+  const windowStartIso = composeIso(nextJob.scheduled_date, nextJob.window_start);
+  if (!windowStartIso) {
+    await matcher.logEvent({
+      ...baseLog,
+      matched_job_id: nextJob.id,
+      action_taken: 'auto_flip_skipped_no_window',
+    });
+    return;
+  }
+  const startsAtMs = new Date(windowStartIso).getTime();
+  const eventMs = new Date(eventTime).getTime();
+  if (startsAtMs - eventMs > horizonMs) {
+    await matcher.logEvent({
+      ...baseLog,
+      matched_job_id: nextJob.id,
+      action_taken: 'auto_flip_skipped_horizon',
+    });
+    return;
+  }
+
+  // Guardrail 5: customer-level cooldown so a tech who exits and
+  // then re-enters the same neighborhood doesn't double-text a
+  // customer. Reads geofence_events for prior auto-flip rows.
+  const recent = await matcher.isRecentAutoFlipForCustomer(nextJob.customer_id, cooldownMin);
+  if (recent) {
+    await matcher.logEvent({
+      ...baseLog,
+      matched_customer_id: nextJob.customer_id,
+      matched_job_id: nextJob.id,
+      action_taken: 'auto_flip_skipped_cooldown',
+    });
+    return;
+  }
+
+  // Dry-run: log as if we fired, but skip markEnRoute. Lets ops
+  // observe production behavior for a week without customer impact.
+  if (dryRun) {
+    await matcher.logEvent({
+      ...baseLog,
+      matched_customer_id: nextJob.customer_id,
+      matched_job_id: nextJob.id,
+      action_taken: 'auto_flip_dry_run',
+    });
+    await auditLog.recordAuditEvent({
+      actor_type: 'system:geofence-automation',
+      action: 'auto_flip_dry_run',
+      resource_type: 'scheduled_service',
+      resource_id: nextJob.id,
+      metadata: {
+        tech_id: tech.id,
+        exited_customer_id: exitedCustomer.id,
+        next_customer_id: nextJob.customer_id,
+        dwell_minutes: dwellMinutes,
+        horizon_hours: horizonHours,
+      },
+    });
+    return;
+  }
+
+  // Live fire. markEnRoute is atomic + idempotent + opt-out-respecting
+  // (notification_prefs.tech_en_route + sms_enabled gating lives in
+  // sendTechEnRoute). A retap or concurrent flip lands as a no-op.
+  let result = null;
+  try {
+    result = await trackTransitions.markEnRoute(nextJob.id, { etaMinutes: null });
+  } catch (err) {
+    logger.error(`[geofence-handler] markEnRoute failed: ${err.message}`);
+  }
+
+  await matcher.logEvent({
+    ...baseLog,
+    matched_customer_id: nextJob.customer_id,
+    matched_job_id: nextJob.id,
+    action_taken: 'auto_flip_en_route',
+  });
+  await auditLog.recordAuditEvent({
+    actor_type: 'system:geofence-automation',
+    action: 'auto_flip_en_route',
+    resource_type: 'scheduled_service',
+    resource_id: nextJob.id,
+    metadata: {
+      tech_id: tech.id,
+      exited_customer_id: exitedCustomer.id,
+      next_customer_id: nextJob.customer_id,
+      dwell_minutes: dwellMinutes,
+      mark_en_route_result: result || null,
+    },
+  });
+}
+
+// Compose a scheduled_date (DATE) + window_start (TIME) pair into a
+// naive local-TZ ISO string the JS Date constructor can parse. The
+// horizon comparison is in millis so TZ skew across the 4-hour window
+// is small enough not to matter; if we ever tighten the horizon below
+// 1 hour, switch to a TZ-aware composition.
+function composeIso(scheduledDate, windowTime) {
+  if (!scheduledDate || !windowTime) return null;
+  const datePart = scheduledDate instanceof Date
+    ? scheduledDate.toISOString().slice(0, 10)
+    : String(scheduledDate).slice(0, 10);
+  const timePart = String(windowTime).slice(0, 8);
+  return `${datePart}T${timePart}`;
 }
 
 function customerName(c) {
