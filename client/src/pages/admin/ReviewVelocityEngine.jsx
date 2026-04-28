@@ -31,11 +31,45 @@ const C = {
 };
 
 // ── GBP Locations ──
+//
+// Source of truth: server/config/locations.js (WAVES_LOCATIONS). The four
+// IDs / review URLs below mirror that file exactly so the
+// /admin/reviews/outreach-candidates response (which returns
+// customers.nearest_location_id) joins cleanly without falling back to
+// city-zone routing. Waves operates four GBPs — Lakewood Ranch (HQ),
+// Parrish, Sarasota, and Venice. Port Charlotte / Punta Gorda is in the
+// service footprint but does NOT have its own GBP — those customers
+// route to Venice. Zones / zips below are kept aligned with the
+// CITY_TO_LOCATION map in server/config/locations.js.
 const GBP_LOCATIONS = [
-  { id: 'bradenton', name: 'Bradenton / Parrish', zones: ['bradenton','parrish','ellenton','palmetto','terra ceia','memphis'], zips: ['34201','34202','34203','34205','34207','34208','34209','34210','34211','34212','34219','34221'], reviewUrl: 'https://g.page/r/CRkzS6M4EpncEBE/review' },
-  { id: 'sarasota', name: 'Sarasota / LWR', zones: ['sarasota','lakewood ranch','university park','longboat key','siesta key','bee ridge','fruitville'], zips: ['34231','34232','34233','34234','34235','34236','34237','34238','34239','34240','34241','34242','34243'], reviewUrl: 'https://g.page/r/SARASOTA_PLACEHOLDER/review' },
-  { id: 'venice', name: 'Venice / North Port', zones: ['venice','north port','nokomis','englewood','osprey','warm mineral springs','wellen park'], zips: ['34275','34285','34286','34287','34288','34289','34291','34292','34293'], reviewUrl: 'https://g.page/r/VENICE_PLACEHOLDER/review' },
-  { id: 'portcharlotte', name: 'Port Charlotte / Punta Gorda', zones: ['port charlotte','punta gorda','murdock','deep creek','charlotte harbor'], zips: ['33947','33948','33949','33950','33952','33953','33954','33955','33980','33981','33982','33983'], reviewUrl: 'https://g.page/r/PORTCHARLOTTE_PLACEHOLDER/review' },
+  {
+    id: 'lakewood-ranch',
+    name: 'Lakewood Ranch / Bradenton',
+    zones: ['lakewood ranch','bradenton','university park'],
+    zips: ['34201','34202','34203','34205','34207','34208','34209','34210','34211','34212'],
+    reviewUrl: 'https://g.page/r/CVRc_P5butTMEBM/review',
+  },
+  {
+    id: 'parrish',
+    name: 'Parrish / Palmetto',
+    zones: ['parrish','palmetto','ellenton','ruskin','apollo beach','terra ceia','memphis'],
+    zips: ['34219','34221','34222'],
+    reviewUrl: 'https://g.page/r/Ca-4KKoWwFacEBM/review',
+  },
+  {
+    id: 'sarasota',
+    name: 'Sarasota / Siesta Key',
+    zones: ['sarasota','siesta key','lido key','osprey','longboat key','bee ridge','fruitville'],
+    zips: ['34231','34232','34233','34234','34235','34236','34237','34238','34239','34240','34241','34242','34243'],
+    reviewUrl: 'https://g.page/r/CRkzS6M4EpncEBM/review',
+  },
+  {
+    id: 'venice',
+    name: 'Venice / North Port',
+    zones: ['venice','north port','englewood','nokomis','port charlotte','punta gorda','warm mineral springs','wellen park'],
+    zips: ['34275','34285','34286','34287','34288','34289','34291','34292','34293','33947','33948','33949','33950','33952','33953','33954','33955','33980','33981','33982','33983'],
+    reviewUrl: 'https://g.page/r/CURA5pQ1KatBEBM/review',
+  },
 ];
 
 const STAGES = {
@@ -495,29 +529,41 @@ function Dashboard({ customers, eligible, sent, reviewed, winback, queue, activi
             const locQueue = locCusts.filter(c => !c.suppressed && c.stage === 'not_contacted').length;
             return (
               <div key={loc.id} onClick={() => setPage('pipeline')} style={{
-                background: C.surface, border: `1px solid ${C.bdr}`, borderRadius: 12, padding: 16,
+                background: C.surface, border: `1px solid ${C.bdr}`, borderRadius: 12, padding: isMobile ? 14 : 18,
                 cursor: 'pointer', transition: 'all .15s',
               }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700 }}>{loc.name}</div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: isMobile ? 10 : 14 }}>
+                  <div style={{ fontSize: isMobile ? 13 : 14, fontWeight: 700 }}>{loc.name}</div>
                   <Tag type="acc">{locCusts.length} customers</Tag>
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 10 }}>
+                {/* Stat strip — 2×2 on phones, 4-col single row on desktop so each
+                    number gets more horizontal space and reads cleanly at a glance. */}
+                <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4, 1fr)', gap: 8 }}>
                   {[
                     { v: locReviewed, l: 'Reviewed' },
                     { v: locSent, l: 'Asked' },
                     { v: locQueue, l: 'In Queue' },
                     { v: `${locSent > 0 ? Math.round(locReviewed / locSent * 100) : 0}%`, l: 'Conv Rate' },
                   ].map(s => (
-                    <div key={s.l} style={{ textAlign: 'center', padding: 6, background: C.input, borderRadius: 8 }}>
-                      <div style={{ fontSize: 14, fontWeight: 700, color: C.acc }}>{s.v}</div>
-                      <div style={{ fontSize: 10, color: C.t3, marginTop: 1 }}>{s.l}</div>
+                    <div key={s.l} style={{ textAlign: 'center', padding: '8px 4px', background: C.input, borderRadius: 8 }}>
+                      <div style={{ fontSize: isMobile ? 14 : 16, fontWeight: 700, color: C.acc }}>{s.v}</div>
+                      <div style={{ fontSize: 10, color: C.t3, marginTop: 2 }}>{s.l}</div>
                     </div>
                   ))}
                 </div>
-                <div style={{ fontSize: 10, color: C.t3, marginTop: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {loc.reviewUrl.substring(0, 50)}...
-                </div>
+                <a
+                  href={loc.reviewUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  style={{
+                    display: 'inline-block', fontSize: 11, color: C.t3, marginTop: 10,
+                    textDecoration: 'none', borderBottom: `1px dotted ${C.bdr}`,
+                  }}
+                  title={loc.reviewUrl}
+                >
+                  Open review link ↗
+                </a>
               </div>
             );
           })}
