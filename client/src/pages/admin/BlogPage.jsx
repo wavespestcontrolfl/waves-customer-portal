@@ -1188,7 +1188,10 @@ export default function BlogPage() {
   if (selectedPost) {
     return (
       <div>
-        <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: '0 0 24px' }}>Content Editor</h1>
+        <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: '0 0 24px' }}>
+          <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Content Editor</span>
+          <span className="hidden md:inline">Content Editor</span>
+        </h1>
         <PostEditor post={selectedPost} onBack={() => setSelectedPost(null)} onUpdate={(p) => { setSelectedPost(null); }} />
       </div>
     );
@@ -1199,7 +1202,10 @@ export default function BlogPage() {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
-        <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>Content Engine</h1>
+        <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>
+          <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Content Engine</span>
+          <span className="hidden md:inline">Content Engine</span>
+        </h1>
         <button onClick={handleGenerateIdeas} disabled={generatingIdeas} style={{
           padding: '8px 16px', borderRadius: 8, border: `1px solid ${D.teal}`, background: 'transparent',
           color: D.teal, fontSize: 13, fontWeight: 500, cursor: 'pointer', opacity: generatingIdeas ? 0.5 : 1,

@@ -177,7 +177,10 @@ export default function DashboardPageV2() {
             <div className="u-label text-ink-secondary max-md:text-13 max-md:tracking-normal max-md:normal-case max-md:font-medium max-md:text-zinc-500">
               {todayLabel}
             </div>
-            <h1 className="text-28 font-normal tracking-h1 mt-1 max-md:mt-2">{greeting()}, Adam</h1>
+            <h1 className="text-28 font-normal tracking-h1 mt-1 max-md:mt-2">
+              <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>{greeting()}, Adam</span>
+              <span className="hidden md:inline">{greeting()}, Adam</span>
+            </h1>
           </div>
         </div>
       </header>

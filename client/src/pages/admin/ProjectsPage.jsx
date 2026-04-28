@@ -76,7 +76,10 @@ export default function ProjectsPage() {
         display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12,
       }}>
         <div>
-          <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>Projects</h1>
+          <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>
+            <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Projects</span>
+            <span className="hidden md:inline">Projects</span>
+          </h1>
         </div>
         <button
           type="button"

@@ -182,7 +182,10 @@ export default function GeofenceEventsPage() {
     <div className="px-6 py-6 max-w-7xl mx-auto">
       <header className="mb-6 flex items-end justify-between gap-4">
         <div>
-          <h1 className="text-28 font-normal tracking-h1 text-ink-primary">Geofence events</h1>
+          <h1 className="text-28 font-normal tracking-h1 text-ink-primary">
+            <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Geofence events</span>
+            <span className="hidden md:inline">Geofence events</span>
+          </h1>
         </div>
         <Button variant="ghost" onClick={load} disabled={loading}>
           {loading ? 'Loading…' : 'Refresh'}

@@ -74,7 +74,10 @@ export default function ToolHealthPage() {
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <div>
-          <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>Tool Health</h1>
+          <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>
+            <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Tool Health</span>
+            <span className="hidden md:inline">Tool Health</span>
+          </h1>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           {[1, 24, 24 * 7].map(h => (
