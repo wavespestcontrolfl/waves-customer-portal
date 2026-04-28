@@ -1,13 +1,47 @@
-const CACHE_NAME = 'waves-v4';
+const CACHE_NAME = 'waves-v5';
+const OFFLINE_URL = '/';
+
+const OFFLINE_FALLBACK_HTML = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reconnecting…</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#0f1923;color:#e2e8f0;
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  .wrap{min-height:100%;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;padding:24px;text-align:center}
+  .logo{width:56px;height:56px;border-radius:14px;background:linear-gradient(135deg,#0ea5e9,#38bdf8);
+    display:flex;align-items:center;justify-content:center;font-weight:800;font-size:26px;color:#fff;margin-bottom:18px}
+  h1{font-size:18px;margin:0 0 6px;font-weight:700}
+  p{font-size:13px;margin:0 0 18px;color:#94a3b8;max-width:320px;line-height:1.5}
+  button{padding:10px 22px;background:#0ea5e9;color:#fff;border:0;border-radius:8px;
+    font-size:14px;font-weight:600;cursor:pointer}
+</style></head>
+<body><div class="wrap">
+  <div class="logo">W</div>
+  <h1>Reconnecting…</h1>
+  <p>Waves needs a connection to load. We'll reload automatically when you're back online.</p>
+  <button onclick="location.reload()">Try again</button>
+</div>
+<script>
+  addEventListener('online', () => location.reload());
+  // Re-attempt periodically in case the offline event misses (iOS sometimes does).
+  setTimeout(() => { if (navigator.onLine) location.reload(); }, 4000);
+</script></body></html>`;
 
 self.addEventListener('install', event => {
-  self.skipWaiting(); // Activate immediately, don't wait for old tabs to close
+  event.waitUntil(
+    caches.open(CACHE_NAME).then(cache => cache.add(new Request(OFFLINE_URL, { cache: 'reload' }))).catch(() => {})
+  );
+  self.skipWaiting();
 });
 
 self.addEventListener('activate', event => {
-  // Delete ALL old caches on activate
   event.waitUntil(
-    caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))))
+    caches.keys().then(keys => Promise.all(
+      keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k))
+    ))
   );
   self.clients.claim();
 });
@@ -20,12 +54,29 @@ self.addEventListener('fetch', event => {
   if (url.pathname.startsWith('/api/')) return;
   if (url.pathname.startsWith('/ws/')) return;
 
-  // HTML navigation requests: ALWAYS go to network first
-  // This ensures deploys are picked up immediately
+  // HTML navigation requests: network-first with offline fallback.
+  // ALWAYS return a Response (never undefined) so iOS standalone PWAs
+  // never render a blank screen on flaky cellular.
   if (event.request.mode === 'navigate' || event.request.destination === 'document') {
-    event.respondWith(
-      fetch(event.request).catch(() => caches.match('/'))
-    );
+    event.respondWith((async () => {
+      try {
+        const response = await fetch(event.request);
+        // Stash a copy of the SPA shell so we have an offline fallback that
+        // references the same hashed assets we already have cached.
+        if (response && response.ok) {
+          const clone = response.clone();
+          caches.open(CACHE_NAME).then(cache => cache.put(OFFLINE_URL, clone)).catch(() => {});
+        }
+        return response;
+      } catch {
+        const cached = (await caches.match(OFFLINE_URL)) || (await caches.match(event.request));
+        if (cached) return cached;
+        return new Response(OFFLINE_FALLBACK_HTML, {
+          status: 200,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        });
+      }
+    })());
     return;
   }
 
