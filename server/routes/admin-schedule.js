@@ -1327,45 +1327,73 @@ router.put('/:id/status', async (req, res, next) => {
             if (latest) {
               const latestStr = String(latest.scheduled_date).split('T')[0];
               const rOpts = { nth: parent.recurring_nth, weekday: parent.recurring_weekday, intervalDays: parent.recurring_interval_days };
-              const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, 1, rOpts);
               const skipParent = cols.skip_weekends ? !!parent.skip_weekends : false;
               const dirParent = cols.weekend_shift ? (parent.weekend_shift === 'back' ? 'back' : 'forward') : 'forward';
-              const nextStr = shiftPastWeekend(rawNext, skipParent, dirParent);
-              const nextData = {
-                customer_id: parent.customer_id,
-                technician_id: parent.technician_id,
-                scheduled_date: nextStr,
-                window_start: parent.window_start, window_end: parent.window_end,
-                service_type: parent.service_type, status: 'pending',
-                time_window: parent.time_window, zone: parent.zone,
-                estimated_duration_minutes: parent.estimated_duration_minutes,
-                is_recurring: true, recurring_pattern: parent.recurring_pattern,
-                recurring_parent_id: parentId,
-              };
-              if (cols.recurring_ongoing) nextData.recurring_ongoing = true;
-              if (cols.skip_weekends) nextData.skip_weekends = skipParent;
-              if (cols.weekend_shift && skipParent) nextData.weekend_shift = dirParent;
-              if (cols.service_id && parent.service_id) nextData.service_id = parent.service_id;
-              if (cols.estimated_price && parent.estimated_price != null) nextData.estimated_price = parent.estimated_price;
-              const [autoExtRow] = await db('scheduled_services').insert(nextData).returning('*');
-              // Mirror parent's add-on lines onto the auto-extended visit
-              // so a multi-service ongoing series keeps its full scope
-              // (and billing) past the seeded 4-visit window.
-              try {
-                const parentAddons = await db('scheduled_service_addons')
-                  .where({ scheduled_service_id: parentId });
-                if (parentAddons.length > 0 && autoExtRow?.id) {
-                  for (const addon of parentAddons) {
-                    await db('scheduled_service_addons').insert({
-                      scheduled_service_id: autoExtRow.id,
-                      service_id: addon.service_id || null,
-                      service_name: addon.service_name,
-                      estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
-                    });
+              // Pre-load every active date on this series (base + boosters,
+              // pending or completed — cancelled/rescheduled rows don't
+              // occupy a slot) so we can dedupe the auto-extend insert
+              // against future booster rows that share recurring_parent_id.
+              // Without this, ongoing+booster combos can double-book — e.g.
+              // a Jan-anchored quarterly series with a January booster has a
+              // booster row at Jan 15 next year, and the auto-extend computed
+              // from latest=Oct 15 lands on the same Jan 15.
+              const existingRows = await db('scheduled_services')
+                .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+                .whereNotIn('status', ['cancelled', 'rescheduled'])
+                .select('scheduled_date');
+              const existingDates = new Set(existingRows
+                .map((r) => String(r.scheduled_date || '').split('T')[0])
+                .filter(Boolean));
+              // Advance until we find an open date or give up. Each step
+              // moves one cadence interval forward from latestStr; capped to
+              // avoid runaway loops on degenerate patterns.
+              let attempt = 1;
+              let nextStr = null;
+              while (attempt <= 12) {
+                const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
+                const candidate = shiftPastWeekend(rawNext, skipParent, dirParent);
+                if (!existingDates.has(candidate)) { nextStr = candidate; break; }
+                attempt++;
+              }
+              if (!nextStr) {
+                logger.warn(`[recurring] Auto-extend skipped for parent=${parentId} — every candidate within 12 cadence steps already booked`);
+              } else {
+                const nextData = {
+                  customer_id: parent.customer_id,
+                  technician_id: parent.technician_id,
+                  scheduled_date: nextStr,
+                  window_start: parent.window_start, window_end: parent.window_end,
+                  service_type: parent.service_type, status: 'pending',
+                  time_window: parent.time_window, zone: parent.zone,
+                  estimated_duration_minutes: parent.estimated_duration_minutes,
+                  is_recurring: true, recurring_pattern: parent.recurring_pattern,
+                  recurring_parent_id: parentId,
+                };
+                if (cols.recurring_ongoing) nextData.recurring_ongoing = true;
+                if (cols.skip_weekends) nextData.skip_weekends = skipParent;
+                if (cols.weekend_shift && skipParent) nextData.weekend_shift = dirParent;
+                if (cols.service_id && parent.service_id) nextData.service_id = parent.service_id;
+                if (cols.estimated_price && parent.estimated_price != null) nextData.estimated_price = parent.estimated_price;
+                const [autoExtRow] = await db('scheduled_services').insert(nextData).returning('*');
+                // Mirror parent's add-on lines onto the auto-extended visit
+                // so a multi-service ongoing series keeps its full scope
+                // (and billing) past the seeded 4-visit window.
+                try {
+                  const parentAddons = await db('scheduled_service_addons')
+                    .where({ scheduled_service_id: parentId });
+                  if (parentAddons.length > 0 && autoExtRow?.id) {
+                    for (const addon of parentAddons) {
+                      await db('scheduled_service_addons').insert({
+                        scheduled_service_id: autoExtRow.id,
+                        service_id: addon.service_id || null,
+                        service_name: addon.service_name,
+                        estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
+                      });
+                    }
                   }
-                }
-              } catch (e) { logger.warn(`[recurring] Auto-extend addon mirror failed (non-blocking): ${e.message}`); }
-              logger.info(`[recurring] Auto-extended ongoing plan parent=${parentId} → ${nextData.scheduled_date}`);
+                } catch (e) { logger.warn(`[recurring] Auto-extend addon mirror failed (non-blocking): ${e.message}`); }
+                logger.info(`[recurring] Auto-extended ongoing plan parent=${parentId} → ${nextData.scheduled_date}`);
+              }
             }
           } else if (!isOngoing && pendingCount === 0) {
             // Fixed plan just finished — queue an alert if table exists and not already open
@@ -2251,11 +2279,32 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
       } catch (e) { logger.warn(`[recurring-alerts] addon mirror failed (non-blocking): ${e.message}`); }
     };
 
+    // Pre-load every active date already on this series (base recurring +
+    // boosters, pending or completed — cancelled/rescheduled rows don't
+    // occupy a slot, so leaving them out lets the operator re-fill a gap
+    // created by a cancellation). Both extend and convert_ongoing dedupe
+    // against this so an extend computed forward from baseDateStr can't
+    // double-book a future booster — e.g. a Jan-anchored quarterly + January
+    // booster has a Jan 15 next-year row that would otherwise collide with
+    // the first extended visit.
+    let seriesDateSeed;
+    try {
+      const allRows = await db('scheduled_services')
+        .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+        .whereNotIn('status', ['cancelled', 'rescheduled'])
+        .select('scheduled_date');
+      seriesDateSeed = new Set(allRows
+        .map((r) => String(r.scheduled_date || '').split('T')[0])
+        .filter(Boolean));
+    } catch {
+      seriesDateSeed = new Set([baseDateStr]);
+    }
+    seriesDateSeed.add(baseDateStr);
+
     let created = 0;
     if (action === 'extend') {
       const n = Math.min(Math.max(parseInt(count) || 4, 1), 12);
-      const seen = new Set();
-      seen.add(baseDateStr);
+      const seen = new Set(seriesDateSeed);
       const maxAttempts = n * 4 + 30;
       let attempt = 1;
       let inserted = 0;
@@ -2300,8 +2349,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         .where('is_recurring', true)
         .where('status', 'pending').count('* as c').first())?.c || 0);
       const need = Math.max(0, 3 - pendingCount);
-      const seen = new Set();
-      seen.add(baseDateStr);
+      const seen = new Set(seriesDateSeed);
       const maxAttempts = need * 4 + 30;
       let attempt = 1;
       let inserted = 0;
