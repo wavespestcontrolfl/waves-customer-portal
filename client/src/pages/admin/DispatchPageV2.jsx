@@ -785,6 +785,17 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
     setGridStats(stats);
   }, []);
 
+  // Reset gridStats whenever the visible range changes (different date or
+  // a different viewMode). Otherwise the centered stats row keeps showing
+  // the prior range's totals until the new TimeGridDays fetch lands —
+  // e.g. switching Week → Day still showed the 7-day count for a beat.
+  // The cleared state falls back to the single-day `services` numbers
+  // (already date-correct via fetchSchedule) until the grid emits fresh
+  // stats.
+  useEffect(() => {
+    setGridStats(null);
+  }, [date, viewMode]);
+
   // Expose "open create modal" to AdminDispatchPage so the lifted "+ Add
   // Appointment" pill in its header can trigger this page's modal.
   useEffect(() => {
