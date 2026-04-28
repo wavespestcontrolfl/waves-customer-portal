@@ -41,11 +41,16 @@ router.get('/', async (req, res, next) => {
   try {
     const { location, rating, responded, search, page = 1, limit = 30 } = req.query;
 
-    // Exclude stats rows and dismissed reviews from actual reviews
+    // Exclude stats rows and dismissed reviews from actual reviews.
+    // Scoped to active WAVES_LOCATIONS so the displayed list stays
+    // consistent with the aggregate stats (retired-location rows
+    // wouldn't be filterable in the dropdown anyway).
     const showDismissed = req.query.dismissed === 'true';
+    const activeLocationIds = WAVES_LOCATIONS.map(l => l.id);
     let query = db('google_reviews')
       .leftJoin('customers', 'google_reviews.customer_id', 'customers.id')
       .where('google_reviews.reviewer_name', '!=', '_stats')
+      .whereIn('google_reviews.location_id', activeLocationIds)
       .modify(qb => { if (!showDismissed) qb.where(function() { this.where('google_reviews.dismissed', false).orWhereNull('google_reviews.dismissed'); }); })
       .select(
         'google_reviews.*',
@@ -66,18 +71,30 @@ router.get('/', async (req, res, next) => {
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const reviews = await query.limit(parseInt(limit)).offset(offset);
 
-    // Get real Google stats from Places API (stored during sync)
-    const statsRows = await db('google_reviews').where({ reviewer_name: '_stats' });
+    // Get real Google stats from Places API (stored during sync).
+    // Restrict to currently-configured WAVES_LOCATIONS so a `_stats`
+    // row from a retired/renamed location can't inflate totalReviews
+    // or the average. Track synced_at per row so we can distinguish
+    // fresh stats from stale rows left behind when a location's sync
+    // stopped updating.
+    const statsRows = await db('google_reviews')
+      .where({ reviewer_name: '_stats' })
+      .whereIn('location_id', activeLocationIds);
     const googleStats = {};
     for (const row of statsRows) {
       try {
         const parsed = JSON.parse(row.review_text);
-        googleStats[row.location_id] = { rating: parsed.rating, totalReviews: parsed.totalReviews };
+        googleStats[row.location_id] = { rating: parsed.rating, totalReviews: parsed.totalReviews, syncedAt: row.synced_at };
       } catch { /* ignore */ }
     }
 
-    // Aggregate stats from actual reviews (excluding _stats rows)
-    const reviewsOnly = db('google_reviews').where('reviewer_name', '!=', '_stats');
+    // Aggregate stats from actual reviews (excluding _stats rows).
+    // Scoped to currently-configured WAVES_LOCATIONS so unreplied reviews
+    // from retired/renamed GBPs don't pad the unresponded count and
+    // skew the response-rate math (denominator already excludes them).
+    const reviewsOnly = db('google_reviews')
+      .where('reviewer_name', '!=', '_stats')
+      .whereIn('location_id', activeLocationIds);
     const [totals, unresponded, respondedCountRow, thisMonth, perLocation] = await Promise.all([
       reviewsOnly.clone().select(
         db.raw('COUNT(*) as total'),
@@ -92,14 +109,38 @@ router.get('/', async (req, res, next) => {
         .groupBy('location_id'),
     ]);
 
-    // Star breakdown (exclude stats rows)
-    const breakdown = await db('google_reviews').where('reviewer_name', '!=', '_stats').select('star_rating').count('* as count').groupBy('star_rating').orderBy('star_rating', 'desc');
+    // Star breakdown (exclude stats rows; scope to active locations).
+    const breakdown = await db('google_reviews')
+      .where('reviewer_name', '!=', '_stats')
+      .whereIn('location_id', activeLocationIds)
+      .select('star_rating').count('* as count')
+      .groupBy('star_rating').orderBy('star_rating', 'desc');
 
     // Use Google's real totals if available
     const totalGoogleReviews = Object.values(googleStats).reduce((s, g) => s + (g.totalReviews || 0), 0);
     const avgGoogleRating = Object.values(googleStats).length > 0
       ? (Object.values(googleStats).reduce((s, g) => s + (g.rating || 0), 0) / Object.values(googleStats).filter(g => g.rating).length).toFixed(1)
       : parseFloat(totals?.avg_rating || 0);
+    // True only when every currently-configured location has a `_stats`
+    // row whose synced_at is recent. Places sync runs hourly and
+    // swallows per-location errors (services/google-business.js
+    // syncAllReviews), so a stale row from a previous successful run
+    // can outlive the failure. We check each WAVES_LOCATIONS ID
+    // explicitly (rather than aggregate row counts) so a stale row from
+    // a retired location can't satisfy the count while a newly added
+    // location has no row yet. The 24h window absorbs transient sync
+    // hiccups; once any configured location goes a full day without a
+    // fresh _stats write, the client falls back to the
+    // responded+unresponded denominator.
+    const STATS_FRESH_MS = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const isFresh = (locId) => {
+      const g = googleStats[locId];
+      if (!g?.syncedAt) return false;
+      const t = new Date(g.syncedAt).getTime();
+      return t > 0 && (now - t) <= STATS_FRESH_MS;
+    };
+    const googleStatsComplete = WAVES_LOCATIONS.every(loc => isFresh(loc.id));
 
     res.json({
       reviews: reviews.map(r => ({
@@ -113,6 +154,7 @@ router.get('/', async (req, res, next) => {
       })),
       stats: {
         totalReviews: totalGoogleReviews || parseInt(totals?.total || 0),
+        googleStatsComplete,
         avgRating: parseFloat(avgGoogleRating) || parseFloat(totals?.avg_rating || 0),
         unresponded: parseInt(unresponded?.count || 0),
         // `responded` is computed from the same google_reviews dataset as
