@@ -4,7 +4,26 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const timeTracking = require('../services/time-tracking');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
+const { etParts, etDateString, addETDays, parseETDateTime, etWeekStart } = require('../utils/datetime-et');
+
+// When an admin mutates time data on a week the tech has already
+// signed (PUT/DELETE entries, daily reject/reopen, dispute), the
+// previous attestation no longer reflects the on-record hours. Clear
+// the sign-off so the tech has to re-sign after seeing the corrected
+// data. No-ops on already-approved weeks (admin-side approval is the
+// terminal lock; we don't reach into a locked row from here).
+async function clearTechSignoffForWeek(technicianId, workDate, trx) {
+  if (!technicianId || !workDate) return;
+  const dateStr = typeof workDate === 'string'
+    ? workDate.split('T')[0]
+    : etDateString(new Date(workDate));
+  const weekStart = etWeekStart(parseETDateTime(`${dateStr}T12:00`));
+  await (trx || db)('time_weekly_summary')
+    .where({ technician_id: technicianId, week_start: weekStart })
+    .whereNot({ status: 'approved' })
+    .whereNotNull('tech_signed_at')
+    .update({ tech_signed_at: null, tech_signature: null, updated_at: new Date() });
+}
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -217,6 +236,9 @@ router.put('/entries/:id', async (req, res, next) => {
       edit_reason,
       edited_by: req.technicianId,
     });
+    if (updated && updated.technician_id) {
+      await clearTechSignoffForWeek(updated.technician_id, updated.clock_in);
+    }
     res.json(updated);
   } catch (err) {
     next(err);
@@ -233,6 +255,9 @@ router.delete('/entries/:id', async (req, res, next) => {
       reason: reason || 'Admin voided',
       voided_by: req.technicianId,
     });
+    if (voided && voided.technician_id) {
+      await clearTechSignoffForWeek(voided.technician_id, voided.clock_in);
+    }
     res.json(voided);
   } catch (err) {
     next(err);
@@ -338,6 +363,7 @@ router.put('/daily/:id/reject', async (req, res, next) => {
       })
       .returning('*');
     await recordApprovalAudit(prior, 'rejected', req.technicianId, reason);
+    await clearTechSignoffForWeek(updated.technician_id, updated.work_date);
     notifyTechOfApproval(updated, 'rejected', reason);
     res.json(updated);
   } catch (err) {
@@ -362,6 +388,7 @@ router.put('/daily/:id/reopen', async (req, res, next) => {
       })
       .returning('*');
     await recordApprovalAudit(prior, 'reopened', req.technicianId, req.body?.reason || null);
+    await clearTechSignoffForWeek(updated.technician_id, updated.work_date);
     notifyTechOfApproval(updated, 'reopened');
     res.json(updated);
   } catch (err) {
