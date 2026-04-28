@@ -17,27 +17,32 @@ function addCalendarDaysToYMD(ymd, days) {
   return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
 }
 
+// Convert a SQL DATE column to YYYY-MM-DD WITHOUT going through the
+// ET shift. pg+knex returns DATE as either a Date at UTC midnight or
+// a YYYY-MM-DD string; both yield the same calendar day via
+// toISOString().slice(0,10), unlike etDateString(new Date(d)) which
+// would push UTC midnight back to the prior ET day.
+function dateColumnToYMD(value) {
+  if (value == null) return null;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
 // When an admin mutates time data on a week the tech has already
 // signed (PUT/DELETE entries, daily reject/reopen, dispute), the
 // previous attestation no longer reflects the on-record hours. Clear
 // the sign-off so the tech has to re-sign after seeing the corrected
 // data. No-ops on already-approved weeks (admin-side approval is the
 // terminal lock; we don't reach into a locked row from here).
-async function clearTechSignoffForWeek(technicianId, workDate, trx) {
-  if (!technicianId || !workDate) return;
-  // Two input shapes:
-  //   - YYYY-MM-DD (work_date DATE column from daily summaries) — use as-is
-  //   - timestamp string or Date (clock_in TIMESTAMP from time_entries) —
-  //     convert through etDateString so we get the ET calendar date.
-  //     A naive split('T')[0] would treat 03:30 UTC (which is the prior
-  //     day in ET) as the same calendar day, clearing the wrong week.
-  let dateStr;
-  if (typeof workDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(workDate)) {
-    dateStr = workDate;
-  } else {
-    dateStr = etDateString(new Date(workDate));
-  }
-  const weekStart = etWeekStart(parseETDateTime(`${dateStr}T12:00`));
+async function clearTechSignoffForWeek(technicianId, ymd, trx) {
+  if (!technicianId || !ymd || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return;
+  // ymd MUST be a YYYY-MM-DD string. Callers convert timestamps via
+  // etDateString(new Date(timestamp)) and DATE columns via the
+  // dateColumnToYMD helper — passing a Date directly would re-introduce
+  // the UTC-midnight-vs-ET confusion (Mon UTC-midnight is Sun in ET,
+  // so etDateString would shift the wrong way for a DATE column while
+  // being correct for a real timestamp).
+  const weekStart = etWeekStart(parseETDateTime(`${ymd}T12:00`));
   await (trx || db)('time_weekly_summary')
     .where({ technician_id: technicianId, week_start: weekStart })
     .whereNot({ status: 'approved' })
@@ -293,7 +298,10 @@ router.put('/entries/:id', requireTechOrAdmin, async (req, res, next) => {
       edited_by: req.technicianId,
     });
     if (updated && updated.technician_id) {
-      await clearTechSignoffForWeek(updated.technician_id, updated.clock_in);
+      // clock_in is a TIMESTAMP — convert to its ET calendar day
+      // before passing to the YMD-only helper.
+      const updatedYmd = etDateString(new Date(updated.clock_in));
+      await clearTechSignoffForWeek(updated.technician_id, updatedYmd);
       // If the entry moved across weeks OR was reassigned to a
       // different tech, the SOURCE tech's source week also has
       // changed totals — clear that with the prior tech_id, not the
@@ -303,7 +311,8 @@ router.put('/entries/:id', requireTechOrAdmin, async (req, res, next) => {
         String(prior.clock_in) !== String(updated.clock_in) ||
         prior.technician_id !== updated.technician_id
       )) {
-        await clearTechSignoffForWeek(prior.technician_id, prior.clock_in);
+        const priorYmd = etDateString(new Date(prior.clock_in));
+        await clearTechSignoffForWeek(prior.technician_id, priorYmd);
       }
     }
     res.json(updated);
@@ -323,7 +332,9 @@ router.delete('/entries/:id', requireTechOrAdmin, async (req, res, next) => {
       voided_by: req.technicianId,
     });
     if (voided && voided.technician_id) {
-      await clearTechSignoffForWeek(voided.technician_id, voided.clock_in);
+      // clock_in is a TIMESTAMP — convert to its ET calendar day.
+      const voidedYmd = etDateString(new Date(voided.clock_in));
+      await clearTechSignoffForWeek(voided.technician_id, voidedYmd);
     }
     res.json(voided);
   } catch (err) {
@@ -430,7 +441,9 @@ router.put('/daily/:id/reject', requireTechOrAdmin, async (req, res, next) => {
       })
       .returning('*');
     await recordApprovalAudit(prior, 'rejected', req.technicianId, reason);
-    await clearTechSignoffForWeek(updated.technician_id, updated.work_date);
+    // work_date is a SQL DATE column — format directly as YMD so we
+    // don't shift through ET (UTC midnight Date would drop a day).
+    await clearTechSignoffForWeek(updated.technician_id, dateColumnToYMD(updated.work_date));
     notifyTechOfApproval(updated, 'rejected', reason);
     res.json(updated);
   } catch (err) {
@@ -455,7 +468,7 @@ router.put('/daily/:id/reopen', requireTechOrAdmin, async (req, res, next) => {
       })
       .returning('*');
     await recordApprovalAudit(prior, 'reopened', req.technicianId, req.body?.reason || null);
-    await clearTechSignoffForWeek(updated.technician_id, updated.work_date);
+    await clearTechSignoffForWeek(updated.technician_id, dateColumnToYMD(updated.work_date));
     notifyTechOfApproval(updated, 'reopened');
     res.json(updated);
   } catch (err) {

@@ -182,8 +182,10 @@ async function disputeEntry({ entryId, adminId, reason }) {
 
   // Disputing an entry mutates the on-record hours for the week, so
   // any prior tech sign-off on this week is now stale — clear it so
-  // the tech re-signs after the correction.
-  const weekStart = etWeekStart(parseETDateTime(`${etDateString(new Date(entry.clock_in))}T12:00`));
+  // the tech re-signs after the correction. clock_in is a TIMESTAMP,
+  // so go through etDateString to land on the right ET calendar day.
+  const entryYmd = etDateString(new Date(entry.clock_in));
+  const weekStart = etWeekStart(parseETDateTime(`${entryYmd}T12:00`));
   await db('time_weekly_summary')
     .where({ technician_id: entry.technician_id, week_start: weekStart })
     .whereNot({ status: 'approved' })

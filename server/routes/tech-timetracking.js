@@ -27,6 +27,18 @@ function sundayOfETWeek(mondayStr) {
   return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
 }
 
+// Convert whatever a SQL DATE column gives us (JS Date at UTC
+// midnight per pg+knex, or a YYYY-MM-DD string in some drivers) into
+// a YYYY-MM-DD string WITHOUT shifting through ET. etDateString on a
+// UTC-midnight Date drops to the prior ET day (e.g., Mon UTC midnight
+// is Sun 8pm EDT) which is the wrong calendar day for a DATE column
+// — DATE has no time, the calendar day is the entire field.
+function dateColumnToYMD(value) {
+  if (value == null) return null;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
 // ---------------------------------------------------------------------------
 // POST /clock-in
 // ---------------------------------------------------------------------------
@@ -187,7 +199,10 @@ router.get('/pending-signoff', async (req, res, next) => {
       .first();
     if (!candidate) return res.json({ weekly: null, weekStart: null });
 
-    const weekStartStr = etDateString(new Date(candidate.week_start));
+    // Format the DATE column directly as YYYY-MM-DD — DON'T route
+    // through etDateString(new Date(...)) because that shifts the
+    // UTC-midnight Date back into the prior ET day.
+    const weekStartStr = dateColumnToYMD(candidate.week_start);
 
     // Always recompute the weekly summary before returning it. Existing
     // rows can be stale after late clock-outs or admin entry edits —
