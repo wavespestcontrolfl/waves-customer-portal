@@ -1498,9 +1498,15 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
           amount={paymentData.amount}
           onClose={() => setPaymentData(null)}
           onInvoiceSent={() => {
+            // Invoice SMS+email was just sent — the bill is now in the
+            // customer's hands. Mirror the cash/check tender flow and
+            // punch straight to the completion sheet so the tech can
+            // wrap the visit without a second step.
+            const svc = paymentData.service;
             setPaymentData(null);
             setCheckoutService(null);
             setDetailService(null);
+            setCompletingService(svc);
             fetchSchedule(date);
           }}
           onChargeSuccess={() => {
