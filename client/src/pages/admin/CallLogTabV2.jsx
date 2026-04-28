@@ -182,11 +182,13 @@ export default function CallLogTabV2() {
     if (!callSid || processingCallSid) return;
     setProcessingCallSid(callSid);
     setProcessResult(null);
-    // Always force on user-initiated taps — the concurrent-run guard exists
-    // to dedup webhook double-fires, not to block a manual retry. Without
-    // force, a row stuck at processing_status='processing' (e.g. an earlier
-    // run that crashed before reaching a terminal state) is unrecoverable.
-    const force = true;
+    // force=true only on Reprocess (alreadyProcessed=true) — the user is
+    // explicitly asking to re-run extraction on a completed row. For the
+    // default Process path, defer to the backend claim guard: it lets
+    // pending/null/no_transcription/stale-'processing' (>10min) through,
+    // and correctly blocks an actively-processing row so a concurrent
+    // run can't duplicate side effects (e.g. extra scheduled_services).
+    const force = alreadyProcessed === true;
     try {
       const res = await adminFetch(
         `/admin/call-recordings/process/${callSid}${force ? '?force=true' : ''}`,
@@ -457,7 +459,8 @@ export default function CallLogTabV2() {
                           }
                           // Stuck: has recording but no transcript (auto-processor lost on
                           // restart, Gemini errored, row wedged in processing_status='processing').
-                          // Manual Process always passes force=true so it bypasses the dedup guard.
+                          // Process defers to the backend claim guard — actively-processing
+                          // rows safely no-op, stale 'processing' rows (>10min) get reclaimed.
                           if (c.recording_url && !hasTranscript) {
                             return (
                               <button
