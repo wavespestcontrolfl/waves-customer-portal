@@ -5923,7 +5923,6 @@ function ServiceTracker() {
   const [loading, setLoading] = useState(true);
   const [propertyPrefs, setPropertyPrefs] = useState(null);
   const [weather, setWeather] = useState(null);
-  const [showExpect, setShowExpect] = useState(false);
 
   const fetchTracker = useCallback(() => {
     api.getActiveTracker()
@@ -5971,16 +5970,6 @@ function ServiceTracker() {
   const estComplete = step >= 4 && step < 6 && tracker.steps[3]?.completedAt
     ? new Date(new Date(tracker.steps[3].completedAt).getTime() + svcDuration * 60000)
     : null;
-
-  const whatToExpect = isPest
-    ? 'Your tech will treat the exterior perimeter with a liquid barrier, apply granular product to landscaping beds, check all bait stations, sweep cobwebs from eaves, and treat interior baseboards and entry points.'
-    : isLawn
-    ? "Your tech will inspect your turf for disease, weeds, and insects, apply fertilizer or herbicide based on your lawn's current program schedule, take soil/thatch measurements, and document any recommendations."
-    : isMosquito
-    ? 'Your tech will apply a barrier treatment to all foliage, fence lines, and standing water areas around your property perimeter, including the lanai area.'
-    : isTermite
-    ? 'Your tech will inspect all bait stations, check for evidence of termite activity, and document findings. Any active stations will be serviced.'
-    : 'Your tech will perform a thorough treatment of your property based on your service plan.';
 
   // Status pill: maps the 7-step internal model to the 5-state UI
   // taxonomy used on the public /track/<token> page so authenticated
@@ -6228,30 +6217,6 @@ function ServiceTracker() {
           ))}
         </div>
       )}
-
-      {/* What to Expect — collapsible card. Customer education for
-          the specific service type. */}
-      <div style={{ ...subCardBase, padding: 0, overflow: 'hidden' }}>
-        <button
-          type="button"
-          onClick={() => setShowExpect(!showExpect)}
-          aria-expanded={showExpect}
-          style={{
-            width: '100%', padding: '14px 16px', cursor: 'pointer',
-            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-            background: 'none', border: 'none',
-            fontFamily: FONTS.body, color: B.blueDeeper,
-          }}
-        >
-          <span style={{ fontSize: 16, fontWeight: 600 }}>What to expect</span>
-          <span style={{ fontSize: 14, color: B.textCaption }}>{showExpect ? '▴' : '▾'}</span>
-        </button>
-        {showExpect && (
-          <div style={{ padding: '0 16px 14px', borderTop: `1px solid ${B.offWhite}` }}>
-            <div style={{ fontSize: 15, color: B.textBody, lineHeight: 1.6, marginTop: 10 }}>{whatToExpect}</div>
-          </div>
-        )}
-      </div>
 
       {/* Live notes from tech, if any */}
       {notes.length > 0 && (
