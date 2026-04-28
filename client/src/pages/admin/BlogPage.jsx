@@ -1213,21 +1213,23 @@ export default function BlogPage() {
       </div>
 
       {/* Tabs */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 24, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
-        {TABS.map(t => (
-          <button key={t.key} onClick={() => setTab(t.key)} style={{
-            padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
-            background: tab === t.key ? '#18181B' : 'transparent',
-            color: tab === t.key ? '#FFFFFF' : '#A1A1AA',
-            fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
-            fontFamily: "'DM Sans', sans-serif",
-          }}>
-            {t.label}
-            {counts[statusMap[t.key]] != null && (
-              <span style={{ marginLeft: 6, fontSize: 11, opacity: 0.7 }}>({counts[statusMap[t.key]] || 0})</span>
-            )}
-          </button>
-        ))}
+      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
+        <div style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
+          {TABS.map(t => (
+            <button key={t.key} onClick={() => setTab(t.key)} style={{
+              padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
+              background: tab === t.key ? '#18181B' : 'transparent',
+              color: tab === t.key ? '#FFFFFF' : '#A1A1AA',
+              fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
+              fontFamily: "'DM Sans', sans-serif",
+            }}>
+              {t.label}
+              {counts[statusMap[t.key]] != null && (
+                <span style={{ marginLeft: 6, fontSize: 11, opacity: 0.7 }}>({counts[statusMap[t.key]] || 0})</span>
+              )}
+            </button>
+          ))}
+        </div>
       </div>
 
       {tab === 'generate' ? (

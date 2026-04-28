@@ -1290,24 +1290,26 @@ export default function ReviewsPage() {
       </h1>
 
       {/* ====================== TAB TOGGLE ====================== */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 24, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
-        {[
-          { key: 'reviews', label: 'Reviews' },
-          { key: 'gbp', label: 'GBP Management' },
-          { key: 'outreach', label: 'Review Outreach' },
-        ].map(tab => (
-          <button
-            key={tab.key}
-            onClick={() => setActiveTab(tab.key)}
-            style={{
-              padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
-              background: activeTab === tab.key ? '#18181B' : 'transparent',
-              color: activeTab === tab.key ? '#FFFFFF' : '#A1A1AA',
-              fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
-              fontFamily: "'DM Sans', sans-serif",
-            }}
-          >{tab.label}</button>
-        ))}
+      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
+        <div style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
+          {[
+            { key: 'reviews', label: 'Reviews' },
+            { key: 'gbp', label: 'GBP Management' },
+            { key: 'outreach', label: 'Review Outreach' },
+          ].map(tab => (
+            <button
+              key={tab.key}
+              onClick={() => setActiveTab(tab.key)}
+              style={{
+                padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
+                background: activeTab === tab.key ? '#18181B' : 'transparent',
+                color: activeTab === tab.key ? '#FFFFFF' : '#A1A1AA',
+                fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
+                fontFamily: "'DM Sans', sans-serif",
+              }}
+            >{tab.label}</button>
+          ))}
+        </div>
       </div>
 
       {/* ====================== TAB: REVIEWS ====================== */}
