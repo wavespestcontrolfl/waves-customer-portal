@@ -756,7 +756,7 @@ router.get('/calls-by-source', async (req, res, next) => {
     const rows = await db('call_log as c')
       .leftJoin(
         'lead_sources as s',
-        db.raw("RIGHT(REGEXP_REPLACE(c.to_phone, '\\\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE(s.twilio_phone_number, '\\\\D', '', 'g'), 10)"),
+        db.raw("RIGHT(REGEXP_REPLACE(c.to_phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE(s.twilio_phone_number, '\\D', '', 'g'), 10)"),
       )
       .where('c.direction', 'inbound')
       // Dormant lead_sources rows (e.g. the unpublished AI Agent number)
@@ -769,7 +769,7 @@ router.get('/calls-by-source', async (req, res, next) => {
         // Unmapped rows: render a stable last-10-digit label instead of
         // whatever raw format the legacy importer happened to store.
         db.raw(
-          "COALESCE(s.name, 'Unmapped — ' || RIGHT(REGEXP_REPLACE(c.to_phone, '\\\\D', '', 'g'), 10)) as name",
+          "COALESCE(s.name, 'Unmapped — ' || RIGHT(REGEXP_REPLACE(c.to_phone, '\\D', '', 'g'), 10)) as name",
         ),
         db.raw("s.source_type as source_type"),
         db.raw("s.channel as channel"),
@@ -787,7 +787,7 @@ router.get('/calls-by-source', async (req, res, next) => {
         's.source_type',
         's.channel',
         's.is_active',
-        db.raw("RIGHT(REGEXP_REPLACE(c.to_phone, '\\\\D', '', 'g'), 10)"),
+        db.raw("RIGHT(REGEXP_REPLACE(c.to_phone, '\\D', '', 'g'), 10)"),
       )
       .orderByRaw('COUNT(*) DESC');
 
