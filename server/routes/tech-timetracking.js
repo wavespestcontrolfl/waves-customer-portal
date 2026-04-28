@@ -184,8 +184,13 @@ router.post('/sign-week', async (req, res, next) => {
       return res.status(409).json({ error: 'Week already approved by admin — cannot sign after lock' });
     }
 
-    const [updated] = await db('time_weekly_summary')
+    // Atomic guard: if an admin approves between our read above and
+    // this update, the whereNot predicate makes the update affect 0
+    // rows so we don't stamp tech_signed_at onto a now-locked week.
+    // Returning 409 lets the tech retry / refresh.
+    const updatedRows = await db('time_weekly_summary')
       .where({ id: weekly.id })
+      .whereNot({ status: 'approved' })
       .update({
         tech_signed_at: new Date(),
         tech_signature: String(signature).trim().slice(0, 200),
@@ -193,8 +198,12 @@ router.post('/sign-week', async (req, res, next) => {
       })
       .returning('*');
 
+    if (!updatedRows.length) {
+      return res.status(409).json({ error: 'Week was approved before sign-off completed — refresh and try again' });
+    }
+
     logger.info(`[timetracking] Tech ${req.technicianId} signed week ${start}`);
-    res.json({ success: true, weekly: updated });
+    res.json({ success: true, weekly: updatedRows[0] });
   } catch (err) { next(err); }
 });
 
