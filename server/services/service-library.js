@@ -30,13 +30,25 @@ async function getServices({ category, billingType, isActive, search, limit = 50
   else if (isActive === 'true') query = query.where('is_active', true);
   else if (isActive === 'false') query = query.where('is_active', false);
   if (search) {
-    const s = `%${search}%`;
-    query = query.where(function () {
-      this.where('name', 'ilike', s)
-        .orWhere('short_name', 'ilike', s)
-        .orWhere('service_key', 'ilike', s)
-        .orWhere('description', 'ilike', s);
-    });
+    // Token-AND across the searchable text columns. Splitting on
+    // whitespace and requiring each token to match somewhere lets the
+    // operator type words in any order — "quarterly pest" still finds
+    // "General Pest Control (Quarterly)", "lawn fert" finds "Lawn
+    // Fertilization & Weed Control". Single-token queries collapse to
+    // the same predicate as the old code. `category` is included so
+    // category words like "lawn" / "termite" surface services whose
+    // display name doesn't repeat the category.
+    const tokens = String(search).trim().split(/\s+/).filter(Boolean);
+    for (const tok of tokens) {
+      const t = `%${tok}%`;
+      query = query.where(function () {
+        this.where('name', 'ilike', t)
+          .orWhere('short_name', 'ilike', t)
+          .orWhere('service_key', 'ilike', t)
+          .orWhere('description', 'ilike', t)
+          .orWhere('category', 'ilike', t);
+      });
+    }
   }
 
   // Don't show archived by default
