@@ -181,14 +181,24 @@ router.put('/read-all', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/admin/notifications/diagnose — one-shot delivery health check
-// for the current admin. Returns each checkpoint in the trigger pipeline
-// so we can pinpoint why a given user is missing notifications without
-// digging through six separate queries by hand.
+// GET /api/admin/notifications/diagnose — one-shot delivery health check.
+// Returns each checkpoint in the trigger pipeline so we can pinpoint why
+// a given user is missing notifications without digging through six
+// separate queries by hand.
+//
+// Defaults to the calling admin. Pass `?userId=<n>` to diagnose a
+// teammate (admin role required) — necessary because the technicians.active
+// checkpoint is otherwise tautological: adminAuthenticate rejects inactive
+// callers before this handler runs.
 router.get('/diagnose', async (req, res, next) => {
   try {
-    const userId = req.technicianId;
-    const report = { userId, checks: {} };
+    const requestedUserId = req.query.userId ? parseInt(req.query.userId, 10) : null;
+    const targetingOther = requestedUserId && requestedUserId !== req.technicianId;
+    if (targetingOther && req.techRole !== 'admin') {
+      return res.status(403).json({ error: 'Admin role required to diagnose another user' });
+    }
+    const userId = requestedUserId || req.technicianId;
+    const report = { targetUserId: userId, callerUserId: req.technicianId, checks: {} };
 
     // 1. VAPID env present (push silently no-ops without these)
     report.checks.vapid = {
