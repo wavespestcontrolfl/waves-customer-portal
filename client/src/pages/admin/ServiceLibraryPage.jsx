@@ -320,8 +320,8 @@ export default function ServiceLibraryPage() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
         <div>
           <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>
-            <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Service Library</span>
-            <span className="hidden md:inline">Service Library</span>
+            <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Services</span>
+            <span className="hidden md:inline">Services</span>
           </h1>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>

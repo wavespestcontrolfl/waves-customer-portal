@@ -79,7 +79,7 @@ const NAV_SECTIONS = [
     { path: '/admin/estimates', icon: ClipboardList, label: 'Pipeline' },
     { path: '/admin/schedule', icon: Calendar, label: 'Schedule' },
     { path: '/admin/timetracking', icon: Clock, label: 'Staff' },
-    { path: '/admin/service-library', icon: BookOpen, label: 'Service Library' },
+    { path: '/admin/service-library', icon: BookOpen, label: 'Services' },
     { path: '/admin/projects', icon: FileText, label: 'Projects' },
   ]},
   { section: 'Communications', items: [
@@ -97,7 +97,7 @@ const NAV_SECTIONS = [
   ]},
   { section: 'Field & Equipment', items: [
     { path: '/admin/equipment', icon: Wrench, label: 'Equipment' },
-    { path: '/admin/fleet', icon: Truck, label: 'Fleet & Mileage' },
+    { path: '/admin/fleet', icon: Truck, label: 'Fleet' },
     { path: '/admin/inventory', icon: Package, label: 'Inventory' },
     { path: '/admin/compliance', icon: ShieldCheck, label: 'Compliance' },
     { path: '/admin/lawn-assessment', icon: Leaf, label: 'Lawn Assessment' },
@@ -109,8 +109,8 @@ const NAV_SECTIONS = [
   { section: 'Finance', items: [
     { path: '/admin/invoices', icon: FileText, label: 'Invoices' },
     { path: '/admin/banking', icon: Landmark, label: 'Banking' },
-    { path: '/admin/tax', icon: Receipt, label: 'Tax Center' },
-    { path: '/admin/pricing-logic', icon: Calculator, label: 'Pricing Logic' },
+    { path: '/admin/tax', icon: Receipt, label: 'Taxes' },
+    { path: '/admin/pricing-logic', icon: Calculator, label: 'Pricing' },
   ]},
   { section: 'System', items: [
     { path: '/admin/tool-health', icon: Activity, label: 'Tool Health' },

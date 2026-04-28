@@ -61,7 +61,7 @@ const CONTEXT_LABELS = {
   revenue: 'Revenue',
   reviews: 'Reviews & Reputation',
   comms: 'Communications',
-  tax: 'Tax Center',
+  tax: 'Taxes',
   leads: 'Pipeline',
   email: 'Email',
   banking: 'Banking & Cash Flow',

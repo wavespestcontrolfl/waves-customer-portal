@@ -121,7 +121,7 @@ function MenuView({ onNav }) {
   return (
     <div className="px-4 pt-4 pb-10 mx-auto" style={{ maxWidth: 640 }}>
       <h1 className="text-zinc-900 tracking-tight mb-4" style={{ fontSize: 32, fontWeight: 800 }}>
-        Service Library
+        Services
       </h1>
       <div className="flex flex-col gap-2">
         {items.map((it) => (
@@ -320,7 +320,7 @@ function DiscountsView({ onBack }) {
         title="Discounts"
         centerTitle
         onBack={onBack}
-        onAdd={() => alert('Create discount — use the desktop Service Library > Discounts tab')}
+        onAdd={() => alert('Create discount — use the desktop Services > Discounts tab')}
       />
       <SearchBar value={query} onChange={setQuery} placeholder="Search discounts" />
       {loading ? (
@@ -483,7 +483,7 @@ function AllServicesView({ onBack }) {
       <Header title="All Services" centerTitle onBack={onBack} />
       <button
         type="button"
-        onClick={() => alert('Create Service — use the desktop Service Library > + Add Service')}
+        onClick={() => alert('Create Service — use the desktop Services > + Add Service')}
         className="w-full bg-zinc-100 text-zinc-900 font-semibold rounded-sm u-focus-ring mt-2"
         style={{ padding: '18px 20px', fontSize: 16 }}
       >
