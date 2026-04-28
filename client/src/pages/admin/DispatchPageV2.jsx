@@ -32,7 +32,7 @@
 // - Mobile vs desktop divergence — confirm the same appointment renders
 //   the same details / action set on both, no orphaned mobile-only state
 //   that desktop users can't reach.
-import { useState, useEffect, useMemo, useRef, useCallback, lazy, Suspense } from 'react';
+import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 import { Plus } from 'lucide-react';
 import {
   CompletionPanel,
@@ -949,10 +949,9 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
   // gridStats.startDate / dayCount to what TimeGridDays *would* compute
   // for the current date+viewMode rejects the stale frame synchronously.
   const expectedDayCount = viewMode === 'week' ? 7 : viewMode === '5day' ? 5 : 1;
-  const expectedStart = useMemo(
-    () => (isMultiDayView ? etStartOfWeek(date) : null),
-    [date, isMultiDayView],
-  );
+  // Plain const — etStartOfWeek is cheap, and a hook here would sit
+  // below the loading/error early-returns above, breaking hook order.
+  const expectedStart = isMultiDayView ? etStartOfWeek(date) : null;
   const useGridStats = isMultiDayView
     && !!gridStats
     && gridStats.startDate === expectedStart
