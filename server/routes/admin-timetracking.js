@@ -101,8 +101,12 @@ router.get('/', async (req, res, next) => {
       .leftJoin('technicians', 'time_entry_daily_summary.technician_id', 'technicians.id')
       .select('time_entry_daily_summary.*', 'technicians.name as tech_name');
 
-    // All technicians for status display
-    const allTechs = await db('technicians').where({ active: true }).select('id', 'name', 'role');
+    // All technicians for status display. pay_rate flows through
+    // so the dashboard can compute labor cost at per-tech rates
+    // instead of the legacy hardcoded $35.
+    const allTechs = await db('technicians')
+      .where({ active: true })
+      .select('id', 'name', 'role', 'pay_rate');
 
     res.json({
       activeShifts: liveStatus,
@@ -594,6 +598,30 @@ router.get('/technicians', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Map camelCase payroll-profile fields from the client to snake_case
+// columns. Each mapping is conditional — undefined leaves the column
+// alone, explicit '' or null clears it. ssn_last4 is normalized to
+// the trailing 4 digits in case the form passed a longer string.
+function applyPayrollProfileFields(updates, body) {
+  const map = {
+    payRate: 'pay_rate',
+    hireDate: 'hire_date',
+    jobTitle: 'job_title',
+    employmentType: 'employment_type',
+    address: 'address',
+    dob: 'dob',
+    emergencyContactName: 'emergency_contact_name',
+    emergencyContactPhone: 'emergency_contact_phone',
+  };
+  for (const [k, col] of Object.entries(map)) {
+    if (body[k] !== undefined) updates[col] = body[k] === '' ? null : body[k];
+  }
+  if (body.ssnLast4 !== undefined) {
+    const digits = String(body.ssnLast4 || '').replace(/\D/g, '').slice(-4);
+    updates.ssn_last4 = digits || null;
+  }
+}
+
 // POST /technicians — add a new technician
 router.post('/technicians', async (req, res, next) => {
   try {
@@ -612,6 +640,7 @@ router.post('/technicians', async (req, res, next) => {
     // the tech out. Falsy explicit value → false; undefined → leave
     // it to the column DEFAULT.
     if (autoFlipEnabled !== undefined) insertRow.auto_flip_enabled = !!autoFlipEnabled;
+    applyPayrollProfileFields(insertRow, req.body);
     const [tech] = await db('technicians').insert(insertRow).returning('*');
     logger.info(`[team] Added technician: ${tech.name} (auto_flip_enabled=${tech.auto_flip_enabled})`);
     res.json({ success: true, technician: tech });
@@ -632,11 +661,56 @@ router.put('/technicians/:id', async (req, res, next) => {
     // action_taken='auto_flip_skipped_tech_disabled'. Default TRUE on
     // the column so existing rows keep current behavior.
     if (autoFlipEnabled !== undefined) updates.auto_flip_enabled = !!autoFlipEnabled;
+    applyPayrollProfileFields(updates, req.body);
     updates.updated_at = new Date();
     await db('technicians').where({ id: req.params.id }).update(updates);
     const tech = await db('technicians').where({ id: req.params.id }).first();
     logger.info(`[team] Updated technician: ${tech.name} (active=${tech.active}, auto_flip_enabled=${tech.auto_flip_enabled})`);
     res.json({ success: true, technician: tech });
+  } catch (err) { next(err); }
+});
+
+// GET /technicians/:id/earnings?from=YYYY-MM-DD&to=YYYY-MM-DD —
+// hours × pay_rate breakdown for a window. OT pays at 1.5×.
+// Falls back to $35/hr if pay_rate is unset (matches the legacy
+// hardcoded LABOR_RATE so dashboards stay consistent).
+router.get('/technicians/:id/earnings', async (req, res, next) => {
+  try {
+    const tech = await db('technicians').where({ id: req.params.id }).first();
+    if (!tech) return res.status(404).json({ error: 'Technician not found' });
+
+    const { from, to } = req.query;
+    if (!from || !to) return res.status(400).json({ error: 'from and to (YYYY-MM-DD) required' });
+
+    const rows = await db('time_entry_daily_summary')
+      .where({ technician_id: tech.id })
+      .where('work_date', '>=', from)
+      .where('work_date', '<=', to)
+      .select('work_date', 'total_shift_minutes', 'overtime_minutes');
+
+    const totalMin = rows.reduce((s, r) => s + parseFloat(r.total_shift_minutes || 0), 0);
+    const otMin = rows.reduce((s, r) => s + parseFloat(r.overtime_minutes || 0), 0);
+    const regMin = Math.max(0, totalMin - otMin);
+
+    const rate = parseFloat(tech.pay_rate) > 0 ? parseFloat(tech.pay_rate) : 35;
+    const regularPay = (regMin / 60) * rate;
+    const overtimePay = (otMin / 60) * rate * 1.5;
+
+    res.json({
+      technicianId: tech.id,
+      technicianName: tech.name,
+      from,
+      to,
+      payRate: rate,
+      payRateSource: parseFloat(tech.pay_rate) > 0 ? 'tech' : 'default',
+      regularMinutes: regMin,
+      overtimeMinutes: otMin,
+      totalMinutes: totalMin,
+      regularPay: Number(regularPay.toFixed(2)),
+      overtimePay: Number(overtimePay.toFixed(2)),
+      grossPay: Number((regularPay + overtimePay).toFixed(2)),
+      daysWorked: rows.length,
+    });
   } catch (err) { next(err); }
 });
 
@@ -803,25 +877,39 @@ async function ensureDocTable() {
   }
 }
 
-// GET /documents — list all (admin only)
+// GET /documents — list all (admin only). Optional filters:
+//   category=<one of DOC_CATEGORIES> | 'all'
+//   technicianId=<uuid> — docs bound to that tech
+//   technicianId='company' — only company-wide docs (technician_id IS NULL)
 router.get('/documents', async (req, res, next) => {
   try {
     await ensureDocTable();
-    const { category } = req.query;
-    let query = db('company_documents').where('is_archived', false).orderBy('created_at', 'desc');
-    if (category && category !== 'all') query = query.where('category', category);
+    const { category, technicianId } = req.query;
+    let query = db('company_documents')
+      .leftJoin('technicians', 'company_documents.technician_id', 'technicians.id')
+      .where('company_documents.is_archived', false)
+      .select('company_documents.*', 'technicians.name as technician_name')
+      .orderBy('company_documents.created_at', 'desc');
+    if (category && category !== 'all') query = query.where('company_documents.category', category);
+    if (technicianId === 'company') {
+      query = query.whereNull('company_documents.technician_id');
+    } else if (technicianId) {
+      query = query.where('company_documents.technician_id', technicianId);
+    }
     const docs = await query;
     res.json({ documents: docs });
   } catch (err) { next(err); }
 });
 
-// POST /documents/upload — upload a file
+// POST /documents/upload — upload a file. Optional binding:
+//   technicianId — bind to one tech (omit / empty for company-wide)
+//   expirationDate — YYYY-MM-DD for licenses, certs, I-9s with reverify dates
 router.post('/documents/upload', upload.single('file'), async (req, res, next) => {
   try {
     await ensureDocTable();
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
 
-    const { title, category, description } = req.body;
+    const { title, category, description, technicianId, expirationDate } = req.body;
     const ext = req.file.originalname.split('.').pop().toLowerCase();
     const key = `${DOC_PREFIX}${Date.now()}-${req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
 
@@ -841,9 +929,11 @@ router.post('/documents/upload', upload.single('file'), async (req, res, next) =
       file_size: req.file.size,
       s3_key: key,
       uploaded_by: req.technicianId || null,
+      technician_id: technicianId || null,
+      expiration_date: expirationDate || null,
     }).returning('*');
 
-    logger.info(`[docs] Uploaded: ${doc.title} (${ext}, ${(req.file.size / 1024).toFixed(0)} KB)`);
+    logger.info(`[docs] Uploaded: ${doc.title} (${ext}, ${(req.file.size / 1024).toFixed(0)} KB)${doc.technician_id ? ` for tech ${doc.technician_id}` : ''}`);
     res.status(201).json(doc);
   } catch (err) { next(err); }
 });
@@ -863,14 +953,18 @@ router.get('/documents/:id/download', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// PUT /documents/:id — update metadata
+// PUT /documents/:id — update metadata. Pass technicianId='' to
+// unbind from a tech back to company-wide; expirationDate='' to
+// clear an expiration.
 router.put('/documents/:id', async (req, res, next) => {
   try {
-    const { title, category, description } = req.body;
+    const { title, category, description, technicianId, expirationDate } = req.body;
     const updates = { updated_at: new Date() };
     if (title !== undefined) updates.title = title;
     if (category !== undefined) updates.category = category;
     if (description !== undefined) updates.description = description;
+    if (technicianId !== undefined) updates.technician_id = technicianId === '' ? null : technicianId;
+    if (expirationDate !== undefined) updates.expiration_date = expirationDate === '' ? null : expirationDate;
     await db('company_documents').where({ id: req.params.id }).update(updates);
     const doc = await db('company_documents').where({ id: req.params.id }).first();
     res.json(doc);

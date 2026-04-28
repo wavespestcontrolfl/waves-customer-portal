@@ -7,6 +7,14 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+function mondayOf(dateStr) {
+  const d = dateStr ? new Date(dateStr) : new Date();
+  const day = d.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  d.setDate(d.getDate() + diff);
+  return d.toISOString().split('T')[0];
+}
+
 // ---------------------------------------------------------------------------
 // POST /clock-in
 // ---------------------------------------------------------------------------
@@ -136,6 +144,52 @@ router.get('/weekly', async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+// ---------------------------------------------------------------------------
+// POST /sign-week { weekStart: 'YYYY-MM-DD', signature: 'Tech Name' }
+//
+// Tech acknowledges their own week before admin approval — Square's
+// pattern. Sign-off is informational; admin still has to approve to
+// lock entries. Rejecting a previously-signed week (admin-side dispute
+// or unlock) clears these columns so the tech has to re-sign after
+// the correction.
+// ---------------------------------------------------------------------------
+router.post('/sign-week', async (req, res, next) => {
+  try {
+    const { weekStart, signature } = req.body || {};
+    if (!signature || !String(signature).trim()) {
+      return res.status(400).json({ error: 'signature required (typed name)' });
+    }
+    const start = mondayOf(weekStart);
+
+    let weekly = await db('time_weekly_summary')
+      .where({ technician_id: req.technicianId, week_start: start })
+      .first();
+    if (!weekly) {
+      try { await timeTracking.computeWeeklySummary(req.technicianId, start); } catch (_) { /* noop */ }
+      weekly = await db('time_weekly_summary')
+        .where({ technician_id: req.technicianId, week_start: start })
+        .first();
+    }
+    if (!weekly) return res.status(404).json({ error: 'No timecard for that week' });
+
+    if (weekly.status === 'approved') {
+      return res.status(409).json({ error: 'Week already approved by admin — cannot sign after lock' });
+    }
+
+    const [updated] = await db('time_weekly_summary')
+      .where({ id: weekly.id })
+      .update({
+        tech_signed_at: new Date(),
+        tech_signature: String(signature).trim().slice(0, 200),
+        updated_at: new Date(),
+      })
+      .returning('*');
+
+    logger.info(`[timetracking] Tech ${req.technicianId} signed week ${start}`);
+    res.json({ success: true, weekly: updated });
+  } catch (err) { next(err); }
 });
 
 module.exports = router;

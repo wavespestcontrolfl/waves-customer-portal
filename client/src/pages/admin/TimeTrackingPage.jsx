@@ -139,7 +139,15 @@ function DashboardTab({ showToast }) {
   const todayJobMin = todaySummaries.reduce((s, d) => s + parseFloat(d.total_job_minutes || 0), 0);
   const todayRevenue = todaySummaries.reduce((s, d) => s + parseFloat(d.revenue_generated || 0), 0);
   const todayJobs = todaySummaries.reduce((s, d) => s + (d.job_count || 0), 0);
-  const todayLaborCost = (todayShiftMin / 60) * LABOR_RATE;
+  // Labor cost is per-tech now: each tech's daily shift minutes × that
+  // tech's pay_rate (falling back to LABOR_RATE = $35 when unset, so
+  // techs without a configured rate stay consistent with the legacy
+  // single-rate calc instead of being silently dropped).
+  const todayLaborCost = todaySummaries.reduce((s, d) => {
+    const tech = allTechs.find(t => t.id === d.technician_id);
+    const rate = tech && parseFloat(tech.pay_rate) > 0 ? parseFloat(tech.pay_rate) : LABOR_RATE;
+    return s + (parseFloat(d.total_shift_minutes || 0) / 60) * rate;
+  }, 0);
   const todayUtil = todayShiftMin > 0 ? (todayJobMin / todayShiftMin * 100) : 0;
 
   // This week totals
@@ -930,13 +938,30 @@ function OvertimeTable({ data }) {
 // ═══════════════════════════════════════════════════════════════════
 // TEAM TAB — Manage technicians
 // ═══════════════════════════════════════════════════════════════════
+// Default form shape for the Add/Edit Tech form. Centralized so the
+// "+ Add Technician" button, the cancel-after-save reset, and the
+// edit-time prefill all stay in lockstep — adding a new payroll
+// field below means changing exactly one place.
+const EMPTY_TECH_FORM = {
+  name: '', phone: '', email: '',
+  autoFlipEnabled: true,
+  // Payroll profile
+  payRate: '', hireDate: '', jobTitle: '', employmentType: '',
+  // Personal / emergency
+  address: '', dob: '',
+  emergencyContactName: '', emergencyContactPhone: '',
+  ssnLast4: '',
+};
+
 function TeamTab({ showToast }) {
   const [techs, setTechs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [editingId, setEditingId] = useState(null);
-  const [form, setForm] = useState({ name: '', phone: '', email: '' });
+  const [form, setForm] = useState(EMPTY_TECH_FORM);
+  const [showPayrollSection, setShowPayrollSection] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [earningsTech, setEarningsTech] = useState(null);
   // Photo upload state. fileInputRef is shared across rows because
   // mounting one <input type=file> per tech is needless DOM. Uploads
   // are serialized: while uploadingId is non-null, every row's Photo
@@ -1001,7 +1026,7 @@ function TeamTab({ showToast }) {
         await adminFetch('/admin/timetracking/technicians', { method: 'POST', body: JSON.stringify(form) });
         showToast('Technician added');
       }
-      setShowAdd(false); setEditingId(null); setForm({ name: '', phone: '', email: '', autoFlipEnabled: true });
+      setShowAdd(false); setEditingId(null); setForm(EMPTY_TECH_FORM); setShowPayrollSection(false);
       load();
     } catch (e) { showToast('Failed: ' + e.message); }
     setSaving(false);
@@ -1043,7 +1068,20 @@ function TeamTab({ showToast }) {
       phone: tech.phone || '',
       email: tech.email || '',
       autoFlipEnabled: tech.auto_flip_enabled !== false, // default true if undefined
+      payRate: tech.pay_rate != null ? String(tech.pay_rate) : '',
+      hireDate: tech.hire_date ? String(tech.hire_date).split('T')[0] : '',
+      jobTitle: tech.job_title || '',
+      employmentType: tech.employment_type || '',
+      address: tech.address || '',
+      dob: tech.dob ? String(tech.dob).split('T')[0] : '',
+      emergencyContactName: tech.emergency_contact_name || '',
+      emergencyContactPhone: tech.emergency_contact_phone || '',
+      ssnLast4: tech.ssn_last4 || '',
     });
+    // Auto-expand payroll section if this tech already has any payroll
+    // fields filled in — saves a click for the "edit existing wage"
+    // path which is the most common reason to reopen this form.
+    setShowPayrollSection(!!(tech.pay_rate || tech.hire_date || tech.job_title || tech.dob || tech.emergency_contact_name));
     setShowAdd(true);
   };
 
@@ -1053,7 +1091,7 @@ function TeamTab({ showToast }) {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>Technicians</div>
-        <button onClick={() => { setShowAdd(true); setEditingId(null); setForm({ name: '', phone: '', email: '', autoFlipEnabled: true }); }} style={sBtn(D.teal, D.white)}>+ Add Technician</button>
+        <button onClick={() => { setShowAdd(true); setEditingId(null); setForm(EMPTY_TECH_FORM); setShowPayrollSection(false); }} style={sBtn(D.teal, D.white)}>+ Add Technician</button>
       </div>
 
       {/* Add / Edit form */}
@@ -1096,11 +1134,96 @@ function TeamTab({ showToast }) {
             </span>
           </label>
 
+          {/* Collapsible payroll + personal info. Hidden by default
+              for the "+ Add" path so the most common case (just a
+              name+phone+email) stays a 3-field form. Auto-expanded
+              from startEdit() when a tech already has payroll data. */}
+          <button
+            type="button"
+            onClick={() => setShowPayrollSection(s => !s)}
+            style={{
+              padding: '6px 0', background: 'transparent', border: 'none',
+              color: D.teal, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+              marginBottom: 8, textAlign: 'left',
+            }}
+          >
+            {showPayrollSection ? '▼' : '▶'} Payroll & personal info {showPayrollSection ? '' : '(optional)'}
+          </button>
+
+          {showPayrollSection && (
+            <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12, marginBottom: 12 }}>
+              <div style={{ fontSize: 11, color: D.muted, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>Compensation</div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 12 }}>
+                <div>
+                  <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Pay rate ($/hr)</div>
+                  <input
+                    type="number" step="0.25" min="0"
+                    value={form.payRate}
+                    onChange={e => setForm(f => ({ ...f, payRate: e.target.value }))}
+                    placeholder="35.00"
+                    style={sInput}
+                  />
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Job title</div>
+                  <input value={form.jobTitle} onChange={e => setForm(f => ({ ...f, jobTitle: e.target.value }))} placeholder="Lead Tech" style={sInput} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Employment type</div>
+                  <select value={form.employmentType} onChange={e => setForm(f => ({ ...f, employmentType: e.target.value }))} style={sInput}>
+                    <option value="">--</option>
+                    <option value="w2">W-2</option>
+                    <option value="1099">1099</option>
+                  </select>
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Hire date</div>
+                  <input type="date" value={form.hireDate} onChange={e => setForm(f => ({ ...f, hireDate: e.target.value }))} style={sInput} />
+                </div>
+              </div>
+
+              <div style={{ fontSize: 11, color: D.muted, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>Personal</div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 12 }}>
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Address</div>
+                  <input value={form.address} onChange={e => setForm(f => ({ ...f, address: e.target.value }))} placeholder="Street, City, FL ZIP" style={sInput} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Date of birth</div>
+                  <input type="date" value={form.dob} onChange={e => setForm(f => ({ ...f, dob: e.target.value }))} style={sInput} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>SSN (last 4)</div>
+                  <input
+                    inputMode="numeric"
+                    maxLength={4}
+                    value={form.ssnLast4}
+                    onChange={e => setForm(f => ({ ...f, ssnLast4: e.target.value.replace(/\D/g, '').slice(0, 4) }))}
+                    placeholder="1234"
+                    style={sInput}
+                  />
+                </div>
+              </div>
+
+              <div style={{ fontSize: 11, color: D.muted, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>Emergency contact</div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 4 }}>
+                <div>
+                  <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Name</div>
+                  <input value={form.emergencyContactName} onChange={e => setForm(f => ({ ...f, emergencyContactName: e.target.value }))} placeholder="Jane Doe" style={sInput} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Phone</div>
+                  <input value={form.emergencyContactPhone} onChange={e => setForm(f => ({ ...f, emergencyContactPhone: e.target.value }))} placeholder="+19415551234" style={sInput} />
+                </div>
+              </div>
+            </div>
+          )}
+
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={handleSave} disabled={saving || !form.name.trim()} style={{ ...sBtn(D.green, D.white), opacity: saving || !form.name.trim() ? 0.5 : 1 }}>
               {saving ? 'Saving...' : editingId ? 'Update' : 'Add'}
             </button>
-            <button onClick={() => { setShowAdd(false); setEditingId(null); }} style={sBtn('transparent', D.muted)}>Cancel</button>
+            <button onClick={() => { setShowAdd(false); setEditingId(null); setShowPayrollSection(false); }} style={sBtn('transparent', D.muted)}>Cancel</button>
           </div>
         </div>
       )}
@@ -1154,7 +1277,17 @@ function TeamTab({ showToast }) {
                     </div>
                   )}
                 </td>
-                <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}`, color: D.heading, fontWeight: 600 }}>{t.name}</td>
+                <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}`, color: D.heading, fontWeight: 600 }}>
+                  <div>{t.name}</div>
+                  {(t.job_title || t.pay_rate) && (
+                    <div style={{ fontSize: 11, fontWeight: 400, color: D.muted, marginTop: 2 }}>
+                      {t.job_title || ''}
+                      {t.job_title && t.pay_rate ? ' · ' : ''}
+                      {t.pay_rate ? `$${parseFloat(t.pay_rate).toFixed(2)}/hr` : ''}
+                      {t.employment_type ? ` · ${t.employment_type === 'w2' ? 'W-2' : '1099'}` : ''}
+                    </div>
+                  )}
+                </td>
                 <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}`, color: D.muted, fontFamily: MONO, fontSize: 12 }}>{t.phone || '\u2014'}</td>
                 <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}`, color: D.muted, fontSize: 12 }}>{t.email || '\u2014'}</td>
                 <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}` }}>
@@ -1163,6 +1296,7 @@ function TeamTab({ showToast }) {
                 <td style={{ padding: '10px 12px', borderBottom: `1px solid ${D.border}` }}>
                   <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                     <button onClick={() => startEdit(t)} style={{ padding: '4px 10px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: D.teal, fontSize: 11, cursor: 'pointer' }}>Edit</button>
+                    <button onClick={() => setEarningsTech(t)} style={{ padding: '4px 10px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: D.green, fontSize: 11, cursor: 'pointer' }}>Earnings</button>
                     <button
                       onClick={() => handlePhotoClick(t.id)}
                       disabled={uploadingId !== null}
@@ -1183,6 +1317,110 @@ function TeamTab({ showToast }) {
             )}
           </tbody>
         </table>
+      </div>
+
+      {earningsTech && (
+        <EarningsModal tech={earningsTech} onClose={() => setEarningsTech(null)} showToast={showToast} />
+      )}
+    </div>
+  );
+}
+
+// Earnings statement modal — pulls /admin/timetracking/technicians/:id/earnings
+// for this week and last week. Regular hours pay at the tech's rate
+// (or $35 fallback shown explicitly so an admin can spot a missing
+// pay_rate config), OT at 1.5×.
+function EarningsModal({ tech, onClose, showToast }) {
+  const [thisWeek, setThisWeek] = useState(null);
+  const [lastWeek, setLastWeek] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const monday = getMonday(new Date());
+        const lastMon = addDays(monday, -7);
+        const sunThis = addDays(monday, 6);
+        const sunLast = addDays(lastMon, 6);
+        const [a, b] = await Promise.all([
+          adminFetch(`/admin/timetracking/technicians/${tech.id}/earnings?from=${monday}&to=${sunThis}`),
+          adminFetch(`/admin/timetracking/technicians/${tech.id}/earnings?from=${lastMon}&to=${sunLast}`),
+        ]);
+        if (!cancelled) { setThisWeek(a); setLastWeek(b); }
+      } catch (e) {
+        if (!cancelled) showToast('Earnings failed: ' + e.message);
+      }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [tech.id, showToast]);
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        zIndex: 200, padding: 16,
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          background: D.card, border: `1px solid ${D.border}`, borderRadius: 12,
+          padding: 24, maxWidth: 520, width: '100%', boxShadow: '0 16px 48px rgba(0,0,0,0.25)',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>{tech.name}</div>
+            <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>Earnings statement</div>
+          </div>
+          <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: D.muted, fontSize: 22, cursor: 'pointer', lineHeight: 1 }}>×</button>
+        </div>
+
+        {loading && <div style={{ color: D.muted, padding: 20, textAlign: 'center' }}>Loading…</div>}
+
+        {!loading && thisWeek && (
+          <>
+            <EarningsBlock label="This week" data={thisWeek} />
+            <div style={{ height: 12 }} />
+            <EarningsBlock label="Last week" data={lastWeek} />
+          </>
+        )}
+
+        {!loading && thisWeek && thisWeek.payRateSource === 'default' && (
+          <div style={{ marginTop: 12, padding: '8px 12px', background: '#FEF3C7', border: `1px solid ${D.amber}`, borderRadius: 6, fontSize: 12, color: '#78350F' }}>
+            No pay rate configured — using fallback ${thisWeek.payRate.toFixed(2)}/hr. Set one in this tech's profile for accurate numbers.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EarningsBlock({ label, data }) {
+  if (!data) return null;
+  const regHrs = (data.regularMinutes / 60).toFixed(2);
+  const otHrs = (data.overtimeMinutes / 60).toFixed(2);
+  return (
+    <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</span>
+        <span style={{ fontSize: 11, color: D.muted, fontFamily: MONO }}>{data.from} → {data.to}</span>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 8 }}>
+        <Stat label="Regular" value={`${regHrs}h`} />
+        <Stat label="OT" value={`${otHrs}h`} warn={data.overtimeMinutes > 0} />
+        <Stat label="Days" value={data.daysWorked} />
+      </div>
+      <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 8, fontSize: 12, color: D.muted, fontFamily: MONO }}>
+        <div>Reg: {fmt(data.regularPay)}  ·  OT (1.5×): {fmt(data.overtimePay)}</div>
+        <div style={{ marginTop: 4, fontSize: 14, fontWeight: 700, color: D.heading }}>
+          Gross: {fmt(data.grossPay)}
+        </div>
       </div>
     </div>
   );
@@ -1216,22 +1454,36 @@ const FILE_ICONS = { pdf: '\uD83D\uDCC4', docx: '\uD83D\uDDD2\uFE0F', doc: '\uD8
 
 function DocumentsTab({ showToast }) {
   const [docs, setDocs] = useState([]);
+  const [techs, setTechs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [catFilter, setCatFilter] = useState('all');
+  const [techFilter, setTechFilter] = useState('all'); // 'all' | 'company' | <techId>
   const [showUpload, setShowUpload] = useState(false);
-  const [uploadForm, setUploadForm] = useState({ title: '', category: 'general', description: '' });
+  const [uploadForm, setUploadForm] = useState({ title: '', category: 'general', description: '', technicianId: '', expirationDate: '' });
   const [file, setFile] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [editingId, setEditingId] = useState(null);
-  const [editForm, setEditForm] = useState({ title: '', category: '', description: '' });
+  const [editForm, setEditForm] = useState({ title: '', category: '', description: '', technicianId: '', expirationDate: '' });
+
+  // Pull techs once for the filter chips and the upload/edit "assign
+  // to" dropdowns. Reusing /admin/timetracking/technicians keeps the
+  // shape identical to TeamTab without a new endpoint.
+  useEffect(() => {
+    adminFetch('/admin/timetracking/technicians')
+      .then(r => setTechs((r.technicians || []).filter(t => t.active)))
+      .catch(() => { /* filter chips just won't show */ });
+  }, []);
 
   const load = useCallback(async () => {
     try {
-      const res = await adminFetch(`/admin/timetracking/documents?category=${catFilter}`);
+      const params = new URLSearchParams();
+      params.set('category', catFilter);
+      if (techFilter && techFilter !== 'all') params.set('technicianId', techFilter);
+      const res = await adminFetch(`/admin/timetracking/documents?${params.toString()}`);
       setDocs(res.documents || []);
     } catch { setDocs([]); }
     setLoading(false);
-  }, [catFilter]);
+  }, [catFilter, techFilter]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -1244,6 +1496,8 @@ function DocumentsTab({ showToast }) {
       fd.append('title', uploadForm.title || file.name);
       fd.append('category', uploadForm.category);
       fd.append('description', uploadForm.description);
+      if (uploadForm.technicianId) fd.append('technicianId', uploadForm.technicianId);
+      if (uploadForm.expirationDate) fd.append('expirationDate', uploadForm.expirationDate);
 
       const token = localStorage.getItem('waves_admin_token');
       const r = await fetch(`${API_BASE}/admin/timetracking/documents/upload`, {
@@ -1254,7 +1508,7 @@ function DocumentsTab({ showToast }) {
       if (!r.ok) throw new Error(`Upload failed: HTTP ${r.status}`);
       showToast('Document uploaded');
       setShowUpload(false);
-      setUploadForm({ title: '', category: 'general', description: '' });
+      setUploadForm({ title: '', category: 'general', description: '', technicianId: '', expirationDate: '' });
       setFile(null);
       load();
     } catch (e) { showToast('Upload failed: ' + e.message); }
@@ -1300,12 +1554,29 @@ function DocumentsTab({ showToast }) {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
-        <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>Company Documents</div>
+        <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>Documents</div>
         <button onClick={() => setShowUpload(true)} style={sBtn(D.teal, D.white)}>+ Upload Document</button>
       </div>
 
+      {/* Tech filter pills — All / Company / one-per-tech. Hidden when
+          there are no techs to assign to. */}
+      {techs.length > 0 && (
+        <div style={{ display: 'flex', gap: 6, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginRight: 4 }}>Assigned to</span>
+          {[{ value: 'all', label: 'All' }, { value: 'company', label: 'Company-wide' }, ...techs.map(t => ({ value: t.id, label: t.name }))].map(c => (
+            <button key={c.value} onClick={() => setTechFilter(c.value)} style={{
+              padding: '6px 12px', borderRadius: 20, fontSize: 12, fontWeight: 500, cursor: 'pointer',
+              border: `1px solid ${techFilter === c.value ? D.teal : D.border}`,
+              background: techFilter === c.value ? D.teal : 'transparent',
+              color: techFilter === c.value ? D.white : D.muted,
+            }}>{c.label}</button>
+          ))}
+        </div>
+      )}
+
       {/* Category filter pills */}
-      <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+        <span style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginRight: 4 }}>Category</span>
         {DOC_CATEGORIES.map(c => (
           <button key={c.value} onClick={() => setCatFilter(c.value)} style={{
             padding: '6px 14px', borderRadius: 20, fontSize: 12, fontWeight: 500, cursor: 'pointer',
@@ -1335,6 +1606,19 @@ function DocumentsTab({ showToast }) {
           <div style={{ marginBottom: 12 }}>
             <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Description (optional)</div>
             <input value={uploadForm.description} onChange={e => setUploadForm(f => ({ ...f, description: e.target.value }))} placeholder="Brief description..." style={sInput} />
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginBottom: 12 }}>
+            <div>
+              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Assigned to (optional)</div>
+              <select value={uploadForm.technicianId} onChange={e => setUploadForm(f => ({ ...f, technicianId: e.target.value }))} style={sInput}>
+                <option value="">Company-wide</option>
+                {techs.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>Expiration (optional)</div>
+              <input type="date" value={uploadForm.expirationDate} onChange={e => setUploadForm(f => ({ ...f, expirationDate: e.target.value }))} style={sInput} />
+            </div>
           </div>
           <div style={{ marginBottom: 12 }}>
             <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>File</div>
@@ -1378,6 +1662,19 @@ function DocumentsTab({ showToast }) {
                   <div style={{ fontSize: 11, color: D.muted, marginBottom: 3 }}>Description</div>
                   <input value={editForm.description} onChange={e => setEditForm(f => ({ ...f, description: e.target.value }))} style={sInput} />
                 </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
+                  <div>
+                    <div style={{ fontSize: 11, color: D.muted, marginBottom: 3 }}>Assigned to</div>
+                    <select value={editForm.technicianId} onChange={e => setEditForm(f => ({ ...f, technicianId: e.target.value }))} style={sInput}>
+                      <option value="">Company-wide</option>
+                      {techs.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, color: D.muted, marginBottom: 3 }}>Expiration</div>
+                    <input type="date" value={editForm.expirationDate} onChange={e => setEditForm(f => ({ ...f, expirationDate: e.target.value }))} style={sInput} />
+                  </div>
+                </div>
                 <div style={{ display: 'flex', gap: 6 }}>
                   <button onClick={handleEditSave} style={sBtn(D.green, D.white)}>Save</button>
                   <button onClick={() => setEditingId(null)} style={sBtn('transparent', D.muted)}>Cancel</button>
@@ -1398,12 +1695,38 @@ function DocumentsTab({ showToast }) {
                     <span style={{ fontSize: 11, color: D.muted }}>{fmtSize(doc.file_size)}</span>
                   </div>
                   {doc.description && <div style={{ fontSize: 12, color: D.muted, marginBottom: 6 }}>{doc.description}</div>}
+                  {(doc.technician_name || doc.expiration_date) && (
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
+                      {doc.technician_name && (
+                        <span style={sBadge(D.teal + '22', D.teal)}>{doc.technician_name}</span>
+                      )}
+                      {doc.expiration_date && (() => {
+                        const exp = new Date(doc.expiration_date);
+                        const days = Math.ceil((exp.getTime() - Date.now()) / 86400000);
+                        const expired = days < 0;
+                        const soon = !expired && days <= 30;
+                        const color = expired ? D.red : soon ? D.amber : D.muted;
+                        return (
+                          <span style={{ fontSize: 11, color, fontFamily: MONO }}>
+                            {expired ? 'Expired ' : 'Expires '}{fmtDate(doc.expiration_date)}
+                            {expired ? ` (${Math.abs(days)}d ago)` : soon ? ` (${days}d)` : ''}
+                          </span>
+                        );
+                      })()}
+                    </div>
+                  )}
                   <div style={{ fontSize: 11, color: D.muted }}>Uploaded {fmtDate(doc.created_at)}</div>
                 </div>
               </div>
               <div style={{ display: 'flex', gap: 6, marginTop: 10, borderTop: `1px solid ${D.border}`, paddingTop: 10 }}>
                 <button onClick={() => handleDownload(doc)} style={{ padding: '5px 12px', background: D.teal + '22', border: 'none', borderRadius: 6, color: D.teal, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Download</button>
-                <button onClick={() => { setEditingId(doc.id); setEditForm({ title: doc.title, category: doc.category, description: doc.description || '' }); }} style={{ padding: '5px 12px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: D.muted, fontSize: 12, cursor: 'pointer' }}>Edit</button>
+                <button onClick={() => { setEditingId(doc.id); setEditForm({
+                  title: doc.title,
+                  category: doc.category,
+                  description: doc.description || '',
+                  technicianId: doc.technician_id || '',
+                  expirationDate: doc.expiration_date ? String(doc.expiration_date).split('T')[0] : '',
+                }); }} style={{ padding: '5px 12px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: D.muted, fontSize: 12, cursor: 'pointer' }}>Edit</button>
                 <button onClick={() => handleDelete(doc)} style={{ padding: '5px 12px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: D.red, fontSize: 12, cursor: 'pointer' }}>Archive</button>
               </div>
             </div>
@@ -1608,10 +1931,22 @@ function ApprovalsTab({ showToast }) {
               )}
               <div style={{ flex: 1, minWidth: 180 }}>
                 <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>{t.tech_name}</div>
-                <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+                <div style={{ fontSize: 12, color: D.muted, marginTop: 2, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
                   <span style={sBadge(approved ? '#DCFCE7' : '#FEF3C7', approved ? D.green : D.amber)}>
                     {t.status || 'pending'}
                   </span>
+                  {/* Tech sign-off badge: green when signed, muted when
+                      awaiting. Hidden after admin approval since the
+                      sign-off is moot once the week is locked. */}
+                  {!approved && (
+                    t.tech_signed_at ? (
+                      <span style={sBadge('#DCFCE7', D.green)} title={t.tech_signature ? `Signed by ${t.tech_signature}` : ''}>
+                        ✓ Tech signed
+                      </span>
+                    ) : (
+                      <span style={sBadge(D.border, D.muted)}>Awaiting tech sign-off</span>
+                    )
+                  )}
                 </div>
               </div>
               <Stat label="Hours" value={`${totalHrs.toFixed(1)}h`} />

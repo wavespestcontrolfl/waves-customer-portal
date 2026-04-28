@@ -210,9 +210,20 @@ async function unlockWeek({ technicianId, weekStart, adminId, reason }) {
       .where('work_date', '<=', end)
       .update({ status: 'pending', approved_by: null, approved_at: null, updated_at: now });
 
+    // Clear tech sign-off too — once we've reopened entries, the
+    // tech's previous "I attest" is stale by definition. Admins
+    // who unlock should expect a fresh sign-off after the tech
+    // fixes whatever broke.
     await trx('time_weekly_summary')
       .where({ technician_id: technicianId, week_start: start })
-      .update({ status: 'pending', approved_by: null, approved_at: null, updated_at: now });
+      .update({
+        status: 'pending',
+        approved_by: null,
+        approved_at: null,
+        tech_signed_at: null,
+        tech_signature: null,
+        updated_at: now,
+      });
   });
 
   logger.info(`[timesheet-approval] Week ${start} unlocked for tech ${technicianId} by ${adminId}: ${reason || 'no reason'}`);
