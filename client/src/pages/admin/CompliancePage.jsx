@@ -3,6 +3,22 @@ import React, { useState, useEffect, useCallback } from 'react';
 const API = '/api/admin/compliance-v2';
 const headers = (token) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' });
 
+// V2 token pass — mirrors the palette used across EmailPage, ReviewsPage,
+// ServiceLibraryPage, etc. Kept as a local const so a one-page restyle
+// doesn't pull in a brand-new import surface.
+const D = {
+  bg: '#F4F4F5', card: '#FFFFFF', border: '#E4E4E7',
+  text: '#27272A', muted: '#71717A', heading: '#09090B',
+  green: '#15803D', amber: '#A16207', red: '#991B1B',
+  ink: '#18181B',
+};
+
+const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 18 };
+const sInput = { padding: '8px 12px', background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none' };
+const thS = { fontSize: 11, color: D.muted, fontWeight: 600, textAlign: 'left', padding: '12px 14px', background: '#F8F8F8', borderBottom: `1px solid ${D.border}` };
+const tdS = { padding: '12px 14px', borderTop: `1px solid ${D.border}`, fontSize: 13, color: D.text, verticalAlign: 'middle' };
+const sTableWrap = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, overflow: 'hidden' };
+
 function useFetch(url, token, deps = []) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -15,13 +31,12 @@ function useFetch(url, token, deps = []) {
   return { data, loading, reload };
 }
 
-// ── Stat Card ──
-function StatCard({ label, value, sub, color = '#00e5ff' }) {
+function StatCard({ label, value, sub, accent = D.ink }) {
   return (
-    <div style={{ background: '#1e1e2e', borderRadius: 10, padding: '18px 22px', minWidth: 160, flex: 1 }}>
-      <div style={{ color: '#999', fontSize: 12, textTransform: 'uppercase', letterSpacing: 1 }}>{label}</div>
-      <div style={{ color, fontSize: 28, fontWeight: 700, margin: '6px 0 2px' }}>{value ?? '—'}</div>
-      {sub && <div style={{ color: '#94a3b8', fontSize: 12 }}>{sub}</div>}
+    <div style={{ ...sCard, padding: '16px 20px', minWidth: 160, flex: 1 }}>
+      <div style={{ color: D.muted, fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.4 }}>{label}</div>
+      <div style={{ color: accent, fontSize: 28, fontWeight: 700, margin: '6px 0 2px', fontFamily: "'JetBrains Mono', monospace" }}>{value ?? '—'}</div>
+      {sub && <div style={{ color: D.muted, fontSize: 12 }}>{sub}</div>}
     </div>
   );
 }
@@ -31,62 +46,62 @@ function DashboardTab({ token }) {
   const { data, loading } = useFetch(`${API}/dashboard`, token);
   const { data: nData } = useFetch(`${API}/nitrogen-status`, token);
 
-  if (loading || !data) return <div style={{ color: '#aaa', padding: 20 }}>Loading dashboard...</div>;
+  if (loading || !data) return <div style={{ color: D.muted, padding: 20 }}>Loading dashboard…</div>;
 
   const blackoutActive = nData?.activeBlackoutCount > 0;
 
   return (
     <div>
-      <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 20 }}>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
         <StatCard label="YTD Applications" value={data.ytdApplications} />
-        <StatCard label="Unique Products" value={data.uniqueProducts} color="#4caf50" />
-        <StatCard label="Warnings" value={data.warningCount} color={data.warningCount > 0 ? '#ff9800' : '#4caf50'} />
+        <StatCard label="Unique Products" value={data.uniqueProducts} accent={D.green} />
+        <StatCard label="Warnings" value={data.warningCount} accent={data.warningCount > 0 ? D.amber : D.green} />
         <StatCard label="Licensed Techs" value={data.licensedTechs}
           sub={data.expiringLicenses > 0 ? `${data.expiringLicenses} expiring soon` : 'All current'}
-          color={data.expiringLicenses > 0 ? '#ff9800' : '#4caf50'} />
-        <StatCard label="Restricted Use Apps" value={data.restrictedUseApps} color="#e91e63" />
+          accent={data.expiringLicenses > 0 ? D.amber : D.green} />
+        <StatCard label="Restricted Use Apps" value={data.restrictedUseApps} accent={D.red} />
       </div>
 
       {/* Nitrogen blackout card */}
       <div style={{
-        background: blackoutActive ? '#3e2723' : '#1b2e1b', borderRadius: 10, padding: 18, marginBottom: 20,
-        border: `1px solid ${blackoutActive ? '#ff5722' : '#4caf50'}`
+        ...sCard, marginBottom: 20,
+        background: blackoutActive ? '#FEF2F2' : '#F0FDF4',
+        borderColor: blackoutActive ? '#FCA5A5' : '#86EFAC',
       }}>
-        <div style={{ color: blackoutActive ? '#ff8a65' : '#81c784', fontWeight: 700, fontSize: 16, marginBottom: 8 }}>
-          {blackoutActive ? 'NITROGEN BLACKOUT ACTIVE' : 'No Active Nitrogen Blackout'}
+        <div style={{ color: blackoutActive ? D.red : D.green, fontWeight: 700, fontSize: 14, marginBottom: 8 }}>
+          {blackoutActive ? 'Nitrogen Blackout Active' : 'No Active Nitrogen Blackout'}
         </div>
         {nData?.blackoutPeriods?.map((b, i) => (
-          <div key={i} style={{ color: '#ccc', fontSize: 13, marginBottom: 4 }}>
+          <div key={i} style={{ color: D.text, fontSize: 13, marginBottom: 4 }}>
             {b.jurisdiction?.replace('_', ' ')}: {b.start} to {b.end}
           </div>
         ))}
       </div>
 
       {/* Recent applications */}
-      <h3 style={{ color: '#ddd', marginBottom: 10 }}>Recent Applications</h3>
-      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-        <thead>
-          <tr style={{ color: '#999', fontSize: 12, textTransform: 'uppercase', borderBottom: '1px solid #333' }}>
-            <th style={{ textAlign: 'left', padding: 8 }}>Date</th>
-            <th style={{ textAlign: 'left', padding: 8 }}>Product</th>
-            <th style={{ textAlign: 'left', padding: 8 }}>Customer</th>
-            <th style={{ textAlign: 'left', padding: 8 }}>Technician</th>
-          </tr>
-        </thead>
-        <tbody>
-          {data.recentApplications?.map(a => (
-            <tr key={a.id} style={{ borderBottom: '1px solid #2a2a3a' }}>
-              <td style={{ padding: 8, color: '#ccc' }}>{a.date}</td>
-              <td style={{ padding: 8, color: '#eee' }}>{a.product || '—'}</td>
-              <td style={{ padding: 8, color: '#ccc' }}>{a.customer || '—'}</td>
-              <td style={{ padding: 8, color: '#ccc' }}>{a.tech || '—'}</td>
+      <div style={{ fontSize: 15, fontWeight: 700, color: D.heading, marginBottom: 10 }}>Recent Applications</div>
+      <div style={sTableWrap}>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              {['Date', 'Product', 'Customer', 'Technician'].map(h => <th key={h} style={thS}>{h}</th>)}
             </tr>
-          ))}
-          {!data.recentApplications?.length && (
-            <tr><td colSpan={4} style={{ padding: 20, color: '#94a3b8', textAlign: 'center' }}>No applications recorded yet</td></tr>
-          )}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {data.recentApplications?.map(a => (
+              <tr key={a.id}>
+                <td style={tdS}>{a.date}</td>
+                <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>{a.product || '—'}</td>
+                <td style={tdS}>{a.customer || '—'}</td>
+                <td style={tdS}>{a.tech || '—'}</td>
+              </tr>
+            ))}
+            {!data.recentApplications?.length && (
+              <tr><td colSpan={4} style={{ ...tdS, color: D.muted, textAlign: 'center', padding: 24 }}>No applications recorded yet</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -115,58 +130,58 @@ function ApplicationLogTab({ token }) {
     URL.revokeObjectURL(url);
   };
 
-  const inp = { background: '#1e1e2e', border: '1px solid #444', borderRadius: 6, color: '#eee', padding: '6px 10px', fontSize: 13 };
-
   return (
     <div>
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16, alignItems: 'center' }}>
-        <input type="date" style={inp} value={filters.startDate} onChange={e => setFilters(f => ({ ...f, startDate: e.target.value, page: 0 }))} />
-        <input type="date" style={inp} value={filters.endDate} onChange={e => setFilters(f => ({ ...f, endDate: e.target.value, page: 0 }))} />
-        <input placeholder="Product name..." style={{ ...inp, width: 180 }} value={filters.productName}
+        <input type="date" style={sInput} value={filters.startDate} onChange={e => setFilters(f => ({ ...f, startDate: e.target.value, page: 0 }))} />
+        <input type="date" style={sInput} value={filters.endDate} onChange={e => setFilters(f => ({ ...f, endDate: e.target.value, page: 0 }))} />
+        <input placeholder="Product name…" style={{ ...sInput, width: 200 }} value={filters.productName}
           onChange={e => setFilters(f => ({ ...f, productName: e.target.value, page: 0 }))} />
         <button onClick={exportCSV}
-          style={{ background: '#00796b', color: '#fff', border: 'none', borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontWeight: 600 }}>
+          style={{ background: D.ink, color: D.card, border: 'none', borderRadius: 8, padding: '8px 16px', cursor: 'pointer', fontWeight: 600, fontSize: 13 }}>
           Export for DACS
         </button>
       </div>
-      {loading ? <div style={{ color: '#aaa' }}>Loading...</div> : (
+      {loading ? <div style={{ color: D.muted }}>Loading…</div> : (
         <>
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 900 }}>
-              <thead>
-                <tr style={{ color: '#999', fontSize: 11, textTransform: 'uppercase', borderBottom: '1px solid #333' }}>
-                  {['Date', 'Product', 'Active Ingredient', 'EPA Reg #', 'Rate', 'Customer', 'Tech', 'Method'].map(h => (
-                    <th key={h} style={{ textAlign: 'left', padding: 8 }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {data?.applications?.map(a => (
-                  <tr key={a.id} style={{ borderBottom: '1px solid #2a2a3a' }}>
-                    <td style={{ padding: 8, color: '#ccc', whiteSpace: 'nowrap' }}>{a.applicationDate}</td>
-                    <td style={{ padding: 8, color: '#eee' }}>{a.productName}</td>
-                    <td style={{ padding: 8, color: '#aaa', fontSize: 12 }}>{a.activeIngredient || '—'}</td>
-                    <td style={{ padding: 8, color: '#aaa', fontSize: 12 }}>{a.epaRegNumber || '—'}</td>
-                    <td style={{ padding: 8, color: '#ccc', fontSize: 12 }}>{a.applicationRate ? `${a.applicationRate} ${a.rateUnit || ''}` : '—'}</td>
-                    <td style={{ padding: 8, color: '#ccc' }}>{a.customerName || '—'}</td>
-                    <td style={{ padding: 8, color: '#ccc' }}>{a.techName || '—'}</td>
-                    <td style={{ padding: 8, color: '#aaa', fontSize: 12 }}>{a.applicationMethod || '—'}</td>
+          <div style={sTableWrap}>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 900 }}>
+                <thead>
+                  <tr>
+                    {['Date', 'Product', 'Active Ingredient', 'EPA Reg #', 'Rate', 'Customer', 'Tech', 'Method'].map(h => (
+                      <th key={h} style={thS}>{h}</th>
+                    ))}
                   </tr>
-                ))}
-                {!data?.applications?.length && (
-                  <tr><td colSpan={8} style={{ padding: 20, color: '#94a3b8', textAlign: 'center' }}>No applications found</td></tr>
-                )}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {data?.applications?.map(a => (
+                    <tr key={a.id}>
+                      <td style={{ ...tdS, whiteSpace: 'nowrap' }}>{a.applicationDate}</td>
+                      <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>{a.productName}</td>
+                      <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>{a.activeIngredient || '—'}</td>
+                      <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>{a.epaRegNumber || '—'}</td>
+                      <td style={{ ...tdS, fontSize: 12 }}>{a.applicationRate ? `${a.applicationRate} ${a.rateUnit || ''}` : '—'}</td>
+                      <td style={tdS}>{a.customerName || '—'}</td>
+                      <td style={tdS}>{a.techName || '—'}</td>
+                      <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>{a.applicationMethod || '—'}</td>
+                    </tr>
+                  ))}
+                  {!data?.applications?.length && (
+                    <tr><td colSpan={8} style={{ ...tdS, color: D.muted, textAlign: 'center', padding: 24 }}>No applications found</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12 }}>
-            <span style={{ color: '#888', fontSize: 13 }}>{data?.total || 0} total records</span>
+            <span style={{ color: D.muted, fontSize: 13 }}>{data?.total || 0} total records</span>
             <div style={{ display: 'flex', gap: 8 }}>
               <button disabled={filters.page === 0} onClick={() => setFilters(f => ({ ...f, page: f.page - 1 }))}
-                style={{ background: '#333', color: '#ccc', border: 'none', borderRadius: 4, padding: '4px 12px', cursor: 'pointer' }}>Prev</button>
+                style={{ background: D.card, color: D.text, border: `1px solid ${D.border}`, borderRadius: 8, padding: '6px 14px', cursor: filters.page === 0 ? 'not-allowed' : 'pointer', fontSize: 13, opacity: filters.page === 0 ? 0.5 : 1 }}>Prev</button>
               <button disabled={(data?.applications?.length || 0) < limit}
                 onClick={() => setFilters(f => ({ ...f, page: f.page + 1 }))}
-                style={{ background: '#333', color: '#ccc', border: 'none', borderRadius: 4, padding: '4px 12px', cursor: 'pointer' }}>Next</button>
+                style={{ background: D.card, color: D.text, border: `1px solid ${D.border}`, borderRadius: 8, padding: '6px 14px', cursor: (data?.applications?.length || 0) < limit ? 'not-allowed' : 'pointer', fontSize: 13, opacity: (data?.applications?.length || 0) < limit ? 0.5 : 1 }}>Next</button>
             </div>
           </div>
         </>
@@ -192,75 +207,74 @@ function ProductLimitsTab({ token }) {
     setLoading(false);
   };
 
-  const statusColor = (s) => ({ ok: '#4caf50', warning: '#ff9800', exceeded: '#f44336', blackout_active: '#f44336' }[s] || '#999');
+  const statusColor = (s) => ({ ok: D.green, warning: D.amber, exceeded: D.red, blackout_active: D.red }[s] || D.muted);
 
   return (
     <div>
       <div style={{ display: 'flex', gap: 10, marginBottom: 20, alignItems: 'center' }}>
-        <input placeholder="Customer ID..." value={customerId} onChange={e => setCustomerId(e.target.value)}
-          style={{ background: '#1e1e2e', border: '1px solid #444', borderRadius: 6, color: '#eee', padding: '6px 10px', width: 300 }} />
+        <input placeholder="Customer ID…" value={customerId} onChange={e => setCustomerId(e.target.value)}
+          style={{ ...sInput, width: 320 }} />
         <button onClick={lookup}
-          style={{ background: '#1976d2', color: '#fff', border: 'none', borderRadius: 6, padding: '8px 16px', cursor: 'pointer' }}>
+          style={{ background: D.ink, color: D.card, border: 'none', borderRadius: 8, padding: '8px 16px', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
           Check Limits
         </button>
       </div>
-      {loading && <div style={{ color: '#aaa' }}>Checking...</div>}
+      {loading && <div style={{ color: D.muted }}>Checking…</div>}
       {result?.limits && (
-        <div>
-          <h4 style={{ color: '#ddd', marginBottom: 10 }}>{result.customerName}</h4>
+        <div style={{ marginBottom: 24 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: D.heading, marginBottom: 10 }}>{result.customerName}</div>
+          <div style={sTableWrap}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr>
+                  {['Type', 'Limit', 'Current', 'Status', 'Severity', 'Description'].map(h => <th key={h} style={thS}>{h}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {result.limits.map((l, i) => (
+                  <tr key={i}>
+                    <td style={tdS}>{l.limitType?.replace(/_/g, ' ')}</td>
+                    <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>{l.limitValue}</td>
+                    <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>{l.currentUsage}</td>
+                    <td style={tdS}><span style={{ color: statusColor(l.status), fontWeight: 600, fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.4 }}>{l.status?.replace(/_/g, ' ')}</span></td>
+                    <td style={{ ...tdS, color: l.severity === 'hard_block' ? D.red : D.amber }}>{l.severity}</td>
+                    <td style={{ ...tdS, color: D.muted, fontSize: 12, maxWidth: 320 }}>{l.description}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <div style={{ fontSize: 15, fontWeight: 700, color: D.heading, marginTop: 24, marginBottom: 10 }}>Nitrogen Status — All Lawn Customers</div>
+      {nData?.customers?.length ? (
+        <div style={sTableWrap}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
-              <tr style={{ color: '#999', fontSize: 11, textTransform: 'uppercase', borderBottom: '1px solid #333' }}>
-                {['Type', 'Limit', 'Current', 'Status', 'Severity', 'Description'].map(h => (
-                  <th key={h} style={{ textAlign: 'left', padding: 8 }}>{h}</th>
-                ))}
+              <tr>
+                {['Customer', 'City', 'County', 'Lawn Type', 'N Apps YTD', 'Blackout'].map(h => <th key={h} style={thS}>{h}</th>)}
               </tr>
             </thead>
             <tbody>
-              {result.limits.map((l, i) => (
-                <tr key={i} style={{ borderBottom: '1px solid #2a2a3a' }}>
-                  <td style={{ padding: 8, color: '#ccc' }}>{l.limitType?.replace(/_/g, ' ')}</td>
-                  <td style={{ padding: 8, color: '#eee' }}>{l.limitValue}</td>
-                  <td style={{ padding: 8, color: '#eee' }}>{l.currentUsage}</td>
-                  <td style={{ padding: 8 }}><span style={{ color: statusColor(l.status), fontWeight: 600 }}>{l.status?.replace(/_/g, ' ').toUpperCase()}</span></td>
-                  <td style={{ padding: 8, color: l.severity === 'hard_block' ? '#f44336' : '#ff9800' }}>{l.severity}</td>
-                  <td style={{ padding: 8, color: '#999', fontSize: 12, maxWidth: 300 }}>{l.description}</td>
+              {nData.customers.map(c => (
+                <tr key={c.customerId}>
+                  <td style={tdS}>{c.customerName}</td>
+                  <td style={{ ...tdS, color: D.muted }}>{c.city}</td>
+                  <td style={{ ...tdS, color: D.muted }}>{c.county?.replace('_', ' ')}</td>
+                  <td style={{ ...tdS, color: D.muted }}>{c.lawnType}</td>
+                  <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>{c.nitrogenAppsYTD}</td>
+                  <td style={tdS}>
+                    <span style={{ color: c.blackoutActive ? D.red : D.green, fontWeight: 600, fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.4 }}>
+                      {c.blackoutActive ? 'Active' : 'Clear'}
+                    </span>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-      )}
-
-      {/* Nitrogen section */}
-      <h3 style={{ color: '#ddd', marginTop: 30, marginBottom: 10 }}>Nitrogen Status — All Lawn Customers</h3>
-      {nData?.customers?.length ? (
-        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-          <thead>
-            <tr style={{ color: '#999', fontSize: 11, textTransform: 'uppercase', borderBottom: '1px solid #333' }}>
-              {['Customer', 'City', 'County', 'Lawn Type', 'N Apps YTD', 'Blackout'].map(h => (
-                <th key={h} style={{ textAlign: 'left', padding: 8 }}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {nData.customers.map(c => (
-              <tr key={c.customerId} style={{ borderBottom: '1px solid #2a2a3a' }}>
-                <td style={{ padding: 8, color: '#ccc' }}>{c.customerName}</td>
-                <td style={{ padding: 8, color: '#aaa' }}>{c.city}</td>
-                <td style={{ padding: 8, color: '#aaa' }}>{c.county?.replace('_', ' ')}</td>
-                <td style={{ padding: 8, color: '#aaa' }}>{c.lawnType}</td>
-                <td style={{ padding: 8, color: '#eee' }}>{c.nitrogenAppsYTD}</td>
-                <td style={{ padding: 8 }}>
-                  <span style={{ color: c.blackoutActive ? '#f44336' : '#4caf50', fontWeight: 600 }}>
-                    {c.blackoutActive ? 'ACTIVE' : 'Clear'}
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      ) : <div style={{ color: '#94a3b8' }}>No lawn customers found</div>}
+      ) : <div style={{ color: D.muted }}>No lawn customers found</div>}
     </div>
   );
 }
@@ -286,54 +300,52 @@ function LicensesTab({ token }) {
   };
 
   const statusBadge = (s) => {
-    const colors = { active: '#4caf50', expiring_soon: '#ff9800', expired: '#f44336', none: '#666' };
-    return <span style={{ color: colors[s] || '#999', fontWeight: 600, fontSize: 12, textTransform: 'uppercase' }}>{s?.replace('_', ' ')}</span>;
+    const colors = { active: D.green, expiring_soon: D.amber, expired: D.red, none: D.muted };
+    return <span style={{ color: colors[s] || D.muted, fontWeight: 600, fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.4 }}>{s?.replace('_', ' ')}</span>;
   };
 
-  if (loading) return <div style={{ color: '#aaa', padding: 20 }}>Loading...</div>;
+  if (loading) return <div style={{ color: D.muted, padding: 20 }}>Loading…</div>;
 
   return (
-    <div>
+    <div style={sTableWrap}>
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
         <thead>
-          <tr style={{ color: '#999', fontSize: 11, textTransform: 'uppercase', borderBottom: '1px solid #333' }}>
-            {['Technician', 'License #', 'Expiry', 'Categories', 'Status', ''].map(h => (
-              <th key={h} style={{ textAlign: 'left', padding: 8 }}>{h}</th>
-            ))}
+          <tr>
+            {['Technician', 'License #', 'Expiry', 'Categories', 'Status', ''].map(h => <th key={h} style={thS}>{h}</th>)}
           </tr>
         </thead>
         <tbody>
           {data?.technicians?.map(t => (
-            <tr key={t.id} style={{ borderBottom: '1px solid #2a2a3a' }}>
-              <td style={{ padding: 8, color: '#eee' }}>{t.name}</td>
+            <tr key={t.id}>
+              <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>{t.name}</td>
               {editing === t.id ? (
                 <>
-                  <td style={{ padding: 8 }}>
+                  <td style={tdS}>
                     <input value={form.fl_applicator_license} onChange={e => setForm(f => ({ ...f, fl_applicator_license: e.target.value }))}
-                      style={{ background: '#2a2a3a', border: '1px solid #555', color: '#eee', borderRadius: 4, padding: '4px 8px', width: 120 }} />
+                      style={{ ...sInput, width: 140 }} />
                   </td>
-                  <td style={{ padding: 8 }}>
+                  <td style={tdS}>
                     <input type="date" value={form.license_expiry} onChange={e => setForm(f => ({ ...f, license_expiry: e.target.value }))}
-                      style={{ background: '#2a2a3a', border: '1px solid #555', color: '#eee', borderRadius: 4, padding: '4px 8px' }} />
+                      style={sInput} />
                   </td>
-                  <td style={{ padding: 8, color: '#aaa', fontSize: 12 }}>—</td>
-                  <td style={{ padding: 8 }}>{statusBadge(t.licenseStatus)}</td>
-                  <td style={{ padding: 8 }}>
-                    <button onClick={save} style={{ background: '#4caf50', color: '#fff', border: 'none', borderRadius: 4, padding: '4px 10px', cursor: 'pointer', marginRight: 6 }}>Save</button>
-                    <button onClick={() => setEditing(null)} style={{ background: '#555', color: '#ccc', border: 'none', borderRadius: 4, padding: '4px 10px', cursor: 'pointer' }}>Cancel</button>
+                  <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>—</td>
+                  <td style={tdS}>{statusBadge(t.licenseStatus)}</td>
+                  <td style={tdS}>
+                    <button onClick={save} style={{ background: D.green, color: D.card, border: 'none', borderRadius: 8, padding: '6px 12px', cursor: 'pointer', marginRight: 6, fontSize: 12, fontWeight: 600 }}>Save</button>
+                    <button onClick={() => setEditing(null)} style={{ background: 'transparent', color: D.muted, border: `1px solid ${D.border}`, borderRadius: 8, padding: '6px 12px', cursor: 'pointer', fontSize: 12 }}>Cancel</button>
                   </td>
                 </>
               ) : (
                 <>
-                  <td style={{ padding: 8, color: '#ccc' }}>{t.license || '—'}</td>
-                  <td style={{ padding: 8, color: '#ccc' }}>{t.licenseExpiry || '—'}</td>
-                  <td style={{ padding: 8, color: '#aaa', fontSize: 12 }}>
+                  <td style={tdS}>{t.license || '—'}</td>
+                  <td style={tdS}>{t.licenseExpiry || '—'}</td>
+                  <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>
                     {Array.isArray(t.licenseCategories) ? t.licenseCategories.join(', ') : '—'}
                   </td>
-                  <td style={{ padding: 8 }}>{statusBadge(t.licenseStatus)}</td>
-                  <td style={{ padding: 8 }}>
+                  <td style={tdS}>{statusBadge(t.licenseStatus)}</td>
+                  <td style={tdS}>
                     <button onClick={() => startEdit(t)}
-                      style={{ background: '#1976d2', color: '#fff', border: 'none', borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 12 }}>Edit</button>
+                      style={{ background: 'transparent', color: D.ink, border: `1px solid ${D.border}`, borderRadius: 8, padding: '6px 12px', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>Edit</button>
                   </td>
                 </>
               )}
@@ -358,23 +370,41 @@ export default function CompliancePage() {
   ];
 
   return (
-    <div style={{ background: '#121218', minHeight: '100vh', color: '#eee', padding: 24 }}>
-      <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', marginBottom: 20 }}>
-        <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Chemical Compliance & DACS Reporting</span>
-        <span className="hidden md:inline">Chemical Compliance & DACS Reporting</span>
+    <div style={{ background: D.bg, minHeight: '100vh', padding: '24px 32px' }}>
+      <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, letterSpacing: '-0.015em', margin: '0 0 24px' }}>
+        Chemical Compliance &amp; DACS Reporting
       </h1>
 
-      <div style={{ display: 'flex', gap: 4, marginBottom: 24, borderBottom: '1px solid #333', paddingBottom: 0 }}>
-        {tabs.map(t => (
-          <button key={t.key} onClick={() => setTab(t.key)}
-            style={{
-              background: tab === t.key ? '#1e1e2e' : 'transparent', color: tab === t.key ? '#00e5ff' : '#888',
-              border: 'none', borderBottom: tab === t.key ? '2px solid #00e5ff' : '2px solid transparent',
-              padding: '10px 20px', cursor: 'pointer', fontSize: 14, fontWeight: tab === t.key ? 700 : 400,
-            }}>
-            {t.label}
-          </button>
-        ))}
+      {/* Centered Pipeline-page tab strip — matches Customers / Pipeline /
+          Dispatch so all the multi-tab admin surfaces share one shape. */}
+      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
+        <div
+          style={{
+            display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center',
+            gap: 4, padding: 4,
+            background: '#F4F4F5', borderRadius: 10, border: `1px solid ${D.border}`,
+          }}
+        >
+          {tabs.map(t => {
+            const active = tab === t.key;
+            return (
+              <button
+                key={t.key}
+                type="button"
+                onClick={() => setTab(t.key)}
+                style={{
+                  padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
+                  background: active ? D.ink : 'transparent',
+                  color: active ? D.card : D.muted,
+                  fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
+                  fontFamily: "'DM Sans', sans-serif",
+                }}
+              >
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {tab === 'dashboard' && <DashboardTab token={token} />}
