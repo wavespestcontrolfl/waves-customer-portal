@@ -120,10 +120,15 @@ router.get('/', async (req, res, next) => {
 
     // All technicians for status display. pay_rate flows through
     // so the dashboard can compute labor cost at per-tech rates
-    // instead of the legacy hardcoded $35.
+    // instead of the legacy hardcoded $35 — admin only. Tech-role
+    // callers (dispatch, status displays) get the same row shape with
+    // pay_rate stripped so they never see coworker wages.
+    const isAdmin = req.techRole === 'admin';
+    const techCols = ['id', 'name', 'role'];
+    if (isAdmin) techCols.push('pay_rate');
     const allTechs = await db('technicians')
       .where({ active: true })
-      .select('id', 'name', 'role', 'pay_rate');
+      .select(techCols);
 
     res.json({
       activeShifts: liveStatus,
@@ -913,7 +918,11 @@ async function ensureDocTable() {
 //   category=<one of DOC_CATEGORIES> | 'all'
 //   technicianId=<uuid> — docs bound to that tech
 //   technicianId='company' — only company-wide docs (technician_id IS NULL)
-router.get('/documents', async (req, res, next) => {
+// requireAdmin: documents now hold per-tech HR records (W-4, I-9,
+// license, cert expirations). Tech-role tokens must not be able to
+// list/read/upload/edit those, even their own — pre-existing tech
+// access to company-wide SOPs is acceptable collateral here.
+router.get('/documents', requireAdmin, async (req, res, next) => {
   try {
     await ensureDocTable();
     const { category, technicianId } = req.query;
@@ -936,7 +945,7 @@ router.get('/documents', async (req, res, next) => {
 // POST /documents/upload — upload a file. Optional binding:
 //   technicianId — bind to one tech (omit / empty for company-wide)
 //   expirationDate — YYYY-MM-DD for licenses, certs, I-9s with reverify dates
-router.post('/documents/upload', upload.single('file'), async (req, res, next) => {
+router.post('/documents/upload', requireAdmin, upload.single('file'), async (req, res, next) => {
   try {
     await ensureDocTable();
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
@@ -971,7 +980,7 @@ router.post('/documents/upload', upload.single('file'), async (req, res, next) =
 });
 
 // GET /documents/:id/download — get presigned download URL
-router.get('/documents/:id/download', async (req, res, next) => {
+router.get('/documents/:id/download', requireAdmin, async (req, res, next) => {
   try {
     const doc = await db('company_documents').where({ id: req.params.id }).first();
     if (!doc) return res.status(404).json({ error: 'Document not found' });
@@ -988,7 +997,7 @@ router.get('/documents/:id/download', async (req, res, next) => {
 // PUT /documents/:id — update metadata. Pass technicianId='' to
 // unbind from a tech back to company-wide; expirationDate='' to
 // clear an expiration.
-router.put('/documents/:id', async (req, res, next) => {
+router.put('/documents/:id', requireAdmin, async (req, res, next) => {
   try {
     const { title, category, description, technicianId, expirationDate } = req.body;
     const updates = { updated_at: new Date() };
@@ -1004,7 +1013,7 @@ router.put('/documents/:id', async (req, res, next) => {
 });
 
 // DELETE /documents/:id — archive (soft delete)
-router.delete('/documents/:id', async (req, res, next) => {
+router.delete('/documents/:id', requireAdmin, async (req, res, next) => {
   try {
     await db('company_documents').where({ id: req.params.id }).update({ is_archived: true, updated_at: new Date() });
     logger.info(`[docs] Archived document: ${req.params.id}`);
