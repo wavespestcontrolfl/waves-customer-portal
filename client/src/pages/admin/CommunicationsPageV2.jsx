@@ -62,6 +62,7 @@ import CallLogTabV2 from './CallLogTabV2';
 import { SmsTemplatesTabV2, CSRCoachTabV2 } from './CommunicationsTabsV2';
 import PushSettingsV2 from '../../components/admin/PushSettingsV2';
 import CallBridgeLink from '../../components/admin/CallBridgeLink';
+import Customer360ProfileV2 from '../../components/admin/Customer360ProfileV2';
 import { Badge, Button, Card, cn } from '../../components/ui';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -246,15 +247,27 @@ function SmsLogItemV2({ msg: m, onReply }) {
   );
 }
 
-function ConversationViewV2({ thread, messages, onReply, onBack }) {
+function ConversationViewV2({ thread, messages, onReply, onBack, onOpenProfile }) {
   const contactPhone = thread.contactPhone;
   const contactName = thread.customerName || contactPhone;
+  const canOpenProfile = !!(thread.customerName && thread.customerId);
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-3 mb-4 pb-3 border-b border-hairline border-zinc-200">
         <Button size="sm" variant="secondary" onClick={onBack}>Back</Button>
         <div className="flex-1 min-w-0">
-          <div className="text-14 font-medium text-zinc-900 truncate">{contactName}</div>
+          {canOpenProfile ? (
+            <button
+              type="button"
+              onClick={() => onOpenProfile(thread.customerId)}
+              className="text-14 font-medium text-zinc-900 truncate hover:underline text-left block"
+              title="Open customer profile"
+            >
+              {contactName}
+            </button>
+          ) : (
+            <div className="text-14 font-medium text-zinc-900 truncate">{contactName}</div>
+          )}
           <CallBridgeLink
             phone={contactPhone}
             customerName={thread.customerName || ''}
@@ -369,6 +382,7 @@ function SmsTab() {
   // PR 4 — status filter chips, reply-from lock.
   const [statusFilter, setStatusFilter] = useState('all');
   const [threadLock, setThreadLock] = useState(null);
+  const [selected360Id, setSelected360Id] = useState(null);
 
   const loadData = useCallback((search = '') => {
     const logUrl = search
@@ -580,6 +594,7 @@ function SmsTab() {
           contactPhone,
           ourNumber,
           customerName: m.customerName || null,
+          customerId: m.customerId || null,
           messages: [],
           lastMessage: null,
           lastTimestamp: null,
@@ -590,6 +605,7 @@ function SmsTab() {
       const thread = threadMap[key];
       thread.messages.push(m);
       if (m.customerName) thread.customerName = m.customerName;
+      if (m.customerId) thread.customerId = m.customerId;
       if (ourNumber && allNums.has(ourNumber)) thread.ourNumber = ourNumber;
       thread.lastMessage = m.body;
       thread.lastTimestamp = m.createdAt;
@@ -1069,6 +1085,7 @@ function SmsTab() {
             messages={activeThread.messages.slice().reverse()}
             onReply={handleThreadReply}
             onBack={() => { setSmsView('threads'); setActiveThread(null); }}
+            onOpenProfile={(id) => setSelected360Id(id)}
           />
         </Card>
       ) : smsView === 'threads' ? (
@@ -1163,9 +1180,20 @@ function SmsTab() {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between mb-0.5">
                         <div className="flex items-center gap-1.5 min-w-0">
-                          <span className="text-16 md:text-14 font-medium text-zinc-900 truncate">
-                            {t.customerName || t.contactPhone}
-                          </span>
+                          {t.customerName && t.customerId ? (
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); setSelected360Id(t.customerId); }}
+                              className="text-16 md:text-14 font-medium text-zinc-900 truncate hover:underline text-left"
+                              title="Open customer profile"
+                            >
+                              {t.customerName}
+                            </button>
+                          ) : (
+                            <span className="text-16 md:text-14 font-medium text-zinc-900 truncate">
+                              {t.customerName || t.contactPhone}
+                            </span>
+                          )}
                           {isUnknown && <Badge tone="neutral">Unknown</Badge>}
                         </div>
                         <span className="font-mono text-12 md:text-11 text-ink-tertiary flex-shrink-0 ml-2">
@@ -1241,6 +1269,13 @@ function SmsTab() {
             )}
           </div>
         </Card>
+      )}
+
+      {selected360Id && (
+        <Customer360ProfileV2
+          customerId={selected360Id}
+          onClose={() => setSelected360Id(null)}
+        />
       )}
     </div>
   );
