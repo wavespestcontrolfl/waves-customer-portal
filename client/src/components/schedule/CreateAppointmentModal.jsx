@@ -375,6 +375,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // add-ons; lines on different cadences fan out into their own parent
   // series so quarterly pest + monthly lawn can co-exist on this form.
   // One-time lines all share one one-time parent.
+  const groupKey = (group) => (group.cadence === 'custom' ? `custom:${group.intervalDays}` : group.cadence);
+  const groupLabel = (group) => {
+    if (group.cadence === 'custom') return `Every ${group.intervalDays} days`;
+    const found = CADENCE_OPTIONS.find((o) => o.value === group.cadence);
+    return found ? found.label : group.cadence;
+  };
   const groupServicesByCadence = (rows) => {
     const groups = new Map();
     for (const s of rows) {
@@ -385,6 +391,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     }
     return Array.from(groups.values());
   };
+
+  // Tracks cadence-group keys already POSTed during this modal session.
+  // If the loop fails partway (e.g. quarterly succeeded, monthly errored),
+  // a retry click skips the keys that landed so we don't double-book the
+  // customer. Reset on successful close.
+  const createdGroupKeysRef = useRef(new Set());
 
   // Compute window_end given a start time and a duration in minutes.
   const computeWindowEnd = (start, durationMin) => {
@@ -397,10 +409,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const handleSubmit = async () => {
     if (!selectedCustomer || services.length === 0) return;
     setSaving(true);
-    try {
-      const groups = groupServicesByCadence(services);
-      const results = [];
-      for (const group of groups) {
+    const groups = groupServicesByCadence(services);
+    const results = [];
+    let firstError = null;
+    for (const group of groups) {
+      const key = groupKey(group);
+      // Skip groups already created in a prior attempt of this submit
+      // session — a retry after partial failure shouldn't duplicate them.
+      if (createdGroupKeysRef.current.has(key)) continue;
+      try {
         const [primary, ...extras] = group.lines;
         const groupSubtotal = group.lines.reduce((sum, s) => {
           const n = parseFloat(s.price);
@@ -465,16 +482,33 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           sendConfirmation: sendSms,
         };
         const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
+        createdGroupKeysRef.current.add(key);
         results.push(r);
+      } catch (e) {
+        firstError = { label: groupLabel(group), message: e.message };
+        break;
       }
-      const apptCount = results.length;
-      const message = apptCount === 1
-        ? 'Appointment created — invoice will send with service report'
-        : `${apptCount} appointments created — invoices will send with each service report`;
-      setToast(message);
-      setTimeout(() => { onCreated?.({ id: results[0]?.id, scheduledDate: apptDate }); }, 1200);
-    } catch (e) { alert('Failed: ' + e.message); }
+    }
     setSaving(false);
+    if (firstError) {
+      const created = createdGroupKeysRef.current.size;
+      const total = groups.length;
+      const lead = created > 0
+        ? `${created} of ${total} appointment series created. ${firstError.label} failed: ${firstError.message}.`
+        : `Failed: ${firstError.message}`;
+      const tail = created > 0 ? ' Click Save to retry the rest.' : '';
+      alert(lead + tail);
+      return;
+    }
+    const apptCount = results.length || createdGroupKeysRef.current.size;
+    const message = apptCount === 1
+      ? 'Appointment created — invoice will send with service report'
+      : `${apptCount} appointment series created — invoices will send with each service report`;
+    setToast(message);
+    setTimeout(() => {
+      createdGroupKeysRef.current = new Set();
+      onCreated?.({ id: results[0]?.id, scheduledDate: apptDate });
+    }, 1200);
   };
 
   const overlayStyle = {
