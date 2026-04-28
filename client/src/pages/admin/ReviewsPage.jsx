@@ -1223,13 +1223,14 @@ export default function ReviewsPage() {
   const locations = data?.locations || [];
   const { totalReviews = 0, avgRating = 0, unresponded = 0, responded = 0, newThisMonth = 0, breakdown = {}, perLocation = [] } = stats;
 
-  // Response-rate numerator AND denominator both come from the same
-  // google_reviews dataset (server-counted) so the percentage is
-  // self-consistent. `totalReviews` is the Google `user_ratings_total`
-  // for the location and may exceed our DB row count when Places API
-  // only synced a capped subset, so it can't be the denominator here.
-  const respondedCount = responded;
-  const ratedTotal = responded + unresponded;
+  // Denominator = real Google `user_ratings_total` across all locations
+  // (`totalReviews`). Unresponded count is reliable from our synced
+  // dataset — Places API returns the newest reviews, which is exactly
+  // where any still-unreplied ones live. Older synced reviews older than
+  // the Places cap are assumed replied (the operator works the queue
+  // down to zero). Replied = total - unresponded.
+  const ratedTotal = totalReviews || (responded + unresponded);
+  const respondedCount = Math.max(0, ratedTotal - unresponded);
   const responseRate = ratedTotal > 0 ? Math.round((respondedCount / ratedTotal) * 100) : 0;
 
   // --- Filtering ---

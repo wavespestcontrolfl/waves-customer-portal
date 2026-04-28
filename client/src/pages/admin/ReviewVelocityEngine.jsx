@@ -44,28 +44,28 @@ const C = {
 const GBP_LOCATIONS = [
   {
     id: 'lakewood-ranch',
-    name: 'Lakewood Ranch / Bradenton',
+    name: 'Lakewood Ranch',
     zones: ['lakewood ranch','bradenton','university park'],
     zips: ['34201','34202','34203','34205','34207','34208','34209','34210','34211','34212'],
     reviewUrl: 'https://g.page/r/CVRc_P5butTMEBM/review',
   },
   {
     id: 'parrish',
-    name: 'Parrish / Palmetto',
+    name: 'Parrish',
     zones: ['parrish','palmetto','ellenton','ruskin','apollo beach','terra ceia','memphis'],
     zips: ['34219','34221','34222'],
     reviewUrl: 'https://g.page/r/Ca-4KKoWwFacEBM/review',
   },
   {
     id: 'sarasota',
-    name: 'Sarasota / Siesta Key',
+    name: 'Sarasota',
     zones: ['sarasota','siesta key','lido key','osprey','longboat key','bee ridge','fruitville'],
     zips: ['34231','34232','34233','34234','34235','34236','34237','34238','34239','34240','34241','34242','34243'],
     reviewUrl: 'https://g.page/r/CRkzS6M4EpncEBM/review',
   },
   {
     id: 'venice',
-    name: 'Venice / North Port',
+    name: 'Venice',
     zones: ['venice','north port','englewood','nokomis','port charlotte','punta gorda','warm mineral springs','wellen park'],
     zips: ['34275','34285','34286','34287','34288','34289','34291','34292','34293','33947','33948','33949','33950','33952','33953','33954','33955','33980','33981','33982','33983'],
     reviewUrl: 'https://g.page/r/CURA5pQ1KatBEBM/review',
@@ -392,25 +392,27 @@ export default function ReviewVelocityEngine() {
   return (
     <div style={{ fontFamily: C.sans, color: C.t1 }}>
       {/* Nav tabs */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7', marginBottom: 20 }}>
-        {tabs.map(t => (
-          <button key={t.key} onClick={() => setPage(t.key)} style={{
-            padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
-            background: page === t.key ? '#18181B' : 'transparent',
-            color: page === t.key ? '#FFFFFF' : '#A1A1AA',
-            fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
-            fontFamily: "'DM Sans', sans-serif",
-          }}>
-            {t.label}
-            {t.count !== undefined && (
-              <span style={{
-                display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minWidth: 18, height: 18,
-                borderRadius: 9, fontSize: 10, fontWeight: 700, padding: '0 5px', marginLeft: 6,
-                background: page === t.key ? 'rgba(255,255,255,0.2)' : '#E4E4E7', color: page === t.key ? '#FFFFFF' : '#A1A1AA',
-              }}>{t.count}</span>
-            )}
-          </button>
-        ))}
+      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 20 }}>
+        <div style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
+          {tabs.map(t => (
+            <button key={t.key} onClick={() => setPage(t.key)} style={{
+              padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
+              background: page === t.key ? '#18181B' : 'transparent',
+              color: page === t.key ? '#FFFFFF' : '#A1A1AA',
+              fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
+              fontFamily: "'DM Sans', sans-serif",
+            }}>
+              {t.label}
+              {t.count !== undefined && (
+                <span style={{
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minWidth: 18, height: 18,
+                  borderRadius: 9, fontSize: 10, fontWeight: 700, padding: '0 5px', marginLeft: 6,
+                  background: page === t.key ? 'rgba(255,255,255,0.2)' : '#E4E4E7', color: page === t.key ? '#FFFFFF' : '#A1A1AA',
+                }}>{t.count}</span>
+              )}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Load banner */}
