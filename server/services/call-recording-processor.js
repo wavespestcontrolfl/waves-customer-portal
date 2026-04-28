@@ -267,10 +267,17 @@ const CallRecordingProcessor = {
     // race through extraction and both send the confirmation SMS. Atomic
     // UPDATE → conditional exit: the first run wins, the second bails.
     if (!opts.force) {
+      // Reclaim stale 'processing' rows older than 10 min — server crash or
+      // Gemini hang between claim (this UPDATE) and terminal status write
+      // would otherwise wedge the row forever, since both the claim guard
+      // below and processAllPending's filter exclude 'processing'.
       const claimed = await db('call_log')
         .where({ twilio_call_sid: callSid })
-        .whereNot('processing_status', 'processing')
         .whereNot('processing_status', 'processed')
+        .where(function () {
+          this.whereNot('processing_status', 'processing')
+            .orWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+        })
         .update({ processing_status: 'processing', updated_at: new Date() });
       if (claimed === 0) {
         logger.info(`[call-proc] Concurrent run detected for ${callSid} — skipping`);
@@ -806,15 +813,30 @@ const CallRecordingProcessor = {
    * Called from admin or cron.
    */
   async processAllPending() {
+    // Eligibility: a row needs (re)processing if it has a recording AND any of:
+    //   - processing_status NULL/pending/no_transcription (never ran or known-incomplete)
+    //   - processing_status='processing' but stale > 10 min (orphaned claim from crash/hang)
+    //   - transcription_status='pending' AND transcription IS NULL (real user-visible symptom:
+    //     "recording present but transcript missing" — the case the cron is most needed for)
+    // Duration filter uses recording_duration_seconds (set by the recording-status webhook)
+    // with duration_seconds fallback, since the call-status webhook may not have populated
+    // the latter yet — earlier filter on duration_seconds alone excluded fresh recordings.
     const pending = await db('call_log')
       .where('recording_url', '!=', '')
       .whereNotNull('recording_url')
       .where(function () {
         this.whereNull('processing_status')
           .orWhere('processing_status', 'pending')
-          .orWhere('processing_status', 'no_transcription');
+          .orWhere('processing_status', 'no_transcription')
+          .orWhere(function () {
+            this.where('processing_status', 'processing')
+              .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+          })
+          .orWhere(function () {
+            this.where('transcription_status', 'pending').whereNull('transcription');
+          });
       })
-      .where('duration_seconds', '>', 10)
+      .where(db.raw('COALESCE(recording_duration_seconds, duration_seconds, 0) > ?', [10]))
       .orderBy('created_at', 'desc')
       .limit(20);
 
