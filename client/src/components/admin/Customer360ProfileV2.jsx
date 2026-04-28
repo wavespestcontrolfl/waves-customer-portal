@@ -50,7 +50,7 @@ import { useState, useEffect, useRef } from 'react';
 import { ChevronLeft, MoreHorizontal, Trash2 } from 'lucide-react';
 import { CustomerActionBar } from './StickyActionBar';
 import { Card, CardBody, Badge, Button, Switch, Table, THead, TBody, TR, TH, TD, cn } from '../ui';
-import CallBridgeLink from './CallBridgeLink';
+import CallBridgeLink, { callViaBridge } from './CallBridgeLink';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -91,8 +91,7 @@ const STAGE_LABELS = {
 // ─── Health Score Circle (monochrome) ────────────────────────────
 function HealthCircle({ score }) {
   if (score == null) return null;
-  const isAlert = score < 40;
-  const stroke = isAlert ? '#C8312F' : '#18181B'; // alert-fg or zinc-900
+  const stroke = score >= 70 ? '#10B981' : score >= 40 ? '#F59E0B' : '#C8312F';
   const r = 18, circ = 2 * Math.PI * r, offset = circ - (score / 100) * circ;
   return (
     <svg width={44} height={44} viewBox="0 0 44 44" className="flex-shrink-0">
@@ -137,19 +136,28 @@ function RadarChart({ data }) {
   );
 }
 
-// ─── Tier badge (monochrome — collapses palette) ─────────────────
+// ─── Tier badge (color-coded per metal) ─────────────────────────
+const TIER_STYLES = {
+  Platinum: { backgroundColor: '#E5E7EB', color: '#1F2937' },
+  Gold:     { backgroundColor: '#D4A017', color: '#FFFFFF' },
+  Silver:   { backgroundColor: '#9CA3AF', color: '#FFFFFF' },
+  Bronze:   { backgroundColor: '#A16207', color: '#FFFFFF' },
+};
 function TierBadgeV2({ tier }) {
   if (!tier) return <Badge tone="neutral">No Plan</Badge>;
-  return <Badge tone="neutral">{tier}</Badge>;
+  const style = TIER_STYLES[tier];
+  if (!style) return <Badge tone="neutral">{tier}</Badge>;
+  return <Badge tone="neutral" style={style}>{tier}</Badge>;
 }
 
-// ─── Stage badge — alert tone only for at_risk/churned ───────────
+// ─── Stage badge — green for active customers, red for everything else ───
 function StageBadgeV2({ stage }) {
   const label = STAGE_LABELS[stage] || stage;
-  const tone = stage === 'at_risk' || stage === 'churned' ? 'alert'
-    : stage === 'active_customer' || stage === 'won' ? 'strong'
-    : 'neutral';
-  return <Badge tone={tone}>{label}</Badge>;
+  const isActive = stage === 'active_customer' || stage === 'won';
+  const style = isActive
+    ? { backgroundColor: '#10B981', color: '#FFFFFF' }
+    : { backgroundColor: '#C8312F', color: '#FFFFFF' };
+  return <Badge tone="neutral" style={style}>{label}</Badge>;
 }
 
 // ─── Section title ───────────────────────────────────────────────
@@ -480,7 +488,7 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
             {(c.phone || c.email) && (
               <div className="flex gap-4 items-center flex-wrap text-12 text-ink-secondary mb-1.5">
                 {c.phone && <CallBridgeLink phone={c.phone} customerName={`${c.firstName || ''} ${c.lastName || ''}`.trim()} className="u-nums text-zinc-900 hover:underline">{c.phone}</CallBridgeLink>}
-                {c.email && <a href={`mailto:${c.email}`} className="text-zinc-900 hover:underline">{c.email}</a>}
+                {c.email && <a href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c.email)}`} target="_blank" rel="noopener noreferrer" className="text-zinc-900 hover:underline">{c.email}</a>}
               </div>
             )}
             {(c.serviceContactPhone || c.serviceContactEmail) && (
@@ -491,12 +499,26 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
                   <CallBridgeLink phone={c.serviceContactPhone} customerName={c.serviceContactName || `${c.firstName || ''} ${c.lastName || ''}`.trim()} className="u-nums text-zinc-900 hover:underline mr-3">{c.serviceContactPhone}</CallBridgeLink>
                 )}
                 {c.serviceContactEmail && (
-                  <a href={`mailto:${c.serviceContactEmail}`} className="text-zinc-900 hover:underline">{c.serviceContactEmail}</a>
+                  <a href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c.serviceContactEmail)}`} target="_blank" rel="noopener noreferrer" className="text-zinc-900 hover:underline">{c.serviceContactEmail}</a>
                 )}
               </div>
             )}
             <div className="flex gap-4 items-center flex-wrap text-12 text-ink-secondary mb-2.5">
-              <span>{c.address?.line1}, {c.address?.city}, {c.address?.state} {c.address?.zip}</span>
+              {(() => {
+                const parts = [c.address?.line1, c.address?.city, c.address?.state, c.address?.zip].filter(Boolean);
+                if (!parts.length) return null;
+                const full = `${c.address?.line1 || ''}, ${c.address?.city || ''}, ${c.address?.state || ''} ${c.address?.zip || ''}`.replace(/^,\s*|\s*,\s*$/g, '');
+                return (
+                  <a
+                    href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(full)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-zinc-900 hover:underline"
+                  >
+                    {full}
+                  </a>
+                );
+              })()}
               <span className="u-nums text-zinc-900">{fmtCurrency(c.monthlyRate)}/mo</span>
               <span className="u-nums">{fmtCurrency(c.annualValue)}/yr</span>
               {c.memberSince && <span>Since {fmtDate(c.memberSince)}</span>}
@@ -504,16 +526,18 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
             <div className="flex gap-2 flex-wrap">
               {c.phone && <>
                 <a href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
-                  className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white hover:bg-zinc-800 u-focus-ring">Text</a>
-                <CallBridgeLink phone={c.phone} customerName={`${c.firstName || ''} ${c.lastName || ''}`.trim()}
-                  className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-50 u-focus-ring">Call</CallBridgeLink>
+                  className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Text</a>
+                <button
+                  type="button"
+                  onClick={() => callViaBridge(c.phone, `${c.firstName || ''} ${c.lastName || ''}`.trim())}
+                  className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Call</button>
               </>}
               <a href={`/admin/schedule?customer=${customerId}`}
-                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-50 u-focus-ring">Book Appt</a>
+                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Book Appt</a>
               <a href={`/admin/invoices?customer=${customerId}`}
-                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-50 u-focus-ring">Invoice</a>
+                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Invoice</a>
               <button onClick={() => setActiveTab('comms')}
-                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-50 u-focus-ring">Add Note</button>
+                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Add Note</button>
               <button
                 onClick={() => {
                   setEditForm({
@@ -532,7 +556,7 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
                   setEditErr('');
                   setEditOpen(true);
                 }}
-                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-50 u-focus-ring">Edit</button>
+                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Edit</button>
             </div>
           </div>
 
@@ -778,7 +802,7 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
                 <RadarChart data={radarData} />
                 {score != null && (
                   <div className="text-center text-12 text-ink-secondary mt-1">
-                    Score: <span className={cn('font-medium', score >= 70 ? 'text-zinc-900' : score >= 40 ? 'text-zinc-900' : 'text-alert-fg')}>{score}/100</span>
+                    Score: <span className="font-medium" style={{ color: score >= 70 ? '#10B981' : score >= 40 ? '#F59E0B' : '#C8312F' }}>{score}/100</span>
                     {hs.churn_risk_level && <span> · {hs.churn_risk_level}</span>}
                   </div>
                 )}

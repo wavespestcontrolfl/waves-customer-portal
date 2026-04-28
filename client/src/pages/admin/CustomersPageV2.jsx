@@ -36,7 +36,7 @@
 //   reskinned eventually but for now stylistic drift is the risk.
 import { useState, useEffect } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import { Filter, Phone, MessageSquare, Plus } from 'lucide-react';
+import { Filter, Phone, MessageSquare, Plus, Trash2 } from 'lucide-react';
 import Customer360Profile from '../../components/admin/Customer360ProfileV2';
 import MobileNewCustomerSheet from '../../components/admin/MobileNewCustomerSheet';
 import useIsMobile from '../../hooks/useIsMobile';
@@ -97,19 +97,23 @@ function StageBadgeV2({ stage }) {
 // Health-score dot. Single color for valid score, alert red only for
 // critical (<40). Amber is collapsed to neutral per the alert-reservation
 // rule — the numeric score still communicates severity.
+// Small ring+number — visually matches Customer 360 HealthCircle, scaled
+// down for row density. Color tier: ≥70 green, 40–69 amber, <40 red.
 function HealthDot({ score }) {
   if (score == null) {
-    return <span className="inline-block w-2 h-2 rounded-full bg-zinc-200" title="No score" />;
+    return <span className="inline-block w-6 h-6 rounded-full border-hairline border-zinc-200" title="No score" />;
   }
-  const isCritical = score < 40;
+  const stroke = score >= 70 ? '#10B981' : score >= 40 ? '#F59E0B' : '#C8312F';
+  const r = 10, circ = 2 * Math.PI * r, offset = circ - (score / 100) * circ;
   return (
-    <span
-      className={cn(
-        'inline-block w-2 h-2 rounded-full',
-        isCritical ? 'bg-alert-fg' : 'bg-zinc-900'
-      )}
-      title={`Health: ${score}`}
-    />
+    <svg width={26} height={26} viewBox="0 0 26 26" className="flex-shrink-0" aria-label={`Health: ${score}`}>
+      <circle cx={13} cy={13} r={r} fill="none" stroke="#E4E4E7" strokeWidth={2} />
+      <circle cx={13} cy={13} r={r} fill="none" stroke={stroke} strokeWidth={2}
+        strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round"
+        transform="rotate(-90 13 13)" />
+      <text x={13} y={16} textAnchor="middle" fill={stroke} fontSize={9} fontWeight={500}
+        fontFamily="ui-monospace, monospace">{score}</text>
+    </svg>
   );
 }
 
@@ -378,9 +382,9 @@ function SortHeaderV2({ label, sortKey, currentSort, currentDir, onSort, classNa
     <button
       type="button"
       onClick={() => onSort(sortKey)}
+      style={{ fontWeight: 700 }}
       className={cn(
-        'inline-flex items-center gap-1 u-label text-left',
-        active ? 'text-zinc-900' : 'text-ink-tertiary hover:text-ink-secondary',
+        'inline-flex items-center gap-1 text-11 uppercase tracking-label text-zinc-900 bg-transparent border-0 p-0 focus:outline-none',
         className
       )}
     >
@@ -392,11 +396,11 @@ function SortHeaderV2({ label, sortKey, currentSort, currentDir, onSort, classNa
 
 // --- View toggle (flat pill row, no emoji) ---
 // Mobile lands on Directory with no visible toggle (it's the only
-// mobile view). Desktop gets the full pill strip of Map / Pipeline /
-// Health / AI Advisor. Directory carries mobileOnly so it doesn't
-// appear in the desktop strip even if state says view === 'directory'.
+// mobile view). Desktop also defaults to Directory (list-first),
+// with Map / Pipeline / Health / AI Advisor as secondary tabs in
+// the pill strip.
 const VIEWS = [
-  { key: 'directory', label: 'Directory', mobileOnly: true },
+  { key: 'directory', label: 'Directory', desktopOnly: true },
   { key: 'map', label: 'Map', desktopOnly: true },
   { key: 'pipeline', label: 'Pipeline', desktopOnly: true },
   { key: 'health', label: 'Health', desktopOnly: true },
@@ -479,14 +483,12 @@ export default function CustomersPageV2() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [searchParams] = useSearchParams();
-  // Default is Directory on mobile (only mobile view) and Map on desktop.
-  // Explicit ?view=… URLs win — so deep-links to a specific view still work.
+  // Default is Directory on both mobile and desktop (list-first).
+  // Explicit ?view=… URLs win — deep-links still work.
   const [view, setView] = useState(() => {
     const raw = searchParams.get('view');
     if (raw) return raw;
-    return typeof window !== 'undefined' && window.matchMedia?.('(max-width: 767px)').matches
-      ? 'directory'
-      : 'map';
+    return 'directory';
   });
   const [search, setSearch] = useState('');
   const [filterStage, setFilterStage] = useState('all');
@@ -673,7 +675,7 @@ export default function CustomersPageV2() {
     );
   }
 
-  const TABLE_COLS = '2fr 0.3fr 0.6fr 0.9fr';
+  const TABLE_COLS = '1.6fr 2fr 0.3fr 0.6fr 0.9fr';
 
   const activeFilterCount =
     (filterTier !== 'all' ? 1 : 0) +
@@ -898,12 +900,15 @@ export default function CustomersPageV2() {
           {/* Desktop table header */}
           {!isMobile && (
             <div
-              className="grid gap-1.5 px-4 py-2.5 mb-1 u-label"
-              style={{ gridTemplateColumns: TABLE_COLS }}
+              className="grid gap-1.5 px-4 py-2.5 mb-1 text-11 uppercase tracking-label text-zinc-900"
+              style={{ gridTemplateColumns: TABLE_COLS, fontWeight: 700 }}
             >
-              <SortHeaderV2 label="Name" sortKey="lastName" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
-              <div className="text-ink-tertiary">HP</div>
-              <div className="text-ink-tertiary">Next Svc</div>
+              <div className="flex justify-center">
+                <SortHeaderV2 label="Name" sortKey="lastName" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
+              </div>
+              <div className="text-center">Address</div>
+              <div className="text-center">HP</div>
+              <div className="text-center">Next Svc</div>
               <div />
             </div>
           )}
@@ -986,13 +991,30 @@ export default function CustomersPageV2() {
                       className="grid gap-1.5 px-4 py-3 items-center bg-white border-hairline border-zinc-200 rounded-sm cursor-pointer hover:bg-zinc-50 transition-colors"
                       style={{ gridTemplateColumns: TABLE_COLS }}
                     >
-                      <div className="text-13 font-medium text-ink-primary">
+                      <div className="text-13 font-medium text-ink-primary text-center">
                         {c.firstName} {c.lastName}
+                      </div>
+                      <div className="text-12 text-ink-secondary truncate text-center">
+                        {(() => {
+                          const full = (c.address || '').replace(/^,\s*|\s*,\s*$/g, '').trim();
+                          if (!full) return <span className="text-ink-tertiary">—</span>;
+                          return (
+                            <a
+                              href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(full)}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              className="text-zinc-900 hover:underline"
+                            >
+                              {full}
+                            </a>
+                          );
+                        })()}
                       </div>
                       <div className="flex items-center justify-center">
                         <HealthDot score={c.healthScore} />
                       </div>
-                      <div className="u-nums text-11 text-ink-secondary">
+                      <div className="u-nums text-11 text-ink-secondary text-center">
                         {c.nextServiceDate
                           ? new Date(c.nextServiceDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
                           : <span className="text-ink-tertiary">—</span>}
@@ -1040,9 +1062,10 @@ export default function CustomersPageV2() {
                         <button
                           type="button"
                           onClick={(e) => { e.stopPropagation(); handleDeleteCustomer(c.id, `${c.firstName} ${c.lastName}`); }}
-                          className="h-6 px-2 u-label border-hairline border-alert-fg/30 rounded-xs text-alert-fg bg-white hover:bg-alert-bg"
+                          aria-label="Delete customer"
+                          className="inline-flex items-center justify-center h-6 w-6 border-hairline border-alert-fg/30 rounded-xs text-alert-fg bg-white hover:bg-alert-bg"
                         >
-                          ×
+                          <Trash2 size={12} strokeWidth={1.75} />
                         </button>
                       </div>
                     </div>
