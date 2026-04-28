@@ -265,8 +265,16 @@ router.put('/entries/:id', async (req, res, next) => {
     });
     if (updated && updated.technician_id) {
       await clearTechSignoffForWeek(updated.technician_id, updated.clock_in);
-      if (prior && prior.clock_in && String(prior.clock_in) !== String(updated.clock_in)) {
-        await clearTechSignoffForWeek(updated.technician_id, prior.clock_in);
+      // If the entry moved across weeks OR was reassigned to a
+      // different tech, the SOURCE tech's source week also has
+      // changed totals — clear that with the prior tech_id, not the
+      // new one. (Passing updated.technician_id here would clear the
+      // wrong row on a reassignment.)
+      if (prior && prior.clock_in && prior.technician_id && (
+        String(prior.clock_in) !== String(updated.clock_in) ||
+        prior.technician_id !== updated.technician_id
+      )) {
+        await clearTechSignoffForWeek(prior.technician_id, prior.clock_in);
       }
     }
     res.json(updated);
