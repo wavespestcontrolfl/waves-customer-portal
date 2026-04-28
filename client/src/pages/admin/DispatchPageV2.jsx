@@ -738,9 +738,25 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab } = {}) 
   // Default desktop to Week (multi-day grid); phones still open on Day,
   // which is what techs and Virginia want when triaging in the field.
   const [viewMode, setViewMode] = useState(() => {
+    // In controlled mode with a non-board sub-tab (Protocols / Tech Match
+    // / CSR / Job Scores / Insights), the panel only renders when
+    // viewMode === 'day'. Initialize to 'day' so deep-linking to those
+    // tabs (e.g. /admin/dispatch?tab=protocols) doesn't render the week
+    // calendar instead of the requested panel.
+    if (isControlled && controlledActiveTab !== 'board') return 'day';
     if (typeof window === 'undefined') return 'week';
     return window.matchMedia('(max-width: 767px)').matches ? 'day' : 'week';
   });
+
+  // Same idea for *runtime* tab swaps from AdminDispatchPage's pill: if
+  // the parent flips activeTab to a non-board sub-tab while we're sitting
+  // on Week / 5-Day / Month, snap back to Day so the panel renders.
+  useEffect(() => {
+    if (!isControlled) return;
+    if (controlledActiveTab !== 'board' && viewMode !== 'day') {
+      setViewMode('day');
+    }
+  }, [isControlled, controlledActiveTab, viewMode]);
   const [date, setDate] = useState(formatDateISO(new Date()));
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
