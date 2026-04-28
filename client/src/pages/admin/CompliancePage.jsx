@@ -359,7 +359,7 @@ export default function CompliancePage() {
 
   return (
     <div style={{ background: '#121218', minHeight: '100vh', color: '#eee', padding: 24 }}>
-      <h1 style={{ fontSize: 28, fontWeight: 400, marginBottom: 20 }}>Chemical Compliance & DACS Reporting</h1>
+      <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', marginBottom: 20 }}>Chemical Compliance & DACS Reporting</h1>
 
       <div style={{ display: 'flex', gap: 4, marginBottom: 24, borderBottom: '1px solid #333', paddingBottom: 0 }}>
         {tabs.map(t => (

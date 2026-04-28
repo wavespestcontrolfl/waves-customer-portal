@@ -1259,11 +1259,11 @@ export default function CommunicationsPageV2() {
           {/* Mobile h1 matches MobileSettingsPage Square style (inline 700 escapes V2 400/500 font restriction). Desktop stays on the V2 28/normal spec. */}
           <h1
             className="md:hidden text-zinc-900"
-            style={{ fontSize: 34, fontWeight: 700, letterSpacing: '-0.015em', lineHeight: 1.1, margin: 0 }}
+            style={{ fontSize: 32, fontWeight: 700, letterSpacing: '-0.015em', lineHeight: 1.1, margin: 0 }}
           >
             Communications
           </h1>
-          <h1 className="hidden md:block text-28 font-normal tracking-display text-zinc-900">
+          <h1 className="hidden md:block text-28 font-normal tracking-h1 text-zinc-900">
             Communications
           </h1>
         </div>

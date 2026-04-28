@@ -290,7 +290,7 @@ export default function EmailPage() {
   if (status && !status.connected) {
     return (
       <div style={{ padding: 32 }}>
-        <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: '0 0 24px' }}>Email</h1>
+        <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: '0 0 24px' }}>Email</h1>
         <div style={{ background: D.card, borderRadius: 12, padding: 40, textAlign: 'center', border: `1px solid ${D.border}`, maxWidth: 480, margin: '60px auto' }}>
           <div style={{ fontSize: 48, marginBottom: 16 }}>📧</div>
           <div style={{ fontSize: 20, fontWeight: 600, color: D.heading, marginBottom: 8 }}>Connect Gmail</div>

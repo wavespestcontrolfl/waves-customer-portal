@@ -1525,7 +1525,7 @@ export default function AdsPage() {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
-        <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>PPC</h1>
+        <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>PPC</h1>
       </div>
 
       {/* Tabs */}

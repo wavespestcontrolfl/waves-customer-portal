@@ -143,7 +143,7 @@ export default function EquipmentMaintenancePage() {
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
       {/* Header */}
       <div style={{ marginBottom: 20 }}>
-        <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>Equipment Maintenance & Fleet</h1>
+        <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>Equipment Maintenance & Fleet</h1>
       </div>
 
       {/* Tabs */}
