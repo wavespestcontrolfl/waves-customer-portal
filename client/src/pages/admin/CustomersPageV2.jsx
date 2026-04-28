@@ -739,9 +739,19 @@ export default function CustomersPageV2() {
             />
           )}
           {view === 'directory' && (
-            <Button variant="primary" onClick={() => setShowAddModal(true)} className="hidden sm:inline-flex">
+            <button
+              type="button"
+              onClick={() => setShowAddModal(true)}
+              className="hidden sm:inline-flex"
+              style={{
+                padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
+                background: '#18181B', color: '#fff', border: 'none', cursor: 'pointer',
+                whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
+                fontFamily: "'DM Sans', sans-serif",
+              }}
+            >
               + Add Customer
-            </Button>
+            </button>
           )}
           {view === 'directory' && (
             <button

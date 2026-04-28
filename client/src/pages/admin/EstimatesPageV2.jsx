@@ -1496,9 +1496,10 @@ export default function EstimatesPageV2() {
     customerEmail: searchParams.get('customerEmail') || '',
   }));
   const hasPrefill = !!(prefill.address || prefill.customerName || prefill.customerPhone || prefill.customerEmail);
+  const initialTab = TABS.some((t) => t.key === searchParams.get('tab')) ? searchParams.get('tab') : null;
 
-  const [activeTab, setActiveTab] = useState(hasPrefill ? 'new' : 'leads');
-  const [mobileView, setMobileView] = useState(hasPrefill ? 'new' : 'list'); // 'list' | 'new'
+  const [activeTab, setActiveTab] = useState(initialTab || (hasPrefill ? 'new' : 'leads'));
+  const [mobileView, setMobileView] = useState(initialTab === 'new' || hasPrefill ? 'new' : 'list'); // 'list' | 'new'
 
   // Watch URL params for incoming prefill. Two cases this needs to handle:
   //   1. First mount with prefill in URL (e.g. arriving from a Customer panel
@@ -1516,12 +1517,19 @@ export default function EstimatesPageV2() {
       customerEmail: searchParams.get('customerEmail') || '',
     };
     const hasIncoming = !!(incoming.address || incoming.customerName || incoming.customerPhone || incoming.customerEmail);
-    if (!hasIncoming) return;
-    setPrefill(incoming);
-    setActiveTab('new');
-    setMobileView('new');
+    const tabParam = searchParams.get('tab');
+    const hasTabParam = TABS.some((t) => t.key === tabParam);
+    if (!hasIncoming && !hasTabParam) return;
+    if (hasIncoming) {
+      setPrefill(incoming);
+      setActiveTab('new');
+      setMobileView('new');
+    } else if (hasTabParam) {
+      setActiveTab(tabParam);
+      if (tabParam === 'new') setMobileView('new');
+    }
     const stripped = new URLSearchParams(searchParams);
-    ['address', 'customerName', 'customerPhone', 'customerEmail'].forEach((k) => stripped.delete(k));
+    ['address', 'customerName', 'customerPhone', 'customerEmail', 'tab'].forEach((k) => stripped.delete(k));
     setSearchParams(stripped, { replace: true });
   }, [searchParams, setSearchParams]);
 
