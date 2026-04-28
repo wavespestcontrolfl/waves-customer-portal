@@ -80,7 +80,9 @@ async function syncConstantsFromDB(dbInstance) {
       if (f.trees_heavy != null) adj.trees_heavy = r(f.trees_heavy);
       if (f.trees_moderate != null) adj.trees_moderate = r(f.trees_moderate);
       if (f.trees_light != null) adj.trees_light = f.trees_light >= 0 ? r(f.trees_light) : -r(Math.abs(f.trees_light));
-      if (f.landscape_complex != null) adj.complexity_complex = r(f.landscape_complex);
+      if (f.landscape_complex != null) adj.complexity_complex = f.landscape_complex >= 0 ? r(f.landscape_complex) : -r(Math.abs(f.landscape_complex));
+      if (f.landscape_moderate != null) adj.complexity_moderate = f.landscape_moderate >= 0 ? r(f.landscape_moderate) : -r(Math.abs(f.landscape_moderate));
+      if (f.landscape_simple != null) adj.complexity_simple = f.landscape_simple >= 0 ? r(f.landscape_simple) : -r(Math.abs(f.landscape_simple));
       if (f.near_water != null) adj.nearWater = f.near_water;
       if (f.large_driveway != null) adj.largeDriveway = f.large_driveway;
       if (f.indoor != null) adj.indoor = r(f.indoor);
