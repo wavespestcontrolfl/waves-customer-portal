@@ -817,12 +817,18 @@ router.post(
       // Return the row with avatar_url presigned from the new
       // photo_s3_key — same shape as GET /technicians, so the
       // client can render the new photo immediately without a
-      // follow-up GET.
+      // follow-up GET. Sanitize for non-admin callers since the
+      // technicians row now carries payroll/PII columns; this route
+      // is requireTechOrAdmin pre-this-PR and we keep that gate so a
+      // tech-side avatar update path (if/when we add one) doesn't
+      // 403, but tech-role responses get the same private columns
+      // stripped as GET /technicians does.
       const updated = await db('technicians').where({ id: tech.id }).first();
       const { resolveTechPhotoUrl } = require('../services/tech-photo');
       updated.avatar_url = await resolveTechPhotoUrl(updated.photo_s3_key, updated.avatar_url);
 
-      res.json({ success: true, technician: updated });
+      const responseRow = isAdminCaller(req) ? updated : sanitizeTechForNonAdmin(updated);
+      res.json({ success: true, technician: responseRow });
     } catch (err) {
       logger.error(`[team] Tech photo upload failed: ${err.message}`);
       next(err);
