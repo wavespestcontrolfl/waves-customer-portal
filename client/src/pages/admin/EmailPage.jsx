@@ -314,18 +314,12 @@ export default function EmailPage() {
 
   return (
     <div style={{ padding: '24px 32px' }}>
-      {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-        <div>
-          <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>Email</h1>
-          <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>
-            contact@wavespestcontrol.com
-            {status?.lastSync && ` \u2014 synced ${timeAgo(status.lastSync)}`}
-          </div>
-        </div>
-        {/* Manual Sync Now button removed — server/services/scheduler.js
-            already syncs Gmail → PostgreSQL every 2 minutes, so the
-            inbox stays current without operator action. */}
+      {/* Header — mailbox subtitle + last-sync timestamp + Sync Now
+          button all removed. The page tab itself labels the surface,
+          and scheduler.js syncs Gmail → PostgreSQL every 2 min so a
+          "synced just now" chip carried no real signal. */}
+      <div style={{ marginBottom: 20 }}>
+        <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>Email</h1>
       </div>
 
       {/* Daily digest card */}
