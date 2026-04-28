@@ -20,6 +20,7 @@
  * surfaces, no inline D palette.
  */
 import React, { Suspense, useState, useEffect, useRef } from 'react';
+import { flushSync } from 'react-dom';
 import { useSearchParams } from 'react-router-dom';
 import DispatchBoardPage from './DispatchBoardPage';
 
@@ -70,7 +71,12 @@ export default function AdminDispatchPage() {
     if (nextIdx == null) return;
     e.preventDefault();
     const nextKey = TAB_LIST[nextIdx].key;
-    setTab(nextKey);
+    // The pill swaps DOM parents between Board (top of page) and Schedule
+    // (under DispatchPageV2's h1), so the old pill unmounts and the new one
+    // mounts in a single React commit. flushSync forces that commit to
+    // complete *before* we call .focus(), so refs point at the new
+    // (mounted) DOM node rather than the old (about-to-unmount) one.
+    flushSync(() => setTab(nextKey));
     tabRefs.current[nextKey]?.focus();
   };
 
