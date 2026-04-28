@@ -38,8 +38,8 @@ export default function EquipmentPage() {
       `}</style>
       <div style={{ marginBottom: 20 }}>
         <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>
-          <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Equipment & Job Costing</span>
-          <span className="hidden md:inline">Equipment & Job Costing</span>
+          <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Equipment</span>
+          <span className="hidden md:inline">Equipment</span>
         </h1>
       </div>
 
