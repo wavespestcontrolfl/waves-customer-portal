@@ -715,25 +715,48 @@ function MobileScheduleSheet({ children, serviceCount, completedCount }) {
   );
 }
 
-export default function DispatchPageV2() {
+export default function DispatchPageV2({ activeTab: controlledActiveTab } = {}) {
   const isMobile = useIsMobile();
-  const [activeTab, setActiveTab] = useState('board');
+  // Controlled mode: when AdminDispatchPage drives the active sub-tab via
+  // the top-level pill, the internal tab strip + mobile pills + More sheet
+  // are hidden and `setActiveTab` becomes a no-op.
+  const isControlled = controlledActiveTab !== undefined;
+  const [internalActiveTab, setInternalActiveTab] = useState('board');
+  const activeTab = isControlled ? controlledActiveTab : internalActiveTab;
+  const setActiveTab = isControlled ? () => {} : setInternalActiveTab;
 
   // On mobile, desktopOnly tabs (Tech Match / CSR / Job Scores / Insights) are
   // hidden from both the top row and the More sheet. If a returning user's
   // persisted activeTab is one of those, snap back to 'board' so they don't
-  // land on a panel they can't navigate away from.
+  // land on a panel they can't navigate away from. Skip in controlled mode —
+  // the parent owns the active tab.
   useEffect(() => {
-    if (!isMobile) return;
+    if (isControlled || !isMobile) return;
     const current = SCHEDULE_TABS.find((t) => t.id === activeTab);
-    if (current?.desktopOnly) setActiveTab('board');
-  }, [isMobile, activeTab]);
+    if (current?.desktopOnly) setInternalActiveTab('board');
+  }, [isControlled, isMobile, activeTab]);
   // Default desktop to Week (multi-day grid); phones still open on Day,
   // which is what techs and Virginia want when triaging in the field.
   const [viewMode, setViewMode] = useState(() => {
+    // In controlled mode with a non-board sub-tab (Protocols / Tech Match
+    // / CSR / Job Scores / Insights), the panel only renders when
+    // viewMode === 'day'. Initialize to 'day' so deep-linking to those
+    // tabs (e.g. /admin/dispatch?tab=protocols) doesn't render the week
+    // calendar instead of the requested panel.
+    if (isControlled && controlledActiveTab !== 'board') return 'day';
     if (typeof window === 'undefined') return 'week';
     return window.matchMedia('(max-width: 767px)').matches ? 'day' : 'week';
   });
+
+  // Same idea for *runtime* tab swaps from AdminDispatchPage's pill: if
+  // the parent flips activeTab to a non-board sub-tab while we're sitting
+  // on Week / 5-Day / Month, snap back to Day so the panel renders.
+  useEffect(() => {
+    if (!isControlled) return;
+    if (controlledActiveTab !== 'board' && viewMode !== 'day') {
+      setViewMode('day');
+    }
+  }, [isControlled, controlledActiveTab, viewMode]);
   const [date, setDate] = useState(formatDateISO(new Date()));
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -957,8 +980,9 @@ export default function DispatchPageV2() {
             </button>
           </div>
 
-          {/* Mobile: Schedule + More pills — above the date nav so users can switch tools first */}
-          {viewMode === 'day' && (
+          {/* Mobile: Schedule + More pills — above the date nav so users can switch tools first.
+              Hidden in controlled mode: AdminDispatchPage's top-level pill replaces them. */}
+          {!isControlled && viewMode === 'day' && (
             <div className="md:hidden mt-3 flex items-center gap-2">
               <button
                 onClick={() => setActiveTab('board')}
@@ -1152,8 +1176,11 @@ export default function DispatchPageV2() {
       )}
       {viewMode === 'month' && <MonthViewV2 date={date} onDateClick={(d) => { setDate(d); setViewMode('day'); }} />}
 
-      {/* Tabs bar — day view only. Mobile pills live above the date nav; desktop strip stays here. */}
-      {viewMode === 'day' && (
+      {/* Tabs bar — day view only, and only when this page owns its own
+          activeTab state. In controlled mode AdminDispatchPage's top-level
+          pill is the single source of truth so we don't render a duplicate
+          strip here. */}
+      {!isControlled && viewMode === 'day' && (
         <>
           {/* Desktop: tab strip — same separate-pill style as ViewModeSelectorV2
               (Day / 5-Day / Week / Month) so the two rows of selectors read
@@ -1286,12 +1313,10 @@ export default function DispatchPageV2() {
             );
           })()}
 
-          {/* New Appointment CTA — desktop only; mobile uses the "+" icon in the header. */}
-          <div className="hidden md:block mb-3 md:mb-5">
-            <Button onClick={() => setShowNewAppt(true)} className="md:w-auto">+ New Appointment</Button>
-          </div>
-
-          {/* Calendar-style time grid — desktop inline, mobile bottom sheet */}
+          {/* Calendar-style time grid — desktop inline, mobile bottom sheet.
+              Desktop "+ New Appointment" CTA removed; the "+ Add Appointment"
+              pill in the page header (top right) is the canonical desktop
+              entry point for creating an appointment. */}
           <div className="hidden md:block">
             <TimeGridDay
               date={date}
