@@ -595,10 +595,18 @@ router.get('/:id', async (req, res, next) => {
     // The invoices table stores the billed amount as `total`; the frontend reads
     // `amount_due`/`amount_paid`. Map them here, and derive lifetime revenue from
     // paid-invoice totals since customers.lifetime_revenue isn't kept in sync.
+    // Only collectible statuses contribute to amount_due — draft/void must not
+    // inflate Balance Owed (frontend filters by `status !== 'paid'`).
+    const COLLECTIBLE_STATUSES = new Set(['sent', 'viewed', 'overdue', 'paid']);
     const mappedInvoices = (invoices || []).map(inv => {
       const total = parseFloat(inv.total || 0);
       const isPaid = inv.status === 'paid';
-      return { ...inv, amount_due: total, amount_paid: isPaid ? total : 0 };
+      const isCollectible = COLLECTIBLE_STATUSES.has(inv.status);
+      return {
+        ...inv,
+        amount_due: isCollectible ? total : 0,
+        amount_paid: isPaid ? total : 0,
+      };
     });
     const lifetimeRevenue = mappedInvoices
       .filter(i => i.status === 'paid')
