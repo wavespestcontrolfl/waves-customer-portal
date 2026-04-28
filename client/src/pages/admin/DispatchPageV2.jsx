@@ -930,35 +930,43 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
   const zoneColors = data.zoneColors || {};
   const zoneLabels = data.zoneLabels || {};
 
-  // Use TimeGridDays' aggregated stats whenever they're available (Day /
-  // 5-Day / Week — the grid's own fetch is the source of truth for the
-  // visible range). Fall back to the single-day `/admin/schedule?date=X`
-  // result if the grid hasn't mounted yet (e.g. Month view, brief loading
-  // window) so the row never goes blank.
-  const useGridStats = !!gridStats;
+  // Stats source by viewMode:
+  //   - Day:           single-day `services` from /admin/schedule?date=X.
+  //                    TimeGridDay (tech swimlanes) doesn't emit gridStats.
+  //   - 5-Day / Week:  gridStats from TimeGridDays' /admin/schedule/week
+  //                    aggregation. We never fall back to single-day data
+  //                    here — that would show one day's numbers labeled
+  //                    as "the week's totals". If the grid is still
+  //                    loading or the fetch failed, the stats row hides
+  //                    via `statsAvailable` instead.
+  //   - Month:         row hidden entirely.
+  const isDayView = viewMode === 'day';
+  const isMultiDayView = viewMode === '5day' || viewMode === 'week';
+  const useGridStats = isMultiDayView && !!gridStats;
+  const statsAvailable = isDayView || useGridStats;
+
+  const AVG_SERVICE_MIN = 35;
+  const AVG_SERVICE_PRICE = 125;
+
   const totalCount = useGridStats ? gridStats.totalCount : services.length;
   const completedCount = useGridStats ? gridStats.completedCount : services.filter((s) => s.status === 'completed').length;
   const skippedCount = useGridStats ? gridStats.skippedCount : services.filter((s) => s.status === 'skipped').length;
   const remainingCount = useGridStats ? gridStats.remainingCount : (totalCount - completedCount - skippedCount);
 
-  const AVG_SERVICE_MIN = 35;
-  const AVG_SERVICE_PRICE = 125;
   const estTotalMin = totalCount * AVG_SERVICE_MIN;
   const estTotalHrs = Math.floor(estTotalMin / 60);
   const estTotalMinRemainder = estTotalMin % 60;
   const estRemainingMin = remainingCount * AVG_SERVICE_MIN;
   // ETA is "now + remaining time" — only meaningful when looking at a
-  // single day; on multi-day views the stat is suppressed since the
-  // implied finish time spans days.
-  const isSingleDayStats = useGridStats ? gridStats.isSingleDay : true;
-  const estFinishTime = isSingleDayStats ? (() => {
+  // single day; on multi-day views it's suppressed since the implied
+  // finish time spans days.
+  const estFinishTime = isDayView ? (() => {
     const finish = new Date(Date.now() + estRemainingMin * 60000);
     return finish.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
   })() : null;
-  // Revenue: prefer the per-service estimatedPrice sum from grid stats,
-  // and from `services` (single-day fetch) when no grid stats are
-  // available. Fall back to the per-service average only when neither
-  // source is present.
+  // Revenue: gridStats already sums per-service estimatedPrice with a
+  // fallback. For Day, sum from the single-day services with the same
+  // logic so the badge is accurate.
   const estRevenue = useGridStats
     ? gridStats.revenue
     : services.reduce(
@@ -1035,11 +1043,12 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
 
       {/* Centered stats badges — schedule grid sub-tab on Day / 5-Day /
           Week (Month uses MonthViewV2 which has its own summary), desktop
-          only. The numbers come from TimeGridDays' aggregated stats so
-          they reflect the visible date range, not just `?date=…`. ETA is
-          only meaningful for a single day, so it's suppressed on multi-
-          day views. */}
-      {(viewMode === 'day' || viewMode === '5day' || viewMode === 'week') && activeTab === 'board' && (
+          only. Day uses the single-day services fetch; multi-day views
+          use TimeGridDays' aggregated stats. The row hides on multi-day
+          while the week fetch is still loading or failed (statsAvailable
+          guards), instead of falling back to single-day numbers that
+          would mislabel the visible range. */}
+      {statsAvailable && activeTab === 'board' && (
         <div className="hidden md:flex justify-center mb-4">
           <div className="flex gap-3 items-center text-12 text-ink-secondary bg-white px-3 py-2 rounded-sm border-hairline border-zinc-200 flex-wrap">
             <span><span className="u-nums font-medium text-zinc-900">{totalCount}</span> services</span>
