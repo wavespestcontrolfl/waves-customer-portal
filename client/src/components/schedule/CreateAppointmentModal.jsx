@@ -375,13 +375,21 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Submit
   const handleSubmit = async () => {
     if (!selectedCustomer || !selectedService) return;
+    if (isRecurring && services.length > 1) return; // see canSubmit comment
     setSaving(true);
     try {
-      // services[0] is the primary line — its name + id + price drive the
-      // parent scheduled_services row. services[1..] are persisted as
+      // services[0] is the primary line — its name + id drive the parent
+      // scheduled_services row. services[1..] are persisted as
       // scheduled_service_addons (handler already supports this shape).
+      //
+      // Pricing: the parent's estimated_price must reflect the WHOLE visit,
+      // not just the primary line. Auto-invoicing on completion
+      // (server/routes/admin-dispatch.js) reads only scheduled_services.
+      // estimated_price; if we sent only the primary, multi-service
+      // appointments would invoice short. Per-line prices are still
+      // preserved on each addon row for analytics / breakdown.
       const [primary, ...extras] = services;
-      const primaryPrice = parseFloat(primary.price);
+      const visitTotal = subtotal > 0 ? subtotal : null;
       const addons = extras.map((s) => {
         const p = parseFloat(s.price);
         return {
@@ -401,7 +409,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         windowEnd: getEndTime(),
         assignmentMode: techMode,
         technicianId: techMode === 'choose' ? techId : undefined,
-        estimatedPrice: isNaN(primaryPrice) ? null : primaryPrice,
+        estimatedPrice: visitTotal,
         urgency: 'routine',
         notes: customerNotes || undefined,
         internalNotes: internalNotes || undefined,
@@ -452,7 +460,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     border: isMobile ? 'none' : `1px solid ${D.border}`,
   };
 
-  const canSubmit = !!selectedCustomer && !!selectedService && !saving;
+  // Recurring + multi-service is intentionally blocked: the schedule API
+  // clones recurring children but doesn't carry addon rows forward, so
+  // visits 2..N would silently lose every line beyond the primary. Until
+  // the server learns to clone addons, force the operator to either drop
+  // recurring or drop the extra services.
+  const recurringMultiServiceBlocked = isRecurring && services.length > 1;
+  const canSubmit = !!selectedCustomer && !!selectedService && !saving && !recurringMultiServiceBlocked;
 
   return (
     <div style={overlayStyle} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
@@ -763,6 +777,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             <input type="checkbox" checked={isRecurring} onChange={e => setIsRecurring(e.target.checked)} style={{ width: 18, height: 18, accentColor: D.teal }} />
             <span style={{ fontSize: 14, fontWeight: 600, color: '#18181B' }}>Recurring</span>
           </label>
+          {isRecurring && recurringMultiServiceBlocked && (
+            <div style={{ background: `${D.red}10`, border: `1px solid ${D.red}55`, borderRadius: 8, padding: 10, marginBottom: 10, fontSize: 12, color: D.red, lineHeight: 1.5 }}>
+              Recurring with multiple services isn&rsquo;t supported yet — only the primary service would repeat on visits 2+. Either remove the extra services or turn off Recurring to save.
+            </div>
+          )}
           {isRecurring && (
             <div>
               <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
