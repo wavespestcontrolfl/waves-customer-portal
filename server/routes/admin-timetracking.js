@@ -25,6 +25,15 @@ function sanitizeTechForNonAdmin(tech) {
   return out;
 }
 
+// Authoritative admin check — reads from req.technician.role (the
+// full DB row attached by adminAuthenticate), not the parallel
+// req.techRole convenience field, so renaming/drift on the convenience
+// field can't cause this to fail open. Fails closed: any missing
+// piece treats the caller as non-admin.
+function isAdminCaller(req) {
+  return !!(req.technician && req.technician.role === 'admin');
+}
+
 // Auto-create tables if missing
 async function ensureTables() {
   if (!(await db.schema.hasTable('time_entries'))) {
@@ -123,9 +132,8 @@ router.get('/', async (req, res, next) => {
     // instead of the legacy hardcoded $35 — admin only. Tech-role
     // callers (dispatch, status displays) get the same row shape with
     // pay_rate stripped so they never see coworker wages.
-    const isAdmin = req.techRole === 'admin';
     const techCols = ['id', 'name', 'role'];
-    if (isAdmin) techCols.push('pay_rate');
+    if (isAdminCaller(req)) techCols.push('pay_rate');
     const allTechs = await db('technicians')
       .where({ active: true })
       .select(techCols);
@@ -616,13 +624,13 @@ router.get('/technicians', async (req, res, next) => {
     // resolve to a fresh presigned URL inside their own auth boundary.
     // This route is admin-authed so presigning is safe.
     const { resolveTechPhotoUrl } = require('../services/tech-photo');
-    const isAdmin = req.techRole === 'admin';
+    const callerIsAdmin = isAdminCaller(req);
     const enriched = await Promise.all(techs.map(async (t) => {
       const row = {
         ...t,
         avatar_url: await resolveTechPhotoUrl(t.photo_s3_key, t.avatar_url),
       };
-      return isAdmin ? row : sanitizeTechForNonAdmin(row);
+      return callerIsAdmin ? row : sanitizeTechForNonAdmin(row);
     }));
     res.json({ technicians: enriched });
   } catch (err) { next(err); }
