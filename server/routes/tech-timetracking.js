@@ -4,19 +4,23 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const timeTracking = require('../services/time-tracking');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
-const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime, etWeekStart } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 // ET-anchored Monday for a YYYY-MM-DD reference (or "today in ET" if
-// dateStr is missing). Railway runs UTC, so a naive new Date() + getDay()
-// near midnight ET picks the wrong week — always go through the
-// ET helpers.
+// dateStr is missing). Delegates to the shared etWeekStart helper so
+// we don't reinvent DST-safe week math here. parseETDateTime treats
+// the date string as ET wall-clock (not server-local UTC), which is
+// the whole point on Railway.
 function mondayOfET(dateStr) {
-  const ref = dateStr ? new Date(`${dateStr}T12:00:00Z`) : new Date();
-  const dayOfWeek = etParts(ref).dayOfWeek; // 0 = Sun, 1 = Mon, ...
-  const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-  return etDateString(addETDays(ref, mondayOffset));
+  const ref = dateStr ? parseETDateTime(`${dateStr}T00:00`) : new Date();
+  return etWeekStart(ref);
+}
+
+// Sunday of the ET week starting at `mondayStr` (YYYY-MM-DD).
+function sundayOfETWeek(mondayStr) {
+  return etDateString(addETDays(parseETDateTime(`${mondayStr}T12:00`), 6));
 }
 
 // ---------------------------------------------------------------------------
@@ -161,13 +165,13 @@ router.get('/weekly', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 router.get('/pending-signoff', async (req, res, next) => {
   try {
-    const todayET = etDateString(new Date());
-    const lastWeekStart = mondayOfET(etDateString(addETDays(new Date(`${todayET}T12:00:00Z`), -7)));
+    const lastWeekStart = mondayOfET(etDateString(addETDays(new Date(), -7)));
+    const lastWeekEnd = sundayOfETWeek(lastWeekStart);
 
     const hasDailies = await db('time_entry_daily_summary')
       .where({ technician_id: req.technicianId })
       .where('work_date', '>=', lastWeekStart)
-      .where('work_date', '<=', etDateString(addETDays(new Date(`${lastWeekStart}T12:00:00Z`), 6)))
+      .where('work_date', '<=', lastWeekEnd)
       .first();
     if (!hasDailies) return res.json({ weekly: null, weekStart: lastWeekStart });
 
@@ -222,8 +226,7 @@ router.post('/sign-week', async (req, res, next) => {
     // signing. computeWeeklySummary will happily create a zero-total
     // row even when there's no underlying time data, which would let
     // a tech sign arbitrary empty weeks. Anchor on the dailies first.
-    const weekEnd = addETDays(new Date(`${start}T12:00:00Z`), 6);
-    const weekEndStr = etDateString(weekEnd);
+    const weekEndStr = sundayOfETWeek(start);
     const hasDailies = await db('time_entry_daily_summary')
       .where({ technician_id: req.technicianId })
       .where('work_date', '>=', start)
