@@ -914,17 +914,15 @@ export default function DispatchPageV2() {
       {/* Header */}
       <div className="flex justify-between items-start mb-4 flex-wrap gap-3">
         <div className="flex-1 min-w-0">
-          <div className="flex items-start justify-between gap-3">
-            <h1 className="text-28 font-normal tracking-h1 text-zinc-900">
-              <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Schedule</span>
-              <span className="hidden md:inline">Schedule</span>
-            </h1>
-            {/* Mobile "+" — matches the Customers pattern; opens CreateAppointmentModal. */}
+          {/* Mobile "+" — matches the Customers pattern; opens CreateAppointmentModal.
+              The Schedule H1 lives in AdminDispatchPage so it renders above the
+              Board / Schedule pill-strip on both tabs. */}
+          <div className="md:hidden flex justify-end mb-3">
             <button
               type="button"
               onClick={() => setShowNewAppt(true)}
               aria-label="New appointment"
-              className="md:hidden flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring shrink-0"
+              className="flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring shrink-0"
               style={{ width: 36, height: 36 }}
             >
               <Plus size={20} strokeWidth={2} />

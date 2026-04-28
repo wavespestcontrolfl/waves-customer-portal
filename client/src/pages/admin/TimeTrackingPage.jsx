@@ -75,7 +75,7 @@ export default function TimeTrackingPage() {
         </h1>
       </div>
 
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 24, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: 4, marginBottom: 24, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7', width: 'fit-content', maxWidth: '100%', marginLeft: 'auto', marginRight: 'auto' }}>
         {[
           { key: 'dashboard', label: 'Dashboard' },
           { key: 'timesheet', label: 'Timesheet' },
