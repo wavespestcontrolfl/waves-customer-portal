@@ -1206,10 +1206,17 @@ export default function BlogPage() {
           <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Blog</span>
           <span className="hidden md:inline">Blog</span>
         </h1>
-        <button onClick={handleGenerateIdeas} disabled={generatingIdeas} style={{
-          padding: '8px 16px', borderRadius: 8, border: `1px solid ${D.teal}`, background: 'transparent',
-          color: D.teal, fontSize: 13, fontWeight: 500, cursor: 'pointer', opacity: generatingIdeas ? 0.5 : 1,
-        }}>{generatingIdeas ? 'Generating...' : 'Generate New Ideas'}</button>
+        <button
+          type="button"
+          onClick={handleGenerateIdeas}
+          disabled={generatingIdeas}
+          style={{
+            padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
+            background: '#18181B', color: '#fff', border: 'none', cursor: 'pointer',
+            whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
+            fontFamily: "'DM Sans', sans-serif", opacity: generatingIdeas ? 0.5 : 1,
+          }}
+        >{generatingIdeas ? 'Generating...' : '+ Create Blog'}</button>
       </div>
 
       {/* Tabs */}

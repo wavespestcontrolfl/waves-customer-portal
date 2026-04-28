@@ -326,7 +326,18 @@ export default function ServiceLibraryPage() {
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <span style={{ fontSize: 12, color: D.muted }}>{total} services</span>
-          {tab === 'catalog' && <button style={sBtn(D.teal, D.white)} onClick={() => { setShowNew(true); setExpandedId(null); }}>+ Add Service</button>}
+          {tab === 'catalog' && (
+            <button
+              type="button"
+              onClick={() => { setShowNew(true); setExpandedId(null); }}
+              style={{
+                padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
+                background: '#18181B', color: '#fff', border: 'none', cursor: 'pointer',
+                whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
+                fontFamily: "'DM Sans', sans-serif",
+              }}
+            >+ Add Service</button>
+          )}
         </div>
       </div>
 
