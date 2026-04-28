@@ -1216,7 +1216,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   if (sel.has('LAWN')) services.lawn = { track, tier: lawnTier };
   if (sel.has('TREE_SHRUB')) services.treeShrub = { tier: 'standard' };
   if (sel.has('MOSQUITO')) services.mosquito = { tier: 'silver' };
-  if (sel.has('TERMITE_BAIT')) services.termite = { system: 'trelona', monitoringTier: 'basic' };
+  if (sel.has('TERMITE_BAIT')) services.termite = { system: 'advance', monitoringTier: 'basic' };
   if (sel.has('RODENT_BAIT')) services.rodentBait = {};
 
   // One-time — urgency/afterHours threaded through; recurringCustomer perk

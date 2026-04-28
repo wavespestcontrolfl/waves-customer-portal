@@ -50,7 +50,7 @@ async function ensureTable() {
       { config_key: 'mosquito_tiers', name: 'Mosquito Tier Visits & Pressure', category: 'mosquito', sort_order: 2, data: JSON.stringify({ visits: { bronze: 12, silver: 12, gold: 15, platinum: 18 }, pressure_cap: 1.80 }) },
 
       // Termite
-      { config_key: 'termite_install', name: 'Termite Install Multiplier', category: 'termite', sort_order: 1, data: JSON.stringify({ multiplier: 1.75, hexpro_bait: 8.69, advance_bait: 14, trelona_bait: 24, labor_per_station: 5.25, misc_per_station: 0.75 }) },
+      { config_key: 'termite_install', name: 'Termite Install Multiplier', category: 'termite', sort_order: 1, data: JSON.stringify({ multiplier: 1.45, hexpro_bait: 8.69, advance_bait: 13.16, trelona_bait: 22.05, labor_per_station: 5.25, misc_per_station: 0.75 }) },
       { config_key: 'termite_monitoring', name: 'Termite Monitoring Monthly', category: 'termite', sort_order: 2, data: JSON.stringify({ basic: 35, premier: 65 }) },
 
       // Rodent

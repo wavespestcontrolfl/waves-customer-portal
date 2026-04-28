@@ -308,10 +308,17 @@ const TERMITE = {
   stationSpacing: 10,  // feet between stations
   minStations: 8,
   systems: {
-    advance: { stationCost: 14, laborMaterial: 5.25, misc: 0.75, label: 'Advance (Active)' },
-    trelona: { stationCost: 24, laborMaterial: 5.25, misc: 0.75, label: 'Trelona (Termite)' },
+    // Wholesale verified Apr 2026: Advance TBS RFID = $131.60 / 10-cs = $13.16/sta;
+    // Trelona ATBS RFID (pre-baited annual) = $352.80 / 16-cs = $22.05/sta.
+    advance: { stationCost: 13.16, laborMaterial: 5.25, misc: 0.75, label: 'Advance (Active)' },
+    trelona: { stationCost: 22.05, laborMaterial: 5.25, misc: 0.75, label: 'Trelona (Termite)' },
   },
-  installMultiplier: 1.75,  // Updated from 1.45 per margin audit (was only 11% margin)
+  // 1.45x set Apr 2026 after competitive review (All U Need: 21 Sentricon stations
+  // for $375). Prior 1.75x put doorstep ~3x market on Trelona default. Note:
+  // laborMaterial+misc ($6/sta) is the only labor recovery in the marked-up base —
+  // actual install labor in service-pricing.js is margin-only, not billed. Don't
+  // remove the $6 buildup without restructuring the formula.
+  installMultiplier: 1.45,
   // TODO(v4.4): document monitoring subscription pricing policy
   // (basic=$35, premier=$65 MRR — what each tier includes, why these values).
   monitoring: {
