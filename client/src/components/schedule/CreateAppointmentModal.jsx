@@ -118,10 +118,18 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Library endpoint directly, render what it returns. No local fallback
   // list, no client-side denylist. If the operator can see it in Service
   // Library, they can book it here.
-  const [selectedService, setSelectedService] = useState(null);
+  //
+  // Multi-service: services[0] is the primary (drives service_id /
+  // serviceType on the parent appointment); services[1..] are persisted as
+  // scheduled_service_addons rows. Each row carries its own price so
+  // Virginia can quote a quarterly pest + rodent station combo without
+  // hand-math.
+  const [services, setServices] = useState([]);
   const [serviceSearch, setServiceSearch] = useState('');
   const [serviceResults, setServiceResults] = useState([]);
   const [serviceLoading, setServiceLoading] = useState(false);
+  const [addingService, setAddingService] = useState(false);
+  const selectedService = services[0] || null;
 
   // Debounced Service Library search (same endpoint + filters as /admin/services catalog).
   useEffect(() => {
@@ -208,10 +216,37 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Notes & Confirm state
   const [customerNotes, setCustomerNotes] = useState('');
   const [internalNotes, setInternalNotes] = useState('');
-  const [price, setPrice] = useState('');
   const [sendSms, setSendSms] = useState(true);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState('');
+
+  // Per-line price helpers. Each entry in `services` carries its own `price`
+  // string (so an operator can override goodwill / loyalty pricing on one
+  // line without touching the others). The summed total drives the discount
+  // base and the totals strip.
+  const updateServicePrice = (idx, val) => {
+    setServices((arr) => arr.map((s, i) => (i === idx ? { ...s, price: val } : s)));
+  };
+  const removeServiceAt = (idx) => {
+    setServices((arr) => arr.filter((_, i) => i !== idx));
+  };
+  const addServiceFromCatalog = (svc) => {
+    const defaultPrice = svc.priceMin || svc.base_price || '';
+    setServices((arr) => [...arr, { ...svc, price: defaultPrice ? String(defaultPrice) : '' }]);
+    setServiceSearch('');
+    setServiceResults([]);
+    setAddingService(false);
+  };
+  const subtotal = useMemo(() => {
+    return services.reduce((sum, s) => {
+      const n = parseFloat(s.price);
+      return sum + (isNaN(n) ? 0 : n);
+    }, 0);
+  }, [services]);
+  const totalDuration = useMemo(() => {
+    if (services.length === 0) return defaultDurationMinutes || 60;
+    return services.reduce((sum, s) => sum + (s.duration || s.default_duration_minutes || 30), 0);
+  }, [services, defaultDurationMinutes]);
 
   // Fetch technicians + discounts on mount. Services are fetched on-demand
   // via the search effect above (Service Library query).
@@ -244,13 +279,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setDiscountType(d.discount_type);
     setDiscountAmount(String(d.amount ?? ''));
   };
-
-  // Set price when service changes
-  useEffect(() => {
-    if (!selectedService) return;
-    const p = selectedService.priceMin || selectedService.base_price || '';
-    setPrice(p ? String(p) : '');
-  }, [selectedService]);
 
   // Customer search
   const doSearch = async (val) => {
@@ -285,11 +313,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     } catch (e) { alert('Failed to add customer: ' + e.message); }
   };
 
-  // Compute end time. Service duration wins when a service is chosen; if no
-  // service is picked yet, honor the duration the operator dragged out on the
-  // grid (defaultDurationMinutes), else fall back to 60.
+  // Compute end time. Sum line-item durations across all services on the
+  // appointment; if none are picked yet, honor the duration the operator
+  // dragged out on the grid (defaultDurationMinutes), else fall back to 60.
   const getEndTime = () => {
-    const dur = selectedService?.duration || selectedService?.default_duration_minutes || defaultDurationMinutes || 60;
+    const dur = totalDuration || 60;
     const [h, m] = windowStart.split(':').map(Number);
     const endMin = h * 60 + m + dur;
     return `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
@@ -302,7 +330,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setSlotError('');
     setTimeSlots(null);
     try {
-      const dur = selectedService.duration || selectedService.default_duration_minutes || 60;
+      const dur = totalDuration || 60;
       const today = new Date();
       const from = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
       const endD = new Date(today); endD.setDate(endD.getDate() + 7);
@@ -349,16 +377,31 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (!selectedCustomer || !selectedService) return;
     setSaving(true);
     try {
+      // services[0] is the primary line — its name + id + price drive the
+      // parent scheduled_services row. services[1..] are persisted as
+      // scheduled_service_addons (handler already supports this shape).
+      const [primary, ...extras] = services;
+      const primaryPrice = parseFloat(primary.price);
+      const addons = extras.map((s) => {
+        const p = parseFloat(s.price);
+        return {
+          serviceId: s.id || null,
+          serviceName: s.name,
+          name: s.name,
+          price: isNaN(p) ? null : p,
+        };
+      });
       const body = {
         customerId: selectedCustomer.id,
         scheduledDate: apptDate,
-        serviceType: selectedService.name,
-        serviceId: selectedService.id || null,
+        serviceType: primary.name,
+        serviceId: primary.id || null,
+        serviceAddons: addons,
         windowStart,
         windowEnd: getEndTime(),
         assignmentMode: techMode,
         technicianId: techMode === 'choose' ? techId : undefined,
-        estimatedPrice: price ? parseFloat(price) : null,
+        estimatedPrice: isNaN(primaryPrice) ? null : primaryPrice,
         urgency: 'routine',
         notes: customerNotes || undefined,
         internalNotes: internalNotes || undefined,
@@ -531,24 +574,68 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           )}
         </div>
 
-        {/* Section 2: Service */}
+        {/* Section 2: Services — stack of line items. The first row is the
+            primary service (drives serviceType + service_id on the parent
+            appointment); rows beyond that persist as scheduled_service_addons
+            so a single visit can carry e.g. quarterly pest + rodent stations. */}
         <div style={sectionStyle}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B', marginBottom: 10 }}>Service</div>
-          {!selectedService ? (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B' }}>
+              Services {services.length > 1 ? <span style={{ fontWeight: 400, color: D.muted, fontSize: 12 }}>({services.length})</span> : null}
+            </div>
+            {services.length > 0 && subtotal > 0 && (
+              <div style={{ fontSize: 13, fontWeight: 600, color: '#18181B' }}>
+                Total: ${subtotal.toFixed(2)}
+              </div>
+            )}
+          </div>
+
+          {/* Existing service line items */}
+          {services.map((svc, idx) => (
+            <div key={`line-${idx}-${svc.id || svc.name}`} style={{ background: '#FFFFFF', borderRadius: 10, padding: 12, border: `1px solid #E4E4E7`, marginBottom: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, color: '#18181B', fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{svc.name}</div>
+                  {idx === 0 && services.length > 1 && (
+                    <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 2 }}>Primary</div>
+                  )}
+                </div>
+                <button
+                  onClick={() => removeServiceAt(idx)}
+                  aria-label="Remove service"
+                  style={{ background: 'none', border: 'none', color: D.muted, cursor: 'pointer', fontSize: 16, minWidth: 44, minHeight: 44, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                >✕</button>
+              </div>
+              <label style={labelStyle}>Price</label>
+              <div style={{ position: 'relative' }}>
+                <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: D.muted, fontSize: 14 }}>$</span>
+                <input
+                  type="number"
+                  value={svc.price ?? ''}
+                  onChange={(e) => updateServicePrice(idx, e.target.value)}
+                  style={{ ...inputStyle, paddingLeft: 28 }}
+                />
+              </div>
+            </div>
+          ))}
+
+          {/* Search box — shown initially (no services yet) or when adding another */}
+          {(services.length === 0 || addingService) && (
             <div>
               <input
                 type="text"
                 value={serviceSearch}
                 onChange={(e) => setServiceSearch(e.target.value)}
-                placeholder="Search by service name..."
+                placeholder={services.length === 0 ? 'Search by service name...' : 'Search to add another service...'}
                 style={inputStyle}
+                autoFocus={addingService}
               />
               {serviceSearch.trim().length > 0 && (
                 <div style={{ marginTop: 8, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, maxHeight: 280, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
                   {serviceResults.map((svc, i) => (
                     <div
                       key={`${svc.id || svc.name}-${i}`}
-                      onClick={() => { setSelectedService(svc); setServiceSearch(''); }}
+                      onClick={() => addServiceFromCatalog(svc)}
                       className="waves-sq-row"
                       style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
                     >
@@ -567,24 +654,28 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   )}
                 </div>
               )}
-            </div>
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#FFFFFF', borderRadius: 10, padding: 12, border: `1px solid #E4E4E7` }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, color: '#18181B', fontSize: 14 }}>{selectedService.name}</div>
-              </div>
-              <button onClick={() => setSelectedService(null)} style={{ background: 'none', border: 'none', color: D.muted, cursor: 'pointer', fontSize: 16, minWidth: 48, minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
+              {addingService && (
+                <button
+                  onClick={() => { setAddingService(false); setServiceSearch(''); setServiceResults([]); }}
+                  style={{ background: 'none', border: 'none', color: D.muted, fontSize: 12, fontWeight: 500, cursor: 'pointer', marginTop: 6, padding: '4px 0', minHeight: 36, display: 'inline-flex', alignItems: 'center' }}
+                >Cancel</button>
+              )}
             </div>
           )}
-        </div>
 
-        {/* Section 2b: Price — its own section below Service */}
-        <div style={sectionStyle}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B', marginBottom: 10 }}>Price</div>
-          <div style={{ position: 'relative' }}>
-            <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: D.muted, fontSize: 14 }}>$</span>
-            <input type="number" value={price} onChange={e => setPrice(e.target.value)} style={{ ...inputStyle, paddingLeft: 28 }} />
-          </div>
+          {/* Add another service — visible once at least one service is on the appt */}
+          {services.length > 0 && !addingService && (
+            <button
+              type="button"
+              onClick={() => setAddingService(true)}
+              style={{
+                width: '100%', padding: '10px 12px', background: 'transparent',
+                border: `1px dashed ${D.border}`, borderRadius: 8, color: D.text,
+                fontSize: 13, fontWeight: 500, cursor: 'pointer', minHeight: 44,
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+              }}
+            >+ Add another service</button>
+          )}
         </div>
 
         {/* Section 3: Date */}
