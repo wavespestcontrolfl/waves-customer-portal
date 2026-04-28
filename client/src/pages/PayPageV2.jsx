@@ -90,6 +90,7 @@ import {
   HelpPhoneLink,
 } from '../components/brand';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
+import { computeCardTotal } from '../lib/cardSurcharge';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -136,13 +137,13 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   const [processing, setProcessing] = useState(false);
   const [elementError, setElementError] = useState(null);
   const [selectedMethod, setSelectedMethod] = useState('card');
+  // Initial fallback uses the same two-step rounding as server
+  // computeChargeAmount so the customer's first paint matches the
+  // PaymentIntent total even if the /update-amount sync fails.
+  const initialCharge = computeCardTotal(amount, cardSurchargeRate || 0.0399);
   const [displayedBase, setDisplayedBase] = useState(amount);
-  const [displayedSurcharge, setDisplayedSurcharge] = useState(
-    Math.round(amount * (cardSurchargeRate || 0.0399) * 100) / 100,
-  );
-  const [displayedTotal, setDisplayedTotal] = useState(
-    Math.round((amount + amount * (cardSurchargeRate || 0.0399)) * 100) / 100,
-  );
+  const [displayedSurcharge, setDisplayedSurcharge] = useState(initialCharge.surcharge);
+  const [displayedTotal, setDisplayedTotal] = useState(initialCharge.total);
   const [syncingAmount, setSyncingAmount] = useState(false);
 
   const syncAmountForMethod = useCallback(async (methodCategory, saveCardOverride) => {
