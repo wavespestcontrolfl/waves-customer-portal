@@ -247,14 +247,22 @@ router.post('/sign-week', async (req, res, next) => {
     if (weekly.status === 'approved') {
       return res.status(409).json({ error: 'Week already approved by admin — cannot sign after lock' });
     }
+    if (weekly.tech_signed_at) {
+      // Friendly idempotent path — the read showed a signature already.
+      // Don't error; return the existing row so a double-click or stale
+      // tab reload sees the same shape it would after a fresh sign.
+      return res.json({ success: true, weekly, alreadySigned: true });
+    }
 
-    // Atomic guard: if an admin approves between our read above and
-    // this update, the whereNot predicate makes the update affect 0
-    // rows so we don't stamp tech_signed_at onto a now-locked week.
-    // Returning 409 lets the tech retry / refresh.
+    // Atomic guard: if either an admin approves or a concurrent sign
+    // request lands between our read above and this update, the
+    // predicates make the update affect 0 rows so we don't (a) stamp
+    // tech_signed_at onto a now-locked week or (b) overwrite a prior
+    // signature timestamp from a double-submit / second-tab race.
     const updatedRows = await db('time_weekly_summary')
       .where({ id: weekly.id })
       .whereNot({ status: 'approved' })
+      .whereNull('tech_signed_at')
       .update({
         tech_signed_at: new Date(),
         tech_signature: String(signature).trim().slice(0, 200),
@@ -263,6 +271,12 @@ router.post('/sign-week', async (req, res, next) => {
       .returning('*');
 
     if (!updatedRows.length) {
+      // Race lost — re-read to figure out which guard tripped so the
+      // tech sees the right state instead of a generic error.
+      const fresh = await db('time_weekly_summary').where({ id: weekly.id }).first();
+      if (fresh?.tech_signed_at) {
+        return res.json({ success: true, weekly: fresh, alreadySigned: true });
+      }
       return res.status(409).json({ error: 'Week was approved before sign-off completed — refresh and try again' });
     }
 
