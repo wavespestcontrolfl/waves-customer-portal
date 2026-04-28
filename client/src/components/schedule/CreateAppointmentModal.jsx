@@ -492,7 +492,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const recurring = groups.filter((g) => g.cadence !== 'one_time');
     if (recurring.length === 0) return [];
     const parsedCount = Number.parseInt(recurringCount, 10);
-    const limit = Math.min(Number.isInteger(parsedCount) && parsedCount >= 2 ? parsedCount : 4, 4);
+    const isFixed = Number.isInteger(parsedCount) && parsedCount >= 2;
+    // Server treats recurringCount as TOTAL visits (initial + children), so
+    // for fixed plans only count - 1 children spawn. Match that here so the
+    // chip row never promises more visits than will exist.
+    const futureVisits = isFixed ? parsedCount - 1 : 4;
+    const limit = Math.min(futureVisits, 4);
     const dir = weekendShift === 'back' ? 'back' : 'forward';
     return recurring.map((group) => {
       // Dedupe + iterate until we've collected `limit` unique dates so
@@ -533,6 +538,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const groups = groupServicesByCadence(services);
     const results = [];
     let firstError = null;
+    // Discount semantics across cadence groups:
+    //   - percentage: rides every group (each visit gets the same % off).
+    //   - fixed_amount / free_service: must apply ONCE across the booking,
+    //     otherwise mixed-cadence ($50 off applied to monthly AND quarterly)
+    //     would multiply the discount.
+    const discountAppliesToAll = discountType === 'percentage';
+    let discountAlreadySent = false;
     for (const group of groups) {
       const key = groupKey(group);
       // Skip groups already created in a prior attempt of this submit
@@ -609,13 +621,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 return arr.length > 0 ? arr : undefined;
               })()
             : undefined,
-          discountType: discountType || undefined,
-          discountAmount: discountType && discountAmount !== '' ? Number(discountAmount) : undefined,
+          discountType: (discountType && (discountAppliesToAll || !discountAlreadySent)) ? discountType : undefined,
+          discountAmount: (discountType && discountAmount !== '' && (discountAppliesToAll || !discountAlreadySent))
+            ? Number(discountAmount)
+            : undefined,
           createInvoice: true,
           sendConfirmation: sendSms,
         };
         const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
         createdGroupKeysRef.current.add(key);
+        if (discountType && !discountAppliesToAll) discountAlreadySent = true;
         results.push(r);
       } catch (e) {
         firstError = { label: groupLabel(group), message: e.message };
