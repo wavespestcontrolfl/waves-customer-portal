@@ -166,11 +166,10 @@ function ServiceForm({ svc, onSave, onCancel }) {
   );
 }
 
-// Table row mirroring the Square service-library layout: thumbnail-less
-// flat list with Name / Category / Billing / Duration / Price / Active /
-// Actions columns. Click the row (or the chevron) to expand into the
-// existing ServiceForm for inline editing — same edit / delete behavior
-// the previous card grid had.
+// Flat-list table row: thumbnail-less Name / Category / Billing /
+// Duration / Price / Active / Actions columns. Click the row (or the
+// chevron) to expand into the existing ServiceForm for inline editing —
+// same edit / delete behavior the previous card grid had.
 function ServiceRow({ svc, expanded, onToggle, onUpdate }) {
   const billingColor = billingColors[svc.billing_type] || '#64748b';
   const catColor = catColors[svc.category] || '#64748b';
@@ -302,7 +301,7 @@ export default function ServiceLibraryPage() {
   ];
 
   // Flat sort by category (using the CATEGORIES filter order) then name —
-  // mirrors Square's flat list while keeping related services adjacent.
+  // keeps related services adjacent without needing per-category headers.
   const sortedServices = (() => {
     const orderIdx = Object.fromEntries(
       CATEGORIES.filter((c) => c.value).map((c, i) => [c.value, i]),
@@ -372,7 +371,7 @@ export default function ServiceLibraryPage() {
             <ServiceForm svc={null} onSave={handleCreate} onCancel={() => setShowNew(false)} />
           )}
 
-          {/* Flat service table — mirrors Square's service-library layout. */}
+          {/* Flat service table — single sortable list, no per-category sections. */}
           {sortedServices.length > 0 ? (
             <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, overflow: 'hidden' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'auto' }}>
