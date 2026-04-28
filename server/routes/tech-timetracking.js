@@ -169,6 +169,30 @@ router.post('/sign-week', async (req, res, next) => {
     }
     const start = mondayOfET(weekStart);
 
+    // Reject current/future weeks. Sign-off only makes sense for a
+    // completed week (Monday last week or earlier) — otherwise a tech
+    // could sign hours that haven't happened yet, polluting the audit
+    // trail.
+    const todayET = etDateString(new Date());
+    if (start >= mondayOfET(todayET)) {
+      return res.status(400).json({ error: 'Cannot sign current or future weeks' });
+    }
+
+    // Require actual daily summaries for that tech in this week before
+    // signing. computeWeeklySummary will happily create a zero-total
+    // row even when there's no underlying time data, which would let
+    // a tech sign arbitrary empty weeks. Anchor on the dailies first.
+    const weekEnd = addETDays(new Date(`${start}T12:00:00Z`), 6);
+    const weekEndStr = etDateString(weekEnd);
+    const hasDailies = await db('time_entry_daily_summary')
+      .where({ technician_id: req.technicianId })
+      .where('work_date', '>=', start)
+      .where('work_date', '<=', weekEndStr)
+      .first();
+    if (!hasDailies) {
+      return res.status(404).json({ error: 'No timecard for that week' });
+    }
+
     let weekly = await db('time_weekly_summary')
       .where({ technician_id: req.technicianId, week_start: start })
       .first();

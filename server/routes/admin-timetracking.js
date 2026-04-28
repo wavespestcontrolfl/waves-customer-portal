@@ -974,7 +974,10 @@ router.post('/documents/upload', requireAdmin, upload.single('file'), async (req
       expiration_date: expirationDate || null,
     }).returning('*');
 
-    logger.info(`[docs] Uploaded: ${doc.title} (${ext}, ${(req.file.size / 1024).toFixed(0)} KB)${doc.technician_id ? ` for tech ${doc.technician_id}` : ''}`);
+    // Log structural metadata only — titles and filenames for HR
+    // documents (W-4, I-9, licenses) commonly embed employee names
+    // and other PII per AGENTS.md guidance, so keep them out of logs.
+    logger.info(`[docs] Uploaded id=${doc.id} category=${doc.category} ext=${ext} size=${req.file.size}B${doc.technician_id ? ` tech=${doc.technician_id}` : ''}`);
     res.status(201).json(doc);
   } catch (err) { next(err); }
 });
