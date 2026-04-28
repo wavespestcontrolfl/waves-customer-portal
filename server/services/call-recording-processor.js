@@ -266,6 +266,14 @@ const CallRecordingProcessor = {
     // processRecording on a 5s delay. Without this atomic claim, both
     // race through extraction and both send the confirmation SMS. Atomic
     // UPDATE → conditional exit: the first run wins, the second bails.
+    // Owner fence for the catch-block release below: write a fresh random
+    // token at claim time, match it on release. Only this code path writes
+    // processing_token, so unrelated updates to call_log.updated_at (e.g.
+    // the Twilio transcription webhook in twilio-voice-webhook.js) can't
+    // accidentally invalidate the fence. When the 10-min stale reclaim
+    // hands the lock to a peer, the peer's claim overwrites the token and
+    // our catch-block UPDATE matches 0 rows — we leave the peer alone.
+    const procToken = crypto.randomBytes(16).toString('hex');
     if (!opts.force) {
       // Reclaim stale 'processing' rows older than 10 min — server crash or
       // Gemini hang between claim (this UPDATE) and terminal status write
@@ -278,15 +286,44 @@ const CallRecordingProcessor = {
           this.whereNot('processing_status', 'processing')
             .orWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
         })
-        .update({ processing_status: 'processing', updated_at: new Date() });
+        .update({ processing_status: 'processing', processing_token: procToken, updated_at: new Date() });
       if (claimed === 0) {
         logger.info(`[call-proc] Concurrent run detected for ${callSid} — skipping`);
+        return { success: true, skipped: true, reason: 'already_processing' };
+      }
+    } else {
+      // force=true bypasses the early-exit on 'processed' rows so admin
+      // Reprocess can re-run extraction. It must NOT bypass an actively-
+      // processing peer — CallRecordingsPanel.jsx always sends force:true,
+      // so without this guard a force click on a row mid-flight would
+      // overwrite the peer's processing_token, breaking the peer's
+      // catch-block fence and wedging the row at 'processing' forever
+      // (the very bug processing_token was added to prevent).
+      //
+      // Use the same atomic claim as the non-force path, minus the
+      // exclude-'processed' filter: in-flight peers (and not-yet-stale
+      // 'processing' rows) still block; everything else flows through.
+      const claimed = await db('call_log')
+        .where({ twilio_call_sid: callSid })
+        .where(function () {
+          this.whereNot('processing_status', 'processing')
+            .orWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+        })
+        .update({ processing_status: 'processing', processing_token: procToken, updated_at: new Date() });
+      if (claimed === 0) {
+        logger.info(`[call-proc] Force run blocked by in-flight peer for ${callSid} — skipping`);
         return { success: true, skipped: true, reason: 'already_processing' };
       }
     }
 
     logger.info(`[call-proc] Processing recording for ${callSid}`);
 
+    // Outer guard: any unhandled throw between the claim above and the
+    // terminal-status writes below would otherwise wedge the row in
+    // processing_status='processing' until the 10-min stale reclaim. Release
+    // the lock to a recoverable terminal state so manual retry works
+    // immediately and the real error reaches the caller.
+    try {
     // Step 1: Transcribe — Gemini is the source of truth. Twilio's built-in is fallback only.
     let transcription = null;
 
@@ -318,6 +355,7 @@ const CallRecordingProcessor = {
       logger.warn(`[call-proc] No transcription available for ${callSid}`);
       await db('call_log').where({ id: call.id }).update({
         processing_status: 'no_transcription',
+        processing_token: null,
         updated_at: new Date(),
       });
       return { success: false, error: 'No transcription available' };
@@ -331,6 +369,7 @@ const CallRecordingProcessor = {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
       await db('call_log').where({ id: call.id }).update({
         processing_status: 'extraction_failed',
+        processing_token: null,
         updated_at: new Date(),
       });
       return { success: false, error: `AI extraction failed: ${err.message}` };
@@ -341,6 +380,7 @@ const CallRecordingProcessor = {
       await db('call_log').where({ id: call.id }).update({
         ai_extraction: JSON.stringify(extracted),
         processing_status: extracted.is_spam ? 'spam' : 'voicemail',
+        processing_token: null,
         updated_at: new Date(),
       });
       logger.info(`[call-proc] Skipping ${callSid}: ${extracted.is_spam ? 'spam' : 'voicemail'}`);
@@ -431,6 +471,7 @@ const CallRecordingProcessor = {
       sentiment: extracted.sentiment || null,
       lead_quality: extracted.lead_quality || null,
       processing_status: 'processed',
+      processing_token: null,
       updated_at: new Date(),
     });
 
@@ -806,6 +847,29 @@ const CallRecordingProcessor = {
       estimateQueueResult,
       beehiivResult,
     };
+    } catch (procErr) {
+      logger.error(`[call-proc] Unhandled error processing ${callSid}: ${procErr.message}\n${procErr.stack || ''}`);
+      try {
+        // Fence on processing_token (owner-only column). If the 10-min stale
+        // reclaim handed the lock to a peer, the peer's claim overwrote our
+        // token and this UPDATE matches 0 rows — we log and bail without
+        // disturbing the peer's lock or duplicating side effects.
+        const released = await db('call_log')
+          .where({ id: call.id })
+          .where('processing_token', procToken)
+          .update({
+            processing_status: 'extraction_failed',
+            processing_token: null,
+            updated_at: new Date(),
+          });
+        if (released === 0) {
+          logger.warn(`[call-proc] Skipped lock release for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
+        }
+      } catch (releaseErr) {
+        logger.error(`[call-proc] Failed to release lock for ${callSid}: ${releaseErr.message}`);
+      }
+      throw procErr;
+    }
   },
 
   /**
