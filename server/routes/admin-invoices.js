@@ -515,6 +515,11 @@ router.post('/:id/record-payment', async (req, res, next) => {
     if (invoice.status === 'paid') {
       return res.status(400).json({ error: 'Invoice is already paid' });
     }
+    // Refuse to mark a $0 invoice paid — surfaces upstream creation bugs
+    // instead of silently producing "$0.00 PAID" rows that misreport revenue.
+    if (parseFloat(invoice.total || 0) <= 0) {
+      return res.status(400).json({ error: 'Invoice has no amount to collect (total is $0)' });
+    }
 
     const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
 
