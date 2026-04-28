@@ -287,6 +287,12 @@ const CallRecordingProcessor = {
 
     logger.info(`[call-proc] Processing recording for ${callSid}`);
 
+    // Outer guard: any unhandled throw between the claim above and the
+    // terminal-status writes below would otherwise wedge the row in
+    // processing_status='processing' until the 10-min stale reclaim. Release
+    // the lock to a recoverable terminal state so manual retry works
+    // immediately and the real error reaches the caller.
+    try {
     // Step 1: Transcribe — Gemini is the source of truth. Twilio's built-in is fallback only.
     let transcription = null;
 
@@ -806,6 +812,18 @@ const CallRecordingProcessor = {
       estimateQueueResult,
       beehiivResult,
     };
+    } catch (procErr) {
+      logger.error(`[call-proc] Unhandled error processing ${callSid}: ${procErr.message}\n${procErr.stack || ''}`);
+      try {
+        await db('call_log').where({ id: call.id }).update({
+          processing_status: 'extraction_failed',
+          updated_at: new Date(),
+        });
+      } catch (releaseErr) {
+        logger.error(`[call-proc] Failed to release lock for ${callSid}: ${releaseErr.message}`);
+      }
+      throw procErr;
+    }
   },
 
   /**
