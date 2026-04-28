@@ -216,9 +216,10 @@ router.post('/recording-status', async (req, res) => {
       // 10-minute delay: Twilio's recording-status:completed fires before the
       // MP3 is reliably fetchable from their CDN, so the auth'd download in
       // the processor can 404 or return a partial buffer and Gemini gets
-      // garbage. Mirrors the Zapier delay step that ran this flow reliably
-      // in production. The 5-min processAllPending cron in scheduler.js is
-      // the restart-safe backstop if this in-memory timer is lost.
+      // garbage. Empirically ~10 min is the propagation window where the
+      // download stabilizes. The 5-min processAllPending cron in scheduler.js
+      // is the restart-safe backstop if this in-memory timer is lost — it
+      // applies the same age gate, so it will not fire ahead of the window.
       try {
         const processor = require('../services/call-recording-processor');
         setTimeout(async () => {

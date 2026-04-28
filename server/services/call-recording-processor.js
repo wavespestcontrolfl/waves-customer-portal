@@ -878,10 +878,12 @@ const CallRecordingProcessor = {
    */
   async processAllPending() {
     // Eligibility: a row needs (re)processing if it has a recording AND any of:
-    //   - processing_status NULL/pending/no_transcription (never ran or known-incomplete)
+    //   - processing_status NULL/pending OR transcription_status='pending' AND transcription
+    //     IS NULL (fresh — gated by a 10-min CDN-settle age window so the cron can't beat
+    //     the inline setTimeout in twilio-voice-webhook.js to a recording the Twilio CDN
+    //     hasn't propagated yet, which produces 404s and partial-buffer downloads)
+    //   - processing_status='no_transcription' (known-failed retry — no age gate, run promptly)
     //   - processing_status='processing' but stale > 10 min (orphaned claim from crash/hang)
-    //   - transcription_status='pending' AND transcription IS NULL (real user-visible symptom:
-    //     "recording present but transcript missing" — the case the cron is most needed for)
     // Duration filter uses recording_duration_seconds (set by the recording-status webhook)
     // with duration_seconds fallback, since the call-status webhook may not have populated
     // the latter yet — earlier filter on duration_seconds alone excluded fresh recordings.
@@ -889,16 +891,26 @@ const CallRecordingProcessor = {
       .where('recording_url', '!=', '')
       .whereNotNull('recording_url')
       .where(function () {
-        this.whereNull('processing_status')
-          .orWhere('processing_status', 'pending')
-          .orWhere('processing_status', 'no_transcription')
-          .orWhere(function () {
-            this.where('processing_status', 'processing')
-              .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+        this.where(function () {
+          // Fresh / waiting branches — only after the 10-min CDN-settle window.
+          // updated_at on these rows is the recording-status webhook timestamp
+          // (or the Twilio transcription webhook if that fired first); either
+          // way it tracks recording-land time, not call-start time, so it's a
+          // tighter gate than created_at for long calls.
+          this.where(function () {
+            this.whereNull('processing_status')
+              .orWhere('processing_status', 'pending')
+              .orWhere(function () {
+                this.where('transcription_status', 'pending').whereNull('transcription');
+              });
           })
-          .orWhere(function () {
-            this.where('transcription_status', 'pending').whereNull('transcription');
-          });
+          .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+        })
+        .orWhere('processing_status', 'no_transcription')
+        .orWhere(function () {
+          this.where('processing_status', 'processing')
+            .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+        });
       })
       .where(db.raw('COALESCE(recording_duration_seconds, duration_seconds, 0) > ?', [10]))
       .orderBy('created_at', 'desc')
