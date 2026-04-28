@@ -23,6 +23,7 @@ export default function InventoryPage() {
   const [stats, setStats] = useState(null);
   const [toast, setToast] = useState('');
   const [productFilter, setProductFilter] = useState('all');
+  const [showAddForm, setShowAddForm] = useState(false);
 
   const loadStats = () => adminFetch('/admin/inventory/stats').then(setStats).catch(() => {});
   useEffect(() => { loadStats(); }, []);
@@ -39,13 +40,16 @@ export default function InventoryPage() {
 
   return (
     <div style={{ maxWidth: 1300, margin: '0 auto' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 20 }}>
         <div>
           <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>
             <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Procurement Intelligence</span>
             <span className="hidden md:inline">Procurement Intelligence</span>
           </h1>
         </div>
+        {tab === 'products' && (
+          <button onClick={() => setShowAddForm(s => !s)} style={sBtn(D.teal, '#fff')}>+ Add Product</button>
+        )}
       </div>
 
       {stats && (
@@ -81,7 +85,7 @@ export default function InventoryPage() {
         </div>
       </div>
 
-      {tab === 'products' && <ProductsTab showToast={showToast} filter={productFilter} onFilterChange={setProductFilter} />}
+      {tab === 'products' && <ProductsTab showToast={showToast} filter={productFilter} onFilterChange={setProductFilter} showAddForm={showAddForm} setShowAddForm={setShowAddForm} />}
       {tab === 'vendors' && <VendorsTab showToast={showToast} />}
       {tab === 'approvals' && <ApprovalsTab showToast={showToast} onUpdate={loadStats} />}
       {tab === 'protocols' && <ProtocolsTab showToast={showToast} />}
@@ -98,7 +102,7 @@ export default function InventoryPage() {
 // ══════════════════════════════════════════════════════════════
 // PRODUCTS TAB — with inline editing
 // ══════════════════════════════════════════════════════════════
-function ProductsTab({ showToast, filter = 'all', onFilterChange }) {
+function ProductsTab({ showToast, filter = 'all', onFilterChange, showAddForm, setShowAddForm }) {
   const [products, setProducts] = useState([]);
   const [categories, setCategories] = useState([]);
   const [search, setSearch] = useState('');
@@ -108,7 +112,6 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange }) {
   const [editing, setEditing] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [vendors, setVendors] = useState([]);
-  const [showAddForm, setShowAddForm] = useState(false);
   const [newProduct, setNewProduct] = useState({ name: '', category: '', activeIngredient: '', moaGroup: '', defaultUnit: 'oz' });
   const [deleting, setDeleting] = useState(null);
   const [page, setPage] = useState(1);
@@ -166,7 +169,6 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange }) {
           <option value="">All Categories</option>
           {categories.map(c => <option key={c.name} value={c.name}>{c.name} ({c.count})</option>)}
         </select>
-        <button onClick={() => setShowAddForm(!showAddForm)} style={{ padding: '10px 16px', borderRadius: 8, border: 'none', background: D.green, color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' }}>+ Add Product</button>
       </div>
 
       {showAddForm && (

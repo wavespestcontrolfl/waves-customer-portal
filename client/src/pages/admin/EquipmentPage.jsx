@@ -27,6 +27,7 @@ const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
 export default function EquipmentPage() {
   const [tab, setTab] = useState('equipment');
   const [toast, setToast] = useState('');
+  const [editing, setEditing] = useState(null);
   const showToast = (m) => { setToast(m); setTimeout(() => setToast(''), 3500); };
 
   return (
@@ -36,11 +37,14 @@ export default function EquipmentPage() {
           .equipment-tab-bar { justify-content: flex-start !important; }
         }
       `}</style>
-      <div style={{ marginBottom: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 20 }}>
         <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>
           <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Equipment</span>
           <span className="hidden md:inline">Equipment</span>
         </h1>
+        {tab === 'equipment' && (
+          <button onClick={() => setEditing({ ...EMPTY_EQUIP })} style={sBtn(D.teal, '#fff')}>+ Add Equipment</button>
+        )}
       </div>
 
       <div className="equipment-tab-bar" style={{ display: 'flex', justifyContent: 'center', marginBottom: 20, overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
@@ -60,7 +64,7 @@ export default function EquipmentPage() {
         </div>
       </div>
 
-      {tab === 'equipment' && <EquipmentTab showToast={showToast} />}
+      {tab === 'equipment' && <EquipmentTab showToast={showToast} editing={editing} setEditing={setEditing} />}
       {tab === 'tank-mixes' && <TankMixTab showToast={showToast} />}
       {tab === 'job-costs' && <JobCostTab />}
       {tab === 'maintenance' && <MaintenanceTab showToast={showToast} />}
@@ -82,10 +86,9 @@ const EMPTY_EQUIP = {
   status: 'active', book_value: '', notes: '',
 };
 
-function EquipmentTab({ showToast }) {
+function EquipmentTab({ showToast, editing, setEditing }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [editing, setEditing] = useState(null); // equipment object or EMPTY_EQUIP for new
   const [saving, setSaving] = useState(false);
 
   const reload = () => adminFetch('/admin/equipment/equipment').then(d => setItems(d.equipment || [])).catch(() => {});
@@ -123,9 +126,6 @@ function EquipmentTab({ showToast }) {
 
   return (
     <>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
-        <button onClick={() => setEditing({ ...EMPTY_EQUIP })} style={sBtn(D.teal, '#fff')}>+ Add Equipment</button>
-      </div>
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(300px, 1fr))', gap: 12 }}>
         {items.map(e => {
           const hoursLeft = e.next_service_hours ? e.next_service_hours - (e.current_hours || 0) : null;
