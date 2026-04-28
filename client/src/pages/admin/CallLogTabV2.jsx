@@ -447,11 +447,27 @@ export default function CallLogTabV2() {
                           const isAuto = autoProcessingSid === c.twilio_call_sid;
                           const isManual = processingCallSid === c.twilio_call_sid;
                           const isProcessed = c.processing_status === 'processed';
+                          const hasTranscript = !!(c.transcription && c.transcription.length > 0);
                           if (isAuto || isManual) {
                             return (
                               <span className="text-12 text-ink-tertiary italic">
                                 {isProcessed ? 'Reprocessing…' : 'Auto-transcribing…'}
                               </span>
+                            );
+                          }
+                          // Stuck: has recording but no transcript (auto-processor lost on
+                          // restart, Gemini errored, row wedged in processing_status='processing').
+                          // Manual Process always passes force=true so it bypasses the dedup guard.
+                          if (c.recording_url && !hasTranscript) {
+                            return (
+                              <button
+                                type="button"
+                                onClick={() => handleProcessCall(c.twilio_call_sid, false)}
+                                disabled={!!processingCallSid || !!autoProcessingSid}
+                                className="text-11 uppercase tracking-label text-ink-tertiary hover:text-ink-primary u-focus-ring"
+                              >
+                                Process
+                              </button>
                             );
                           }
                           if (isProcessed) {
