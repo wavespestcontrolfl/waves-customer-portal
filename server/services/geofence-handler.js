@@ -458,10 +458,12 @@ async function handleDeparture({ tech, customer, job, lat, lng, eventTime, imei,
 //
 // Guardrails (all must pass — failing any one is logged + skipped):
 //   1. system_settings.geofence.auto_flip_on_departure = 'true'
-//   2. Active timer dwell ≥ auto_flip_dwell_minutes (default 10)
-//   3. A next scheduled job exists for this tech, customer != exited
-//   4. Next job's start is within auto_flip_horizon_hours (default 4)
-//   5. No prior auto-flip SMS to that customer in
+//   2. technicians.auto_flip_enabled = TRUE for this tech
+//   3. Active timer dwell ≥ auto_flip_dwell_minutes (default 10)
+//   4. A next scheduled job exists for this tech, customer != exited
+//   5. Next job's start is within auto_flip_horizon_hours (default 4)
+//   6. notification_prefs.auto_flip_en_route = TRUE for next customer
+//   7. No prior auto-flip SMS to that customer in
 //      auto_flip_cooldown_minutes (default 30)
 //
 // Dry-run mode (auto_flip_dry_run=true, the launch default) skips
@@ -471,6 +473,28 @@ async function handleDeparture({ tech, customer, job, lat, lng, eventTime, imei,
 async function maybeAutoFlipNextJob({ tech, exitedCustomer, activeTimer, eventTime, lat, lng, imei, payload, dwellMinutes }) {
   const enabled = await matcher.getAutoFlipOnDeparture();
   if (!enabled) return;
+
+  // Per-tech opt-out (Phase 2E). Lets ops silence a single tech with
+  // false-positive issues without disabling the master toggle for
+  // the whole org. Defaults TRUE in the column, so this is a no-op
+  // unless an admin has explicitly set it false on the technicians
+  // row. Skipped at the very top so we don't waste any DB lookups
+  // (next-job, customer prefs, etc.) when a tech is opted out.
+  if (tech && tech.auto_flip_enabled === false) {
+    await matcher.logEvent({
+      bouncie_imei: imei,
+      technician_id: tech.id,
+      event_type: 'EXIT',
+      latitude: lat,
+      longitude: lng,
+      matched_customer_id: exitedCustomer.id,
+      time_entry_id: (activeTimer && activeTimer.id) || null,
+      raw_payload: payload,
+      event_timestamp: eventTime,
+      action_taken: 'auto_flip_skipped_tech_disabled',
+    });
+    return;
+  }
 
   const dryRun = await matcher.getAutoFlipDryRun();
   const minDwell = await matcher.getAutoFlipDwellMinutes();
@@ -611,6 +635,24 @@ async function maybeAutoFlipNextJob({ tech, exitedCustomer, activeTimer, eventTi
       ...baseLog,
       matched_job_id: nextJob.id,
       action_taken: 'auto_flip_skipped_horizon',
+    });
+    return;
+  }
+
+  // Per-customer auto-flip opt-out (Phase 2E). Distinct from the
+  // SMS-layer notification_prefs.tech_en_route gate inside
+  // sendTechEnRoute. This flag lets a customer keep manual en_route
+  // SMS while opting out of the automated departure-triggered version.
+  // Skipping here means we don't flip state OR send SMS for the
+  // opted-out customer — the next job stays 'scheduled' until the
+  // tech taps the button manually.
+  const customerOptedOut = await matcher.isAutoFlipDisabledForCustomer(nextJob.customer_id);
+  if (customerOptedOut) {
+    await matcher.logEvent({
+      ...baseLog,
+      matched_customer_id: nextJob.customer_id,
+      matched_job_id: nextJob.id,
+      action_taken: 'auto_flip_skipped_customer_disabled',
     });
     return;
   }
