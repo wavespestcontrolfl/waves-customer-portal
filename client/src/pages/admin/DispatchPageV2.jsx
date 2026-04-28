@@ -926,11 +926,11 @@ export default function DispatchPageV2() {
       {/* Header */}
       <div className="flex justify-between items-start mb-4 flex-wrap gap-3">
         <div className="flex-1 min-w-0">
-          <div className="flex items-start justify-between gap-3">
-            <h1 className="text-28 font-normal tracking-h1 text-zinc-900">
-              <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Schedule</span>
-              <span className="hidden md:inline">Schedule</span>
-            </h1>
+          {/* Top-right "new appointment" CTAs — desktop pill + mobile "+" circle.
+              The "Schedule" h1 that used to share this row now lives in
+              AdminDispatchPage so the Board ↔ Schedule pill can render
+              directly under it. */}
+          <div className="flex items-center justify-end gap-3">
             {/* Desktop "+ Add Appointment" — pill mirrors "+ Add Customer"; opens CreateAppointmentModal. */}
             <button
               type="button"
