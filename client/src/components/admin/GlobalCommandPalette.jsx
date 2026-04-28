@@ -301,13 +301,6 @@ function GlobalCommandPalette(_props, ref) {
           padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 12,
           borderBottom: `1px solid ${D.border}44`,
         }}>
-          <div style={{
-            width: 32, height: 32, borderRadius: 10,
-            background: `linear-gradient(135deg, ${accentColor}, #6366f1)`,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 16, flexShrink: 0,
-          }}>⚡</div>
-
           <div style={{ flex: 1, position: 'relative' }}>
             <input
               ref={inputRef}
