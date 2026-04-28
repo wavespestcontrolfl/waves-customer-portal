@@ -32,7 +32,7 @@
 // - Mobile vs desktop divergence — confirm the same appointment renders
 //   the same details / action set on both, no orphaned mobile-only state
 //   that desktop users can't reach.
-import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback, lazy, Suspense } from 'react';
 import { Plus } from 'lucide-react';
 import {
   CompletionPanel,
@@ -942,7 +942,25 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
   //   - Month:         row hidden entirely.
   const isDayView = viewMode === 'day';
   const isMultiDayView = viewMode === '5day' || viewMode === 'week';
-  const useGridStats = isMultiDayView && !!gridStats;
+  // Identity-check incoming gridStats against the currently-visible range
+  // before trusting them. The reset-on-change useEffect runs after render,
+  // so a Week→Week date hop (or Week→5-Day mode swap) would briefly render
+  // the old range's totals labeled as the new range's. Comparing
+  // gridStats.startDate / dayCount to what TimeGridDays *would* compute
+  // for the current date+viewMode rejects the stale frame synchronously.
+  const expectedDayCount = viewMode === 'week' ? 7 : viewMode === '5day' ? 5 : 1;
+  const expectedStart = useMemo(() => {
+    if (!isMultiDayView) return null;
+    const d = new Date(date + 'T12:00:00');
+    const dow = d.getDay();
+    const monday = new Date(d);
+    monday.setDate(d.getDate() - (dow === 0 ? 6 : dow - 1));
+    return etDateString(monday);
+  }, [date, isMultiDayView]);
+  const useGridStats = isMultiDayView
+    && !!gridStats
+    && gridStats.startDate === expectedStart
+    && gridStats.dayCount === expectedDayCount;
   const statsAvailable = isDayView || useGridStats;
 
   const AVG_SERVICE_MIN = 35;

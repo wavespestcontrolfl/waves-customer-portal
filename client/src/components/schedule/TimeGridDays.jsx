@@ -568,6 +568,11 @@ export default function TimeGridDays({
       0,
     );
     onStatsChange({
+      // Range identity — DispatchPageV2 validates these against its
+      // current date/viewMode before rendering, so a late emission from a
+      // prior range never leaks into the new range's stats row.
+      startDate: monday,
+      dayCount,
       totalCount,
       completedCount,
       skippedCount,
