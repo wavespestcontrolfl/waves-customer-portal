@@ -1,23 +1,26 @@
 /**
  * <AdminDispatchPage> — top-level dispatcher surface at /admin/dispatch.
- * Two tabs:
- *   - "Board"    (default) — phase 2 v1 dispatch board (this PR)
- *   - "Schedule"           — existing DispatchPageV2 (the schedule list)
+ * Seven tabs, all rendered as one centered pill:
+ *   - "Board"        — phase 2 dispatch board (map + roster)
+ *   - "Schedule"     — DispatchPageV2's schedule grid (default)
+ *   - "Protocols"    — DispatchPageV2's Protocols panel
+ *   - "Tech Match"   — DispatchPageV2's TechMatchPanel
+ *   - "CSR Booking"  — DispatchPageV2's CSRPanel
+ *   - "Job Scores"   — DispatchPageV2's RevenuePanel
+ *   - "Insights"     — DispatchPageV2's InsightsPanel
  *
- * Per-tab URL state via ?tab=board|schedule so a dispatcher can refresh
- * or share a link to a specific view. Default = board.
+ * Per-tab URL state via ?tab=<key>. Default = board. Tabs that route into
+ * DispatchPageV2 pass `activeTab` so its internal tab strip can stay
+ * hidden (the top-level pill replaces it).
  *
- * Why a tab wrapper at /admin/dispatch (not a sibling /admin/dispatch-board
- * route): one canonical URL space for the dispatcher's primary surface.
- * Two top-level routes would cause context-switch friction and ambiguity
- * in every conversation about "the dispatch page."
+ * Why a tab wrapper at /admin/dispatch (not sibling routes): one canonical
+ * URL space for the dispatcher's primary surface — two top-level routes
+ * would cause context-switch friction.
  *
  * The legacy /admin/schedule route still works (App.jsx redirect) so
- * existing bookmarks and internal links don't break — they land on
- * the Schedule tab here.
+ * existing bookmarks land on the Schedule tab.
  *
- * Tier 1 V2 styling: uses the components/ui Tabs primitive + zinc
- * surfaces, no inline D palette.
+ * Tier 1 V2 styling.
  */
 import React, { Suspense, useState, useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
@@ -26,15 +29,34 @@ import DispatchBoardPage from './DispatchBoardPage';
 const DispatchPageV2 = React.lazy(() => import('./DispatchPageV2'));
 
 const TAB_KEY = 'tab';
-const TABS = { BOARD: 'board', SCHEDULE: 'schedule' };
+const TABS = {
+  BOARD: 'board',
+  SCHEDULE: 'schedule',
+  PROTOCOLS: 'protocols',
+  MATCH: 'match',
+  CSR: 'csr',
+  REVENUE: 'revenue',
+  INSIGHTS: 'insights',
+};
 const TAB_LIST = [
   { key: TABS.BOARD, label: 'Board' },
   { key: TABS.SCHEDULE, label: 'Schedule' },
+  { key: TABS.PROTOCOLS, label: 'Protocols' },
+  { key: TABS.MATCH, label: 'Tech Match' },
+  { key: TABS.CSR, label: 'CSR Booking' },
+  { key: TABS.REVENUE, label: 'Job Scores' },
+  { key: TABS.INSIGHTS, label: 'Insights' },
 ];
+const VALID_TABS = TAB_LIST.map((t) => t.key);
+
+// Top-level tab → DispatchPageV2 internal activeTab. The schedule grid
+// inside DispatchPageV2 is keyed as 'board' (legacy), while every other
+// sub-tab key matches its top-level key 1:1.
+const innerActiveTabFor = (topTab) => (topTab === TABS.SCHEDULE ? 'board' : topTab);
 
 export default function AdminDispatchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const initial = searchParams.get(TAB_KEY) === TABS.SCHEDULE ? TABS.SCHEDULE : TABS.BOARD;
+  const initial = VALID_TABS.includes(searchParams.get(TAB_KEY)) ? searchParams.get(TAB_KEY) : TABS.BOARD;
   const [tab, setTab] = useState(initial);
   const tabRefs = useRef({});
 
@@ -134,14 +156,14 @@ export default function AdminDispatchPage() {
           tab switches). Lifting the heading here keeps the pill in one
           stable parent on both tabs while still rendering the heading
           immediately above it on Schedule. */}
-      <div className="px-4 md:px-6 pt-4 md:pt-6 pb-2 flex flex-col items-start gap-3">
+      <div className="px-4 md:px-6 pt-4 md:pt-6 pb-2 flex flex-col items-center gap-3">
         {/* Always render the h1 so the pill stays the same React sibling on
-            both tabs; React reconciles unkeyed children by position, so a
+            every tab; React reconciles unkeyed children by position, so a
             conditional <h1> here would flip the pill between sibling slot 0
-            and slot 1 on every Board ↔ Schedule swap and remount it (the
-            very keyboard-focus regression this lift was supposed to fix).
-            On Board, hide the h1 with display:none — flex `gap-3` skips
-            display:none children, so visual layout matches "no h1". */}
+            and slot 1 on tab swaps and remount it (a keyboard-focus
+            regression we already fixed once). On non-Schedule tabs, hide
+            the h1 with display:none — flex `gap-3` skips display:none
+            children, so visual layout matches "no h1". */}
         <h1
           className="text-28 font-normal tracking-h1 text-zinc-900"
           style={tab === TABS.SCHEDULE ? undefined : { display: 'none' }}
@@ -167,7 +189,7 @@ export default function AdminDispatchPage() {
               </div>
             }
           >
-            <DispatchPageV2 />
+            <DispatchPageV2 activeTab={innerActiveTabFor(tab)} />
           </Suspense>
         )}
       </div>
