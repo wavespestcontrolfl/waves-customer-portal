@@ -519,7 +519,9 @@ export default function TimeGridDays({
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 
   const days = useMemo(() => {
-    const all = (optimistic || data?.days || []);
+    // optimistic is `{ ...data, days: [...] }` (an object) — read its days
+    // array, not the wrapper, or `.slice` / `.forEach` blow up downstream.
+    const all = (optimistic?.days || data?.days || []);
     return dayCount === 5 ? all.slice(0, 5) : all;
   }, [data, optimistic, dayCount]);
 
