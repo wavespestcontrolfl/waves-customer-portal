@@ -100,6 +100,12 @@ router.get('/', async (req, res, next) => {
     const avgGoogleRating = Object.values(googleStats).length > 0
       ? (Object.values(googleStats).reduce((s, g) => s + (g.rating || 0), 0) / Object.values(googleStats).filter(g => g.rating).length).toFixed(1)
       : parseFloat(totals?.avg_rating || 0);
+    // True only when every configured location has a fresh `_stats` row.
+    // Places sync swallows per-location errors (see services/google-business.js
+    // syncAllReviews loop), so partial coverage is a real state. The client
+    // uses this flag to decide whether `totalReviews` is safe as the
+    // response-rate denominator vs. falling back to responded+unresponded.
+    const googleStatsComplete = Object.keys(googleStats).length === WAVES_LOCATIONS.length;
 
     res.json({
       reviews: reviews.map(r => ({
@@ -113,6 +119,7 @@ router.get('/', async (req, res, next) => {
       })),
       stats: {
         totalReviews: totalGoogleReviews || parseInt(totals?.total || 0),
+        googleStatsComplete,
         avgRating: parseFloat(avgGoogleRating) || parseFloat(totals?.avg_rating || 0),
         unresponded: parseInt(unresponded?.count || 0),
         // `responded` is computed from the same google_reviews dataset as
