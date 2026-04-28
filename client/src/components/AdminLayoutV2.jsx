@@ -79,7 +79,7 @@ const NAV_SECTIONS = [
     { path: '/admin/estimates', icon: ClipboardList, label: 'Pipeline' },
     { path: '/admin/schedule', icon: Calendar, label: 'Schedule' },
     { path: '/admin/timetracking', icon: Clock, label: 'Staff' },
-    { path: '/admin/service-library', icon: BookOpen, label: 'Service Library' },
+    { path: '/admin/service-library', icon: BookOpen, label: 'Services' },
     { path: '/admin/projects', icon: FileText, label: 'Projects' },
   ]},
   { section: 'Communications', items: [

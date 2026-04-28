@@ -14,7 +14,7 @@ const SECTIONS = [
   { section: 'Operations', items: [
     { path: '/admin/estimates', icon: FileText, label: 'Pipeline & Estimates' },
     { path: '/admin/timetracking', icon: Clock, label: 'Staff' },
-    { path: '/admin/service-library', icon: BookOpen, label: 'Service Library' },
+    { path: '/admin/service-library', icon: BookOpen, label: 'Services' },
   ]},
   { section: 'Communications', items: [
     { path: '/admin/reviews', icon: Star, label: 'Reviews' },
