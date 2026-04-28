@@ -747,18 +747,32 @@ router.put('/technicians/:id', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /technicians/:id/earnings?from=YYYY-MM-DD&to=YYYY-MM-DD —
-// hours × pay_rate breakdown for a window. OT pays at 1.5×.
-// Falls back to $35/hr if pay_rate is unset (matches the legacy
-// hardcoded LABOR_RATE so dashboards stay consistent). Admin only —
-// payroll info, even one tech's own, isn't a tech-role surface.
+// GET /technicians/:id/earnings — hours × pay_rate breakdown for a
+// window. OT pays at 1.5×. Falls back to $35/hr if pay_rate is unset
+// (matches the legacy hardcoded LABOR_RATE so dashboards stay
+// consistent). Admin only — payroll info, even one tech's own, isn't
+// a tech-role surface.
+//
+// Window is selected via either:
+//   - period=this-week | last-week  (server anchors on ET, preferred)
+//   - from=YYYY-MM-DD & to=YYYY-MM-DD (explicit, for ad-hoc windows)
+//
+// Clients should prefer ?period= so week boundaries don't drift on
+// browsers outside ET or near midnight.
 router.get('/technicians/:id/earnings', requireAdmin, async (req, res, next) => {
   try {
     const tech = await db('technicians').where({ id: req.params.id }).first();
     if (!tech) return res.status(404).json({ error: 'Technician not found' });
 
-    const { from, to } = req.query;
-    if (!from || !to) return res.status(400).json({ error: 'from and to (YYYY-MM-DD) required' });
+    let { from, to } = req.query;
+    const { period } = req.query;
+    if (period === 'this-week' || period === 'last-week') {
+      const offsetDays = period === 'last-week' ? -7 : 0;
+      const anchor = addETDays(new Date(), offsetDays);
+      from = etWeekStart(anchor);
+      to = etDateString(addETDays(parseETDateTime(`${from}T12:00`), 6));
+    }
+    if (!from || !to) return res.status(400).json({ error: 'from+to (YYYY-MM-DD) or period=this-week|last-week required' });
 
     const rows = await db('time_entry_daily_summary')
       .where({ technician_id: tech.id })

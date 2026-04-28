@@ -1340,13 +1340,13 @@ function EarningsModal({ tech, onClose, showToast }) {
     (async () => {
       setLoading(true);
       try {
-        const monday = getMonday(new Date());
-        const lastMon = addDays(monday, -7);
-        const sunThis = addDays(monday, 6);
-        const sunLast = addDays(lastMon, 6);
+        // Server anchors the week boundaries on ET so admins outside
+        // ET (or hitting this near midnight) can't drift onto the
+        // wrong payroll week — we just ask for "this week" / "last
+        // week" and let the endpoint compute the dates.
         const [a, b] = await Promise.all([
-          adminFetch(`/admin/timetracking/technicians/${tech.id}/earnings?from=${monday}&to=${sunThis}`),
-          adminFetch(`/admin/timetracking/technicians/${tech.id}/earnings?from=${lastMon}&to=${sunLast}`),
+          adminFetch(`/admin/timetracking/technicians/${tech.id}/earnings?period=this-week`),
+          adminFetch(`/admin/timetracking/technicians/${tech.id}/earnings?period=last-week`),
         ]);
         if (!cancelled) { setThisWeek(a); setLastWeek(b); }
       } catch (e) {
