@@ -287,7 +287,10 @@ router.post('/sign-week', async (req, res, next) => {
       return res.status(409).json({ error: 'Week was approved before sign-off completed — refresh and try again' });
     }
 
-    logger.info(`[timetracking] Tech ${req.technicianId} signed week ${start}`);
+    // Structural identifiers only — no typed signature or name-bearing
+    // context per AGENTS.md. tech UUID + weekly_summary id are enough
+    // to reconstruct the event from DB if needed.
+    logger.info(`[timetracking] sign-week tech=${req.technicianId} weekly_id=${updatedRows[0].id}`);
     res.json({ success: true, weekly: updatedRows[0] });
   } catch (err) { next(err); }
 });
