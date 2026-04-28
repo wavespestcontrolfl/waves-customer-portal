@@ -83,7 +83,7 @@ export default function LoginPage() {
       <div style={{ position: 'relative', zIndex: 2, textAlign: 'center', marginBottom: 32 }}>
         <img
           src="/waves-logo.png"
-          alt="Waves Lawn & Pest"
+          alt="Waves"
           style={{ width: 140, height: 'auto', marginBottom: 14, filter: 'drop-shadow(0 4px 12px rgba(0,0,0,0.3))' }}
         />
         <h1 style={{

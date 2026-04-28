@@ -2017,7 +2017,7 @@ function ServicesTab() {
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState(null);
   const [typeFilter, setTypeFilter] = useState('All');
-  const [yearFilter, setYearFilter] = useState(String(new Date().getFullYear()));
+  const [yearFilter, setYearFilter] = useState('All');
   const [searchTerm, setSearchTerm] = useState('');
   const [photoMap, setPhotoMap] = useState({});
   const [lightbox, setLightbox] = useState(null);
@@ -2197,7 +2197,9 @@ function ServicesTab() {
       {/* Empty state */}
       {filtered.length === 0 && (
         <div style={{ padding: 30, textAlign: 'center', color: B.grayMid, fontSize: 14 }}>
-          No services match your filters.
+          {services.length === 0
+            ? "We haven't logged any visits yet — your service history will appear here after your first appointment."
+            : 'No services match your filters. Try clearing the year or type filter above.'}
         </div>
       )}
 
@@ -3083,7 +3085,6 @@ function BillingTab({ customer }) {
   const dueDate = nextCharge?.date ? parseDate(nextCharge.date) : (() => { const d = new Date(); d.setDate(d.getDate() + 5); return d; })();
   const daysUntilDue = Math.max(0, Math.ceil((dueDate - new Date()) / 86400000));
   const defaultCard = cards.find(c => c.isDefault) || cards[0];
-  const hasAutoPay = defaultCard?.autopayEnabled !== false;
   const lastPaymentFailed = balance?.lastPaymentFailed || false;
   const tierName = customer?.tier || 'Bronze';
   const tier = TIER[tierName];
@@ -3312,31 +3313,6 @@ function BillingTab({ customer }) {
             Explore Platinum — save {Math.round(((platinumDiscount - discount) / (1 - discount)) * 100)}% more on services
           </div>
         )}
-      </div>
-
-      {/* ── 3. Manage Auto Pay ── */}
-      <div style={{ background: B.white, borderRadius: 14, padding: 20, border: `1px solid ${B.grayLight}` }}>
-        <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 14 }}>Manage Auto Pay</div>
-
-        {/* Enrollment status */}
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '14px 16px', background: B.offWhite, borderRadius: 10,
-        }}>
-          <div>
-            <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>Auto Pay Enrollment</div>
-            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>Auto Pay keeps your WaveGuard {tierName} membership active and hassle-free. Bank transfers have no added fee — credit/debit cards add a 3.99% processing fee.</div>
-            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 6, lineHeight: 1.5 }}>
-              By enrolling in automatic payments, you authorize Waves Pest Control, LLC to charge your selected payment method after each scheduled service visit. Bank transfers (ACH) are charged the quoted invoice amount. Credit and debit card payments include a 3.99% processing fee added at checkout. To update your billing information or cancel automatic payments, contact us at (941) 297-5749 or billing@wavespestcontrol.com.
-            </div>
-          </div>
-          <span style={{
-            fontSize: 12, fontWeight: 800, letterSpacing: 0.5, textTransform: 'uppercase',
-            padding: '4px 12px', borderRadius: 20,
-            background: hasAutoPay ? `${B.green}20` : `${B.orange}20`,
-            color: hasAutoPay ? B.green : B.orange,
-          }}>{hasAutoPay ? 'Enrolled' : 'Not Enrolled'}</span>
-        </div>
       </div>
 
       {/* ── Manage Payment Methods ── */}
@@ -5385,91 +5361,146 @@ function MyPlanTab({ customer }) {
         </Card>
       ))}
 
-      {/* Section 4 — Tier Comparison */}
+      {/* Section 4 — Tier Comparison Matrix */}
       <SectionHeading>Compare WaveGuard Tiers</SectionHeading>
-      <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
-        <div style={{ display: 'flex', gap: 12, minWidth: 600, paddingBottom: 4 }}>
-          {TIER_ORDER.map((tn, i) => {
-            const t = TIER[tn];
-            const isCurrent = tn === tierName;
-            const disc = TIER_DISCOUNTS[tn];
-            const svcs = TIER_SERVICES[tn];
-            const tierServiceNames = TIER_SERVICE_NAMES[tn] || [];
-            // Estimate monthly cost for this tier
-            const tierMonthly = SERVICE_CATALOG.slice(0, svcs).reduce((sum, s) => sum + s.basePrice * (1 - disc), 0);
-            return (
-              <div key={tn} style={{
-                flex: 1, minWidth: 140, borderRadius: 14, padding: 16, textAlign: 'center',
-                border: isCurrent ? `2px solid ${t.color}` : `1px solid ${B.grayLight}`,
-                background: isCurrent ? `${t.color}12` : B.white,
-              }}>
-                <div style={{
-                  width: 40, height: 40, borderRadius: 10, margin: '0 auto 8px',
-                  background: `linear-gradient(135deg, ${t.gradientFrom}, ${t.gradientTo})`,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontSize: 18,
-                }}></div>
-                <div style={{ fontSize: 14, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>{tn}</div>
-                <div style={{ fontSize: 22, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui, marginTop: 4 }}>{Math.round(disc * 100)}%</div>
-                <div style={{ fontSize: 12, color: B.grayMid }}>discount</div>
-
-                {/* Estimated monthly cost */}
-                <div style={{ fontSize: 14, fontWeight: 700, color: B.wavesBlue, fontFamily: FONTS.ui, marginTop: 6 }}>
-                  ~${tierMonthly.toFixed(2)}/mo
-                </div>
-
-                {/* Service names list */}
-                <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  {tierServiceNames.map((sn, si) => (
-                    <div key={si} style={{ fontSize: 10, color: B.grayDark, lineHeight: 1.4 }}>{sn}</div>
-                  ))}
-                </div>
-
-                {isCurrent ? (
-                  <div style={{ marginTop: 10, fontSize: 12, fontWeight: 700, color: B.green, background: `${B.green}20`, padding: '4px 10px', borderRadius: 20 }}>Current Plan</div>
-                ) : i > tierIdx ? (
-                  upgradeRequested[tn] ? (
-                    <div style={{ marginTop: 10, fontSize: 12, fontWeight: 600, color: B.green, padding: '4px 10px' }}>
-                       Request sent
+      <div style={{ fontSize: 12, color: B.grayMid, marginTop: -12, marginBottom: 4 }}>
+        Each row is a service. Check marks show which tier already includes it — no need to pay extra if it's covered by your plan.
+      </div>
+      <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch', borderRadius: 14, border: `1px solid ${B.grayLight}`, background: B.white }}>
+        <div style={{ minWidth: 640 }}>
+          {/* Header row — tier name, price, discount, current-plan badge */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1.4fr repeat(4, 1fr)' }}>
+            <div style={{ padding: '14px 14px 10px', fontSize: 11, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5, borderBottom: `1px solid ${B.grayLight}` }}>
+              What's included
+            </div>
+            {TIER_ORDER.map(tn => {
+              const t = TIER[tn];
+              const isCurrent = tn === tierName;
+              const disc = TIER_DISCOUNTS[tn];
+              const tierMonthly = SERVICE_CATALOG.slice(0, TIER_SERVICES[tn]).reduce((sum, s) => sum + s.basePrice * (1 - disc), 0);
+              return (
+                <div key={tn} style={{
+                  padding: '12px 8px 10px', textAlign: 'center',
+                  background: isCurrent ? `${t.color}12` : 'transparent',
+                  borderLeft: `1px solid ${B.grayLight}`,
+                  borderBottom: `1px solid ${B.grayLight}`,
+                }}>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, textTransform: 'uppercase', letterSpacing: 0.4 }}>{tn}</div>
+                  <div style={{ fontSize: 18, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui, marginTop: 2 }}>
+                    ${tierMonthly.toFixed(0)}<span style={{ fontSize: 11, color: B.grayMid, fontWeight: 400 }}>/mo</span>
+                  </div>
+                  <div style={{ fontSize: 10, fontWeight: 600, color: disc > 0 ? B.green : B.grayMid, marginTop: 2 }}>
+                    {disc > 0 ? `${Math.round(disc * 100)}% bundle discount` : 'No bundle discount'}
+                  </div>
+                  {isCurrent && (
+                    <div style={{ fontSize: 9, fontWeight: 700, color: B.green, background: `${B.green}20`, padding: '2px 8px', borderRadius: 12, marginTop: 5, display: 'inline-block' }}>
+                      YOUR PLAN
                     </div>
-                  ) : (
-                    <div>
-                      <button
-                        disabled={upgradeSubmitting[tn]}
-                        onClick={async () => {
-                          if (upgradeSubmitting[tn]) return;
-                          setUpgradeSubmitting(prev => ({ ...prev, [tn]: true }));
-                          try {
-                            await api.createRequest?.({ category: 'upgrade', subject: `Upgrade to WaveGuard ${tn}`, description: `Customer requested tier upgrade from ${tierName} to ${tn}.` });
-                            setUpgradeRequested(prev => ({ ...prev, [tn]: true }));
-                          } catch (err) {
-                            alert(`Couldn't send upgrade request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
-                          } finally {
-                            setUpgradeSubmitting(prev => ({ ...prev, [tn]: false }));
-                          }
-                        }}
-                        style={{
-                          ...BUTTON_BASE, marginTop: 10, padding: '4px 12px', fontSize: 12,
-                          background: B.yellow, color: B.blueDeeper,
-                          opacity: upgradeSubmitting[tn] ? 0.6 : 1,
-                          cursor: upgradeSubmitting[tn] ? 'wait' : 'pointer',
-                        }}>{upgradeSubmitting[tn] ? 'Sending…' : 'Upgrade'}</button>
-                      {tierIdx >= 1 && i === tierIdx + 1 && (
-                        <div style={{ fontSize: 9, color: B.green, fontWeight: 600, marginTop: 4, lineHeight: 1.3 }}>
-                          Your {tierName} loyalty credit covers ${tierIdx >= 2 ? 100 : tierIdx >= 1 ? 50 : 25} off your first {tn} month
-                        </div>
-                      )}
-                    </div>
-                  )
-                ) : (
-                  <a href="sms:+19412975749?body=Hi Waves, I'd like to discuss adjusting my WaveGuard plan." style={{
-                    marginTop: 10, display: 'inline-block', fontSize: 10, color: B.wavesBlue,
-                    fontWeight: 600, textDecoration: 'none', padding: '4px 0',
-                  }}>Contact us to adjust</a>
-                )}
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Service rows — ✓ where included */}
+          {SERVICE_CATALOG.slice(0, 4).map((svc, rowIdx) => (
+            <div key={svc.id} style={{ display: 'grid', gridTemplateColumns: '1.4fr repeat(4, 1fr)' }}>
+              <div style={{ padding: '12px 14px', fontSize: 13, color: B.navy, fontWeight: 600, borderBottom: `1px solid ${B.grayLight}` }}>
+                {svc.name}
+                <div style={{ fontSize: 11, color: B.grayMid, fontWeight: 400, marginTop: 2, lineHeight: 1.4 }}>
+                  {svc.description}
+                </div>
               </div>
-            );
-          })}
+              {TIER_ORDER.map((tn, colIdx) => {
+                const isCurrent = tn === tierName;
+                const includes = colIdx >= rowIdx;
+                return (
+                  <div key={tn} style={{
+                    padding: '12px 8px', textAlign: 'center',
+                    background: isCurrent ? `${TIER[tn].color}08` : 'transparent',
+                    borderLeft: `1px solid ${B.grayLight}`,
+                    borderBottom: `1px solid ${B.grayLight}`,
+                    fontSize: 18, fontWeight: 700,
+                    color: includes ? B.green : B.grayLight,
+                  }}>{includes ? '✓' : '—'}</div>
+                );
+              })}
+            </div>
+          ))}
+
+          {/* Member perks row — applies to all tiers */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1.4fr repeat(4, 1fr)' }}>
+            <div style={{ padding: '12px 14px', fontSize: 13, color: B.navy, fontWeight: 600 }}>
+              Unlimited callbacks
+              <div style={{ fontSize: 11, color: B.grayMid, fontWeight: 400, marginTop: 2, lineHeight: 1.4 }}>
+                Free re-treatment if pests return between scheduled visits
+              </div>
+            </div>
+            {TIER_ORDER.map(tn => (
+              <div key={tn} style={{
+                padding: '12px 8px', textAlign: 'center',
+                background: tn === tierName ? `${TIER[tn].color}08` : 'transparent',
+                borderLeft: `1px solid ${B.grayLight}`,
+                fontSize: 18, fontWeight: 700, color: B.green,
+              }}>✓</div>
+            ))}
+          </div>
+
+          {/* CTA row */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1.4fr repeat(4, 1fr)', borderTop: `2px solid ${B.grayLight}` }}>
+            <div style={{ padding: '14px' }} />
+            {TIER_ORDER.map((tn, i) => {
+              const isCurrent = tn === tierName;
+              const isUpgrade = i > tierIdx;
+              return (
+                <div key={tn} style={{
+                  padding: '12px 6px', textAlign: 'center',
+                  background: isCurrent ? `${TIER[tn].color}12` : 'transparent',
+                  borderLeft: `1px solid ${B.grayLight}`,
+                }}>
+                  {isCurrent ? (
+                    <div style={{ fontSize: 11, fontWeight: 700, color: B.green }}>Current</div>
+                  ) : isUpgrade ? (
+                    upgradeRequested[tn] ? (
+                      <div style={{ fontSize: 11, fontWeight: 600, color: B.green }}>Request sent</div>
+                    ) : (
+                      <>
+                        <button
+                          disabled={upgradeSubmitting[tn]}
+                          onClick={async () => {
+                            if (upgradeSubmitting[tn]) return;
+                            setUpgradeSubmitting(prev => ({ ...prev, [tn]: true }));
+                            try {
+                              await api.createRequest?.({ category: 'upgrade', subject: `Upgrade to WaveGuard ${tn}`, description: `Customer requested tier upgrade from ${tierName} to ${tn}.` });
+                              setUpgradeRequested(prev => ({ ...prev, [tn]: true }));
+                            } catch (err) {
+                              alert(`Couldn't send upgrade request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
+                            } finally {
+                              setUpgradeSubmitting(prev => ({ ...prev, [tn]: false }));
+                            }
+                          }}
+                          style={{
+                            ...BUTTON_BASE, padding: '6px 10px', fontSize: 11,
+                            background: B.yellow, color: B.blueDeeper, width: '100%',
+                            opacity: upgradeSubmitting[tn] ? 0.6 : 1,
+                            cursor: upgradeSubmitting[tn] ? 'wait' : 'pointer',
+                          }}>{upgradeSubmitting[tn] ? '…' : 'Upgrade'}</button>
+                        {tierIdx >= 1 && i === tierIdx + 1 && (
+                          <div style={{ fontSize: 9, color: B.green, fontWeight: 600, marginTop: 4, lineHeight: 1.3 }}>
+                            ${tierIdx >= 2 ? 100 : 50} loyalty credit applies
+                          </div>
+                        )}
+                      </>
+                    )
+                  ) : (
+                    <a href="sms:+19412975749?body=Hi Waves, I'd like to discuss adjusting my WaveGuard plan." style={{
+                      fontSize: 10, color: B.wavesBlue, fontWeight: 600, textDecoration: 'none',
+                    }}>Contact us</a>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
       </div>
 
@@ -7558,6 +7589,11 @@ function VisitsTab({ customer, subTab, onSubTabChange }) {
         {pill('upcoming', 'Upcoming')}
         {pill('completed', 'Completed')}
       </div>
+      {active === 'upcoming' && (
+        <div style={{ fontSize: 12, color: B.grayMid, marginTop: -8, paddingLeft: 4 }}>
+          Tap <strong style={{ color: B.navy }}>Completed</strong> above to see your past visits and service reports.
+        </div>
+      )}
       {active === 'upcoming' ? <ScheduleTab customer={customer} /> : <ServicesTab />}
     </div>
   );
