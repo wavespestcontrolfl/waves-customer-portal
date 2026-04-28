@@ -66,13 +66,15 @@ router.get('/', async (req, res, next) => {
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const reviews = await query.limit(parseInt(limit)).offset(offset);
 
-    // Get real Google stats from Places API (stored during sync)
+    // Get real Google stats from Places API (stored during sync). Track
+    // synced_at per row so we can distinguish fresh stats from stale rows
+    // left behind when a location's sync stopped updating.
     const statsRows = await db('google_reviews').where({ reviewer_name: '_stats' });
     const googleStats = {};
     for (const row of statsRows) {
       try {
         const parsed = JSON.parse(row.review_text);
-        googleStats[row.location_id] = { rating: parsed.rating, totalReviews: parsed.totalReviews };
+        googleStats[row.location_id] = { rating: parsed.rating, totalReviews: parsed.totalReviews, syncedAt: row.synced_at };
       } catch { /* ignore */ }
     }
 
@@ -100,12 +102,22 @@ router.get('/', async (req, res, next) => {
     const avgGoogleRating = Object.values(googleStats).length > 0
       ? (Object.values(googleStats).reduce((s, g) => s + (g.rating || 0), 0) / Object.values(googleStats).filter(g => g.rating).length).toFixed(1)
       : parseFloat(totals?.avg_rating || 0);
-    // True only when every configured location has a fresh `_stats` row.
-    // Places sync swallows per-location errors (see services/google-business.js
-    // syncAllReviews loop), so partial coverage is a real state. The client
-    // uses this flag to decide whether `totalReviews` is safe as the
-    // response-rate denominator vs. falling back to responded+unresponded.
-    const googleStatsComplete = Object.keys(googleStats).length === WAVES_LOCATIONS.length;
+    // True only when every configured location has a `_stats` row whose
+    // synced_at is recent. Places sync runs hourly and swallows
+    // per-location errors (services/google-business.js syncAllReviews),
+    // so a stale row from a previous successful run can outlive the
+    // failure. The 24h window absorbs transient sync hiccups while still
+    // catching multi-run outages — once a location goes a full day
+    // without a fresh _stats write, the client falls back to the
+    // responded+unresponded denominator instead of silently mismatching
+    // numerator and denominator populations.
+    const STATS_FRESH_MS = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const freshStatsCount = Object.values(googleStats).filter(g => {
+      const t = g.syncedAt ? new Date(g.syncedAt).getTime() : 0;
+      return t > 0 && (now - t) <= STATS_FRESH_MS;
+    }).length;
+    const googleStatsComplete = freshStatsCount === WAVES_LOCATIONS.length;
 
     res.json({
       reviews: reviews.map(r => ({
