@@ -55,6 +55,10 @@ function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
   const addressLine = currentJob ? truncate(streetOnly(currentJob.address), 28) : '—';
   const dotColor = STATUS_DOT[tech.status] || STATUS_DOT.idle;
   const statusTextColor = STATUS_TEXT[tech.status] || STATUS_TEXT.idle;
+  // ETA: backend computes via haversine when status is en_route or
+  // driving + tech has a current_job + both have lat/lng. Null in
+  // every other case — render nothing rather than a fake number.
+  const showEta = tech.eta_minutes != null && (tech.status === 'en_route' || tech.status === 'driving');
 
   const initials = (tech.name || '?')
     .split(/\s+/)
@@ -120,6 +124,11 @@ function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
               >
                 {tech.status || 'idle'}
               </span>
+              {showEta ? (
+                <span className="text-11 uppercase tracking-label font-medium text-zinc-500">
+                  · {tech.eta_minutes} MIN
+                </span>
+              ) : null}
             </div>
           </div>
         </div>
@@ -145,6 +154,7 @@ export default React.memo(TechCardImpl, (prev, next) => {
   if (prev.tech.id !== next.tech.id) return false;
   if (prev.tech.updated_at !== next.tech.updated_at) return false;
   if (prev.tech.current_job_id !== next.tech.current_job_id) return false;
+  if (prev.tech.eta_minutes !== next.tech.eta_minutes) return false;
   if (prev.selected !== next.selected) return false;
   if (prev.jobs !== next.jobs) return false;
   if (prev.onSelect !== next.onSelect) return false;
