@@ -414,7 +414,7 @@ function ViewToggleV2({ view, onChange }) {
     // (Leads / Estimates / Create Estimate / Pricing Logic) shape:
     // a zinc-100 framed segmented bar with title-case labels that flip
     // to a solid black pill when active. Centered on the page.
-    <div className="hidden sm:flex justify-center">
+    <div className="hidden md:flex justify-center">
       <div
         className="inline-flex flex-wrap items-center"
         style={{
