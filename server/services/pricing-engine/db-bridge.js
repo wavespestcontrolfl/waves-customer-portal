@@ -151,6 +151,29 @@ async function syncConstantsFromDB(dbInstance) {
       constants.RODENT.trapping.base = r(config.rodent_trapping.base);
       constants.RODENT.trapping.floor = r(config.rodent_trapping.base);
     }
+    if (config.rodent_trapping?.followup_rate) {
+      constants.RODENT.trapping.followupRate = r(config.rodent_trapping.followup_rate);
+    }
+    if (config.rodent_trapping?.followup_3pack_rate) {
+      constants.RODENT.trapping.followup3PackRate = r(config.rodent_trapping.followup_3pack_rate);
+    }
+    if (config.rodent_setup_fee?.value) {
+      constants.RODENT.baitSetupFee = r(config.rodent_setup_fee.value);
+    }
+    if (config.rodent_post_exclusion) {
+      const pe = config.rodent_post_exclusion;
+      if (pe.multiplier) constants.RODENT.baitPostExclusion.multiplier = pe.multiplier;
+      if (pe.floor_monthly) constants.RODENT.baitPostExclusion.floorMonthly = r(pe.floor_monthly);
+    }
+    if (config.rodent_sanitation) {
+      const sa = config.rodent_sanitation;
+      ['light', 'medium', 'heavy'].forEach(tier => {
+        if (sa[tier]) {
+          if (sa[tier].base !== undefined) constants.RODENT.sanitation[tier].base = r(sa[tier].base);
+          if (sa[tier].floor !== undefined) constants.RODENT.sanitation[tier].floor = r(sa[tier].floor);
+        }
+      });
+    }
 
     // ── WaveGuard ────────────────────────────────────────────
     if (config.waveguard_tiers) {
@@ -195,6 +218,8 @@ async function syncConstantsFromDB(dbInstance) {
       if (ex.simple) constants.SPECIALTY.exclusion.perPoint.simple = r(ex.simple);
       if (ex.moderate) constants.SPECIALTY.exclusion.perPoint.moderate = r(ex.moderate);
       if (ex.advanced) constants.SPECIALTY.exclusion.perPoint.advanced = r(ex.advanced);
+      if (ex.floor) constants.SPECIALTY.exclusion.floor = r(ex.floor);
+      if (ex.inspection) constants.SPECIALTY.exclusion.inspectionFee = r(ex.inspection);
     }
 
     // ── Lawn Care Brackets (all 4 grass tracks) ──────────────

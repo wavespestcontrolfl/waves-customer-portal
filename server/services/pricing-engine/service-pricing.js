@@ -535,35 +535,48 @@ function priceRodentBait(property, options = {}) {
   let annual = monthly * 12 + roofAnnualAdj;
   monthly = Math.round(annual / 12 * 100) / 100;
 
-  // Cost estimate: 12 visits/year
-  let onSiteMin = size === 'small' ? 15 : size === 'medium' ? 20 : 25;
-  let materialPerVisit = size === 'small' ? 10 : size === 'medium' ? 12 : 15;
+  // Cost estimate: quarterly visits (4/yr) — billed monthly to customer.
+  // On-site time per visit is slightly longer than the old monthly model
+  // because the tech inspects all stations in one pass instead of spreading
+  // checks across the year.
+  const visitsPerYear = RODENT.baitVisitsPerYear || 4;
+  let onSiteMin = size === 'small' ? 25 : size === 'medium' ? 30 : 40;
+  let materialPerVisit = size === 'small' ? 6 : size === 'medium' ? 9 : 12;
+  let stationAmortAnnual = size === 'small' ? 30 : size === 'medium' ? 45 : 60;
 
   // POST-EXCLUSION MODIFIER — sealed structure = lighter scope
   // Three independent levers (per post-exclusion-modifier-spec.md):
   //   1. Station count   ~ -35% (perimeter only, floor 4 stations) → revenue-side ~0.65×
   //   2. Bait cost       ~ -20% (lower uptake on sealed structure)
-  //   3. Labor           ~ -40% (no diagnostic, ~24min vs ~40min visits)
-  // Net combined revenue impact ≈ 0.72× (25–30% off). Floor: $55/mo.
+  //   3. Labor           ~ -40% (no diagnostic, lighter visits)
+  // Net combined revenue impact ≈ 0.72×. Floor rebased to $39/mo for new
+  // quarterly-cadence base prices ($49/$59/$69).
   if (postExclusion) {
-    const POST_EXCL_MULT = 0.72;
-    const POST_EXCL_FLOOR_MONTHLY = 55;
-    monthly = Math.max(POST_EXCL_FLOOR_MONTHLY, Math.round(monthly * POST_EXCL_MULT * 100) / 100);
+    const cfg = RODENT.baitPostExclusion || { multiplier: 0.72, floorMonthly: 39 };
+    monthly = Math.max(cfg.floorMonthly, Math.round(monthly * cfg.multiplier * 100) / 100);
     annual = Math.round(monthly * 12);
     materialPerVisit = Math.round(materialPerVisit * 0.80 * 100) / 100;
     onSiteMin = Math.round(onSiteMin * 0.60);
   }
 
   const laborPerVisitCost = laborCost(onSiteMin);
-  const annualCost = (materialPerVisit + laborPerVisitCost) * 12 + GLOBAL.ADMIN_ANNUAL;
+  const annualCost =
+    (materialPerVisit + laborPerVisitCost) * visitsPerYear
+    + stationAmortAnnual
+    + GLOBAL.ADMIN_ANNUAL;
   const margin = annual > 0 ? (annual - annualCost) / annual : 0;
 
   return {
     service: 'rodent_bait',
     score, size, monthly, annual,
-    visitsPerYear: 12,
+    visitsPerYear,
     postExclusion,
-    costs: { materialPerVisit, laborPerVisit: Math.round(laborPerVisitCost * 100) / 100, annualCost: Math.round(annualCost) },
+    costs: {
+      materialPerVisit,
+      laborPerVisit: Math.round(laborPerVisitCost * 100) / 100,
+      stationAmortAnnual,
+      annualCost: Math.round(annualCost),
+    },
     margin: Math.round(margin * 1000) / 1000,
     marginFloorOk: margin >= GLOBAL.MARGIN_FLOOR,
     tierQualifier: RODENT.tierQualifier,
@@ -574,6 +587,8 @@ function priceRodentBait(property, options = {}) {
 // ============================================================
 // RODENT TRAPPING (One-Time)
 // ============================================================
+// Base price = setup visit + 1 follow-up trap check.
+// Additional follow-ups billed via priceRodentTrappingFollowups().
 function priceRodentTrapping(property) {
   const footprint = property.footprint;
   const lotSqFt = property.lotSqFt;
@@ -589,6 +604,91 @@ function priceRodentTrapping(property) {
   const price = Math.max(RODENT.trapping.floor, base);
 
   return { service: 'rodent_trapping', price, footprintAdj: Math.round(footprintAdj), lotAdj: Math.round(lotAdj) };
+}
+
+// ============================================================
+// RODENT TRAPPING — ADDITIONAL FOLLOW-UP VISITS
+// ============================================================
+// Base trapping price includes setup + 1 follow-up. Use this for
+// additional checks on active infestations. 3-pack saves $40 vs
+// three individual follow-ups.
+function priceRodentTrappingFollowups(count = 1) {
+  const n = Math.max(0, Math.floor(count));
+  if (n === 0) return null;
+
+  const perVisit = RODENT.trapping.followupRate;
+  const packRate = RODENT.trapping.followup3PackRate;
+
+  let price;
+  let usePack = false;
+  if (n >= 3) {
+    usePack = true;
+    price = packRate + (n - 3) * perVisit;
+  } else {
+    price = n * perVisit;
+  }
+
+  return {
+    service: 'rodent_trapping_followup',
+    count: n,
+    perVisit,
+    usePack,
+    price,
+    detail: usePack
+      ? `${n} follow-up${n === 1 ? '' : 's'} (3-pack + ${Math.max(0, n - 3)} extra)`
+      : `${n} follow-up${n === 1 ? '' : 's'} @ $${perVisit}/ea`,
+  };
+}
+
+// ============================================================
+// RODENT SANITATION (bleach + manual wipe)
+// ============================================================
+// Three tiers, scope is bleach + manual wipe-down (NOT enzyme/fogger).
+// Footprint adjustment scales with attic size beyond 1500 sf baseline.
+//   light  — single room or small zone, ~30 min on site
+//   medium — multiple rooms or attic perimeter, ~75 min on site
+//   heavy  — whole attic or multi-zone problem, ~150 min on site
+function priceSanitation(options = {}) {
+  const { tier = 'medium', atticSqFt = 1500 } = options;
+  const cfg = RODENT.sanitation[tier];
+  if (!cfg) {
+    throw new Error(`Unknown sanitation tier: ${tier}`);
+  }
+
+  const baseline = 1500;
+  const step = 500;
+  const adjPerStep = RODENT.sanitation.footprintAdj?.[tier] || 0;
+  const stepsAbove = Math.max(-2, Math.round((atticSqFt - baseline) / step));
+  const footprintAdj = stepsAbove * adjPerStep;
+
+  const price = Math.max(cfg.floor, cfg.base + footprintAdj);
+
+  return {
+    service: 'rodent_sanitation',
+    tier,
+    name: `Rodent Sanitation (${cfg.label})`,
+    price,
+    footprintAdj,
+    detail: `${cfg.label} — ${cfg.durationMin} min, ${atticSqFt} sf attic`,
+  };
+}
+
+// ============================================================
+// BAIT-STATION SETUP FEE (waived in standard recurring sign-up)
+// ============================================================
+// Returns 0 when waived (caller decides). Constant retained on the
+// books so non-recurring edge cases can invoice it explicitly.
+function priceBaitSetup(options = {}) {
+  const { waived = true } = options;
+  return {
+    service: 'rodent_bait_setup',
+    name: 'Bait Station Setup',
+    price: waived ? 0 : RODENT.baitSetupFee,
+    waived,
+    detail: waived
+      ? 'Waived with recurring plan'
+      : `One-time $${RODENT.baitSetupFee} setup`,
+  };
 }
 
 // ============================================================
@@ -965,25 +1065,34 @@ function priceStingingInsect(options = {}) {
 // EXCLUSION (rodent entry-point sealing)
 // ============================================================
 // v2 parity: urgency applied to points subtotal, NOT to inspection fee.
+// Inspection fee auto-waived when caller signals any rodent service is
+// being purchased alongside (`hasServiceOptIn: true`).
 function priceExclusion(options = {}) {
   const {
-    simple = 0, moderate = 0, advanced = 0, waiveInspection = false,
+    simple = 0, moderate = 0, advanced = 0,
+    waiveInspection = false,
+    hasServiceOptIn = false,
     urgency = 'ROUTINE', afterHours = false,
   } = options;
   const cfg = SPECIALTY.exclusion;
   const sc = simple * cfg.perPoint.simple + moderate * cfg.perPoint.moderate + advanced * cfg.perPoint.advanced;
   const ep = Math.max(cfg.floor, Math.round(sc));
-  const insp = waiveInspection ? 0 : cfg.inspectionFee;
+  const inspectionWaived = waiveInspection || hasServiceOptIn;
+  const insp = inspectionWaived ? 0 : cfg.inspectionFee;
   const total = applyUrgency(ep, urgency, afterHours) + insp;
   let tier = 'Basic';
   if (advanced > 0) tier = 'Advanced (Roof)';
   else if (moderate > 0) tier = 'Moderate';
+  const inspectDetail = insp > 0
+    ? ` + $${insp} inspect`
+    : (hasServiceOptIn ? ' (inspect waived w/ service)' : ' (inspect waived)');
   return {
     service: 'exclusion',
     name: 'Rodent Exclusion',
     price: total,
-    detail: `${tier} — ${simple + moderate + advanced} points${insp > 0 ? ` + $${insp} inspect` : ' (inspect waived)'}`,
+    detail: `${tier} — ${simple + moderate + advanced} points${inspectDetail}`,
     points: { simple, moderate, advanced }, inspectionFee: insp, tier,
+    inspectionWaived,
   };
 }
 
@@ -1217,6 +1326,7 @@ function calculateRodentGuaranteeCombo(config = {}) {
 module.exports = {
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
+  priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
   priceTrenching, priceBoraCare, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceWDO, priceFlea,

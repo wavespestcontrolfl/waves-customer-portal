@@ -312,18 +312,18 @@
       "tmBait": null
     },
     "oneTime": {
-      "total": 452,
+      "total": 725,
       "tmInstall": 0,
       "items": [],
       "specItems": [
         {
           "name": "Exclusion",
-          "price": 452
+          "price": 725
         }
       ]
     },
     "totals": {
-      "year1": 452,
+      "year1": 725,
       "year2": 0
     }
   },
@@ -480,9 +480,9 @@
     "recurring": {
       "tier": "Bronze",
       "discount": 0,
-      "annualBeforeDiscount": 1308,
-      "annualAfterDiscount": 1308,
-      "monthlyTotal": 109,
+      "annualBeforeDiscount": 828,
+      "annualAfterDiscount": 828,
+      "monthlyTotal": 69,
       "savings": 0,
       "serviceCount": 0
     },
@@ -492,7 +492,7 @@
       "ts": [],
       "mq": [],
       "tmBait": null,
-      "rodBaitMo": 109
+      "rodBaitMo": 69
     },
     "oneTime": {
       "total": 0,
@@ -501,8 +501,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1308,
-      "year2": 1308
+      "year1": 828,
+      "year2": 828
     }
   },
   "v1adapter_zone_c_bimonthly_pest_lawn_treeshrub": {

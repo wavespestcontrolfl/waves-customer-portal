@@ -330,22 +330,34 @@ const TERMITE = {
 // ============================================================
 // RODENT
 // ============================================================
+// Pricing realigned Apr 2026 to match actual operating model:
+// - Bait stations: quarterly visits (4/yr), billed monthly
+// - Trapping: setup + 1 follow-up included; additional follow-ups billed
+// - Sanitation: bleach + manual wipe scope, three tiers
+// - Setup fee waived in standard recurring sign-up flow
+// - Inspection fee waived when any rodent service is opted in
+// ============================================================
 const RODENT = {
   baitScoreFactors: {
     footprint_2500plus: 2, footprint_1800plus: 1,
     lot_20000plus: 2, lot_12000plus: 1,
     nearWater: 1, trees_heavy: 1,
   },
-  // TODO(v4.4): document monthly bait subscription pricing policy
-  // (small=$75, medium=$89, large=$109 — station count × service frequency justification).
   baitMonthly: {
-    small:  { maxScore: 1, monthly: r(75),  label: 'Small' },
-    medium: { maxScore: 2, monthly: r(89),  label: 'Medium' },
-    large:  { maxScore: Infinity, monthly: r(109), label: 'Large' },
+    small:  { maxScore: 1, monthly: r(49), label: 'Small' },
+    medium: { maxScore: 2, monthly: r(59), label: 'Medium' },
+    large:  { maxScore: Infinity, monthly: r(69), label: 'Large' },
   },
+  baitVisitsPerYear: 4,            // Quarterly visits, billed monthly
+  baitSetupFee: r(199),            // Waived with any recurring plan
+  baitPostExclusion: {
+    multiplier: 0.72,
+    floorMonthly: r(39),
+  },
+  baitPerStationOverage: r(8),     // Per extra station beyond tier default, monthly
   trapping: {
-    base: r(350),
-    floor: r(350),
+    base: r(295),                  // Setup + 1 follow-up included
+    floor: r(295),
     footprintAdj: [ // [sqft, adjustment]
       [800, -r(25)], [1200, -r(15)], [1500, -r(8)], [2000, 0],
       [2500, r(10)], [3000, r(20)], [4000, r(40)], [5500, r(65)],
@@ -353,11 +365,19 @@ const RODENT = {
     lotAdj: [
       [5000, 0], [10000, r(10)], [15000, r(20)], [20000, r(35)],
     ],
+    followupRate: r(95),           // Per additional follow-up visit
+    followup3PackRate: r(245),     // Saves $40 vs 3 individual
+  },
+  sanitation: {
+    light:  { base: r(195), floor: r(145), durationMin: 30,  label: 'Light' },
+    medium: { base: r(295), floor: r(245), durationMin: 75,  label: 'Medium' },
+    heavy:  { base: r(395), floor: r(345), durationMin: 150, label: 'Heavy' },
+    footprintAdj: { light: 25, medium: 50, heavy: 75 },
   },
   // WaveGuard rules: NOT a tier qualifier, excluded from % discounts
   tierQualifier: false,
   excludeFromPctDiscount: true,
-  setupCredit: 50, // One-time $50 credit for WaveGuard members
+  setupCredit: 50, // Legacy WG credit, retained for migration compatibility
 };
 
 // ============================================================
@@ -514,9 +534,9 @@ const SPECIALTY = {
     freeWithRecurringPest: true,
   },
   exclusion: {
-    perPoint: { simple: r(37.50), moderate: r(75), advanced: r(150) },
-    floor: r(150),
-    inspectionFee: r(85),
+    perPoint: { simple: r(75), moderate: r(125), advanced: r(175) },
+    floor: r(195),
+    inspectionFee: r(125),   // Auto-waived when any rodent service opted in
     rodentGuarantee: r(199), // per year with trapping + exclusion
   },
   wdo: {

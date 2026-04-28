@@ -54,9 +54,13 @@ async function ensureTable() {
       { config_key: 'termite_monitoring', name: 'Termite Monitoring Monthly', category: 'termite', sort_order: 2, data: JSON.stringify({ basic: 35, premier: 65 }) },
 
       // Rodent
-      { config_key: 'rodent_monthly', name: 'Rodent Monthly Tiers', category: 'rodent', sort_order: 1, data: JSON.stringify({ small: 75, medium: 89, large: 109 }) },
-      { config_key: 'rodent_trapping', name: 'Rodent Trapping Base', category: 'rodent', sort_order: 2, data: JSON.stringify({ base: 350, floor: 350 }) },
-      { config_key: 'rodent_waveguard', name: 'Rodent WaveGuard Rules', category: 'rodent', sort_order: 3, data: JSON.stringify({ tier_qualifier: false, exclude_from_pct_discount: true, setup_credit: 50 }) },
+      { config_key: 'rodent_monthly', name: 'Rodent Bait Monthly Tiers (quarterly visits, billed monthly)', category: 'rodent', sort_order: 1, data: JSON.stringify({ small: 49, medium: 59, large: 69, visits_per_year: 4 }) },
+      { config_key: 'rodent_trapping', name: 'Rodent Trapping Base + Follow-ups', category: 'rodent', sort_order: 2, data: JSON.stringify({ base: 295, floor: 295, followup_rate: 95, followup_3pack_rate: 245, includes: 'setup + 1 follow-up' }) },
+      { config_key: 'rodent_setup_fee', name: 'Rodent Bait Setup Fee', category: 'rodent', sort_order: 3, data: JSON.stringify({ value: 199, waived_with_recurring: true, note: 'Waived in standard recurring sign-up flow' }) },
+      { config_key: 'rodent_post_exclusion', name: 'Rodent Bait Post-Exclusion Modifier', category: 'rodent', sort_order: 4, data: JSON.stringify({ multiplier: 0.72, floor_monthly: 39, note: 'Sealed structure = lighter scope' }) },
+      { config_key: 'rodent_sanitation', name: 'Rodent Sanitation Tiers (bleach + wipe)', category: 'rodent', sort_order: 5, data: JSON.stringify({ light: { base: 195, floor: 145, duration_min: 30 }, medium: { base: 295, floor: 245, duration_min: 75 }, heavy: { base: 395, floor: 345, duration_min: 150 } }) },
+      { config_key: 'rodent_per_station_overage', name: 'Rodent Per-Station Overage', category: 'rodent', sort_order: 6, data: JSON.stringify({ value: 8, unit: '$/mo per extra station beyond tier default' }) },
+      { config_key: 'rodent_waveguard', name: 'Rodent WaveGuard Rules', category: 'rodent', sort_order: 7, data: JSON.stringify({ tier_qualifier: false, exclude_from_pct_discount: true, setup_credit: 50 }) },
 
       // One-time
       { config_key: 'onetime_urgency', name: 'Urgency Multipliers', category: 'one_time', sort_order: 1, data: JSON.stringify({ routine: 1.0, soon: 1.25, soon_after_hours: 1.50, urgent: 1.50, urgent_after_hours: 2.0 }) },
@@ -66,7 +70,7 @@ async function ensureTable() {
       { config_key: 'onetime_trenching', name: 'Trenching Rates', category: 'one_time', sort_order: 5, data: JSON.stringify({ per_lf_dirt: 10, per_lf_concrete: 14, floor: 600, renewal: 325 }) },
       { config_key: 'onetime_boracare', name: 'Bora-Care Constants', category: 'one_time', sort_order: 6, data: JSON.stringify({ bc_gal: 91.98, bc_cov: 275, bc_equip: 17.50 }) },
       { config_key: 'onetime_preslab', name: 'Pre-Slab Termidor', category: 'one_time', sort_order: 7, data: JSON.stringify({ ps_btl: 174.72, ps_cov: 1250, ps_equip: 15, warranty_extended: 206 }) },
-      { config_key: 'onetime_exclusion', name: 'Exclusion Point Pricing', category: 'one_time', sort_order: 8, data: JSON.stringify({ simple: 37.5, moderate: 75, advanced: 150, floor: 150, inspection: 85 }) },
+      { config_key: 'onetime_exclusion', name: 'Exclusion Point Pricing', category: 'one_time', sort_order: 8, data: JSON.stringify({ simple: 75, moderate: 125, advanced: 175, floor: 195, inspection: 125, inspection_waived_with_service_optin: true }) },
 
       // WaveGuard discount caps & ACH
       { config_key: 'waveguard_discount_caps', name: 'Service Discount Caps', category: 'waveguard', sort_order: 12, data: JSON.stringify({ lawn_care_enhanced: 0.15, lawn_care_premium: 0.15, rodent_bait: 0, palm_injection: 0, bed_bug_chemical: 0, bed_bug_heat: 0, bora_care: 0, pre_slab_termidor: 0, composite_cap: 0.25 }) },
