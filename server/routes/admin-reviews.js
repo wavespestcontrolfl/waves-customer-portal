@@ -66,10 +66,16 @@ router.get('/', async (req, res, next) => {
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const reviews = await query.limit(parseInt(limit)).offset(offset);
 
-    // Get real Google stats from Places API (stored during sync). Track
-    // synced_at per row so we can distinguish fresh stats from stale rows
-    // left behind when a location's sync stopped updating.
-    const statsRows = await db('google_reviews').where({ reviewer_name: '_stats' });
+    // Get real Google stats from Places API (stored during sync).
+    // Restrict to currently-configured WAVES_LOCATIONS so a `_stats`
+    // row from a retired/renamed location can't inflate totalReviews
+    // or the average. Track synced_at per row so we can distinguish
+    // fresh stats from stale rows left behind when a location's sync
+    // stopped updating.
+    const activeLocationIds = WAVES_LOCATIONS.map(l => l.id);
+    const statsRows = await db('google_reviews')
+      .where({ reviewer_name: '_stats' })
+      .whereIn('location_id', activeLocationIds);
     const googleStats = {};
     for (const row of statsRows) {
       try {
