@@ -545,21 +545,35 @@ export default function TimeGridDays({
   // done / left / total / ETA / revenue) accurately across Day / 5-Day /
   // Week — instead of the previous behavior where the row always reflected
   // a single day's services from /admin/schedule?date=X regardless of view.
+  //
+  // Skip emission while the week fetch is still loading or has failed; we
+  // don't want to publish zero totals that would overwrite the single-day
+  // fallback in DispatchPageV2 with bogus values during the load window.
   useEffect(() => {
     if (typeof onStatsChange !== 'function') return;
+    if (loading || !data) return;
     const allServices = days.flatMap((d) => d.services || []);
     const totalCount = allServices.length;
     const completedCount = allServices.filter((s) => s.status === 'completed').length;
     const skippedCount = allServices.filter((s) => s.status === 'skipped').length;
+    // Sum exact estimated_price when present; fall back to a per-service
+    // average for any service that hasn't been priced yet. This preserves
+    // accurate revenue totals (vs. the prior fixed-rate multiplication).
+    const AVG_FALLBACK = 125;
+    const revenue = allServices.reduce(
+      (sum, s) => sum + (typeof s.estimatedPrice === 'number' ? s.estimatedPrice : AVG_FALLBACK),
+      0,
+    );
     onStatsChange({
       totalCount,
       completedCount,
       skippedCount,
       remainingCount: totalCount - completedCount - skippedCount,
+      revenue,
       isSingleDay: dayCount === 1,
       services: allServices,
     });
-  }, [days, dayCount, onStatsChange]);
+  }, [days, dayCount, onStatsChange, loading, data]);
 
   const unassignedList = useMemo(() => {
     const items = [];

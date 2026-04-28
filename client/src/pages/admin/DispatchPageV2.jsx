@@ -943,9 +943,16 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
     const finish = new Date(Date.now() + estRemainingMin * 60000);
     return finish.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
   })() : null;
+  // Revenue: prefer the per-service estimatedPrice sum from grid stats,
+  // and from `services` (single-day fetch) when no grid stats are
+  // available. Fall back to the per-service average only when neither
+  // source is present.
   const estRevenue = useGridStats
-    ? totalCount * AVG_SERVICE_PRICE
-    : services.reduce((sum, s) => sum + (s.price || AVG_SERVICE_PRICE), 0);
+    ? gridStats.revenue
+    : services.reduce(
+        (sum, s) => sum + (typeof s.estimatedPrice === 'number' ? s.estimatedPrice : AVG_SERVICE_PRICE),
+        0,
+      );
 
   const unassignedCount = unassigned.length;
   const newCustomers = services.filter((s) => !s.lastServiceDate);

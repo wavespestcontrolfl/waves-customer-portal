@@ -268,6 +268,7 @@ router.get('/week', async (req, res, next) => {
         .select('scheduled_services.id', 'scheduled_services.service_type', 'scheduled_services.status',
           'scheduled_services.window_start', 'scheduled_services.window_end',
           'scheduled_services.estimated_duration_minutes',
+          'scheduled_services.estimated_price',
           'scheduled_services.technician_id',
           'scheduled_services.zone', 'scheduled_services.route_order',
           'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
@@ -294,6 +295,7 @@ router.get('/week', async (req, res, next) => {
             windowStart: s.window_start,
             windowEnd: s.window_end,
             estimatedDuration: s.estimated_duration_minutes,
+            estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
             technicianId: s.technician_id,
             technicianName: s.tech_name,
           };
