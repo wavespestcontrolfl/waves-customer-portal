@@ -554,14 +554,24 @@ export default function TimeGridDays({
     const totalCount = allServices.length;
     const completedCount = allServices.filter((s) => s.status === 'completed').length;
     const skippedCount = allServices.filter((s) => s.status === 'skipped').length;
-    // Sum exact estimated_price when present; fall back to a per-service
-    // average for any service that hasn't been priced yet. This preserves
-    // accurate revenue totals (vs. the prior fixed-rate multiplication).
-    const AVG_FALLBACK = 125;
+    // Sum only the actual planned figures from the visible services. A
+    // service without an estimated price/duration contributes 0 — using
+    // a fallback inflates the totals (e.g. 2 priced appts at $617 read
+    // as $867 once two unpriced rows added a $125 placeholder each).
     const revenue = allServices.reduce(
-      (sum, s) => sum + (typeof s.estimatedPrice === 'number' ? s.estimatedPrice : AVG_FALLBACK),
+      (sum, s) => sum + (typeof s.estimatedPrice === 'number' ? s.estimatedPrice : 0),
       0,
     );
+    // Use effectiveDuration so the badge matches how blocks actually
+    // render: prefer estimatedDuration, fall back to (windowEnd -
+    // windowStart), then 30. The week feed leaves
+    // estimated_duration_minutes nullable, so a raw sum would read 0
+    // for services whose only signal is an explicit time window.
+    const totalMin = allServices.reduce((sum, s) => sum + effectiveDuration(s), 0);
+    const remainingMin = allServices.reduce((sum, s) => {
+      if (s.status === 'completed' || s.status === 'skipped') return sum;
+      return sum + effectiveDuration(s);
+    }, 0);
     onStatsChange({
       // Range identity — DispatchPageV2 validates these against its
       // current date/viewMode before rendering, so a late emission from a
@@ -573,6 +583,8 @@ export default function TimeGridDays({
       skippedCount,
       remainingCount: totalCount - completedCount - skippedCount,
       revenue,
+      totalMin,
+      remainingMin,
       isSingleDay: dayCount === 1,
       services: allServices,
     });
