@@ -364,12 +364,18 @@ function TechBlock({ tech, size = 'md' }) {
 function ServiceMeta({ data }) {
   const window = formatWindow(data.window?.start, data.window?.end);
   const addr = data.property?.addressLine1;
+  const summary = data.service?.summary;
   return (
     <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${COLORS.offWhite}` }}>
-      <div style={{ fontSize: 14, color: COLORS.textCaption, marginBottom: 4 }}>Service</div>
-      <div style={{ fontSize: 15, fontWeight: 500, color: COLORS.navy }}>{data.service?.type}</div>
+      <div style={{ fontSize: 14, color: COLORS.textCaption, marginBottom: 4 }}>Today's visit</div>
+      <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.navy }}>{data.service?.type}</div>
+      {summary ? (
+        <div style={{ fontSize: 15, color: COLORS.textBody, marginTop: 6, lineHeight: 1.5 }}>
+          {summary}
+        </div>
+      ) : null}
       {window ? (
-        <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 8 }}>{window}</div>
+        <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 10 }}>{window}</div>
       ) : null}
       {addr ? (
         <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4 }}>{addr}</div>

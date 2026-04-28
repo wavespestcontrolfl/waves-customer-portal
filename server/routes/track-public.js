@@ -216,6 +216,7 @@ router.get('/:token', async (req, res, next) => {
     const row = await db('scheduled_services as s')
       .leftJoin('customers as c', 's.customer_id', 'c.id')
       .leftJoin('technicians as t', 's.technician_id', 't.id')
+      .leftJoin('services as sv', 's.service_id', 'sv.id')
       .where('s.track_view_token', req.params.token)
       .first(
         's.id',
@@ -238,7 +239,13 @@ router.get('/:token', async (req, res, next) => {
         'c.longitude',
         't.name as tech_name',
         't.photo_url as tech_photo_url',
-        't.photo_s3_key as tech_photo_s3_key'
+        't.photo_s3_key as tech_photo_s3_key',
+        // Customer-friendly description from the service library. Used
+        // for the "Today's visit" line on the en-route / on-property
+        // cards. Null when scheduled_services.service_id is missing
+        // (legacy rows) or when description is unset on the service.
+        'sv.description as service_description',
+        'sv.customer_visible as service_customer_visible'
       );
 
     if (!row) return res.status(404).json({ error: 'Not found' });
@@ -276,6 +283,15 @@ router.get('/:token', async (req, res, next) => {
       service: {
         type: row.service_type,
         estimatedDurationMin: durationMinutes(row.window_start, row.window_end),
+        // Plain-language summary from services.description. Gated on
+        // customer_visible so admin-only services (estimates, internal
+        // inspections) don't leak their internal copy to the customer
+        // page. Null when scheduled_services has no service_id FK
+        // (legacy rows) or when the matched service hides itself from
+        // customers — the UI hides the line in either case.
+        summary: row.service_customer_visible !== false
+          ? (row.service_description || null)
+          : null,
       },
       vehicle: row.track_state === 'en_route' ? await buildVehicle(row) : null,
       summary: row.track_state === 'complete' ? await buildSummary(row) : null,

@@ -43,6 +43,7 @@ function mockData(state) {
     service: {
       type: 'Quarterly Pest Control',
       estimatedDurationMin: 60,
+      summary: 'Interior/exterior perimeter treatment targeting roaches, ants, spiders, silverfish, and occasional invaders.',
     },
     vehicle: null,
     summary: null,
@@ -376,17 +377,24 @@ function TechBlock({ tech, size = 'md' }) {
 function ServiceMeta({ data }) {
   const window = formatWindow(data.window?.start, data.window?.end);
   const addr = data.property?.addressLine1;
+  const summary = data.service?.summary;
   return (
     <div style={{
       marginTop: 16,
       paddingTop: 16,
       borderTop: `1px solid ${COLORS.offWhite}`,
     }}>
-      <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.navy }}>
+      <div style={{ fontSize: 14, color: COLORS.textCaption, marginBottom: 4 }}>Today's visit</div>
+      <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.navy }}>
         {data.service?.type}
       </div>
+      {summary ? (
+        <div style={{ fontSize: 15, color: COLORS.textBody, marginTop: 6, lineHeight: 1.5 }}>
+          {summary}
+        </div>
+      ) : null}
       {window ? (
-        <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 4 }}>{window}</div>
+        <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 10 }}>{window}</div>
       ) : null}
       {addr ? (
         <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 2 }}>{addr}</div>
