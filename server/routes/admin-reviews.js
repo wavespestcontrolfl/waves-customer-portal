@@ -78,12 +78,13 @@ router.get('/', async (req, res, next) => {
 
     // Aggregate stats from actual reviews (excluding _stats rows)
     const reviewsOnly = db('google_reviews').where('reviewer_name', '!=', '_stats');
-    const [totals, unresponded, thisMonth, perLocation] = await Promise.all([
+    const [totals, unresponded, respondedCountRow, thisMonth, perLocation] = await Promise.all([
       reviewsOnly.clone().select(
         db.raw('COUNT(*) as total'),
         db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),
       ).first(),
       reviewsOnly.clone().whereNull('review_reply').count('* as count').first(),
+      reviewsOnly.clone().whereNotNull('review_reply').count('* as count').first(),
       reviewsOnly.clone().where('review_created_at', '>=', new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString()).count('* as count').first(),
       reviewsOnly.clone().select('location_id')
         .count('* as count')
@@ -114,6 +115,14 @@ router.get('/', async (req, res, next) => {
         totalReviews: totalGoogleReviews || parseInt(totals?.total || 0),
         avgRating: parseFloat(avgGoogleRating) || parseFloat(totals?.avg_rating || 0),
         unresponded: parseInt(unresponded?.count || 0),
+        // `responded` is computed from the same google_reviews dataset as
+        // `unresponded` so the response-rate stat (rendered client-side
+        // as responded / (responded + unresponded)) divides numerator and
+        // denominator from a consistent population. `totalReviews` above
+        // is sourced from Google Places `user_ratings_total` and is not
+        // safe to use as the denominator here, since the Places API only
+        // returns a capped subset of reviews per location for sync.
+        responded: parseInt(respondedCountRow?.count || 0),
         newThisMonth: parseInt(thisMonth?.count || 0),
         breakdown: Object.fromEntries(breakdown.map(b => [b.star_rating, parseInt(b.count)])),
         perLocation: perLocation.map(l => {

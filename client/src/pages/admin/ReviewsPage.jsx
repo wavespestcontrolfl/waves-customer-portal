@@ -172,7 +172,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
               <Stars count={review.starRating} size={14} />
               <span style={{
-                fontSize: 11, fontFamily: 'DM Sans, sans-serif', background: '#334155', color: D.muted,
+                fontSize: 11, fontFamily: 'DM Sans, sans-serif', background: '#334155', color: '#FFFFFF',
                 padding: '2px 8px', borderRadius: 99,
               }}>{LOCATION_LABELS[review.locationId] || review.locationId}</span>
             </div>
@@ -1221,10 +1221,16 @@ export default function ReviewsPage() {
   const reviews = data?.reviews || [];
   const stats = data?.stats || {};
   const locations = data?.locations || [];
-  const { totalReviews = 0, avgRating = 0, unresponded = 0, newThisMonth = 0, breakdown = {}, perLocation = [] } = stats;
+  const { totalReviews = 0, avgRating = 0, unresponded = 0, responded = 0, newThisMonth = 0, breakdown = {}, perLocation = [] } = stats;
 
-  const respondedCount = reviews.filter(r => r.reply).length;
-  const responseRate = totalReviews > 0 ? Math.round((respondedCount / totalReviews) * 100) : 0;
+  // Response-rate numerator AND denominator both come from the same
+  // google_reviews dataset (server-counted) so the percentage is
+  // self-consistent. `totalReviews` is the Google `user_ratings_total`
+  // for the location and may exceed our DB row count when Places API
+  // only synced a capped subset, so it can't be the denominator here.
+  const respondedCount = responded;
+  const ratedTotal = responded + unresponded;
+  const responseRate = ratedTotal > 0 ? Math.round((respondedCount / ratedTotal) * 100) : 0;
 
   // --- Filtering ---
   const filtered = reviews.filter(r => {
@@ -1364,7 +1370,7 @@ export default function ReviewsPage() {
                   label="Response Rate"
                   value={`${responseRate}%`}
                   color={responseRate >= 90 ? D.green : responseRate >= 70 ? D.amber : D.red}
-                  sub={`${respondedCount} of ${totalReviews} replied`}
+                  sub={`${respondedCount} of ${ratedTotal} replied`}
                 />
               </div>
 
