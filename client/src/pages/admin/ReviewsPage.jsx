@@ -1221,17 +1221,17 @@ export default function ReviewsPage() {
   const reviews = data?.reviews || [];
   const stats = data?.stats || {};
   const locations = data?.locations || [];
-  const { totalReviews = 0, googleStatsComplete = false, avgRating = 0, unresponded = 0, responded = 0, newThisMonth = 0, breakdown = {}, perLocation = [] } = stats;
+  const { totalReviews = 0, avgRating = 0, unresponded = 0, unrespondedInRated = 0, responded = 0, newThisMonth = 0, breakdown = {}, perLocation = [] } = stats;
 
-  // Denominator = real Google `user_ratings_total` across all locations
-  // when every location has fresh _stats rows (`googleStatsComplete`).
-  // Replied = total - unresponded; Places API returns the newest
-  // reviews, so any still-unreplied ones are inside the synced subset.
-  // When stats are partial (a location's Places sync errored), fall back
-  // to responded+unresponded so numerator and denominator come from the
-  // same population — otherwise the percentage is materially wrong.
-  const ratedTotal = googleStatsComplete && totalReviews ? totalReviews : (responded + unresponded);
-  const respondedCount = googleStatsComplete && totalReviews ? Math.max(0, ratedTotal - unresponded) : responded;
+  // Denominator = real Google `user_ratings_total` summed across all
+  // locations that have a Places `_stats` row. The server scopes
+  // `unrespondedInRated` to that same location set so the subtraction
+  // numerator and denominator share a population (a location with
+  // reviews-but-no-_stats can't inflate unresponded without
+  // contributing to total). Fall back to responded+unresponded only
+  // when no Google totals are available at all.
+  const ratedTotal = totalReviews > 0 ? totalReviews : (responded + unresponded);
+  const respondedCount = totalReviews > 0 ? Math.max(0, ratedTotal - unrespondedInRated) : responded;
   const responseRate = ratedTotal > 0 ? Math.round((respondedCount / ratedTotal) * 100) : 0;
 
   // --- Filtering ---

@@ -118,6 +118,17 @@ router.get('/', async (req, res, next) => {
 
     // Use Google's real totals if available
     const totalGoogleReviews = Object.values(googleStats).reduce((s, g) => s + (g.totalReviews || 0), 0);
+
+    // For the response-rate calc, the numerator and denominator must come
+    // from the same population. `totalGoogleReviews` only sums locations
+    // that have a `_stats` row, so scope the unresponded count we expose
+    // for the rate-calc denominator to those same locations. Otherwise a
+    // location with reviews-but-no-_stats would inflate `unresponded`
+    // without contributing to the total, breaking `total - unresponded`.
+    const ratedLocationIds = Object.keys(googleStats).filter(id => (googleStats[id]?.totalReviews || 0) > 0);
+    const unrespondedInRatedRow = ratedLocationIds.length > 0
+      ? await reviewsOnly.clone().whereIn('location_id', ratedLocationIds).whereNull('review_reply').count('* as count').first()
+      : { count: 0 };
     const avgGoogleRating = Object.values(googleStats).length > 0
       ? (Object.values(googleStats).reduce((s, g) => s + (g.rating || 0), 0) / Object.values(googleStats).filter(g => g.rating).length).toFixed(1)
       : parseFloat(totals?.avg_rating || 0);
@@ -157,13 +168,11 @@ router.get('/', async (req, res, next) => {
         googleStatsComplete,
         avgRating: parseFloat(avgGoogleRating) || parseFloat(totals?.avg_rating || 0),
         unresponded: parseInt(unresponded?.count || 0),
-        // `responded` is computed from the same google_reviews dataset as
-        // `unresponded` so the response-rate stat (rendered client-side
-        // as responded / (responded + unresponded)) divides numerator and
-        // denominator from a consistent population. `totalReviews` above
-        // is sourced from Google Places `user_ratings_total` and is not
-        // safe to use as the denominator here, since the Places API only
-        // returns a capped subset of reviews per location for sync.
+        // Unresponded count scoped to locations that contribute to
+        // `totalReviews` — used as the response-rate denominator's
+        // companion so numerator (totalReviews - unrespondedInRated) and
+        // denominator (totalReviews) come from the same location set.
+        unrespondedInRated: parseInt(unrespondedInRatedRow?.count || 0),
         responded: parseInt(respondedCountRow?.count || 0),
         newThisMonth: parseInt(thisMonth?.count || 0),
         breakdown: Object.fromEntries(breakdown.map(b => [b.star_rating, parseInt(b.count)])),
