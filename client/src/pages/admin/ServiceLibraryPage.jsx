@@ -426,7 +426,7 @@ export default function ServiceLibraryPage() {
                       svc={svc}
                       expanded={expandedId === svc.id}
                       onToggle={() => { setExpandedId(expandedId === svc.id ? null : svc.id); setShowNew(false); }}
-                      onUpdate={() => { loadServices(); loadDropdown(); showToast('Service updated'); }}
+                      onUpdate={() => { loadServices(); showToast('Service updated'); }}
                     />
                   ))}
                 </tbody>
