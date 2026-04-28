@@ -196,7 +196,6 @@ const ReviewService = {
     if (customer && customer.has_left_google_review) {
       await db('review_requests').where({ id: requestId }).update({
         status: 'suppressed',
-        updated_at: new Date(),
       });
       logger.info(`[review] Suppressed request for ${customer.first_name} ${customer.last_name} (already-reviewed flag)`);
       return;
@@ -237,7 +236,6 @@ const ReviewService = {
       await db('review_requests').where({ id: requestId }).update({
         sms_sent_at: new Date(),
         status: 'sent',
-        updated_at: new Date(),
       });
 
       logger.info(`[review] SMS sent for ${customer.first_name} ${customer.last_name}`);
@@ -421,7 +419,6 @@ const ReviewService = {
       feedback_text: feedbackText || null,
       status: 'rated',
       google_location: location,
-      updated_at: new Date(),
     };
 
     if (isPromoter) {
@@ -534,7 +531,6 @@ const ReviewService = {
         await db('review_requests').where({ id: request.id }).update({
           followup_sent: true,
           followup_sent_at: new Date(),
-          updated_at: new Date(),
         });
         suppressed++;
         continue;
@@ -549,7 +545,6 @@ const ReviewService = {
         await db('review_requests').where({ id: request.id }).update({
           followup_sent: true,
           followup_sent_at: new Date(),
-          updated_at: new Date(),
         });
         suppressed++;
         continue;
@@ -561,7 +556,6 @@ const ReviewService = {
         await db('review_requests').where({ id: request.id }).update({
           followup_sent: true,
           followup_sent_at: new Date(),
-          updated_at: new Date(),
         });
         suppressed++;
         continue;
@@ -597,7 +591,6 @@ const ReviewService = {
         await db('review_requests').where({ id: request.id }).update({
           followup_sent: true,
           followup_sent_at: new Date(),
-          updated_at: new Date(),
         });
         sentThisRun.add(request.customer_id);
         sent++;
