@@ -169,33 +169,47 @@ router.get('/weekly', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 router.get('/pending-signoff', async (req, res, next) => {
   try {
-    const lastWeekStart = mondayOfET(etDateString(addETDays(new Date(), -7)));
-    const lastWeekEnd = sundayOfETWeek(lastWeekStart);
+    const thisMonday = mondayOfET(etDateString(new Date()));
 
-    const hasDailies = await db('time_entry_daily_summary')
+    // Find the OLDEST past week that still needs sign-off — not just
+    // last week. unlockWeek clears tech_signed_at on whichever week
+    // an admin reopens, which may be older than last week; restricting
+    // to lastWeekStart silently hides those re-sign prompts. Filter
+    // out approved + already-signed + zero-hour rows so we only
+    // surface real outstanding attestations.
+    const candidate = await db('time_weekly_summary')
       .where({ technician_id: req.technicianId })
-      .where('work_date', '>=', lastWeekStart)
-      .where('work_date', '<=', lastWeekEnd)
+      .where('status', '!=', 'approved')
+      .whereNull('tech_signed_at')
+      .where('week_start', '<', thisMonday)
+      .where('total_shift_minutes', '>', 0)
+      .orderBy('week_start', 'asc')
       .first();
-    if (!hasDailies) return res.json({ weekly: null, weekStart: lastWeekStart });
+    if (!candidate) return res.json({ weekly: null, weekStart: null });
+
+    const weekStartStr = etDateString(new Date(candidate.week_start));
 
     // Always recompute the weekly summary before returning it. Existing
-    // rows can be stale after late clock-outs or admin entry edits;
-    // those mutations clear tech_signed_at but don't always re-run
+    // rows can be stale after late clock-outs or admin entry edits —
+    // mutation paths clear tech_signed_at but don't all re-run
     // computeWeeklySummary, so total_shift_minutes / overtime_minutes
-    // / job_count on the row may not match the current dailies. Recompute
-    // is idempotent and cheap.
-    try { await timeTracking.computeWeeklySummary(req.technicianId, lastWeekStart); } catch (_) { /* noop */ }
+    // / job_count may not match the current dailies. Recompute is
+    // idempotent and cheap.
+    try { await timeTracking.computeWeeklySummary(req.technicianId, weekStartStr); } catch (_) { /* noop */ }
     const weekly = await db('time_weekly_summary')
-      .where({ technician_id: req.technicianId, week_start: lastWeekStart })
+      .where({ id: candidate.id })
       .first();
-    if (!weekly) return res.json({ weekly: null, weekStart: lastWeekStart });
+    if (!weekly) return res.json({ weekly: null, weekStart: weekStartStr });
 
-    // Approved or already signed -> nothing pending.
-    if (weekly.status === 'approved' || weekly.tech_signed_at) {
-      return res.json({ weekly, weekStart: lastWeekStart, pending: false });
+    // Recompute may have flipped this row's eligibility — re-check the
+    // gate. Approved (admin raced ahead), tech_signed_at set (concurrent
+    // sign), or total_shift_minutes now zero (admin voided everything)
+    // -> not pending anymore.
+    const hours = parseFloat(weekly.total_shift_minutes || 0);
+    if (weekly.status === 'approved' || weekly.tech_signed_at || hours === 0) {
+      return res.json({ weekly, weekStart: weekStartStr, pending: false });
     }
-    res.json({ weekly, weekStart: lastWeekStart, pending: true });
+    res.json({ weekly, weekStart: weekStartStr, pending: true });
   } catch (err) { next(err); }
 });
 
@@ -227,18 +241,21 @@ router.post('/sign-week', async (req, res, next) => {
       return res.status(400).json({ error: 'Cannot sign current or future weeks' });
     }
 
-    // Require actual daily summaries for that tech in this week before
-    // signing. computeWeeklySummary will happily create a zero-total
-    // row even when there's no underlying time data, which would let
-    // a tech sign arbitrary empty weeks. Anchor on the dailies first.
+    // Require actual worked time in this week before signing.
+    // computeDailySummary leaves zero-total rows in place after admin
+    // voids/edits (services/time-tracking.js: existing rows are
+    // updated, never deleted), so a row's mere existence isn't enough
+    // — total_shift_minutes>0 or job_count>0 is. computeWeeklySummary
+    // would also happily create a zero row, which we want to refuse.
     const weekEndStr = sundayOfETWeek(start);
-    const hasDailies = await db('time_entry_daily_summary')
+    const workedDay = await db('time_entry_daily_summary')
       .where({ technician_id: req.technicianId })
       .where('work_date', '>=', start)
       .where('work_date', '<=', weekEndStr)
+      .where(b => b.where('total_shift_minutes', '>', 0).orWhere('job_count', '>', 0))
       .first();
-    if (!hasDailies) {
-      return res.status(404).json({ error: 'No timecard for that week' });
+    if (!workedDay) {
+      return res.status(404).json({ error: 'No worked time on that week' });
     }
 
     // Recompute before reading so the tech is signing the latest

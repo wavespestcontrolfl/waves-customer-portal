@@ -184,9 +184,31 @@ router.get('/', requireTechOrAdmin, async (req, res, next) => {
     // pay_rate stripped so they never see coworker wages.
     const techCols = ['id', 'name', 'role'];
     if (isAdminCaller(req)) techCols.push('pay_rate');
-    const allTechs = await db('technicians')
+    const activeTechs = await db('technicians')
       .where({ active: true })
       .select(techCols);
+    // Pull rates for any inactive tech that still has activity in
+    // todaySummaries / weekDailies / activeShifts so labor-cost
+    // calculations don't silently fall back to the $35 default. A
+    // tech deactivated mid-day still earned their configured rate
+    // for the hours worked. Admin only — tech-role responses never
+    // got pay_rate to start with.
+    let allTechs = activeTechs;
+    if (isAdminCaller(req)) {
+      const activityIds = new Set([
+        ...todaySummaries.map(s => s.technician_id),
+        ...weekDailies.map(d => d.technician_id),
+        ...liveStatus.map(s => s.technician_id),
+      ]);
+      const knownIds = new Set(activeTechs.map(t => t.id));
+      const missingIds = [...activityIds].filter(id => id && !knownIds.has(id));
+      if (missingIds.length) {
+        const inactiveActive = await db('technicians')
+          .whereIn('id', missingIds)
+          .select(techCols);
+        allTechs = [...activeTechs, ...inactiveActive];
+      }
+    }
 
     res.json({
       activeShifts: liveStatus,
@@ -820,6 +842,15 @@ router.get('/technicians/:id/earnings', requireAdmin, async (req, res, next) => 
       to = addCalendarDaysToYMD(from, 6);
     }
     if (!from || !to) return res.status(400).json({ error: 'from+to (YYYY-MM-DD) or period=this-week|last-week required' });
+    // Validate shape before parseETDateTime — bad input would
+    // otherwise throw "Invalid time value" and surface as a 500.
+    const ymd = /^\d{4}-\d{2}-\d{2}$/;
+    if (!ymd.test(from) || !ymd.test(to)) {
+      return res.status(400).json({ error: 'from/to must be YYYY-MM-DD' });
+    }
+    if (from > to) {
+      return res.status(400).json({ error: 'from must be on or before to' });
+    }
 
     // Recompute the weekly summaries that overlap the window before
     // reading dailies. time_entry_daily_summary.overtime_minutes is
