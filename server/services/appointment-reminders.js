@@ -67,7 +67,7 @@ function smsServiceLabelStored(name) {
   if (!name) return 'service';
   const cleaned = String(name)
     .replace(/\s*\([^)]*\)/g, '')
-    .replace(/\s+[—–]\s+[^&]+?(?=\s+&\s+|\s*$)/g, '')
+    .replace(/\s+[—–]\s+[^&,]+?(?=\s+&\s+|,\s+|\s*$)/g, '')
     .replace(/\s{2,}/g, ' ')
     .trim();
   return cleaned || String(name);
