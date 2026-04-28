@@ -97,6 +97,10 @@ const WAVES_OFFICE_PHONE = '+19413187612';
 // =========================================================================
 router.get('/pending', async (req, res, next) => {
   try {
+    if (req.customer?.has_left_google_review) {
+      return res.json({ pending: [] });
+    }
+
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 

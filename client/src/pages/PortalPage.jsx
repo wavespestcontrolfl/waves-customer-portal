@@ -1199,7 +1199,7 @@ function HeroSlider({ onSwitchTab }) {
       alt: 'Waves Pest Control & Lawn Care truck',
       title: 'Stay in the Know',
       subtitle: 'SWFL pest & lawn tips, expert advice from UF/IFAS, and our monthly newsletter — all in the Learn tab.',
-      cta: { label: 'Open Learn', tab: 'learn' },
+      cta: { label: 'Learn More', tab: 'learn' },
     },
   ];
 
@@ -1277,8 +1277,8 @@ function HeroSlider({ onSwitchTab }) {
                   onClick={() => onSwitchTab(slide.cta.tab)}
                   style={{
                     ...BUTTON_BASE, padding: '8px 18px', fontSize: 12,
-                    background: 'rgba(255,255,255,0.2)', color: '#fff',
-                    backdropFilter: 'blur(8px)', border: '1px solid rgba(255,255,255,0.3)',
+                    background: B.yellow, color: '#000',
+                    border: 'none',
                     alignSelf: 'flex-start',
                   }}
                 >{slide.cta.label}</button>
@@ -1487,7 +1487,6 @@ function DashboardTab({ customer, onSwitchTab }) {
                 <>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <span style={{ fontSize: 28 }}>⭐</span>
                       <div>
                         <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>How was your visit?</div>
                         <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
