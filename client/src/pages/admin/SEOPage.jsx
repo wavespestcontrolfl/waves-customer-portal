@@ -1081,16 +1081,18 @@ export default function SEOPage() {
         <div style={{ fontSize: 12, color: D.muted, fontFamily: MONO }}>wavespestcontrol.com</div>
       </div>
 
-      <div className="seo-tab-bar" style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 24, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
-        {tabs.map(t => (
-          <button key={t.key} onClick={() => setTab(t.key)} style={{
-            padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
-            background: tab === t.key ? '#18181B' : 'transparent',
-            color: tab === t.key ? '#FFFFFF' : '#A1A1AA',
-            fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
-            fontFamily: "'DM Sans', sans-serif",
-          }}>{t.label}</button>
-        ))}
+      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
+        <div className="seo-tab-bar" style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
+          {tabs.map(t => (
+            <button key={t.key} onClick={() => setTab(t.key)} style={{
+              padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
+              background: tab === t.key ? '#18181B' : 'transparent',
+              color: tab === t.key ? '#FFFFFF' : '#A1A1AA',
+              fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
+              fontFamily: "'DM Sans', sans-serif",
+            }}>{t.label}</button>
+          ))}
+        </div>
       </div>
 
       {tab === 'dashboard' && <Suspense fallback={<div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading dashboard...</div>}><SEODashboardPage domain={PRIMARY_DOMAIN} /></Suspense>}
