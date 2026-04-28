@@ -377,8 +377,9 @@ export default function CompliancePage() {
 
       {/* Centered Pipeline-page tab strip — matches Customers / Pipeline /
           Dispatch so all the multi-tab admin surfaces share one shape. */}
-      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
+      <div className="tab-pill-scroll" style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
         <div
+          className="tab-pill-scroll-inner"
           style={{
             display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center',
             gap: 4, padding: 4,
