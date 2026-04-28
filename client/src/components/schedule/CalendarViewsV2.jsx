@@ -93,17 +93,21 @@ export function ViewModeSelectorV2({ viewMode, onViewModeChange, allowed }) {
     ? ALL_MODES.filter((m) => allowed.includes(m.id))
     : ALL_MODES;
 
+  // Newsletter-style separate-pill buttons (Dashboard / Compose / History
+  // pattern from NewsletterPage.jsx) — gap between each, hairline border
+  // that flips to a solid black pill when active.
   return (
-    <div className="inline-flex items-center border-hairline border-zinc-200 rounded-sm overflow-hidden bg-white">
+    <div className="inline-flex flex-wrap gap-1.5">
       {modes.map((m) => (
         <button
           key={m.id}
+          type="button"
           onClick={() => onViewModeChange(m.id)}
           className={cn(
-            'h-8 px-4 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors',
+            'h-8 px-3 text-11 uppercase font-medium tracking-label rounded-sm border-hairline u-focus-ring transition-colors',
             viewMode === m.id
-              ? 'bg-zinc-900 text-white'
-              : 'bg-white text-ink-secondary hover:bg-zinc-50'
+              ? 'bg-zinc-900 text-white border-zinc-900'
+              : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50',
           )}
         >
           {m.label}
