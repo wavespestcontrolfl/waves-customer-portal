@@ -292,10 +292,28 @@ const CallRecordingProcessor = {
         return { success: true, skipped: true, reason: 'already_processing' };
       }
     } else {
-      // force=true skips the claim entirely (admin Reprocess on a row that's
-      // already 'processed'). Still stamp our token so the catch-block fence
-      // works if this run throws — without it, the WHERE matches no row.
-      await db('call_log').where({ twilio_call_sid: callSid }).update({ processing_token: procToken });
+      // force=true bypasses the early-exit on 'processed' rows so admin
+      // Reprocess can re-run extraction. It must NOT bypass an actively-
+      // processing peer — CallRecordingsPanel.jsx always sends force:true,
+      // so without this guard a force click on a row mid-flight would
+      // overwrite the peer's processing_token, breaking the peer's
+      // catch-block fence and wedging the row at 'processing' forever
+      // (the very bug processing_token was added to prevent).
+      //
+      // Use the same atomic claim as the non-force path, minus the
+      // exclude-'processed' filter: in-flight peers (and not-yet-stale
+      // 'processing' rows) still block; everything else flows through.
+      const claimed = await db('call_log')
+        .where({ twilio_call_sid: callSid })
+        .where(function () {
+          this.whereNot('processing_status', 'processing')
+            .orWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+        })
+        .update({ processing_status: 'processing', processing_token: procToken, updated_at: new Date() });
+      if (claimed === 0) {
+        logger.info(`[call-proc] Force run blocked by in-flight peer for ${callSid} — skipping`);
+        return { success: true, skipped: true, reason: 'already_processing' };
+      }
     }
 
     logger.info(`[call-proc] Processing recording for ${callSid}`);
