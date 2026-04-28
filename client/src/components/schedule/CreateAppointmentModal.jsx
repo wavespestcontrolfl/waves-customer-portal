@@ -439,6 +439,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           };
         });
         const isRecurring = group.cadence !== 'one_time';
+        const parsedRecurringCount = Number.parseInt(recurringCount, 10);
+        const hasFiniteRecurringCount = Number.isInteger(parsedRecurringCount) && parsedRecurringCount >= 2;
         const body = {
           customerId: selectedCustomer.id,
           scheduledDate: apptDate,
@@ -460,10 +462,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           sendConfirmationSms: sendSms,
           isRecurring,
           recurringPattern: isRecurring ? group.cadence : undefined,
-          recurringCount: isRecurring
-            ? (parseInt(recurringCount) >= 2 ? parseInt(recurringCount) : 4)
-            : undefined,
-          recurringOngoing: isRecurring ? !(parseInt(recurringCount) >= 2) : undefined,
+          // Send undefined for ongoing so the server's plannedCount fallback
+          // (recurringCount || 4) owns the default. Only send a finite count
+          // when the operator explicitly typed >= 2 in the Visits input.
+          recurringCount: isRecurring && hasFiniteRecurringCount ? parsedRecurringCount : undefined,
+          recurringOngoing: isRecurring ? !hasFiniteRecurringCount : undefined,
           recurringIntervalDays: isRecurring && group.cadence === 'custom' ? group.intervalDays : undefined,
           skipWeekends: isRecurring ? !!skipWeekends : undefined,
           weekendShift: isRecurring && skipWeekends ? weekendShift : undefined,
