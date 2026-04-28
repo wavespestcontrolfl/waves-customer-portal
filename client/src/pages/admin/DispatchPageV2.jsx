@@ -1098,6 +1098,10 @@ export default function DispatchPageV2() {
           hideUnassignedRail={false}
           onEdit={(svc) => setEditingService(svc)}
           onChange={() => fetchSchedule(date)}
+          onCreateSlot={({ date: slotDate, windowStart }) => {
+            setNewApptDefaults({ date: slotDate, windowStart });
+            setShowNewAppt(true);
+          }}
         />
       )}
       {viewMode === '5day' && (
@@ -1108,6 +1112,10 @@ export default function DispatchPageV2() {
           hideUnassignedRail={isMobile}
           onEdit={(svc) => setEditingService(svc)}
           onChange={() => fetchSchedule(date)}
+          onCreateSlot={({ date: slotDate, windowStart }) => {
+            setNewApptDefaults({ date: slotDate, windowStart });
+            setShowNewAppt(true);
+          }}
         />
       )}
       {viewMode === 'month' && <MonthViewV2 date={date} onDateClick={(d) => { setDate(d); setViewMode('day'); }} />}
