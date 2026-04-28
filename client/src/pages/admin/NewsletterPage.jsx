@@ -458,9 +458,6 @@ export default function NewsletterPage() {
       <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
         <div>
           <h1 className="text-28 font-normal tracking-h1 text-ink-primary">Newsletter</h1>
-          <div className="text-13 text-ink-tertiary mt-1">
-            Draft from local SWFL events, publish, distribute.
-          </div>
         </div>
         <button
           type="button"

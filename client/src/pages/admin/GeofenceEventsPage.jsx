@@ -183,9 +183,6 @@ export default function GeofenceEventsPage() {
       <header className="mb-6 flex items-end justify-between gap-4">
         <div>
           <h1 className="text-display font-medium text-ink-primary tracking-display">Geofence events</h1>
-          <p className="text-14 text-ink-secondary mt-1">
-            Auto-flip rollout observability. Counts and recent rows from the <code className="text-zinc-700">geofence_events</code> table.
-          </p>
         </div>
         <Button variant="ghost" onClick={load} disabled={loading}>
           {loading ? 'Loading…' : 'Refresh'}
