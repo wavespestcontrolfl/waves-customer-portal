@@ -7,6 +7,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
 
 const EARTH_METERS = 6371000;
 
@@ -175,31 +176,61 @@ async function findScheduledJob(techId, customerId, date = new Date()) {
 /**
  * Find the tech's next scheduled job after the given time, optionally
  * excluding a specific customer (so we don't auto-flip the customer
- * we just departed). Ordered by window_start ascending so the closest-
- * upcoming visit wins. Excludes already-completed/cancelled jobs and
+ * we just departed). Excludes already-completed/cancelled jobs and
  * any job whose track_state has already advanced past 'scheduled' (so
  * a tech who manually flipped en_route doesn't get re-flipped).
+ *
+ * Ordering matches admin-dispatch's day-plan: COALESCE(route_order,999)
+ * first, then window_start. If ops manually re-sequenced a tech's day
+ * (route_order set on rows), respect that sequence — chronological
+ * window_start can be wrong when ops reorders jobs out of time order.
+ *
+ * TZ correctness: scheduled_date (DATE) and window_start/window_end
+ * (TIME) are stored as ET wall-clock values. Server is UTC, so we
+ * derive both via datetime-et helpers — never via toISOString(), which
+ * would compare 1pm-ET as "17:00:00" against ET wall-clock window times.
+ *
+ * Cross-midnight: after a late-night EXIT (e.g. 11pm ET) the next job
+ * may sit on tomorrow's date. We query both today (after the EXIT
+ * time) and tomorrow (any time) and take the earliest.
  */
 async function findNextScheduledJobForTech(techId, afterTime, excludeCustomerId = null) {
   if (!techId || !afterTime) return null;
   try {
-    const dateStr = new Date(afterTime).toISOString().split('T')[0];
-    const timePart = new Date(afterTime).toISOString().slice(11, 19);
+    const exitDate = new Date(afterTime);
+    const todayStr = etDateString(exitDate);
+    const tomorrowStr = etDateString(addETDays(exitDate, 1));
+    const et = etParts(exitDate);
+    const timePart = `${String(et.hour).padStart(2, '0')}:${String(et.minute).padStart(2, '0')}:${String(et.second).padStart(2, '0')}`;
+
+    // SELECT * FROM scheduled_services
+    //  WHERE technician_id = ?
+    //    AND status NOT IN ('completed', 'cancelled')
+    //    AND track_state = 'scheduled'
+    //    AND ((scheduled_date = today AND (window_start >= time
+    //             OR (window_end > time AND track_state='scheduled')))
+    //      OR scheduled_date = tomorrow)
+    //    AND (excludeCustomerId is null OR customer_id != ?)
+    //  ORDER BY scheduled_date ASC,
+    //           COALESCE(route_order, 999) ASC,
+    //           window_start ASC
+    //  LIMIT 1
     let q = db('scheduled_services')
       .where({ technician_id: techId })
-      .where('scheduled_date', dateStr)
       .whereNotIn('status', ['completed', 'cancelled'])
-      .where(function () {
-        // Job's window starts after the EXIT time, OR the window has
-        // already opened but the job hasn't been flipped yet (tech
-        // running late; auto-flip is still useful).
-        this.where('window_start', '>=', timePart)
-          .orWhere(function () {
-            this.where('window_end', '>', timePart)
-              .where('track_state', 'scheduled');
-          });
-      })
       .where('track_state', 'scheduled')
+      .where(function () {
+        this.where(function () {
+          this.where('scheduled_date', todayStr)
+            .where(function () {
+              this.where('window_start', '>=', timePart)
+                .orWhere('window_end', '>', timePart);
+            });
+        })
+          .orWhere('scheduled_date', tomorrowStr);
+      })
+      .orderBy('scheduled_date', 'asc')
+      .orderByRaw('COALESCE(route_order, 999) ASC')
       .orderBy('window_start', 'asc');
     if (excludeCustomerId) q = q.whereNot('customer_id', excludeCustomerId);
     return await q.first();
