@@ -41,11 +41,16 @@ router.get('/', async (req, res, next) => {
   try {
     const { location, rating, responded, search, page = 1, limit = 30 } = req.query;
 
-    // Exclude stats rows and dismissed reviews from actual reviews
+    // Exclude stats rows and dismissed reviews from actual reviews.
+    // Scoped to active WAVES_LOCATIONS so the displayed list stays
+    // consistent with the aggregate stats (retired-location rows
+    // wouldn't be filterable in the dropdown anyway).
     const showDismissed = req.query.dismissed === 'true';
+    const activeLocationIds = WAVES_LOCATIONS.map(l => l.id);
     let query = db('google_reviews')
       .leftJoin('customers', 'google_reviews.customer_id', 'customers.id')
       .where('google_reviews.reviewer_name', '!=', '_stats')
+      .whereIn('google_reviews.location_id', activeLocationIds)
       .modify(qb => { if (!showDismissed) qb.where(function() { this.where('google_reviews.dismissed', false).orWhereNull('google_reviews.dismissed'); }); })
       .select(
         'google_reviews.*',
@@ -72,7 +77,6 @@ router.get('/', async (req, res, next) => {
     // or the average. Track synced_at per row so we can distinguish
     // fresh stats from stale rows left behind when a location's sync
     // stopped updating.
-    const activeLocationIds = WAVES_LOCATIONS.map(l => l.id);
     const statsRows = await db('google_reviews')
       .where({ reviewer_name: '_stats' })
       .whereIn('location_id', activeLocationIds);
