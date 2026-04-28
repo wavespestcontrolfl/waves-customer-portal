@@ -55,18 +55,21 @@ function smsServiceLabel(name) {
 }
 
 // Defensive cleanup for already-stored appointment_reminders.service_type
-// values, which may be joined multi-service strings ("A & B", Oxford
-// "A, B, and C") from the newer multi-service flow OR legacy single-
-// service strings from before. Always strips trailing parenthetical
-// suffix (safe on joins — anchored to end). Strips em/en-dash suffix
-// only when no join marker is present, because the em-dash regex is
-// greedy and would silently drop the trailing component of a join.
+// values, which may be joined multi-service strings ("A & B") from the
+// newer multi-service flow OR legacy single-service strings from before.
+// Strips every "(...)" admin suffix globally — the catalog has no
+// non-suffix parens, so this is safe. Em/en-dash suffix is stripped
+// only at component boundaries (immediately before " & " or end-of-
+// string), so joined strings like "Rodent Sanitation — Heavy &
+// Mosquito Control" become "Rodent Sanitation & Mosquito Control"
+// without dropping the trailing component.
 function smsServiceLabelStored(name) {
   if (!name) return 'service';
-  let cleaned = String(name).replace(/\s*\([^)]*\)\s*$/, '').trim();
-  if (!/ & |, and /.test(cleaned)) {
-    cleaned = cleaned.replace(/\s+[—–]\s+.+$/, '').trim();
-  }
+  const cleaned = String(name)
+    .replace(/\s*\([^)]*\)/g, '')
+    .replace(/\s+[—–]\s+\S+(?=\s+&\s+|\s*$)/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
   return cleaned || String(name);
 }
 
