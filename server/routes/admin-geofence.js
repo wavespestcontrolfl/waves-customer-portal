@@ -107,4 +107,37 @@ router.get('/events', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/geofence/events/summary
+//
+// Aggregated counts of geofence_events by action_taken, scoped to a
+// rolling time window (default 7 days). Backs the observability
+// dashboard at /admin/geofence-events — operators use this to spot
+// auto-flip misfires during the dry-run rollout without writing SQL
+// against the events table.
+//
+// Returns:
+//   { sinceHours, total, byAction: [{ action, count }, ...] }
+//
+// byAction is ordered by count desc so the loudest signals show first.
+router.get('/events/summary', async (req, res, next) => {
+  try {
+    const sinceHours = Math.max(1, Math.min(720, parseInt(req.query.sinceHours, 10) || 168));
+    const cutoff = new Date(Date.now() - sinceHours * 60 * 60 * 1000);
+    const rows = await db('geofence_events')
+      .where('event_timestamp', '>=', cutoff)
+      .groupBy('action_taken')
+      .select('action_taken')
+      .count('* as count')
+      .orderBy('count', 'desc');
+
+    const byAction = rows.map((r) => ({
+      action: r.action_taken,
+      count: parseInt(r.count, 10) || 0,
+    }));
+    const total = byAction.reduce((sum, r) => sum + r.count, 0);
+
+    res.json({ sinceHours, total, byAction });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

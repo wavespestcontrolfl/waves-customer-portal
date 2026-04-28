@@ -109,6 +109,7 @@ const EquipmentMaintenancePage = lazyWithRetry(() => import('./pages/admin/Equip
 const ServiceLibraryPage = lazyWithRetry(() => import('./pages/admin/ServiceLibraryPage'));
 const ProjectsPage = lazyWithRetry(() => import('./pages/admin/ProjectsPage'));
 const CredentialsPage = lazyWithRetry(() => import('./pages/admin/CredentialsPage'));
+const GeofenceEventsPage = lazyWithRetry(() => import('./pages/admin/GeofenceEventsPage'));
 const NewsletterPage = lazyWithRetry(() => import('./pages/admin/NewsletterPage'));
 const DiscountsPage = lazyWithRetry(() => import('./pages/admin/DiscountsPage'));
 const CompliancePage = lazyWithRetry(() => import('./pages/admin/CompliancePage'));
@@ -228,6 +229,7 @@ export default function App() {
             <Route path="discounts" element={<Navigate to="/admin/service-library?tab=discounts" replace />} />
             <Route path="compliance" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading compliance...</div>}><CompliancePage /></Suspense>} />
             <Route path="credentials" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading credentials...</div>}><CredentialsPage /></Suspense>} />
+            <Route path="geofence-events" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading geofence events...</div>}><GeofenceEventsPage /></Suspense>} />
             <Route path="newsletter" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading newsletter...</div>}><NewsletterPage /></Suspense>} />
             <Route path="call-recordings" element={<Navigate to="/admin/communications" replace />} />
             <Route path="phone-numbers" element={<Navigate to="/admin/communications" replace />} />
