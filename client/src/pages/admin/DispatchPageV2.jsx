@@ -728,7 +728,7 @@ export default function DispatchPageV2() {
     const current = SCHEDULE_TABS.find((t) => t.id === activeTab);
     if (current?.desktopOnly) setActiveTab('board');
   }, [isMobile, activeTab]);
-  // Default desktop to Week (Square-style); phones still open on Day,
+  // Default desktop to Week (multi-day grid); phones still open on Day,
   // which is what techs and Virginia want when triaging in the field.
   const [viewMode, setViewMode] = useState(() => {
     if (typeof window === 'undefined') return 'week';
@@ -1097,7 +1097,7 @@ export default function DispatchPageV2() {
         />
       )}
 
-      {/* Week / 5-Day = Square-style time grid (drag to reschedule). Month = summary grid. */}
+      {/* Week / 5-Day = multi-day time grid (drag to reschedule). Month = summary grid. */}
       {viewMode === 'week' && isMobile && (
         <MobileDispatchList
           mode="week"
@@ -1289,7 +1289,7 @@ export default function DispatchPageV2() {
             />
           </div>
 
-          {/* Mobile: inline scrollable day list (replaces Square-style calendar) */}
+          {/* Mobile: inline scrollable day list (replaces the multi-day calendar) */}
           <div className="md:hidden">
             <MobileDispatchList
               mode="day"

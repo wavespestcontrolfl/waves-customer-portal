@@ -1,4 +1,4 @@
-// Square-style multi-day time grid (5-day or 7-day Week views).
+// Multi-day time grid (5-day or 7-day Week views).
 // Each column is a calendar day; appointments stack inside their column at
 // their windowStart time. Drag a block to a new (day, time) cell to
 // reschedule. Click a block to open the existing edit modal.
@@ -72,7 +72,7 @@ function minutesToLabel(min) {
   return m === 0 ? `${h12} ${ap}` : `${h12}:${String(m).padStart(2, '0')}`;
 }
 
-// "2026-04-21" → "04/21"  (zero-padded MM/DD, mirroring Square's day header).
+// "2026-04-21" → "04/21"  (zero-padded MM/DD for the day header).
 function formatMonthDay(dateStr) {
   if (!dateStr || typeof dateStr !== 'string') return '';
   const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -93,7 +93,7 @@ function effectiveDuration(svc) {
   return 30;
 }
 
-// Square-style flat-color blocks. Mirrors TimeGridDay's palette so the
+// Flat-color appointment blocks. Mirrors TimeGridDay's palette so the
 // week/5-day grid reads identically to the single-day swimlane view.
 function statusBlockClasses(status) {
   switch (status) {
