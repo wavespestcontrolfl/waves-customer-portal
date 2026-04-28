@@ -93,7 +93,13 @@ router.get('/', async (req, res, next) => {
 
     const services = await db('scheduled_services')
       .where({ 'scheduled_services.scheduled_date': date })
-      .whereNotIn('scheduled_services.status', ['cancelled'])
+      // Exclude 'rescheduled' alongside 'cancelled': the customer-portal
+      // reschedule request flow flips status to 'rescheduled' but leaves
+      // the original scheduled_date / window in place until the office
+      // actions it through SmartRebooker (which resets status). Treating
+      // those phantom rows as real appointments inflates the badge totals
+      // and shows a block at a time slot the tech isn't actually working.
+      .whereNotIn('scheduled_services.status', ['cancelled', 'rescheduled'])
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
       .select(
@@ -262,7 +268,8 @@ router.get('/week', async (req, res, next) => {
 
       const services = await db('scheduled_services')
         .where({ scheduled_date: dateStr })
-        .whereNotIn('status', ['cancelled'])
+        // See day endpoint for why 'rescheduled' is excluded.
+        .whereNotIn('status', ['cancelled', 'rescheduled'])
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
         .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
         .select('scheduled_services.id', 'scheduled_services.service_type', 'scheduled_services.status',
@@ -334,7 +341,8 @@ router.get('/month', async (req, res, next) => {
         gridStart.toISOString().split('T')[0],
         gridEnd.toISOString().split('T')[0],
       ])
-      .whereNotIn('scheduled_services.status', ['cancelled'])
+      // See day endpoint for why 'rescheduled' is excluded.
+      .whereNotIn('scheduled_services.status', ['cancelled', 'rescheduled'])
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
       .select(
