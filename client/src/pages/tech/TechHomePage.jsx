@@ -425,6 +425,7 @@ export default function TechHomePage() {
 function TimecardSignoffCard({ techName }) {
   const [weekly, setWeekly] = useState(null);
   const [weekStart, setWeekStart] = useState(null);
+  const [pending, setPending] = useState(false);
   const [loading, setLoading] = useState(true);
   const [signature, setSignature] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -441,10 +442,11 @@ function TimecardSignoffCard({ techName }) {
       const res = await fetch(`${API}/api/tech/timetracking/pending-signoff`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (!res.ok) { setWeekly(null); return; }
+      if (!res.ok) { setWeekly(null); setPending(false); return; }
       const data = await res.json();
       setWeekly(data.weekly || null);
       setWeekStart(data.weekStart || null);
+      setPending(data.pending === true);
       // Functional setter so we don't depend on `signature` here —
       // including it in the useCallback deps would cause this to
       // re-run every time the input changes, refetching on each
@@ -461,19 +463,23 @@ function TimecardSignoffCard({ techName }) {
 
   if (loading) return null;
   if (!weekly) return null;
-  // Already approved by admin — nothing for tech to do.
-  if (weekly.status === 'approved') return null;
-  // Already signed — show a quiet confirmation, don't block UI.
-  if (weekly.tech_signed_at) {
-    return (
-      <div style={{
-        background: DARK.card, border: `1px solid #22c55e44`, borderRadius: 12,
-        padding: 12, margin: '20px 0',
-        fontSize: 12, color: '#22c55e',
-      }}>
-        ✓ Last week signed{weekly.tech_signature ? ` as "${weekly.tech_signature}"` : ''} — awaiting admin approval.
-      </div>
-    );
+  // Server is authoritative on whether sign-off is pending. If the
+  // endpoint says pending=false and the tech has already signed,
+  // render a quiet confirmation; if pending=false and not signed
+  // (the week is approved or otherwise not eligible), render nothing.
+  if (!pending) {
+    if (weekly.tech_signed_at) {
+      return (
+        <div style={{
+          background: DARK.card, border: `1px solid #22c55e44`, borderRadius: 12,
+          padding: 12, margin: '20px 0',
+          fontSize: 12, color: '#22c55e',
+        }}>
+          ✓ Last week signed{weekly.tech_signature ? ` as "${weekly.tech_signature}"` : ''} — awaiting admin approval.
+        </div>
+      );
+    }
+    return null;
   }
 
   const hours = (parseFloat(weekly.total_shift_minutes || 0) / 60).toFixed(1);
