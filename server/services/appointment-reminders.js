@@ -55,14 +55,19 @@ function smsServiceLabel(name) {
 }
 
 // Defensive cleanup for already-stored appointment_reminders.service_type
-// values, which may be joined multi-service strings ("A & B & C") from
-// the newer multi-service flow OR legacy single-service strings from
-// before. Strips only the trailing-parenthetical suffix (anchored to
-// end, no-op on joined strings without trailing parens). Em-dash strip
-// is omitted here because it is unsafe on joins.
+// values, which may be joined multi-service strings ("A & B", Oxford
+// "A, B, and C") from the newer multi-service flow OR legacy single-
+// service strings from before. Always strips trailing parenthetical
+// suffix (safe on joins — anchored to end). Strips em/en-dash suffix
+// only when no join marker is present, because the em-dash regex is
+// greedy and would silently drop the trailing component of a join.
 function smsServiceLabelStored(name) {
   if (!name) return 'service';
-  return String(name).replace(/\s*\([^)]*\)\s*$/, '').trim() || String(name);
+  let cleaned = String(name).replace(/\s*\([^)]*\)\s*$/, '').trim();
+  if (!/ & |, and /.test(cleaned)) {
+    cleaned = cleaned.replace(/\s+[—–]\s+.+$/, '').trim();
+  }
+  return cleaned || String(name);
 }
 
 // Joined service label for multi-service appointments. Returns the parent name
