@@ -33,19 +33,19 @@ function useIsMobile() {
 
 export default function SocialMediaPage() {
   const [tab, setTab] = useState('compose');
+  const [status, setStatus] = useState(null);
   const [stats, setStats] = useState(null);
   const [rssItems, setRssItems] = useState([]);
   const [history, setHistory] = useState([]);
   const [toast, setToast] = useState('');
 
-  // /status fetch removed along with the platform-connection tile row —
-  // its only consumer was that decorative strip. Stats + history still
-  // load in parallel as before.
   const loadData = useCallback(async () => {
-    const [st, h] = await Promise.all([
+    const [s, st, h] = await Promise.all([
+      adminFetch('/admin/social-media/status').catch(() => null),
       adminFetch('/admin/social-media/stats').catch(() => null),
       adminFetch('/admin/social-media/history?limit=20').catch(() => ({ posts: [] })),
     ]);
+    setStatus(s);
     setStats(st);
     setHistory(h.posts || []);
   }, []);
@@ -60,11 +60,12 @@ export default function SocialMediaPage() {
         Social Media Engine
       </h1>
 
-      {/* Tabs — moved directly below the heading per Adam. The platform-
-          connection tiles (Facebook / Instagram / LinkedIn / GBP / Gemini /
-          AI "Connected") used to live above this strip; removed because the
-          status was decorative — the underlying integrations and API
-          connections are unchanged, just no longer surfaced as a tile row. */}
+      {/* Tabs — moved directly below the heading per Adam. Platform-
+          connection tiles still render below as a status row; the emoji
+          icons that previously sat at the top of each tile have been
+          removed (purely decorative), but the platform name + Connected
+          badge stay so the operator can see at a glance which API
+          integrations are healthy. */}
       <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 20 }}>
         <div
           style={{
@@ -92,7 +93,26 @@ export default function SocialMediaPage() {
         </div>
       </div>
 
-      {/* Stats — kept; sit below the tab strip now. */}
+      {/* Platform connection status — same tiles as before, just without
+          the emoji icon row at the top. Operator can still scan which API
+          integrations are healthy at a glance. */}
+      {status && (
+        <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
+          {Object.entries(status.platforms).map(([key, p]) => (
+            <div key={key} style={{ ...sCard, flex: '1 1 140px', minWidth: 140, marginBottom: 0, textAlign: 'center' }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, textTransform: 'capitalize' }}>{key}</div>
+              <div style={{ marginTop: 4 }}>
+                {p.configured
+                  ? <span style={sBadge(`${D.green}22`, D.green)}>Connected</span>
+                  : <span style={sBadge(`${D.muted}22`, D.muted)}>Not configured</span>
+                }
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Stats — kept; sit below the platform connection row. */}
       {stats && (
         <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
           {[
