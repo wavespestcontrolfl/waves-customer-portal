@@ -85,25 +85,27 @@ function effectiveDuration(svc) {
   return 30;
 }
 
+// Square-style flat-color blocks. Mirrors TimeGridDay's palette so the
+// week/5-day grid reads identically to the single-day swimlane view.
 function statusBlockClasses(status) {
   switch (status) {
     case 'completed': return 'bg-zinc-200 text-zinc-500';
     case 'skipped':   return 'bg-alert-bg text-alert-fg';
     case 'on_site':   return 'bg-zinc-900 text-white';
-    case 'en_route':  return 'bg-zinc-700 text-white';
-    case 'confirmed': return 'bg-white text-zinc-900';
-    default:          return 'bg-white text-zinc-900';
+    case 'en_route':  return 'text-white';
+    case 'confirmed': return 'text-white';
+    default:          return 'text-white';
   }
 }
 
-function statusBorderColor(status) {
+function statusBlockFill(status) {
   switch (status) {
-    case 'completed': return '#D4D4D8';
-    case 'skipped':   return '#C0392B';
-    case 'on_site':   return '#18181B';
-    case 'en_route':  return '#3F3F46';
-    case 'confirmed': return '#18181B';
-    default:          return '#A1A1AA';
+    case 'en_route':  return '#1E40AF';
+    case 'on_site':   return null;
+    case 'completed': return null;
+    case 'skipped':   return null;
+    case 'confirmed': return '#3B82F6';
+    default:          return '#3B82F6';
   }
 }
 
@@ -181,15 +183,21 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
         height: Math.max(height, SLOT_HEIGHT - 2),
         left: `calc(${laneIdx * (100 / laneCount)}% + 2px)`,
         width: `calc(${100 / laneCount}% - 4px)`,
-        border: `1px solid ${statusBorderColor(service.status)}`,
+        background: statusBlockFill(service.status) || undefined,
         ...dragStyle,
       }}
       title={`${service.customerName || 'Unassigned'} · ${service.serviceType || ''} · ${service.windowStart || ''}${service.technicianName ? ' · ' + service.technicianName : ''}`}
     >
+      <div className="opacity-90 truncate text-10">
+        {(() => {
+          const min = parseHHMM(service.windowStart);
+          return min == null ? '' : minutesToLabel(min);
+        })()}
+      </div>
       <div className="font-medium truncate">{service.customerName || 'Unassigned'}</div>
       {height > SLOT_HEIGHT && (
-        <div className="opacity-70 truncate text-10">
-          {service.technicianName || '—'} · {service.serviceType || ''}
+        <div className="opacity-80 truncate text-10">
+          {service.serviceType || ''}{service.technicianName ? ` · ${service.technicianName}` : ''}
         </div>
       )}
     </div>

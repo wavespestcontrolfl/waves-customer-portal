@@ -717,7 +717,12 @@ export default function DispatchPageV2() {
     const current = SCHEDULE_TABS.find((t) => t.id === activeTab);
     if (current?.desktopOnly) setActiveTab('board');
   }, [isMobile, activeTab]);
-  const [viewMode, setViewMode] = useState('day');
+  // Default desktop to Week (Square-style); phones still open on Day,
+  // which is what techs and Virginia want when triaging in the field.
+  const [viewMode, setViewMode] = useState(() => {
+    if (typeof window === 'undefined') return 'week';
+    return window.matchMedia('(max-width: 767px)').matches ? 'day' : 'week';
+  });
   const [date, setDate] = useState(formatDateISO(new Date()));
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -890,9 +895,17 @@ export default function DispatchPageV2() {
     ? formatDateDisplay(date)
     : viewMode === 'week'
       ? (() => {
+          // TimeGridDays renders a Mon→Sun week containing the selected
+          // date, so the header must label that same span — not
+          // selected → selected + 6, which drifts as soon as the user
+          // picks any non-Monday.
           const d = new Date(date + 'T12:00:00');
-          const end = new Date(d); end.setDate(end.getDate() + 6);
-          return `${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
+          const dow = d.getDay();
+          const monday = new Date(d);
+          monday.setDate(d.getDate() - (dow === 0 ? 6 : dow - 1));
+          const sunday = new Date(monday);
+          sunday.setDate(monday.getDate() + 6);
+          return `${monday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${sunday.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
         })()
       : new Date(date + 'T12:00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 
