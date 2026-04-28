@@ -183,6 +183,38 @@ router.get('/pending-signoff', async (req, res, next) => {
   try {
     const thisMonday = mondayOfET(etDateString(new Date()));
 
+    // Backfill weekly summary rows for any past week (within a
+    // 12-week lookback) that has worked dailies but no time_weekly_summary
+    // row yet. Without this, a cron gap or a fresh tech would let
+    // /pending-signoff silently return null even though there's a
+    // legitimate week to sign. Mirrors the pattern in
+    // timesheet-approval.getPendingWeeks.
+    const LOOKBACK_DAYS = 7 * 12;
+    const lookbackStart = etDateString(addETDays(new Date(), -LOOKBACK_DAYS));
+    const workDays = await db('time_entry_daily_summary')
+      .where({ technician_id: req.technicianId })
+      .where('work_date', '>=', lookbackStart)
+      .where('work_date', '<', thisMonday)
+      .where(b => b.where('total_shift_minutes', '>', 0).orWhere('job_count', '>', 0))
+      .select('work_date');
+    if (workDays.length) {
+      const weekMondays = new Set();
+      for (const row of workDays) {
+        const ymd = dateColumnToYMD(row.work_date);
+        weekMondays.add(etWeekStart(parseETDateTime(`${ymd}T12:00`)));
+      }
+      const existing = await db('time_weekly_summary')
+        .where({ technician_id: req.technicianId })
+        .whereIn('week_start', [...weekMondays])
+        .select('week_start');
+      const existingSet = new Set(existing.map(r => dateColumnToYMD(r.week_start)));
+      for (const ws of weekMondays) {
+        if (!existingSet.has(ws)) {
+          try { await timeTracking.computeWeeklySummary(req.technicianId, ws); } catch (_) { /* noop */ }
+        }
+      }
+    }
+
     // Find the OLDEST past week that still needs sign-off — not just
     // last week. unlockWeek clears tech_signed_at on whichever week
     // an admin reopens, which may be older than last week; restricting
