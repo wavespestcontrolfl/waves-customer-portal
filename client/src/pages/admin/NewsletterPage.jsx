@@ -474,8 +474,11 @@ export default function NewsletterPage() {
     prevTabRef.current = tab;
   }, [tab]);
 
+  // History badge is null while loading AND on fetch error — only show
+  // (0) when /sends actually succeeded with no sent rows, so an outage
+  // isn't read as "no sent campaigns".
   const tabCounts = {
-    history: sendsLoading ? null : (sendsData?.counts?.sent ?? 0),
+    history: sendsData ? (sendsData.counts?.sent ?? 0) : null,
     subscribers: subscribersActive,
   };
 
