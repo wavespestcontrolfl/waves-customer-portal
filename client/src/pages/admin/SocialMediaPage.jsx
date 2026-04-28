@@ -33,19 +33,19 @@ function useIsMobile() {
 
 export default function SocialMediaPage() {
   const [tab, setTab] = useState('compose');
-  const [status, setStatus] = useState(null);
   const [stats, setStats] = useState(null);
   const [rssItems, setRssItems] = useState([]);
   const [history, setHistory] = useState([]);
   const [toast, setToast] = useState('');
 
+  // /status fetch removed along with the platform-connection tile row —
+  // its only consumer was that decorative strip. Stats + history still
+  // load in parallel as before.
   const loadData = useCallback(async () => {
-    const [s, st, h] = await Promise.all([
-      adminFetch('/admin/social-media/status').catch(() => null),
+    const [st, h] = await Promise.all([
       adminFetch('/admin/social-media/stats').catch(() => null),
       adminFetch('/admin/social-media/history?limit=20').catch(() => ({ posts: [] })),
     ]);
-    setStatus(s);
     setStats(st);
     setHistory(h.posts || []);
   }, []);
@@ -56,34 +56,43 @@ export default function SocialMediaPage() {
 
   return (
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-        <div>
-          <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>
-            <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Social Media Engine</span>
-            <span className="hidden md:inline">Social Media Engine</span>
-          </h1>
+      <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: '0 0 20px' }}>
+        Social Media Engine
+      </h1>
+
+      {/* Tabs — moved directly below the heading per Adam. The platform-
+          connection tiles (Facebook / Instagram / LinkedIn / GBP / Gemini /
+          AI "Connected") used to live above this strip; removed because the
+          status was decorative — the underlying integrations and API
+          connections are unchanged, just no longer surfaced as a tile row. */}
+      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 20 }}>
+        <div
+          style={{
+            display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center',
+            gap: 4, padding: 4,
+            background: '#F4F4F5', borderRadius: 10, border: '1px solid #E4E4E7',
+          }}
+        >
+          {[
+            { key: 'compose', label: 'Compose & Publish' },
+            { key: 'rss', label: 'RSS Feed' },
+            { key: 'calendar', label: 'Calendar' },
+            { key: 'analytics', label: 'Analytics' },
+            { key: 'templates', label: 'Templates' },
+            { key: 'history', label: 'Post History' },
+          ].map(t => (
+            <button key={t.key} onClick={() => setTab(t.key)} style={{
+              padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
+              background: tab === t.key ? '#18181B' : 'transparent',
+              color: tab === t.key ? '#FFFFFF' : '#A1A1AA',
+              fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
+              fontFamily: "'DM Sans', sans-serif",
+            }}>{t.label}</button>
+          ))}
         </div>
       </div>
 
-      {/* Platform Status */}
-      {status && (
-        <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
-          {Object.entries(status.platforms).map(([key, p]) => (
-            <div key={key} style={{ ...sCard, flex: '1 1 140px', minWidth: 140, marginBottom: 0, textAlign: 'center' }}>
-              <div style={{ fontSize: 24, marginBottom: 4 }}>{PLATFORM_ICONS[key] || '⚙️'}</div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, textTransform: 'capitalize' }}>{key}</div>
-              <div style={{ marginTop: 4 }}>
-                {p.configured
-                  ? <span style={sBadge(`${D.green}22`, D.green)}>Connected</span>
-                  : <span style={sBadge(`${D.muted}22`, D.muted)}>Not configured</span>
-                }
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Stats */}
+      {/* Stats — kept; sit below the tab strip now. */}
       {stats && (
         <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
           {[
@@ -99,26 +108,6 @@ export default function SocialMediaPage() {
           ))}
         </div>
       )}
-
-      {/* Tabs */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 20, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
-        {[
-          { key: 'compose', label: 'Compose & Publish' },
-          { key: 'rss', label: 'RSS Feed' },
-          { key: 'calendar', label: 'Calendar' },
-          { key: 'analytics', label: 'Analytics' },
-          { key: 'templates', label: 'Templates' },
-          { key: 'history', label: 'Post History' },
-        ].map(t => (
-          <button key={t.key} onClick={() => setTab(t.key)} style={{
-            padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
-            background: tab === t.key ? '#18181B' : 'transparent',
-            color: tab === t.key ? '#FFFFFF' : '#A1A1AA',
-            fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
-            fontFamily: "'DM Sans', sans-serif",
-          }}>{t.label}</button>
-        ))}
-      </div>
 
       {tab === 'compose' && <ComposeTab showToast={showToast} onPublished={loadData} />}
       {tab === 'rss' && <RSSTab showToast={showToast} onPublished={loadData} />}
