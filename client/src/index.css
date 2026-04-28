@@ -17,6 +17,28 @@
 .horizontal-scroll::-webkit-scrollbar { display: none; }
 .horizontal-scroll > * { flex-shrink: 0; white-space: nowrap; }
 
+/* Mobile horizontally-scrollable tab pill — applied to admin-page tab bars
+   that otherwise wrap to multiple rows when there are 5+ tabs. Mirrors the
+   pattern in SEOPage so a single swipe reveals overflow tabs. */
+@media (max-width: 640px) {
+  .tab-pill-scroll {
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    justify-content: flex-start !important;
+    scrollbar-width: none;
+  }
+  .tab-pill-scroll::-webkit-scrollbar { display: none; }
+  .tab-pill-scroll-inner {
+    flex-wrap: nowrap !important;
+  }
+  .tab-pill-scroll-inner > button {
+    flex-shrink: 0 !important;
+    white-space: nowrap !important;
+    padding: 8px 14px !important;
+    font-size: 13px !important;
+  }
+}
+
 /* Global focus-visible ring for interactive elements. The .btn system in
    buttons.css already has its own focus style; this catches every inline
    <button> and <a> (customer portal is full of them) so keyboard users

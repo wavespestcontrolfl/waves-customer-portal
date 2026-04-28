@@ -1298,8 +1298,8 @@ export default function ReviewsPage() {
       </h1>
 
       {/* ====================== TAB TOGGLE ====================== */}
-      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
-        <div style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
+      <div className="tab-pill-scroll" style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
+        <div className="tab-pill-scroll-inner" style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
           {[
             { key: 'reviews', label: 'Reviews' },
             { key: 'gbp', label: 'GBP Management' },
