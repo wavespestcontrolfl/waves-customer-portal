@@ -70,7 +70,7 @@ export default function ProjectsPage() {
   const selected = projects.find(p => p.id === selectedId);
 
   return (
-    <div style={{ minHeight: '100vh', background: D.bg, padding: '16px 4px', color: D.text, fontFamily: "'DM Sans', sans-serif" }}>
+    <div style={{ padding: '16px 4px', color: D.text, fontFamily: "'DM Sans', sans-serif" }}>
       <header style={{
         marginBottom: 16,
         display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12,
