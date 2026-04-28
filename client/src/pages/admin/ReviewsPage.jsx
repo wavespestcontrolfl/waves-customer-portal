@@ -172,7 +172,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
               <Stars count={review.starRating} size={14} />
               <span style={{
-                fontSize: 11, fontFamily: 'DM Sans, sans-serif', background: '#334155', color: D.muted,
+                fontSize: 11, fontFamily: 'DM Sans, sans-serif', background: '#334155', color: '#FFFFFF',
                 padding: '2px 8px', borderRadius: 99,
               }}>{LOCATION_LABELS[review.locationId] || review.locationId}</span>
             </div>
@@ -1223,7 +1223,11 @@ export default function ReviewsPage() {
   const locations = data?.locations || [];
   const { totalReviews = 0, avgRating = 0, unresponded = 0, newThisMonth = 0, breakdown = {}, perLocation = [] } = stats;
 
-  const respondedCount = reviews.filter(r => r.reply).length;
+  // Derive responded count from server-side `unresponded` (DB count of
+  // review_reply IS NULL) rather than the loaded page of `reviews`, which
+  // is paginated (limit 30) and would otherwise divide a partial sample
+  // by the full Google totalReviews and bottom out near 0%.
+  const respondedCount = Math.max(totalReviews - unresponded, 0);
   const responseRate = totalReviews > 0 ? Math.round((respondedCount / totalReviews) * 100) : 0;
 
   // --- Filtering ---
