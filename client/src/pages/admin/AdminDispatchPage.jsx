@@ -22,8 +22,9 @@
  *
  * Tier 1 V2 styling.
  */
-import React, { Suspense, useState, useEffect, useRef } from 'react';
+import React, { Suspense, useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { Plus } from 'lucide-react';
 import DispatchBoardPage from './DispatchBoardPage';
 
 const DispatchPageV2 = React.lazy(() => import('./DispatchPageV2'));
@@ -59,6 +60,17 @@ export default function AdminDispatchPage() {
   const initial = VALID_TABS.includes(searchParams.get(TAB_KEY)) ? searchParams.get(TAB_KEY) : TABS.BOARD;
   const [tab, setTab] = useState(initial);
   const tabRefs = useRef({});
+
+  // DispatchPageV2 owns the "create appointment" state + modal; expose a
+  // handle here so the lifted "+ Add Appointment" pill in this header can
+  // open it without lifting the state. DispatchPageV2 calls
+  // setOpenCreateHandler on mount with its own (() => setShowNewAppt(true))
+  // and clears it on unmount.
+  const openCreateRef = useRef(null);
+  const setOpenCreateHandler = useCallback((handler) => {
+    openCreateRef.current = handler || null;
+  }, []);
+  const handleAddAppointment = () => openCreateRef.current?.();
 
   // Keep URL in sync without remount-thrashing the inactive tab content
   // (DispatchPageV2 in particular does its own data fetches).
@@ -156,11 +168,48 @@ export default function AdminDispatchPage() {
           tab switches). Lifting the heading here keeps the pill in one
           stable parent on both tabs while still rendering the heading
           immediately above it on Schedule. */}
-      {/* Centered tab pill — page-level navigation. The "Schedule" h1 lives
-          inside DispatchPageV2's header (alongside the "+ Add Appointment"
-          pill on the right) per the standard admin h1 + action-button
-          pattern; AdminDispatchPage owns only the pill. */}
-      <div className="px-4 md:px-6 pt-4 md:pt-6 pb-2 flex justify-center">
+      {/* Page header (h1 + action buttons) — visible only on top-level
+          Schedule. Always rendered (with display:none on the others) so
+          the centered pill below stays in the same React sibling slot
+          across tab swaps and never remounts. */}
+      <div
+        className="px-4 md:px-6 pt-4 md:pt-6 flex flex-wrap items-center justify-between gap-3"
+        style={tab === TABS.SCHEDULE ? undefined : { display: 'none' }}
+      >
+        <h1 className="text-28 font-normal tracking-h1 text-zinc-900">
+          <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Schedule</span>
+          <span className="hidden md:inline">Schedule</span>
+        </h1>
+        <div className="flex items-center gap-3">
+          {/* Desktop "+ Add Appointment" — pill mirrors "+ Add Customer". */}
+          <button
+            type="button"
+            onClick={handleAddAppointment}
+            className="hidden md:inline-flex"
+            style={{
+              padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
+              background: '#18181B', color: '#fff', border: 'none', cursor: 'pointer',
+              whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
+              fontFamily: "'DM Sans', sans-serif",
+            }}
+          >
+            + Add Appointment
+          </button>
+          {/* Mobile "+" circle */}
+          <button
+            type="button"
+            onClick={handleAddAppointment}
+            aria-label="New appointment"
+            className="md:hidden flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring shrink-0"
+            style={{ width: 36, height: 36 }}
+          >
+            <Plus size={20} strokeWidth={2} />
+          </button>
+        </div>
+      </div>
+
+      {/* Centered tab pill — page-level navigation, below the header. */}
+      <div className="px-4 md:px-6 pt-3 md:pt-4 pb-2 flex justify-center">
         {tabPill}
       </div>
       <div
@@ -179,7 +228,10 @@ export default function AdminDispatchPage() {
               </div>
             }
           >
-            <DispatchPageV2 activeTab={innerActiveTabFor(tab)} />
+            <DispatchPageV2
+              activeTab={innerActiveTabFor(tab)}
+              setOpenCreateHandler={setOpenCreateHandler}
+            />
           </Suspense>
         )}
       </div>

@@ -715,7 +715,7 @@ function MobileScheduleSheet({ children, serviceCount, completedCount }) {
   );
 }
 
-export default function DispatchPageV2({ activeTab: controlledActiveTab } = {}) {
+export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpenCreateHandler } = {}) {
   const isMobile = useIsMobile();
   // Controlled mode: when AdminDispatchPage drives the active sub-tab via
   // the top-level pill, the internal tab strip + mobile pills + More sheet
@@ -777,6 +777,17 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab } = {}) 
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
   const [showMoreSheet, setShowMoreSheet] = useState(false);
+
+  // Expose "open create modal" to AdminDispatchPage so the lifted "+ Add
+  // Appointment" pill in its header can trigger this page's modal.
+  useEffect(() => {
+    if (typeof setOpenCreateHandler !== 'function') return;
+    setOpenCreateHandler(() => {
+      setNewApptDefaults(null);
+      setShowNewAppt(true);
+    });
+    return () => setOpenCreateHandler(null);
+  }, [setOpenCreateHandler]);
 
   const fetchSchedule = useCallback(async (d) => {
     setLoading(true);
@@ -946,57 +957,17 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab } = {}) 
 
   return (
     <div className="bg-surface-page min-h-full p-4 md:p-6 font-sans text-zinc-900">
-      {/* Page-header row: Schedule h1 left, "+ Add Appointment" pill right
-          (matches CustomersPageV2's pattern). h1 only renders on the
-          schedule grid sub-tab; on Protocols/Tech Match/CSR/Job Scores/
-          Insights it's hidden so those panels can own their own headings.
-          The right side swaps to "↻ Sync AI Data" on those non-board tabs. */}
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-        {activeTab === 'board' ? (
-          <h1 className="text-28 font-normal tracking-h1 text-zinc-900">
-            <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Schedule</span>
-            <span className="hidden md:inline">Schedule</span>
-          </h1>
-        ) : (
-          // Spacer keeps `justify-between` pushing the right-side action to
-          // the right edge when the h1 isn't rendered.
-          <span aria-hidden="true" />
-        )}
-        <div className="flex items-center gap-3">
-          {activeTab === 'board' ? (
-            <>
-              {/* Desktop "+ Add Appointment" — pill mirrors "+ Add Customer". */}
-              <button
-                type="button"
-                onClick={() => setShowNewAppt(true)}
-                className="hidden md:inline-flex"
-                style={{
-                  padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
-                  background: '#18181B', color: '#fff', border: 'none', cursor: 'pointer',
-                  whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
-                  fontFamily: "'DM Sans', sans-serif",
-                }}
-              >
-                + Add Appointment
-              </button>
-              {/* Mobile "+" circle */}
-              <button
-                type="button"
-                onClick={() => setShowNewAppt(true)}
-                aria-label="New appointment"
-                className="md:hidden flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring shrink-0"
-                style={{ width: 36, height: 36 }}
-              >
-                <Plus size={20} strokeWidth={2} />
-              </button>
-            </>
-          ) : viewMode === 'day' ? (
-            <Button variant="secondary" onClick={syncDispatchAI} disabled={syncing} className="hidden md:inline-flex">
-              {syncing ? 'Syncing…' : '↻ Sync AI Data'}
-            </Button>
-          ) : null}
+      {/* "↻ Sync AI Data" — right-aligned, only visible on non-board sub-tabs.
+          The Schedule h1 + "+ Add Appointment" pill that used to share this
+          row are now lifted into AdminDispatchPage so they sit above the
+          centered top-level tab pill. */}
+      {activeTab !== 'board' && viewMode === 'day' && (
+        <div className="hidden md:flex justify-end mb-4">
+          <Button variant="secondary" onClick={syncDispatchAI} disabled={syncing}>
+            {syncing ? 'Syncing…' : '↻ Sync AI Data'}
+          </Button>
         </div>
-      </div>
+      )}
 
       {/* Mobile: Schedule + More pills. Hidden in controlled mode (top-level
           pill in AdminDispatchPage replaces them). */}
@@ -1032,7 +1003,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab } = {}) 
             <span><span className="u-nums font-medium text-zinc-900">{completedCount}</span> done</span>
             <span><span className={cn('u-nums font-medium', remainingCount > 0 ? 'text-zinc-900' : 'text-ink-secondary')}>{remainingCount}</span> left</span>
             <span className="pl-3 border-l-hairline border-zinc-200">
-              ~{estTotalHrs}h{estTotalMinRemainder > 0 ? `${estTotalMinRemainder}m` : ''} total
+              ~{estTotalHrs}h{estTotalMinRemainder > 0 ? ` ${estTotalMinRemainder}m` : ''} total
             </span>
             <span>ETA <span className="u-nums font-medium text-zinc-900">{estFinishTime}</span></span>
             <span className="pl-3 border-l-hairline border-zinc-200">
@@ -1077,35 +1048,33 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab } = {}) 
 
       {syncMsg && <div className="text-11 text-ink-secondary mb-2">{syncMsg}</div>}
 
-      {/* Mobile week strip — 7 rolling days centered on selected date */}
+      {/* Mobile day strip — 7 rolling days centered on the selected date.
+          Styled to mirror ViewModeSelectorV2 (Day / 5-Day / Week / Month):
+          h-8 hairline pills, dark fill when active, single inline label
+          "<num> <weekday-letter>" so all 7 fit comfortably in the row. */}
       {viewMode === 'day' && (
-        <div className="md:hidden mb-4 -mx-4 px-4 overflow-x-auto" style={{ WebkitOverflowScrolling: 'touch' }}>
-          <div className="flex gap-1.5 min-w-max">
+        <div className="md:hidden mb-4 flex justify-center -mx-4 px-4 overflow-x-auto" style={{ WebkitOverflowScrolling: 'touch' }}>
+          <div className="inline-flex gap-1.5 min-w-max">
             {Array.from({ length: 7 }).map((_, i) => {
               const d = new Date(date + 'T12:00:00');
               d.setDate(d.getDate() + (i - 3));
               const iso = formatDateISO(d);
               const selected = iso === date;
-              const today = isToday(iso);
+              const dayNum = d.getDate();
+              const weekdayLetter = d.toLocaleDateString('en-US', { weekday: 'narrow' });
               return (
                 <button
                   key={iso}
                   onClick={() => setDate(iso)}
                   className={cn(
-                    'flex-1 inline-flex flex-col items-center justify-center h-14 min-w-[44px] rounded-sm u-focus-ring transition-colors',
+                    'inline-flex items-center justify-center gap-1 h-8 px-3 text-11 uppercase font-medium tracking-label rounded-sm border-hairline u-focus-ring transition-colors flex-shrink-0',
                     selected
-                      ? 'bg-zinc-100 border-2 border-zinc-900'
-                      : today
-                        ? 'bg-white border border-zinc-900'
-                        : 'bg-white border-hairline border-zinc-300'
+                      ? 'bg-zinc-900 text-white border-zinc-900'
+                      : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50'
                   )}
                 >
-                  <span className="text-10 uppercase tracking-label font-medium text-ink-tertiary">
-                    {d.toLocaleDateString('en-US', { weekday: 'short' })}
-                  </span>
-                  <span className="u-nums text-14 font-medium text-ink-primary">
-                    {d.getDate()}
-                  </span>
+                  <span className="u-nums">{dayNum}</span>
+                  <span>{weekdayLetter}</span>
                 </button>
               );
             })}
