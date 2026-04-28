@@ -66,8 +66,21 @@ const CADENCE_OPTIONS = [
   { value: 'bimonthly', label: 'Every 2 months' },
   { value: 'quarterly', label: 'Quarterly' },
   { value: 'triannual', label: 'Every 4 months' },
+  { value: 'monthly_nth_weekday', label: 'Monthly (Nth weekday)' },
   { value: 'custom', label: 'Custom (every N days)' },
 ];
+
+const NTH_OPTIONS = [
+  { value: 1, label: '1st' }, { value: 2, label: '2nd' },
+  { value: 3, label: '3rd' }, { value: 4, label: '4th' },
+];
+const WEEKDAY_OPTIONS = [
+  { value: 0, label: 'Sunday' }, { value: 1, label: 'Monday' },
+  { value: 2, label: 'Tuesday' }, { value: 3, label: 'Wednesday' },
+  { value: 4, label: 'Thursday' }, { value: 5, label: 'Friday' },
+  { value: 6, label: 'Saturday' },
+];
+const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 // Booster months — extra visits on top of a recurring base. Common pattern:
 // quarterly pest + boosters in Jun/Aug. Months are 1-indexed.
@@ -81,6 +94,42 @@ const MONTH_CHIPS = [
 const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 16, fontFamily: 'inherit', fontWeight: 400, outline: 'none', boxSizing: 'border-box', minHeight: 44, colorScheme: 'light' };
 const labelStyle = { fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 500, display: 'block', marginBottom: 4 };
 const sectionStyle = { background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}`, marginBottom: 12 };
+
+// Client mirror of the server's recurring-date math. Returns a Date.
+function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
+  const { intervalDays, nth, weekday } = opts;
+  const safe = baseDateStr ? String(baseDateStr).split('T')[0] : '';
+  const base = new Date(safe + 'T12:00:00');
+  if (isNaN(base.getTime())) return new Date();
+  const nthNum = (nth != null && nth !== '' && !isNaN(parseInt(nth))) ? parseInt(nth) : null;
+  const wdayNum = (weekday != null && weekday !== '' && !isNaN(parseInt(weekday))) ? parseInt(weekday) : null;
+  if (pattern === 'monthly_nth_weekday' && nthNum != null && wdayNum != null) {
+    const d = new Date(base.getFullYear(), base.getMonth() + i, 1, 12, 0, 0);
+    const firstW = d.getDay();
+    const offset = (wdayNum - firstW + 7) % 7;
+    d.setDate(1 + offset + (nthNum - 1) * 7);
+    return isNaN(d.getTime()) ? base : d;
+  }
+  const intervals = { monthly: 30, bimonthly: 60, quarterly: 91, triannual: 122 };
+  let gap;
+  if (pattern === 'custom' && intervalDays) gap = Math.max(1, parseInt(intervalDays) || 30);
+  else gap = intervals[pattern] || 91;
+  const d = new Date(base);
+  d.setDate(d.getDate() + gap * i);
+  return isNaN(d.getTime()) ? base : d;
+}
+
+// Client mirror of server-side shiftPastWeekend so the preview reflects
+// actual saved dates when skip-weekends is on.
+function shiftPastWeekendClient(d, skip, direction) {
+  if (!skip || !d || isNaN(d.getTime())) return d;
+  const day = d.getDay();
+  if (day !== 0 && day !== 6) return d;
+  const out = new Date(d);
+  if (direction === 'back') out.setDate(out.getDate() - (day === 6 ? 1 : 2));
+  else out.setDate(out.getDate() + (day === 6 ? 2 : 1));
+  return out;
+}
 
 export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, onClose, onCreated }) {
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
@@ -213,6 +262,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const updateServiceInterval = (idx, val) => {
     setServices((arr) => arr.map((s, i) => (i === idx ? { ...s, intervalDays: val } : s)));
   };
+  const updateServiceNth = (idx, val) => {
+    setServices((arr) => arr.map((s, i) => (i === idx ? { ...s, nth: val } : s)));
+  };
+  const updateServiceWeekday = (idx, val) => {
+    setServices((arr) => arr.map((s, i) => (i === idx ? { ...s, weekday: val } : s)));
+  };
   const toggleBoosterMonth = (idx, month) => {
     setServices((arr) => arr.map((s, i) => {
       if (i !== idx) return s;
@@ -233,6 +288,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         price: defaultPrice ? String(defaultPrice) : '',
         cadence: 'one_time',
         intervalDays: 30,
+        nth: 3,        // default "3rd"
+        weekday: 3,    // default "Wednesday"
         boosterMonths: [],
       },
     ]);
@@ -380,9 +437,21 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // add-ons; lines on different cadences fan out into their own parent
   // series so quarterly pest + monthly lawn can co-exist on this form.
   // One-time lines all share one one-time parent.
-  const groupKey = (group) => (group.cadence === 'custom' ? `custom:${group.intervalDays}` : group.cadence);
+  // Group key + label include the cadence-specific config so different
+  // configurations (e.g. "3rd Wed" vs "1st Mon") become separate parent
+  // appointments instead of collapsing into one group.
+  const groupKey = (group) => {
+    if (group.cadence === 'custom') return `custom:${group.intervalDays}`;
+    if (group.cadence === 'monthly_nth_weekday') return `nth:${group.nth}:${group.weekday}`;
+    return group.cadence;
+  };
   const groupLabel = (group) => {
     if (group.cadence === 'custom') return `Every ${group.intervalDays} days`;
+    if (group.cadence === 'monthly_nth_weekday') {
+      const nthOpt = NTH_OPTIONS.find((o) => o.value === parseInt(group.nth));
+      const wOpt = WEEKDAY_OPTIONS.find((o) => o.value === parseInt(group.weekday));
+      return `${nthOpt?.label || group.nth} ${wOpt?.label || ''}`.trim();
+    }
     const found = CADENCE_OPTIONS.find((o) => o.value === group.cadence);
     return found ? found.label : group.cadence;
   };
@@ -390,8 +459,19 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const groups = new Map();
     for (const s of rows) {
       const cadence = s.cadence || 'one_time';
-      const key = cadence === 'custom' ? `custom:${parseInt(s.intervalDays) || 30}` : cadence;
-      if (!groups.has(key)) groups.set(key, { cadence, intervalDays: cadence === 'custom' ? parseInt(s.intervalDays) || 30 : null, lines: [] });
+      let key;
+      if (cadence === 'custom') key = `custom:${parseInt(s.intervalDays) || 30}`;
+      else if (cadence === 'monthly_nth_weekday') key = `nth:${parseInt(s.nth) || 3}:${parseInt(s.weekday) || 3}`;
+      else key = cadence;
+      if (!groups.has(key)) {
+        groups.set(key, {
+          cadence,
+          intervalDays: cadence === 'custom' ? parseInt(s.intervalDays) || 30 : null,
+          nth: cadence === 'monthly_nth_weekday' ? parseInt(s.nth) || 3 : null,
+          weekday: cadence === 'monthly_nth_weekday' ? parseInt(s.weekday) || 3 : null,
+          lines: [],
+        });
+      }
       groups.get(key).lines.push(s);
     }
     return Array.from(groups.values());
@@ -402,6 +482,30 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // a retry click skips the keys that landed so we don't double-book the
   // customer. Reset on successful close.
   const createdGroupKeysRef = useRef(new Set());
+
+  // Recurring preview — for each cadence group, produce up to 4 future
+  // dates Virginia will land on. Honors skip-weekends shift so what's
+  // shown matches what gets saved. Renders below the Visits input.
+  const recurringPreview = useMemo(() => {
+    if (!apptDate) return [];
+    const groups = groupServicesByCadence(services);
+    const recurring = groups.filter((g) => g.cadence !== 'one_time');
+    if (recurring.length === 0) return [];
+    const parsedCount = Number.parseInt(recurringCount, 10);
+    const limit = Math.min(Number.isInteger(parsedCount) && parsedCount >= 2 ? parsedCount : 4, 4);
+    const dir = weekendShift === 'back' ? 'back' : 'forward';
+    return recurring.map((group) => {
+      const dates = [];
+      for (let i = 0; i < limit; i++) {
+        const opts = { intervalDays: group.intervalDays, nth: group.nth, weekday: group.weekday };
+        const raw = nextRecurringDate(apptDate, group.cadence, i, opts);
+        const shifted = shiftPastWeekendClient(raw, !!skipWeekends, dir);
+        dates.push(shifted);
+      }
+      return { group, dates };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [services, apptDate, recurringCount, skipWeekends, weekendShift]);
 
   // Compute window_end given a start time and a duration in minutes.
   const computeWindowEnd = (start, durationMin) => {
@@ -468,6 +572,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           recurringCount: isRecurring && hasFiniteRecurringCount ? parsedRecurringCount : undefined,
           recurringOngoing: isRecurring ? !hasFiniteRecurringCount : undefined,
           recurringIntervalDays: isRecurring && group.cadence === 'custom' ? group.intervalDays : undefined,
+          recurringNth: isRecurring && group.cadence === 'monthly_nth_weekday' ? group.nth : undefined,
+          recurringWeekday: isRecurring && group.cadence === 'monthly_nth_weekday' ? group.weekday : undefined,
           skipWeekends: isRecurring ? !!skipWeekends : undefined,
           weekendShift: isRecurring && skipWeekends ? weekendShift : undefined,
           boosterMonths: isRecurring
@@ -728,6 +834,30 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   </div>
                 )}
               </div>
+              {svc.cadence === 'monthly_nth_weekday' && (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
+                  <div>
+                    <label style={labelStyle}>Nth</label>
+                    <select
+                      value={svc.nth ?? 3}
+                      onChange={(e) => updateServiceNth(idx, parseInt(e.target.value))}
+                      style={inputStyle}
+                    >
+                      {NTH_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label style={labelStyle}>Weekday</label>
+                    <select
+                      value={svc.weekday ?? 3}
+                      onChange={(e) => updateServiceWeekday(idx, parseInt(e.target.value))}
+                      style={inputStyle}
+                    >
+                      {WEEKDAY_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                  </div>
+                </div>
+              )}
               {svc.cadence && svc.cadence !== 'one_time' && (
                 <div style={{ marginTop: 10 }}>
                   <label style={labelStyle}>Booster months (optional)</label>
@@ -830,6 +960,32 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 placeholder="Ongoing"
                 style={inputStyle}
               />
+              {recurringPreview.length > 0 && (
+                <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {recurringPreview.map(({ group, dates }) => (
+                    <div key={groupKey(group)} style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+                      <span style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 500, minWidth: 96 }}>
+                        {groupLabel(group)}
+                      </span>
+                      {dates.map((d, i) => (
+                        <span
+                          key={`${groupKey(group)}-${i}`}
+                          style={{
+                            fontSize: 11, color: D.text, padding: '2px 8px',
+                            background: '#F4F4F5', border: `1px solid ${D.border}`,
+                            borderRadius: 4, whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                        </span>
+                      ))}
+                      {!Number.isInteger(Number.parseInt(recurringCount, 10)) && (
+                        <span style={{ fontSize: 11, color: D.muted }}>… then auto-extends</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
