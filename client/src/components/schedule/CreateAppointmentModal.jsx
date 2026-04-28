@@ -153,6 +153,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [techMode, setTechMode] = useState(defaultTechId ? 'choose' : 'auto');
   const [techId, setTechId] = useState(defaultTechId || '');
   const [techs, setTechs] = useState([]);
+  const [skipWeekends, setSkipWeekends] = useState(false);
+  const [weekendShift, setWeekendShift] = useState('forward'); // 'forward' (Mon) | 'back' (Fri)
   const [discountType, setDiscountType] = useState('');
   const [discountAmount, setDiscountAmount] = useState('');
   const [discountPresets, setDiscountPresets] = useState([]);
@@ -421,6 +423,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           recurringCount: isRecurring ? 4 : undefined,
           recurringOngoing: isRecurring ? true : undefined,
           recurringIntervalDays: isRecurring && group.cadence === 'custom' ? group.intervalDays : undefined,
+          skipWeekends: isRecurring ? !!skipWeekends : undefined,
+          weekendShift: isRecurring && skipWeekends ? weekendShift : undefined,
           discountType: discountType || undefined,
           discountAmount: discountType && discountAmount !== '' ? Number(discountAmount) : undefined,
           createInvoice: true,
@@ -785,6 +789,47 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               <input type="time" value={windowStart} onChange={e => setWindowStart(e.target.value)} step={900} className="waves-sq-date" style={inputStyle} />
             </div>
           </div>
+
+          {/* Skip weekends — only meaningful when at least one service is
+              recurring. Applies to recurring spawns + the auto-extend
+              cron via skip_weekends/weekend_shift on scheduled_services. */}
+          {services.some((s) => s.cadence && s.cadence !== 'one_time') && (
+            <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 10, marginTop: 4 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', minHeight: 36, marginBottom: skipWeekends ? 8 : 0 }}>
+                <input
+                  type="checkbox"
+                  checked={skipWeekends}
+                  onChange={(e) => setSkipWeekends(e.target.checked)}
+                  style={{ width: 18, height: 18, accentColor: D.teal }}
+                />
+                <span style={{ fontSize: 13, fontWeight: 500, color: '#18181B' }}>Skip weekends on recurring visits</span>
+              </label>
+              {skipWeekends && (
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button
+                    type="button"
+                    onClick={() => setWeekendShift('forward')}
+                    style={{
+                      flex: 1, padding: '8px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                      background: weekendShift === 'forward' ? D.teal : 'transparent',
+                      color: weekendShift === 'forward' ? '#fff' : D.muted,
+                      border: `1px solid ${weekendShift === 'forward' ? D.teal : D.border}`,
+                    }}
+                  >Move to Monday</button>
+                  <button
+                    type="button"
+                    onClick={() => setWeekendShift('back')}
+                    style={{
+                      flex: 1, padding: '8px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                      background: weekendShift === 'back' ? D.teal : 'transparent',
+                      color: weekendShift === 'back' ? '#fff' : D.muted,
+                      border: `1px solid ${weekendShift === 'back' ? D.teal : D.border}`,
+                    }}
+                  >Pull to Friday</button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Section 3.5: Discount — applies to both one-time and recurring.
