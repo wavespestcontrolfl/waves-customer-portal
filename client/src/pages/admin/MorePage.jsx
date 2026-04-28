@@ -28,7 +28,7 @@ const SECTIONS = [
   ]},
   { section: 'Field & Equipment', items: [
     { path: '/admin/equipment', icon: Wrench, label: 'Equipment' },
-    { path: '/admin/fleet', icon: Truck, label: 'Fleet & Mileage' },
+    { path: '/admin/fleet', icon: Truck, label: 'Fleet' },
     { path: '/admin/inventory', icon: Package, label: 'Inventory' },
     { path: '/admin/compliance', icon: ClipboardCheck, label: 'Compliance' },
     { path: '/admin/lawn-assessment', icon: Leaf, label: 'Lawn Assessment' },

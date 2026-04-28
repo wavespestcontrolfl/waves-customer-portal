@@ -144,8 +144,8 @@ export default function EquipmentMaintenancePage() {
       {/* Header */}
       <div style={{ marginBottom: 20 }}>
         <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>
-          <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Equipment Maintenance & Fleet</span>
-          <span className="hidden md:inline">Equipment Maintenance & Fleet</span>
+          <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Fleet</span>
+          <span className="hidden md:inline">Fleet</span>
         </h1>
       </div>
 
