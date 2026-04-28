@@ -6,6 +6,17 @@ const timeTracking = require('../services/time-tracking');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { etParts, etDateString, addETDays, parseETDateTime, etWeekStart } = require('../utils/datetime-et');
 
+// Pure calendar arithmetic on YYYY-MM-DD strings — no timezone enters
+// because we never read hours. Use this anywhere we need a "+ N days
+// from this calendar date" string, instead of stringing together
+// addETDays + etDateString (which works but invites questions every
+// time it's audited).
+function addCalendarDaysToYMD(ymd, days) {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + days));
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+}
+
 // When an admin mutates time data on a week the tech has already
 // signed (PUT/DELETE entries, daily reject/reopen, dispute), the
 // previous attestation no longer reflects the on-record hours. Clear
@@ -779,7 +790,9 @@ router.get('/technicians/:id/earnings', requireAdmin, async (req, res, next) => 
       const offsetDays = period === 'last-week' ? -7 : 0;
       const anchor = addETDays(new Date(), offsetDays);
       from = etWeekStart(anchor);
-      to = etDateString(addETDays(parseETDateTime(`${from}T12:00`), 6));
+      // Pure calendar +6 on the YYYY-MM-DD Monday string — no
+      // timezone ambiguity since we never read hours.
+      to = addCalendarDaysToYMD(from, 6);
     }
     if (!from || !to) return res.status(400).json({ error: 'from+to (YYYY-MM-DD) or period=this-week|last-week required' });
 

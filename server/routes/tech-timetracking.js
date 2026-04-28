@@ -18,9 +18,13 @@ function mondayOfET(dateStr) {
   return etWeekStart(ref);
 }
 
-// Sunday of the ET week starting at `mondayStr` (YYYY-MM-DD).
+// Sunday of the ET week starting at `mondayStr` (YYYY-MM-DD). Pure
+// calendar +6 — no timezone enters because we never read hours from
+// the YYYY-MM-DD string.
 function sundayOfETWeek(mondayStr) {
-  return etDateString(addETDays(parseETDateTime(`${mondayStr}T12:00`), 6));
+  const [y, m, d] = mondayStr.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + 6));
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
 }
 
 // ---------------------------------------------------------------------------
