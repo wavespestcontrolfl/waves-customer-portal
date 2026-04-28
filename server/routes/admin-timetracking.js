@@ -231,7 +231,7 @@ router.get('/', requireTechOrAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /entries — paginated entries with filters
 // ---------------------------------------------------------------------------
-router.get('/entries', requireTechOrAdmin, async (req, res, next) => {
+router.get('/entries', requireAdmin, async (req, res, next) => {
   try {
     const { technicianId, startDate, endDate, entryType, status, limit, offset } = req.query;
     const result = await timeTracking.getEntries({
@@ -252,7 +252,7 @@ router.get('/entries', requireTechOrAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /entries/:id — single entry
 // ---------------------------------------------------------------------------
-router.get('/entries/:id', requireTechOrAdmin, async (req, res, next) => {
+router.get('/entries/:id', requireAdmin, async (req, res, next) => {
   try {
     const entry = await db('time_entries')
       .where('time_entries.id', req.params.id)
@@ -345,7 +345,7 @@ router.delete('/entries/:id', requireAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /daily — daily summaries with filters
 // ---------------------------------------------------------------------------
-router.get('/daily', requireTechOrAdmin, async (req, res, next) => {
+router.get('/daily', requireAdmin, async (req, res, next) => {
   try {
     const { technicianId, startDate, endDate, status } = req.query;
     const summaries = await timeTracking.getDailySummaries({ technicianId, startDate, endDate, status });
@@ -479,7 +479,7 @@ router.put('/daily/:id/reopen', requireAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /daily/:id/history — approval audit trail for a summary
 // ---------------------------------------------------------------------------
-router.get('/daily/:id/history', requireTechOrAdmin, async (req, res, next) => {
+router.get('/daily/:id/history', requireAdmin, async (req, res, next) => {
   try {
     const rows = await db('timesheet_approvals')
       .where({ daily_summary_id: req.params.id })
@@ -533,7 +533,7 @@ router.post('/daily/bulk-approve', requireAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /weekly — weekly summaries
 // ---------------------------------------------------------------------------
-router.get('/weekly', requireTechOrAdmin, async (req, res, next) => {
+router.get('/weekly', requireAdmin, async (req, res, next) => {
   try {
     const { technicianId, startDate, endDate } = req.query;
     const summaries = await timeTracking.getWeeklySummaries({ technicianId, startDate, endDate });
@@ -596,7 +596,7 @@ router.get('/payroll-export', requireAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /analytics — actual vs estimated, utilization, RPMH, overtime
 // ---------------------------------------------------------------------------
-router.get('/analytics', requireTechOrAdmin, async (req, res, next) => {
+router.get('/analytics', requireAdmin, async (req, res, next) => {
   try {
     const { startDate, endDate, technicianId } = req.query;
     const start = startDate || new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString().split('T')[0];
@@ -685,7 +685,7 @@ router.get('/analytics', requireTechOrAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /analytics/comparison — service type time comparison by tech
 // ---------------------------------------------------------------------------
-router.get('/analytics/comparison', requireTechOrAdmin, async (req, res, next) => {
+router.get('/analytics/comparison', requireAdmin, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
     const start = startDate || new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString().split('T')[0];
