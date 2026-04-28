@@ -19,7 +19,7 @@
  * Tier 1 V2 styling: uses the components/ui Tabs primitive + zinc
  * surfaces, no inline D palette.
  */
-import React, { Suspense, useState, useEffect } from 'react';
+import React, { Suspense, useState, useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import DispatchBoardPage from './DispatchBoardPage';
 
@@ -36,6 +36,7 @@ export default function AdminDispatchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const initial = searchParams.get(TAB_KEY) === TABS.SCHEDULE ? TABS.SCHEDULE : TABS.BOARD;
   const [tab, setTab] = useState(initial);
+  const tabRefs = useRef({});
 
   // Keep URL in sync without remount-thrashing the inactive tab content
   // (DispatchPageV2 in particular does its own data fetches).
@@ -48,6 +49,30 @@ export default function AdminDispatchPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
+
+  // Roving-tabindex arrow-key navigation. With tabIndex={active ? 0 : -1}
+  // the inactive tab is out of the document tab order, so keyboard users
+  // need ←/→/Home/End to switch between tabs (per the WAI-ARIA tabs
+  // pattern). Activates the new tab on focus so the panel updates too.
+  const onTabKeyDown = (e) => {
+    const idx = TAB_LIST.findIndex((t) => t.key === tab);
+    if (idx < 0) return;
+    let nextIdx = null;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+      nextIdx = (idx + 1) % TAB_LIST.length;
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+      nextIdx = (idx - 1 + TAB_LIST.length) % TAB_LIST.length;
+    } else if (e.key === 'Home') {
+      nextIdx = 0;
+    } else if (e.key === 'End') {
+      nextIdx = TAB_LIST.length - 1;
+    }
+    if (nextIdx == null) return;
+    e.preventDefault();
+    const nextKey = TAB_LIST[nextIdx].key;
+    setTab(nextKey);
+    tabRefs.current[nextKey]?.focus();
+  };
 
   return (
     <div className="flex flex-col bg-surface-page min-h-[calc(100vh-64px)]">
@@ -78,12 +103,14 @@ export default function AdminDispatchPage() {
               <button
                 key={t.key}
                 id={`dispatch-tab-${t.key}`}
+                ref={(el) => { tabRefs.current[t.key] = el; }}
                 type="button"
                 role="tab"
                 aria-selected={active}
                 aria-controls={`dispatch-tabpanel-${t.key}`}
                 tabIndex={active ? 0 : -1}
                 onClick={() => setTab(t.key)}
+                onKeyDown={onTabKeyDown}
                 style={{
                   padding: '10px 24px',
                   borderRadius: 8,
