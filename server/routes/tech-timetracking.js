@@ -151,6 +151,46 @@ router.get('/weekly', async (req, res, next) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /pending-signoff — server-anchored "what week should this tech
+// sign right now?" lookup. Returns last week's weekly summary if it
+// exists, isn't yet admin-approved, and isn't yet tech-signed.
+// Returns { weekly: null } otherwise. The TechHomePage signoff card
+// hits this so the week boundary is computed in ET on the server,
+// not via browser-local Date math (Railway runs UTC, browser may
+// not be in ET).
+// ---------------------------------------------------------------------------
+router.get('/pending-signoff', async (req, res, next) => {
+  try {
+    const todayET = etDateString(new Date());
+    const lastWeekStart = mondayOfET(etDateString(addETDays(new Date(`${todayET}T12:00:00Z`), -7)));
+
+    const hasDailies = await db('time_entry_daily_summary')
+      .where({ technician_id: req.technicianId })
+      .where('work_date', '>=', lastWeekStart)
+      .where('work_date', '<=', etDateString(addETDays(new Date(`${lastWeekStart}T12:00:00Z`), 6)))
+      .first();
+    if (!hasDailies) return res.json({ weekly: null, weekStart: lastWeekStart });
+
+    let weekly = await db('time_weekly_summary')
+      .where({ technician_id: req.technicianId, week_start: lastWeekStart })
+      .first();
+    if (!weekly) {
+      try { await timeTracking.computeWeeklySummary(req.technicianId, lastWeekStart); } catch (_) { /* noop */ }
+      weekly = await db('time_weekly_summary')
+        .where({ technician_id: req.technicianId, week_start: lastWeekStart })
+        .first();
+    }
+    if (!weekly) return res.json({ weekly: null, weekStart: lastWeekStart });
+
+    // Approved or already signed -> nothing pending.
+    if (weekly.status === 'approved' || weekly.tech_signed_at) {
+      return res.json({ weekly, weekStart: lastWeekStart, pending: false });
+    }
+    res.json({ weekly, weekStart: lastWeekStart, pending: true });
+  } catch (err) { next(err); }
+});
+
+// ---------------------------------------------------------------------------
 // POST /sign-week { weekStart: 'YYYY-MM-DD', signature: 'Tech Name' }
 //
 // Tech acknowledges their own week before admin approval. Sign-off is

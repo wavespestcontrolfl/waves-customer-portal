@@ -424,38 +424,33 @@ export default function TechHomePage() {
 // before manager approval, which is the audit value here.
 function TimecardSignoffCard({ techName }) {
   const [weekly, setWeekly] = useState(null);
+  const [weekStart, setWeekStart] = useState(null);
   const [loading, setLoading] = useState(true);
   const [signature, setSignature] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState(null); // {message, isError}
 
-  // Last Monday (in local time — matches getMonday in TimeTrackingPage).
-  const lastMonday = (() => {
-    const d = new Date();
-    d.setDate(d.getDate() - 7);
-    const day = d.getDay();
-    const diff = day === 0 ? -6 : 1 - day;
-    d.setDate(d.getDate() + diff);
-    return d.toISOString().split('T')[0];
-  })();
-
   const load = useCallback(async () => {
     setLoading(true);
     try {
+      // Server is the source of truth for "what week should this tech
+      // sign right now?" — Railway runs UTC, browser may not be in ET,
+      // so computing the boundary client-side drifts near midnight.
+      // The endpoint anchors on ET via shared helpers.
       const token = localStorage.getItem('adminToken');
-      const res = await fetch(`${API}/api/tech/timetracking/weekly?startDate=${lastMonday}&endDate=${lastMonday}`, {
+      const res = await fetch(`${API}/api/tech/timetracking/pending-signoff`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) { setWeekly(null); return; }
       const data = await res.json();
-      const row = Array.isArray(data) ? data[0] : data?.[0] || null;
-      setWeekly(row || null);
-      if (row && !signature) setSignature(techName || '');
+      setWeekly(data.weekly || null);
+      setWeekStart(data.weekStart || null);
+      if (data.weekly && !signature) setSignature(techName || '');
     } catch {
       setWeekly(null);
     }
     setLoading(false);
-  }, [lastMonday, techName, signature]);
+  }, [techName, signature]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -491,7 +486,7 @@ function TimecardSignoffCard({ techName }) {
       const r = await fetch(`${API}/api/tech/timetracking/sign-week`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ weekStart: lastMonday, signature: signature.trim() }),
+        body: JSON.stringify({ weekStart, signature: signature.trim() }),
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
@@ -512,7 +507,7 @@ function TimecardSignoffCard({ techName }) {
         Sign Last Week's Timecard
       </div>
       <div style={{ fontSize: 12, color: DARK.muted, marginBottom: 10 }}>
-        Week of {weekly.week_start ? String(weekly.week_start).split('T')[0] : lastMonday} — review and attest these hours.
+        Week of {weekly.week_start ? String(weekly.week_start).split('T')[0] : weekStart} — review and attest these hours.
       </div>
       <div style={{ display: 'flex', gap: 16, marginBottom: 12, fontSize: 13, color: DARK.text }}>
         <div><strong style={{ color: DARK.text }}>{hours}h</strong> <span style={{ color: DARK.muted }}>total</span></div>
