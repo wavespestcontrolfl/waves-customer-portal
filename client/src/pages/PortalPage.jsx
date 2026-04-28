@@ -5370,7 +5370,7 @@ function MyPlanTab({ customer }) {
         <div style={{ minWidth: 640 }}>
           {/* Header row — tier name, price, discount, current-plan badge */}
           <div style={{ display: 'grid', gridTemplateColumns: '1.4fr repeat(4, 1fr)' }}>
-            <div style={{ padding: '14px 14px 10px', fontSize: 11, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5, borderBottom: `1px solid ${B.grayLight}` }}>
+            <div style={{ padding: '14px 14px 10px', fontSize: 14, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5, borderBottom: `1px solid ${B.grayLight}` }}>
               What's included
             </div>
             {TIER_ORDER.map(tn => {
@@ -5385,15 +5385,15 @@ function MyPlanTab({ customer }) {
                   borderLeft: `1px solid ${B.grayLight}`,
                   borderBottom: `1px solid ${B.grayLight}`,
                 }}>
-                  <div style={{ fontSize: 13, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, textTransform: 'uppercase', letterSpacing: 0.4 }}>{tn}</div>
+                  <div style={{ fontSize: 14, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, textTransform: 'uppercase', letterSpacing: 0.4 }}>{tn}</div>
                   <div style={{ fontSize: 18, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui, marginTop: 2 }}>
-                    ${tierMonthly.toFixed(0)}<span style={{ fontSize: 11, color: B.grayMid, fontWeight: 400 }}>/mo</span>
+                    ${tierMonthly.toFixed(0)}<span style={{ fontSize: 14, color: B.grayMid, fontWeight: 400 }}>/mo</span>
                   </div>
-                  <div style={{ fontSize: 10, fontWeight: 600, color: disc > 0 ? B.green : B.grayMid, marginTop: 2 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: disc > 0 ? B.green : B.grayMid, marginTop: 2 }}>
                     {disc > 0 ? `${Math.round(disc * 100)}% bundle discount` : 'No bundle discount'}
                   </div>
                   {isCurrent && (
-                    <div style={{ fontSize: 9, fontWeight: 700, color: B.green, background: `${B.green}20`, padding: '2px 8px', borderRadius: 12, marginTop: 5, display: 'inline-block' }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: B.green, background: `${B.green}20`, padding: '2px 8px', borderRadius: 12, marginTop: 5, display: 'inline-block' }}>
                       YOUR PLAN
                     </div>
                   )}
@@ -5402,12 +5402,12 @@ function MyPlanTab({ customer }) {
             })}
           </div>
 
-          {/* Service rows — ✓ where included */}
+          {/* Service rows — checkmark icon where the service is included in that tier */}
           {SERVICE_CATALOG.slice(0, 4).map((svc, rowIdx) => (
             <div key={svc.id} style={{ display: 'grid', gridTemplateColumns: '1.4fr repeat(4, 1fr)' }}>
-              <div style={{ padding: '12px 14px', fontSize: 13, color: B.navy, fontWeight: 600, borderBottom: `1px solid ${B.grayLight}` }}>
+              <div style={{ padding: '12px 14px', fontSize: 14, color: B.navy, fontWeight: 600, borderBottom: `1px solid ${B.grayLight}` }}>
                 {svc.name}
-                <div style={{ fontSize: 11, color: B.grayMid, fontWeight: 400, marginTop: 2, lineHeight: 1.4 }}>
+                <div style={{ fontSize: 12, color: B.grayMid, fontWeight: 400, marginTop: 2, lineHeight: 1.4 }}>
                   {svc.description}
                 </div>
               </div>
@@ -5420,9 +5420,11 @@ function MyPlanTab({ customer }) {
                     background: isCurrent ? `${TIER[tn].color}08` : 'transparent',
                     borderLeft: `1px solid ${B.grayLight}`,
                     borderBottom: `1px solid ${B.grayLight}`,
-                    fontSize: 18, fontWeight: 700,
                     color: includes ? B.green : B.grayLight,
-                  }}>{includes ? '✓' : '—'}</div>
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  }}>
+                    {includes ? <Icon name="check" size={20} strokeWidth={2.5} /> : <span style={{ fontSize: 18, fontWeight: 700 }}>{'—'}</span>}
+                  </div>
                 );
               })}
             </div>
@@ -5430,9 +5432,9 @@ function MyPlanTab({ customer }) {
 
           {/* Member perks row — applies to all tiers */}
           <div style={{ display: 'grid', gridTemplateColumns: '1.4fr repeat(4, 1fr)' }}>
-            <div style={{ padding: '12px 14px', fontSize: 13, color: B.navy, fontWeight: 600 }}>
+            <div style={{ padding: '12px 14px', fontSize: 14, color: B.navy, fontWeight: 600 }}>
               Unlimited callbacks
-              <div style={{ fontSize: 11, color: B.grayMid, fontWeight: 400, marginTop: 2, lineHeight: 1.4 }}>
+              <div style={{ fontSize: 12, color: B.grayMid, fontWeight: 400, marginTop: 2, lineHeight: 1.4 }}>
                 Free re-treatment if pests return between scheduled visits
               </div>
             </div>
@@ -5441,8 +5443,11 @@ function MyPlanTab({ customer }) {
                 padding: '12px 8px', textAlign: 'center',
                 background: tn === tierName ? `${TIER[tn].color}08` : 'transparent',
                 borderLeft: `1px solid ${B.grayLight}`,
-                fontSize: 18, fontWeight: 700, color: B.green,
-              }}>✓</div>
+                color: B.green,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>
+                <Icon name="check" size={20} strokeWidth={2.5} />
+              </div>
             ))}
           </div>
 
@@ -5459,10 +5464,10 @@ function MyPlanTab({ customer }) {
                   borderLeft: `1px solid ${B.grayLight}`,
                 }}>
                   {isCurrent ? (
-                    <div style={{ fontSize: 11, fontWeight: 700, color: B.green }}>Current</div>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: B.green }}>Current</div>
                   ) : isUpgrade ? (
                     upgradeRequested[tn] ? (
-                      <div style={{ fontSize: 11, fontWeight: 600, color: B.green }}>Request sent</div>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: B.green }}>Request sent</div>
                     ) : (
                       <>
                         <button
@@ -5480,7 +5485,7 @@ function MyPlanTab({ customer }) {
                             }
                           }}
                           style={{
-                            ...BUTTON_BASE, padding: '6px 10px', fontSize: 11,
+                            ...BUTTON_BASE, padding: '6px 10px', fontSize: 12,
                             background: B.yellow, color: B.blueDeeper, width: '100%',
                             opacity: upgradeSubmitting[tn] ? 0.6 : 1,
                             cursor: upgradeSubmitting[tn] ? 'wait' : 'pointer',
