@@ -56,7 +56,7 @@ import CreateAppointmentModal from '../../components/schedule/CreateAppointmentM
 import HorizontalScroll from '../../components/HorizontalScroll';
 import useIsMobile from '../../hooks/useIsMobile';
 import { Button, Badge, Card, CardBody, cn } from '../../components/ui';
-import { etDateString, isETToday as isETTodayStr } from '../../lib/timezone';
+import { etDateString, etStartOfWeek, isETToday as isETTodayStr } from '../../lib/timezone';
 
 const TechMatchPanel = lazy(() => import('../../components/dispatch/TechMatchPanelV2'));
 const CSRPanel = lazy(() => import('../../components/dispatch/CSRPanelV2'));
@@ -942,7 +942,20 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
   //   - Month:         row hidden entirely.
   const isDayView = viewMode === 'day';
   const isMultiDayView = viewMode === '5day' || viewMode === 'week';
-  const useGridStats = isMultiDayView && !!gridStats;
+  // Identity-check incoming gridStats against the currently-visible range
+  // before trusting them. The reset-on-change useEffect runs after render,
+  // so a Week→Week date hop (or Week→5-Day mode swap) would briefly render
+  // the old range's totals labeled as the new range's. Comparing
+  // gridStats.startDate / dayCount to what TimeGridDays *would* compute
+  // for the current date+viewMode rejects the stale frame synchronously.
+  const expectedDayCount = viewMode === 'week' ? 7 : viewMode === '5day' ? 5 : 1;
+  // Plain const — etStartOfWeek is cheap, and a hook here would sit
+  // below the loading/error early-returns above, breaking hook order.
+  const expectedStart = isMultiDayView ? etStartOfWeek(date) : null;
+  const useGridStats = isMultiDayView
+    && !!gridStats
+    && gridStats.startDate === expectedStart
+    && gridStats.dayCount === expectedDayCount;
   const statsAvailable = isDayView || useGridStats;
 
   const AVG_SERVICE_MIN = 35;

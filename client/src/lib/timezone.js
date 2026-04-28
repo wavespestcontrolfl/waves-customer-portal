@@ -105,3 +105,19 @@ export function addETDays(date, days) {
   const et = etParts(date);
   return new Date(Date.UTC(et.year, et.month - 1, et.day + days, 12, 0, 0));
 }
+
+// ── Week start (Monday, ET) ────────────────────────────────────────
+//
+// Returns the 'YYYY-MM-DD' of the ET-Monday containing `dateStr`.
+// Sunday falls back into the *prior* Monday, matching Mon→Sun week
+// layout used by the dispatch grid.
+
+export function etStartOfWeek(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  // Noon UTC = morning ET regardless of DST, so this anchor lands on
+  // the same ET calendar day as `dateStr` and we can read its ET dow.
+  const anchor = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+  const { dayOfWeek } = etParts(anchor);
+  const offset = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+  return etDateString(addETDays(anchor, -offset));
+}
