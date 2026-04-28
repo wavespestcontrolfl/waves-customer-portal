@@ -410,8 +410,10 @@ const VIEWS = [
 function ViewToggleV2({ view, onChange }) {
   return (
     // Hidden on mobile entirely — Directory is the only mobile view, no
-    // toggle needed. Desktop renders the pill strip as before.
-    <div className="hidden sm:inline-flex sm:w-auto bg-white border-hairline border-zinc-200 rounded-sm overflow-hidden">
+    // toggle needed. Desktop renders separate gap-spaced buttons matching
+    // the Newsletter page's tab strip — uppercase tracking-label, hairline
+    // border that flips to a solid black pill when active.
+    <div className="hidden sm:flex sm:flex-wrap sm:gap-1.5">
       {VIEWS.map((v) => {
         const active = v.key === view;
         return (
@@ -420,12 +422,12 @@ function ViewToggleV2({ view, onChange }) {
             type="button"
             onClick={() => onChange(v.key)}
             className={cn(
-              'sm:flex-none u-label px-2 sm:px-3 h-11 sm:h-8 border-r-hairline border-zinc-200 last:border-r-0 transition-colors u-focus-ring',
+              'h-8 px-3 text-11 uppercase font-medium tracking-label rounded-sm border-hairline u-focus-ring transition-colors',
               v.desktopOnly && 'hidden md:inline-flex items-center justify-center',
               v.mobileOnly && 'hidden',
               active
-                ? 'bg-zinc-900 text-white'
-                : 'bg-white text-ink-secondary hover:bg-zinc-50'
+                ? 'bg-zinc-900 text-white border-zinc-900'
+                : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50',
             )}
           >
             {v.label}
