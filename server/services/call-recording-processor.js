@@ -266,6 +266,11 @@ const CallRecordingProcessor = {
     // processRecording on a 5s delay. Without this atomic claim, both
     // race through extraction and both send the confirmation SMS. Atomic
     // UPDATE → conditional exit: the first run wins, the second bails.
+    // Track the latest updated_at this run wrote, so the catch-block release
+    // below can fence on ownership: if the row's updated_at no longer matches,
+    // the 10-min stale reclaim already handed the lock to another run and we
+    // must not touch processing_status (or we'd unlock a peer mid-flight).
+    let claimUpdatedAt = new Date();
     if (!opts.force) {
       // Reclaim stale 'processing' rows older than 10 min — server crash or
       // Gemini hang between claim (this UPDATE) and terminal status write
@@ -278,7 +283,7 @@ const CallRecordingProcessor = {
           this.whereNot('processing_status', 'processing')
             .orWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
         })
-        .update({ processing_status: 'processing', updated_at: new Date() });
+        .update({ processing_status: 'processing', updated_at: claimUpdatedAt });
       if (claimed === 0) {
         logger.info(`[call-proc] Concurrent run detected for ${callSid} — skipping`);
         return { success: true, skipped: true, reason: 'already_processing' };
@@ -299,11 +304,13 @@ const CallRecordingProcessor = {
     if (call.recording_url) {
       transcription = await transcribeWithGemini(call.recording_url);
       if (transcription) {
+        const transcriptionAt = new Date();
         await db('call_log').where({ id: call.id }).update({
           transcription,
           transcription_status: 'completed',
-          updated_at: new Date(),
+          updated_at: transcriptionAt,
         });
+        claimUpdatedAt = transcriptionAt;
         logger.info(`[call-proc] Gemini transcription complete: ${transcription.length} chars`);
       }
     }
@@ -815,10 +822,23 @@ const CallRecordingProcessor = {
     } catch (procErr) {
       logger.error(`[call-proc] Unhandled error processing ${callSid}: ${procErr.message}\n${procErr.stack || ''}`);
       try {
-        await db('call_log').where({ id: call.id }).update({
-          processing_status: 'extraction_failed',
-          updated_at: new Date(),
-        });
+        // Fence on ownership: only release the lock if the row is still in
+        // 'processing' AND updated_at matches the timestamp this run wrote
+        // most recently (claim, or transcription write). If it doesn't match,
+        // the 10-min stale reclaim already gave the lock to a peer and we
+        // must leave it alone — touching it would let yet another run claim
+        // while the peer is mid-flight, duplicating side effects.
+        const released = await db('call_log')
+          .where({ id: call.id })
+          .where('processing_status', 'processing')
+          .where('updated_at', claimUpdatedAt)
+          .update({
+            processing_status: 'extraction_failed',
+            updated_at: new Date(),
+          });
+        if (released === 0) {
+          logger.warn(`[call-proc] Skipped lock release for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
+        }
       } catch (releaseErr) {
         logger.error(`[call-proc] Failed to release lock for ${callSid}: ${releaseErr.message}`);
       }
