@@ -39,6 +39,26 @@ const formatDay = formatETDay;
 const formatDate = formatETDate;
 const formatTime = formatETTime;
 
+// Joined service label for multi-service appointments. Returns the parent name
+// alone for single-service visits, "A & B" for two, and Oxford-comma style
+// "A, B, and C" for three or more. The result is persisted into
+// appointment_reminders.service_type so the cron / reschedule / cancel paths
+// inherit it automatically without re-querying addons.
+async function buildServiceLabel(scheduledServiceId, parentName) {
+  const fallback = parentName || 'service';
+  try {
+    const addons = await db('scheduled_service_addons')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .pluck('service_name');
+    const all = [parentName, ...addons].map(s => (s || '').trim()).filter(Boolean);
+    if (all.length <= 1) return fallback;
+    if (all.length === 2) return `${all[0]} & ${all[1]}`;
+    return `${all.slice(0, -1).join(', ')}, and ${all[all.length - 1]}`;
+  } catch {
+    return fallback;
+  }
+}
+
 // ── Landline detection ──
 
 async function isLandline(customerId, phone) {
@@ -157,11 +177,15 @@ const AppointmentReminders = {
         ? options.sendConfirmation
         : (source === 'booking_new' || source === 'admin_manual');
 
+      // Resolve once and persist — cron, reschedule, and cancel all read this
+      // column back, so multi-service formatting inherits without extra work.
+      const serviceLabel = await buildServiceLabel(scheduledServiceId, serviceType);
+
       const [record] = await db('appointment_reminders').insert({
         scheduled_service_id: scheduledServiceId,
         customer_id: customerId,
         appointment_time: apptTime,
-        service_type: serviceType || 'Service',
+        service_type: serviceLabel,
         source,
         confirmation_sent: false,
       }).returning('*');
@@ -181,8 +205,8 @@ const AppointmentReminders = {
 
             const body = await renderTemplate(
               'appointment_confirmation',
-              { first_name: firstName, service_type: serviceType || 'service', date, time, day },
-              `Hello ${firstName}! Your ${serviceType || 'service'} appointment has been successfully scheduled for ${date} at ${time}.\n\nPlease reply to this message if you need any assistance.`,
+              { first_name: firstName, service_type: serviceLabel, date, time, day },
+              `Hello ${firstName}! Your ${serviceLabel} appointment has been successfully scheduled for ${date} at ${time}.\n\nPlease reply to this message if you need any assistance.`,
             );
 
             const sent = await safeSend(customerId, contact.phone, body, 'confirmation');
@@ -191,7 +215,7 @@ const AppointmentReminders = {
               await db('appointment_reminders')
                 .where({ id: record.id })
                 .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
-              logger.info(`[appt-remind] Confirmation sent to ${customer.first_name} for ${serviceType}`);
+              logger.info(`[appt-remind] Confirmation sent to ${customer.first_name} for ${serviceLabel}`);
             } else {
               // Mark as sent even if landline — don't retry
               await db('appointment_reminders')
