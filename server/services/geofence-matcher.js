@@ -265,30 +265,6 @@ async function getActiveTimerDwellMinutes(techId) {
 }
 
 /**
- * Check whether an auto-flip evaluation has already run for a given
- * active timer. Used as a per-EXIT idempotency gate: a duplicate
- * webhook payload (Bouncie retry, race between dispatcher webhook
- * and live webhook) could otherwise re-enter maybeAutoFlipNextJob
- * after the first request already flipped job-N to en_route, then
- * pick job-N+1 (still 'scheduled') and fire a second SMS to the
- * wrong customer. Any prior auto_flip_* row tied to this time_entry
- * means we've already processed this departure — skip the next call.
- */
-async function isAutoFlipAlreadyEvaluatedForTimer(timeEntryId) {
-  if (!timeEntryId) return false;
-  try {
-    const row = await db('geofence_events')
-      .where({ time_entry_id: timeEntryId })
-      .where('action_taken', 'like', 'auto_flip_%')
-      .first('id');
-    return !!row;
-  } catch (err) {
-    logger.error(`[geofence-matcher] isAutoFlipAlreadyEvaluatedForTimer failed: ${err.message}`);
-    return false;
-  }
-}
-
-/**
  * Check whether an auto-flip en-route SMS was already sent to this
  * customer recently. Reads `geofence_events` for action_taken values
  * that map to a sent SMS. Used to suppress departure-then-arrival
@@ -387,7 +363,6 @@ module.exports = {
   findNextScheduledJobForTech,
   isDuplicateEnter,
   isRecentAutoFlipForCustomer,
-  isAutoFlipAlreadyEvaluatedForTimer,
   getActiveJobTimer,
   getActiveTimerDwellMinutes,
   logEvent,

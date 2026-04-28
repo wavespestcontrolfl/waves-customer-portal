@@ -503,21 +503,55 @@ async function maybeAutoFlipNextJob({ tech, exitedCustomer, activeTimer, eventTi
     event_timestamp: eventTime,
   };
 
-  // Guardrail 0: idempotency. If a prior auto_flip_* row already
-  // exists for this active timer, this is a duplicate EXIT — skip
-  // and log. Without this, two concurrent EXIT webhooks could each
-  // pass the in-flight check, both call findNextScheduledJobForTech,
-  // and end up flipping job-1 (request A) and job-2 (request B —
-  // sees job-1 already en_route, picks the one after) — sending an
-  // SMS to the wrong customer. Race window is small but real on
-  // Bouncie's at-least-once delivery semantics.
+  // Guardrail 0: atomic per-timer claim. Insert a sentinel row with
+  // action_taken='auto_flip_claim' — backed by a partial UNIQUE index
+  // (migration 20260428000001) so the FIRST concurrent caller for
+  // this time_entry_id wins the index and any later caller gets a
+  // UNIQUE violation. No race window: Postgres enforces mutual
+  // exclusion at INSERT time, not after a separate read. Without
+  // this, two concurrent EXIT webhooks could each observe no prior
+  // row, both call findNextScheduledJobForTech, and end up flipping
+  // job-1 (request A) and job-2 (request B picks the one after,
+  // since A's flip already moved track_state past 'scheduled').
   //
-  // Best-effort: if the dedupe lookup itself fails the helper
-  // returns false and we proceed; the cooldown + markEnRoute
-  // idempotency still mostly contains the blast radius.
+  // Best-effort: if the claim INSERT fails for any other reason
+  // (DB outage, no time_entry_id), we still proceed without the
+  // claim — the cooldown + markEnRoute's atomic conditional UPDATE
+  // contain most of the residual blast radius.
   if (activeTimer && activeTimer.id) {
-    const already = await matcher.isAutoFlipAlreadyEvaluatedForTimer(activeTimer.id);
-    if (already) {
+    let claimed = false;
+    try {
+      const inserted = await db('geofence_events')
+        .insert({
+          bouncie_imei: imei,
+          technician_id: tech.id,
+          event_type: 'EXIT',
+          latitude: lat,
+          longitude: lng,
+          matched_customer_id: exitedCustomer.id,
+          time_entry_id: activeTimer.id,
+          action_taken: 'auto_flip_claim',
+          raw_payload: payload ? JSON.stringify(payload) : null,
+          event_timestamp: eventTime,
+        })
+        .onConflict() // partial unique on (time_entry_id) WHERE action_taken='auto_flip_claim'
+        .ignore()
+        .returning('id');
+      claimed = Array.isArray(inserted) ? inserted.length > 0 : !!inserted;
+    } catch (err) {
+      // UNIQUE violation surfaces as an error in some Knex/PG combos;
+      // also any other DB error. In either case treat as "did not
+      // claim" — but only the violation should mean dedupe.
+      const isUnique = /unique|duplicate|conflict/i.test(err?.message || '');
+      if (isUnique) {
+        claimed = false;
+      } else {
+        logger.error(`[geofence-handler] auto_flip_claim insert failed: ${err.message}`);
+        // Proceed without the claim — best-effort posture
+        claimed = true;
+      }
+    }
+    if (!claimed) {
       await matcher.logEvent({
         ...baseLog,
         action_taken: 'auto_flip_skipped_dedupe',
@@ -634,12 +668,22 @@ async function maybeAutoFlipNextJob({ tech, exitedCustomer, activeTimer, eventTi
   }
 
   // Only log the success action_taken when markEnRoute actually
-  // committed the flip. On throw or `ok: false` (cancelled, not found,
-  // race) log auto_flip_failed instead — that value is NOT in the
-  // isRecentAutoFlipForCustomer cooldown set, so a transient failure
-  // doesn't poison the next 30 minutes by suppressing retry. Audit
-  // log captures the full result/error for forensics either way.
-  const succeeded = !threw && result && result.ok === true;
+  // committed THIS flip. markEnRoute returns ok:true on three paths:
+  //  (1) we won the atomic UPDATE → state='en_route', alreadyEnRoute:false
+  //  (2) lost the race → alreadyEnRoute:true
+  //  (3) state was already past 'scheduled' (on_property/complete) →
+  //      alreadyEnRoute may be false but state isn't 'en_route'
+  // Only path (1) is "we did the flip"; we want the action_taken to
+  // reflect that, not paths (2)/(3) where another actor already
+  // advanced the state. Treating no-ops as success would skew audit
+  // counters and trigger cooldown suppression on customers we never
+  // actually contacted. Throws + ok:false (cancelled, not found) also
+  // log auto_flip_failed — that value is NOT in the cooldown set.
+  const succeeded = !threw
+    && result
+    && result.ok === true
+    && result.state === 'en_route'
+    && result.alreadyEnRoute === false;
   await matcher.logEvent({
     ...baseLog,
     matched_customer_id: nextJob.customer_id,
