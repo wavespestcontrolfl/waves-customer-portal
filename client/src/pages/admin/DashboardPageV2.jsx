@@ -236,15 +236,7 @@ export default function DashboardPageV2() {
         </ChartCard>
         <ChartCard
           title="Estimate Funnel"
-          sub={
-            funnel?.period
-              ? `${funnel.period.from} → ${funnel.period.to}${
-                  funnel.excluded_internal_customers?.length
-                    ? ` · excludes ${funnel.excluded_internal_customers.join(', ')}`
-                    : ''
-                }`
-              : ''
-          }
+          sub={funnel?.period ? `${funnel.period.from} → ${funnel.period.to}` : ''}
         >
           <EstimateFunnel
             funnel={funnel?.funnel || {}}
@@ -428,11 +420,7 @@ export default function DashboardPageV2() {
           title="Leads by Source"
           sub={
             leadsBySource?.total_leads != null
-              ? `${leadsBySource.total_leads} leads · ${leadsBySource.overall_conversion_pct ?? 0}% booked · ${leadsBySource.period?.label || 'MTD'}${
-                  leadsBySource.excluded_internal_customers?.length
-                    ? ` · excludes ${leadsBySource.excluded_internal_customers.join(', ')}`
-                    : ''
-                }`
+              ? `${leadsBySource.total_leads} leads · ${leadsBySource.overall_conversion_pct ?? 0}% booked · ${leadsBySource.period?.label || 'MTD'}`
               : ''
           }
         >
@@ -440,15 +428,7 @@ export default function DashboardPageV2() {
         </ChartCard>
         <ChartCard
           title="Channel Mix"
-          sub={
-            channelMix?.total_leads != null
-              ? `${channelMix.total_leads} leads by first-contact channel${
-                  channelMix.excluded_internal_customers?.length
-                    ? ` · excludes ${channelMix.excluded_internal_customers.join(', ')}`
-                    : ''
-                }`
-              : ''
-          }
+          sub={channelMix?.total_leads != null ? `${channelMix.total_leads} leads by first-contact channel` : ''}
         >
           <ChannelMixDonut channels={channelMix?.channels || []} />
         </ChartCard>
@@ -463,26 +443,6 @@ export default function DashboardPageV2() {
 
       {/* Billing Health — kept as a peer panel per user instruction */}
       {billing && <BillingHealthPanel summary={billing} />}
-
-      {/* Quick actions */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-5">
-        {[
-          { label: 'New Estimate',    path: '/admin/estimates' },
-          { label: 'New Customer',    path: '/admin/customers' },
-          { label: 'Review Request',  path: '/admin/reviews' },
-          { label: 'Property Lookup', path: '/admin/estimates' },
-        ].map((a) => (
-          <a
-            key={a.label}
-            href={a.path}
-            className="block bg-white border-hairline border-zinc-200 rounded-md px-4 py-5 text-center no-underline u-focus-ring hover:bg-zinc-50 max-md:border-0 max-md:shadow-sm max-md:rounded-xl"
-          >
-            <div className="u-label text-ink-secondary max-md:text-14 max-md:font-medium max-md:normal-case max-md:tracking-normal max-md:text-zinc-900">
-              {a.label}
-            </div>
-          </a>
-        ))}
-      </div>
     </div>
   );
 }
@@ -491,7 +451,7 @@ function pct(n) { return n == null ? '—' : `${n}%`; }
 
 function SectionLabel({ children }) {
   return (
-    <div className="u-label text-ink-secondary pb-2 mb-3 border-b border-hairline border-zinc-200 mt-4 first:mt-0">
+    <div className="u-label text-ink-secondary pb-2 mb-3 mt-4 first:mt-0">
       {children}
     </div>
   );

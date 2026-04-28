@@ -748,21 +748,47 @@ function resolveAttributionWindow(period) {
 router.get('/calls-by-source', async (req, res, next) => {
   try {
     const win = resolveAttributionWindow(req.query.period);
+    // Match call_log.to_phone against lead_sources by last 10 digits so
+    // legacy imports stored as '9413187612' / '(941) 318-7612' (see
+    // admin-import-sheets.js #L140) line up with the seeded E.164 number.
+    // Without this, +19413187612 (GBP — Lakewood Ranch) and the bare
+    // 9413187612 imports show up as two rows — one mapped, one Unmapped.
     const rows = await db('call_log as c')
-      .leftJoin('lead_sources as s', 'c.to_phone', 's.twilio_phone_number')
+      .leftJoin(
+        'lead_sources as s',
+        db.raw("RIGHT(REGEXP_REPLACE(c.to_phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE(s.twilio_phone_number, '\\D', '', 'g'), 10)"),
+      )
       .where('c.direction', 'inbound')
+      // Dormant lead_sources rows (e.g. the unpublished AI Agent number)
+      // would otherwise surface stray wrong-number / spam calls in the
+      // attribution panel. Keep the seed row for registry purposes and
+      // drop it from the dashboard instead.
+      .where((qb) => qb.where('s.is_active', true).orWhereNull('s.is_active'))
       .whereBetween('c.created_at', [`${win.from}T00:00:00`, `${win.to}T23:59:59`])
       .select(
-        db.raw("COALESCE(s.name, 'Unmapped — ' || c.to_phone) as name"),
+        // Unmapped rows: render a stable last-10-digit label instead of
+        // whatever raw format the legacy importer happened to store.
+        db.raw(
+          "COALESCE(s.name, 'Unmapped — ' || RIGHT(REGEXP_REPLACE(c.to_phone, '\\D', '', 'g'), 10)) as name",
+        ),
         db.raw("s.source_type as source_type"),
         db.raw("s.channel as channel"),
         db.raw("s.is_active as is_active"),
-        db.raw("c.to_phone as to_phone"),
+        // Pick one representative to_phone per group for the API response.
+        db.raw("MAX(c.to_phone) as to_phone"),
         db.raw('COUNT(*) as calls'),
         db.raw('COUNT(DISTINCT c.from_phone) as unique_callers'),
         db.raw('COUNT(c.customer_id) as linked_to_customer'),
       )
-      .groupBy('s.name', 's.source_type', 's.channel', 's.is_active', 'c.to_phone')
+      // Group by the normalized last-10-digit key so two rows for the
+      // same number in different formats collapse into one panel entry.
+      .groupBy(
+        's.name',
+        's.source_type',
+        's.channel',
+        's.is_active',
+        db.raw("RIGHT(REGEXP_REPLACE(c.to_phone, '\\D', '', 'g'), 10)"),
+      )
       .orderByRaw('COUNT(*) DESC');
 
     const total = rows.reduce((acc, r) => acc + parseInt(r.calls), 0);

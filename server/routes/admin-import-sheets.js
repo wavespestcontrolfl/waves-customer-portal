@@ -133,11 +133,22 @@ router.post('/calls', async (req, res, next) => {
         .where('phone', 'like', `%${cleanPhone.slice(-10)}`)
         .first();
 
+      // Normalize to E.164 so JOINs against lead_sources.twilio_phone_number
+      // line up. Sheet rows historically held formats like '9413187612' or
+      // '(941) 318-7612', which produced an "Unmapped — …" duplicate of
+      // GBP — Lakewood Ranch in the dashboard's Calls by Source panel.
+      const wavesDigits = (wavesPhone || '').replace(/\D/g, '');
+      const wavesE164 = wavesDigits.length === 10
+        ? `+1${wavesDigits}`
+        : wavesDigits.length === 11
+          ? `+${wavesDigits}`
+          : wavesPhone || null;
+
       await db('call_log').insert({
         customer_id: customer?.id || null,
         direction: 'inbound',
         from_phone: normalizedPhone,
-        to_phone: wavesPhone || null,
+        to_phone: wavesE164,
         status: 'completed',
         answered_by: 'human',
         recording_url: recordingUrl || null,
