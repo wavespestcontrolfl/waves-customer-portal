@@ -3,10 +3,91 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const timeTracking = require('../services/time-tracking');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
-const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { etParts, etDateString, addETDays, parseETDateTime, etWeekStart } = require('../utils/datetime-et');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+// Pure calendar arithmetic on YYYY-MM-DD strings — no timezone enters
+// because we never read hours. Use this anywhere we need a "+ N days
+// from this calendar date" string, instead of stringing together
+// addETDays + etDateString (which works but invites questions every
+// time it's audited).
+function addCalendarDaysToYMD(ymd, days) {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + days));
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+}
+
+// Convert a SQL DATE column to YYYY-MM-DD WITHOUT going through the
+// ET shift. pg+knex returns DATE as either a Date at UTC midnight or
+// a YYYY-MM-DD string; both yield the same calendar day via
+// toISOString().slice(0,10), unlike etDateString(new Date(d)) which
+// would push UTC midnight back to the prior ET day.
+function dateColumnToYMD(value) {
+  if (value == null) return null;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
+// When an admin mutates time data on a week the tech has already
+// signed (PUT/DELETE entries, daily reject/reopen, dispute), the
+// previous attestation no longer reflects the on-record hours. Clear
+// the sign-off so the tech has to re-sign after seeing the corrected
+// data. No-ops on already-approved weeks (admin-side approval is the
+// terminal lock; we don't reach into a locked row from here).
+async function clearTechSignoffForWeek(technicianId, ymd, trx) {
+  if (!technicianId || !ymd || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return;
+  // ymd MUST be a YYYY-MM-DD string. Callers convert timestamps via
+  // etDateString(new Date(timestamp)) and DATE columns via the
+  // dateColumnToYMD helper — passing a Date directly would re-introduce
+  // the UTC-midnight-vs-ET confusion (Mon UTC-midnight is Sun in ET,
+  // so etDateString would shift the wrong way for a DATE column while
+  // being correct for a real timestamp).
+  const weekStart = etWeekStart(parseETDateTime(`${ymd}T12:00`));
+  await (trx || db)('time_weekly_summary')
+    .where({ technician_id: technicianId, week_start: weekStart })
+    .whereNot({ status: 'approved' })
+    .whereNotNull('tech_signed_at')
+    .update({ tech_signed_at: null, tech_signature: null, updated_at: new Date() });
+}
+
+// Authentication is router-wide; authorization is per-route. The
+// previous setup mounted requireTechOrAdmin at the router level, but
+// that pattern is harder to audit when individual routes also stack
+// requireAdmin on top — readers (and code-review tools) have to
+// reason about whether the chain still flows. Each route now
+// declares its access scope inline: tech-or-admin reads/edits get
+// requireTechOrAdmin, admin-only payroll/PII paths get requireAdmin.
+router.use(adminAuthenticate);
+
+// Allowlist of `technicians` columns safe to expose to tech-role
+// callers (other techs hitting GET /technicians for a roster view).
+// Allowlist over denylist — an unknown future column added to the
+// table (auth tokens, password resets, anything HR adds) defaults to
+// "not exposed" instead of "leaked until somebody updates the
+// denylist." password_hash specifically lives on this table.
+const PUBLIC_TECH_FIELDS = [
+  'id', 'name', 'phone', 'email', 'role',
+  'active', 'auto_flip_enabled',
+  'avatar_url',
+  'created_at', 'updated_at',
+];
+
+function sanitizeTechForNonAdmin(tech) {
+  const out = {};
+  for (const f of PUBLIC_TECH_FIELDS) {
+    if (f in tech) out[f] = tech[f];
+  }
+  return out;
+}
+
+// Authoritative admin check — reads from req.technician.role (the
+// full DB row attached by adminAuthenticate), not the parallel
+// req.techRole convenience field, so renaming/drift on the convenience
+// field can't cause this to fail open. Fails closed: any missing
+// piece treats the caller as non-admin.
+function isAdminCaller(req) {
+  return !!(req.technician && req.technician.role === 'admin');
+}
 
 // Auto-create tables if missing
 async function ensureTables() {
@@ -52,7 +133,7 @@ async function ensureTables() {
 // ---------------------------------------------------------------------------
 // GET /  — Dashboard: who's clocked in, today's labor, weekly stats
 // ---------------------------------------------------------------------------
-router.get('/', async (req, res, next) => {
+router.get('/', requireTechOrAdmin, async (req, res, next) => {
   try {
     await ensureTables();
     const today = etDateString(new Date());
@@ -101,8 +182,38 @@ router.get('/', async (req, res, next) => {
       .leftJoin('technicians', 'time_entry_daily_summary.technician_id', 'technicians.id')
       .select('time_entry_daily_summary.*', 'technicians.name as tech_name');
 
-    // All technicians for status display
-    const allTechs = await db('technicians').where({ active: true }).select('id', 'name', 'role');
+    // All technicians for status display. pay_rate flows through
+    // so the dashboard can compute labor cost at per-tech rates
+    // instead of the legacy hardcoded $35 — admin only. Tech-role
+    // callers (dispatch, status displays) get the same row shape with
+    // pay_rate stripped so they never see coworker wages.
+    const techCols = ['id', 'name', 'role'];
+    if (isAdminCaller(req)) techCols.push('pay_rate');
+    const activeTechs = await db('technicians')
+      .where({ active: true })
+      .select(techCols);
+    // Pull rates for any inactive tech that still has activity in
+    // todaySummaries / weekDailies / activeShifts so labor-cost
+    // calculations don't silently fall back to the $35 default. A
+    // tech deactivated mid-day still earned their configured rate
+    // for the hours worked. Admin only — tech-role responses never
+    // got pay_rate to start with.
+    let allTechs = activeTechs;
+    if (isAdminCaller(req)) {
+      const activityIds = new Set([
+        ...todaySummaries.map(s => s.technician_id),
+        ...weekDailies.map(d => d.technician_id),
+        ...liveStatus.map(s => s.technician_id),
+      ]);
+      const knownIds = new Set(activeTechs.map(t => t.id));
+      const missingIds = [...activityIds].filter(id => id && !knownIds.has(id));
+      if (missingIds.length) {
+        const inactiveActive = await db('technicians')
+          .whereIn('id', missingIds)
+          .select(techCols);
+        allTechs = [...activeTechs, ...inactiveActive];
+      }
+    }
 
     res.json({
       activeShifts: liveStatus,
@@ -120,7 +231,7 @@ router.get('/', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /entries — paginated entries with filters
 // ---------------------------------------------------------------------------
-router.get('/entries', async (req, res, next) => {
+router.get('/entries', requireAdmin, async (req, res, next) => {
   try {
     const { technicianId, startDate, endDate, entryType, status, limit, offset } = req.query;
     const result = await timeTracking.getEntries({
@@ -141,7 +252,7 @@ router.get('/entries', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /entries/:id — single entry
 // ---------------------------------------------------------------------------
-router.get('/entries/:id', async (req, res, next) => {
+router.get('/entries/:id', requireAdmin, async (req, res, next) => {
   try {
     const entry = await db('time_entries')
       .where('time_entries.id', req.params.id)
@@ -166,11 +277,18 @@ router.get('/entries/:id', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // PUT /entries/:id — admin edit (requires edit_reason)
 // ---------------------------------------------------------------------------
-router.put('/entries/:id', async (req, res, next) => {
+router.put('/entries/:id', requireAdmin, async (req, res, next) => {
   try {
     const { clock_in, clock_out, entry_type, notes, edit_reason } = req.body;
     if (!edit_reason) return res.status(400).json({ error: 'edit_reason is required' });
 
+    // Capture the pre-edit clock_in so we can also invalidate the
+    // OLD week's sign-off when an admin moves an entry across week
+    // boundaries — both the source and destination weeks have changed
+    // totals, so neither tech attestation should survive.
+    const prior = await db('time_entries')
+      .where({ id: req.params.id })
+      .first('technician_id', 'clock_in');
     const updated = await timeTracking.adminEditEntry(req.params.id, {
       clock_in,
       clock_out,
@@ -179,6 +297,24 @@ router.put('/entries/:id', async (req, res, next) => {
       edit_reason,
       edited_by: req.technicianId,
     });
+    if (updated && updated.technician_id) {
+      // clock_in is a TIMESTAMP — convert to its ET calendar day
+      // before passing to the YMD-only helper.
+      const updatedYmd = etDateString(new Date(updated.clock_in));
+      await clearTechSignoffForWeek(updated.technician_id, updatedYmd);
+      // If the entry moved across weeks OR was reassigned to a
+      // different tech, the SOURCE tech's source week also has
+      // changed totals — clear that with the prior tech_id, not the
+      // new one. (Passing updated.technician_id here would clear the
+      // wrong row on a reassignment.)
+      if (prior && prior.clock_in && prior.technician_id && (
+        String(prior.clock_in) !== String(updated.clock_in) ||
+        prior.technician_id !== updated.technician_id
+      )) {
+        const priorYmd = etDateString(new Date(prior.clock_in));
+        await clearTechSignoffForWeek(prior.technician_id, priorYmd);
+      }
+    }
     res.json(updated);
   } catch (err) {
     next(err);
@@ -188,13 +324,18 @@ router.put('/entries/:id', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // DELETE /entries/:id — void entry
 // ---------------------------------------------------------------------------
-router.delete('/entries/:id', async (req, res, next) => {
+router.delete('/entries/:id', requireAdmin, async (req, res, next) => {
   try {
     const { reason } = req.body || {};
     const voided = await timeTracking.voidEntry(req.params.id, {
       reason: reason || 'Admin voided',
       voided_by: req.technicianId,
     });
+    if (voided && voided.technician_id) {
+      // clock_in is a TIMESTAMP — convert to its ET calendar day.
+      const voidedYmd = etDateString(new Date(voided.clock_in));
+      await clearTechSignoffForWeek(voided.technician_id, voidedYmd);
+    }
     res.json(voided);
   } catch (err) {
     next(err);
@@ -204,7 +345,7 @@ router.delete('/entries/:id', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /daily — daily summaries with filters
 // ---------------------------------------------------------------------------
-router.get('/daily', async (req, res, next) => {
+router.get('/daily', requireAdmin, async (req, res, next) => {
   try {
     const { technicianId, startDate, endDate, status } = req.query;
     const summaries = await timeTracking.getDailySummaries({ technicianId, startDate, endDate, status });
@@ -257,7 +398,7 @@ async function notifyTechOfApproval(summary, action, reason) {
 // ---------------------------------------------------------------------------
 // PUT /daily/:id/approve — approve a daily summary
 // ---------------------------------------------------------------------------
-router.put('/daily/:id/approve', async (req, res, next) => {
+router.put('/daily/:id/approve', requireAdmin, async (req, res, next) => {
   try {
     const prior = await db('time_entry_daily_summary').where({ id: req.params.id }).first();
     if (!prior) return res.status(404).json({ error: 'Summary not found' });
@@ -281,7 +422,7 @@ router.put('/daily/:id/approve', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // PUT /daily/:id/reject — reject a daily summary with reason
 // ---------------------------------------------------------------------------
-router.put('/daily/:id/reject', async (req, res, next) => {
+router.put('/daily/:id/reject', requireAdmin, async (req, res, next) => {
   try {
     const { reason } = req.body || {};
     if (!reason || !reason.trim()) {
@@ -300,6 +441,9 @@ router.put('/daily/:id/reject', async (req, res, next) => {
       })
       .returning('*');
     await recordApprovalAudit(prior, 'rejected', req.technicianId, reason);
+    // work_date is a SQL DATE column — format directly as YMD so we
+    // don't shift through ET (UTC midnight Date would drop a day).
+    await clearTechSignoffForWeek(updated.technician_id, dateColumnToYMD(updated.work_date));
     notifyTechOfApproval(updated, 'rejected', reason);
     res.json(updated);
   } catch (err) {
@@ -310,7 +454,7 @@ router.put('/daily/:id/reject', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // PUT /daily/:id/reopen — return an approved/rejected summary to pending
 // ---------------------------------------------------------------------------
-router.put('/daily/:id/reopen', async (req, res, next) => {
+router.put('/daily/:id/reopen', requireAdmin, async (req, res, next) => {
   try {
     const prior = await db('time_entry_daily_summary').where({ id: req.params.id }).first();
     if (!prior) return res.status(404).json({ error: 'Summary not found' });
@@ -324,6 +468,7 @@ router.put('/daily/:id/reopen', async (req, res, next) => {
       })
       .returning('*');
     await recordApprovalAudit(prior, 'reopened', req.technicianId, req.body?.reason || null);
+    await clearTechSignoffForWeek(updated.technician_id, dateColumnToYMD(updated.work_date));
     notifyTechOfApproval(updated, 'reopened');
     res.json(updated);
   } catch (err) {
@@ -334,7 +479,7 @@ router.put('/daily/:id/reopen', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /daily/:id/history — approval audit trail for a summary
 // ---------------------------------------------------------------------------
-router.get('/daily/:id/history', async (req, res, next) => {
+router.get('/daily/:id/history', requireAdmin, async (req, res, next) => {
   try {
     const rows = await db('timesheet_approvals')
       .where({ daily_summary_id: req.params.id })
@@ -357,7 +502,7 @@ router.get('/daily/:id/history', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // POST /daily/bulk-approve — approve multiple daily summaries
 // ---------------------------------------------------------------------------
-router.post('/daily/bulk-approve', async (req, res, next) => {
+router.post('/daily/bulk-approve', requireAdmin, async (req, res, next) => {
   try {
     const { ids } = req.body;
     if (!ids || !Array.isArray(ids) || ids.length === 0) {
@@ -388,7 +533,7 @@ router.post('/daily/bulk-approve', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /weekly — weekly summaries
 // ---------------------------------------------------------------------------
-router.get('/weekly', async (req, res, next) => {
+router.get('/weekly', requireAdmin, async (req, res, next) => {
   try {
     const { technicianId, startDate, endDate } = req.query;
     const summaries = await timeTracking.getWeeklySummaries({ technicianId, startDate, endDate });
@@ -401,7 +546,7 @@ router.get('/weekly', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /payroll-export — CSV export for a week
 // ---------------------------------------------------------------------------
-router.get('/payroll-export', async (req, res, next) => {
+router.get('/payroll-export', requireAdmin, async (req, res, next) => {
   try {
     const { weekStart } = req.query;
     if (!weekStart) return res.status(400).json({ error: 'weekStart required (YYYY-MM-DD, Monday)' });
@@ -451,7 +596,7 @@ router.get('/payroll-export', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /analytics — actual vs estimated, utilization, RPMH, overtime
 // ---------------------------------------------------------------------------
-router.get('/analytics', async (req, res, next) => {
+router.get('/analytics', requireAdmin, async (req, res, next) => {
   try {
     const { startDate, endDate, technicianId } = req.query;
     const start = startDate || new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString().split('T')[0];
@@ -540,7 +685,7 @@ router.get('/analytics', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /analytics/comparison — service type time comparison by tech
 // ---------------------------------------------------------------------------
-router.get('/analytics/comparison', async (req, res, next) => {
+router.get('/analytics/comparison', requireAdmin, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
     const start = startDate || new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString().split('T')[0];
@@ -576,8 +721,12 @@ router.get('/analytics/comparison', async (req, res, next) => {
 // TECHNICIAN MANAGEMENT — CRUD
 // ═══════════════════════════════════════════════════════════════════
 
-// GET /technicians — list all technicians (including inactive)
-router.get('/technicians', async (req, res, next) => {
+// GET /technicians — list all technicians (including inactive).
+// Tech-role tokens get the rows with payroll/PII columns stripped;
+// admin tokens get the full rows. Keeping the route accessible to
+// techs preserves the pre-existing dispatch/team-roster use cases
+// without exposing each coworker's wage, DOB, address, etc.
+router.get('/technicians', requireTechOrAdmin, async (req, res, next) => {
   try {
     const techs = await db('technicians').orderBy('active', 'desc').orderBy('name');
     // Presign photo_s3_key into avatar_url for the response. After
@@ -586,16 +735,48 @@ router.get('/technicians', async (req, res, next) => {
     // resolve to a fresh presigned URL inside their own auth boundary.
     // This route is admin-authed so presigning is safe.
     const { resolveTechPhotoUrl } = require('../services/tech-photo');
-    const enriched = await Promise.all(techs.map(async (t) => ({
-      ...t,
-      avatar_url: await resolveTechPhotoUrl(t.photo_s3_key, t.avatar_url),
-    })));
+    const callerIsAdmin = isAdminCaller(req);
+    const enriched = await Promise.all(techs.map(async (t) => {
+      const row = {
+        ...t,
+        avatar_url: await resolveTechPhotoUrl(t.photo_s3_key, t.avatar_url),
+      };
+      return callerIsAdmin ? row : sanitizeTechForNonAdmin(row);
+    }));
     res.json({ technicians: enriched });
   } catch (err) { next(err); }
 });
 
-// POST /technicians — add a new technician
-router.post('/technicians', async (req, res, next) => {
+// Map camelCase payroll-profile fields from the client to snake_case
+// columns. Each mapping is conditional — undefined leaves the column
+// alone, explicit '' or null clears it. ssn_last4 is normalized to
+// the trailing 4 digits in case the form passed a longer string.
+function applyPayrollProfileFields(updates, body) {
+  const map = {
+    payRate: 'pay_rate',
+    hireDate: 'hire_date',
+    jobTitle: 'job_title',
+    employmentType: 'employment_type',
+    address: 'address',
+    dob: 'dob',
+    emergencyContactName: 'emergency_contact_name',
+    emergencyContactPhone: 'emergency_contact_phone',
+  };
+  for (const [k, col] of Object.entries(map)) {
+    if (body[k] !== undefined) updates[col] = body[k] === '' ? null : body[k];
+  }
+  if (body.ssnLast4 !== undefined) {
+    const digits = String(body.ssnLast4 || '').replace(/\D/g, '').slice(-4);
+    updates.ssn_last4 = digits || null;
+  }
+}
+
+// POST /technicians — add a new technician. Admin only because the
+// payload now carries payroll/PII fields (pay_rate, DOB, address,
+// SSN-4, emergency contact). Pre-existing route protection was
+// requireTechOrAdmin; tightening to requireAdmin since we widened
+// the body shape.
+router.post('/technicians', requireAdmin, async (req, res, next) => {
   try {
     const { name, phone, email, autoFlipEnabled } = req.body;
     if (!name || !name.trim()) return res.status(400).json({ error: 'Name is required' });
@@ -612,14 +793,19 @@ router.post('/technicians', async (req, res, next) => {
     // the tech out. Falsy explicit value → false; undefined → leave
     // it to the column DEFAULT.
     if (autoFlipEnabled !== undefined) insertRow.auto_flip_enabled = !!autoFlipEnabled;
+    applyPayrollProfileFields(insertRow, req.body);
     const [tech] = await db('technicians').insert(insertRow).returning('*');
-    logger.info(`[team] Added technician: ${tech.name} (auto_flip_enabled=${tech.auto_flip_enabled})`);
+    // Log id + structural state only; the row now carries payroll/PII
+    // so names stay out of logs per AGENTS.md.
+    logger.info(`[team] Added technician id=${tech.id} (auto_flip_enabled=${tech.auto_flip_enabled})`);
     res.json({ success: true, technician: tech });
   } catch (err) { next(err); }
 });
 
-// PUT /technicians/:id — update a technician
-router.put('/technicians/:id', async (req, res, next) => {
+// PUT /technicians/:id — update a technician. Admin only — same
+// reasoning as POST: techs must not be able to edit their own (or
+// anyone else's) pay rate, DOB, SSN, address, or emergency contact.
+router.put('/technicians/:id', requireAdmin, async (req, res, next) => {
   try {
     const { name, phone, email, active, autoFlipEnabled } = req.body;
     const updates = {};
@@ -632,11 +818,116 @@ router.put('/technicians/:id', async (req, res, next) => {
     // action_taken='auto_flip_skipped_tech_disabled'. Default TRUE on
     // the column so existing rows keep current behavior.
     if (autoFlipEnabled !== undefined) updates.auto_flip_enabled = !!autoFlipEnabled;
+    applyPayrollProfileFields(updates, req.body);
     updates.updated_at = new Date();
     await db('technicians').where({ id: req.params.id }).update(updates);
     const tech = await db('technicians').where({ id: req.params.id }).first();
-    logger.info(`[team] Updated technician: ${tech.name} (active=${tech.active}, auto_flip_enabled=${tech.auto_flip_enabled})`);
+    logger.info(`[team] Updated technician id=${tech.id} (active=${tech.active}, auto_flip_enabled=${tech.auto_flip_enabled})`);
     res.json({ success: true, technician: tech });
+  } catch (err) { next(err); }
+});
+
+// GET /technicians/:id/earnings — hours × pay_rate breakdown for a
+// window. OT pays at 1.5×. Falls back to $35/hr if pay_rate is unset
+// (matches the legacy hardcoded LABOR_RATE so dashboards stay
+// consistent). Admin only — payroll info, even one tech's own, isn't
+// a tech-role surface.
+//
+// Window is selected via either:
+//   - period=this-week | last-week  (server anchors on ET, preferred)
+//   - from=YYYY-MM-DD & to=YYYY-MM-DD (explicit, for ad-hoc windows)
+//
+// Clients should prefer ?period= so week boundaries don't drift on
+// browsers outside ET or near midnight.
+router.get('/technicians/:id/earnings', requireAdmin, async (req, res, next) => {
+  try {
+    const tech = await db('technicians').where({ id: req.params.id }).first();
+    if (!tech) return res.status(404).json({ error: 'Technician not found' });
+
+    let { from, to } = req.query;
+    const { period } = req.query;
+    if (period === 'this-week' || period === 'last-week') {
+      const offsetDays = period === 'last-week' ? -7 : 0;
+      const anchor = addETDays(new Date(), offsetDays);
+      from = etWeekStart(anchor);
+      // Pure calendar +6 on the YYYY-MM-DD Monday string — no
+      // timezone ambiguity since we never read hours.
+      to = addCalendarDaysToYMD(from, 6);
+    }
+    if (!from || !to) return res.status(400).json({ error: 'from+to (YYYY-MM-DD) or period=this-week|last-week required' });
+    // Validate shape AND calendar-validity before parseETDateTime —
+    // bad shape (`from=bad`) would throw "Invalid time value" → 500;
+    // an invalid date like `2026-02-31` would silently overflow to
+    // `2026-03-03` and return earnings for the wrong window.
+    const ymdRe = /^\d{4}-\d{2}-\d{2}$/;
+    const realDate = (s) => {
+      if (!ymdRe.test(s)) return false;
+      const [y, m, d] = s.split('-').map(Number);
+      const dt = new Date(Date.UTC(y, m - 1, d));
+      return dt.getUTCFullYear() === y && dt.getUTCMonth() + 1 === m && dt.getUTCDate() === d;
+    };
+    if (!realDate(from) || !realDate(to)) {
+      return res.status(400).json({ error: 'from/to must be a valid YYYY-MM-DD calendar date' });
+    }
+    if (from > to) {
+      return res.status(400).json({ error: 'from must be on or before to' });
+    }
+
+    // Recompute the weekly summaries that overlap the window before
+    // reading dailies. time_entry_daily_summary.overtime_minutes is
+    // populated by computeWeeklySummary as a per-day allocation of
+    // weekly OT, and admin entry edits clear sign-off but don't always
+    // re-run that compute, so OT minutes can be stale → wrong gross
+    // pay. Iterating week starts is bounded (one call per ISO week
+    // in the window).
+    const firstWeekStart = etWeekStart(parseETDateTime(`${from}T12:00`));
+    const lastWeekStart = etWeekStart(parseETDateTime(`${to}T12:00`));
+    let cursor = firstWeekStart;
+    while (cursor <= lastWeekStart) {
+      try { await timeTracking.computeWeeklySummary(tech.id, cursor); } catch (_) { /* noop */ }
+      cursor = addCalendarDaysToYMD(cursor, 7);
+    }
+
+    const rows = await db('time_entry_daily_summary')
+      .where({ technician_id: tech.id })
+      .where('work_date', '>=', from)
+      .where('work_date', '<=', to)
+      .select('work_date', 'total_shift_minutes', 'overtime_minutes', 'job_count');
+
+    const totalMin = rows.reduce((s, r) => s + parseFloat(r.total_shift_minutes || 0), 0);
+    const otMin = rows.reduce((s, r) => s + parseFloat(r.overtime_minutes || 0), 0);
+    const regMin = Math.max(0, totalMin - otMin);
+
+    const rate = parseFloat(tech.pay_rate) > 0 ? parseFloat(tech.pay_rate) : 35;
+    // Round line items to cents and reconcile gross from those rounded
+    // components so the response is internally self-consistent — the
+    // earnings modal renders reg + ot + gross side by side, and admins
+    // double-checking payroll should never see line items that don't
+    // sum to the displayed gross. computeDailySummary leaves zero rows
+    // in place after voids, so daysWorked filters on actual worked
+    // time too.
+    const regularPay = Number(((regMin / 60) * rate).toFixed(2));
+    const overtimePay = Number(((otMin / 60) * rate * 1.5).toFixed(2));
+    const grossPay = Number((regularPay + overtimePay).toFixed(2));
+    const daysWorked = rows.filter(r =>
+      parseFloat(r.total_shift_minutes || 0) > 0 || (r.job_count || 0) > 0
+    ).length;
+
+    res.json({
+      technicianId: tech.id,
+      technicianName: tech.name,
+      from,
+      to,
+      payRate: rate,
+      payRateSource: parseFloat(tech.pay_rate) > 0 ? 'tech' : 'default',
+      regularMinutes: regMin,
+      overtimeMinutes: otMin,
+      totalMinutes: totalMin,
+      regularPay,
+      overtimePay,
+      grossPay,
+      daysWorked,
+    });
   } catch (err) { next(err); }
 });
 
@@ -668,6 +959,17 @@ router.put('/technicians/:id', async (req, res, next) => {
 const PHOTO_PREFIX = 'tech-photos/';
 router.post(
   '/technicians/:id/photo',
+  // Two-stage gate: requireTechOrAdmin first to reject any role that
+  // isn't admin/technician (matches every other route on this file
+  // now that router-level role gating is gone), then a stricter
+  // self-or-admin guard so a tech-role token can only update its
+  // own photo, not a coworker's row.
+  requireTechOrAdmin,
+  (req, res, next) => {
+    if (isAdminCaller(req)) return next();
+    if (req.params.id && req.technicianId && req.params.id === req.technicianId) return next();
+    return res.status(403).json({ error: 'Can only update your own photo' });
+  },
   (req, res, next) => upload.single('photo')(req, res, next),
   async (req, res, next) => {
     try {
@@ -696,12 +998,18 @@ router.post(
       // Return the row with avatar_url presigned from the new
       // photo_s3_key — same shape as GET /technicians, so the
       // client can render the new photo immediately without a
-      // follow-up GET.
+      // follow-up GET. Sanitize for non-admin callers since the
+      // technicians row now carries payroll/PII columns; this route
+      // is requireTechOrAdmin pre-this-PR and we keep that gate so a
+      // tech-side avatar update path (if/when we add one) doesn't
+      // 403, but tech-role responses get the same private columns
+      // stripped as GET /technicians does.
       const updated = await db('technicians').where({ id: tech.id }).first();
       const { resolveTechPhotoUrl } = require('../services/tech-photo');
       updated.avatar_url = await resolveTechPhotoUrl(updated.photo_s3_key, updated.avatar_url);
 
-      res.json({ success: true, technician: updated });
+      const responseRow = isAdminCaller(req) ? updated : sanitizeTechForNonAdmin(updated);
+      res.json({ success: true, technician: responseRow });
     } catch (err) {
       logger.error(`[team] Tech photo upload failed: ${err.message}`);
       next(err);
@@ -711,8 +1019,11 @@ router.post(
 
 // DELETE /technicians/:id — hard delete the technician row.
 // If related records exist (time entries, assignments) the DB FK
-// will error; the client surfaces that message.
-router.delete('/technicians/:id', async (req, res, next) => {
+// will error; the client surfaces that message. Admin only — the
+// row now carries payroll/PII and the ?force=true branch can purge
+// related records, so tech-role tokens have no business calling
+// this.
+router.delete('/technicians/:id', requireAdmin, async (req, res, next) => {
   const force = String(req.query.force || '') === 'true';
   try {
     if (!force) {
@@ -798,30 +1109,57 @@ async function ensureDocTable() {
       t.string('s3_key', 500).notNullable();
       t.uuid('uploaded_by');
       t.boolean('is_archived').defaultTo(false);
+      // Per-tech binding + expiration (added by migration
+      // 20260428000008). Mirror the columns here so a fresh env that
+      // auto-creates this table doesn't 500 on the GET /documents
+      // join below — the route now leftJoins technicians on
+      // company_documents.technician_id.
+      t.uuid('technician_id');
+      t.date('expiration_date');
+      t.index('technician_id');
+      t.index('expiration_date');
       t.timestamps(true, true);
     });
   }
 }
 
-// GET /documents — list all (admin only)
-router.get('/documents', async (req, res, next) => {
+// GET /documents — list all (admin only). Optional filters:
+//   category=<one of DOC_CATEGORIES> | 'all'
+//   technicianId=<uuid> — docs bound to that tech
+//   technicianId='company' — only company-wide docs (technician_id IS NULL)
+// requireAdmin: documents now hold per-tech HR records (W-4, I-9,
+// license, cert expirations). Tech-role tokens must not be able to
+// list/read/upload/edit those, even their own — pre-existing tech
+// access to company-wide SOPs is acceptable collateral here.
+router.get('/documents', requireAdmin, async (req, res, next) => {
   try {
     await ensureDocTable();
-    const { category } = req.query;
-    let query = db('company_documents').where('is_archived', false).orderBy('created_at', 'desc');
-    if (category && category !== 'all') query = query.where('category', category);
+    const { category, technicianId } = req.query;
+    let query = db('company_documents')
+      .leftJoin('technicians', 'company_documents.technician_id', 'technicians.id')
+      .where('company_documents.is_archived', false)
+      .select('company_documents.*', 'technicians.name as technician_name')
+      .orderBy('company_documents.created_at', 'desc');
+    if (category && category !== 'all') query = query.where('company_documents.category', category);
+    if (technicianId === 'company') {
+      query = query.whereNull('company_documents.technician_id');
+    } else if (technicianId) {
+      query = query.where('company_documents.technician_id', technicianId);
+    }
     const docs = await query;
     res.json({ documents: docs });
   } catch (err) { next(err); }
 });
 
-// POST /documents/upload — upload a file
-router.post('/documents/upload', upload.single('file'), async (req, res, next) => {
+// POST /documents/upload — upload a file. Optional binding:
+//   technicianId — bind to one tech (omit / empty for company-wide)
+//   expirationDate — YYYY-MM-DD for licenses, certs, I-9s with reverify dates
+router.post('/documents/upload', requireAdmin, upload.single('file'), async (req, res, next) => {
   try {
     await ensureDocTable();
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
 
-    const { title, category, description } = req.body;
+    const { title, category, description, technicianId, expirationDate } = req.body;
     const ext = req.file.originalname.split('.').pop().toLowerCase();
     const key = `${DOC_PREFIX}${Date.now()}-${req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
 
@@ -841,15 +1179,20 @@ router.post('/documents/upload', upload.single('file'), async (req, res, next) =
       file_size: req.file.size,
       s3_key: key,
       uploaded_by: req.technicianId || null,
+      technician_id: technicianId || null,
+      expiration_date: expirationDate || null,
     }).returning('*');
 
-    logger.info(`[docs] Uploaded: ${doc.title} (${ext}, ${(req.file.size / 1024).toFixed(0)} KB)`);
+    // Log structural metadata only — titles and filenames for HR
+    // documents (W-4, I-9, licenses) commonly embed employee names
+    // and other PII per AGENTS.md guidance, so keep them out of logs.
+    logger.info(`[docs] Uploaded id=${doc.id} category=${doc.category} ext=${ext} size=${req.file.size}B${doc.technician_id ? ` tech=${doc.technician_id}` : ''}`);
     res.status(201).json(doc);
   } catch (err) { next(err); }
 });
 
 // GET /documents/:id/download — get presigned download URL
-router.get('/documents/:id/download', async (req, res, next) => {
+router.get('/documents/:id/download', requireAdmin, async (req, res, next) => {
   try {
     const doc = await db('company_documents').where({ id: req.params.id }).first();
     if (!doc) return res.status(404).json({ error: 'Document not found' });
@@ -863,14 +1206,18 @@ router.get('/documents/:id/download', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// PUT /documents/:id — update metadata
-router.put('/documents/:id', async (req, res, next) => {
+// PUT /documents/:id — update metadata. Pass technicianId='' to
+// unbind from a tech back to company-wide; expirationDate='' to
+// clear an expiration.
+router.put('/documents/:id', requireAdmin, async (req, res, next) => {
   try {
-    const { title, category, description } = req.body;
+    const { title, category, description, technicianId, expirationDate } = req.body;
     const updates = { updated_at: new Date() };
     if (title !== undefined) updates.title = title;
     if (category !== undefined) updates.category = category;
     if (description !== undefined) updates.description = description;
+    if (technicianId !== undefined) updates.technician_id = technicianId === '' ? null : technicianId;
+    if (expirationDate !== undefined) updates.expiration_date = expirationDate === '' ? null : expirationDate;
     await db('company_documents').where({ id: req.params.id }).update(updates);
     const doc = await db('company_documents').where({ id: req.params.id }).first();
     res.json(doc);
@@ -878,7 +1225,7 @@ router.put('/documents/:id', async (req, res, next) => {
 });
 
 // DELETE /documents/:id — archive (soft delete)
-router.delete('/documents/:id', async (req, res, next) => {
+router.delete('/documents/:id', requireAdmin, async (req, res, next) => {
   try {
     await db('company_documents').where({ id: req.params.id }).update({ is_archived: true, updated_at: new Date() });
     logger.info(`[docs] Archived document: ${req.params.id}`);

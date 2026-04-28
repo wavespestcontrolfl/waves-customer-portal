@@ -13,7 +13,7 @@ import { refetchFlags } from '../../hooks/useFeatureFlag';
 const SECTIONS = [
   { section: 'Operations', items: [
     { path: '/admin/estimates', icon: FileText, label: 'Pipeline & Estimates' },
-    { path: '/admin/timetracking', icon: Clock, label: 'Time Tracking' },
+    { path: '/admin/timetracking', icon: Clock, label: 'Staff' },
     { path: '/admin/service-library', icon: BookOpen, label: 'Service Library' },
   ]},
   { section: 'Communications', items: [

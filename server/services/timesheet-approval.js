@@ -9,6 +9,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const timeTracking = require('./time-tracking');
+const { etDateString, parseETDateTime, etWeekStart } = require('../utils/datetime-et');
 
 function weekRange(weekStart) {
   const end = new Date(weekStart);
@@ -179,6 +180,18 @@ async function disputeEntry({ entryId, adminId, reason }) {
     .where({ technician_id: entry.technician_id, work_date: workDate })
     .update({ status: 'disputed', updated_at: now });
 
+  // Disputing an entry mutates the on-record hours for the week, so
+  // any prior tech sign-off on this week is now stale — clear it so
+  // the tech re-signs after the correction. clock_in is a TIMESTAMP,
+  // so go through etDateString to land on the right ET calendar day.
+  const entryYmd = etDateString(new Date(entry.clock_in));
+  const weekStart = etWeekStart(parseETDateTime(`${entryYmd}T12:00`));
+  await db('time_weekly_summary')
+    .where({ technician_id: entry.technician_id, week_start: weekStart })
+    .whereNot({ status: 'approved' })
+    .whereNotNull('tech_signed_at')
+    .update({ tech_signed_at: null, tech_signature: null, updated_at: now });
+
   logger.info(`[timesheet-approval] Entry ${entryId} disputed by ${adminId}: ${reason}`);
   return db('time_entries').where({ id: entryId }).first();
 }
@@ -210,9 +223,20 @@ async function unlockWeek({ technicianId, weekStart, adminId, reason }) {
       .where('work_date', '<=', end)
       .update({ status: 'pending', approved_by: null, approved_at: null, updated_at: now });
 
+    // Clear tech sign-off too — once we've reopened entries, the
+    // tech's previous "I attest" is stale by definition. Admins
+    // who unlock should expect a fresh sign-off after the tech
+    // fixes whatever broke.
     await trx('time_weekly_summary')
       .where({ technician_id: technicianId, week_start: start })
-      .update({ status: 'pending', approved_by: null, approved_at: null, updated_at: now });
+      .update({
+        status: 'pending',
+        approved_by: null,
+        approved_at: null,
+        tech_signed_at: null,
+        tech_signature: null,
+        updated_at: now,
+      });
   });
 
   logger.info(`[timesheet-approval] Week ${start} unlocked for tech ${technicianId} by ${adminId}: ${reason || 'no reason'}`);

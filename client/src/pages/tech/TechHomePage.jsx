@@ -396,6 +396,8 @@ export default function TechHomePage() {
         </>
       )}
 
+      <TimecardSignoffCard techName={techName} />
+
       {showCreateProject && (
         <CreateProjectModal
           onClose={() => setShowCreateProject(false)}
@@ -409,6 +411,163 @@ export default function TechHomePage() {
           customerName={photoTarget.customerName}
           onClose={() => setPhotoTarget(null)}
         />
+      )}
+    </div>
+  );
+}
+
+// Sign-off card — surfaces last week's weekly summary and a "Sign
+// timecard" button when the tech hasn't yet acknowledged the hours.
+// Quietly hides itself when there's no last-week data, when the week
+// is already approved by admin (sign-off is moot), or when the tech
+// has already signed. Lets the employee attest their own hours
+// before manager approval, which is the audit value here.
+function TimecardSignoffCard({ techName }) {
+  const [weekly, setWeekly] = useState(null);
+  const [weekStart, setWeekStart] = useState(null);
+  const [pending, setPending] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [signature, setSignature] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [feedback, setFeedback] = useState(null); // {message, isError}
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      // Server is the source of truth for "what week should this tech
+      // sign right now?" — Railway runs UTC, browser may not be in ET,
+      // so computing the boundary client-side drifts near midnight.
+      // The endpoint anchors on ET via shared helpers.
+      const token = localStorage.getItem('adminToken');
+      const res = await fetch(`${API}/api/tech/timetracking/pending-signoff`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        setWeekly(null);
+        setPending(false);
+      } else {
+        const data = await res.json();
+        setWeekly(data.weekly || null);
+        setWeekStart(data.weekStart || null);
+        setPending(data.pending === true);
+        // Functional setter so we don't depend on `signature` here —
+        // including it in the useCallback deps would cause this to
+        // re-run every time the input changes, refetching on each
+        // keystroke. Pre-fill from techName only if the field is still
+        // empty.
+        if (data.weekly) setSignature((s) => s || techName || '');
+      }
+    } catch {
+      setWeekly(null);
+    } finally {
+      // Always clear loading — a non-OK fetch used to early-return
+      // before this line, leaving loading stuck true and the card
+      // permanently null until a full page reload.
+      setLoading(false);
+    }
+  }, [techName]);
+
+  useEffect(() => { load(); }, [load]);
+
+  if (loading) return null;
+  if (!weekly) return null;
+  // Server is authoritative on whether sign-off is pending. pending
+  // is false for both "already signed" AND "already approved" — split
+  // those: approved weeks render nothing (the week is final, no need
+  // to surface anything to the tech), signed-but-not-yet-approved
+  // weeks render the green "awaiting" confirmation.
+  if (!pending) {
+    if (weekly.status === 'approved') return null;
+    if (weekly.tech_signed_at) {
+      return (
+        <div style={{
+          background: DARK.card, border: `1px solid #22c55e44`, borderRadius: 12,
+          padding: 12, margin: '20px 0',
+          fontSize: 12, color: '#22c55e',
+        }}>
+          ✓ Last week signed{weekly.tech_signature ? ` as "${weekly.tech_signature}"` : ''} — awaiting admin approval.
+        </div>
+      );
+    }
+    return null;
+  }
+
+  const hours = (parseFloat(weekly.total_shift_minutes || 0) / 60).toFixed(1);
+  const otHrs = (parseFloat(weekly.overtime_minutes || 0) / 60).toFixed(1);
+
+  const handleSign = async () => {
+    if (!signature.trim()) {
+      setFeedback({ message: 'Type your name to sign', isError: true });
+      return;
+    }
+    setSubmitting(true);
+    setFeedback(null);
+    try {
+      const token = localStorage.getItem('adminToken');
+      const r = await fetch(`${API}/api/tech/timetracking/sign-week`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ weekStart, signature: signature.trim() }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      setFeedback({ message: 'Timecard signed', isError: false });
+      load();
+    } catch (e) {
+      setFeedback({ message: e.message || 'Sign failed', isError: true });
+    }
+    setSubmitting(false);
+  };
+
+  return (
+    <div style={{
+      background: DARK.card, borderRadius: 12, border: `1px solid #f59e0b66`,
+      padding: 16, margin: '20px 0',
+    }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: '#f59e0b', marginBottom: 4, fontFamily: "'Montserrat', sans-serif", textTransform: 'uppercase', letterSpacing: 1 }}>
+        Sign Last Week's Timecard
+      </div>
+      <div style={{ fontSize: 12, color: DARK.muted, marginBottom: 10 }}>
+        Week of {weekly.week_start ? String(weekly.week_start).split('T')[0] : weekStart} — review and attest these hours.
+      </div>
+      <div style={{ display: 'flex', gap: 16, marginBottom: 12, fontSize: 13, color: DARK.text }}>
+        <div><strong style={{ color: DARK.text }}>{hours}h</strong> <span style={{ color: DARK.muted }}>total</span></div>
+        <div><strong style={{ color: parseFloat(otHrs) > 0 ? '#f59e0b' : DARK.text }}>{otHrs}h</strong> <span style={{ color: DARK.muted }}>OT</span></div>
+        <div><strong>{weekly.job_count || 0}</strong> <span style={{ color: DARK.muted }}>jobs</span></div>
+      </div>
+      <div style={{ fontSize: 11, color: DARK.muted, marginBottom: 4 }}>Type your name to sign:</div>
+      <input
+        value={signature}
+        onChange={(e) => setSignature(e.target.value)}
+        placeholder="Your name"
+        style={{
+          width: '100%', boxSizing: 'border-box',
+          padding: '8px 10px', fontSize: 14,
+          background: '#0f1923', color: DARK.text,
+          border: `1px solid ${DARK.border}`, borderRadius: 6,
+          marginBottom: 10,
+        }}
+      />
+      <button
+        onClick={handleSign}
+        disabled={submitting || !signature.trim()}
+        style={{
+          width: '100%', padding: '10px', fontSize: 14, fontWeight: 700,
+          background: '#22c55e', color: '#fff', border: 'none', borderRadius: 8,
+          cursor: submitting || !signature.trim() ? 'wait' : 'pointer',
+          opacity: submitting || !signature.trim() ? 0.6 : 1,
+          fontFamily: "'Montserrat', sans-serif",
+        }}
+      >
+        {submitting ? 'Signing…' : 'Sign Timecard'}
+      </button>
+      {feedback && (
+        <div style={{
+          marginTop: 10, fontSize: 12, padding: '6px 10px', borderRadius: 6,
+          background: feedback.isError ? '#ef444422' : '#22c55e22',
+          border: `1px solid ${feedback.isError ? '#ef4444' : '#22c55e'}`,
+          color: feedback.isError ? '#ef4444' : '#22c55e',
+        }}>{feedback.message}</div>
       )}
     </div>
   );
