@@ -459,16 +459,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const groups = new Map();
     for (const s of rows) {
       const cadence = s.cadence || 'one_time';
+      const wd = Number.isFinite(parseInt(s.weekday)) ? parseInt(s.weekday) : 3;
       let key;
       if (cadence === 'custom') key = `custom:${parseInt(s.intervalDays) || 30}`;
-      else if (cadence === 'monthly_nth_weekday') key = `nth:${parseInt(s.nth) || 3}:${parseInt(s.weekday) || 3}`;
+      else if (cadence === 'monthly_nth_weekday') key = `nth:${parseInt(s.nth) || 3}:${wd}`;
       else key = cadence;
       if (!groups.has(key)) {
         groups.set(key, {
           cadence,
           intervalDays: cadence === 'custom' ? parseInt(s.intervalDays) || 30 : null,
           nth: cadence === 'monthly_nth_weekday' ? parseInt(s.nth) || 3 : null,
-          weekday: cadence === 'monthly_nth_weekday' ? parseInt(s.weekday) || 3 : null,
+          weekday: cadence === 'monthly_nth_weekday' ? wd : null,
           lines: [],
         });
       }
