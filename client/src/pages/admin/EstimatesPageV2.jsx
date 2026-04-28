@@ -1590,10 +1590,22 @@ export default function EstimatesPageV2() {
 
   return (
     <div>
-      <div className="mb-5">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
         <h1 className="text-28 font-normal text-zinc-900 tracking-display">
           Pipeline
         </h1>
+        <button
+          type="button"
+          onClick={() => setActiveTab('new')}
+          style={{
+            padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
+            background: '#18181B', color: '#fff', border: 'none', cursor: 'pointer',
+            whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
+            fontFamily: "'DM Sans', sans-serif",
+          }}
+        >
+          + Create Estimate
+        </button>
       </div>
       {/* Centered tab strip — wrapper centers the inline-flex pill bar
           so it shrinks to its content and floats in the middle of the
