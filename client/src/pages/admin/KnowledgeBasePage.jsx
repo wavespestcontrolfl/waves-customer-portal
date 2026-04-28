@@ -58,6 +58,26 @@ export default function KnowledgeBasePage() {
         </div>
       </div>
 
+      {/* Tabs */}
+      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
+        <div style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
+          {[
+            { key: 'browse', label: isMobile ? 'Browse' : 'Browse & Search' },
+            { key: 'create', label: isMobile ? 'New' : 'New Entry' },
+            { key: 'audit', label: 'AI Audit' },
+            { key: 'tokens', label: isMobile ? 'Tokens' : 'Token Health' },
+          ].map(t => (
+            <button key={t.key} onClick={() => setTab(t.key)} style={{
+              padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
+              background: tab === t.key ? '#18181B' : 'transparent',
+              color: tab === t.key ? '#FFFFFF' : '#A1A1AA',
+              fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
+              fontFamily: "'DM Sans', sans-serif",
+            }}>{t.label}</button>
+          ))}
+        </div>
+      </div>
+
       {/* Stats Row */}
       {stats && (
         <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
@@ -75,24 +95,6 @@ export default function KnowledgeBasePage() {
           ))}
         </div>
       )}
-
-      {/* Tabs */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 24, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
-        {[
-          { key: 'browse', label: isMobile ? 'Browse' : 'Browse & Search' },
-          { key: 'create', label: isMobile ? 'New' : 'New Entry' },
-          { key: 'audit', label: 'AI Audit' },
-          { key: 'tokens', label: isMobile ? 'Tokens' : 'Token Health' },
-        ].map(t => (
-          <button key={t.key} onClick={() => setTab(t.key)} style={{
-            padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
-            background: tab === t.key ? '#18181B' : 'transparent',
-            color: tab === t.key ? '#FFFFFF' : '#A1A1AA',
-            fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
-            fontFamily: "'DM Sans', sans-serif",
-          }}>{t.label}</button>
-        ))}
-      </div>
 
       {tab === 'browse' && <BrowseTab showToast={showToast} onRefresh={loadStats} isMobile={isMobile} />}
       {tab === 'create' && <CreateTab showToast={showToast} onCreated={() => { loadStats(); setTab('browse'); }} isMobile={isMobile} />}

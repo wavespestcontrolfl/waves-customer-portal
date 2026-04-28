@@ -16,11 +16,6 @@ function Card({ children, style }) {
   return <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 24, ...style }}>{children}</div>;
 }
 
-const CATEGORY_ICONS = {
-  services: '🏢', products: '📦', protocols: '🧪', compliance: '⚖️', equipment: '🔧',
-  pricing: '💰', customers: '👥', pests: '🐛', turf: '🌿', operations: '📋', competitive: '🏆', index: '📇',
-};
-
 // =========================================================================
 // Q&A MODAL
 // =========================================================================
@@ -47,7 +42,7 @@ function QAModal({ onClose }) {
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
       <div style={{ background: D.card, borderRadius: 16, padding: 28, maxWidth: 600, width: '100%', maxHeight: '80vh', overflow: 'auto', border: `1px solid ${D.border}` }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-          <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>{'🔍'} Ask the Knowledge Base</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>Ask the Knowledge Base</div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 20, cursor: 'pointer' }}>{'✕'}</button>
         </div>
 
@@ -73,12 +68,12 @@ function QAModal({ onClose }) {
             )}
 
             <div style={{ display: 'flex', gap: 8 }}>
-              <button style={{ padding: '6px 12px', borderRadius: 6, border: `1px solid ${D.green}`, background: 'transparent', color: D.green, fontSize: 12, cursor: 'pointer' }}>{'👍'} Good</button>
-              <button style={{ padding: '6px 12px', borderRadius: 6, border: `1px solid ${D.amber}`, background: 'transparent', color: D.amber, fontSize: 12, cursor: 'pointer' }}>{'👎'} Incomplete</button>
+              <button style={{ padding: '6px 12px', borderRadius: 6, border: `1px solid ${D.green}`, background: 'transparent', color: D.green, fontSize: 12, cursor: 'pointer' }}>Good</button>
+              <button style={{ padding: '6px 12px', borderRadius: 6, border: `1px solid ${D.amber}`, background: 'transparent', color: D.amber, fontSize: 12, cursor: 'pointer' }}>Incomplete</button>
               {!result.filedBack && (
-                <button onClick={() => handleFileBack(result.queryId)} style={{ padding: '6px 12px', borderRadius: 6, border: `1px solid ${D.purple}`, background: 'transparent', color: D.purple, fontSize: 12, cursor: 'pointer' }}>{'📥'} File into wiki</button>
+                <button onClick={() => handleFileBack(result.queryId)} style={{ padding: '6px 12px', borderRadius: 6, border: `1px solid ${D.purple}`, background: 'transparent', color: D.purple, fontSize: 12, cursor: 'pointer' }}>File into wiki</button>
               )}
-              {result.filedBack && <span style={{ fontSize: 12, color: D.green }}>{'✅'} Filed</span>}
+              {result.filedBack && <span style={{ fontSize: 12, color: D.green }}>Filed</span>}
             </div>
           </div>
         )}
@@ -108,12 +103,9 @@ function ArticleViewer({ articleId, onBack }) {
       <button onClick={onBack} style={{ alignSelf: 'flex-start', padding: '6px 14px', borderRadius: 6, border: `1px solid ${D.border}`, background: 'transparent', color: D.muted, fontSize: 12, cursor: 'pointer' }}>{'←'} Back</button>
 
       <Card>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-          <span style={{ fontSize: 24 }}>{CATEGORY_ICONS[article.category] || '📄'}</span>
-          <div>
-            <div style={{ fontSize: 20, fontWeight: 700, color: D.heading }}>{article.title}</div>
-            <div style={{ fontSize: 12, color: D.muted }}>{article.path} • v{article.version} • {article.word_count} words</div>
-          </div>
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ fontSize: 20, fontWeight: 700, color: D.heading }}>{article.title}</div>
+          <div style={{ fontSize: 12, color: D.muted }}>{article.path} • v{article.version} • {article.word_count} words</div>
         </div>
 
         {article.summary && <div style={{ fontSize: 14, color: D.text, padding: '10px 14px', background: D.bg, borderRadius: 8, marginBottom: 12, lineHeight: 1.6, borderLeft: `3px solid ${D.teal}` }}>{article.summary}</div>}
@@ -128,7 +120,7 @@ function ArticleViewer({ articleId, onBack }) {
 
         <div style={{ fontSize: 11, color: D.muted, display: 'flex', gap: 16, marginBottom: 16 }}>
           {article.last_compiled && <span>Compiled: {new Date(article.last_compiled).toLocaleDateString()}</span>}
-          {article.last_verified && <span style={{ color: D.green }}>{'✅'} Verified: {new Date(article.last_verified).toLocaleDateString()}</span>}
+          {article.last_verified && <span style={{ color: D.green }}>Verified: {new Date(article.last_verified).toLocaleDateString()}</span>}
         </div>
       </Card>
 
@@ -183,7 +175,7 @@ function HealthCheck() {
       )}
 
       {health.issues.length === 0 && (
-        <div style={{ padding: 16, textAlign: 'center', color: D.green, fontSize: 14 }}>{'✅'} No issues found</div>
+        <div style={{ padding: 16, textAlign: 'center', color: D.green, fontSize: 14 }}>No issues found</div>
       )}
     </Card>
   );
@@ -255,7 +247,7 @@ function SourcesView() {
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             {s.processed ? (
-              <span style={{ fontSize: 11, color: D.green }}>{'✅'} Compiled</span>
+              <span style={{ fontSize: 11, color: D.green }}>Compiled</span>
             ) : (
               <button onClick={() => handleCompile(s.id)} disabled={compiling === s.id} style={{
                 padding: '4px 10px', borderRadius: 4, border: 'none', background: D.teal, color: '#fff', fontSize: 11, cursor: 'pointer', opacity: compiling === s.id ? 0.5 : 1,
@@ -272,10 +264,10 @@ function SourcesView() {
 // MAIN PAGE
 // =========================================================================
 const TABS = [
-  { key: 'articles', label: 'Articles', icon: '📚' },
-  { key: 'sources', label: 'Sources', icon: '📂' },
-  { key: 'health', label: 'Health', icon: '🩺' },
-  { key: 'queries', label: 'Recent Queries', icon: '💬' },
+  { key: 'articles', label: 'Articles' },
+  { key: 'sources', label: 'Sources' },
+  { key: 'health', label: 'Health' },
+  { key: 'queries', label: 'Recent Queries' },
 ];
 
 export default function KnowledgePage() {
@@ -329,7 +321,7 @@ export default function KnowledgePage() {
         </div>
         <button onClick={() => setShowQA(true)} style={{
           padding: '10px 20px', borderRadius: 8, border: 'none', background: D.teal, color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer',
-        }}>{'🔍'} Ask a Question</button>
+        }}>Ask a Question</button>
       </div>
 
       {/* Tabs */}
@@ -342,8 +334,7 @@ export default function KnowledgePage() {
               color: tab === t.key ? '#FFFFFF' : '#A1A1AA',
               fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
               fontFamily: "'DM Sans', sans-serif",
-              display: 'flex', alignItems: 'center', gap: 6,
-            }}><span>{t.icon}</span> {t.label}</button>
+            }}>{t.label}</button>
           ))}
         </div>
       </div>
@@ -358,7 +349,6 @@ export default function KnowledgePage() {
                 padding: '12px 14px', background: filterCat === cat ? D.teal + '22' : D.card, border: `1px solid ${filterCat === cat ? D.teal : D.border}`,
                 borderRadius: 10, cursor: 'pointer', textAlign: 'center', transition: 'all 0.15s',
               }}>
-                <div style={{ fontSize: 22, marginBottom: 4 }}>{CATEGORY_ICONS[cat] || '📄'}</div>
                 <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, textTransform: 'capitalize' }}>{cat}</div>
                 <div style={{ fontSize: 18, fontWeight: 700, color: D.teal, fontFamily: MONO }}>{count}</div>
               </div>
@@ -375,7 +365,6 @@ export default function KnowledgePage() {
             <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading articles...</div>
           ) : articles.length === 0 ? (
             <Card style={{ textAlign: 'center', padding: 60 }}>
-              <div style={{ fontSize: 48, marginBottom: 16 }}>{'📚'}</div>
               <div style={{ fontSize: 18, fontWeight: 600, color: D.heading, marginBottom: 8 }}>No Articles Yet</div>
               <div style={{ fontSize: 14, color: D.muted }}>Add source documents and compile them to build your knowledge base.</div>
             </Card>
@@ -387,7 +376,6 @@ export default function KnowledgePage() {
                   padding: '12px 16px', background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, cursor: 'pointer', transition: 'border-color 0.15s',
                 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span style={{ fontSize: 18 }}>{CATEGORY_ICONS[a.category] || '📄'}</span>
                     <div style={{ flex: 1 }}>
                       <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{a.title}</div>
                       <div style={{ fontSize: 12, color: D.muted }}>{a.summary || a.path}</div>
@@ -395,7 +383,7 @@ export default function KnowledgePage() {
                     <div style={{ fontSize: 11, color: D.muted, fontFamily: MONO }}>{a.word_count}w</div>
                   </div>
                   {tags.length > 0 && (
-                    <div style={{ display: 'flex', gap: 4, marginTop: 6, marginLeft: 30 }}>
+                    <div style={{ display: 'flex', gap: 4, marginTop: 6 }}>
                       {tags.slice(0, 5).map((t, i) => (
                         <span key={i} style={{ padding: '1px 6px', borderRadius: 3, background: D.bg, color: D.muted, fontSize: 10 }}>{t}</span>
                       ))}
@@ -426,8 +414,8 @@ export default function KnowledgePage() {
               <div style={{ display: 'flex', gap: 12, marginTop: 8, fontSize: 11, color: D.muted }}>
                 <span>{q.asked_by}</span>
                 <span>{new Date(q.created_at).toLocaleString()}</span>
-                {q.response_quality && <span>{'⭐'.repeat(q.response_quality)}</span>}
-                {q.filed_back && <span style={{ color: D.green }}>{'📥'} Filed back</span>}
+                {q.response_quality && <span>{q.response_quality}/5</span>}
+                {q.filed_back && <span style={{ color: D.green }}>Filed back</span>}
               </div>
             </Card>
           ))}
