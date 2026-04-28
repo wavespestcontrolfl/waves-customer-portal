@@ -512,7 +512,7 @@ router.post('/', async (req, res, next) => {
       discountType, discountAmount,
       createInvoice,
       sendConfirmation, serviceId, serviceAddons, assignmentMode,
-      estimatedPrice, urgency, internalNotes, customerNotes, isCallback,
+      estimatedPrice, estimatedDuration, urgency, internalNotes, customerNotes, isCallback,
       parentServiceId, sendConfirmationSms, sendTechNotification,
     } = req.body;
 
@@ -529,6 +529,14 @@ router.post('/', async (req, res, next) => {
         serviceRecord = await db('services').where({ id: serviceId }).first();
         if (serviceRecord?.default_duration_minutes) duration = serviceRecord.default_duration_minutes;
       } catch (e) { logger.warn(`[schedule] services table lookup failed: ${e.message}`); }
+    }
+
+    // Explicit override from the client (multi-service groups send the
+    // summed line-item duration so estimated_duration_minutes matches the
+    // actual time window). Wins over the heuristic + service-record default.
+    const parsedExplicitDuration = Number.parseInt(estimatedDuration, 10);
+    if (Number.isInteger(parsedExplicitDuration) && parsedExplicitDuration > 0) {
+      duration = parsedExplicitDuration;
     }
 
     // Calculate end time from start + duration if not provided
@@ -627,8 +635,17 @@ router.post('/', async (req, res, next) => {
       // appointments at the same date/time.
       const seenChildDates = new Set();
       seenChildDates.add(String(scheduledDate || '').split('T')[0]);
-      for (let i = 1; i < plannedCount; i++) {
-        const rawNext = nextRecurringDate(scheduledDate, recurringPattern, i, rOpts);
+      // Iterate by inserts, not by attempts: when skip-weekends collapses
+      // consecutive recurrences onto the same shifted weekday (e.g. custom
+      // interval=1 over Sat+Sun → Mon), we still need plannedCount-1 children
+      // inserted, not plannedCount-1 attempts. Cap iterations to avoid an
+      // infinite loop if the pattern is degenerate.
+      const maxAttempts = (plannedCount - 1) * 4 + 30;
+      let attempt = 1;
+      let inserted = 0;
+      while (inserted < plannedCount - 1 && attempt < maxAttempts) {
+        const rawNext = nextRecurringDate(scheduledDate, recurringPattern, attempt, rOpts);
+        attempt++;
         const nextDateStr = shiftPastWeekend(rawNext, !!skipWeekends, shiftDir);
         if (seenChildDates.has(nextDateStr)) continue;
         seenChildDates.add(nextDateStr);
@@ -668,6 +685,7 @@ router.post('/', async (req, res, next) => {
             }
           } catch (e) { logger.warn(`[schedule] Recurring child addon insert failed (non-blocking): ${e.message}`); }
         }
+        inserted++;
       }
      } catch (e) { logger.error(`[schedule] Recurring spawn failed (non-blocking): ${e.message}`); }
     }
@@ -862,8 +880,15 @@ router.put('/:id/update-details', async (req, res, next) => {
         // same weekday.
         const seenChildDates = new Set();
         seenChildDates.add(String(baseDateStr || '').split('T')[0]);
-        for (let i = 1; i < spawnCount; i++) {
-          const rawNext = nextRecurringDate(baseDateStr, recurringPattern, i, rOpts);
+        // Iterate by inserts (matches POST spawn): skip-weekends can
+        // collapse multiple raw recurrences onto the same shifted weekday,
+        // and a fixed-count plan still owes spawnCount-1 children.
+        const maxAttempts = (spawnCount - 1) * 4 + 30;
+        let attempt = 1;
+        let inserted = 0;
+        while (inserted < spawnCount - 1 && attempt < maxAttempts) {
+          const rawNext = nextRecurringDate(baseDateStr, recurringPattern, attempt, rOpts);
+          attempt++;
           const nextDateStr = shiftPastWeekend(rawNext, skipChild, dirChild);
           if (seenChildDates.has(nextDateStr)) continue;
           seenChildDates.add(nextDateStr);
@@ -914,6 +939,7 @@ router.put('/:id/update-details', async (req, res, next) => {
             } catch (e) { logger.warn(`[schedule] PUT recurring child addon insert failed (non-blocking): ${e.message}`); }
           }
           recurringCreated++;
+          inserted++;
         }
       }
     }

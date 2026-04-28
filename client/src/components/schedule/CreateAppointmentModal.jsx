@@ -495,11 +495,23 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const limit = Math.min(Number.isInteger(parsedCount) && parsedCount >= 2 ? parsedCount : 4, 4);
     const dir = weekendShift === 'back' ? 'back' : 'forward';
     return recurring.map((group) => {
+      // Dedupe + iterate until we've collected `limit` unique dates so
+      // the chips reflect the server's spawn behavior (which now skips
+      // duplicate weekend-shifted dates and keeps going until N children
+      // are inserted).
       const dates = [];
-      for (let i = 0; i < limit; i++) {
+      const seen = new Set();
+      seen.add(String(apptDate || '').split('T')[0]);
+      const maxAttempts = limit * 4 + 30;
+      let attempt = 0;
+      while (dates.length < limit && attempt < maxAttempts) {
         const opts = { intervalDays: group.intervalDays, nth: group.nth, weekday: group.weekday };
-        const raw = nextRecurringDate(apptDate, group.cadence, i, opts);
+        const raw = nextRecurringDate(apptDate, group.cadence, attempt, opts);
+        attempt++;
         const shifted = shiftPastWeekendClient(raw, !!skipWeekends, dir);
+        const key = shifted.toISOString().split('T')[0];
+        if (seen.has(key)) continue;
+        seen.add(key);
         dates.push(shifted);
       }
       return { group, dates };
@@ -560,6 +572,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // the full visit. Per-line prices stay on each addon row for
           // breakdown / analytics.
           estimatedPrice: groupSubtotal > 0 ? groupSubtotal : null,
+          // Send the summed group duration so the server's
+          // estimated_duration_minutes matches the actual time window
+          // (windowStart..windowEnd) instead of just the primary line's
+          // catalog default — capacity / dispatch math depends on this.
+          estimatedDuration: groupDuration > 0 ? groupDuration : undefined,
           urgency: 'routine',
           notes: customerNotes || undefined,
           internalNotes: internalNotes || undefined,
