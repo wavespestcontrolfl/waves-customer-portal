@@ -1,11 +1,11 @@
-// Square-style multi-day time grid (5-day or 7-day Week views).
+// Multi-day time grid (5-day or 7-day Week views).
 // Each column is a calendar day; appointments stack inside their column at
 // their windowStart time. Drag a block to a new (day, time) cell to
 // reschedule. Click a block to open the existing edit modal.
 //
 // Uses the existing reschedule endpoint:
 //   POST /admin/dispatch/:id/reschedule { newDate, newWindow, reasonCode, reasonText, notifyCustomer }
-import { useMemo, useState, useCallback, useEffect } from 'react';
+import { useMemo, useState, useCallback, useEffect, useRef } from 'react';
 import {
   DndContext,
   PointerSensor,
@@ -15,6 +15,7 @@ import {
   useDroppable,
   pointerWithin,
 } from '@dnd-kit/core';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { cn } from '../ui';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
 import { etDateString } from '../../lib/timezone';
@@ -71,6 +72,13 @@ function minutesToLabel(min) {
   return m === 0 ? `${h12} ${ap}` : `${h12}:${String(m).padStart(2, '0')}`;
 }
 
+// "2026-04-21" → "04/21"  (zero-padded MM/DD for the day header).
+function formatMonthDay(dateStr) {
+  if (!dateStr || typeof dateStr !== 'string') return '';
+  const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[2]}/${m[3]}` : '';
+}
+
 function minutesToTopPx(min) {
   return ((min - DAY_START_HOUR * 60) / SLOT_MIN) * SLOT_HEIGHT;
 }
@@ -85,7 +93,7 @@ function effectiveDuration(svc) {
   return 30;
 }
 
-// Square-style flat-color blocks. Mirrors TimeGridDay's palette so the
+// Flat-color appointment blocks. Mirrors TimeGridDay's palette so the
 // week/5-day grid reads identically to the single-day swimlane view.
 function statusBlockClasses(status) {
   switch (status) {
@@ -204,7 +212,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
   );
 }
 
-function SlotDroppable({ date, slotIdx }) {
+function SlotDroppable({ date, slotIdx, onCreateStart }) {
   const slotMin = DAY_START_HOUR * 60 + slotIdx * SLOT_MIN;
   const { setNodeRef, isOver } = useDroppable({
     id: `slot-${date}-${slotIdx}`,
@@ -214,7 +222,8 @@ function SlotDroppable({ date, slotIdx }) {
   return (
     <div
       ref={setNodeRef}
-      className={cn('transition-colors', isOver && 'bg-zinc-100')}
+      onPointerDown={onCreateStart ? (e) => onCreateStart(e, slotIdx) : undefined}
+      className={cn('transition-colors', isOver && 'bg-zinc-100', onCreateStart && 'cursor-crosshair')}
       style={{
         height: SLOT_HEIGHT,
         borderTop: `1px solid ${isHour ? '#E4E4E7' : '#F4F4F5'}`,
@@ -223,35 +232,88 @@ function SlotDroppable({ date, slotIdx }) {
   );
 }
 
-function DayColumn({ day, onEdit, isToday, isSelected }) {
+function DayColumn({ day, onEdit, onCreateSlot }) {
   // Unassigned-with-time services render in the UnassignedRail, not here.
   const services = (day.services || []).filter(
     (s) => s.technicianId && parseHHMM(s.windowStart) != null,
   );
+  const gridRef = useRef(null);
+  const [sel, setSel] = useState(null); // { startIdx, endIdx } during drag-to-select
+  const selRef = useRef(sel);
+  useEffect(() => { selRef.current = sel; }, [sel]);
+
+  const handleCreateStart = useCallback((e, slotIdx) => {
+    if (e.button !== 0) return;
+    if (!onCreateSlot) return;
+    e.preventDefault();
+    setSel({ startIdx: slotIdx, endIdx: slotIdx });
+    const gridEl = gridRef.current;
+    if (!gridEl) return;
+    const onMove = (ev) => {
+      const rect = gridEl.getBoundingClientRect();
+      const y = Math.max(0, Math.min(rect.height - 1, ev.clientY - rect.top));
+      const idx = Math.min(SLOT_COUNT - 1, Math.max(0, Math.floor(y / SLOT_HEIGHT)));
+      setSel((prev) => (prev ? { ...prev, endIdx: idx } : prev));
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      const cur = selRef.current;
+      setSel(null);
+      if (!cur) return;
+      const lo = Math.min(cur.startIdx, cur.endIdx);
+      const hi = Math.max(cur.startIdx, cur.endIdx);
+      const startMin = DAY_START_HOUR * 60 + lo * SLOT_MIN;
+      const endMin = DAY_START_HOUR * 60 + (hi + 1) * SLOT_MIN;
+      onCreateSlot({
+        date: day.date,
+        windowStart: minutesToHHMM(startMin),
+        windowEnd: minutesToHHMM(endMin),
+      });
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }, [onCreateSlot, day.date]);
+
+  const selTop = sel ? Math.min(sel.startIdx, sel.endIdx) * SLOT_HEIGHT : 0;
+  const selHeight = sel
+    ? (Math.max(sel.startIdx, sel.endIdx) - Math.min(sel.startIdx, sel.endIdx) + 1) * SLOT_HEIGHT
+    : 0;
+
   return (
     <div
       className="flex-1 relative"
       style={{ minWidth: COL_MIN_WIDTH, borderRight: '1px solid #E4E4E7' }}
     >
       <div
-        className={cn(
-          'sticky top-0 z-10 px-3 py-2 text-12 font-medium flex items-center justify-between',
-          isToday ? 'bg-zinc-900 text-white' : isSelected ? 'bg-zinc-100 text-zinc-900' : 'bg-zinc-50 text-zinc-900',
-        )}
+        className="sticky top-0 z-10 bg-white px-3 py-2 text-13 text-zinc-500 flex items-center justify-between"
         style={{ borderBottom: '1px solid #E4E4E7' }}
       >
         <span className="truncate">
-          <span className="u-label">{day.dayOfWeek}</span>
-          <span className="ml-2 u-nums text-13">{day.dayNum}</span>
+          {day.dayOfWeek} {formatMonthDay(day.date)}
         </span>
-        <span className={cn('u-nums text-11', isToday ? 'text-white/80' : 'text-ink-secondary')}>
-          {services.length}
-        </span>
+        <span className="u-nums text-11 text-zinc-400">{services.length}</span>
       </div>
-      <div className="relative" style={{ height: GRID_HEIGHT }}>
+      <div ref={gridRef} className="relative" style={{ height: GRID_HEIGHT }}>
         {Array.from({ length: SLOT_COUNT }).map((_, idx) => (
-          <SlotDroppable key={idx} date={day.date} slotIdx={idx} />
+          <SlotDroppable
+            key={idx}
+            date={day.date}
+            slotIdx={idx}
+            onCreateStart={onCreateSlot ? handleCreateStart : undefined}
+          />
         ))}
+        {sel && (
+          <div
+            className="absolute left-0 right-0 pointer-events-none"
+            style={{
+              top: selTop,
+              height: selHeight,
+              background: 'rgba(24, 24, 27, 0.08)',
+              borderLeft: '2px solid #18181B',
+            }}
+          />
+        )}
         {(() => {
           const lanes = computeLanes(services);
           return services.map((svc) => {
@@ -286,23 +348,20 @@ function TimeAxis({ headerHeight }) {
       style={{ width: TIME_AXIS_WIDTH, borderRight: '1px solid #E4E4E7' }}
     >
       <div
-        className="bg-zinc-50"
+        className="bg-white"
         style={{ height: headerHeight, borderBottom: '1px solid #E4E4E7' }}
       />
       <div className="relative" style={{ height: GRID_HEIGHT }}>
         {Array.from({ length: SLOT_COUNT }).map((_, idx) => {
           const min = DAY_START_HOUR * 60 + idx * SLOT_MIN;
-          const isHour = min % 60 === 0;
+          if (min % 60 !== 0) return null;
           return (
             <div
               key={idx}
-              className={cn(
-                'absolute right-0 pr-2 text-10 u-nums',
-                isHour ? 'text-zinc-700 font-medium' : 'text-ink-tertiary',
-              )}
-              style={{ top: idx * SLOT_HEIGHT - 6, height: SLOT_HEIGHT }}
+              className="absolute right-0 pr-2 text-12 u-nums text-zinc-500"
+              style={{ top: idx * SLOT_HEIGHT - 8, height: SLOT_HEIGHT }}
             >
-              {isHour ? minutesToLabel(min) : ''}
+              {minutesToLabel(min)}
             </div>
           );
         })}
@@ -349,7 +408,7 @@ function RailItem({ service, dayLabel, onEdit }) {
   );
 }
 
-function UnassignedRail({ items, onEdit }) {
+function UnassignedRail({ items, onEdit, collapsed, onToggleCollapsed }) {
   const { setNodeRef, isOver } = useDroppable({
     id: 'rail-unassigned',
     data: { target: 'rail' },
@@ -358,33 +417,64 @@ function UnassignedRail({ items, onEdit }) {
     <div
       ref={setNodeRef}
       className={cn(
-        'bg-zinc-50 flex-shrink-0 sticky left-0 z-30 transition-colors',
+        'bg-zinc-50 flex-shrink-0 sticky left-0 z-30 transition-all',
         isOver && 'bg-zinc-100',
       )}
-      style={{ width: 180, borderRight: '1px solid #E4E4E7' }}
+      style={{ width: collapsed ? 36 : 180, borderRight: '1px solid #E4E4E7' }}
     >
       <div
-        className="sticky top-0 z-10 bg-zinc-50 px-3 py-2 flex items-center justify-between"
-        style={{ height: 36, borderBottom: '1px solid #E4E4E7' }}
+        className="sticky top-0 z-10 bg-zinc-50 flex items-center justify-between gap-2"
+        style={{
+          height: 36,
+          padding: collapsed ? '0' : '0 12px',
+          borderBottom: '1px solid #E4E4E7',
+        }}
       >
-        <span className="text-10 uppercase tracking-label text-ink-tertiary font-medium">Unassigned</span>
-        <span className="u-nums text-11 text-zinc-700">{items.length}</span>
+        {collapsed ? (
+          <button
+            type="button"
+            onClick={onToggleCollapsed}
+            className="w-full h-full flex items-center justify-center text-ink-tertiary hover:text-zinc-900 u-focus-ring"
+            title={`Expand unassigned (${items.length})`}
+            aria-label="Expand unassigned"
+          >
+            <ChevronRight size={14} />
+          </button>
+        ) : (
+          <>
+            <span className="text-10 uppercase tracking-label text-ink-tertiary font-medium">Unassigned</span>
+            <div className="flex items-center gap-2">
+              <span className="u-nums text-11 text-zinc-700">{items.length}</span>
+              <button
+                type="button"
+                onClick={onToggleCollapsed}
+                className="text-ink-tertiary hover:text-zinc-900 u-focus-ring p-0.5 -mr-1"
+                title="Collapse unassigned"
+                aria-label="Collapse unassigned"
+              >
+                <ChevronLeft size={14} />
+              </button>
+            </div>
+          </>
+        )}
       </div>
-      {items.length === 0 ? (
-        <div className="px-3 py-6 text-11 text-ink-tertiary text-center">
-          Drop here to unassign
-        </div>
-      ) : (
-        <div className="px-2 py-2 flex flex-col gap-1.5">
-          {items.map(({ service, dayLabel }) => (
-            <RailItem
-              key={service.id}
-              service={service}
-              dayLabel={dayLabel}
-              onEdit={onEdit}
-            />
-          ))}
-        </div>
+      {!collapsed && (
+        items.length === 0 ? (
+          <div className="px-3 py-6 text-11 text-ink-tertiary text-center">
+            Drop here to unassign
+          </div>
+        ) : (
+          <div className="px-2 py-2 flex flex-col gap-1.5">
+            {items.map(({ service, dayLabel }) => (
+              <RailItem
+                key={service.id}
+                service={service}
+                dayLabel={dayLabel}
+                onEdit={onEdit}
+              />
+            ))}
+          </div>
+        )
       )}
     </div>
   );
@@ -405,6 +495,8 @@ export default function TimeGridDays({
   onEdit,
   onChange,
   onDateClick,
+  onCreateSlot,
+  refreshKey = 0, // bump to force a week-fetch refresh from the parent
   hideUnassignedRail = false,
 }) {
   const [data, setData] = useState(null);
@@ -412,6 +504,7 @@ export default function TimeGridDays({
   const [optimistic, setOptimistic] = useState(null);
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState(null);
+  const [unassignedCollapsed, setUnassignedCollapsed] = useState(false);
 
   const monday = useMemo(() => startOfWeek(date), [date]);
 
@@ -421,7 +514,7 @@ export default function TimeGridDays({
     adminFetch(`/admin/schedule/week?start=${monday}`)
       .then((j) => { setData(j); setLoading(false); })
       .catch((err) => { console.error(err); setLoading(false); });
-  }, [monday]);
+  }, [monday, refreshKey]);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 
@@ -449,8 +542,6 @@ export default function TimeGridDays({
     });
     return items;
   }, [days]);
-
-  const today = etDateString();
 
   const onDragEnd = useCallback((event) => {
     const { active, over } = event;
@@ -589,7 +680,14 @@ export default function TimeGridDays({
     >
       <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragEnd={onDragEnd}>
         <div className="flex" style={{ maxHeight: '70vh' }}>
-          {!hideUnassignedRail && <UnassignedRail items={unassignedList} onEdit={onEdit} />}
+          {!hideUnassignedRail && (
+            <UnassignedRail
+              items={unassignedList}
+              onEdit={onEdit}
+              collapsed={unassignedCollapsed}
+              onToggleCollapsed={() => setUnassignedCollapsed((v) => !v)}
+            />
+          )}
           <div className="overflow-auto flex-1">
             <div className="flex" style={{ minWidth: TIME_AXIS_WIDTH + days.length * COL_MIN_WIDTH }}>
               <TimeAxis headerHeight={36} />
@@ -598,8 +696,7 @@ export default function TimeGridDays({
                   key={day.date}
                   day={day}
                   onEdit={onEdit}
-                  isToday={day.date === today}
-                  isSelected={selectedDate && day.date === selectedDate}
+                  onCreateSlot={onCreateSlot}
                 />
               ))}
             </div>

@@ -111,6 +111,17 @@ function formatDateDisplay(dateStr) {
 
 const isToday = (dateStr) => isETTodayStr(dateStr);
 
+// "08:00", "09:30" → 90. Returns undefined for missing/malformed input so the
+// modal can fall back to the chosen service's default duration.
+function slotDurationMinutes(start, end) {
+  if (!start || !end) return undefined;
+  const sm = start.match(/^(\d{1,2}):(\d{2})/);
+  const em = end.match(/^(\d{1,2}):(\d{2})/);
+  if (!sm || !em) return undefined;
+  const minutes = (Number(em[1]) * 60 + Number(em[2])) - (Number(sm[1]) * 60 + Number(sm[2]));
+  return minutes > 0 ? minutes : undefined;
+}
+
 function sanitizeServiceTypeClient(serviceType) {
   if (!serviceType) return 'General Service';
   if (/^[A-Z0-9]{5,}$/.test(serviceType)) return 'General Service';
@@ -717,7 +728,7 @@ export default function DispatchPageV2() {
     const current = SCHEDULE_TABS.find((t) => t.id === activeTab);
     if (current?.desktopOnly) setActiveTab('board');
   }, [isMobile, activeTab]);
-  // Default desktop to Week (Square-style); phones still open on Day,
+  // Default desktop to Week (multi-day grid); phones still open on Day,
   // which is what techs and Virginia want when triaging in the field.
   const [viewMode, setViewMode] = useState(() => {
     if (typeof window === 'undefined') return 'week';
@@ -739,6 +750,7 @@ export default function DispatchPageV2() {
   const [protocolService, setProtocolService] = useState(null);
   const [showNewAppt, setShowNewAppt] = useState(false);
   const [newApptDefaults, setNewApptDefaults] = useState(null);
+  const [scheduleRefreshKey, setScheduleRefreshKey] = useState(0);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
   const [showMoreSheet, setShowMoreSheet] = useState(false);
@@ -1070,6 +1082,7 @@ export default function DispatchPageV2() {
         <CreateAppointmentModal
           defaultDate={newApptDefaults?.date || date}
           defaultWindowStart={newApptDefaults?.windowStart}
+          defaultDurationMinutes={newApptDefaults?.durationMinutes}
           defaultTechId={newApptDefaults?.techId}
           defaultCustomer={newApptDefaults?.customer || null}
           onClose={() => { setShowNewAppt(false); setNewApptDefaults(null); }}
@@ -1077,11 +1090,14 @@ export default function DispatchPageV2() {
             setShowNewAppt(false);
             setNewApptDefaults(null);
             fetchSchedule(appt.scheduledDate || date);
+            // TimeGridDays (week / 5-day) owns its own week-fetch — bump the
+            // key so it refetches and the just-created appointment shows up.
+            setScheduleRefreshKey((k) => k + 1);
           }}
         />
       )}
 
-      {/* Week / 5-Day = Square-style time grid (drag to reschedule). Month = summary grid. */}
+      {/* Week / 5-Day = multi-day time grid (drag to reschedule). Month = summary grid. */}
       {viewMode === 'week' && isMobile && (
         <MobileDispatchList
           mode="week"
@@ -1096,8 +1112,13 @@ export default function DispatchPageV2() {
           dayCount={7}
           selectedDate={date}
           hideUnassignedRail={false}
+          refreshKey={scheduleRefreshKey}
           onEdit={(svc) => setEditingService(svc)}
           onChange={() => fetchSchedule(date)}
+          onCreateSlot={({ date: slotDate, windowStart, windowEnd }) => {
+            setNewApptDefaults({ date: slotDate, windowStart, durationMinutes: slotDurationMinutes(windowStart, windowEnd) });
+            setShowNewAppt(true);
+          }}
         />
       )}
       {viewMode === '5day' && (
@@ -1106,8 +1127,13 @@ export default function DispatchPageV2() {
           dayCount={5}
           selectedDate={date}
           hideUnassignedRail={isMobile}
+          refreshKey={scheduleRefreshKey}
           onEdit={(svc) => setEditingService(svc)}
           onChange={() => fetchSchedule(date)}
+          onCreateSlot={({ date: slotDate, windowStart, windowEnd }) => {
+            setNewApptDefaults({ date: slotDate, windowStart, durationMinutes: slotDurationMinutes(windowStart, windowEnd) });
+            setShowNewAppt(true);
+          }}
         />
       )}
       {viewMode === 'month' && <MonthViewV2 date={date} onDateClick={(d) => { setDate(d); setViewMode('day'); }} />}
@@ -1263,7 +1289,7 @@ export default function DispatchPageV2() {
             />
           </div>
 
-          {/* Mobile: inline scrollable day list (replaces Square-style calendar) */}
+          {/* Mobile: inline scrollable day list (replaces the multi-day calendar) */}
           <div className="md:hidden">
             <MobileDispatchList
               mode="day"

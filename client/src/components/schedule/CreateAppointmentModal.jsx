@@ -103,7 +103,7 @@ const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, b
 const labelStyle = { fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 500, display: 'block', marginBottom: 4 };
 const sectionStyle = { background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}`, marginBottom: 12 };
 
-export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultTechId, defaultCustomer = null, onClose, onCreated }) {
+export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, onClose, onCreated }) {
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
 
@@ -285,9 +285,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     } catch (e) { alert('Failed to add customer: ' + e.message); }
   };
 
-  // Compute end time
+  // Compute end time. Service duration wins when a service is chosen; if no
+  // service is picked yet, honor the duration the operator dragged out on the
+  // grid (defaultDurationMinutes), else fall back to 60.
   const getEndTime = () => {
-    const dur = selectedService?.duration || selectedService?.default_duration_minutes || 60;
+    const dur = selectedService?.duration || selectedService?.default_duration_minutes || defaultDurationMinutes || 60;
     const [h, m] = windowStart.split(':').map(Number);
     const endMin = h * 60 + m + dur;
     return `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
