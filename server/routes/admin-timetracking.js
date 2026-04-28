@@ -597,15 +597,23 @@ router.get('/technicians', async (req, res, next) => {
 // POST /technicians — add a new technician
 router.post('/technicians', async (req, res, next) => {
   try {
-    const { name, phone, email } = req.body;
+    const { name, phone, email, autoFlipEnabled } = req.body;
     if (!name || !name.trim()) return res.status(400).json({ error: 'Name is required' });
-    const [tech] = await db('technicians').insert({
+    const insertRow = {
       name: name.trim(),
       phone: phone || null,
       email: email || null,
       active: true,
-    }).returning('*');
-    logger.info(`[team] Added technician: ${tech.name}`);
+    };
+    // Honor the create-form's auto-flip checkbox. Without this, an
+    // operator unchecking "Auto-flip enabled" during creation would
+    // see the value silently dropped and the row created at the
+    // column DEFAULT (TRUE), needing a second edit to actually opt
+    // the tech out. Falsy explicit value → false; undefined → leave
+    // it to the column DEFAULT.
+    if (autoFlipEnabled !== undefined) insertRow.auto_flip_enabled = !!autoFlipEnabled;
+    const [tech] = await db('technicians').insert(insertRow).returning('*');
+    logger.info(`[team] Added technician: ${tech.name} (auto_flip_enabled=${tech.auto_flip_enabled})`);
     res.json({ success: true, technician: tech });
   } catch (err) { next(err); }
 });
@@ -613,16 +621,21 @@ router.post('/technicians', async (req, res, next) => {
 // PUT /technicians/:id — update a technician
 router.put('/technicians/:id', async (req, res, next) => {
   try {
-    const { name, phone, email, active } = req.body;
+    const { name, phone, email, active, autoFlipEnabled } = req.body;
     const updates = {};
     if (name !== undefined) updates.name = name.trim();
     if (phone !== undefined) updates.phone = phone;
     if (email !== undefined) updates.email = email;
     if (active !== undefined) updates.active = active;
+    // Per-tech auto-flip opt-out (Phase 2E). When false, the geofence
+    // EXIT auto-flip pipeline skips this tech entirely with
+    // action_taken='auto_flip_skipped_tech_disabled'. Default TRUE on
+    // the column so existing rows keep current behavior.
+    if (autoFlipEnabled !== undefined) updates.auto_flip_enabled = !!autoFlipEnabled;
     updates.updated_at = new Date();
     await db('technicians').where({ id: req.params.id }).update(updates);
     const tech = await db('technicians').where({ id: req.params.id }).first();
-    logger.info(`[team] Updated technician: ${tech.name} (active=${tech.active})`);
+    logger.info(`[team] Updated technician: ${tech.name} (active=${tech.active}, auto_flip_enabled=${tech.auto_flip_enabled})`);
     res.json({ success: true, technician: tech });
   } catch (err) { next(err); }
 });

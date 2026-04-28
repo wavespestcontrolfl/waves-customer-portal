@@ -994,7 +994,7 @@ function TeamTab({ showToast }) {
         await adminFetch('/admin/timetracking/technicians', { method: 'POST', body: JSON.stringify(form) });
         showToast('Technician added');
       }
-      setShowAdd(false); setEditingId(null); setForm({ name: '', phone: '', email: '' });
+      setShowAdd(false); setEditingId(null); setForm({ name: '', phone: '', email: '', autoFlipEnabled: true });
       load();
     } catch (e) { showToast('Failed: ' + e.message); }
     setSaving(false);
@@ -1031,7 +1031,12 @@ function TeamTab({ showToast }) {
 
   const startEdit = (tech) => {
     setEditingId(tech.id);
-    setForm({ name: tech.name, phone: tech.phone || '', email: tech.email || '' });
+    setForm({
+      name: tech.name,
+      phone: tech.phone || '',
+      email: tech.email || '',
+      autoFlipEnabled: tech.auto_flip_enabled !== false, // default true if undefined
+    });
     setShowAdd(true);
   };
 
@@ -1041,7 +1046,7 @@ function TeamTab({ showToast }) {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>Technicians</div>
-        <button onClick={() => { setShowAdd(true); setEditingId(null); setForm({ name: '', phone: '', email: '' }); }} style={sBtn(D.teal, D.white)}>+ Add Technician</button>
+        <button onClick={() => { setShowAdd(true); setEditingId(null); setForm({ name: '', phone: '', email: '', autoFlipEnabled: true }); }} style={sBtn(D.teal, D.white)}>+ Add Technician</button>
       </div>
 
       {/* Add / Edit form */}
@@ -1062,6 +1067,28 @@ function TeamTab({ showToast }) {
               <input value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} placeholder="john@wavespestcontrol.com" style={sInput} />
             </div>
           </div>
+
+          {/* Auto-flip opt-out (Phase 2E). Default ON. When OFF, the
+              geofence EXIT pipeline skips this tech entirely — useful
+              for a tech generating false-positive auto-flip SMS while
+              ops fine-tunes thresholds. Customer-side opt-out lives on
+              Customer 360. Master toggle is geofence.auto_flip_on_departure
+              in system_settings. */}
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={form.autoFlipEnabled !== false}
+              onChange={e => setForm(f => ({ ...f, autoFlipEnabled: e.target.checked }))}
+              style={{ width: 14, height: 14, cursor: 'pointer' }}
+            />
+            <span style={{ fontSize: 12, color: D.heading }}>
+              Auto-flip on EXIT enabled
+            </span>
+            <span style={{ fontSize: 11, color: D.muted }}>
+              (when off, EXIT events for this tech skip the en-route auto-flip pipeline)
+            </span>
+          </label>
+
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={handleSave} disabled={saving || !form.name.trim()} style={{ ...sBtn(D.green, D.white), opacity: saving || !form.name.trim() ? 0.5 : 1 }}>
               {saving ? 'Saving...' : editingId ? 'Update' : 'Add'}

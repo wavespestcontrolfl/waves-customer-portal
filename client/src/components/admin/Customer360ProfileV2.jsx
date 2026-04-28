@@ -1021,6 +1021,49 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
                 </div>
               )}
 
+              {/* Notification preferences — admin override only.
+                  Customers manage everything else via the customer-
+                  facing /api/notifications/preferences endpoint
+                  themselves. Today this exposes only the per-customer
+                  auto-flip opt-out (Phase 2E). Add more rows here only
+                  when ops genuinely needs to override on a customer's
+                  behalf. */}
+              <div className="mt-4">
+                <SectionTitle>Notification preferences</SectionTitle>
+                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={data.notificationPrefs?.auto_flip_en_route !== false}
+                    onChange={async (e) => {
+                      const next = e.target.checked;
+                      setData(prev => prev ? ({
+                        ...prev,
+                        notificationPrefs: { ...(prev.notificationPrefs || {}), auto_flip_en_route: next },
+                      }) : prev);
+                      try {
+                        await adminFetch(`/admin/customers/${customerId}/notification-prefs`, {
+                          method: 'PUT',
+                          body: JSON.stringify({ autoFlipEnRoute: next }),
+                        });
+                      } catch {
+                        // Revert on error so the toggle reflects DB truth.
+                        setData(prev => prev ? ({
+                          ...prev,
+                          notificationPrefs: { ...(prev.notificationPrefs || {}), auto_flip_en_route: !next },
+                        }) : prev);
+                      }
+                    }}
+                  />
+                  <div>
+                    <div className="text-12 font-medium text-zinc-900">Auto-flip en route SMS</div>
+                    <div className="text-12 text-ink-secondary">
+                      When the tech&apos;s vehicle leaves a previous geofence and the next job is this customer, fire the &quot;on the way&quot; SMS automatically. Off here = customer keeps manual en-route SMS but skips auto-flip.
+                    </div>
+                  </div>
+                </label>
+              </div>
+
               <div className="mt-4">
                 <SectionTitle>Notes &amp; Interactions ({(data.interactions || []).length})</SectionTitle>
                 {(data.interactions || []).slice(0, 10).map((n, i) => (
