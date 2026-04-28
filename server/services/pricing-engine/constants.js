@@ -1,6 +1,6 @@
 // ============================================================
 // constants.js — Waves Pest Control Pricing Constants
-// Prices are quoted at base. A 3% processing fee is added at
+// Prices are quoted at base. A 3.99% processing fee is added at
 // checkout when the customer pays by credit card (not ACH).
 // ============================================================
 
@@ -163,7 +163,7 @@ const LAWN_TIERS = {
 };
 
 // Bracket tables: [sqft, basic, standard, enhanced, premium]
-// Base prices — 3% card surcharge is applied at checkout, not baked in here.
+// Base prices — 3.99% card surcharge is applied at checkout, not baked in here.
 const LAWN_BRACKETS = {
   st_augustine: [
     [3000,  r(35), r(45), r(55), r(65)],
@@ -573,7 +573,7 @@ const WAVEGUARD = {
 
 // ── ACH Payment Discount ──────────────────────────────────────
 // Retired. Kept at 0% so any legacy callers stay harmless. Card payments
-// incur a 3% processing surcharge at checkout instead.
+// incur a 3.99% processing surcharge at checkout instead.
 const ACH_DISCOUNT = {
   percentage: 0,
   paymentMethod: 'us_bank_account',

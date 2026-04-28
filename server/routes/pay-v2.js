@@ -103,7 +103,7 @@ router.post('/:token/setup', async (req, res, next) => {
 
 // =========================================================================
 // POST /api/pay/:token/update-amount — Adjust PI for selected payment method
-// (adds a 3% processing surcharge for card-family methods; ACH stays at base)
+// (adds a 3.99% processing surcharge for card-family methods; ACH stays at base)
 // =========================================================================
 router.post('/:token/update-amount', async (req, res, next) => {
   try {

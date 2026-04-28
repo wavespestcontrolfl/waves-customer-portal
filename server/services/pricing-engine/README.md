@@ -21,7 +21,7 @@ Single source of truth for what this engine prices, how, and with what constants
 | `MARGIN_FLOOR` | 35% | Minimum contribution margin for recurring lines |
 | `MARGIN_TARGET_TS` | 43% | Tree & Shrub conservative target |
 | `CONDITIONAL_CEILING` | $60 | Max conditional material/yr before reprice |
-| `PROCESSING_ADJUSTMENT` | 1.00 | Card-fee multiplier (currently no-op; 3% added at checkout) |
+| `PROCESSING_ADJUSTMENT` | 1.00 | Card-fee multiplier (currently no-op; 3.99% added at checkout) |
 
 **Zone multipliers** (applied after all service pricing):
 
@@ -248,7 +248,7 @@ All priced via margin-divisor formula: `price = cost / marginDivisor`. A `margin
 ## 13. Payment Adjustments
 
 **ACH discount:** retired (0%). Kept as a constant for legacy-caller safety.
-**Card surcharge:** 3% added at checkout, not baked into engine output.
+**Card surcharge:** 3.99% added at checkout, not baked into engine output.
 
 ---
 

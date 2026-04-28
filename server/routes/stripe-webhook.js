@@ -519,12 +519,12 @@ async function handleAchFailure(paymentIntent, failureReason) {
         if (recentFailures >= 3) {
           // 3rd failure — ACH suspended
           await twilio.sendSMS(phone,
-            `Hi ${customer.first_name}, your bank payment failed again. We've updated your default payment to your card. Card payments include a 3% processing fee — update your bank account at ${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/billing to pay with no added fee. — Waves Pest Control`
+            `Hi ${customer.first_name}, your bank payment failed again. We've updated your default payment to your card. Card payments include a 3.99% processing fee — update your bank account at ${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/billing to pay with no added fee. — Waves Pest Control`
           );
         } else if (recentFailures >= 2) {
           // 2nd failure — card fallback
           await twilio.sendSMS(phone,
-            `Hi ${customer.first_name}, your bank payment failed again. We've switched this payment to your card on file. Card payments include a 3% processing fee — you can switch back to bank payment once your account is verified. — Waves Pest Control`
+            `Hi ${customer.first_name}, your bank payment failed again. We've switched this payment to your card on file. Card payments include a 3.99% processing fee — you can switch back to bank payment once your account is verified. — Waves Pest Control`
           );
         } else {
           // 1st failure — notify + auto-retry

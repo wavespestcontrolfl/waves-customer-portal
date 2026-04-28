@@ -316,7 +316,7 @@ const DiscountEngine = {
 
   /**
    * ACH discount has been retired. Prices no longer bake in a 3% card-processing
-   * absorption — instead, credit card payments incur a 3% surcharge at checkout
+   * absorption — instead, credit card payments incur a 3.99% surcharge at checkout
    * and ACH pays the quoted price with no discount. Kept as a no-op for callers.
    */
   async getAchDiscount(_amount, _paymentMethod) {

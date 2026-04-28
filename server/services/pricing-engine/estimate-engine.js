@@ -527,11 +527,11 @@ function generateEstimate(input) {
       year2Monthly: Math.round(year2WithRenewal / 12 * 100) / 100,
     },
 
-    // Payment — a 3% processing fee is added at checkout for card payments.
+    // Payment — a 3.99% processing fee is added at checkout for card payments.
     // ACH pays the quoted price. No ACH "discount" is presented anymore.
     paymentMethod,
-    cardProcessingFeeRate: 0.03,
-    cardProcessingFeeEstimate: Math.round(year1Total * 0.03),
+    cardProcessingFeeRate: 0.0399,
+    cardProcessingFeeEstimate: Math.round(year1Total * 0.0399),
     achSavings: 0,
 
     // Warnings

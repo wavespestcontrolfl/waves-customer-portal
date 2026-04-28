@@ -10,6 +10,7 @@
 
 import { ArrowLeft } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { computeCardTotal } from '../../lib/cardSurcharge';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -40,7 +41,7 @@ export default function MobileManualCardSheet({
   const [processing, setProcessing] = useState(false);
   const [paymentIntentId, setPaymentIntentId] = useState(null);
 
-  const surcharge = Math.round(amount * 1.03 * 100) / 100;
+  const { total: surcharge } = computeCardTotal(amount);
 
   useEffect(() => {
     if (!invoiceToken) return;
@@ -191,7 +192,7 @@ export default function MobileManualCardSheet({
           className="text-ink-secondary"
           style={{ fontSize: 15, marginTop: 8 }}
         >
-          ${surcharge.toFixed(2)} with 3% credit card surcharge
+          ${surcharge.toFixed(2)} with 3.99% credit card surcharge
         </div>
 
         {/* Card form — Stripe Payment Element restricted to card tender */}

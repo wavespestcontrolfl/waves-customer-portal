@@ -35,12 +35,12 @@ finding and warns on P1. Reviewers must return JSON matching
   `''`, removing the guard, or accepting events without verification is a
   forged-event vector.
 - **Surcharge math must come from `computeChargeAmount`.**
-  `server/services/stripe.js:39-47` is the single source of truth for the 3%
+  `server/services/stripe.js:39-47` is the single source of truth for the 3.99%
   card surcharge. The dollar amount displayed to the customer, the
   `amountCents` sent to Stripe (`Math.round(total * 100)`), and the
   `card_surcharge` recorded on the `payments` row must all derive from the
   same `computeChargeAmount(invoice.total, methodCategory)` call. New
-  ad-hoc `* 1.03`, `* 0.03`, or local rounding in pay/admin/autopay code
+  ad-hoc `* 1.0399`, `* 0.0399`, or local rounding in pay/admin/autopay code
   will drift the three numbers apart and produce reconciliation breaks.
 - **`isCardMethodType` is the surcharge classifier.** Adding a new payment
   method type (e.g. `cashapp`, `affirm`) without updating
@@ -204,7 +204,7 @@ finding and warns on P1. Reviewers must return JSON matching
   ET-wall-clock fields. `node-cron` schedules pass
   `timezone: 'America/New_York'` explicitly.
 - **Payment processor.** Stripe only — Payment Element (card / Apple Pay
-  / Google Pay / ACH). Card-family pays a 3% surcharge; ACH pays the base.
+  / Google Pay / ACH). Card-family pays a 3.99% surcharge; ACH pays the base.
   Surcharge math is centralized in `server/services/stripe.js`
   (`computeChargeAmount`, `isCardMethodType`). Square is fully phased out
   and must not be reintroduced.
