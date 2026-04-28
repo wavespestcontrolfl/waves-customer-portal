@@ -805,7 +805,7 @@ export default function EstimateToolViewV2({
         method: 'POST', headers: authHeaders,
         body: JSON.stringify({
           address: form.address,
-          customerName: customerSearch || form.customerName || '',
+          customerName: form.customerName || '',
           customerPhone: form.customerPhone || '',
           customerEmail: form.customerEmail || '',
           estimateData: { inputs: form, result: E },
@@ -940,12 +940,14 @@ export default function EstimateToolViewV2({
                         key={c.id}
                         type="button"
                         onClick={() => {
+                          const hasActivePlan = c.tier && c.tier !== 'null' && c.monthlyRate > 0;
                           setForm((f) => ({
                             ...f,
                             address: c.address || f.address,
                             customerName: name,
                             customerPhone: c.phone || f.customerPhone || '',
                             customerEmail: c.email || f.customerEmail || '',
+                            isRecurringCustomer: hasActivePlan ? 'YES' : f.isRecurringCustomer,
                           }));
                           setExistingCustomerMatch(c);
                           setCustomerSearch('');
