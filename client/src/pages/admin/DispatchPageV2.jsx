@@ -42,7 +42,6 @@ import {
 } from './SchedulePage';
 import ProtocolReferenceTabV2 from './ProtocolReferenceTabV2';
 import { ViewModeSelectorV2, MonthViewV2 } from '../../components/schedule/CalendarViewsV2';
-import TimeGridDay from '../../components/schedule/TimeGridDay';
 import TimeGridDays from '../../components/schedule/TimeGridDays';
 import MobileWeekGrid from '../../components/schedule/MobileWeekGrid';
 import MobileDispatchList from '../../components/schedule/MobileDispatchList';
@@ -777,6 +776,14 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
   const [showMoreSheet, setShowMoreSheet] = useState(false);
+  // Aggregated stats from TimeGridDays for the currently-visible range
+  // (Day / 5-Day / Week). null until the grid mounts and emits the first
+  // batch — at which point we use these for the centered stats row so the
+  // numbers reflect the visible date range, not just `?date=…`.
+  const [gridStats, setGridStats] = useState(null);
+  const handleGridStatsChange = useCallback((stats) => {
+    setGridStats(stats);
+  }, []);
 
   // Expose "open create modal" to AdminDispatchPage so the lifted "+ Add
   // Appointment" pill in its header can trigger this page's modal.
@@ -911,21 +918,34 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
   const zoneColors = data.zoneColors || {};
   const zoneLabels = data.zoneLabels || {};
 
-  const totalCount = services.length;
-  const completedCount = services.filter((s) => s.status === 'completed').length;
-  const skippedCount = services.filter((s) => s.status === 'skipped').length;
-  const remainingCount = totalCount - completedCount - skippedCount;
+  // Use TimeGridDays' aggregated stats whenever they're available (Day /
+  // 5-Day / Week — the grid's own fetch is the source of truth for the
+  // visible range). Fall back to the single-day `/admin/schedule?date=X`
+  // result if the grid hasn't mounted yet (e.g. Month view, brief loading
+  // window) so the row never goes blank.
+  const useGridStats = !!gridStats;
+  const totalCount = useGridStats ? gridStats.totalCount : services.length;
+  const completedCount = useGridStats ? gridStats.completedCount : services.filter((s) => s.status === 'completed').length;
+  const skippedCount = useGridStats ? gridStats.skippedCount : services.filter((s) => s.status === 'skipped').length;
+  const remainingCount = useGridStats ? gridStats.remainingCount : (totalCount - completedCount - skippedCount);
 
   const AVG_SERVICE_MIN = 35;
+  const AVG_SERVICE_PRICE = 125;
   const estTotalMin = totalCount * AVG_SERVICE_MIN;
   const estTotalHrs = Math.floor(estTotalMin / 60);
   const estTotalMinRemainder = estTotalMin % 60;
   const estRemainingMin = remainingCount * AVG_SERVICE_MIN;
-  const estFinishTime = (() => {
+  // ETA is "now + remaining time" — only meaningful when looking at a
+  // single day; on multi-day views the stat is suppressed since the
+  // implied finish time spans days.
+  const isSingleDayStats = useGridStats ? gridStats.isSingleDay : true;
+  const estFinishTime = isSingleDayStats ? (() => {
     const finish = new Date(Date.now() + estRemainingMin * 60000);
     return finish.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-  })();
-  const estRevenue = services.reduce((sum, s) => sum + (s.price || 125), 0);
+  })() : null;
+  const estRevenue = useGridStats
+    ? totalCount * AVG_SERVICE_PRICE
+    : services.reduce((sum, s) => sum + (s.price || AVG_SERVICE_PRICE), 0);
 
   const unassignedCount = unassigned.length;
   const newCustomers = services.filter((s) => !s.lastServiceDate);
@@ -994,9 +1014,13 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
         </div>
       )}
 
-      {/* Centered stats badges — schedule grid sub-tab + day view only,
-          desktop only (mobile keeps a leaner header). */}
-      {viewMode === 'day' && activeTab === 'board' && (
+      {/* Centered stats badges — schedule grid sub-tab on Day / 5-Day /
+          Week (Month uses MonthViewV2 which has its own summary), desktop
+          only. The numbers come from TimeGridDays' aggregated stats so
+          they reflect the visible date range, not just `?date=…`. ETA is
+          only meaningful for a single day, so it's suppressed on multi-
+          day views. */}
+      {(viewMode === 'day' || viewMode === '5day' || viewMode === 'week') && activeTab === 'board' && (
         <div className="hidden md:flex justify-center mb-4">
           <div className="flex gap-3 items-center text-12 text-ink-secondary bg-white px-3 py-2 rounded-sm border-hairline border-zinc-200 flex-wrap">
             <span><span className="u-nums font-medium text-zinc-900">{totalCount}</span> services</span>
@@ -1005,7 +1029,9 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
             <span className="pl-3 border-l-hairline border-zinc-200">
               ~{estTotalHrs}h{estTotalMinRemainder > 0 ? ` ${estTotalMinRemainder}m` : ''} total
             </span>
-            <span>ETA <span className="u-nums font-medium text-zinc-900">{estFinishTime}</span></span>
+            {estFinishTime && (
+              <span>ETA <span className="u-nums font-medium text-zinc-900">{estFinishTime}</span></span>
+            )}
             <span className="pl-3 border-l-hairline border-zinc-200">
               <span className="u-nums font-medium text-zinc-900">${estRevenue.toLocaleString()}</span> revenue
             </span>
@@ -1138,6 +1164,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
           refreshKey={scheduleRefreshKey}
           onEdit={(svc) => setEditingService(svc)}
           onChange={() => fetchSchedule(date)}
+          onStatsChange={handleGridStatsChange}
           onCreateSlot={({ date: slotDate, windowStart, windowEnd }) => {
             setNewApptDefaults({ date: slotDate, windowStart, durationMinutes: slotDurationMinutes(windowStart, windowEnd) });
             setShowNewAppt(true);
@@ -1153,6 +1180,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
           refreshKey={scheduleRefreshKey}
           onEdit={(svc) => setEditingService(svc)}
           onChange={() => fetchSchedule(date)}
+          onStatsChange={handleGridStatsChange}
           onCreateSlot={({ date: slotDate, windowStart, windowEnd }) => {
             setNewApptDefaults({ date: slotDate, windowStart, durationMinutes: slotDurationMinutes(windowStart, windowEnd) });
             setShowNewAppt(true);
@@ -1298,20 +1326,25 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
             );
           })()}
 
-          {/* Calendar-style time grid — desktop inline, mobile bottom sheet.
-              Desktop "+ New Appointment" CTA removed; the "+ Add Appointment"
-              pill in the page header (top right) is the canonical desktop
-              entry point for creating an appointment. */}
+          {/* Day view — uses the same multi-day grid component as 5-Day /
+              Week / Month with dayCount={1} so the visual treatment is
+              identical (header, time gutter, hairlines, drag-to-reschedule,
+              click-to-create). The dispatcher loses the per-tech swimlane
+              that the old TimeGridDay rendered; jobs for the selected day
+              now stack in a single calendar column matching the wider
+              views' visual language. */}
           <div className="hidden md:block">
-            <TimeGridDay
+            <TimeGridDays
               date={date}
-              services={services}
-              technicians={technicians}
+              dayCount={1}
+              selectedDate={date}
+              hideUnassignedRail={false}
+              refreshKey={scheduleRefreshKey}
               onEdit={(svc) => setEditingService(svc)}
               onChange={() => fetchSchedule(date)}
-              onDateChange={setDate}
-              onCreateSlot={({ date: slotDate, windowStart, techId }) => {
-                setNewApptDefaults({ date: slotDate, windowStart, techId });
+              onStatsChange={handleGridStatsChange}
+              onCreateSlot={({ date: slotDate, windowStart, windowEnd }) => {
+                setNewApptDefaults({ date: slotDate, windowStart, durationMinutes: slotDurationMinutes(windowStart, windowEnd) });
                 setShowNewAppt(true);
               }}
             />

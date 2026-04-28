@@ -28,7 +28,11 @@ const SLOT_MIN = 30;
 const SLOT_HEIGHT = 32;
 const SLOT_COUNT = ((DAY_END_HOUR - DAY_START_HOUR) * 60) / SLOT_MIN;
 const GRID_HEIGHT = SLOT_COUNT * SLOT_HEIGHT;
-const COL_MIN_WIDTH = 160;
+// Tightened from 160 → 130 so the full Mon→Sun Week fits more often
+// without horizontal scroll on a typical desktop viewport (sidebar +
+// content padding + collapsed unassigned rail leave ~870px for 7
+// columns + 64px time axis).
+const COL_MIN_WIDTH = 130;
 const TIME_AXIS_WIDTH = 64;
 
 function adminFetch(path, options = {}) {
@@ -202,7 +206,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
           return min == null ? '' : minutesToLabel(min);
         })()}
       </div>
-      <div className="font-medium truncate">{service.customerName || 'Unassigned'}</div>
+      <div className="font-bold truncate">{service.customerName || 'Unassigned'}</div>
       {height > SLOT_HEIGHT && (
         <div className="opacity-80 truncate text-10">
           {service.serviceType || ''}{service.technicianName ? ` · ${service.technicianName}` : ''}
@@ -442,9 +446,11 @@ function UnassignedRail({ items, onEdit, collapsed, onToggleCollapsed }) {
           </button>
         ) : (
           <>
-            <span className="text-10 uppercase tracking-label text-ink-tertiary font-medium">Unassigned</span>
+            <span className="uppercase tracking-label text-ink-tertiary font-medium" style={{ fontSize: 8 }}>Unassigned</span>
             <div className="flex items-center gap-2">
-              <span className="u-nums text-11 text-zinc-700">{items.length}</span>
+              {/* Count rendered in waves-blue + bold so the dispatcher can
+                  spot a non-zero unassigned backlog at a glance. */}
+              <span className="u-nums text-11 font-bold text-waves-blue" style={{ color: '#2E7DB3' }}>{items.length}</span>
               <button
                 type="button"
                 onClick={onToggleCollapsed}
@@ -489,13 +495,14 @@ function startOfWeek(dateStr) {
 }
 
 export default function TimeGridDays({
-  date,           // anchor date (any day in the week)
-  dayCount = 7,   // 5 (Mon–Fri) or 7 (Mon–Sun)
+  date,           // anchor date (any day in the visible range)
+  dayCount = 7,   // 1 (Day) | 5 (Mon–Fri) | 7 (Mon–Sun)
   selectedDate,   // optional — highlight this day
   onEdit,
   onChange,
   onDateClick,
   onCreateSlot,
+  onStatsChange,  // receives aggregated stats (totalCount, completedCount, …) for the visible range
   refreshKey = 0, // bump to force a week-fetch refresh from the parent
   hideUnassignedRail = false,
 }) {
@@ -522,8 +529,37 @@ export default function TimeGridDays({
     // optimistic is `{ ...data, days: [...] }` (an object) — read its days
     // array, not the wrapper, or `.slice` / `.forEach` blow up downstream.
     const all = (optimistic?.days || data?.days || []);
-    return dayCount === 5 ? all.slice(0, 5) : all;
-  }, [data, optimistic, dayCount]);
+    if (dayCount === 1) {
+      // Day view — render the single column for the selected date. The
+      // /admin/schedule/week fetch returns Mon→Sun for the anchor's week,
+      // so the selected day is always present.
+      const selected = all.find((d) => d.date === date);
+      return selected ? [selected] : (all.length ? [all[0]] : []);
+    }
+    if (dayCount === 5) return all.slice(0, 5);
+    return all;
+  }, [data, optimistic, dayCount, date]);
+
+  // Emit aggregated stats for the visible range whenever the data shifts.
+  // DispatchPageV2 uses this to render the centered stats row (services /
+  // done / left / total / ETA / revenue) accurately across Day / 5-Day /
+  // Week — instead of the previous behavior where the row always reflected
+  // a single day's services from /admin/schedule?date=X regardless of view.
+  useEffect(() => {
+    if (typeof onStatsChange !== 'function') return;
+    const allServices = days.flatMap((d) => d.services || []);
+    const totalCount = allServices.length;
+    const completedCount = allServices.filter((s) => s.status === 'completed').length;
+    const skippedCount = allServices.filter((s) => s.status === 'skipped').length;
+    onStatsChange({
+      totalCount,
+      completedCount,
+      skippedCount,
+      remainingCount: totalCount - completedCount - skippedCount,
+      isSingleDay: dayCount === 1,
+      services: allServices,
+    });
+  }, [days, dayCount, onStatsChange]);
 
   const unassignedList = useMemo(() => {
     const items = [];
