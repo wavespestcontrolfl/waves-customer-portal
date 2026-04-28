@@ -3,10 +3,27 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const timeTracking = require('../services/time-tracking');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+// Columns on `technicians` that are admin-only — payroll, personal,
+// emergency contact. Tech-role tokens hitting GET /technicians get
+// the row with these stripped so a tech can still see "who's on the
+// team" (id, name, photo, contact, role) without leaking each
+// coworker's wage, DOB, address, SSN, etc.
+const PRIVATE_TECH_FIELDS = [
+  'pay_rate', 'hire_date', 'job_title', 'employment_type',
+  'address', 'dob', 'ssn_last4',
+  'emergency_contact_name', 'emergency_contact_phone',
+];
+
+function sanitizeTechForNonAdmin(tech) {
+  const out = { ...tech };
+  for (const f of PRIVATE_TECH_FIELDS) delete out[f];
+  return out;
+}
 
 // Auto-create tables if missing
 async function ensureTables() {
@@ -580,7 +597,11 @@ router.get('/analytics/comparison', async (req, res, next) => {
 // TECHNICIAN MANAGEMENT — CRUD
 // ═══════════════════════════════════════════════════════════════════
 
-// GET /technicians — list all technicians (including inactive)
+// GET /technicians — list all technicians (including inactive).
+// Tech-role tokens get the rows with payroll/PII columns stripped;
+// admin tokens get the full rows. Keeping the route accessible to
+// techs preserves the pre-existing dispatch/team-roster use cases
+// without exposing each coworker's wage, DOB, address, etc.
 router.get('/technicians', async (req, res, next) => {
   try {
     const techs = await db('technicians').orderBy('active', 'desc').orderBy('name');
@@ -590,10 +611,14 @@ router.get('/technicians', async (req, res, next) => {
     // resolve to a fresh presigned URL inside their own auth boundary.
     // This route is admin-authed so presigning is safe.
     const { resolveTechPhotoUrl } = require('../services/tech-photo');
-    const enriched = await Promise.all(techs.map(async (t) => ({
-      ...t,
-      avatar_url: await resolveTechPhotoUrl(t.photo_s3_key, t.avatar_url),
-    })));
+    const isAdmin = req.techRole === 'admin';
+    const enriched = await Promise.all(techs.map(async (t) => {
+      const row = {
+        ...t,
+        avatar_url: await resolveTechPhotoUrl(t.photo_s3_key, t.avatar_url),
+      };
+      return isAdmin ? row : sanitizeTechForNonAdmin(row);
+    }));
     res.json({ technicians: enriched });
   } catch (err) { next(err); }
 });
@@ -622,8 +647,12 @@ function applyPayrollProfileFields(updates, body) {
   }
 }
 
-// POST /technicians — add a new technician
-router.post('/technicians', async (req, res, next) => {
+// POST /technicians — add a new technician. Admin only because the
+// payload now carries payroll/PII fields (pay_rate, DOB, address,
+// SSN-4, emergency contact). Pre-existing route protection was
+// requireTechOrAdmin; tightening to requireAdmin since we widened
+// the body shape.
+router.post('/technicians', requireAdmin, async (req, res, next) => {
   try {
     const { name, phone, email, autoFlipEnabled } = req.body;
     if (!name || !name.trim()) return res.status(400).json({ error: 'Name is required' });
@@ -647,8 +676,10 @@ router.post('/technicians', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// PUT /technicians/:id — update a technician
-router.put('/technicians/:id', async (req, res, next) => {
+// PUT /technicians/:id — update a technician. Admin only — same
+// reasoning as POST: techs must not be able to edit their own (or
+// anyone else's) pay rate, DOB, SSN, address, or emergency contact.
+router.put('/technicians/:id', requireAdmin, async (req, res, next) => {
   try {
     const { name, phone, email, active, autoFlipEnabled } = req.body;
     const updates = {};
@@ -673,8 +704,9 @@ router.put('/technicians/:id', async (req, res, next) => {
 // GET /technicians/:id/earnings?from=YYYY-MM-DD&to=YYYY-MM-DD —
 // hours × pay_rate breakdown for a window. OT pays at 1.5×.
 // Falls back to $35/hr if pay_rate is unset (matches the legacy
-// hardcoded LABOR_RATE so dashboards stay consistent).
-router.get('/technicians/:id/earnings', async (req, res, next) => {
+// hardcoded LABOR_RATE so dashboards stay consistent). Admin only —
+// payroll info, even one tech's own, isn't a tech-role surface.
+router.get('/technicians/:id/earnings', requireAdmin, async (req, res, next) => {
   try {
     const tech = await db('technicians').where({ id: req.params.id }).first();
     if (!tech) return res.status(404).json({ error: 'Technician not found' });
