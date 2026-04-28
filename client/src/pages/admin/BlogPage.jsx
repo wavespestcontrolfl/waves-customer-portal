@@ -1203,8 +1203,8 @@ export default function BlogPage() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
         <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>
-          <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Content Engine</span>
-          <span className="hidden md:inline">Content Engine</span>
+          <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Blog</span>
+          <span className="hidden md:inline">Blog</span>
         </h1>
         <button onClick={handleGenerateIdeas} disabled={generatingIdeas} style={{
           padding: '8px 16px', borderRadius: 8, border: `1px solid ${D.teal}`, background: 'transparent',

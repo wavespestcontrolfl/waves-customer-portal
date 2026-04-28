@@ -57,7 +57,7 @@ export default function SocialMediaPage() {
   return (
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
       <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: '0 0 20px' }}>
-        Social Media Engine
+        Social Media
       </h1>
 
       {/* Tabs — moved directly below the heading per Adam. Platform-
