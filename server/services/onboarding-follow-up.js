@@ -181,14 +181,14 @@ const OnboardingFollowUp = {
           const tier = ob.waveguard_tier || 'Bronze';
           const smsBody = await renderTemplate('onboarding_followup_expiring',
             { first_name: firstName, onboarding_url: url, expires_at: expDate, waveguard_tier: tier },
-            `Hey ${firstName} — heads up, your Waves onboarding link expires on ${expDate}. Lock in your ${tier} WaveGuard plan and first service here:\n\n${url}\n\nQuestions? (941) 318-7612 🌊`
+            `Hey ${firstName} — heads up, your Waves onboarding link expires on ${expDate}. Lock in your WaveGuard ${tier} plan and first service here:\n\n${url}\n\nQuestions? (941) 318-7612 🌊`
           );
           const ok = await sendDualChannel(ob, {
             sms: smsBody,
             email: {
               subject: `Your Waves onboarding link expires ${expDate}`,
               heading: `Heads up — your link expires ${expDate}`,
-              body: `<p>Your Waves onboarding link is set to expire on <strong>${expDate}</strong>. Finish up to lock in your ${tier} WaveGuard plan and get scheduled for your first service.</p><p>Questions? Reply to this email or call (941) 318-7612.</p>`,
+              body: `<p>Your Waves onboarding link is set to expire on <strong>${expDate}</strong>. Finish up to lock in your WaveGuard ${tier} plan and get scheduled for your first service.</p><p>Questions? Reply to this email or call (941) 318-7612.</p>`,
               ctaUrl: url,
             },
           });

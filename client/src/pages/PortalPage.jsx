@@ -2290,7 +2290,7 @@ function ServicesTab() {
                               fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6,
                               marginBottom: 10,
                             }}>
-                              <Icon name="refresh" size={16} strokeWidth={1.75} /> Callback — included with your Gold WaveGuard
+                              <Icon name="refresh" size={16} strokeWidth={1.75} /> Callback — included with your WaveGuard Gold
                             </div>
                           </div>
                         )}
@@ -3286,7 +3286,7 @@ function BillingTab({ customer }) {
             padding: '4px 12px', borderRadius: 20,
             background: `${tier?.color || B.navy}22`,
             color: tier?.darkText ? B.navy : (tier?.color || B.navy),
-          }}>{tierName} WaveGuard</span>
+          }}>WaveGuard {tierName}</span>
           <span style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui }}>${monthlyRate}/mo</span>
         </div>
         <div style={{ fontSize: 14, fontWeight: 600, color: B.navy, marginBottom: 8, fontFamily: FONTS.heading }}>Included Services</div>
@@ -4623,8 +4623,8 @@ function LearnTab({ customer }) {
   const personalizeFaqAnswer = (answer) => {
     if (!answer || !tierName) return answer;
     return answer
-      .replace(/your (plan|membership|tier)/gi, `your ${tierName} WaveGuard`)
-      .replace(/unlimited callbacks/gi, `unlimited callbacks (included with ${tierName} WaveGuard)`)
+      .replace(/your (plan|membership|tier)/gi, `your WaveGuard ${tierName}`)
+      .replace(/unlimited callbacks/gi, `unlimited callbacks (included with WaveGuard ${tierName})`)
       .replace(/callback guarantee/gi, `callback guarantee (${tierName} benefit)`);
   };
 
@@ -4980,7 +4980,7 @@ function MyPlanTab({ customer }) {
   const planTimeline = [];
   if (customer.memberSince) {
     const startDate = parseDate(customer.memberSince);
-    planTimeline.push({ date: startDate, label: `Started ${tierName} WaveGuard`, icon: 'rocket' });
+    planTimeline.push({ date: startDate, label: `Started WaveGuard ${tierName}`, icon: 'rocket' });
   }
   if (customer.activity_log) {
     customer.activity_log.forEach(a => {
@@ -5071,7 +5071,7 @@ function MyPlanTab({ customer }) {
         <div style={{ position: 'absolute', top: -30, right: -30, fontSize: 120, opacity: 0.1 }}></div>
         <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1.5, opacity: 0.8 }}>Your Plan</div>
         <div style={{ fontSize: 32, fontWeight: 400, fontFamily: FONTS.display, letterSpacing: '0.02em', marginTop: 4 }}>
-          {tierName} WaveGuard
+          WaveGuard {tierName}
         </div>
 
         {/* Bundled services one-liner */}
@@ -5441,7 +5441,7 @@ function MyPlanTab({ customer }) {
                           if (upgradeSubmitting[tn]) return;
                           setUpgradeSubmitting(prev => ({ ...prev, [tn]: true }));
                           try {
-                            await api.createRequest?.({ category: 'upgrade', subject: `Upgrade to ${tn} WaveGuard`, description: `Customer requested tier upgrade from ${tierName} to ${tn}.` });
+                            await api.createRequest?.({ category: 'upgrade', subject: `Upgrade to WaveGuard ${tn}`, description: `Customer requested tier upgrade from ${tierName} to ${tn}.` });
                             setUpgradeRequested(prev => ({ ...prev, [tn]: true }));
                           } catch (err) {
                             alert(`Couldn't send upgrade request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
@@ -5480,7 +5480,7 @@ function MyPlanTab({ customer }) {
           <Icon name="money" size={28} strokeWidth={1.75} />
           <div>
             <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>Your Annual Savings</div>
-            <div style={{ fontSize: 12, color: B.grayMid }}>With your {tierName} WaveGuard bundle</div>
+            <div style={{ fontSize: 12, color: B.grayMid }}>With your WaveGuard {tierName} bundle</div>
           </div>
         </div>
         <div style={{ fontSize: 36, fontWeight: 700, color: B.green, fontFamily: FONTS.ui }}>
@@ -5570,7 +5570,7 @@ function MyPlanTab({ customer }) {
             <div style={{ paddingTop: planTimeline.length > 0 ? 20 : 0 }}>
               <div style={{ fontSize: 12, color: B.grayMid, fontWeight: 600 }}>Now</div>
               <div style={{ fontSize: 14, fontWeight: 600, color: B.green, marginTop: 2 }}>
-                Active — {tierName} WaveGuard · No contract
+                Active — WaveGuard {tierName} · No contract
               </div>
             </div>
           </div>
@@ -5640,7 +5640,7 @@ function MyPlanTab({ customer }) {
                     await api.createRequest?.({
                       category: 'pause',
                       subject: `Pause plan for ${pauseDuration} month(s)`,
-                      description: `Customer requested to pause their ${tierName} WaveGuard plan for ${pauseDuration} month(s). Reason: ${pauseReason || 'Not specified'}`,
+                      description: `Customer requested to pause their WaveGuard ${tierName} plan for ${pauseDuration} month(s). Reason: ${pauseReason || 'Not specified'}`,
                     });
                     setPauseSubmitted(true);
                     setShowPauseForm(false);
@@ -5713,7 +5713,7 @@ function MyPlanTab({ customer }) {
                   try {
                     await api.createRequest?.({
                       category: 'cancellation',
-                      subject: `Cancel ${tierName} WaveGuard plan`,
+                      subject: `Cancel WaveGuard ${tierName} plan`,
                       description: `Customer requested cancellation. Reason: ${cancelReason || 'Not specified'}. Details: ${cancelDetails || 'None'}`,
                     });
                     setCancelSubmitted(true);
@@ -7054,16 +7054,10 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   }, [open]);
 
   const problemCategories = [
-    { value: 'pest_issue', label: ' Pest Issue' },
-    { value: 'lawn_concern', label: ' Lawn Problem' },
-    { value: 'irrigation_issue', label: ' Irrigation' },
-    { value: 'schedule_change', label: ' Schedule' },
-  ];
-
-  const requestCategories = [
+    { value: 'pest_issue', label: ' Pest' },
+    { value: 'lawn_concern', label: ' Lawn' },
     { value: 'billing', label: ' Billing' },
-    { value: 'add_service', label: ' Add Service' },
-    { value: 'other', label: ' Other' },
+    { value: 'schedule_change', label: ' Schedule' },
   ];
 
   const locationOptions = [
@@ -7078,8 +7072,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     { value: 'other', label: 'Other' },
   ];
 
-  const isProblemCategory = ['pest_issue', 'lawn_concern', 'irrigation_issue', 'schedule_change'].includes(category);
-  const isRequestCategory = ['billing', 'add_service', 'other'].includes(category);
+  const isProblemCategory = ['pest_issue', 'lawn_concern', 'schedule_change'].includes(category);
 
   // Callback recognition: pest/lawn issue within 30 days of last service
   const tierName = customer?.tier || 'Bronze';
@@ -7195,7 +7188,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
             }}>
               <span style={{ fontWeight: 700, color: B.navy }}>{customer.firstName} {customer.lastName}</span>
               {customer.address?.street && <span> · {customer.address.street}</span>}
-              <span> · {tierName} WaveGuard</span>
+              <span> · WaveGuard {tierName}</span>
               {lastService && (
                 <span> · Last service: {parseDate(lastService.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
               )}
@@ -7237,34 +7230,15 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
             </div>
           </div>
 
-          {/* Category — split into "Something's wrong" and "I need something" */}
           <div style={{ marginBottom: 20 }}>
             <div style={{ fontSize: 15, fontWeight: 800, color: B.navy, marginBottom: 12, fontFamily: FONTS.heading }}>
               We're on it. Tell us what's happening.
             </div>
-
-            <div style={{ fontSize: 12, fontWeight: 700, color: B.grayDark, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-              Something's wrong
-            </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
               {problemCategories.map(c => (
                 <button key={c.value} onClick={() => { setCategory(c.value); if (!isProblemCategory) setUrgency('routine'); }} style={{
                   ...BUTTON_BASE, padding: '9px 16px', fontSize: 14, borderRadius: 12,
                   background: category === c.value ? B.wavesBlue : B.white,
-                  color: category === c.value ? '#fff' : B.grayDark,
-                  border: category === c.value ? 'none' : `1px solid ${B.grayLight}`,
-                }}>{c.label}</button>
-              ))}
-            </div>
-
-            <div style={{ fontSize: 12, fontWeight: 700, color: B.grayDark, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-              I need something
-            </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-              {requestCategories.map(c => (
-                <button key={c.value} onClick={() => setCategory(c.value)} style={{
-                  ...BUTTON_BASE, padding: '9px 16px', fontSize: 14, borderRadius: 12,
-                  background: category === c.value ? B.teal : B.white,
                   color: category === c.value ? '#fff' : B.grayDark,
                   border: category === c.value ? 'none' : `1px solid ${B.grayLight}`,
                 }}>{c.label}</button>
@@ -7279,7 +7253,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
               background: `${B.green}10`, border: `1px solid ${B.green}30`,
               fontSize: 12, color: B.green, fontWeight: 600, lineHeight: 1.5,
             }}>
-              Callbacks are free with your {tierName} WaveGuard plan. We'll get this taken care of.
+              Callbacks are free with your WaveGuard {tierName} plan. We'll get this taken care of.
             </div>
           )}
 
@@ -7322,14 +7296,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
             <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, marginBottom: 8 }}>
               Describe what's happening
             </div>
-            <div style={{ fontSize: 12, color: B.grayMid, marginBottom: 6 }}>
-              The more detail, the faster we can help
-            </div>
             <textarea
               value={description} onChange={e => { if (e.target.value.length <= 500) setDescription(e.target.value); }}
-              placeholder={isProblemCategory
-                ? 'e.g., Seeing ants in the kitchen near the sink. Started two days ago, getting worse...'
-                : 'e.g., I\'d like to add mosquito service to my plan...'}
               rows={5}
               style={{
                 width: '100%', padding: '12px 14px', borderRadius: 12,
@@ -7365,13 +7333,11 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
 
           {/* Submit */}
           <button onClick={handleSubmit} disabled={!category || !description.trim() || submitting} style={{
-            ...BUTTON_BASE, width: '100%', padding: 16, fontSize: 16,
-            background: (category && description.trim()) ? B.red : B.grayLight,
-            color: (category && description.trim()) ? '#fff' : B.grayMid,
-            opacity: submitting ? 0.7 : 1,
-            boxShadow: (category && description.trim()) ? `0 4px 15px ${B.teal}40` : 'none',
+            ...GOLD_CTA, width: '100%',
+            opacity: (!category || !description.trim() || submitting) ? 0.55 : 1,
+            cursor: (!category || !description.trim() || submitting) ? 'not-allowed' : 'pointer',
           }}>
-            {submitting ? 'Sending...' : ' Send to Waves'}
+            {submitting ? 'Submitting...' : 'Submit'}
           </button>
         </div>
       )}

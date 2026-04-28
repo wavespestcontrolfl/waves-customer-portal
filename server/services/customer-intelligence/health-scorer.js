@@ -133,7 +133,7 @@ class HealthScorer {
 
       // Pest but no lawn
       if (Array.from(hasService).some(s => s.includes('pest')) && !Array.from(hasService).some(s => s.includes('lawn'))) {
-        opps.push({ service: 'lawn_care', reason: 'Has pest but no lawn — bundling saves 15% with Gold WaveGuard', confidence: 0.7, monthly_value: 72.50, trigger: 'service_pattern' });
+        opps.push({ service: 'lawn_care', reason: 'Has pest but no lawn — bundling saves 15% with WaveGuard Gold', confidence: 0.7, monthly_value: 72.50, trigger: 'service_pattern' });
       }
 
       // Lawn but no pest
