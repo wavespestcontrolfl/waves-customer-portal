@@ -165,11 +165,27 @@ router.get('/', async (req, res, next) => {
 
     if (search) {
       const s = `%${search}%`;
+      // Phone-digit fallback: stored phones carry formatting (e.g. "(941)
+      // 555-1234" or "+19415551234"), so a literal ILIKE on `phone` misses
+      // when the operator types a bare 10-digit number. Mirrors the dedupe
+      // check used by /quick-add. Only fires when the *whole* search term
+      // is phone-shaped (digits + standard separators) — otherwise mixed
+      // queries like "Acme 941" or "123 Main St" would pull in every
+      // customer whose phone happens to contain those digits, and in 941
+      // that's all of them.
+      const isPhoneLike = /^[\d\s().+\-]+$/.test(search);
+      const phoneDigits = isPhoneLike ? String(search).replace(/\D/g, '') : '';
       query = query.where(function () {
         this.whereILike('first_name', s).orWhereILike('last_name', s)
           .orWhereILike('phone', s).orWhereILike('email', s)
           .orWhereILike('address_line1', s).orWhereILike('city', s)
-          .orWhereILike('company_name', s);
+          .orWhereILike('company_name', s)
+          // Multi-word name match — "Joe Smith" needs to hit first+last
+          // concatenated, not each column in isolation.
+          .orWhereRaw("(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) ILIKE ?", [s]);
+        if (phoneDigits.length >= 3) {
+          this.orWhereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}%`]);
+        }
       });
     }
     if (stage) query = query.where('pipeline_stage', stage);
