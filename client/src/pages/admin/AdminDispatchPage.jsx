@@ -19,15 +19,18 @@
  * Tier 1 V2 styling: uses the components/ui Tabs primitive + zinc
  * surfaces, no inline D palette.
  */
-import React, { Suspense, useState, useCallback, useEffect } from 'react';
+import React, { Suspense, useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Tabs, TabList, Tab } from '../../components/ui';
 import DispatchBoardPage from './DispatchBoardPage';
 
 const DispatchPageV2 = React.lazy(() => import('./DispatchPageV2'));
 
 const TAB_KEY = 'tab';
 const TABS = { BOARD: 'board', SCHEDULE: 'schedule' };
+const TAB_LIST = [
+  { key: TABS.BOARD, label: 'Board' },
+  { key: TABS.SCHEDULE, label: 'Schedule' },
+];
 
 export default function AdminDispatchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -46,16 +49,51 @@ export default function AdminDispatchPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
-  const onValueChange = useCallback((v) => setTab(v), []);
-
   return (
     <div className="flex flex-col bg-surface-page min-h-[calc(100vh-64px)]">
-      <Tabs value={tab} onValueChange={onValueChange}>
-        <TabList className="px-4 bg-white">
-          <Tab value={TABS.BOARD}>Board</Tab>
-          <Tab value={TABS.SCHEDULE}>Schedule</Tab>
-        </TabList>
-      </Tabs>
+      {/* Centered Pipeline-page tab strip — mirrors the
+          Leads/Estimates/Create/Pricing pill (EstimatesPageV2) so
+          the dispatcher's two top-level views read consistently with
+          the rest of the admin shell. */}
+      <div style={{ display: 'flex', justifyContent: 'center', padding: '12px 16px' }}>
+        <div
+          style={{
+            display: 'inline-flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            gap: 4,
+            background: '#F4F4F5',
+            borderRadius: 10,
+            padding: 4,
+            border: '1px solid #E4E4E7',
+          }}
+        >
+          {TAB_LIST.map((t) => {
+            const active = tab === t.key;
+            return (
+              <button
+                key={t.key}
+                type="button"
+                onClick={() => setTab(t.key)}
+                style={{
+                  padding: '10px 24px',
+                  borderRadius: 8,
+                  border: 'none',
+                  cursor: 'pointer',
+                  background: active ? '#18181B' : 'transparent',
+                  color: active ? '#FFFFFF' : '#A1A1AA',
+                  fontSize: 14,
+                  fontWeight: 700,
+                  transition: 'all 0.2s',
+                  fontFamily: "'DM Sans', sans-serif",
+                }}
+              >
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
       <div className="flex-1 min-h-0 flex flex-col">
         {tab === TABS.BOARD ? (
           <DispatchBoardPage />
