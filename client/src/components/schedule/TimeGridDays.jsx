@@ -567,17 +567,16 @@ export default function TimeGridDays({
       (sum, s) => sum + (typeof s.estimatedPrice === 'number' ? s.estimatedPrice : 0),
       0,
     );
-    const totalMin = allServices.reduce(
-      (sum, s) => sum + (typeof s.estimatedDuration === 'number' ? s.estimatedDuration : 0),
-      0,
-    );
-    const remainingMin = allServices.reduce(
-      (sum, s) => {
-        if (s.status === 'completed' || s.status === 'skipped') return sum;
-        return sum + (typeof s.estimatedDuration === 'number' ? s.estimatedDuration : 0);
-      },
-      0,
-    );
+    // Use effectiveDuration so the badge matches how blocks actually
+    // render: prefer estimatedDuration, fall back to (windowEnd -
+    // windowStart), then 30. The week feed leaves
+    // estimated_duration_minutes nullable, so a raw sum would read 0
+    // for services whose only signal is an explicit time window.
+    const totalMin = allServices.reduce((sum, s) => sum + effectiveDuration(s), 0);
+    const remainingMin = allServices.reduce((sum, s) => {
+      if (s.status === 'completed' || s.status === 'skipped') return sum;
+      return sum + effectiveDuration(s);
+    }, 0);
     onStatsChange({
       totalCount,
       completedCount,
