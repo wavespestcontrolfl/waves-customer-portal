@@ -109,8 +109,8 @@ const NAV_SECTIONS = [
   { section: 'Finance', items: [
     { path: '/admin/invoices', icon: FileText, label: 'Invoices' },
     { path: '/admin/banking', icon: Landmark, label: 'Banking' },
-    { path: '/admin/tax', icon: Receipt, label: 'Tax Center' },
-    { path: '/admin/pricing-logic', icon: Calculator, label: 'Pricing Logic' },
+    { path: '/admin/tax', icon: Receipt, label: 'Taxes' },
+    { path: '/admin/pricing-logic', icon: Calculator, label: 'Pricing' },
   ]},
   { section: 'System', items: [
     { path: '/admin/tool-health', icon: Activity, label: 'Tool Health' },

@@ -185,8 +185,8 @@ export default function PricingLogicPage() {
       <div style={{ maxWidth: 1280, margin: '0 auto' }}>
         <div style={{ marginBottom: 24 }}>
           <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>
-            <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Pricing Logic</span>
-            <span className="hidden md:inline">Pricing Logic</span>
+            <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Pricing</span>
+            <span className="hidden md:inline">Pricing</span>
           </h1>
         </div>
 

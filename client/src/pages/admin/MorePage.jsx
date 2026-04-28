@@ -40,8 +40,8 @@ const SECTIONS = [
   { section: 'Finance', items: [
     { path: '/admin/invoices', icon: Receipt, label: 'Invoices' },
     { path: '/admin/banking', icon: Landmark, label: 'Banking' },
-    { path: '/admin/tax', icon: Calculator, label: 'Tax Center' },
-    { path: '/admin/pricing-logic', icon: Ruler, label: 'Pricing Logic' },
+    { path: '/admin/tax', icon: Calculator, label: 'Taxes' },
+    { path: '/admin/pricing-logic', icon: Ruler, label: 'Pricing' },
   ]},
   { section: 'System', items: [
     { path: '/admin/tool-health', icon: Activity, label: 'Tool Health' },

@@ -43,8 +43,8 @@ export default function InventoryPage() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 20 }}>
         <div>
           <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>
-            <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Procurement Intelligence</span>
-            <span className="hidden md:inline">Procurement Intelligence</span>
+            <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Inventory</span>
+            <span className="hidden md:inline">Inventory</span>
           </h1>
         </div>
         {tab === 'products' && (
