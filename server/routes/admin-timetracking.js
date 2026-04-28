@@ -45,7 +45,14 @@ async function clearTechSignoffForWeek(technicianId, workDate, trx) {
     .update({ tech_signed_at: null, tech_signature: null, updated_at: new Date() });
 }
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+// Authentication is router-wide; authorization is per-route. The
+// previous setup mounted requireTechOrAdmin at the router level, but
+// that pattern is harder to audit when individual routes also stack
+// requireAdmin on top — readers (and code-review tools) have to
+// reason about whether the chain still flows. Each route now
+// declares its access scope inline: tech-or-admin reads/edits get
+// requireTechOrAdmin, admin-only payroll/PII paths get requireAdmin.
+router.use(adminAuthenticate);
 
 // Allowlist of `technicians` columns safe to expose to tech-role
 // callers (other techs hitting GET /technicians for a roster view).
@@ -121,7 +128,7 @@ async function ensureTables() {
 // ---------------------------------------------------------------------------
 // GET /  — Dashboard: who's clocked in, today's labor, weekly stats
 // ---------------------------------------------------------------------------
-router.get('/', async (req, res, next) => {
+router.get('/', requireTechOrAdmin, async (req, res, next) => {
   try {
     await ensureTables();
     const today = etDateString(new Date());
@@ -197,7 +204,7 @@ router.get('/', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /entries — paginated entries with filters
 // ---------------------------------------------------------------------------
-router.get('/entries', async (req, res, next) => {
+router.get('/entries', requireTechOrAdmin, async (req, res, next) => {
   try {
     const { technicianId, startDate, endDate, entryType, status, limit, offset } = req.query;
     const result = await timeTracking.getEntries({
@@ -218,7 +225,7 @@ router.get('/entries', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /entries/:id — single entry
 // ---------------------------------------------------------------------------
-router.get('/entries/:id', async (req, res, next) => {
+router.get('/entries/:id', requireTechOrAdmin, async (req, res, next) => {
   try {
     const entry = await db('time_entries')
       .where('time_entries.id', req.params.id)
@@ -243,7 +250,7 @@ router.get('/entries/:id', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // PUT /entries/:id — admin edit (requires edit_reason)
 // ---------------------------------------------------------------------------
-router.put('/entries/:id', async (req, res, next) => {
+router.put('/entries/:id', requireTechOrAdmin, async (req, res, next) => {
   try {
     const { clock_in, clock_out, entry_type, notes, edit_reason } = req.body;
     if (!edit_reason) return res.status(400).json({ error: 'edit_reason is required' });
@@ -286,7 +293,7 @@ router.put('/entries/:id', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // DELETE /entries/:id — void entry
 // ---------------------------------------------------------------------------
-router.delete('/entries/:id', async (req, res, next) => {
+router.delete('/entries/:id', requireTechOrAdmin, async (req, res, next) => {
   try {
     const { reason } = req.body || {};
     const voided = await timeTracking.voidEntry(req.params.id, {
@@ -305,7 +312,7 @@ router.delete('/entries/:id', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /daily — daily summaries with filters
 // ---------------------------------------------------------------------------
-router.get('/daily', async (req, res, next) => {
+router.get('/daily', requireTechOrAdmin, async (req, res, next) => {
   try {
     const { technicianId, startDate, endDate, status } = req.query;
     const summaries = await timeTracking.getDailySummaries({ technicianId, startDate, endDate, status });
@@ -358,7 +365,7 @@ async function notifyTechOfApproval(summary, action, reason) {
 // ---------------------------------------------------------------------------
 // PUT /daily/:id/approve — approve a daily summary
 // ---------------------------------------------------------------------------
-router.put('/daily/:id/approve', async (req, res, next) => {
+router.put('/daily/:id/approve', requireTechOrAdmin, async (req, res, next) => {
   try {
     const prior = await db('time_entry_daily_summary').where({ id: req.params.id }).first();
     if (!prior) return res.status(404).json({ error: 'Summary not found' });
@@ -382,7 +389,7 @@ router.put('/daily/:id/approve', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // PUT /daily/:id/reject — reject a daily summary with reason
 // ---------------------------------------------------------------------------
-router.put('/daily/:id/reject', async (req, res, next) => {
+router.put('/daily/:id/reject', requireTechOrAdmin, async (req, res, next) => {
   try {
     const { reason } = req.body || {};
     if (!reason || !reason.trim()) {
@@ -412,7 +419,7 @@ router.put('/daily/:id/reject', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // PUT /daily/:id/reopen — return an approved/rejected summary to pending
 // ---------------------------------------------------------------------------
-router.put('/daily/:id/reopen', async (req, res, next) => {
+router.put('/daily/:id/reopen', requireTechOrAdmin, async (req, res, next) => {
   try {
     const prior = await db('time_entry_daily_summary').where({ id: req.params.id }).first();
     if (!prior) return res.status(404).json({ error: 'Summary not found' });
@@ -437,7 +444,7 @@ router.put('/daily/:id/reopen', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /daily/:id/history — approval audit trail for a summary
 // ---------------------------------------------------------------------------
-router.get('/daily/:id/history', async (req, res, next) => {
+router.get('/daily/:id/history', requireTechOrAdmin, async (req, res, next) => {
   try {
     const rows = await db('timesheet_approvals')
       .where({ daily_summary_id: req.params.id })
@@ -460,7 +467,7 @@ router.get('/daily/:id/history', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // POST /daily/bulk-approve — approve multiple daily summaries
 // ---------------------------------------------------------------------------
-router.post('/daily/bulk-approve', async (req, res, next) => {
+router.post('/daily/bulk-approve', requireTechOrAdmin, async (req, res, next) => {
   try {
     const { ids } = req.body;
     if (!ids || !Array.isArray(ids) || ids.length === 0) {
@@ -491,7 +498,7 @@ router.post('/daily/bulk-approve', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /weekly — weekly summaries
 // ---------------------------------------------------------------------------
-router.get('/weekly', async (req, res, next) => {
+router.get('/weekly', requireTechOrAdmin, async (req, res, next) => {
   try {
     const { technicianId, startDate, endDate } = req.query;
     const summaries = await timeTracking.getWeeklySummaries({ technicianId, startDate, endDate });
@@ -504,7 +511,7 @@ router.get('/weekly', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /payroll-export — CSV export for a week
 // ---------------------------------------------------------------------------
-router.get('/payroll-export', async (req, res, next) => {
+router.get('/payroll-export', requireTechOrAdmin, async (req, res, next) => {
   try {
     const { weekStart } = req.query;
     if (!weekStart) return res.status(400).json({ error: 'weekStart required (YYYY-MM-DD, Monday)' });
@@ -554,7 +561,7 @@ router.get('/payroll-export', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /analytics — actual vs estimated, utilization, RPMH, overtime
 // ---------------------------------------------------------------------------
-router.get('/analytics', async (req, res, next) => {
+router.get('/analytics', requireTechOrAdmin, async (req, res, next) => {
   try {
     const { startDate, endDate, technicianId } = req.query;
     const start = startDate || new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString().split('T')[0];
@@ -643,7 +650,7 @@ router.get('/analytics', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /analytics/comparison — service type time comparison by tech
 // ---------------------------------------------------------------------------
-router.get('/analytics/comparison', async (req, res, next) => {
+router.get('/analytics/comparison', requireTechOrAdmin, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
     const start = startDate || new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString().split('T')[0];
@@ -684,7 +691,7 @@ router.get('/analytics/comparison', async (req, res, next) => {
 // admin tokens get the full rows. Keeping the route accessible to
 // techs preserves the pre-existing dispatch/team-roster use cases
 // without exposing each coworker's wage, DOB, address, etc.
-router.get('/technicians', async (req, res, next) => {
+router.get('/technicians', requireTechOrAdmin, async (req, res, next) => {
   try {
     const techs = await db('technicians').orderBy('active', 'desc').orderBy('name');
     // Presign photo_s3_key into avatar_url for the response. After
