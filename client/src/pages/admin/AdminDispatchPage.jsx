@@ -156,21 +156,11 @@ export default function AdminDispatchPage() {
           tab switches). Lifting the heading here keeps the pill in one
           stable parent on both tabs while still rendering the heading
           immediately above it on Schedule. */}
-      <div className="px-4 md:px-6 pt-4 md:pt-6 pb-2 flex flex-col items-center gap-3">
-        {/* Always render the h1 so the pill stays the same React sibling on
-            every tab; React reconciles unkeyed children by position, so a
-            conditional <h1> here would flip the pill between sibling slot 0
-            and slot 1 on tab swaps and remount it (a keyboard-focus
-            regression we already fixed once). On non-Schedule tabs, hide
-            the h1 with display:none — flex `gap-3` skips display:none
-            children, so visual layout matches "no h1". */}
-        <h1
-          className="text-28 font-normal tracking-h1 text-zinc-900"
-          style={tab === TABS.SCHEDULE ? undefined : { display: 'none' }}
-        >
-          <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Schedule</span>
-          <span className="hidden md:inline">Schedule</span>
-        </h1>
+      {/* Centered tab pill — page-level navigation. The "Schedule" h1 lives
+          inside DispatchPageV2's header (alongside the "+ Add Appointment"
+          pill on the right) per the standard admin h1 + action-button
+          pattern; AdminDispatchPage owns only the pill. */}
+      <div className="px-4 md:px-6 pt-4 md:pt-6 pb-2 flex justify-center">
         {tabPill}
       </div>
       <div
