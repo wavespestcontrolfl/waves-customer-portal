@@ -1,9 +1,10 @@
 // Chart primitives for the redesigned admin Dashboard (DashboardPageV2).
 //
-// Style contract: Tier 1 V2 monochrome — zinc ramp + hairline borders +
-// the existing 11–28 type scale. alert-fg red is reserved for genuinely
-// failing values (overdue 90+, churn, callbacks above threshold), never
-// for decoration. fontWeight stays 400/500.
+// Palette: semantic colors keyed to what each chart represents (revenue
+// = emerald, primary/info = sky, ops warn = amber, alarms = red). This
+// is a deliberate exception to the broader admin monochrome contract,
+// kept scoped to the Dashboard's data-viz primitives at the owner's
+// request — text + chrome on every other admin surface stays zinc.
 
 import {
   Area,
@@ -28,21 +29,35 @@ import { Card, CardBody, CardHeader, CardTitle, cn } from '../ui';
 
 // ─── Palette ──────────────────────────────────────────────────────
 //
-// Categorical chart colors are pulled from the zinc ramp so the
-// dashboard reads as a monochrome surface, not a candy-store of brand
-// hues. Alert red is the only chromatic accent and only on alarm bars.
+// Semantic ramp: each color carries meaning rather than position. The
+// dashboard is the only admin surface using non-zinc fills; everything
+// outside this file still follows the zinc + alert-fg-only rule.
 
-export const CHART_INK = '#18181B';            // zinc-900 — primary fills
+export const CHART_INK = '#18181B';            // zinc-900 — neutral text fills
 export const CHART_INK_DIM = '#52525B';        // zinc-600 — secondary lines
 export const CHART_GRID = '#E4E4E7';           // zinc-200 — gridlines / dividers
 export const CHART_TICK = '#71717A';           // zinc-500 — axis ticks
-export const CHART_PRIOR = '#A1A1AA';          // zinc-400 — prior-period overlay
+export const CHART_PRIOR = '#A1A1AA';          // zinc-400 — prior-period overlay / dim
 export const CHART_ALERT = '#C8312F';          // alert-fg — failing buckets only
 
-// Categorical ramp for service mix / lead source — staircase of zincs so
-// the eye scans by length, not color.
+// Semantic accents — used by data fills, not by text or chrome.
+export const CHART_PRIMARY = '#0EA5E9';        // sky-500 — Waves brand, primary data fills
+export const CHART_SUCCESS = '#10B981';        // emerald-500 — revenue / healthy / completed
+export const CHART_WARN    = '#F59E0B';        // amber-500 — aging / soft warnings
+export const CHART_INFO    = '#A855F7';        // purple-500 — secondary categorical
+export const CHART_PINK    = '#EC4899';        // pink-500 — categorical
+export const CHART_TEAL    = '#14B8A6';        // teal-500 — categorical
+
+// Categorical ramp for service mix / channel mix / source attribution.
+// Ordered so the most-common slice gets Waves sky and adjacent hues stay
+// distinguishable on a small donut.
 export const CHART_SERIES = [
-  '#18181B', '#3F3F46', '#52525B', '#71717A', '#A1A1AA', '#D4D4D8',
+  CHART_PRIMARY, // sky
+  CHART_SUCCESS, // emerald
+  CHART_WARN,    // amber
+  CHART_INFO,    // purple
+  CHART_PINK,    // pink
+  CHART_TEAL,    // teal
 ];
 
 // ─── Formatters ───────────────────────────────────────────────────
@@ -122,15 +137,15 @@ export function KpiSparklineTile({ label, value, sub, delta, deltaSuffix, alert,
                 <AreaChart data={data} margin={{ top: 2, right: 0, bottom: 0, left: 0 }}>
                   <defs>
                     <linearGradient id="sparkfill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor={CHART_INK} stopOpacity={0.18} />
-                      <stop offset="100%" stopColor={CHART_INK} stopOpacity={0} />
+                      <stop offset="0%" stopColor={CHART_PRIMARY} stopOpacity={0.22} />
+                      <stop offset="100%" stopColor={CHART_PRIMARY} stopOpacity={0} />
                     </linearGradient>
                   </defs>
                   <Area
                     type="monotone"
                     dataKey="v"
-                    stroke={CHART_INK}
-                    strokeWidth={1.25}
+                    stroke={CHART_PRIMARY}
+                    strokeWidth={1.5}
                     fill="url(#sparkfill)"
                     isAnimationActive={false}
                   />
@@ -175,8 +190,8 @@ export function RevenueTrendArea({ current = [], prior = [], height = 240 }) {
         <AreaChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: -12 }}>
           <defs>
             <linearGradient id="rev-current" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={CHART_INK} stopOpacity={0.22} />
-              <stop offset="100%" stopColor={CHART_INK} stopOpacity={0} />
+              <stop offset="0%" stopColor={CHART_SUCCESS} stopOpacity={0.28} />
+              <stop offset="100%" stopColor={CHART_SUCCESS} stopOpacity={0} />
             </linearGradient>
           </defs>
           <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID} vertical={false} />
@@ -210,8 +225,8 @@ export function RevenueTrendArea({ current = [], prior = [], height = 240 }) {
           <Area
             type="monotone"
             dataKey="current"
-            stroke={CHART_INK}
-            strokeWidth={1.5}
+            stroke={CHART_SUCCESS}
+            strokeWidth={1.75}
             fill="url(#rev-current)"
             isAnimationActive={false}
           />
@@ -302,14 +317,14 @@ export function EstimateFunnel({ funnel = {}, rates = {}, totalAcceptedValue }) 
               className="h-full"
               style={{
                 width: `${Math.min(100, s.pct)}%`,
-                background: s.dim ? CHART_PRIOR : CHART_INK,
+                background: s.dim ? CHART_PRIOR : CHART_PRIMARY,
               }}
             />
           </div>
         </div>
       ))}
       {totalAcceptedValue != null && (
-        <div className="pt-3 mt-3 border-t border-hairline border-zinc-200 flex items-baseline justify-between">
+        <div className="pt-3 mt-3 flex items-baseline justify-between">
           <span className="u-label text-ink-secondary">Accepted value</span>
           <span className="u-nums text-18 font-medium">{fmtMoney(totalAcceptedValue)}</span>
         </div>
@@ -325,9 +340,9 @@ export function EstimateFunnel({ funnel = {}, rates = {}, totalAcceptedValue }) 
 // at a glance — that bucket is the only one drawn in alert red.
 export function AgingBar({ aging = {}, totalOutstanding, totalOverdue, height = 180 }) {
   const buckets = [
-    { key: 'current',     label: 'Current',  amount: aging.current     || 0, fill: CHART_INK },
-    { key: 'days_30',     label: '1–30 days', amount: aging.days_30     || 0, fill: CHART_INK_DIM },
-    { key: 'days_60',     label: '31–60 days', amount: aging.days_60     || 0, fill: CHART_TICK },
+    { key: 'current',     label: 'Current',  amount: aging.current     || 0, fill: CHART_SUCCESS },
+    { key: 'days_30',     label: '1–30 days', amount: aging.days_30     || 0, fill: CHART_PRIMARY },
+    { key: 'days_60',     label: '31–60 days', amount: aging.days_60     || 0, fill: CHART_WARN },
     { key: 'days_90_plus',label: '90+ days',  amount: aging.days_90_plus|| 0, fill: CHART_ALERT },
   ];
   const total = buckets.reduce((s, b) => s + b.amount, 0);
@@ -372,7 +387,7 @@ export function AgingBar({ aging = {}, totalOutstanding, totalOverdue, height = 
 
 export function CompletionGauge({ completed = 0, total = 0, remaining = 0, cancelled = 0 }) {
   const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
-  const data = [{ name: 'Completed', value: pct, fill: CHART_INK }];
+  const data = [{ name: 'Completed', value: pct, fill: CHART_SUCCESS }];
   return (
     <div className="grid grid-cols-2 gap-4 items-center">
       <div style={{ height: 180 }}>
@@ -394,7 +409,7 @@ export function CompletionGauge({ completed = 0, total = 0, remaining = 0, cance
               x="50%" y="50%"
               textAnchor="middle"
               dominantBaseline="middle"
-              fill={CHART_INK}
+              fill="#18181B"
               style={{ fontSize: 28, fontWeight: 500, letterSpacing: '-0.02em' }}
             >
               {total === 0 ? '—' : `${pct}%`}
@@ -403,10 +418,10 @@ export function CompletionGauge({ completed = 0, total = 0, remaining = 0, cance
         </ResponsiveContainer>
       </div>
       <ul className="text-12 space-y-2">
-        <Row label="Completed" value={completed} fill={CHART_INK} />
-        <Row label="Remaining" value={remaining} fill={CHART_TICK} />
+        <Row label="Completed" value={completed} fill={CHART_SUCCESS} />
+        <Row label="Remaining" value={remaining} fill={CHART_PRIMARY} />
         <Row label="Cancelled" value={cancelled} fill={CHART_PRIOR} dim />
-        <li className="pt-2 mt-2 border-t border-hairline border-zinc-200 flex items-baseline justify-between">
+        <li className="pt-2 mt-2 flex items-baseline justify-between">
           <span className="u-label text-ink-secondary">Scheduled today</span>
           <span className="u-nums font-medium">{total}</span>
         </li>
@@ -450,9 +465,9 @@ export function MrrTrendChart({ trend = [], height = 220 }) {
           <Line
             type="monotone"
             dataKey="mrr"
-            stroke={CHART_INK}
+            stroke={CHART_SUCCESS}
             strokeWidth={1.75}
-            dot={{ r: 2, fill: CHART_INK, strokeWidth: 0 }}
+            dot={{ r: 2, fill: CHART_SUCCESS, strokeWidth: 0 }}
             activeDot={{ r: 4 }}
             isAnimationActive={false}
           />
@@ -481,7 +496,7 @@ export function LeadSourceBars({ bySource = [], maxRows = 8 }) {
             </span>
           </div>
           <div className="h-2 bg-surface-sunken rounded-sm overflow-hidden">
-            <div className="h-full" style={{ width: `${(r.count / max) * 100}%`, background: CHART_INK }} />
+            <div className="h-full" style={{ width: `${(r.count / max) * 100}%`, background: CHART_PRIMARY }} />
           </div>
         </li>
       ))}
@@ -519,7 +534,7 @@ export function TechLeaderboardBars({ leaderboard = [] }) {
                 className="h-full"
                 style={{
                   width: `${(t.revenue / max) * 100}%`,
-                  background: unassigned ? CHART_ALERT : CHART_INK,
+                  background: unassigned ? CHART_ALERT : CHART_SUCCESS,
                 }}
               />
             </div>
@@ -600,7 +615,7 @@ export function CallsBySourceList({ sources = [], maxRows = 10 }) {
                 className="h-full"
                 style={{
                   width: `${(r.calls / max) * 100}%`,
-                  background: unmapped ? CHART_ALERT : (dormant ? CHART_PRIOR : CHART_INK),
+                  background: unmapped ? CHART_ALERT : (dormant ? CHART_PRIOR : CHART_PRIMARY),
                 }}
               />
             </div>
@@ -642,7 +657,7 @@ export function LeadsBySourceList({ sources = [], maxRows = 10 }) {
             <div className="h-2 bg-surface-sunken rounded-sm overflow-hidden">
               <div
                 className="h-full"
-                style={{ width: `${(r.leads / max) * 100}%`, background: CHART_INK }}
+                style={{ width: `${(r.leads / max) * 100}%`, background: CHART_PRIMARY }}
               />
             </div>
           </li>
