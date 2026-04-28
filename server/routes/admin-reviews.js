@@ -78,7 +78,7 @@ router.get('/', async (req, res, next) => {
 
     // Aggregate stats from actual reviews (excluding _stats rows)
     const reviewsOnly = db('google_reviews').where('reviewer_name', '!=', '_stats');
-    const [totals, unresponded, responded, thisMonth, perLocation] = await Promise.all([
+    const [totals, unresponded, respondedCountRow, thisMonth, perLocation] = await Promise.all([
       reviewsOnly.clone().select(
         db.raw('COUNT(*) as total'),
         db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),
@@ -122,7 +122,7 @@ router.get('/', async (req, res, next) => {
         // is sourced from Google Places `user_ratings_total` and is not
         // safe to use as the denominator here, since the Places API only
         // returns a capped subset of reviews per location for sync.
-        responded: parseInt(responded?.count || 0),
+        responded: parseInt(respondedCountRow?.count || 0),
         newThisMonth: parseInt(thisMonth?.count || 0),
         breakdown: Object.fromEntries(breakdown.map(b => [b.star_rating, parseInt(b.count)])),
         perLocation: perLocation.map(l => {

@@ -7,6 +7,11 @@
  * Match by (reviewer_name, location_id) — google_review_id isn't reliably
  * populated for older rows, but the name+location pair is unique here.
  *
+ * `reply_updated_at` is intentionally LEFT NULL: we don't know when these
+ * were actually answered on Google, and the response-latency analytics
+ * compute `reply_updated_at - review_created_at`. Backfilling with NOW()
+ * would treat every row as a multi-week-late reply and skew KPIs.
+ *
  * down() restores NULL so rollback puts them back in the queue.
  */
 
@@ -38,10 +43,7 @@ exports.up = async function up(knex) {
       .whereRaw('LOWER(reviewer_name) = LOWER(?)', [r.name])
       .where({ location_id: r.location })
       .whereNull('review_reply')
-      .update({
-        review_reply: REPLIED_VIA_GOOGLE,
-        reply_updated_at: knex.fn.now(),
-      });
+      .update({ review_reply: REPLIED_VIA_GOOGLE });
     updated += count;
   }
   // eslint-disable-next-line no-console
@@ -57,6 +59,6 @@ exports.down = async function down(knex) {
       .whereRaw('LOWER(reviewer_name) = LOWER(?)', [r.name])
       .where({ location_id: r.location })
       .where({ review_reply: REPLIED_VIA_GOOGLE })
-      .update({ review_reply: null, reply_updated_at: null });
+      .update({ review_reply: null });
   }
 };
