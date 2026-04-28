@@ -464,6 +464,133 @@ router.post('/:id/send-receipt', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /:id/record-payment — log an off-Stripe payment (cash, check,
+// Zelle, or other) against an open invoice. Marks the invoice paid,
+// stops the follow-up sequence, and optionally fires the receipt in
+// the same call so the operator can close the bill in one tap.
+//
+// Body: {
+//   method:       'cash' | 'check' | 'zelle' | 'other'  (required)
+//   reference?:   string  — check #, Zelle confirmation, etc.  (≤200 chars)
+//   note?:        string  — operator note appended to invoice notes  (≤400 chars)
+//   sendReceipt?: boolean — fire receipt SMS/email after marking paid (default true)
+//   via?:         'email' | 'sms' | 'both'  — receipt channels (default 'both')
+// }
+//
+// Refuses to overwrite an already-paid invoice (use refund flow first)
+// and refuses to mark a void invoice paid. Stripe-paid invoices keep
+// their card_brand/card_last_four; manual payments leave those NULL so
+// timeline rendering can distinguish.
+const VALID_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'other'];
+router.post('/:id/record-payment', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const {
+      method,
+      reference,
+      note,
+      sendReceipt = true,
+      via = 'both',
+    } = req.body || {};
+
+    if (!method || !VALID_PAYMENT_METHODS.includes(method)) {
+      return res.status(400).json({
+        error: `method must be one of: ${VALID_PAYMENT_METHODS.join(', ')}`,
+      });
+    }
+    if (sendReceipt && !['email', 'sms', 'both'].includes(via)) {
+      return res.status(400).json({ error: "via must be 'email', 'sms', or 'both'" });
+    }
+    const trimmedReference = typeof reference === 'string' ? reference.trim().slice(0, 200) : '';
+    const trimmedNote = typeof note === 'string' ? note.trim().slice(0, 400) : '';
+
+    const invoice = await db('invoices').where({ id }).first();
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    if (invoice.status === 'paid') {
+      return res.status(400).json({ error: 'Invoice is already paid' });
+    }
+    if (invoice.status === 'void') {
+      return res.status(400).json({ error: 'Cannot record payment on a voided invoice' });
+    }
+
+    const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
+
+    // Append operator note to invoice notes (don't clobber existing notes).
+    let nextNotes = invoice.notes || null;
+    if (trimmedNote) {
+      const stamp = new Date().toISOString().slice(0, 10);
+      const line = `[${stamp}] ${method.toUpperCase()}${trimmedReference ? ` ${trimmedReference}` : ''}: ${trimmedNote}`;
+      nextNotes = nextNotes ? `${nextNotes}\n${line}` : line;
+    }
+
+    await db('invoices').where({ id }).update({
+      status: 'paid',
+      paid_at: db.fn.now(),
+      payment_method: method,
+      payment_reference: trimmedReference || null,
+      payment_recorded_by: recordedBy,
+      payment_recorded_at: db.fn.now(),
+      notes: nextNotes,
+      updated_at: db.fn.now(),
+    });
+
+    // Stop the follow-up sequence the same way the Stripe webhook does.
+    try {
+      const FollowUps = require('../services/invoice-followups');
+      await FollowUps.stopOnPayment(id);
+    } catch (err) {
+      logger.warn(`[admin-invoices:record-payment] stopOnPayment failed: ${err.message}`);
+    }
+
+    await db('activity_log').insert({
+      customer_id: invoice.customer_id,
+      action: 'invoice_payment_recorded',
+      description: `Manual payment recorded for ${invoice.invoice_number}`
+        + ` ($${Number(invoice.total).toFixed(2)} via ${method}`
+        + `${trimmedReference ? ` · ref ${trimmedReference}` : ''})`
+        + ` — ${recordedBy}`,
+    }).catch((err) => logger.warn(`[admin-invoices:record-payment] activity_log insert failed: ${err.message}`));
+
+    // Optional inline receipt — same pipeline as /:id/send-receipt.
+    let emailResult = null;
+    let smsResult = null;
+    if (sendReceipt) {
+      const { sendReceiptEmail } = require('../services/invoice-email');
+      if (via === 'email' || via === 'both') {
+        emailResult = await sendReceiptEmail(id).catch((err) => ({ ok: false, error: err.message }));
+      }
+      if (via === 'sms' || via === 'both') {
+        try {
+          await InvoiceService.sendReceipt(id, { force: true, recordActivity: false });
+          smsResult = { ok: true };
+        } catch (err) {
+          smsResult = { ok: false, error: err.message };
+        }
+      }
+      if (emailResult?.ok || smsResult?.ok) {
+        await db('invoices').where({ id }).update({ receipt_sent_at: db.fn.now() });
+        await db('activity_log').insert({
+          customer_id: invoice.customer_id,
+          action: 'invoice_receipt_sent',
+          description: `Receipt sent for invoice ${invoice.invoice_number}`
+            + ` (${[emailResult?.ok && 'email', smsResult?.ok && 'sms'].filter(Boolean).join(' + ')})`
+            + ' — auto after manual payment',
+        }).catch((err) => logger.warn(`[admin-invoices:record-payment] activity_log insert failed: ${err.message}`));
+      }
+    }
+
+    const updated = await db('invoices').where({ id }).first();
+    res.json({
+      ok: true,
+      invoice: updated,
+      receipt: sendReceipt ? { email: emailResult, sms: smsResult } : null,
+    });
+  } catch (err) {
+    logger.error(`[admin-invoices] record-payment failed: ${err.message}`);
+    next(err);
+  }
+});
+
 // ─────────────────────────────────────────────────────────────
 // Per-invoice follow-up sequence (Day 0/3/7/14/30 reminder chain)
 // ─────────────────────────────────────────────────────────────
