@@ -33,6 +33,13 @@ router.get('/preferences', async (req, res, next) => {
     res.json({
       serviceReminder24h: prefs.service_reminder_24h,
       techEnRoute: prefs.tech_en_route,
+      // Phase 2E: per-customer auto-flip opt-out, distinct from
+      // tech_en_route. Customer can keep manual en-route SMS while
+      // skipping the geofence-departure-triggered automated version.
+      // Defaults TRUE on the column (added in migration
+      // 20260428000002) so a customer with an old prefs row reads
+      // as opted-in.
+      autoFlipEnRoute: prefs.auto_flip_en_route !== false,
       serviceCompleted: prefs.service_completed,
       billingReminder: prefs.billing_reminder,
       seasonalTips: prefs.seasonal_tips,
@@ -54,6 +61,7 @@ router.put('/preferences', async (req, res, next) => {
     const schema = Joi.object({
       serviceReminder24h: Joi.boolean(),
       techEnRoute: Joi.boolean(),
+      autoFlipEnRoute: Joi.boolean(),
       serviceCompleted: Joi.boolean(),
       billingReminder: Joi.boolean(),
       seasonalTips: Joi.boolean(),
@@ -69,6 +77,7 @@ router.put('/preferences', async (req, res, next) => {
     const dbUpdates = {};
     if (updates.serviceReminder24h !== undefined) dbUpdates.service_reminder_24h = updates.serviceReminder24h;
     if (updates.techEnRoute !== undefined) dbUpdates.tech_en_route = updates.techEnRoute;
+    if (updates.autoFlipEnRoute !== undefined) dbUpdates.auto_flip_en_route = updates.autoFlipEnRoute;
     if (updates.serviceCompleted !== undefined) dbUpdates.service_completed = updates.serviceCompleted;
     if (updates.billingReminder !== undefined) dbUpdates.billing_reminder = updates.billingReminder;
     if (updates.seasonalTips !== undefined) dbUpdates.seasonal_tips = updates.seasonalTips;
@@ -100,6 +109,7 @@ router.put('/preferences', async (req, res, next) => {
       preferences: {
         serviceReminder24h: prefs.service_reminder_24h,
         techEnRoute: prefs.tech_en_route,
+        autoFlipEnRoute: prefs.auto_flip_en_route !== false,
         serviceCompleted: prefs.service_completed,
         billingReminder: prefs.billing_reminder,
         seasonalTips: prefs.seasonal_tips,
