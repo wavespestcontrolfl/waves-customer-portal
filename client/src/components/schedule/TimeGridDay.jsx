@@ -505,29 +505,29 @@ function TechColumn({ tech, services, onEdit, onCreateSlot, onResize, selection,
 }
 
 function TimeAxis() {
+  // Cleaner, calendar-style time column: hour-only labels, larger
+  // (12px) and a touch lighter than before, right-aligned on the
+  // start of each hour line. No background fill on the header
+  // spacer — the header chrome above carries the divider so the
+  // axis itself reads as part of the grid.
   return (
     <div
       className="bg-white sticky left-0 z-20"
       style={{ width: TIME_AXIS_WIDTH, borderRight: '1px solid #E4E4E7' }}
     >
-      <div
-        className="bg-zinc-50"
-        style={{ height: 36, borderBottom: '1px solid #E4E4E7' }}
-      />
+      <div style={{ height: 36, borderBottom: '1px solid #E4E4E7' }} />
       <div className="relative" style={{ height: GRID_HEIGHT }}>
         {Array.from({ length: SLOT_COUNT }).map((_, idx) => {
           const min = DAY_START_HOUR * 60 + idx * SLOT_MIN;
           const isHour = min % 60 === 0;
+          if (!isHour) return null;
           return (
             <div
               key={idx}
-              className={cn(
-                'absolute right-0 pr-2 u-nums',
-                isHour ? 'text-13 md:text-10 text-zinc-700 font-medium' : 'text-10 text-ink-tertiary',
-              )}
-              style={{ top: idx * SLOT_HEIGHT - 6, height: SLOT_HEIGHT }}
+              className="absolute right-0 pr-2 u-nums text-12 text-ink-tertiary"
+              style={{ top: idx * SLOT_HEIGHT - 6, height: SLOT_HEIGHT, lineHeight: '12px' }}
             >
-              {isHour ? minutesToLabel(min) : ''}
+              {minutesToLabel(min)}
             </div>
           );
         })}
@@ -601,6 +601,7 @@ function RailItem({ service, onEdit, isSelected, onToggleSelect }) {
 }
 
 function UnassignedRail({ services, onEdit, selection, onToggleSelect }) {
+  const [open, setOpen] = useState(true);
   const { setNodeRef, isOver } = useDroppable({
     id: 'rail-unassigned',
     data: { techId: '__unassigned__' },
@@ -614,34 +615,54 @@ function UnassignedRail({ services, onEdit, selection, onToggleSelect }) {
     <div
       ref={setNodeRef}
       className={cn(
-        'bg-zinc-50 flex-shrink-0 overflow-auto transition-colors',
+        'bg-zinc-50 flex-shrink-0 overflow-auto transition-[width,background] duration-150',
         isOver && 'bg-zinc-100',
       )}
-      style={{ width: 180, borderRight: '1px solid #E4E4E7' }}
+      style={{ width: open ? 180 : 44, borderRight: '1px solid #E4E4E7' }}
     >
-      <div
-        className="sticky top-0 z-10 bg-zinc-50 px-3 py-2 flex items-center justify-between"
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-label={open ? 'Collapse unassigned rail' : 'Expand unassigned rail'}
+        className={cn(
+          'sticky top-0 z-10 bg-zinc-50 w-full px-3 py-2 flex items-center justify-between u-focus-ring hover:bg-zinc-100',
+        )}
         style={{ borderBottom: '1px solid #E4E4E7' }}
       >
-        <span className="text-10 uppercase tracking-label text-ink-tertiary font-medium">Unassigned</span>
-        <span className="u-nums text-11 text-zinc-700">{sorted.length}</span>
-      </div>
-      {sorted.length === 0 ? (
-        <div className="px-3 py-6 text-11 text-ink-tertiary text-center">
-          Drop here to unassign
-        </div>
-      ) : (
-        <div className="px-2 py-2 flex flex-col gap-1.5">
-          {sorted.map((svc) => (
-            <RailItem
-              key={svc.id}
-              service={svc}
-              onEdit={onEdit}
-              isSelected={selection?.has(svc.id)}
-              onToggleSelect={onToggleSelect}
-            />
-          ))}
-        </div>
+        {open ? (
+          <>
+            <span className="text-10 uppercase tracking-label text-ink-tertiary font-medium">Unassigned</span>
+            <span className="flex items-center gap-1.5">
+              <span className="u-nums text-11 text-zinc-700">{sorted.length}</span>
+              <span className="text-zinc-500" aria-hidden>‹</span>
+            </span>
+          </>
+        ) : (
+          <span className="flex flex-col items-center w-full gap-1">
+            <span className="u-nums text-11 font-medium text-zinc-700">{sorted.length}</span>
+            <span className="text-zinc-500" aria-hidden>›</span>
+          </span>
+        )}
+      </button>
+      {open && (
+        sorted.length === 0 ? (
+          <div className="px-3 py-6 text-11 text-ink-tertiary text-center">
+            Drop here to unassign
+          </div>
+        ) : (
+          <div className="px-2 py-2 flex flex-col gap-1.5">
+            {sorted.map((svc) => (
+              <RailItem
+                key={svc.id}
+                service={svc}
+                onEdit={onEdit}
+                isSelected={selection?.has(svc.id)}
+                onToggleSelect={onToggleSelect}
+              />
+            ))}
+          </div>
+        )
       )}
     </div>
   );
