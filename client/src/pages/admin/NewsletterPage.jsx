@@ -16,7 +16,7 @@
 // /admin/newsletter when newsletter-v1 was rolled out). Automations
 // renders EmailAutomationsPanelV2 directly.
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Badge, Button, Card, CardBody } from '../../components/ui';
 import { Mail, Users, Zap, Calendar, FileText, TrendingUp, Sparkles, Upload, MapPin } from 'lucide-react';
@@ -269,11 +269,13 @@ function RecentPosts({ posts, loading }) {
   );
 }
 
-function DashboardView({ onSelectTab, onDraftFromEvent, sendsData, subscribersActive }) {
+function DashboardView({ onSelectTab, onDraftFromEvent, sendsData, sendsLoading, subscribersActive }) {
   // Recent posts + Last open rate are derived from the sends payload owned
   // by the parent (NewsletterPage) so the sends/subscribers fetches don't
   // run twice on the default dashboard tab. Events stay local — only the
-  // dashboard uses them.
+  // dashboard uses them. `loadingPosts` is gated on the parent's loading
+  // flag (not `sendsData == null`) so a fetch error clears the spinner
+  // instead of leaving the panel stuck on "Loading…".
   const recentPosts = useMemo(() => (sendsData?.sends || []).slice(0, 5), [sendsData]);
   const lastOpenRate = useMemo(() => {
     const sends = sendsData?.sends || [];
@@ -287,7 +289,7 @@ function DashboardView({ onSelectTab, onDraftFromEvent, sendsData, subscribersAc
       : null;
   }, [sendsData]);
   const scheduledCount = sendsData ? (sendsData.counts?.scheduled ?? 0) : null;
-  const loadingPosts = sendsData == null;
+  const loadingPosts = sendsLoading;
 
   const stats = {
     subscribers: subscribersActive,
@@ -437,27 +439,43 @@ export default function NewsletterPage() {
 
   // Sends + subscribers are fetched once at the page level and shared with
   // DashboardView (avoids the duplicate /sends call on the default dashboard
-  // tab). Tab counts are derived from the same payloads.
-  //   - null  = pre-fetch / fetch failed (badge hidden)
-  //   - 0     = explicit empty bucket (badge shows "(0)")
-  // The /sends and /subscribers endpoints group rows by status, so absent
-  // keys mean zero — we coalesce to 0 on success rather than null, otherwise
-  // a brand-new install with no sent campaigns would silently drop the badge.
+  // tab). Tab counts and dashboard panels are derived from the same payloads.
+  //   - sendsLoading=true   → badges hidden, dashboard shows "Loading…"
+  //   - sendsData present   → counts.sent ?? 0 (empty bucket → "(0)")
+  //   - fetch failed        → loading clears, sendsData stays null, badges hidden
+  // /sends and /subscribers group rows by status, so absent keys mean zero —
+  // coalesce missing keys to 0 on success rather than null, otherwise a
+  // brand-new install with no sent campaigns would silently drop the badge.
   const [sendsData, setSendsData] = useState(null);
+  const [sendsLoading, setSendsLoading] = useState(true);
   const [subscribersActive, setSubscribersActive] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
   useEffect(() => {
     let ignore = false;
+    setSendsLoading(true);
     adminFetch('/admin/newsletter/sends')
-      .then((d) => { if (!ignore) setSendsData(d || { sends: [], counts: {} }); })
-      .catch(() => {});
+      .then((d) => { if (!ignore) { setSendsData(d || { sends: [], counts: {} }); setSendsLoading(false); } })
+      .catch(() => { if (!ignore) setSendsLoading(false); });
     adminFetch('/admin/newsletter/subscribers?limit=1')
       .then((d) => { if (!ignore) setSubscribersActive(d.counts?.active ?? 0); })
       .catch(() => {});
     return () => { ignore = true; };
-  }, []);
+  }, [refreshKey]);
+
+  // Refetch on Dashboard re-entry — mirrors the prior per-tab DashboardView
+  // remount so a campaign sent in Compose or a subscriber added in Subscribers
+  // is reflected when the user returns to the dashboard. Skips refetch on
+  // tab switches that don't land on dashboard (e.g. Compose → Subscribers).
+  const prevTabRef = useRef(tab);
+  useEffect(() => {
+    if (tab === 'dashboard' && prevTabRef.current !== 'dashboard') {
+      setRefreshKey((k) => k + 1);
+    }
+    prevTabRef.current = tab;
+  }, [tab]);
 
   const tabCounts = {
-    history: sendsData ? (sendsData.counts?.sent ?? 0) : null,
+    history: sendsLoading ? null : (sendsData?.counts?.sent ?? 0),
     subscribers: subscribersActive,
   };
 
@@ -527,6 +545,7 @@ export default function NewsletterPage() {
           onSelectTab={setTab}
           onDraftFromEvent={onDraftFromEvent}
           sendsData={sendsData}
+          sendsLoading={sendsLoading}
           subscribersActive={subscribersActive}
         />
       )}
