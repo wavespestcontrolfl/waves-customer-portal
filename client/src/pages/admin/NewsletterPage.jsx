@@ -269,41 +269,37 @@ function RecentPosts({ posts, loading }) {
   );
 }
 
-function DashboardView({ onSelectTab, onDraftFromEvent }) {
-  const [stats, setStats] = useState({ subscribers: null, lastOpenRate: null, scheduledCount: null });
-  const [recentPosts, setRecentPosts] = useState([]);
-  const [loadingPosts, setLoadingPosts] = useState(true);
+function DashboardView({ onSelectTab, onDraftFromEvent, sendsData, subscribersActive }) {
+  // Recent posts + Last open rate are derived from the sends payload owned
+  // by the parent (NewsletterPage) so the sends/subscribers fetches don't
+  // run twice on the default dashboard tab. Events stay local — only the
+  // dashboard uses them.
+  const recentPosts = useMemo(() => (sendsData?.sends || []).slice(0, 5), [sendsData]);
+  const lastOpenRate = useMemo(() => {
+    const sends = sendsData?.sends || [];
+    // Most recent sent row, regardless of delivered_count — a send to an
+    // empty segment can land with delivered_count=0, and the tile should
+    // reflect the *true* latest send (rendering '—' when there's nothing
+    // to compute), not skip to an older one.
+    const lastSent = sends.find((s) => s.status === 'sent');
+    return (lastSent && lastSent.delivered_count > 0)
+      ? lastSent.opened_count / lastSent.delivered_count
+      : null;
+  }, [sendsData]);
+  const scheduledCount = sendsData ? (sendsData.counts?.scheduled ?? 0) : null;
+  const loadingPosts = sendsData == null;
+
+  const stats = {
+    subscribers: subscribersActive,
+    lastOpenRate,
+    scheduledCount,
+  };
+
   const [events, setEvents] = useState([]);
   const [loadingEvents, setLoadingEvents] = useState(true);
 
   useEffect(() => {
     let ignore = false;
-    adminFetch('/admin/newsletter/subscribers?limit=1')
-      .then((d) => { if (!ignore) setStats((s) => ({ ...s, subscribers: d.counts?.active ?? null })); })
-      .catch(() => {});
-    // /sends returns the recent campaign list (capped at 500) plus an
-    // uncapped status breakdown in `counts` — use `counts.scheduled`
-    // for the queued-sends tile so we don't undercount when historical
-    // rows push scheduled drafts past the row cap. Recent posts (top 5)
-    // and Last open rate (most recent sent) come from the rows.
-    adminFetch('/admin/newsletter/sends')
-      .then((d) => {
-        if (ignore) return;
-        const sends = d.sends || [];
-        setRecentPosts(sends.slice(0, 5));
-        // Most recent sent row, regardless of delivered_count — a send
-        // to an empty segment can land with delivered_count=0, and the
-        // tile should reflect the *true* latest send (rendering '—'
-        // when there's nothing to compute), not skip to an older one.
-        const lastSent = sends.find((s) => s.status === 'sent');
-        const lastOpenRate = (lastSent && lastSent.delivered_count > 0)
-          ? lastSent.opened_count / lastSent.delivered_count
-          : null;
-        const scheduledCount = d.counts?.scheduled ?? 0;
-        setStats((s) => ({ ...s, lastOpenRate, scheduledCount }));
-        setLoadingPosts(false);
-      })
-      .catch(() => { if (!ignore) setLoadingPosts(false); });
     adminFetch('/admin/newsletter/events?days=14&limit=12')
       .then((d) => { if (!ignore) { setEvents(d.events || []); setLoadingEvents(false); } })
       .catch(() => { if (!ignore) setLoadingEvents(false); });
@@ -439,21 +435,31 @@ export default function NewsletterPage() {
   // clearPendingDraftEvent so reopening Compose later doesn't re-fire.
   const [pendingDraftEvent, setPendingDraftEvent] = useState(null);
 
-  // Tab-strip counts: history → sent campaigns, subscribers → active list.
-  // Fetched once on mount — tab switches don't refresh, since the underlying
-  // newsletter data doesn't change just because the user clicked a tab. Avoid
-  // re-hitting the 500-row /sends payload on every tab click.
-  const [tabCounts, setTabCounts] = useState({ history: null, subscribers: null });
+  // Sends + subscribers are fetched once at the page level and shared with
+  // DashboardView (avoids the duplicate /sends call on the default dashboard
+  // tab). Tab counts are derived from the same payloads.
+  //   - null  = pre-fetch / fetch failed (badge hidden)
+  //   - 0     = explicit empty bucket (badge shows "(0)")
+  // The /sends and /subscribers endpoints group rows by status, so absent
+  // keys mean zero — we coalesce to 0 on success rather than null, otherwise
+  // a brand-new install with no sent campaigns would silently drop the badge.
+  const [sendsData, setSendsData] = useState(null);
+  const [subscribersActive, setSubscribersActive] = useState(null);
   useEffect(() => {
     let ignore = false;
     adminFetch('/admin/newsletter/sends')
-      .then((d) => { if (!ignore) setTabCounts((c) => ({ ...c, history: d.counts?.sent ?? null })); })
+      .then((d) => { if (!ignore) setSendsData(d || { sends: [], counts: {} }); })
       .catch(() => {});
     adminFetch('/admin/newsletter/subscribers?limit=1')
-      .then((d) => { if (!ignore) setTabCounts((c) => ({ ...c, subscribers: d.counts?.active ?? null })); })
+      .then((d) => { if (!ignore) setSubscribersActive(d.counts?.active ?? 0); })
       .catch(() => {});
     return () => { ignore = true; };
   }, []);
+
+  const tabCounts = {
+    history: sendsData ? (sendsData.counts?.sent ?? 0) : null,
+    subscribers: subscribersActive,
+  };
 
   const setTab = (next) => {
     const newParams = new URLSearchParams(searchParams);
@@ -516,7 +522,14 @@ export default function NewsletterPage() {
       </div>
 
       {/* Tab content */}
-      {tab === 'dashboard' && <DashboardView onSelectTab={setTab} onDraftFromEvent={onDraftFromEvent} />}
+      {tab === 'dashboard' && (
+        <DashboardView
+          onSelectTab={setTab}
+          onDraftFromEvent={onDraftFromEvent}
+          sendsData={sendsData}
+          subscribersActive={subscribersActive}
+        />
+      )}
       {tab === 'compose' && <ComposeView pendingEvent={pendingDraftEvent} onPendingEventConsumed={clearPendingDraftEvent} />}
       {tab === 'history' && <HistoryView />}
       {tab === 'subscribers' && <SubscribersView />}
