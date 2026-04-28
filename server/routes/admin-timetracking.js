@@ -896,12 +896,12 @@ router.get('/technicians/:id/earnings', requireAdmin, async (req, res, next) => 
 const PHOTO_PREFIX = 'tech-photos/';
 router.post(
   '/technicians/:id/photo',
-  // Self-or-admin guard: tech-role tokens can update their own photo
-  // (matches a likely future tech-side avatar flow), but they must not
-  // mutate another tech's row — the row now carries payroll/PII so
-  // arbitrary cross-tech writes need to be blocked even when the only
-  // mutating column here is photo_s3_key. Admin tokens can update
-  // anyone's photo as before.
+  // Two-stage gate: requireTechOrAdmin first to reject any role that
+  // isn't admin/technician (matches every other route on this file
+  // now that router-level role gating is gone), then a stricter
+  // self-or-admin guard so a tech-role token can only update its
+  // own photo, not a coworker's row.
+  requireTechOrAdmin,
   (req, res, next) => {
     if (isAdminCaller(req)) return next();
     if (req.params.id && req.technicianId && req.params.id === req.technicianId) return next();
