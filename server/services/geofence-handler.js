@@ -414,6 +414,14 @@ async function handleDeparture({ tech, customer, job, lat, lng, eventTime, imei,
   // Pass the dwell minutes from the timer we just stopped — that's
   // our "tech actually serviced this customer" signal. Errors here
   // never disrupt the EXIT processing above; auto-flip is best-effort.
+  //
+  // Pass `activeTimer` so maybeAutoFlipNextJob can use the timer's
+  // customer/job identity as the exclusion key. In dense neighborhoods
+  // the geo-matched `customer` may differ from the customer the tech
+  // actually serviced (the timer was started for); excluding by geo
+  // identity could leave the just-serviced job eligible as "next" and
+  // re-flip it to en_route. Same trap the auto-complete branch above
+  // already calls out.
   const dwellMinutes = stopped && stopped.duration_minutes
     ? Math.round(Number(stopped.duration_minutes))
     : Math.round((eventTime - new Date(activeTimer.clock_in)) / 60000);
@@ -421,6 +429,7 @@ async function handleDeparture({ tech, customer, job, lat, lng, eventTime, imei,
     await maybeAutoFlipNextJob({
       tech,
       exitedCustomer: customer,
+      activeTimer,
       eventTime,
       lat,
       lng,
@@ -452,7 +461,7 @@ async function handleDeparture({ tech, customer, job, lat, lng, eventTime, imei,
 // the markEnRoute() call but still writes the geofence_events row
 // with action_taken='auto_flip_dry_run' so we can observe what the
 // system WOULD have done before flipping the real switch.
-async function maybeAutoFlipNextJob({ tech, exitedCustomer, eventTime, lat, lng, imei, payload, dwellMinutes }) {
+async function maybeAutoFlipNextJob({ tech, exitedCustomer, activeTimer, eventTime, lat, lng, imei, payload, dwellMinutes }) {
   const enabled = await matcher.getAutoFlipOnDeparture();
   if (!enabled) return;
 
@@ -460,6 +469,16 @@ async function maybeAutoFlipNextJob({ tech, exitedCustomer, eventTime, lat, lng,
   const minDwell = await matcher.getAutoFlipDwellMinutes();
   const horizonHours = await matcher.getAutoFlipHorizonHours();
   const cooldownMin = await matcher.getAutoFlipCooldownMinutes();
+
+  // Authoritative "customer the tech just serviced" — the active timer
+  // wins over the geo-matched primary because in dense neighborhoods
+  // the tech may have started a timer for a different customer than
+  // the nearest one (multi-arrival selection at ENTER). Falls back to
+  // the geo-matched customer only when the timer didn't capture a
+  // customer_id (legacy rows). This is the value we exclude from
+  // findNextScheduledJobForTech so the just-serviced job isn't picked
+  // as "next" and re-flipped to en_route.
+  const servicedCustomerId = (activeTimer && activeTimer.customer_id) || exitedCustomer.id;
 
   const baseLog = {
     bouncie_imei: imei,
@@ -483,11 +502,13 @@ async function maybeAutoFlipNextJob({ tech, exitedCustomer, eventTime, lat, lng,
   }
 
   // Guardrail 3: must have a next scheduled job for this tech that
-  // isn't the customer we just left.
+  // isn't the customer we just left. Exclusion uses servicedCustomerId
+  // (active timer) — see comment above for why geo-matched id alone
+  // is insufficient.
   const nextJob = await matcher.findNextScheduledJobForTech(
     tech.id,
     eventTime,
-    exitedCustomer.id
+    servicedCustomerId
   );
   if (!nextJob) {
     await matcher.logEvent({
@@ -555,7 +576,8 @@ async function maybeAutoFlipNextJob({ tech, exitedCustomer, eventTime, lat, lng,
       resource_id: nextJob.id,
       metadata: {
         tech_id: tech.id,
-        exited_customer_id: exitedCustomer.id,
+        geo_matched_customer_id: exitedCustomer.id,
+        serviced_customer_id: servicedCustomerId,
         next_customer_id: nextJob.customer_id,
         dwell_minutes: dwellMinutes,
         horizon_hours: horizonHours,
@@ -587,7 +609,8 @@ async function maybeAutoFlipNextJob({ tech, exitedCustomer, eventTime, lat, lng,
     resource_id: nextJob.id,
     metadata: {
       tech_id: tech.id,
-      exited_customer_id: exitedCustomer.id,
+      geo_matched_customer_id: exitedCustomer.id,
+      serviced_customer_id: servicedCustomerId,
       next_customer_id: nextJob.customer_id,
       dwell_minutes: dwellMinutes,
       mark_en_route_result: result || null,
