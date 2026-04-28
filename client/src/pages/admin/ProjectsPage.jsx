@@ -77,9 +77,6 @@ export default function ProjectsPage() {
       }}>
         <div>
           <h1 style={{ fontSize: 22, fontWeight: 700, color: D.heading, margin: 0 }}>Projects</h1>
-          <p style={{ fontSize: 13, color: D.muted, margin: '2px 0 0' }}>
-            Inspection & documentation reports — WDO, termite, pest, rodent, bed bug.
-          </p>
         </div>
         <button
           type="button"
