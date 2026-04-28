@@ -128,13 +128,19 @@ export default function AdminDispatchPage() {
 
   return (
     <div className="flex flex-col bg-surface-page min-h-[calc(100vh-64px)]">
-      {/* Tab pill renders here for both Board and Schedule. We previously
-          slotted it under DispatchPageV2's h1 on Schedule, but DispatchPageV2
-          is React.lazy — during the chunk-load window the slot doesn't exist,
-          which (a) leaves no Board/Schedule controls visible and (b) drops
-          keyboard focus on tab-arrow nav since the new pill DOM hasn't
-          mounted yet. Persistent top placement avoids both regressions. */}
-      <div style={{ display: 'flex', justifyContent: 'center', padding: '12px 16px' }}>
+      {/* Page heading + tab pill — the "Schedule" h1 used to live inside
+          DispatchPageV2's header, which made it impossible to put the pill
+          below it without swapping DOM parents (and unmounting the pill on
+          tab switches). Lifting the heading here keeps the pill in one
+          stable parent on both tabs while still rendering the heading
+          immediately above it on Schedule. */}
+      <div className="px-4 md:px-6 pt-4 md:pt-6 pb-2 flex flex-col items-start gap-3">
+        {tab === TABS.SCHEDULE && (
+          <h1 className="text-28 font-normal tracking-h1 text-zinc-900">
+            <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Schedule</span>
+            <span className="hidden md:inline">Schedule</span>
+          </h1>
+        )}
         {tabPill}
       </div>
       <div
