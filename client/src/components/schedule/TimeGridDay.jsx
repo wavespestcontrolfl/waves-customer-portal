@@ -111,25 +111,31 @@ function minutesToTopPx(min) {
   return ((min - DAY_START_HOUR * 60) / SLOT_MIN) * SLOT_HEIGHT;
 }
 
+// Square-style flat color blocks. Default/scheduled → blue-500;
+// active states darken; completed fades to grey; skipped stays red.
+// White text reads on every non-completed bg.
 function statusBlockClasses(status) {
   switch (status) {
     case 'completed': return 'bg-zinc-200 text-zinc-500';
     case 'skipped':   return 'bg-alert-bg text-alert-fg';
     case 'on_site':   return 'bg-zinc-900 text-white';
-    case 'en_route':  return 'bg-zinc-700 text-white';
-    case 'confirmed': return 'bg-white text-zinc-900';
-    default:          return 'bg-white text-zinc-900';
+    case 'en_route':  return 'text-white';
+    case 'confirmed': return 'text-white';
+    default:          return 'text-white';
   }
 }
 
-function statusBorderColor(status) {
+// Inline fill for the Square-blue states. Tailwind doesn't ship the
+// exact #3B82F6 / #1E40AF tokens we want here, so we set them as
+// inline backgrounds and skip a class+arbitrary-value combo.
+function statusBlockFill(status) {
   switch (status) {
-    case 'completed': return '#D4D4D8';
-    case 'skipped':   return '#C0392B';
-    case 'on_site':   return '#18181B';
-    case 'en_route':  return '#3F3F46';
-    case 'confirmed': return '#18181B';
-    default:          return '#A1A1AA';
+    case 'en_route':  return '#1E40AF'; // blue-800 — actively heading
+    case 'on_site':   return null;      // bg-zinc-900 already applied
+    case 'completed': return null;      // bg-zinc-200 already applied
+    case 'skipped':   return null;      // bg-alert-bg already applied
+    case 'confirmed': return '#3B82F6'; // blue-500 — Square default
+    default:          return '#3B82F6';
   }
 }
 
@@ -329,26 +335,29 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
         height: effectiveHeight,
         left: `calc(${laneIdx * (100 / laneCount)}% + 2px)`,
         width: `calc(${100 / laneCount}% - 4px)`,
-        border: `1px solid ${statusBorderColor(service.status)}`,
-        borderLeft: accent ? `3px solid ${accent}` : `1px solid ${statusBorderColor(service.status)}`,
+        background: statusBlockFill(service.status) || undefined,
+        borderLeft: accent ? `3px solid ${accent}` : undefined,
         ...dragStyle,
       }}
       title={`${service.customerName || 'Unassigned'} · ${service.serviceType || ''} · ${service.windowDisplay || ''}\nShift+click to select for bulk actions`}
     >
       {routeOrder != null && (
         <div
-          className="absolute top-0.5 right-0.5 u-nums text-10 font-medium text-ink-tertiary bg-white/80 px-1 rounded-xs"
+          className="absolute top-0.5 right-0.5 u-nums text-10 font-medium bg-white/85 text-zinc-700 px-1 rounded-xs"
           style={{ minWidth: 14, textAlign: 'center', lineHeight: '14px' }}
         >
           {routeOrder}
         </div>
       )}
-      <div className="font-medium truncate">{service.customerName || 'Unassigned'}</div>
-      <div className="opacity-80 truncate">
-        {service.windowDisplay || minutesToHHMM(parseHHMM(service.windowStart) || 0)} · {service.serviceType || ''}
+      <div className="opacity-90 truncate text-10">
+        {service.windowDisplay || minutesToHHMM(parseHHMM(service.windowStart) || 0)}
       </div>
-      {service.address && effectiveHeight > SLOT_HEIGHT * 1.5 && (
-        <div className="opacity-60 truncate">{service.address}</div>
+      <div className="font-medium truncate">{service.customerName || 'Unassigned'}</div>
+      {effectiveHeight > SLOT_HEIGHT && (
+        <div className="opacity-80 truncate">{service.serviceType || ''}</div>
+      )}
+      {service.address && effectiveHeight > SLOT_HEIGHT * 2 && (
+        <div className="opacity-70 truncate">{service.address}</div>
       )}
       {onResize && (
         <div
