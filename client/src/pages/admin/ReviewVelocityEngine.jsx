@@ -705,8 +705,8 @@ function Pipeline({ customers, allCustomers, selectedIds, setSelectedIds, curren
                 <tr key={c.id} onDoubleClick={() => setDrawerCust(c)} style={{ background: isSelected ? C.accG : 'transparent', transition: 'background .1s', cursor: 'pointer' }}>
                   <td style={tdStyle}><input type="checkbox" checked={isSelected} onChange={() => toggleSel(c.id)} style={{ accentColor: C.acc, cursor: 'pointer' }} /></td>
                   <td style={tdStyle}>
-                    <div style={{ fontWeight: 600, fontSize: 12 }}>{c.name}</div>
-                    <div style={{ fontSize: 10, color: C.t3 }}>{c.addr.substring(0, 40)}</div>
+                    <div style={{ fontWeight: 500, fontSize: 13, color: C.t1 }}>{c.name}</div>
+                    <div style={{ fontSize: 12, color: C.t2 }}>{c.addr.substring(0, 40)}</div>
                   </td>
                   <td style={tdStyle}><Tag type="acc">{c.gbpName}</Tag></td>
                   <td style={tdStyle}>
@@ -727,11 +727,11 @@ function Pipeline({ customers, allCustomers, selectedIds, setSelectedIds, curren
                     </select>
                   </td>
                   <td style={tdStyle}>
-                    <div style={{ fontSize: 11 }}>{c.lastSvc}</div>
-                    <div style={{ fontSize: 10, color: C.t3 }}>{c.lastDate} · {c.daysAgo}d ago</div>
+                    <div style={{ fontSize: 12, color: C.t2 }}>{c.lastSvc}</div>
+                    <div style={{ fontSize: 11, color: C.t3 }}>{c.lastDate} · {c.daysAgo}d ago</div>
                   </td>
                   <td style={tdStyle}>
-                    {c.seqStep > 0 ? <Tag type="blu">Step {c.seqStep}/3</Tag> : <span style={{ color: C.t3, fontSize: 10 }}>—</span>}
+                    {c.seqStep > 0 ? <Tag type="blu">Step {c.seqStep}/3</Tag> : <span style={{ color: C.t3, fontSize: 11 }}>—</span>}
                   </td>
                   <td style={{ ...tdStyle, whiteSpace: 'nowrap' }}>
                     <Btn onClick={() => setDrawerCust(c)} style={{ padding: '4px 8px', fontSize: 10 }}>View</Btn>{' '}
@@ -750,8 +750,8 @@ function Pipeline({ customers, allCustomers, selectedIds, setSelectedIds, curren
   );
 }
 
-const thStyle = { fontSize: 11, fontWeight: 600, color: C.t2, textAlign: 'left', padding: '8px 10px', borderBottom: `1px solid ${C.bdr}` };
-const tdStyle = { padding: '10px', borderBottom: `1px solid ${C.bdr}`, fontSize: 12, verticalAlign: 'middle' };
+const thStyle = { fontSize: 11, fontWeight: 700, color: C.acc, textAlign: 'left', padding: '10px 16px', borderBottom: `1px solid ${C.bdr}`, textTransform: 'uppercase', letterSpacing: '0.04em', fontFamily: C.sans };
+const tdStyle = { padding: '12px 16px', borderBottom: `1px solid ${C.bdr}`, fontSize: 13, verticalAlign: 'middle', fontFamily: C.sans };
 
 // ══════════════════════════════════════════════════════════════
 // SEQUENCES
