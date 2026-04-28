@@ -643,7 +643,23 @@ router.post('/', async (req, res, next) => {
         if (cols.discount_type && discountType) childData.discount_type = discountType;
         if (cols.discount_amount && discountAmount != null && discountAmount !== '') childData.discount_amount = Number(discountAmount);
         if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = !!createInvoice;
-        await db('scheduled_services').insert(childData);
+        const [childRow] = await db('scheduled_services').insert(childData).returning('*');
+        // Mirror the parent's add-on lines onto each recurring child so a
+        // pest+rodent quarterly series carries rodent on every visit, not
+        // just the first. Non-blocking — if it fails the child still
+        // exists and dispatch can re-add the line manually.
+        if (Array.isArray(serviceAddons) && serviceAddons.length > 0 && childRow?.id) {
+          try {
+            for (const addon of serviceAddons) {
+              await db('scheduled_service_addons').insert({
+                scheduled_service_id: childRow.id,
+                service_id: addon.serviceId || null,
+                service_name: addon.name || addon.serviceName,
+                estimated_price: addon.price || null,
+              });
+            }
+          } catch (e) { logger.warn(`[schedule] Recurring child addon insert failed (non-blocking): ${e.message}`); }
+        }
       }
      } catch (e) { logger.error(`[schedule] Recurring spawn failed (non-blocking): ${e.message}`); }
     }
@@ -827,6 +843,12 @@ router.put('/:id/update-details', async (req, res, next) => {
         const dirParent = parent.weekend_shift === 'back' ? 'back' : 'forward';
         const skipChild = skipWeekends !== undefined ? !!skipWeekends : skipParent;
         const dirChild = (weekendShift !== undefined ? weekendShift : dirParent) === 'back' ? 'back' : 'forward';
+        // Pull parent's existing add-on lines once so we can mirror them
+        // onto each spawned child below.
+        let parentAddons = [];
+        try {
+          parentAddons = await db('scheduled_service_addons').where({ scheduled_service_id: parent.id });
+        } catch (e) { /* table may not exist pre-migration — non-blocking */ }
         for (let i = 1; i < spawnCount; i++) {
           const rawNext = nextRecurringDate(baseDateStr, recurringPattern, i, rOpts);
           const nextDateStr = shiftPastWeekend(rawNext, skipChild, dirChild);
@@ -863,7 +885,19 @@ router.put('/:id/update-details', async (req, res, next) => {
             const inv = createInvoice !== undefined ? !!createInvoice : !!parent.create_invoice_on_complete;
             if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = inv;
           } catch { /* non-blocking */ }
-          await db('scheduled_services').insert(childData);
+          const [childRow] = await db('scheduled_services').insert(childData).returning('*');
+          if (parentAddons.length > 0 && childRow?.id) {
+            try {
+              for (const addon of parentAddons) {
+                await db('scheduled_service_addons').insert({
+                  scheduled_service_id: childRow.id,
+                  service_id: addon.service_id || null,
+                  service_name: addon.service_name,
+                  estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
+                });
+              }
+            } catch (e) { logger.warn(`[schedule] PUT recurring child addon insert failed (non-blocking): ${e.message}`); }
+          }
           recurringCreated++;
         }
       }
@@ -1257,7 +1291,24 @@ router.put('/:id/status', async (req, res, next) => {
               if (cols.weekend_shift && skipParent) nextData.weekend_shift = dirParent;
               if (cols.service_id && parent.service_id) nextData.service_id = parent.service_id;
               if (cols.estimated_price && parent.estimated_price != null) nextData.estimated_price = parent.estimated_price;
-              await db('scheduled_services').insert(nextData);
+              const [autoExtRow] = await db('scheduled_services').insert(nextData).returning('*');
+              // Mirror parent's add-on lines onto the auto-extended visit
+              // so a multi-service ongoing series keeps its full scope
+              // (and billing) past the seeded 4-visit window.
+              try {
+                const parentAddons = await db('scheduled_service_addons')
+                  .where({ scheduled_service_id: parentId });
+                if (parentAddons.length > 0 && autoExtRow?.id) {
+                  for (const addon of parentAddons) {
+                    await db('scheduled_service_addons').insert({
+                      scheduled_service_id: autoExtRow.id,
+                      service_id: addon.service_id || null,
+                      service_name: addon.service_name,
+                      estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
+                    });
+                  }
+                }
+              } catch (e) { logger.warn(`[recurring] Auto-extend addon mirror failed (non-blocking): ${e.message}`); }
               logger.info(`[recurring] Auto-extended ongoing plan parent=${parentId} → ${nextData.scheduled_date}`);
             }
           } else if (!isOngoing && pendingCount === 0) {
