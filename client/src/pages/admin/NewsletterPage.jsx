@@ -18,7 +18,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Badge, Button, Card, CardBody, cn } from '../../components/ui';
+import { Badge, Button, Card, CardBody } from '../../components/ui';
 import { Mail, Users, Zap, Calendar, FileText, TrendingUp, Sparkles, Upload, MapPin } from 'lucide-react';
 import { ComposeView, HistoryView, SubscribersView } from './NewsletterTabs';
 import EmailAutomationsPanelV2 from './EmailAutomationsPanelV2';
@@ -439,6 +439,21 @@ export default function NewsletterPage() {
   // clearPendingDraftEvent so reopening Compose later doesn't re-fire.
   const [pendingDraftEvent, setPendingDraftEvent] = useState(null);
 
+  // Tab-strip counts: history → sent campaigns, subscribers → active list.
+  // Fetched at the page level (independent of DashboardView) so they show
+  // immediately on whichever tab the user lands on.
+  const [tabCounts, setTabCounts] = useState({ history: null, subscribers: null });
+  useEffect(() => {
+    let ignore = false;
+    adminFetch('/admin/newsletter/sends')
+      .then((d) => { if (!ignore) setTabCounts((c) => ({ ...c, history: d.counts?.sent ?? null })); })
+      .catch(() => {});
+    adminFetch('/admin/newsletter/subscribers?limit=1')
+      .then((d) => { if (!ignore) setTabCounts((c) => ({ ...c, subscribers: d.counts?.active ?? null })); })
+      .catch(() => {});
+    return () => { ignore = true; };
+  }, [tab]);
+
   const setTab = (next) => {
     const newParams = new URLSearchParams(searchParams);
     if (next === 'dashboard') newParams.delete('tab');
@@ -455,13 +470,11 @@ export default function NewsletterPage() {
   return (
     <div>
       {/* Title + Create */}
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
-        <div>
-          <h1 className="text-28 font-normal tracking-h1 text-ink-primary">
-            <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Newsletter</span>
-            <span className="hidden md:inline">Newsletter</span>
-          </h1>
-        </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
+        <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: '#18181B', margin: 0 }}>
+          <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Newsletter</span>
+          <span className="hidden md:inline">Newsletter</span>
+        </h1>
         <button
           type="button"
           onClick={() => setTab('compose')}
@@ -476,23 +489,29 @@ export default function NewsletterPage() {
         </button>
       </div>
 
-      {/* Tab nav */}
-      <div className="flex justify-center gap-1.5 flex-wrap mb-5">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            type="button"
-            onClick={() => setTab(t.key)}
-            className={cn(
-              'h-8 px-3 text-11 uppercase font-medium tracking-label rounded-sm border-hairline u-focus-ring transition-colors',
-              tab === t.key
-                ? 'bg-zinc-900 text-white border-zinc-900'
-                : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50',
-            )}
-          >
-            {t.label}
-          </button>
-        ))}
+      {/* Tabs — pill group, matches Blog/Generate page tab style */}
+      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
+        <div style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
+          {TABS.map((t) => (
+            <button
+              key={t.key}
+              type="button"
+              onClick={() => setTab(t.key)}
+              style={{
+                padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
+                background: tab === t.key ? '#18181B' : 'transparent',
+                color: tab === t.key ? '#FFFFFF' : '#A1A1AA',
+                fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
+                fontFamily: "'DM Sans', sans-serif",
+              }}
+            >
+              {t.label}
+              {tabCounts[t.key] != null && (
+                <span style={{ marginLeft: 6, fontSize: 11, opacity: 0.7 }}>({tabCounts[t.key]})</span>
+              )}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Tab content */}
