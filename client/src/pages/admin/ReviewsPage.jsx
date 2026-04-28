@@ -1162,12 +1162,17 @@ export default function ReviewsPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [syncing, setSyncing] = useState(false);
 
   // Filters
   const [filterLocation, setFilterLocation] = useState('all');
   const [filterRating, setFilterRating] = useState('all');
-  const [filterResponded, setFilterResponded] = useState('all');
+  // Default to "needs-reply" so the queue shows only the reviews still
+  // waiting on a portal response. Reviews we've already replied to
+  // (either via the portal or directly on Google — the latter flowing
+  // back through the hourly Places sync as `review_reply`) drop off the
+  // list automatically. Operators can flip back to "All Reviews" via
+  // the filter dropdown when they need the full archive.
+  const [filterResponded, setFilterResponded] = useState('needs-reply');
   const [search, setSearch] = useState('');
 
   const loadData = () => {
@@ -1179,18 +1184,6 @@ export default function ReviewsPage() {
   };
 
   useEffect(() => { loadData(); }, []);
-
-  const handleSync = async () => {
-    setSyncing(true);
-    try {
-      await adminFetch('/admin/reviews/sync', { method: 'POST', body: JSON.stringify({ fresh: true }) });
-      await loadData();
-    } catch (e) {
-      alert('Sync failed: ' + e.message);
-    } finally {
-      setSyncing(false);
-    }
-  };
 
   const handleReply = async (reviewId, replyText) => {
     await adminFetch(`/admin/reviews/${reviewId}/reply`, {
@@ -1342,20 +1335,10 @@ export default function ReviewsPage() {
           {/* Reviews content */}
           {!loading && !error && data && (
             <>
-              {/* Page header */}
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
-                <div>
-                  <div style={{ fontSize: 24, fontWeight: 700, color: D.heading, fontFamily: 'DM Sans, sans-serif' }}>Google Reviews</div>
-                  <div style={{ fontSize: 13, color: D.muted, fontFamily: 'DM Sans, sans-serif', marginTop: 4 }}>
-                    Manage reviews across all locations
-                  </div>
-                </div>
-                <button onClick={handleSync} disabled={syncing} style={{
-                  padding: '10px 20px', background: syncing ? D.border : D.teal, color: D.heading, border: 'none',
-                  borderRadius: 8, fontSize: 14, fontFamily: 'DM Sans, sans-serif', fontWeight: 600,
-                  cursor: syncing ? 'not-allowed' : 'pointer', opacity: syncing ? 0.7 : 1,
-                }}>{syncing ? 'Syncing...' : 'Sync Reviews'}</button>
-              </div>
+              {/* Page header + Sync Reviews button removed: the page tab
+                  ("Reviews") already labels this surface, and the hourly
+                  cron added in PR #382 (services/scheduler.js) keeps
+                  google_reviews fresh without anyone clicking sync. */}
 
               {/* Stats bar */}
               <div style={{ display: 'flex', gap: 12, marginBottom: 24, flexWrap: 'wrap' }}>
