@@ -1,10 +1,10 @@
 /**
  * Tech-side weekly timecard sign-off on time_weekly_summary.
  *
- * Mirrors the Square pattern where the employee acknowledges their
- * own week before the manager approves it — useful for audit and
- * for catching errors the tech sees but the admin wouldn't (e.g.,
- * a missed clock-out the tech remembers but the data shows wrong).
+ * The employee acknowledges their own week before the manager approves
+ * it — useful for audit and for catching errors the tech sees but the
+ * admin wouldn't (e.g., a missed clock-out the tech remembers but the
+ * data shows wrong).
  *
  * tech_signature stores the tech's typed name as the "I attest"
  * marker. Both columns nullable so existing rows are untouched.

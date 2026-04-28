@@ -420,8 +420,8 @@ export default function TechHomePage() {
 // timecard" button when the tech hasn't yet acknowledged the hours.
 // Quietly hides itself when there's no last-week data, when the week
 // is already approved by admin (sign-off is moot), or when the tech
-// has already signed. Mirrors the Square pattern of letting the
-// employee attest their own hours before manager approval.
+// has already signed. Lets the employee attest their own hours
+// before manager approval, which is the audit value here.
 function TimecardSignoffCard({ techName }) {
   const [weekly, setWeekly] = useState(null);
   const [loading, setLoading] = useState(true);

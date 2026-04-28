@@ -4,15 +4,19 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const timeTracking = require('../services/time-tracking');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-function mondayOf(dateStr) {
-  const d = dateStr ? new Date(dateStr) : new Date();
-  const day = d.getDay();
-  const diff = day === 0 ? -6 : 1 - day;
-  d.setDate(d.getDate() + diff);
-  return d.toISOString().split('T')[0];
+// ET-anchored Monday for a YYYY-MM-DD reference (or "today in ET" if
+// dateStr is missing). Railway runs UTC, so a naive new Date() + getDay()
+// near midnight ET picks the wrong week — always go through the
+// ET helpers.
+function mondayOfET(dateStr) {
+  const ref = dateStr ? new Date(`${dateStr}T12:00:00Z`) : new Date();
+  const dayOfWeek = etParts(ref).dayOfWeek; // 0 = Sun, 1 = Mon, ...
+  const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+  return etDateString(addETDays(ref, mondayOffset));
 }
 
 // ---------------------------------------------------------------------------
@@ -149,11 +153,10 @@ router.get('/weekly', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // POST /sign-week { weekStart: 'YYYY-MM-DD', signature: 'Tech Name' }
 //
-// Tech acknowledges their own week before admin approval — Square's
-// pattern. Sign-off is informational; admin still has to approve to
-// lock entries. Rejecting a previously-signed week (admin-side dispute
-// or unlock) clears these columns so the tech has to re-sign after
-// the correction.
+// Tech acknowledges their own week before admin approval. Sign-off is
+// informational; admin still has to approve to lock entries. A
+// previously-signed week that's later disputed or unlocked has these
+// columns cleared so the tech re-signs after the correction.
 // ---------------------------------------------------------------------------
 router.post('/sign-week', async (req, res, next) => {
   try {
@@ -161,7 +164,10 @@ router.post('/sign-week', async (req, res, next) => {
     if (!signature || !String(signature).trim()) {
       return res.status(400).json({ error: 'signature required (typed name)' });
     }
-    const start = mondayOf(weekStart);
+    if (weekStart && !/^\d{4}-\d{2}-\d{2}$/.test(weekStart)) {
+      return res.status(400).json({ error: 'weekStart must be YYYY-MM-DD' });
+    }
+    const start = mondayOfET(weekStart);
 
     let weekly = await db('time_weekly_summary')
       .where({ technician_id: req.technicianId, week_start: start })
