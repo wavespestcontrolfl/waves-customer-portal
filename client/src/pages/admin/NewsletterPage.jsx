@@ -455,7 +455,10 @@ export default function NewsletterPage() {
     setSendsLoading(true);
     adminFetch('/admin/newsletter/sends')
       .then((d) => { if (!ignore) { setSendsData(d || { sends: [], counts: {} }); setSendsLoading(false); } })
-      .catch(() => { if (!ignore) setSendsLoading(false); });
+      // Clear sendsData on error so a failed refresh doesn't silently keep
+      // showing stale History counts and recent-post data — the badge/stats
+      // disappearance signals to the admin that the refresh didn't land.
+      .catch(() => { if (!ignore) { setSendsData(null); setSendsLoading(false); } });
     adminFetch('/admin/newsletter/subscribers?limit=1')
       .then((d) => { if (!ignore) setSubscribersActive(d.counts?.active ?? 0); })
       .catch(() => {});
