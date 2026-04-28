@@ -19,7 +19,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Badge, Button, Card, CardBody, cn } from '../../components/ui';
-import { Mail, Users, Zap, Calendar, FileText, TrendingUp, Sparkles, Plus, Upload, MapPin } from 'lucide-react';
+import { Mail, Users, Zap, Calendar, FileText, TrendingUp, Sparkles, Upload, MapPin } from 'lucide-react';
 import { ComposeView, HistoryView, SubscribersView } from './NewsletterTabs';
 import EmailAutomationsPanelV2 from './EmailAutomationsPanelV2';
 
@@ -465,10 +465,14 @@ export default function NewsletterPage() {
         <button
           type="button"
           onClick={() => setTab('compose')}
-          className="inline-flex items-center gap-1.5 h-10 px-3 rounded-full bg-zinc-900 text-white text-12 font-medium uppercase tracking-label u-focus-ring hover:bg-zinc-800 border-0 cursor-pointer"
+          style={{
+            padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
+            background: '#18181B', color: '#fff', border: 'none', cursor: 'pointer',
+            whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
+            fontFamily: "'DM Sans', sans-serif",
+          }}
         >
-          <Plus size={14} strokeWidth={2} aria-hidden />
-          New draft
+          + Add Newsletter
         </button>
       </div>
 

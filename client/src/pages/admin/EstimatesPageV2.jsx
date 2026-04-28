@@ -539,6 +539,22 @@ function EstimatePipelineViewV2() {
         />
       )}
 
+      {/* "+ Add Estimate" — mirrors the "+ New project" pill; routes to Create Estimate tab. */}
+      <div className="flex justify-end mb-3">
+        <button
+          type="button"
+          onClick={() => navigate('/admin/estimates?tab=new')}
+          style={{
+            padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
+            background: '#18181B', color: '#fff', border: 'none', cursor: 'pointer',
+            whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
+            fontFamily: "'DM Sans', sans-serif",
+          }}
+        >
+          + Add Estimate
+        </button>
+      </div>
+
       {/* Stats bar */}
       <div className="flex gap-2 mb-5 flex-wrap">
         <StatCard

@@ -87,9 +87,10 @@ export default function ProjectsPage() {
           style={{
             padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
             background: D.accent, color: '#fff', border: 'none', cursor: 'pointer',
-            whiteSpace: 'nowrap', flexShrink: 0,
+            whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
+            fontFamily: "'DM Sans', sans-serif",
           }}
-        >+ New project</button>
+        >+ New Project</button>
       </header>
 
       {/* Filters */}

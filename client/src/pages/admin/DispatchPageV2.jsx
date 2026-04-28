@@ -947,6 +947,20 @@ export default function DispatchPageV2() {
             >
               + Add Estimate
             </button>
+            {/* Desktop "+ Add Appointment" — same pill; opens CreateAppointmentModal. */}
+            <button
+              type="button"
+              onClick={() => setShowNewAppt(true)}
+              className="hidden md:inline-flex"
+              style={{
+                padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
+                background: '#18181B', color: '#fff', border: 'none', cursor: 'pointer',
+                whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
+                fontFamily: "'DM Sans', sans-serif",
+              }}
+            >
+              + Add Appointment
+            </button>
             {/* Mobile "+" — matches the Customers pattern; opens CreateAppointmentModal. */}
             <button
               type="button"
