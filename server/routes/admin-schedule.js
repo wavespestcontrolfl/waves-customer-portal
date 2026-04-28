@@ -272,6 +272,7 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.technician_id',
           'scheduled_services.zone', 'scheduled_services.route_order',
           'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
+          'customers.property_sqft', 'customers.lot_sqft',
           'technicians.name as tech_name')
         .orderByRaw('COALESCE(route_order, 999)');
 
@@ -294,7 +295,10 @@ router.get('/week', async (req, res, next) => {
             tier: s.waveguard_tier,
             windowStart: s.window_start,
             windowEnd: s.window_end,
-            estimatedDuration: s.estimated_duration_minutes,
+            // Match the day feed (line 175): fall back to a service-type
+            // estimate when no minutes are stored, so multi-day stats
+            // don't read 0 for the same workload Day view fills in.
+            estimatedDuration: s.estimated_duration_minutes || estimateDuration(svcType, s.property_sqft, s.lot_sqft),
             estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
             technicianId: s.technician_id,
             technicianName: s.tech_name,
