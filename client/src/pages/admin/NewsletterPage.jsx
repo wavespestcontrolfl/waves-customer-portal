@@ -461,7 +461,10 @@ export default function NewsletterPage() {
       .catch(() => { if (!ignore) { setSendsData(null); setSendsLoading(false); } });
     adminFetch('/admin/newsletter/subscribers?limit=1')
       .then((d) => { if (!ignore) setSubscribersActive(d.counts?.active ?? 0); })
-      .catch(() => {});
+      // Clear on error for the same reason as /sends — a failed refresh
+      // would otherwise keep the prior count in both the stats tile and
+      // the Subscribers tab badge with no signal that the refresh failed.
+      .catch(() => { if (!ignore) setSubscribersActive(null); });
     return () => { ignore = true; };
   }, [refreshKey]);
 
