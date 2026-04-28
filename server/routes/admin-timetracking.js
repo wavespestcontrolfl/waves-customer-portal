@@ -597,15 +597,23 @@ router.get('/technicians', async (req, res, next) => {
 // POST /technicians — add a new technician
 router.post('/technicians', async (req, res, next) => {
   try {
-    const { name, phone, email } = req.body;
+    const { name, phone, email, autoFlipEnabled } = req.body;
     if (!name || !name.trim()) return res.status(400).json({ error: 'Name is required' });
-    const [tech] = await db('technicians').insert({
+    const insertRow = {
       name: name.trim(),
       phone: phone || null,
       email: email || null,
       active: true,
-    }).returning('*');
-    logger.info(`[team] Added technician: ${tech.name}`);
+    };
+    // Honor the create-form's auto-flip checkbox. Without this, an
+    // operator unchecking "Auto-flip enabled" during creation would
+    // see the value silently dropped and the row created at the
+    // column DEFAULT (TRUE), needing a second edit to actually opt
+    // the tech out. Falsy explicit value → false; undefined → leave
+    // it to the column DEFAULT.
+    if (autoFlipEnabled !== undefined) insertRow.auto_flip_enabled = !!autoFlipEnabled;
+    const [tech] = await db('technicians').insert(insertRow).returning('*');
+    logger.info(`[team] Added technician: ${tech.name} (auto_flip_enabled=${tech.auto_flip_enabled})`);
     res.json({ success: true, technician: tech });
   } catch (err) { next(err); }
 });

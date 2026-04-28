@@ -759,7 +759,13 @@ router.put('/:id/notification-prefs', async (req, res, next) => {
     const prefs = await db('notification_prefs')
       .where({ customer_id: req.params.id })
       .first();
-    logger.info(`[customers] notification_prefs updated for ${req.params.id}: ${JSON.stringify(req.body)}`);
+    // Log only normalized fields persisted (not raw req.body) — the
+    // endpoint accepts arbitrary JSON and a future caller could put
+    // phone/email/address-like fields into plaintext logs (Railway,
+    // errors.log) and create avoidable PII exposure. Drop updated_at
+    // from the payload — timestamp noise that adds nothing forensically.
+    const { updated_at: _drop, ...logPayload } = dbUpdates;
+    logger.info(`[customers] notification_prefs updated for ${req.params.id}: ${JSON.stringify(logPayload)}`);
     res.json({ success: true, notificationPrefs: prefs });
   } catch (err) { next(err); }
 });
