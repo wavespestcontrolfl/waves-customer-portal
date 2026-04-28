@@ -42,6 +42,7 @@ import {
 } from './SchedulePage';
 import ProtocolReferenceTabV2 from './ProtocolReferenceTabV2';
 import { ViewModeSelectorV2, MonthViewV2 } from '../../components/schedule/CalendarViewsV2';
+import TimeGridDay from '../../components/schedule/TimeGridDay';
 import TimeGridDays from '../../components/schedule/TimeGridDays';
 import MobileWeekGrid from '../../components/schedule/MobileWeekGrid';
 import MobileDispatchList from '../../components/schedule/MobileDispatchList';
@@ -1344,25 +1345,23 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
             );
           })()}
 
-          {/* Day view — uses the same multi-day grid component as 5-Day /
-              Week / Month with dayCount={1} so the visual treatment is
-              identical (header, time gutter, hairlines, drag-to-reschedule,
-              click-to-create). The dispatcher loses the per-tech swimlane
-              that the old TimeGridDay rendered; jobs for the selected day
-              now stack in a single calendar column matching the wider
-              views' visual language. */}
+          {/* Day view keeps the per-technician swimlane layout (TimeGridDay)
+              so dispatchers can drag jobs between tech lanes and create a
+              slot pre-bound to a specific tech — the core same-day
+              reassignment workflow. The 5-Day / Week / Month views use the
+              date-column TimeGridDays since tech-by-tech granularity isn't
+              meaningful across multiple days. Visual styling on TimeGridDay
+              already mirrors TimeGridDays. */}
           <div className="hidden md:block">
-            <TimeGridDays
+            <TimeGridDay
               date={date}
-              dayCount={1}
-              selectedDate={date}
-              hideUnassignedRail={false}
-              refreshKey={scheduleRefreshKey}
+              services={services}
+              technicians={technicians}
               onEdit={(svc) => setEditingService(svc)}
               onChange={() => fetchSchedule(date)}
-              onStatsChange={handleGridStatsChange}
-              onCreateSlot={({ date: slotDate, windowStart, windowEnd }) => {
-                setNewApptDefaults({ date: slotDate, windowStart, durationMinutes: slotDurationMinutes(windowStart, windowEnd) });
+              onDateChange={setDate}
+              onCreateSlot={({ date: slotDate, windowStart, techId }) => {
+                setNewApptDefaults({ date: slotDate, windowStart, techId });
                 setShowNewAppt(true);
               }}
             />
