@@ -39,17 +39,30 @@ const formatDay = formatETDay;
 const formatDate = formatETDate;
 const formatTime = formatETTime;
 
-// Strip admin-disambiguation suffixes ("(Bi-Monthly)", " — Heavy") from a
-// service name before it lands in customer-facing SMS. Catalog rows carry the
-// frequency/tier in the name so admin tables can disambiguate; the customer
-// just needs the base service name. No-op on already-clean strings.
+// Per-component cleanup: strips trailing parenthetical and em/en-dash
+// suffixes from a single service name. Only safe on one component at a
+// time (e.g. a single services.name value). Returns empty string on
+// falsy input so callers can filter empties out of joined output.
+// Do NOT apply to already-joined multi-service strings — the em-dash
+// regex is anchored to end-of-string and would greedily eat any
+// "& second service" tail past the first em-dash.
 function smsServiceLabel(name) {
-  if (!name) return 'service';
-  const cleaned = String(name)
+  if (!name) return '';
+  return String(name)
     .replace(/\s+[—–]\s+.+$/, '')
     .replace(/\s*\([^)]*\)\s*$/, '')
     .trim();
-  return cleaned || String(name);
+}
+
+// Defensive cleanup for already-stored appointment_reminders.service_type
+// values, which may be joined multi-service strings ("A & B & C") from
+// the newer multi-service flow OR legacy single-service strings from
+// before. Strips only the trailing-parenthetical suffix (anchored to
+// end, no-op on joined strings without trailing parens). Em-dash strip
+// is omitted here because it is unsafe on joins.
+function smsServiceLabelStored(name) {
+  if (!name) return 'service';
+  return String(name).replace(/\s*\([^)]*\)\s*$/, '').trim() || String(name);
 }
 
 // Joined service label for multi-service appointments. Returns the parent name
@@ -58,12 +71,12 @@ function smsServiceLabel(name) {
 // appointment_reminders.service_type so the cron / reschedule / cancel paths
 // inherit it automatically without re-querying addons.
 async function buildServiceLabel(scheduledServiceId, parentName) {
-  const fallback = smsServiceLabel(parentName);
+  const fallback = smsServiceLabel(parentName) || 'service';
   try {
     const addons = await db('scheduled_service_addons')
       .where({ scheduled_service_id: scheduledServiceId })
       .pluck('service_name');
-    const all = [parentName, ...addons].map(s => smsServiceLabel(s)).filter(Boolean);
+    const all = [parentName, ...addons].map(smsServiceLabel).filter(Boolean);
     if (all.length <= 1) return fallback;
     if (all.length === 2) return `${all[0]} & ${all[1]}`;
     return `${all.slice(0, -1).join(', ')}, and ${all[all.length - 1]}`;
@@ -303,7 +316,7 @@ const AppointmentReminders = {
             const date = formatDate(apptTime);
             const time = formatTime(apptTime);
 
-            const serviceLabel = smsServiceLabel(r.service_type);
+            const serviceLabel = smsServiceLabelStored(r.service_type);
             const body = await renderTemplate(
               'reminder_72h',
               { first_name: firstName, service_type: serviceLabel, day, date, time },
@@ -344,7 +357,7 @@ const AppointmentReminders = {
             const firstName = contact.name || customer?.first_name || 'there';
             const time = formatTime(apptTime);
 
-            const serviceLabel = smsServiceLabel(r.service_type);
+            const serviceLabel = smsServiceLabelStored(r.service_type);
             const body = await renderTemplate(
               'reminder_24h',
               { first_name: firstName, service_type: serviceLabel, time },
@@ -418,7 +431,7 @@ const AppointmentReminders = {
         const date = formatDate(newApptTime);
         const time = formatTime(newApptTime);
 
-        const serviceLabel = smsServiceLabel(record.service_type);
+        const serviceLabel = smsServiceLabelStored(record.service_type);
         const body = await renderTemplate(
           'appointment_rescheduled',
           { first_name: firstName, service_type: serviceLabel, day, date, time },
@@ -465,7 +478,7 @@ const AppointmentReminders = {
         const day = formatDay(apptTime);
         const date = formatDate(apptTime);
 
-        const serviceLabel = smsServiceLabel(record.service_type);
+        const serviceLabel = smsServiceLabelStored(record.service_type);
         const body = await renderTemplate(
           'appointment_cancelled',
           { first_name: firstName, service_type: serviceLabel, day, date },
