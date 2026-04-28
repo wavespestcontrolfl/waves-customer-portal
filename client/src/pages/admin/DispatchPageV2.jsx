@@ -33,6 +33,7 @@
 //   the same details / action set on both, no orphaned mobile-only state
 //   that desktop users can't reach.
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Plus } from 'lucide-react';
 import {
   CompletionPanel,
@@ -706,6 +707,7 @@ function MobileScheduleSheet({ children, serviceCount, completedCount }) {
 
 export default function DispatchPageV2() {
   const isMobile = useIsMobile();
+  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState('board');
 
   // On mobile, desktopOnly tabs (Tech Match / CSR / Job Scores / Insights) are
@@ -919,6 +921,20 @@ export default function DispatchPageV2() {
               <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Schedule</span>
               <span className="hidden md:inline">Schedule</span>
             </h1>
+            {/* Desktop "+ Add Estimate" — mirrors the "+ New project" pill; routes to Create Estimate flow. */}
+            <button
+              type="button"
+              onClick={() => navigate('/admin/estimates?tab=new')}
+              className="hidden md:inline-flex"
+              style={{
+                padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
+                background: '#18181B', color: '#fff', border: 'none', cursor: 'pointer',
+                whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
+                fontFamily: "'DM Sans', sans-serif",
+              }}
+            >
+              + Add Estimate
+            </button>
             {/* Mobile "+" — matches the Customers pattern; opens CreateAppointmentModal. */}
             <button
               type="button"
