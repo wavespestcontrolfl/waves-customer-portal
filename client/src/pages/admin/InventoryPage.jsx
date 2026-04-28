@@ -48,7 +48,17 @@ export default function InventoryPage() {
           </h1>
         </div>
         {tab === 'products' && (
-          <button onClick={() => setShowAddForm(s => !s)} style={sBtn(D.teal, '#fff')}>+ Add Product</button>
+          <button
+            onClick={() => setShowAddForm(s => !s)}
+            style={{
+              padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
+              background: '#18181B', color: '#fff', border: 'none', cursor: 'pointer',
+              whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
+              fontFamily: "'DM Sans', sans-serif",
+            }}
+          >
+            + Add Product
+          </button>
         )}
       </div>
 
