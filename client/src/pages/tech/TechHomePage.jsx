@@ -445,12 +445,17 @@ function TimecardSignoffCard({ techName }) {
       const data = await res.json();
       setWeekly(data.weekly || null);
       setWeekStart(data.weekStart || null);
-      if (data.weekly && !signature) setSignature(techName || '');
+      // Functional setter so we don't depend on `signature` here —
+      // including it in the useCallback deps would cause this to
+      // re-run every time the input changes, refetching on each
+      // keystroke. Pre-fill from techName only if the field is still
+      // empty.
+      if (data.weekly) setSignature((s) => s || techName || '');
     } catch {
       setWeekly(null);
     }
     setLoading(false);
-  }, [techName, signature]);
+  }, [techName]);
 
   useEffect(() => { load(); }, [load]);
 
