@@ -203,15 +203,15 @@ router.get('/pending-signoff', async (req, res, next) => {
         const ymd = dateColumnToYMD(row.work_date);
         weekMondays.add(etWeekStart(parseETDateTime(`${ymd}T12:00`)));
       }
-      const existing = await db('time_weekly_summary')
-        .where({ technician_id: req.technicianId })
-        .whereIn('week_start', [...weekMondays])
-        .select('week_start');
-      const existingSet = new Set(existing.map(r => dateColumnToYMD(r.week_start)));
+      // Recompute UNCONDITIONALLY for every past Monday with worked
+      // dailies — not just missing rows. A stale zero-total row from
+      // a prior compute (before admin entry edits added hours) would
+      // otherwise be skipped by the total_shift_minutes>0 filter on
+      // the candidate query below, hiding a legitimate sign-off
+      // prompt. computeWeeklySummary is idempotent and cheap;
+      // bounded at ~12 calls per /pending-signoff hit.
       for (const ws of weekMondays) {
-        if (!existingSet.has(ws)) {
-          try { await timeTracking.computeWeeklySummary(req.technicianId, ws); } catch (_) { /* noop */ }
-        }
+        try { await timeTracking.computeWeeklySummary(req.technicianId, ws); } catch (_) { /* noop */ }
       }
     }
 
