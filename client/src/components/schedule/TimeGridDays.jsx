@@ -546,12 +546,15 @@ export default function TimeGridDays({
   // Week — instead of the previous behavior where the row always reflected
   // a single day's services from /admin/schedule?date=X regardless of view.
   //
-  // Skip emission while the week fetch is still loading or has failed; we
-  // don't want to publish zero totals that would overwrite the single-day
-  // fallback in DispatchPageV2 with bogus values during the load window.
+  // Skip emission while the week fetch is still loading, before any data
+  // has loaded, OR when the data we *do* hold belongs to a previous range
+  // (the fetch for `monday` is in flight or failed and `data.startDate`
+  // still points at the prior successful week). The startDate guard is
+  // what stops stale totals from leaking into the stats row after a
+  // failed /admin/schedule/week request when the user scrolls weeks.
   useEffect(() => {
     if (typeof onStatsChange !== 'function') return;
-    if (loading || !data) return;
+    if (loading || !data || data.startDate !== monday) return;
     const allServices = days.flatMap((d) => d.services || []);
     const totalCount = allServices.length;
     const completedCount = allServices.filter((s) => s.status === 'completed').length;
@@ -573,7 +576,7 @@ export default function TimeGridDays({
       isSingleDay: dayCount === 1,
       services: allServices,
     });
-  }, [days, dayCount, onStatsChange, loading, data]);
+  }, [days, dayCount, onStatsChange, loading, data, monday]);
 
   const unassignedList = useMemo(() => {
     const items = [];
