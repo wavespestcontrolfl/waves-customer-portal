@@ -1263,19 +1263,20 @@ export default function CommunicationsPageV2() {
         </div>
       </div>
 
-      <div className="flex gap-1.5 mb-5 mt-4 flex-wrap">
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 24, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
         {tabs.map((t) => (
           <button
             key={t.key}
             type="button"
             onClick={() => setTab(t.key)}
-            className={cn(
-              'h-11 md:h-9 px-4 text-14 md:text-12 normal-case md:uppercase font-medium tracking-normal md:tracking-label rounded-sm border-hairline u-focus-ring transition-colors',
-              t.desktopOnly && 'hidden md:inline-flex items-center',
-              tab === t.key
-                ? 'bg-zinc-900 text-white border-zinc-900'
-                : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50',
-            )}
+            className={t.desktopOnly ? 'hidden md:inline-block' : ''}
+            style={{
+              padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
+              background: tab === t.key ? '#18181B' : 'transparent',
+              color: tab === t.key ? '#FFFFFF' : '#A1A1AA',
+              fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
+              fontFamily: "'DM Sans', sans-serif",
+            }}
           >
             {t.label}
           </button>
