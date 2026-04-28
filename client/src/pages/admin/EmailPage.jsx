@@ -85,6 +85,9 @@ export default function EmailPage() {
   const [blockInput, setBlockInput] = useState('');
   const [drafting, setDrafting] = useState(false);
   const [draftResult, setDraftResult] = useState(null);
+  const [showCompose, setShowCompose] = useState(false);
+  const [composeForm, setComposeForm] = useState({ to: '', subject: '', body: '' });
+  const [composeSending, setComposeSending] = useState(false);
 
   const loadStatus = useCallback(async () => {
     try {
@@ -250,6 +253,29 @@ export default function EmailPage() {
     // This button pre-fills a quick path for Virginia
   };
 
+  const handleComposeSend = async () => {
+    if (!composeForm.to.trim() || !composeForm.body.trim()) return;
+    setComposeSending(true);
+    try {
+      const r = await adminFetch('/api/admin/email/send', {
+        method: 'POST',
+        body: JSON.stringify({
+          to: composeForm.to.trim(),
+          subject: composeForm.subject.trim() || '(no subject)',
+          body: composeForm.body.replace(/\n/g, '<br>'),
+        }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      setShowCompose(false);
+      setComposeForm({ to: '', subject: '', body: '' });
+      loadStats();
+    } catch (err) {
+      window.alert('Failed to send: ' + err.message);
+    } finally {
+      setComposeSending(false);
+    }
+  };
+
   const handleBlock = async () => {
     if (!blockInput.trim()) return;
     try {
@@ -318,8 +344,20 @@ export default function EmailPage() {
           button all removed. The page tab itself labels the surface,
           and scheduler.js syncs Gmail → PostgreSQL every 2 min so a
           "synced just now" chip carried no real signal. */}
-      <div style={{ marginBottom: 20 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 20 }}>
         <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>Email</h1>
+        <button
+          type="button"
+          onClick={() => setShowCompose(true)}
+          style={{
+            padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
+            background: '#18181B', color: '#fff', border: 'none', cursor: 'pointer',
+            whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
+            fontFamily: "'DM Sans', sans-serif",
+          }}
+        >
+          + New Email
+        </button>
       </div>
 
       {/* Daily digest card */}
@@ -674,6 +712,93 @@ export default function EmailPage() {
             </div>
           )}
         </>
+      )}
+
+      {/* Compose modal — opened by + New Email */}
+      {showCompose && (
+        <div
+          onClick={() => !composeSending && setShowCompose(false)}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 1000,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: D.card, border: `1px solid ${D.border}`, borderRadius: 12,
+              width: '100%', maxWidth: 560, padding: 20, boxShadow: '0 12px 40px rgba(0,0,0,0.18)',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <h2 style={{ fontSize: 18, fontWeight: 600, color: D.heading, margin: 0 }}>New Email</h2>
+              <button
+                onClick={() => !composeSending && setShowCompose(false)}
+                style={{ background: 'transparent', border: 'none', color: D.muted, cursor: 'pointer', fontSize: 20, padding: 4 }}
+                aria-label="Close"
+              >×</button>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div>
+                <label style={{ display: 'block', fontSize: 11, color: D.muted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.04em' }}>To *</label>
+                <input
+                  type="email"
+                  value={composeForm.to}
+                  onChange={(e) => setComposeForm((f) => ({ ...f, to: e.target.value }))}
+                  placeholder="recipient@example.com"
+                  style={{
+                    width: '100%', padding: '9px 12px', background: D.bg, border: `1px solid ${D.inputBorder}`, borderRadius: 6,
+                    color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box',
+                  }}
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: 11, color: D.muted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Subject</label>
+                <input
+                  value={composeForm.subject}
+                  onChange={(e) => setComposeForm((f) => ({ ...f, subject: e.target.value }))}
+                  style={{
+                    width: '100%', padding: '9px 12px', background: D.bg, border: `1px solid ${D.inputBorder}`, borderRadius: 6,
+                    color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box',
+                  }}
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: 11, color: D.muted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Message *</label>
+                <textarea
+                  rows={8}
+                  value={composeForm.body}
+                  onChange={(e) => setComposeForm((f) => ({ ...f, body: e.target.value }))}
+                  style={{
+                    width: '100%', padding: 12, background: D.bg, border: `1px solid ${D.inputBorder}`, borderRadius: 6,
+                    color: D.text, fontSize: 13, outline: 'none', resize: 'vertical', fontFamily: "'DM Sans', sans-serif", boxSizing: 'border-box',
+                  }}
+                />
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 18 }}>
+              <button
+                onClick={() => setShowCompose(false)}
+                disabled={composeSending}
+                style={{
+                  padding: '8px 16px', borderRadius: 6, fontSize: 13, cursor: 'pointer',
+                  background: 'transparent', border: `1px solid ${D.border}`, color: D.muted,
+                }}
+              >Cancel</button>
+              <button
+                onClick={handleComposeSend}
+                disabled={composeSending || !composeForm.to.trim() || !composeForm.body.trim()}
+                style={{
+                  padding: '8px 20px', borderRadius: 6, fontSize: 13, fontWeight: 600, border: 'none', cursor: 'pointer',
+                  background: D.teal, color: '#fff',
+                  opacity: composeSending || !composeForm.to.trim() || !composeForm.body.trim() ? 0.5 : 1,
+                }}
+              >{composeSending ? 'Sending…' : 'Send'}</button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
