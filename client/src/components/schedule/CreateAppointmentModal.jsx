@@ -515,7 +515,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       const seen = new Set();
       seen.add(String(apptDate || '').split('T')[0]);
       const maxAttempts = limit * 4 + 30;
-      let attempt = 0;
+      // Server spawn loops start at i=1. For monthly_nth_weekday, i=0
+      // returns the Nth weekday of the CURRENT month (which can be in the
+      // past relative to apptDate), so the preview must start from 1 too
+      // — otherwise a 3rd-Wed series anchored on April 20 would show
+      // April 15 as the first chip while the calendar's first child is
+      // actually May.
+      let attempt = 1;
       while (dates.length < limit && attempt < maxAttempts) {
         const opts = { intervalDays: group.intervalDays, nth: group.nth, weekday: group.weekday };
         const raw = nextRecurringDate(apptDate, group.cadence, attempt, opts);
