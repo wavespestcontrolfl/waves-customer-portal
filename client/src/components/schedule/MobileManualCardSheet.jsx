@@ -10,6 +10,7 @@
 
 import { ArrowLeft } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { computeCardTotal } from '../../lib/cardSurcharge';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -40,7 +41,7 @@ export default function MobileManualCardSheet({
   const [processing, setProcessing] = useState(false);
   const [paymentIntentId, setPaymentIntentId] = useState(null);
 
-  const surcharge = Math.round(amount * 1.0399 * 100) / 100;
+  const { total: surcharge } = computeCardTotal(amount);
 
   useEffect(() => {
     if (!invoiceToken) return;
