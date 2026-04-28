@@ -1484,11 +1484,11 @@ export default function EstimateToolViewV2({
                   </div>
                   <div className="max-h-[calc(100vh-120px)] overflow-y-auto pr-2">
                     {/* Summary Card */}
-                    {(E.recurring.serviceCount > 0 || E.oneTime.total > 0) && (
+                    {(E.recurring.serviceCount > 0 || E.oneTime.total > 0 || E.recurring.palmInjectionMo > 0 || E.recurring.rodentBaitMo > 0) && (
                       <>
                         <div className="bg-zinc-50 border-hairline border-zinc-900 rounded-sm p-6 mb-6 text-center">
                           <div className="font-mono text-28 font-medium text-zinc-900 u-nums">
-                            {fmt(E.recurring.grandTotal || (E.recurring.monthlyTotal + (E.recurring.rodentBaitMo || 0)))}/mo
+                            {fmt(E.recurring.grandTotal || (E.recurring.monthlyTotal + (E.recurring.rodentBaitMo || 0) + (E.recurring.palmInjectionMo || 0)))}/mo
                           </div>
                           <div className="text-12 text-ink-secondary mt-1">
                             Recurring monthly{E.recurring.savings > 0 ? ` (WaveGuard ${E.recurring.waveGuardTier} pricing)` : ''}
@@ -1814,7 +1814,7 @@ export default function EstimateToolViewV2({
                     )}
 
                     {/* WaveGuard + Totals */}
-                    {(E.recurring.serviceCount > 0 || E.oneTime.total > 0 || E.recurring.rodentBaitMo > 0) && (
+                    {(E.recurring.serviceCount > 0 || E.oneTime.total > 0 || E.recurring.rodentBaitMo > 0 || E.recurring.palmInjectionMo > 0) && (
                       <>
                         <div className="h-px bg-zinc-200 my-4" />
 
@@ -1862,6 +1862,12 @@ export default function EstimateToolViewV2({
                             <div className="flex justify-between items-center py-1.5 text-14">
                               <span className="text-ink-secondary">Rodent bait (separate)</span>
                               <span className="font-mono font-medium text-zinc-900 u-nums">{fmtInt(E.recurring.rodentBaitMo * 12)}/yr (${E.recurring.rodentBaitMo}/mo)</span>
+                            </div>
+                          )}
+                          {E.recurring.palmInjectionMo > 0 && (
+                            <div className="flex justify-between items-center py-1.5 text-14">
+                              <span className="text-ink-secondary">Palm injection (separate)</span>
+                              <span className="font-mono font-medium text-zinc-900 u-nums">{fmtInt(E.recurring.palmInjectionAnn || E.recurring.palmInjectionMo * 12)}/yr ({fmt(E.recurring.palmInjectionMo)}/mo)</span>
                             </div>
                           )}
                           {E.manualDiscount && E.manualDiscount.amount > 0 && (

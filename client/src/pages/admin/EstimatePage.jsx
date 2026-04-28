@@ -1296,11 +1296,11 @@ function EstimateToolView() {
               </div>
               <div style={{ maxHeight: 'calc(100vh - 120px)', overflowY: 'auto', paddingRight: 10 }}>
                 {/* ── Summary Card ──────────────────────── */}
-                {(E.recurring.serviceCount > 0 || E.oneTime.total > 0) && (
+                {(E.recurring.serviceCount > 0 || E.oneTime.total > 0 || E.recurring.palmInjectionMo > 0 || E.recurring.rodentBaitMo > 0) && (
                   <>
                     <div style={{ background: 'linear-gradient(135deg, rgba(14,165,233,0.15), rgba(16,185,129,0.10))', border: `2px solid ${C.teal}`, borderRadius: C.radius, padding: 24, marginBottom: 24, textAlign: 'center' }}>
                       <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 36, fontWeight: 700, color: C.green }}>
-                        {fmt(E.recurring.grandTotal || (E.recurring.monthlyTotal + (E.recurring.rodentBaitMo || 0)))}/mo
+                        {fmt(E.recurring.grandTotal || (E.recurring.monthlyTotal + (E.recurring.rodentBaitMo || 0) + (E.recurring.palmInjectionMo || 0)))}/mo
                       </div>
                       <div style={{ fontSize: 14, color: C.gray, marginTop: 4 }}>
                         Recurring monthly{E.recurring.savings > 0 ? ` (WaveGuard ${E.recurring.waveGuardTier} pricing)` : ''}{E.manualDiscount && E.manualDiscount.amount > 0 ? ' + manual discount' : ''}
@@ -1611,7 +1611,7 @@ function EstimateToolView() {
                 )}
 
                 {/* ── WaveGuard + Totals ───────────────── */}
-                {(E.recurring.serviceCount > 0 || E.oneTime.total > 0 || E.recurring.rodentBaitMo > 0) && (
+                {(E.recurring.serviceCount > 0 || E.oneTime.total > 0 || E.recurring.rodentBaitMo > 0 || E.recurring.palmInjectionMo > 0) && (
                   <>
                     <div style={{ height: 1, background: C.border, margin: '18px 0' }} />
 
@@ -1657,6 +1657,12 @@ function EstimateToolView() {
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', fontSize: 16 }}>
                           <span>Rodent bait (separate)</span>
                           <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, color: C.green }}>{fmtInt(E.recurring.rodentBaitMo * 12)}/yr (${E.recurring.rodentBaitMo}/mo)</span>
+                        </div>
+                      )}
+                      {E.recurring.palmInjectionMo > 0 && (
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', fontSize: 16 }}>
+                          <span>Palm injection (separate)</span>
+                          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, color: C.green }}>{fmtInt(E.recurring.palmInjectionAnn || E.recurring.palmInjectionMo * 12)}/yr ({fmt(E.recurring.palmInjectionMo)}/mo)</span>
                         </div>
                       )}
                       {E.manualDiscount && E.manualDiscount.amount > 0 && (
