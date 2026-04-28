@@ -66,8 +66,9 @@ export default function SocialMediaPage() {
           removed (purely decorative), but the platform name + Connected
           badge stay so the operator can see at a glance which API
           integrations are healthy. */}
-      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 20 }}>
+      <div className="tab-pill-scroll" style={{ display: 'flex', justifyContent: 'center', marginBottom: 20 }}>
         <div
+          className="tab-pill-scroll-inner"
           style={{
             display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center',
             gap: 4, padding: 4,

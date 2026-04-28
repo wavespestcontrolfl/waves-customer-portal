@@ -524,8 +524,8 @@ export default function NewsletterPage() {
       </div>
 
       {/* Tabs — pill group, matches Blog/Generate page tab style */}
-      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
-        <div style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
+      <div className="tab-pill-scroll" style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
+        <div className="tab-pill-scroll-inner" style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
           {TABS.map((t) => (
             <button
               key={t.key}
