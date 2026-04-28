@@ -5370,7 +5370,7 @@ function MyPlanTab({ customer }) {
         <div style={{ minWidth: 640 }}>
           {/* Header row — tier name, price, discount, current-plan badge */}
           <div style={{ display: 'grid', gridTemplateColumns: '1.4fr repeat(4, 1fr)' }}>
-            <div style={{ padding: '14px 14px 10px', fontSize: 11, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5, borderBottom: `1px solid ${B.grayLight}` }}>
+            <div style={{ padding: '14px 14px 10px', fontSize: 14, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5, borderBottom: `1px solid ${B.grayLight}` }}>
               What's included
             </div>
             {TIER_ORDER.map(tn => {
@@ -5385,15 +5385,15 @@ function MyPlanTab({ customer }) {
                   borderLeft: `1px solid ${B.grayLight}`,
                   borderBottom: `1px solid ${B.grayLight}`,
                 }}>
-                  <div style={{ fontSize: 13, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, textTransform: 'uppercase', letterSpacing: 0.4 }}>{tn}</div>
+                  <div style={{ fontSize: 14, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, textTransform: 'uppercase', letterSpacing: 0.4 }}>{tn}</div>
                   <div style={{ fontSize: 18, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui, marginTop: 2 }}>
-                    ${tierMonthly.toFixed(0)}<span style={{ fontSize: 11, color: B.grayMid, fontWeight: 400 }}>/mo</span>
+                    ${tierMonthly.toFixed(0)}<span style={{ fontSize: 14, color: B.grayMid, fontWeight: 400 }}>/mo</span>
                   </div>
-                  <div style={{ fontSize: 10, fontWeight: 600, color: disc > 0 ? B.green : B.grayMid, marginTop: 2 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: disc > 0 ? B.green : B.grayMid, marginTop: 2 }}>
                     {disc > 0 ? `${Math.round(disc * 100)}% bundle discount` : 'No bundle discount'}
                   </div>
                   {isCurrent && (
-                    <div style={{ fontSize: 9, fontWeight: 700, color: B.green, background: `${B.green}20`, padding: '2px 8px', borderRadius: 12, marginTop: 5, display: 'inline-block' }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: B.green, background: `${B.green}20`, padding: '2px 8px', borderRadius: 12, marginTop: 5, display: 'inline-block' }}>
                       YOUR PLAN
                     </div>
                   )}
@@ -5402,12 +5402,12 @@ function MyPlanTab({ customer }) {
             })}
           </div>
 
-          {/* Service rows — ✓ where included */}
+          {/* Service rows — checkmark icon where the service is included in that tier */}
           {SERVICE_CATALOG.slice(0, 4).map((svc, rowIdx) => (
             <div key={svc.id} style={{ display: 'grid', gridTemplateColumns: '1.4fr repeat(4, 1fr)' }}>
-              <div style={{ padding: '12px 14px', fontSize: 13, color: B.navy, fontWeight: 600, borderBottom: `1px solid ${B.grayLight}` }}>
+              <div style={{ padding: '12px 14px', fontSize: 14, color: B.navy, fontWeight: 600, borderBottom: `1px solid ${B.grayLight}` }}>
                 {svc.name}
-                <div style={{ fontSize: 11, color: B.grayMid, fontWeight: 400, marginTop: 2, lineHeight: 1.4 }}>
+                <div style={{ fontSize: 12, color: B.grayMid, fontWeight: 400, marginTop: 2, lineHeight: 1.4 }}>
                   {svc.description}
                 </div>
               </div>
@@ -5420,9 +5420,11 @@ function MyPlanTab({ customer }) {
                     background: isCurrent ? `${TIER[tn].color}08` : 'transparent',
                     borderLeft: `1px solid ${B.grayLight}`,
                     borderBottom: `1px solid ${B.grayLight}`,
-                    fontSize: 18, fontWeight: 700,
                     color: includes ? B.green : B.grayLight,
-                  }}>{includes ? '✓' : '—'}</div>
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  }}>
+                    {includes ? <Icon name="check" size={20} strokeWidth={2.5} /> : <span style={{ fontSize: 18, fontWeight: 700 }}>{'—'}</span>}
+                  </div>
                 );
               })}
             </div>
@@ -5430,9 +5432,9 @@ function MyPlanTab({ customer }) {
 
           {/* Member perks row — applies to all tiers */}
           <div style={{ display: 'grid', gridTemplateColumns: '1.4fr repeat(4, 1fr)' }}>
-            <div style={{ padding: '12px 14px', fontSize: 13, color: B.navy, fontWeight: 600 }}>
+            <div style={{ padding: '12px 14px', fontSize: 14, color: B.navy, fontWeight: 600 }}>
               Unlimited callbacks
-              <div style={{ fontSize: 11, color: B.grayMid, fontWeight: 400, marginTop: 2, lineHeight: 1.4 }}>
+              <div style={{ fontSize: 12, color: B.grayMid, fontWeight: 400, marginTop: 2, lineHeight: 1.4 }}>
                 Free re-treatment if pests return between scheduled visits
               </div>
             </div>
@@ -5441,8 +5443,11 @@ function MyPlanTab({ customer }) {
                 padding: '12px 8px', textAlign: 'center',
                 background: tn === tierName ? `${TIER[tn].color}08` : 'transparent',
                 borderLeft: `1px solid ${B.grayLight}`,
-                fontSize: 18, fontWeight: 700, color: B.green,
-              }}>✓</div>
+                color: B.green,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>
+                <Icon name="check" size={20} strokeWidth={2.5} />
+              </div>
             ))}
           </div>
 
@@ -5459,10 +5464,10 @@ function MyPlanTab({ customer }) {
                   borderLeft: `1px solid ${B.grayLight}`,
                 }}>
                   {isCurrent ? (
-                    <div style={{ fontSize: 11, fontWeight: 700, color: B.green }}>Current</div>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: B.green }}>Current</div>
                   ) : isUpgrade ? (
                     upgradeRequested[tn] ? (
-                      <div style={{ fontSize: 11, fontWeight: 600, color: B.green }}>Request sent</div>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: B.green }}>Request sent</div>
                     ) : (
                       <>
                         <button
@@ -5480,7 +5485,7 @@ function MyPlanTab({ customer }) {
                             }
                           }}
                           style={{
-                            ...BUTTON_BASE, padding: '6px 10px', fontSize: 11,
+                            ...BUTTON_BASE, padding: '6px 10px', fontSize: 12,
                             background: B.yellow, color: B.blueDeeper, width: '100%',
                             opacity: upgradeSubmitting[tn] ? 0.6 : 1,
                             cursor: upgradeSubmitting[tn] ? 'wait' : 'pointer',
@@ -5923,7 +5928,6 @@ function ServiceTracker() {
   const [loading, setLoading] = useState(true);
   const [propertyPrefs, setPropertyPrefs] = useState(null);
   const [weather, setWeather] = useState(null);
-  const [showExpect, setShowExpect] = useState(false);
 
   const fetchTracker = useCallback(() => {
     api.getActiveTracker()
@@ -5971,16 +5975,6 @@ function ServiceTracker() {
   const estComplete = step >= 4 && step < 6 && tracker.steps[3]?.completedAt
     ? new Date(new Date(tracker.steps[3].completedAt).getTime() + svcDuration * 60000)
     : null;
-
-  const whatToExpect = isPest
-    ? 'Your tech will treat the exterior perimeter with a liquid barrier, apply granular product to landscaping beds, check all bait stations, sweep cobwebs from eaves, and treat interior baseboards and entry points.'
-    : isLawn
-    ? "Your tech will inspect your turf for disease, weeds, and insects, apply fertilizer or herbicide based on your lawn's current program schedule, take soil/thatch measurements, and document any recommendations."
-    : isMosquito
-    ? 'Your tech will apply a barrier treatment to all foliage, fence lines, and standing water areas around your property perimeter, including the lanai area.'
-    : isTermite
-    ? 'Your tech will inspect all bait stations, check for evidence of termite activity, and document findings. Any active stations will be serviced.'
-    : 'Your tech will perform a thorough treatment of your property based on your service plan.';
 
   // Status pill: maps the 7-step internal model to the 5-state UI
   // taxonomy used on the public /track/<token> page so authenticated
@@ -6228,30 +6222,6 @@ function ServiceTracker() {
           ))}
         </div>
       )}
-
-      {/* What to Expect — collapsible card. Customer education for
-          the specific service type. */}
-      <div style={{ ...subCardBase, padding: 0, overflow: 'hidden' }}>
-        <button
-          type="button"
-          onClick={() => setShowExpect(!showExpect)}
-          aria-expanded={showExpect}
-          style={{
-            width: '100%', padding: '14px 16px', cursor: 'pointer',
-            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-            background: 'none', border: 'none',
-            fontFamily: FONTS.body, color: B.blueDeeper,
-          }}
-        >
-          <span style={{ fontSize: 16, fontWeight: 600 }}>What to expect</span>
-          <span style={{ fontSize: 14, color: B.textCaption }}>{showExpect ? '▴' : '▾'}</span>
-        </button>
-        {showExpect && (
-          <div style={{ padding: '0 16px 14px', borderTop: `1px solid ${B.offWhite}` }}>
-            <div style={{ fontSize: 15, color: B.textBody, lineHeight: 1.6, marginTop: 10 }}>{whatToExpect}</div>
-          </div>
-        )}
-      </div>
 
       {/* Live notes from tech, if any */}
       {notes.length > 0 && (
