@@ -621,9 +621,17 @@ router.post('/', async (req, res, next) => {
       const cols = await db('scheduled_services').columnInfo();
       const rOpts = { nth: recurringNth, weekday: recurringWeekday, intervalDays: recurringIntervalDays };
       const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
+      // Track child dates we've already inserted in this spawn — when
+      // skip-weekends collapses Sat+Sun onto the same shifted weekday
+      // (common with custom interval=1) we'd otherwise stack duplicate
+      // appointments at the same date/time.
+      const seenChildDates = new Set();
+      seenChildDates.add(String(scheduledDate || '').split('T')[0]);
       for (let i = 1; i < plannedCount; i++) {
         const rawNext = nextRecurringDate(scheduledDate, recurringPattern, i, rOpts);
         const nextDateStr = shiftPastWeekend(rawNext, !!skipWeekends, shiftDir);
+        if (seenChildDates.has(nextDateStr)) continue;
+        seenChildDates.add(nextDateStr);
         const childData = {
           customer_id: customerId, technician_id: resolvedTechId,
           scheduled_date: nextDateStr,
@@ -849,9 +857,16 @@ router.put('/:id/update-details', async (req, res, next) => {
         try {
           parentAddons = await db('scheduled_service_addons').where({ scheduled_service_id: parent.id });
         } catch (e) { /* table may not exist pre-migration — non-blocking */ }
+        // Dedupe shifted child dates — same rationale as the POST spawn:
+        // skip-weekends can collapse consecutive recurrences onto the
+        // same weekday.
+        const seenChildDates = new Set();
+        seenChildDates.add(String(baseDateStr || '').split('T')[0]);
         for (let i = 1; i < spawnCount; i++) {
           const rawNext = nextRecurringDate(baseDateStr, recurringPattern, i, rOpts);
           const nextDateStr = shiftPastWeekend(rawNext, skipChild, dirChild);
+          if (seenChildDates.has(nextDateStr)) continue;
+          seenChildDates.add(nextDateStr);
           const childData = {
             customer_id: parent.customer_id,
             technician_id: parent.technician_id,
@@ -2094,6 +2109,7 @@ router.get('/recurring-alerts', async (req, res, next) => {
         for (const plan of ending) {
           const pending = await db('scheduled_services')
             .where(function () { this.where('recurring_parent_id', plan.id).orWhere('id', plan.id); })
+            .where('is_recurring', true)
             .where('status', 'pending')
             .where('scheduled_date', '>=', today)
             .orderBy('scheduled_date', 'desc').limit(1);
@@ -2103,6 +2119,7 @@ router.get('/recurring-alerts', async (req, res, next) => {
 
           const pendingCount = parseInt((await db('scheduled_services')
             .where(function () { this.where('recurring_parent_id', plan.id).orWhere('id', plan.id); })
+            .where('is_recurring', true)
             .where('status', 'pending')
             .count('* as c').first())?.c || 0);
           if (pendingCount > 1) continue;
@@ -2161,8 +2178,11 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
     const cols = await db('scheduled_services').columnInfo();
     const rOpts = { nth: parent.recurring_nth, weekday: parent.recurring_weekday, intervalDays: parent.recurring_interval_days };
 
+    // Boosters share recurring_parent_id but have is_recurring=false;
+    // exclude them so the next-date math keys off the true cadence.
     const latest = await db('scheduled_services')
       .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+      .where('is_recurring', true)
       .orderBy('scheduled_date', 'desc').first();
     const baseDateStr = latest?.scheduled_date
       ? String(latest.scheduled_date).split('T')[0]
@@ -2191,13 +2211,17 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
       }
     } else if (action === 'convert_ongoing') {
       if (cols.recurring_ongoing) {
+        // Only flip the base series rows to ongoing; boosters
+        // (is_recurring=false) shouldn't carry the recurring_ongoing flag.
         await db('scheduled_services')
           .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+          .where('is_recurring', true)
           .update({ recurring_ongoing: true });
       }
       // Also ensure at least 3 pending visits scheduled ahead
       const pendingCount = parseInt((await db('scheduled_services')
         .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+        .where('is_recurring', true)
         .where('status', 'pending').count('* as c').first())?.c || 0);
       const need = Math.max(0, 3 - pendingCount);
       for (let i = 1; i <= need; i++) {
