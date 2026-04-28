@@ -105,7 +105,7 @@ export default function AdminInvoicesPage() {
     <div style={{ maxWidth: 960, margin: '0 auto', padding: isMobile ? '8px 4px 24px' : '0' }}>
       {/* Header — title + round add button (mirrors attached UI) */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: isMobile ? '16px 16px 12px' : '4px 0 16px' }}>
-        <h1 style={{ fontSize: isMobile ? 32 : 28, fontWeight: 700, color: D.heading, margin: 0, letterSpacing: '-0.01em' }}>Invoices</h1>
+        <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>Invoices</h1>
         <button
           onClick={() => setTab(tab === 'create' ? 'list' : 'create')}
           aria-label={tab === 'create' ? 'Back to invoices' : 'Create invoice'}

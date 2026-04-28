@@ -51,7 +51,7 @@ export default function KnowledgeBasePage() {
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 8 }}>
         <div>
-          <div style={{ fontSize: isMobile ? 18 : 22, fontWeight: 700, color: D.heading }}>Knowledge Base</div>
+          <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>Knowledge Base</h1>
         </div>
       </div>
 

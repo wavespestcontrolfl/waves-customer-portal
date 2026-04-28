@@ -76,7 +76,7 @@ export default function ProjectsPage() {
         display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12,
       }}>
         <div>
-          <h1 style={{ fontSize: 22, fontWeight: 700, color: D.heading, margin: 0 }}>Projects</h1>
+          <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>Projects</h1>
         </div>
         <button
           type="button"

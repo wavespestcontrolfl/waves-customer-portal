@@ -305,7 +305,7 @@ export default function KnowledgePage() {
   if (selectedArticle) {
     return (
       <div>
-        <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: '0 0 24px' }}>Knowledge Base</h1>
+        <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: '0 0 24px' }}>Knowledge Base</h1>
         <ArticleViewer articleId={selectedArticle} onBack={() => setSelectedArticle(null)} />
       </div>
     );
@@ -319,7 +319,7 @@ export default function KnowledgePage() {
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
         <div>
-          <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>Knowledge Base</h1>
+          <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>Knowledge Base</h1>
         </div>
         <button onClick={() => setShowQA(true)} style={{
           padding: '10px 20px', borderRadius: 8, border: 'none', background: D.teal, color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer',
