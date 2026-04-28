@@ -919,6 +919,52 @@ export default function EstimateToolViewV2({
         <div className="grid gap-7 grid-cols-1 lg:grid-cols-[440px_1fr]">
           {/* ═══ LEFT COLUMN: FORM ═══ */}
           <div className="space-y-4">
+            {/* Customer Lookup */}
+            <div>
+              <PanelTitle>Customer Lookup</PanelTitle>
+              <FieldV2 label="Search customers">
+                <input
+                  type="text"
+                  value={customerSearch}
+                  onChange={(e) => setCustomerSearch(e.target.value)}
+                  placeholder="Name, phone, email, or address..."
+                  className={INPUT_CLS}
+                />
+              </FieldV2>
+              {customers.length > 0 && (
+                <div className="mb-3 border-hairline border-zinc-300 rounded-xs bg-white max-h-72 overflow-y-auto">
+                  {customers.slice(0, 8).map((c) => {
+                    const name = `${c.firstName || ''} ${c.lastName || ''}`.trim() || '(no name)';
+                    return (
+                      <button
+                        key={c.id}
+                        type="button"
+                        onClick={() => {
+                          setForm((f) => ({
+                            ...f,
+                            address: c.address || f.address,
+                            customerName: name,
+                            customerPhone: c.phone || f.customerPhone || '',
+                            customerEmail: c.email || f.customerEmail || '',
+                          }));
+                          setExistingCustomerMatch(c);
+                          setCustomerSearch('');
+                          setCustomers([]);
+                        }}
+                        className="w-full text-left px-3 py-2 border-b-hairline border-zinc-200 last:border-b-0 hover:bg-zinc-50 cursor-pointer"
+                      >
+                        <div className="text-14 text-zinc-900 font-medium">{name}</div>
+                        <div className="font-mono text-12 text-ink-secondary">
+                          {c.address || 'no address on file'}
+                          {c.phone ? ` · ${c.phone}` : ''}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
             {/* Property Lookup */}
             <div>
               <PanelTitle>Property Lookup</PanelTitle>
