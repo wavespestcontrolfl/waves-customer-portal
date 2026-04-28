@@ -29,7 +29,6 @@
 //   availability API responds slowly.
 import { useState, useEffect, useMemo, useRef } from 'react';
 import AddressAutocomplete from '../AddressAutocomplete';
-import { etDateString } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -56,48 +55,19 @@ const TIER_COLORS = { Platinum: '#E5E4E2', Gold: '#FDD835', Silver: '#90CAF9', B
 const CATEGORY_LABELS = { recurring: 'Recurring Services', one_time: 'One-Time Treatments', assessment: 'Assessments', pest_control: 'Pest Control', lawn_care: 'Lawn Care', mosquito: 'Mosquito', termite: 'Termite', rodent: 'Rodent', tree_shrub: 'Tree & Shrub', inspection: 'Inspections', specialty: 'Specialty', other: 'Other' };
 
 
-const FREQUENCIES = [
+// Per-line cadence options. Each service line picks its own cadence so a
+// customer can get e.g. quarterly pest + monthly lawn from a single new-
+// appointment form. Same-cadence lines ride one parent appointment as
+// add-ons; different-cadence lines fan out into separate parent series at
+// submit time.
+const CADENCE_OPTIONS = [
+  { value: 'one_time', label: 'One-time' },
   { value: 'monthly', label: 'Monthly' },
   { value: 'bimonthly', label: 'Every 2 months' },
   { value: 'quarterly', label: 'Quarterly' },
   { value: 'triannual', label: 'Every 4 months' },
-  { value: 'monthly_nth_weekday', label: 'Every month on the Nth weekday' },
   { value: 'custom', label: 'Custom (every N days)' },
 ];
-const NTH_OPTIONS = [
-  { value: 1, label: '1st' }, { value: 2, label: '2nd' },
-  { value: 3, label: '3rd' }, { value: 4, label: '4th' },
-];
-const WEEKDAY_OPTIONS = [
-  { value: 0, label: 'Sunday' }, { value: 1, label: 'Monday' },
-  { value: 2, label: 'Tuesday' }, { value: 3, label: 'Wednesday' },
-  { value: 4, label: 'Thursday' }, { value: 5, label: 'Friday' },
-  { value: 6, label: 'Saturday' },
-];
-
-function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
-  const { nth, weekday, intervalDays } = opts;
-  const safe = baseDateStr ? String(baseDateStr).split('T')[0] : etDateString();
-  const base = new Date(safe + 'T12:00:00');
-  if (isNaN(base.getTime())) return new Date();
-  const nthNum = (nth != null && nth !== '' && !isNaN(parseInt(nth))) ? parseInt(nth) : null;
-  const wdayNum = (weekday != null && weekday !== '' && !isNaN(parseInt(weekday))) ? parseInt(weekday) : null;
-  const intNum = (intervalDays != null && intervalDays !== '' && !isNaN(parseInt(intervalDays))) ? parseInt(intervalDays) : null;
-  if (pattern === 'monthly_nth_weekday' && nthNum != null && wdayNum != null) {
-    const d = new Date(base.getFullYear(), base.getMonth() + i, 1, 12, 0, 0);
-    const firstW = d.getDay();
-    const offset = (wdayNum - firstW + 7) % 7;
-    d.setDate(1 + offset + (nthNum - 1) * 7);
-    return isNaN(d.getTime()) ? base : d;
-  }
-  const intervals = { daily: 1, weekly: 7, biweekly: 14, monthly: 30, bimonthly: 60, quarterly: 91, triannual: 122 };
-  let gap;
-  if (pattern === 'custom' && intNum) gap = Math.max(1, intNum);
-  else gap = intervals[pattern] || 91;
-  const d = new Date(base);
-  d.setDate(d.getDate() + gap * i);
-  return isNaN(d.getTime()) ? base : d;
-}
 
 const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 16, fontFamily: 'inherit', fontWeight: 400, outline: 'none', boxSizing: 'border-box', minHeight: 44, colorScheme: 'light' };
 const labelStyle = { fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 500, display: 'block', marginBottom: 4 };
@@ -183,13 +153,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [techMode, setTechMode] = useState(defaultTechId ? 'choose' : 'auto');
   const [techId, setTechId] = useState(defaultTechId || '');
   const [techs, setTechs] = useState([]);
-  const [isRecurring, setIsRecurring] = useState(false);
-  const [recurringFreq, setRecurringFreq] = useState('quarterly');
-  const [recurringCount, setRecurringCount] = useState(4);
-  const [recurringOngoing, setRecurringOngoing] = useState(true);
-  const [recurringNth, setRecurringNth] = useState(3);
-  const [recurringWeekday, setRecurringWeekday] = useState(3);
-  const [recurringIntervalDays, setRecurringIntervalDays] = useState(30);
   const [discountType, setDiscountType] = useState('');
   const [discountAmount, setDiscountAmount] = useState('');
   const [discountPresets, setDiscountPresets] = useState([]);
@@ -220,19 +183,34 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState('');
 
-  // Per-line price helpers. Each entry in `services` carries its own `price`
+  // Per-line helpers. Each entry in `services` carries its own `price`
   // string (so an operator can override goodwill / loyalty pricing on one
-  // line without touching the others). The summed total drives the discount
-  // base and the totals strip.
+  // line without touching the others) and its own `cadence` + `intervalDays`
+  // so quarterly pest + monthly lawn can live on the same form. The
+  // summed total drives the discount base and the totals strip.
   const updateServicePrice = (idx, val) => {
     setServices((arr) => arr.map((s, i) => (i === idx ? { ...s, price: val } : s)));
+  };
+  const updateServiceCadence = (idx, val) => {
+    setServices((arr) => arr.map((s, i) => (i === idx ? { ...s, cadence: val } : s)));
+  };
+  const updateServiceInterval = (idx, val) => {
+    setServices((arr) => arr.map((s, i) => (i === idx ? { ...s, intervalDays: val } : s)));
   };
   const removeServiceAt = (idx) => {
     setServices((arr) => arr.filter((_, i) => i !== idx));
   };
   const addServiceFromCatalog = (svc) => {
     const defaultPrice = svc.priceMin || svc.base_price || '';
-    setServices((arr) => [...arr, { ...svc, price: defaultPrice ? String(defaultPrice) : '' }]);
+    setServices((arr) => [
+      ...arr,
+      {
+        ...svc,
+        price: defaultPrice ? String(defaultPrice) : '',
+        cadence: 'one_time',
+        intervalDays: 30,
+      },
+    ]);
     setServiceSearch('');
     setServiceResults([]);
     setAddingService(false);
@@ -372,78 +350,93 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     return `${h > 12 ? h - 12 : h}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
   };
 
-  // Submit
-  const handleSubmit = async () => {
-    if (!selectedCustomer || !selectedService) return;
-    if (isRecurring && services.length > 1) return; // see canSubmit comment
-    setSaving(true);
-    try {
-      // services[0] is the primary line — its name + id drive the parent
-      // scheduled_services row. services[1..] are persisted as
-      // scheduled_service_addons (handler already supports this shape).
-      //
-      // Pricing: the parent's estimated_price must reflect the WHOLE visit,
-      // not just the primary line. Auto-invoicing on completion
-      // (server/routes/admin-dispatch.js) reads only scheduled_services.
-      // estimated_price; if we sent only the primary, multi-service
-      // appointments would invoice short. Per-line prices are still
-      // preserved on each addon row for analytics / breakdown.
-      const [primary, ...extras] = services;
-      const visitTotal = subtotal > 0 ? subtotal : null;
-      const addons = extras.map((s) => {
-        const p = parseFloat(s.price);
-        return {
-          serviceId: s.id || null,
-          serviceName: s.name,
-          name: s.name,
-          price: isNaN(p) ? null : p,
-        };
-      });
-      const body = {
-        customerId: selectedCustomer.id,
-        scheduledDate: apptDate,
-        serviceType: primary.name,
-        serviceId: primary.id || null,
-        serviceAddons: addons,
-        windowStart,
-        windowEnd: getEndTime(),
-        assignmentMode: techMode,
-        technicianId: techMode === 'choose' ? techId : undefined,
-        estimatedPrice: visitTotal,
-        urgency: 'routine',
-        notes: customerNotes || undefined,
-        internalNotes: internalNotes || undefined,
-        sendConfirmationSms: sendSms,
-        isRecurring,
-        recurringPattern: isRecurring ? recurringFreq : undefined,
-        recurringCount: isRecurring ? (recurringOngoing ? 4 : recurringCount) : undefined,
-        recurringOngoing: isRecurring ? recurringOngoing : undefined,
-        recurringNth: isRecurring && recurringFreq === 'monthly_nth_weekday' ? recurringNth : undefined,
-        recurringWeekday: isRecurring && recurringFreq === 'monthly_nth_weekday' ? recurringWeekday : undefined,
-        recurringIntervalDays: isRecurring && recurringFreq === 'custom' ? recurringIntervalDays : undefined,
-        discountType: discountType || undefined,
-        discountAmount: discountType && discountAmount !== '' ? Number(discountAmount) : undefined,
-        createInvoice: true,
-        sendConfirmation: sendSms,
-      };
-      const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
-      setToast(`Appointment created${r.recurringCreated > 1 ? ` (${r.recurringCreated} total)` : ''} — invoice will send with service report`);
-      setTimeout(() => { onCreated?.({ id: r.id, scheduledDate: apptDate }); }, 1200);
-    } catch (e) { alert('Failed: ' + e.message); }
-    setSaving(false);
+  // Group services into appointment payloads. Lines that share a cadence
+  // (and interval, when custom) ride a single parent appointment as
+  // add-ons; lines on different cadences fan out into their own parent
+  // series so quarterly pest + monthly lawn can co-exist on this form.
+  // One-time lines all share one one-time parent.
+  const groupServicesByCadence = (rows) => {
+    const groups = new Map();
+    for (const s of rows) {
+      const cadence = s.cadence || 'one_time';
+      const key = cadence === 'custom' ? `custom:${parseInt(s.intervalDays) || 30}` : cadence;
+      if (!groups.has(key)) groups.set(key, { cadence, intervalDays: cadence === 'custom' ? parseInt(s.intervalDays) || 30 : null, lines: [] });
+      groups.get(key).lines.push(s);
+    }
+    return Array.from(groups.values());
   };
 
-  // Recurring preview
-  const recurringPreview = () => {
-    if (!isRecurring) return null;
-    const opts = { nth: recurringNth, weekday: recurringWeekday, intervalDays: recurringIntervalDays };
-    const limit = Math.min(recurringOngoing ? 4 : recurringCount, 6);
-    const dates = [];
-    for (let i = 0; i < limit; i++) {
-      const d = nextRecurringDate(apptDate, recurringFreq, i, opts);
-      dates.push(d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
-    }
-    return dates;
+  // Compute window_end given a start time and a duration in minutes.
+  const computeWindowEnd = (start, durationMin) => {
+    const [h, m] = start.split(':').map(Number);
+    const endMin = h * 60 + m + Math.max(durationMin || 0, 30);
+    return `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+  };
+
+  // Submit
+  const handleSubmit = async () => {
+    if (!selectedCustomer || services.length === 0) return;
+    setSaving(true);
+    try {
+      const groups = groupServicesByCadence(services);
+      const results = [];
+      for (const group of groups) {
+        const [primary, ...extras] = group.lines;
+        const groupSubtotal = group.lines.reduce((sum, s) => {
+          const n = parseFloat(s.price);
+          return sum + (isNaN(n) ? 0 : n);
+        }, 0);
+        const groupDuration = group.lines.reduce((sum, s) => sum + (s.duration || s.default_duration_minutes || 30), 0);
+        const addons = extras.map((s) => {
+          const p = parseFloat(s.price);
+          return {
+            serviceId: s.id || null,
+            serviceName: s.name,
+            name: s.name,
+            price: isNaN(p) ? null : p,
+          };
+        });
+        const isRecurring = group.cadence !== 'one_time';
+        const body = {
+          customerId: selectedCustomer.id,
+          scheduledDate: apptDate,
+          serviceType: primary.name,
+          serviceId: primary.id || null,
+          serviceAddons: addons,
+          windowStart,
+          windowEnd: computeWindowEnd(windowStart, groupDuration),
+          assignmentMode: techMode,
+          technicianId: techMode === 'choose' ? techId : undefined,
+          // Parent's estimated_price reflects the whole group so completion-
+          // triggered auto-invoicing (server/routes/admin-dispatch.js) charges
+          // the full visit. Per-line prices stay on each addon row for
+          // breakdown / analytics.
+          estimatedPrice: groupSubtotal > 0 ? groupSubtotal : null,
+          urgency: 'routine',
+          notes: customerNotes || undefined,
+          internalNotes: internalNotes || undefined,
+          sendConfirmationSms: sendSms,
+          isRecurring,
+          recurringPattern: isRecurring ? group.cadence : undefined,
+          recurringCount: isRecurring ? 4 : undefined,
+          recurringOngoing: isRecurring ? true : undefined,
+          recurringIntervalDays: isRecurring && group.cadence === 'custom' ? group.intervalDays : undefined,
+          discountType: discountType || undefined,
+          discountAmount: discountType && discountAmount !== '' ? Number(discountAmount) : undefined,
+          createInvoice: true,
+          sendConfirmation: sendSms,
+        };
+        const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
+        results.push(r);
+      }
+      const apptCount = results.length;
+      const message = apptCount === 1
+        ? 'Appointment created — invoice will send with service report'
+        : `${apptCount} appointments created — invoices will send with each service report`;
+      setToast(message);
+      setTimeout(() => { onCreated?.({ id: results[0]?.id, scheduledDate: apptDate }); }, 1200);
+    } catch (e) { alert('Failed: ' + e.message); }
+    setSaving(false);
   };
 
   const overlayStyle = {
@@ -460,13 +453,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     border: isMobile ? 'none' : `1px solid ${D.border}`,
   };
 
-  // Recurring + multi-service is intentionally blocked: the schedule API
-  // clones recurring children but doesn't carry addon rows forward, so
-  // visits 2..N would silently lose every line beyond the primary. Until
-  // the server learns to clone addons, force the operator to either drop
-  // recurring or drop the extra services.
-  const recurringMultiServiceBlocked = isRecurring && services.length > 1;
-  const canSubmit = !!selectedCustomer && !!selectedService && !saving && !recurringMultiServiceBlocked;
+  const canSubmit = !!selectedCustomer && !!selectedService && !saving;
 
   return (
     <div style={overlayStyle} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
@@ -620,15 +607,44 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   style={{ background: 'none', border: 'none', color: D.muted, cursor: 'pointer', fontSize: 16, minWidth: 44, minHeight: 44, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                 >✕</button>
               </div>
-              <label style={labelStyle}>Price</label>
-              <div style={{ position: 'relative' }}>
-                <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: D.muted, fontSize: 14 }}>$</span>
-                <input
-                  type="number"
-                  value={svc.price ?? ''}
-                  onChange={(e) => updateServicePrice(idx, e.target.value)}
-                  style={{ ...inputStyle, paddingLeft: 28 }}
-                />
+              <div style={{ display: 'grid', gridTemplateColumns: svc.cadence === 'custom' ? '1fr 1fr 100px' : '1fr 1fr', gap: 8 }}>
+                <div>
+                  <label style={labelStyle}>Price</label>
+                  <div style={{ position: 'relative' }}>
+                    <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: D.muted, fontSize: 14 }}>$</span>
+                    <input
+                      type="number"
+                      value={svc.price ?? ''}
+                      onChange={(e) => updateServicePrice(idx, e.target.value)}
+                      style={{ ...inputStyle, paddingLeft: 28 }}
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label style={labelStyle}>Repeats</label>
+                  <select
+                    value={svc.cadence || 'one_time'}
+                    onChange={(e) => updateServiceCadence(idx, e.target.value)}
+                    style={inputStyle}
+                  >
+                    {CADENCE_OPTIONS.map((c) => (
+                      <option key={c.value} value={c.value}>{c.label}</option>
+                    ))}
+                  </select>
+                </div>
+                {svc.cadence === 'custom' && (
+                  <div>
+                    <label style={labelStyle}>Days</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={365}
+                      value={svc.intervalDays ?? 30}
+                      onChange={(e) => updateServiceInterval(idx, e.target.value)}
+                      style={inputStyle}
+                    />
+                  </div>
+                )}
               </div>
             </div>
           ))}
@@ -769,83 +785,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               <input type="time" value={windowStart} onChange={e => setWindowStart(e.target.value)} step={900} className="waves-sq-date" style={inputStyle} />
             </div>
           </div>
-        </div>
-
-        {/* Section 3a: Recurring — its own section below Date */}
-        <div style={sectionStyle}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', minHeight: 44, marginBottom: isRecurring ? 8 : 0 }}>
-            <input type="checkbox" checked={isRecurring} onChange={e => setIsRecurring(e.target.checked)} style={{ width: 18, height: 18, accentColor: D.teal }} />
-            <span style={{ fontSize: 14, fontWeight: 600, color: '#18181B' }}>Recurring</span>
-          </label>
-          {isRecurring && recurringMultiServiceBlocked && (
-            <div style={{ background: `${D.red}10`, border: `1px solid ${D.red}55`, borderRadius: 8, padding: 10, marginBottom: 10, fontSize: 12, color: D.red, lineHeight: 1.5 }}>
-              Recurring with multiple services isn&rsquo;t supported yet — only the primary service would repeat on visits 2+. Either remove the extra services or turn off Recurring to save.
-            </div>
-          )}
-          {isRecurring && (
-            <div>
-              <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
-                <button type="button" onClick={() => setRecurringOngoing(true)} style={{
-                  flex: 1, padding: '8px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
-                  background: recurringOngoing ? D.teal : 'transparent',
-                  color: recurringOngoing ? '#fff' : D.muted,
-                  border: `1px solid ${recurringOngoing ? D.teal : D.border}`,
-                }}>Ongoing (auto-extend)</button>
-                <button type="button" onClick={() => setRecurringOngoing(false)} style={{
-                  flex: 1, padding: '8px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
-                  background: !recurringOngoing ? D.teal : 'transparent',
-                  color: !recurringOngoing ? '#fff' : D.muted,
-                  border: `1px solid ${!recurringOngoing ? D.teal : D.border}`,
-                }}>Fixed count</button>
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: recurringOngoing ? '1fr' : '2fr 1fr', gap: 8, marginBottom: 8 }}>
-                <div>
-                  <label style={labelStyle}>Frequency</label>
-                  <select value={recurringFreq} onChange={e => setRecurringFreq(e.target.value)} style={inputStyle}>
-                    {FREQUENCIES.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
-                  </select>
-                </div>
-                {!recurringOngoing && (
-                  <div>
-                    <label style={labelStyle}>Count</label>
-                    <input type="number" min={2} max={24} value={recurringCount} onChange={e => setRecurringCount(parseInt(e.target.value) || 4)} style={inputStyle} />
-                  </div>
-                )}
-              </div>
-              {recurringFreq === 'monthly_nth_weekday' && (
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
-                  <div>
-                    <label style={labelStyle}>Nth</label>
-                    <select value={recurringNth} onChange={e => setRecurringNth(parseInt(e.target.value))} style={inputStyle}>
-                      {NTH_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label style={labelStyle}>Weekday</label>
-                    <select value={recurringWeekday} onChange={e => setRecurringWeekday(parseInt(e.target.value))} style={inputStyle}>
-                      {WEEKDAY_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                    </select>
-                  </div>
-                </div>
-              )}
-              {recurringFreq === 'custom' && (
-                <div style={{ marginBottom: 8 }}>
-                  <label style={labelStyle}>Every N days</label>
-                  <input type="number" min={1} max={365} value={recurringIntervalDays} onChange={e => setRecurringIntervalDays(parseInt(e.target.value) || 30)} style={inputStyle} />
-                </div>
-              )}
-              {recurringPreview() && (
-                <div style={{ fontSize: 11, color: D.muted, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                  {recurringPreview().map((d, i) => (
-                    <span key={i} style={{ padding: '2px 6px', background: `${D.teal}15`, borderRadius: 4 }}>{d}</span>
-                  ))}
-                  {recurringOngoing
-                    ? <span style={{ padding: '2px 6px' }}>… then auto-extends</span>
-                    : (recurringCount > 6 && <span style={{ padding: '2px 6px' }}>+{recurringCount - 6} more</span>)}
-                </div>
-              )}
-            </div>
-          )}
         </div>
 
         {/* Section 3.5: Discount — applies to both one-time and recurring.
