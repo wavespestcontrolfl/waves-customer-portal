@@ -22,9 +22,9 @@ function getStripe() {
 
 // ═══════════════════════════════════════════════════════════════
 // Credit card processing surcharge
-// ACH pays the quoted amount; cards / wallets pay base × 1.03.
+// ACH pays the quoted amount; cards / wallets pay base × 1.0399.
 // ═══════════════════════════════════════════════════════════════
-const CARD_SURCHARGE_RATE = 0.03;
+const CARD_SURCHARGE_RATE = 0.0399;
 
 // Accepts a stored payment_methods.method_type ('card' | 'ach')
 // OR a Stripe Payment Element type ('card' | 'us_bank_account' | 'apple_pay' | 'google_pay' | 'link')
@@ -314,7 +314,7 @@ const StripeService = {
 
     const stripeCustomerId = await this.ensureStripeCustomer(customerId);
 
-    // Apply 3% processing surcharge when the stored autopay method is card-family.
+    // Apply 3.99% processing surcharge when the stored autopay method is card-family.
     // ACH methods are charged the quoted amount with no surcharge.
     const { base: baseAmount, surcharge: surchargeAmount, total: totalAmount } =
       computeChargeAmount(amountDollars, card.method_type);
@@ -650,7 +650,7 @@ const StripeService = {
     const saveCard = !!opts.saveCard;
     const cardOnly = !!opts.cardOnly;
     const baseAmount = parseFloat(invoice.total);
-    // Card-only flow (admin manual card entry): bake the 3% surcharge
+    // Card-only flow (admin manual card entry): bake the 3.99% surcharge
     // into the PI up front since we already know the tender is card.
     // The default non-card path leaves the PI at base amount and relies
     // on /update-amount to add surcharge when the Payment Element
@@ -716,7 +716,7 @@ const StripeService = {
    * Update an open invoice PaymentIntent's amount based on the payment method
    * the customer picked on the Payment Element.
    *
-   * - Card / Apple Pay / Google Pay / Link → base × 1.03
+   * - Card / Apple Pay / Google Pay / Link → base × 1.0399
    * - us_bank_account (ACH) → base × 1.00
    *
    * @param {string} invoiceId

@@ -1,7 +1,7 @@
 // client/src/pages/PayPageV2.jsx
 //
 // Customer-facing pay page (V2). Renders the Stripe Payment Element,
-// 3% credit-card surcharge preview, save-card consent, and on success
+// 3.99% credit-card surcharge preview, save-card consent, and on success
 // redirects to /receipt/:token. The single most security-and-money-
 // critical page in the customer-facing portal.
 //
@@ -32,9 +32,9 @@
 // - Stripe SDK loaded once, cached in module scope. Confirm subsequent
 //   page mounts don't re-load the script (would re-prompt user agents
 //   and slow first-paint).
-// - 3% surcharge preview client-side vs authoritative server-side
+// - 3.99% surcharge preview client-side vs authoritative server-side
 //   computeChargeAmount. The two MUST agree on every payment method
-//   (card / apple_pay / google_pay = 3%; ACH = 0%). Drift = customer
+//   (card / apple_pay / google_pay = 3.99%; ACH = 0%). Drift = customer
 //   sees one number and gets charged another.
 // - Confirm button single-flight: Stripe Payment Intent confirm is
 //   slow (~2-5s). Double-click must not double-confirm. Standard
@@ -59,7 +59,7 @@
 // - Idempotency table (stripe_webhook_events): event.id must be
 //   recorded BEFORE processing. If the table write happens after,
 //   a Stripe retry races and we double-credit the invoice.
-// - computeChargeAmount: 3% surcharge logic for card / apple_pay /
+// - computeChargeAmount: 3.99% surcharge logic for card / apple_pay /
 //   google_pay; 0% for ACH. Any other method (Cash App, Klarna)
 //   needs an explicit branch — silently defaulting to 0% loses
 //   money on every transaction.
@@ -138,10 +138,10 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   const [selectedMethod, setSelectedMethod] = useState('card');
   const [displayedBase, setDisplayedBase] = useState(amount);
   const [displayedSurcharge, setDisplayedSurcharge] = useState(
-    Math.round(amount * (cardSurchargeRate || 0.03) * 100) / 100,
+    Math.round(amount * (cardSurchargeRate || 0.0399) * 100) / 100,
   );
   const [displayedTotal, setDisplayedTotal] = useState(
-    Math.round((amount + amount * (cardSurchargeRate || 0.03)) * 100) / 100,
+    Math.round((amount + amount * (cardSurchargeRate || 0.0399)) * 100) / 100,
   );
   const [syncingAmount, setSyncingAmount] = useState(false);
 
@@ -242,7 +242,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         // Pay and our domain is registered with Stripe.
         //
         // We pre-apply the card-family surcharge on mount so the wallet
-        // sheet displays the correct total ($X + 3%) — wallets are
+        // sheet displays the correct total ($X + 3.99%) — wallets are
         // always card-family, and updating the PI from inside the click
         // handler has too tight a deadline (1s).
         const express = elements.create('expressCheckout', {
@@ -254,7 +254,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 
         express.on('ready', async () => {
           if (cancelled) return;
-          // Surcharge wallets = card-family × 1.03. Pre-apply now so the
+          // Surcharge wallets = card-family × 1.0399. Pre-apply now so the
           // wallet sheet shows the right total instead of the base amount.
           try { await syncAmountForMethod('card', saveCard); } catch { /* non-fatal */ }
         });
@@ -321,7 +321,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   }, [publishableKey, clientSecret]);
 
   const isCardFamily = selectedMethod !== 'us_bank_account';
-  const pct = Math.round((cardSurchargeRate || 0.03) * 100);
+  const pct = (((cardSurchargeRate || 0.0399) * 100).toFixed(2)).replace(/\.?0+$/, '');
   const buttonAmount = isCardFamily ? displayedTotal : displayedBase;
 
   const handleSubmit = async () => {
@@ -505,7 +505,7 @@ export default function PayPageV2() {
           clientSecret: setup.clientSecret,
           paymentIntentId: setup.paymentIntentId,
           baseAmount: setup.baseAmount ?? setup.amount,
-          cardSurchargeRate: setup.cardSurchargeRate ?? 0.03,
+          cardSurchargeRate: setup.cardSurchargeRate ?? 0.0399,
           publishableKey: setup.publishableKey || data.stripe.publishableKey,
         });
         setPaymentState('ready');

@@ -3326,9 +3326,9 @@ function BillingTab({ customer }) {
         }}>
           <div>
             <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>Auto Pay Enrollment</div>
-            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>Auto Pay keeps your WaveGuard {tierName} membership active and hassle-free. Bank transfers have no added fee — credit/debit cards add a 3% processing fee.</div>
+            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>Auto Pay keeps your WaveGuard {tierName} membership active and hassle-free. Bank transfers have no added fee — credit/debit cards add a 3.99% processing fee.</div>
             <div style={{ fontSize: 12, color: B.grayMid, marginTop: 6, lineHeight: 1.5 }}>
-              By enrolling in automatic payments, you authorize Waves Pest Control, LLC to charge your selected payment method after each scheduled service visit. Bank transfers (ACH) are charged the quoted invoice amount. Credit and debit card payments include a 3% processing fee added at checkout. To update your billing information or cancel automatic payments, contact us at (941) 297-5749 or billing@wavespestcontrol.com.
+              By enrolling in automatic payments, you authorize Waves Pest Control, LLC to charge your selected payment method after each scheduled service visit. Bank transfers (ACH) are charged the quoted invoice amount. Credit and debit card payments include a 3.99% processing fee added at checkout. To update your billing information or cancel automatic payments, contact us at (941) 297-5749 or billing@wavespestcontrol.com.
             </div>
           </div>
           <span style={{

@@ -32,7 +32,7 @@
 //
 // Audit focus:
 // - Refund amount math: invoice.js → refund() pulls from
-//   DiscountEngine. Confirm a refund REVERSES the 3% credit-card
+//   DiscountEngine. Confirm a refund REVERSES the 3.99% credit-card
 //   surcharge if the original payment was card (otherwise we eat the
 //   surcharge). Verify it does NOT re-apply tax on a refund.
 // - Void vs refund: void = unpaid invoice cancellation (no money

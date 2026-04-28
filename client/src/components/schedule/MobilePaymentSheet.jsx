@@ -79,7 +79,7 @@ export default function MobilePaymentSheet({
     }
   }
 
-  const surcharge = Math.round(amount * 1.03 * 100) / 100;
+  const surcharge = Math.round(amount * 1.0399 * 100) / 100;
 
   async function handleTapToPay() {
     if (charging) return;
@@ -141,7 +141,7 @@ export default function MobilePaymentSheet({
             className="text-ink-tertiary"
             style={{ fontSize: 14, marginTop: 10 }}
           >
-            ${surcharge.toFixed(2)} with 3% credit card surcharge
+            ${surcharge.toFixed(2)} with 3.99% credit card surcharge
           </div>
 
           {/* Tap to Pay card */}
