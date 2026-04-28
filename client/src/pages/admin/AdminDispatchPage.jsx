@@ -54,9 +54,13 @@ export default function AdminDispatchPage() {
       {/* Centered Pipeline-page tab strip — mirrors the
           Leads/Estimates/Create/Pricing pill (EstimatesPageV2) so
           the dispatcher's two top-level views read consistently with
-          the rest of the admin shell. */}
+          the rest of the admin shell. ARIA roles + aria-selected are
+          set on the markup directly here since we're not using the
+          components/ui Tabs primitive. */}
       <div style={{ display: 'flex', justifyContent: 'center', padding: '12px 16px' }}>
         <div
+          role="tablist"
+          aria-label="Dispatch view"
           style={{
             display: 'inline-flex',
             flexWrap: 'wrap',
@@ -73,7 +77,12 @@ export default function AdminDispatchPage() {
             return (
               <button
                 key={t.key}
+                id={`dispatch-tab-${t.key}`}
                 type="button"
+                role="tab"
+                aria-selected={active}
+                aria-controls={`dispatch-tabpanel-${t.key}`}
+                tabIndex={active ? 0 : -1}
                 onClick={() => setTab(t.key)}
                 style={{
                   padding: '10px 24px',
@@ -94,7 +103,12 @@ export default function AdminDispatchPage() {
           })}
         </div>
       </div>
-      <div className="flex-1 min-h-0 flex flex-col">
+      <div
+        role="tabpanel"
+        id={`dispatch-tabpanel-${tab}`}
+        aria-labelledby={`dispatch-tab-${tab}`}
+        className="flex-1 min-h-0 flex flex-col"
+      >
         {tab === TABS.BOARD ? (
           <DispatchBoardPage />
         ) : (
