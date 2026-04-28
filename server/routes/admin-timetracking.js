@@ -613,16 +613,21 @@ router.post('/technicians', async (req, res, next) => {
 // PUT /technicians/:id — update a technician
 router.put('/technicians/:id', async (req, res, next) => {
   try {
-    const { name, phone, email, active } = req.body;
+    const { name, phone, email, active, autoFlipEnabled } = req.body;
     const updates = {};
     if (name !== undefined) updates.name = name.trim();
     if (phone !== undefined) updates.phone = phone;
     if (email !== undefined) updates.email = email;
     if (active !== undefined) updates.active = active;
+    // Per-tech auto-flip opt-out (Phase 2E). When false, the geofence
+    // EXIT auto-flip pipeline skips this tech entirely with
+    // action_taken='auto_flip_skipped_tech_disabled'. Default TRUE on
+    // the column so existing rows keep current behavior.
+    if (autoFlipEnabled !== undefined) updates.auto_flip_enabled = !!autoFlipEnabled;
     updates.updated_at = new Date();
     await db('technicians').where({ id: req.params.id }).update(updates);
     const tech = await db('technicians').where({ id: req.params.id }).first();
-    logger.info(`[team] Updated technician: ${tech.name} (active=${tech.active})`);
+    logger.info(`[team] Updated technician: ${tech.name} (active=${tech.active}, auto_flip_enabled=${tech.auto_flip_enabled})`);
     res.json({ success: true, technician: tech });
   } catch (err) { next(err); }
 });

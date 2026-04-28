@@ -721,6 +721,49 @@ router.put('/:id', async (req, res, next) => {
   }
 });
 
+// PUT /api/admin/customers/:id/notification-prefs
+//
+// Admin override for a customer's notification_prefs row. Today this
+// only exposes auto_flip_en_route (Phase 2E per-customer opt-out for
+// the geofence EXIT auto-flip pipeline) — customers manage everything
+// else through the customer-facing /api/notifications/preferences
+// endpoint themselves. Add new fields here only when ops genuinely
+// needs to override on a customer's behalf.
+//
+// Creates the prefs row if it doesn't exist (defaults to all TRUE).
+router.put('/:id/notification-prefs', async (req, res, next) => {
+  try {
+    const dbUpdates = {};
+    if (req.body.autoFlipEnRoute !== undefined) {
+      dbUpdates.auto_flip_en_route = !!req.body.autoFlipEnRoute;
+    }
+    if (Object.keys(dbUpdates).length === 0) {
+      return res.status(400).json({ error: 'No supported fields provided.' });
+    }
+    dbUpdates.updated_at = new Date();
+
+    const existing = await db('notification_prefs')
+      .where({ customer_id: req.params.id })
+      .first();
+    if (existing) {
+      await db('notification_prefs')
+        .where({ customer_id: req.params.id })
+        .update(dbUpdates);
+    } else {
+      await db('notification_prefs').insert({
+        customer_id: req.params.id,
+        ...dbUpdates,
+      });
+    }
+
+    const prefs = await db('notification_prefs')
+      .where({ customer_id: req.params.id })
+      .first();
+    logger.info(`[customers] notification_prefs updated for ${req.params.id}: ${JSON.stringify(req.body)}`);
+    res.json({ success: true, notificationPrefs: prefs });
+  } catch (err) { next(err); }
+});
+
 // PUT /api/admin/customers/:id/stage
 router.put('/:id/stage', async (req, res, next) => {
   try {
