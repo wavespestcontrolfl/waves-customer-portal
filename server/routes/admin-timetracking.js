@@ -843,6 +843,17 @@ router.get('/technicians/:id/earnings', requireAdmin, async (req, res, next) => 
 const PHOTO_PREFIX = 'tech-photos/';
 router.post(
   '/technicians/:id/photo',
+  // Self-or-admin guard: tech-role tokens can update their own photo
+  // (matches a likely future tech-side avatar flow), but they must not
+  // mutate another tech's row — the row now carries payroll/PII so
+  // arbitrary cross-tech writes need to be blocked even when the only
+  // mutating column here is photo_s3_key. Admin tokens can update
+  // anyone's photo as before.
+  (req, res, next) => {
+    if (isAdminCaller(req)) return next();
+    if (req.params.id && req.technicianId && req.params.id === req.technicianId) return next();
+    return res.status(403).json({ error: 'Can only update your own photo' });
+  },
   (req, res, next) => upload.single('photo')(req, res, next),
   async (req, res, next) => {
     try {
