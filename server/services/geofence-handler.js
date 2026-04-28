@@ -13,6 +13,7 @@ const matcher = require('./geofence-matcher');
 const timeTracking = require('./time-tracking');
 const trackTransitions = require('./track-transitions');
 const auditLog = require('./audit-log');
+const { parseETDateTime } = require('../utils/datetime-et');
 
 let twilioService = null;
 function getTwilio() {
@@ -496,10 +497,13 @@ async function maybeAutoFlipNextJob({ tech, exitedCustomer, eventTime, lat, lng,
     return;
   }
 
-  // Guardrail 4: next job's window_start is within the horizon. The
-  // window is stored as a TIME on a separate scheduled_date column;
-  // compose into a JS Date to compare against horizon hours from the
-  // departure timestamp.
+  // Guardrail 4: next job's window_start is within the horizon.
+  // scheduled_date (DATE) and window_start (TIME) are ET wall-clock
+  // values. Build the naive 'YYYY-MM-DDTHH:mm:ss' string then parse
+  // it with parseETDateTime() — never `new Date(...)` directly,
+  // which on Railway (UTC) would interpret the wall-clock as UTC
+  // and shift the result by 4–5 hours, causing far-future jobs to
+  // be treated as inside the horizon.
   const horizonMs = horizonHours * 60 * 60 * 1000;
   const windowStartIso = composeIso(nextJob.scheduled_date, nextJob.window_start);
   if (!windowStartIso) {
@@ -510,7 +514,7 @@ async function maybeAutoFlipNextJob({ tech, exitedCustomer, eventTime, lat, lng,
     });
     return;
   }
-  const startsAtMs = new Date(windowStartIso).getTime();
+  const startsAtMs = parseETDateTime(windowStartIso).getTime();
   const eventMs = new Date(eventTime).getTime();
   if (startsAtMs - eventMs > horizonMs) {
     await matcher.logEvent({
