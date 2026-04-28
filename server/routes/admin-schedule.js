@@ -1044,15 +1044,28 @@ router.post('/:id/invoice', async (req, res, next) => {
     // minting. Each extra is { description, quantity, unit_price, amount,
     // category? }; negative amount = discount. Sanitize aggressively — this
     // field is client-supplied.
+    //
+    // InvoiceService.create() computes subtotal as `quantity * unit_price`
+    // (services/invoice.js), NOT amount. If the client sends `amount` without
+    // a matching `unit_price`, the line slips past the extrasTotal guard
+    // below but mints with subtotal = 0. Reconcile here: when unit_price
+    // is missing/zero but amount is set, derive unit_price from amount.
     const extras = Array.isArray(req.body?.extraLineItems) ? req.body.extraLineItems : [];
     const extraLines = extras
-      .map((e) => ({
-        description: String(e?.description || '').slice(0, 200),
-        quantity: Number(e?.quantity) || 1,
-        unit_price: Number(e?.unit_price) || 0,
-        amount: Number(e?.amount) || (Number(e?.quantity) || 1) * (Number(e?.unit_price) || 0),
-        category: e?.category ? String(e.category).slice(0, 100) : null,
-      }))
+      .map((e) => {
+        const quantity = Number(e?.quantity) || 1;
+        const rawUnitPrice = Number(e?.unit_price) || 0;
+        const rawAmount = Number(e?.amount) || 0;
+        const unit_price = rawUnitPrice !== 0 ? rawUnitPrice : (quantity !== 0 ? rawAmount / quantity : 0);
+        const amount = rawAmount || quantity * unit_price;
+        return {
+          description: String(e?.description || '').slice(0, 200),
+          quantity,
+          unit_price,
+          amount,
+          category: e?.category ? String(e.category).slice(0, 100) : null,
+        };
+      })
       .filter((e) => e.description && Number.isFinite(e.unit_price));
 
     const extrasTotal = extraLines.reduce((s, e) => s + e.amount, 0);
