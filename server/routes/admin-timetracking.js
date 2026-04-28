@@ -821,6 +821,21 @@ router.get('/technicians/:id/earnings', requireAdmin, async (req, res, next) => 
     }
     if (!from || !to) return res.status(400).json({ error: 'from+to (YYYY-MM-DD) or period=this-week|last-week required' });
 
+    // Recompute the weekly summaries that overlap the window before
+    // reading dailies. time_entry_daily_summary.overtime_minutes is
+    // populated by computeWeeklySummary as a per-day allocation of
+    // weekly OT, and admin entry edits clear sign-off but don't always
+    // re-run that compute, so OT minutes can be stale → wrong gross
+    // pay. Iterating week starts is bounded (one call per ISO week
+    // in the window).
+    const firstWeekStart = etWeekStart(parseETDateTime(`${from}T12:00`));
+    const lastWeekStart = etWeekStart(parseETDateTime(`${to}T12:00`));
+    let cursor = firstWeekStart;
+    while (cursor <= lastWeekStart) {
+      try { await timeTracking.computeWeeklySummary(tech.id, cursor); } catch (_) { /* noop */ }
+      cursor = addCalendarDaysToYMD(cursor, 7);
+    }
+
     const rows = await db('time_entry_daily_summary')
       .where({ technician_id: tech.id })
       .where('work_date', '>=', from)

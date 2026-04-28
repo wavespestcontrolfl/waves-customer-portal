@@ -179,15 +179,16 @@ router.get('/pending-signoff', async (req, res, next) => {
       .first();
     if (!hasDailies) return res.json({ weekly: null, weekStart: lastWeekStart });
 
-    let weekly = await db('time_weekly_summary')
+    // Always recompute the weekly summary before returning it. Existing
+    // rows can be stale after late clock-outs or admin entry edits;
+    // those mutations clear tech_signed_at but don't always re-run
+    // computeWeeklySummary, so total_shift_minutes / overtime_minutes
+    // / job_count on the row may not match the current dailies. Recompute
+    // is idempotent and cheap.
+    try { await timeTracking.computeWeeklySummary(req.technicianId, lastWeekStart); } catch (_) { /* noop */ }
+    const weekly = await db('time_weekly_summary')
       .where({ technician_id: req.technicianId, week_start: lastWeekStart })
       .first();
-    if (!weekly) {
-      try { await timeTracking.computeWeeklySummary(req.technicianId, lastWeekStart); } catch (_) { /* noop */ }
-      weekly = await db('time_weekly_summary')
-        .where({ technician_id: req.technicianId, week_start: lastWeekStart })
-        .first();
-    }
     if (!weekly) return res.json({ weekly: null, weekStart: lastWeekStart });
 
     // Approved or already signed -> nothing pending.
@@ -240,15 +241,14 @@ router.post('/sign-week', async (req, res, next) => {
       return res.status(404).json({ error: 'No timecard for that week' });
     }
 
-    let weekly = await db('time_weekly_summary')
+    // Recompute before reading so the tech is signing the latest
+    // totals, not whatever was stored before the most recent
+    // clock-out / entry edit. Idempotent.
+    try { await timeTracking.computeWeeklySummary(req.technicianId, start); } catch (_) { /* noop */ }
+
+    const weekly = await db('time_weekly_summary')
       .where({ technician_id: req.technicianId, week_start: start })
       .first();
-    if (!weekly) {
-      try { await timeTracking.computeWeeklySummary(req.technicianId, start); } catch (_) { /* noop */ }
-      weekly = await db('time_weekly_summary')
-        .where({ technician_id: req.technicianId, week_start: start })
-        .first();
-    }
     if (!weekly) return res.status(404).json({ error: 'No timecard for that week' });
 
     if (weekly.status === 'approved') {
