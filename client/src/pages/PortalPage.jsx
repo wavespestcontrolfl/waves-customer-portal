@@ -5880,7 +5880,6 @@ function EnRouteLiveMap({ techPosition, customerLocation, techName }) {
 function ServiceTracker() {
   const [tracker, setTracker] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [demoNote, setDemoNote] = useState('');
   const [propertyPrefs, setPropertyPrefs] = useState(null);
   const [weather, setWeather] = useState(null);
   const [showExpect, setShowExpect] = useState(false);
@@ -5905,16 +5904,6 @@ function ServiceTracker() {
     return () => clearInterval(interval);
   }, [tracker?.currentStep, fetchTracker]);
 
-  const handleAdvance = async () => {
-    try { const r = await api.advanceTrackerDemo(); setTracker(r.tracker); } catch (e) { console.error(e); }
-  };
-  const handleAddNote = async () => {
-    if (!demoNote.trim() || !tracker) return;
-    await api.addTrackerNote(tracker.id, demoNote.trim());
-    setDemoNote('');
-    fetchTracker();
-  };
-
   if (loading || !tracker) return null;
 
   const step = tracker.currentStep;
@@ -5930,15 +5919,6 @@ function ServiceTracker() {
   const isPest = svcType.toLowerCase().includes('pest');
   const isMosquito = svcType.toLowerCase().includes('mosquito');
   const isTermite = svcType.toLowerCase().includes('termite');
-
-  const STEPS = [
-    { num: 1, label: 'SCHEDULED' },
-    { num: 2, label: 'CONFIRMED' },
-    { num: 3, label: 'EN ROUTE' },
-    { num: 4, label: 'ON-SITE' },
-    { num: 5, label: 'IN PROGRESS' },
-    { num: 6, label: 'COMPLETE' },
-  ];
 
   const fmtTime = (t) => { if (!t) return ''; const [h, m] = t.split(':').map(Number); return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`; };
   const window = tracker.service?.windowStart ? `${fmtTime(tracker.service.windowStart)} – ${fmtTime(tracker.service.windowEnd)}` : 'today';
@@ -5961,330 +5941,348 @@ function ServiceTracker() {
     ? 'Your tech will inspect all bait stations, check for evidence of termite activity, and document findings. Any active stations will be serviced.'
     : 'Your tech will perform a thorough treatment of your property based on your service plan.';
 
-  return (
-    <div style={{ borderRadius: 20, overflow: 'hidden', boxShadow: '0 4px 30px rgba(0,0,0,0.12)' }}>
-      <style>{`
-        @keyframes active-pulse { 0%,100%{opacity:.92;box-shadow:0 0 10px rgba(168,59,52,.3)} 50%{opacity:1;box-shadow:0 0 22px rgba(168,59,52,.5)} }
-      `}</style>
+  // Status pill: maps the 7-step internal model to the 5-state UI
+  // taxonomy used on the public /track/<token> page so authenticated
+  // and public customers see the same status vocabulary.
+  // Distance-driven sub-states for en route (Nearby / Arriving now)
+  // pull from tracker.techPosition.eta.distanceMiles when available.
+  const distMi = tracker.techPosition?.eta?.distanceMiles;
+  const status = (() => {
+    if (step === 7) return { label: 'Service complete', color: B.green };
+    if (step >= 4) {
+      if (step === 6) return { label: 'Finishing up', color: B.green };
+      if (step === 5) return { label: 'Servicing now', color: B.green };
+      return { label: 'On property', color: B.green };
+    }
+    if (step === 3) {
+      if (distMi != null && distMi < 0.3) return { label: 'Arriving now', color: B.green };
+      if (distMi != null && distMi < 3)   return { label: 'Nearby',       color: B.wavesBlue };
+      return { label: 'On the way', color: B.wavesBlue };
+    }
+    if (step === 2) return { label: 'Confirmed', color: B.wavesBlue };
+    return { label: 'Scheduled', color: B.wavesBlue };
+  })();
 
-      {/* Header */}
-      <div style={{
-        background: `linear-gradient(135deg, #0D47A1, ${B.blueDark})`,
-        backgroundImage: `${HALFTONE_PATTERN}, linear-gradient(135deg, #0D47A1, ${B.blueDark})`,
-        backgroundSize: `${HALFTONE_SIZE}, 100% 100%`,
-        padding: '16px 20px 24px', position: 'relative',
-        display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <img src="/waves-logo.png" alt="" style={{ height: 22, width: 'auto', opacity: 0.9 }} />
-          <div style={{ fontSize: 20, fontWeight: 900, color: '#fff', fontFamily: FONTS.heading, letterSpacing: 2, textShadow: '0 2px 4px rgba(0,0,0,0.2)' }}>
-            WAVES SERVICE TRACKER
-          </div>
+  const cardBase = {
+    background: B.white,
+    borderRadius: 16,
+    padding: 20,
+    boxShadow: '0 2px 12px rgba(15, 23, 42, 0.06)',
+  };
+  const subCardBase = {
+    background: B.white,
+    borderRadius: 12,
+    padding: '14px 16px',
+    border: `1px solid ${B.slate200 || '#E2E8F0'}`,
+  };
+
+  return (
+    <div style={{
+      background: B.sand,
+      borderRadius: 20,
+      padding: 16,
+      display: 'flex', flexDirection: 'column', gap: 12,
+    }}>
+      {/* Status pill + weather strip. The pill is the authoritative
+          state read; the weather chip is informational context.
+          Replaces the gradient header + 6-step chevron bar. */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <div style={{
+          display: 'inline-block',
+          fontSize: 12, fontWeight: 700,
+          letterSpacing: '0.1em', textTransform: 'uppercase',
+          color: status.color, background: `${status.color}1A`,
+          padding: '6px 12px', borderRadius: 9999,
+        }}>
+          <span style={{
+            display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
+            background: status.color, marginRight: 8, verticalAlign: 'middle',
+          }} />
+          {status.label}
         </div>
-        {/* Weather badge */}
         {weather && (
-          <div style={{ fontSize: 12, color: '#fff', fontWeight: 600, fontFamily: FONTS.ui, textAlign: 'right' }}>
-            {weather.forecast?.toLowerCase().includes('rain') ? '' : weather.temp >= 85 ? '' : ''} {weather.temp}°F
+          <div style={{ fontSize: 14, color: B.textBody, fontFamily: FONTS.ui, textAlign: 'right' }}>
+            {weather.temp}°F
             {weather.forecast?.toLowerCase().includes('rain') && (
-              <div style={{ fontSize: 9, color: B.blueLight, marginTop: 2 }}>Rain possible — tech may adjust timing</div>
+              <div style={{ fontSize: 12, color: B.textCaption, marginTop: 2 }}>Rain possible — tech may adjust timing</div>
             )}
           </div>
         )}
-        {/* Wave bottom */}
-        <div style={{ position: 'absolute', bottom: -1, left: 0, right: 0, height: 16, background: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 60'%3E%3Cpath d='M0,15 C200,45 400,0 600,25 C800,50 1000,5 1200,20 L1200,60 L0,60Z' fill='%231565C0'/%3E%3C/svg%3E") no-repeat bottom`, backgroundSize: '100% 100%' }} />
       </div>
 
-      {/* Chevron tracker bar */}
-      <div style={{ background: `linear-gradient(180deg, ${B.blueDark}, ${B.wavesBlue})`, padding: '12px 8px 18px' }}>
-        <div style={{ display: 'flex', position: 'relative' }}>
-          {STEPS.map((s, i) => {
-            const isComplete = i + 1 < step;
-            const isCurrent = i + 1 === step;
-            const isFuture = i + 1 > step;
-            const isFirst = i === 0;
-            const isLast = i === STEPS.length - 1;
-            const chevronW = 10;
+      {/* Main state card. Content depends on step; chrome is constant
+          (sand-bg parent, white card, rounded 16, soft shadow). */}
+      <div style={cardBase}>
+        {/* Step 1-2: Scheduled / Confirmed message */}
+        {step <= 2 && (
+          <>
+            <div style={{
+              fontFamily: FONTS.heading, fontSize: 22, fontWeight: 700,
+              lineHeight: 1.25, color: B.blueDeeper,
+            }}>
+              Your {svcType.toLowerCase()} is {step === 2 ? 'confirmed' : 'booked'}{tracker.service?.windowStart ? ` for ${window}` : ''}.
+            </div>
+            <div style={{ fontSize: 16, color: B.textBody, marginTop: 12, lineHeight: 1.5 }}>
+              You'll get a text as soon as {techFirst} is on the way.
+            </div>
+          </>
+        )}
 
-            const bg = isComplete ? `linear-gradient(135deg, ${B.wavesBlue}, #64B5F6)` : isCurrent ? B.red : 'rgba(255,255,255,0.08)';
-
-            return (
-              <div key={s.num} style={{
-                flex: 1, position: 'relative',
-                height: isCurrent ? 56 : 48,
-                marginTop: isCurrent ? -4 : 0,
-                zIndex: isCurrent ? 10 : 7 - i,
-                transition: 'all 0.4s ease',
-              }}>
-                {/* Chevron shape via SVG */}
-                <svg viewBox="0 0 100 48" preserveAspectRatio="none" style={{
-                  position: 'absolute', inset: 0, width: '100%', height: '100%',
-                  filter: isCurrent ? 'drop-shadow(0 4px 8px rgba(168,59,52,0.4))' : 'none',
-                }}>
-                  <defs>
-                    {isComplete && <linearGradient id={`grad-${i}`} x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stopColor={B.wavesBlue}/><stop offset="100%" stopColor="#64B5F6"/></linearGradient>}
-                  </defs>
-                  <path
-                    d={isFirst
-                      ? `M0,0 L${100 - chevronW},0 L100,24 L${100 - chevronW},48 L0,48 Z`
-                      : isLast
-                        ? `M0,0 L100,0 L100,48 L0,48 L${chevronW},24 Z`
-                        : `M0,0 L${100 - chevronW},0 L100,24 L${100 - chevronW},48 L0,48 L${chevronW},24 Z`
-                    }
-                    fill={isComplete ? `url(#grad-${i})` : isCurrent ? B.red : 'rgba(255,255,255,0.08)'}
-                    stroke="rgba(0,0,0,0.1)"
-                    strokeWidth="0.5"
-                  />
-                </svg>
-
-                {/* Content */}
+        {/* Step 3: EN ROUTE — Anton ETA hero + map + tech block + gold CTA */}
+        {step === 3 && (
+          <>
+            {eta && (
+              <div>
+                <div style={{ fontSize: 16, color: B.textBody, marginBottom: 4 }}>
+                  {techName} arrives in
+                </div>
                 <div style={{
-                  position: 'relative', zIndex: 2, height: '100%',
-                  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-                  animation: isCurrent ? 'active-pulse 2s ease-in-out infinite' : 'none',
+                  fontFamily: FONTS.display,
+                  fontSize: 'clamp(56px, 14vw, 88px)',
+                  fontWeight: 700,
+                  color: B.blueDeeper,
+                  lineHeight: 1,
+                  letterSpacing: '0.02em',
+                  display: 'flex',
+                  alignItems: 'baseline',
+                  gap: 12,
                 }}>
-                  <div style={{
-                    fontSize: isCurrent ? 22 : 18, fontWeight: 900,
-                    color: '#fff', fontFamily: FONTS.ui, lineHeight: 1,
-                    textShadow: isCurrent ? '0 1px 3px rgba(0,0,0,0.3)' : 'none',
-                  }}>{isComplete ? '' : s.num}</div>
-                  <div style={{
-                    fontSize: isCurrent ? 8 : 6, fontWeight: 700, marginTop: 2,
-                    color: isCurrent ? B.yellow : isFuture ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.85)',
-                    fontFamily: FONTS.heading, letterSpacing: 0.3,
-                  }}>{s.label}</div>
+                  <span>{eta}</span>
+                  <span style={{
+                    fontSize: 22, color: B.textCaption,
+                    fontFamily: FONTS.body, fontWeight: 600, letterSpacing: '0.02em',
+                  }}>min</span>
                 </div>
               </div>
-            );
-          })}
-        </div>
+            )}
+            {tracker.techPosition && tracker.customerLocation && (
+              <EnRouteLiveMap
+                techPosition={tracker.techPosition}
+                customerLocation={tracker.customerLocation}
+                techName={techName}
+              />
+            )}
+          </>
+        )}
 
-        {/* Labels removed — text inside chevrons is sufficient */}
-      </div>
-
-      {/* Wave divider */}
-      <div style={{ height: 10, background: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 60'%3E%3Cpath d='M0,0 L0,25 C200,50 400,5 600,25 C800,45 1000,5 1200,25 L1200,0Z' fill='%231976D2'/%3E%3C/svg%3E") no-repeat top`, backgroundSize: '100% 100%', backgroundColor: B.blueSurface }} />
-
-      {/* Content */}
-      <div style={{ background: B.blueSurface, padding: '2px 14px 10px' }}>
-        {/* Status */}
-        <div style={{
-          padding: '10px 12px', borderRadius: 10,
-          background: step === 7 ? `${B.green}20` : B.white,
-          border: `1px solid ${step === 7 ? B.green + '33' : B.bluePale}`,
-          boxShadow: '0 1px 4px rgba(0,0,0,0.03)',
-          display: 'flex', alignItems: 'flex-start', gap: 10,
-        }}>
-          {/* Date badge */}
-          <div style={{
-            width: 40, height: 44, borderRadius: 8, flexShrink: 0,
-            background: step === 7 ? B.green : B.red,
-            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-            color: '#fff', boxShadow: `0 2px 6px ${step === 7 ? B.green : B.red}40`,
-          }}>
-            <div style={{ fontSize: 18, fontWeight: 900, fontFamily: FONTS.ui, lineHeight: 1 }}>
-              {new Date().getDate()}
+        {/* Step 4-6: ON PROPERTY / IN PROGRESS / WRAPPING UP */}
+        {step >= 4 && step < 7 && (
+          <>
+            <div style={{
+              fontFamily: FONTS.heading, fontSize: 22, fontWeight: 700,
+              lineHeight: 1.25, color: B.blueDeeper,
+            }}>
+              {techName} is {step === 6 ? 'wrapping up' : step === 5 ? 'servicing your property' : 'on your property'}.
             </div>
-            <div style={{ fontSize: 7, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 1 }}>
-              {new Date().toLocaleDateString('en-US', { month: 'short' })}
-            </div>
-          </div>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 14, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, lineHeight: 1.2 }}>
-              {svcType}
-            </div>
-            <div style={{ fontSize: 12, color: B.grayDark, marginTop: 2, lineHeight: 1.3 }}>
-              {step === 7 ? 'Service complete!' : step === 3 ? `${techName} is on the way${eta ? ` — ~${eta} min` : ''}` : step >= 4 ? `${techName} is on your property` : `Scheduled for ${window}`}
-              {estComplete && step >= 4 && step < 7 && (
-                <span style={{ color: B.wavesBlue, fontWeight: 600 }}> · Est. done ~{estComplete.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</span>
-              )}
-            </div>
-            {stepTs && (
-              <div style={{ fontSize: 12, color: B.textCaption, marginTop: 2 }}>
-                {techName} · {new Date(stepTs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
+            {estComplete && (
+              <div style={{ fontSize: 16, color: B.textBody, marginTop: 10, lineHeight: 1.5 }}>
+                Estimated done at {estComplete.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}.
               </div>
             )}
-          </div>
-        </div>
+          </>
+        )}
 
-        {/* Full-width stacked cards */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
-          {/* Live map — only while EN ROUTE and the server returned a
-              live bouncie position + geocoded customer address. Falls
-              back silently to the ETA/tech/office cards below when any
-              piece is missing. */}
-          {step === 3 && tracker.techPosition && tracker.customerLocation && (
-            <EnRouteLiveMap
-              techPosition={tracker.techPosition}
-              customerLocation={tracker.customerLocation}
-              techName={techName}
-            />
-          )}
-          {/* ETA hero — Anton condensed display, large readable number.
-              Replaces the small horizontal progress bar. Matches the
-              /track/<token> public tracking page so authenticated and
-              public customers see the same en-route treatment. */}
-          {step === 3 && eta && (
-            <div style={{ padding: '12px 16px', borderRadius: 12, background: B.white, border: `1px solid ${B.bluePale}` }}>
-              <div style={{ fontSize: 14, color: B.textBody, marginBottom: 2 }}>
-                {techName} arrives in
-              </div>
-              <div style={{
-                fontFamily: FONTS.display,
-                fontSize: 'clamp(40px, 10vw, 64px)',
-                fontWeight: 700,
-                color: B.blueDeeper,
-                lineHeight: 1,
-                letterSpacing: '0.02em',
-                display: 'flex',
-                alignItems: 'baseline',
-                gap: 10,
-              }}>
-                <span>{eta}</span>
-                <span style={{
-                  fontSize: 18, color: B.textCaption,
-                  fontFamily: FONTS.body, fontWeight: 600, letterSpacing: '0.02em',
-                }}>min</span>
-              </div>
-            </div>
-          )}
-
-          {/* Tech card */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
+        {/* Step 7: COMPLETE */}
+        {step === 7 && (
+          <>
             <div style={{
-              width: 38, height: 38, borderRadius: '50%',
-              background: `linear-gradient(135deg, ${B.wavesBlue}, ${B.blueDark})`,
-              border: `2px solid ${B.yellow}`,
-              color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 14, fontWeight: 800, fontFamily: FONTS.heading, flexShrink: 0,
+              fontFamily: FONTS.heading, fontSize: 22, fontWeight: 700,
+              lineHeight: 1.25, color: B.blueDeeper,
+            }}>
+              Thanks for choosing Waves.
+            </div>
+            <div style={{ fontSize: 16, color: B.textBody, marginTop: 8 }}>
+              {svcType} completed{stepTs ? ` at ${new Date(stepTs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}` : ''}.
+            </div>
+          </>
+        )}
+
+        {/* Tech block (steps 2+) — name + service-type pill */}
+        {step >= 2 && step < 7 && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 14,
+            marginTop: 20, paddingTop: 16,
+            borderTop: `1px solid ${B.offWhite}`,
+          }}>
+            <div style={{
+              width: 56, height: 56, borderRadius: '50%',
+              background: B.blueDeeper, color: '#fff',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, flexShrink: 0,
             }}>{techInitials}</div>
             <div>
-              <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{techName}</div>
-              <span style={{ display: 'inline-block', fontSize: 9, fontWeight: 600, padding: '2px 7px', borderRadius: 8, background: B.yellow, color: B.blueDeeper, fontFamily: FONTS.ui, marginTop: 1 }}>{svcType}</span>
+              <div style={{ fontSize: 18, fontWeight: 700, color: B.navy, lineHeight: 1.2 }}>{techName}</div>
+              <div style={{ fontSize: 14, color: B.textCaption, marginTop: 4 }}>{svcType}</div>
             </div>
           </div>
+        )}
 
-          {/* Gold "TEXT WAVES" CTA — only while EN ROUTE. Routes to the
-              office's SMS line (per-office, not the central dispatch
-              number) so the customer's text lands on the team handling
-              their service. Mirrors the same gold sms: CTA on the
-              public /track/<token> page. */}
-          {step === 3 && office?.phone && (
-            <a
-              href={`sms:${office.phone.replace(/\D/g, '')}`}
-              style={{ ...GOLD_CTA, width: '100%', boxSizing: 'border-box' }}
-            >
-              TEXT WAVES
-            </a>
+        {/* Service meta — type + window + tech timestamp */}
+        <div style={{
+          marginTop: 16, paddingTop: 16,
+          borderTop: `1px solid ${B.offWhite}`,
+        }}>
+          <div style={{ fontSize: 14, color: B.textCaption, marginBottom: 4 }}>Today's visit</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: B.navy }}>{svcType}</div>
+          {tracker.service?.windowStart && (
+            <div style={{ fontSize: 14, color: B.textBody, marginTop: 6 }}>{window}</div>
           )}
-
-          {/* Office card */}
-          <div style={{ padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{office.name}</div>
-              <div style={{ fontSize: 9, color: B.textCaption }}>Open 24 hrs</div>
-            </div>
-            <div style={{ display: 'flex', gap: 6 }}>
-              <a href={`tel:${office.phone.replace(/\D/g, '')}`} style={{ ...BUTTON_BASE, flex: 1, padding: '6px 8px', fontSize: 10, background: B.yellow, color: B.blueDeeper, textDecoration: 'none' }}> Call</a>
-              <a href={`sms:${office.phone.replace(/\D/g, '')}`} style={{ ...BUTTON_BASE, flex: 1, padding: '6px 8px', fontSize: 10, background: B.wavesBlue, color: '#fff', textDecoration: 'none' }}> Text</a>
-            </div>
-          </div>
-
-          {/* Pre-arrival checklist */}
-          {step < 5 && (
-            <div style={{ padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>Before Your Tech Arrives</div>
-              {[
-                propertyPrefs?.neighborhoodGateCode || propertyPrefs?.propertyGateCode
-                  ? { icon: 'checkCircle', text: 'Gate code on file', ok: true }
-                  : { icon: 'warning', text: 'No gate code on file', ok: false },
-                propertyPrefs?.petCount > 0 && propertyPrefs?.petSecuredPlan
-                  ? { icon: 'checkCircle', text: `Pet plan: ${propertyPrefs.petSecuredPlan.slice(0, 40)}`, ok: true }
-                  : { icon: 'warning', text: 'Secure pets before tech arrives', ok: false },
-                { icon: 'unlock', text: 'Ensure gates are unlocked', ok: true },
-                ...(isLawn ? [
-                  { icon: 'droplet', text: 'Turn off irrigation 24hrs before', ok: true },
-                  { icon: 'leaf', text: "Don't mow 3 days before/after", ok: true },
-                ] : []),
-                ...(isPest ? [
-                  { icon: 'home', text: 'Clear counters and baseboards', ok: true },
-                  { icon: 'fish', text: 'Cover fish tanks and pet bowls', ok: true },
-                ] : []),
-                ...(isMosquito ? [
-                  { icon: 'droplet', text: 'Remove standing water', ok: true },
-                  { icon: 'checkCircle', text: 'Exterior only — no indoor prep', ok: true },
-                ] : []),
-                ...(isTermite ? [
-                  { icon: 'home', text: 'Clear access to garage/attic', ok: true },
-                ] : []),
-              ].map((item, i) => (
-                <div key={i} style={{
-                  display: 'flex', gap: 5, alignItems: 'center', marginBottom: 3,
-                  borderLeft: item.ok ? 'none' : `2px solid ${B.orange}`,
-                  paddingLeft: item.ok ? 0 : 6,
-                }}>
-                  <Icon name={item.icon} size={12} strokeWidth={1.75} style={{ flexShrink: 0 }} />
-                  <span style={{ fontSize: 12, fontWeight: item.ok ? 400 : 600, color: item.ok ? B.grayDark : B.navy, lineHeight: 1.3 }}>{item.text}</span>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* What to Expect */}
-          <div style={{ borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}`, overflow: 'hidden' }}>
-            <div onClick={() => setShowExpect(!showExpect)} style={{
-              padding: '7px 12px', cursor: 'pointer',
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-            }}>
-              <span style={{ fontSize: 12, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>What to Expect</span>
-              <span style={{ fontSize: 12, color: B.grayMid, transform: showExpect ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s' }}>▾</span>
-            </div>
-            {showExpect && (
-              <div style={{ padding: '0 12px 8px', borderTop: `1px solid ${B.grayLight}` }}>
-                <div style={{ fontSize: 12, color: B.grayDark, lineHeight: 1.5, marginTop: 6 }}>{whatToExpect}</div>
-              </div>
-            )}
-          </div>
-
-          {/* Live notes */}
-          {notes.length > 0 && (
-            <div style={{ padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
-              <div style={{ fontSize: 10, fontWeight: 700, color: B.wavesBlue, fontFamily: FONTS.ui, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 5 }}>Live Updates</div>
-              {notes.map((n, i) => (
-                <div key={i} style={{ display: 'flex', gap: 6, marginBottom: i < notes.length - 1 ? 5 : 0 }}>
-                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 10, flexShrink: 0 }}>
-                    <div style={{ width: 6, height: 6, borderRadius: '50%', background: B.wavesBlue }} />
-                    {i < notes.length - 1 && <div style={{ width: 1.5, flex: 1, background: B.bluePale, marginTop: 1 }} />}
-                  </div>
-                  <div><div style={{ fontSize: 12, color: B.navy, fontWeight: 500, lineHeight: 1.3 }}>{n.note}</div><div style={{ fontSize: 9, color: B.textCaption }}>{new Date(n.timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</div></div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Completion summary */}
-          {step === 7 && summary && (
-            <div style={{ padding: '8px 12px', borderRadius: 10, background: `${B.green}20`, border: `1px solid ${B.green}33` }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: B.green, marginBottom: 4 }}>Service Summary</div>
-              {summary.productsApplied?.length > 0 && (
-                <div style={{ marginBottom: 6 }}>
-                  <div style={{ fontSize: 10, color: B.grayDark, fontWeight: 600, marginBottom: 3 }}>Products:</div>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>{summary.productsApplied.map((p, i) => (<span key={i} style={{ fontSize: 9, padding: '2px 6px', borderRadius: 5, background: B.white, color: B.navy, fontWeight: 600 }}>{p}</span>))}</div>
-                </div>
-              )}
-              {summary.areasTreated?.length > 0 && <div style={{ fontSize: 12, color: B.grayDark, marginBottom: 4 }}><strong>Areas:</strong> {summary.areasTreated.join(' · ')}</div>}
-              {summary.recommendations && <div style={{ fontSize: 12, color: B.grayDark, fontStyle: 'italic' }}> {summary.recommendations}</div>}
-              {summary.nextVisitDate && <div style={{ fontSize: 10, color: B.wavesBlue, fontWeight: 600, marginTop: 4 }}>Next visit: {new Date(summary.nextVisitDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>}
+          {stepTs && step < 7 && (
+            <div style={{ fontSize: 14, color: B.textCaption, marginTop: 4 }}>
+              {techFirst} · {new Date(stepTs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
             </div>
           )}
         </div>
+
+        {/* Gold "TEXT WAVES" CTA — only EN ROUTE. Same pattern as
+            /track/<token>: SMS to office.phone (per-office). */}
+        {step === 3 && office?.phone && (
+          <a
+            href={`sms:${office.phone.replace(/\D/g, '')}`}
+            style={{ ...GOLD_CTA, width: '100%', marginTop: 20, boxSizing: 'border-box' }}
+          >
+            TEXT WAVES
+          </a>
+        )}
       </div>
 
-      {/* Demo controls */}
-      {step < 7 && (
-        <div style={{ padding: '6px 14px 8px', background: B.white, borderTop: `1px solid ${B.grayLight}`, display: 'flex', gap: 6, alignItems: 'center' }}>
-          <button onClick={handleAdvance} style={{ ...BUTTON_BASE, padding: '8px 14px', fontSize: 12, background: B.yellow, color: B.blueDeeper, flexShrink: 0 }}>Next Step →</button>
-          <input type="text" value={demoNote} onChange={e => setDemoNote(e.target.value)} placeholder="Add note..." style={{ flex: 1, padding: '7px 10px', borderRadius: 8, fontSize: 12, border: `1px solid ${B.grayLight}`, outline: 'none', fontFamily: FONTS.body, color: B.navy, boxSizing: 'border-box' }} onKeyDown={e => e.key === 'Enter' && handleAddNote()} />
-          <button onClick={handleAddNote} disabled={!demoNote.trim()} style={{ ...BUTTON_BASE, padding: '8px 10px', fontSize: 12, background: B.wavesBlue, color: '#fff', flexShrink: 0, opacity: demoNote.trim() ? 1 : 0.5 }}>+Note</button>
+      {/* Pre-arrival checklist — richer than /track's because it
+          consults the customer's actual property prefs and service
+          type. Shown until the tech is fully servicing (step 5+). */}
+      {step < 5 && (
+        <div style={subCardBase}>
+          <div style={{ fontSize: 16, fontWeight: 600, color: B.blueDeeper, marginBottom: 8 }}>Before your tech arrives</div>
+          {[
+            propertyPrefs?.neighborhoodGateCode || propertyPrefs?.propertyGateCode
+              ? { icon: 'checkCircle', text: 'Gate code on file', ok: true }
+              : { icon: 'warning', text: 'No gate code on file', ok: false },
+            propertyPrefs?.petCount > 0 && propertyPrefs?.petSecuredPlan
+              ? { icon: 'checkCircle', text: `Pet plan: ${propertyPrefs.petSecuredPlan.slice(0, 40)}`, ok: true }
+              : { icon: 'warning', text: 'Secure pets before tech arrives', ok: false },
+            { icon: 'unlock', text: 'Ensure gates are unlocked', ok: true },
+            ...(isLawn ? [
+              { icon: 'droplet', text: 'Turn off irrigation 24hrs before', ok: true },
+              { icon: 'leaf', text: "Don't mow 3 days before/after", ok: true },
+            ] : []),
+            ...(isPest ? [
+              { icon: 'home', text: 'Clear counters and baseboards', ok: true },
+              { icon: 'fish', text: 'Cover fish tanks and pet bowls', ok: true },
+            ] : []),
+            ...(isMosquito ? [
+              { icon: 'droplet', text: 'Remove standing water', ok: true },
+              { icon: 'checkCircle', text: 'Exterior only — no indoor prep', ok: true },
+            ] : []),
+            ...(isTermite ? [
+              { icon: 'home', text: 'Clear access to garage/attic', ok: true },
+            ] : []),
+          ].map((item, i) => (
+            <div key={i} style={{
+              display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6,
+              borderLeft: item.ok ? 'none' : `2px solid ${B.orange}`,
+              paddingLeft: item.ok ? 0 : 8,
+            }}>
+              <Icon name={item.icon} size={16} strokeWidth={1.75} style={{ flexShrink: 0 }} />
+              <span style={{ fontSize: 14, fontWeight: item.ok ? 400 : 600, color: item.ok ? B.textBody : B.navy, lineHeight: 1.4 }}>{item.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* What to Expect — collapsible card. Customer education for
+          the specific service type. */}
+      <div style={{ ...subCardBase, padding: 0, overflow: 'hidden' }}>
+        <button
+          type="button"
+          onClick={() => setShowExpect(!showExpect)}
+          aria-expanded={showExpect}
+          style={{
+            width: '100%', padding: '14px 16px', cursor: 'pointer',
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            background: 'none', border: 'none',
+            fontFamily: FONTS.body, color: B.blueDeeper,
+          }}
+        >
+          <span style={{ fontSize: 16, fontWeight: 600 }}>What to expect</span>
+          <span style={{ fontSize: 14, color: B.textCaption }}>{showExpect ? '▴' : '▾'}</span>
+        </button>
+        {showExpect && (
+          <div style={{ padding: '0 16px 14px', borderTop: `1px solid ${B.offWhite}` }}>
+            <div style={{ fontSize: 15, color: B.textBody, lineHeight: 1.6, marginTop: 10 }}>{whatToExpect}</div>
+          </div>
+        )}
+      </div>
+
+      {/* Live notes from tech, if any */}
+      {notes.length > 0 && (
+        <div style={subCardBase}>
+          <div style={{
+            fontSize: 12, fontWeight: 700, letterSpacing: '0.1em',
+            textTransform: 'uppercase', color: B.wavesBlue, marginBottom: 8,
+          }}>Live updates</div>
+          {notes.map((n, i) => (
+            <div key={i} style={{ display: 'flex', gap: 10, marginBottom: i < notes.length - 1 ? 8 : 0 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 12, flexShrink: 0 }}>
+                <div style={{ width: 8, height: 8, borderRadius: '50%', background: B.wavesBlue, marginTop: 4 }} />
+                {i < notes.length - 1 && <div style={{ width: 1.5, flex: 1, background: B.bluePale, marginTop: 2 }} />}
+              </div>
+              <div>
+                <div style={{ fontSize: 15, color: B.navy, fontWeight: 500, lineHeight: 1.4 }}>{n.note}</div>
+                <div style={{ fontSize: 14, color: B.textCaption, marginTop: 2 }}>
+                  {new Date(n.timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Office card — Call / Text. Always shown; the gold CTA above
+          covers en-route specifically, this is the always-available
+          contact path. */}
+      <div style={subCardBase}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+          <div style={{ fontSize: 15, fontWeight: 600, color: B.navy }}>{office.name}</div>
+          <div style={{ fontSize: 14, color: B.textCaption }}>Open 24 hrs</div>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <a
+            href={`tel:${office.phone.replace(/\D/g, '')}`}
+            style={{ ...BUTTON_BASE, flex: 1, padding: '12px 16px', fontSize: 14, background: B.yellow, color: B.blueDeeper, textDecoration: 'none' }}
+          >Call</a>
+          <a
+            href={`sms:${office.phone.replace(/\D/g, '')}`}
+            style={{ ...BUTTON_BASE, flex: 1, padding: '12px 16px', fontSize: 14, background: B.wavesBlue, color: '#fff', textDecoration: 'none' }}
+          >Text</a>
+        </div>
+      </div>
+
+      {/* Completion summary at step 7 */}
+      {step === 7 && summary && (
+        <div style={{ ...subCardBase, background: `${B.green}14`, borderColor: `${B.green}33` }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: B.green, letterSpacing: '0.05em', marginBottom: 8, textTransform: 'uppercase' }}>Service summary</div>
+          {summary.productsApplied?.length > 0 && (
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 14, color: B.textBody, fontWeight: 600, marginBottom: 6 }}>Products</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {summary.productsApplied.map((p, i) => (
+                  <span key={i} style={{ fontSize: 14, padding: '4px 10px', borderRadius: 6, background: B.white, color: B.navy, fontWeight: 600 }}>{p}</span>
+                ))}
+              </div>
+            </div>
+          )}
+          {summary.areasTreated?.length > 0 && (
+            <div style={{ fontSize: 15, color: B.textBody, marginBottom: 8 }}>
+              <strong>Areas:</strong> {summary.areasTreated.join(' · ')}
+            </div>
+          )}
+          {summary.recommendations && (
+            <div style={{ fontSize: 15, color: B.textBody, fontStyle: 'italic' }}>{summary.recommendations}</div>
+          )}
+          {summary.nextVisitDate && (
+            <div style={{ fontSize: 14, color: B.wavesBlue, fontWeight: 600, marginTop: 8 }}>
+              Next visit: {new Date(summary.nextVisitDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+            </div>
+          )}
         </div>
       )}
     </div>
