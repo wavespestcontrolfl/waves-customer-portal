@@ -199,6 +199,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
   const [selected, setSelected] = useState(new Set());
   const [batchSending, setBatchSending] = useState(false);
   const [receiptModalInvoice, setReceiptModalInvoice] = useState(null);
+  const [paymentModalInvoice, setPaymentModalInvoice] = useState(null);
   const sendReceiptEnabled = useFeatureFlag('ff_invoice_send_receipt', true);
 
   const load = useCallback(async () => {
@@ -519,6 +520,13 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                               title="Open Waves Tech app to tap customer's card/phone"
                             >Charge in person</button>
                           )}
+                          {inv.status !== 'paid' && inv.status !== 'void' && (
+                            <button
+                              onClick={() => setPaymentModalInvoice(inv)}
+                              style={sBtn(D.heading, D.white, isMobile)}
+                              title="Record cash, check, or Zelle payment and close the invoice"
+                            >Add payment</button>
+                          )}
                           {inv.status !== 'void' && inv.token && (
                             <a
                               href={inv.status === 'paid' ? `${API_BASE}/receipt/${inv.token}/pdf` : `${API_BASE}/pay/${inv.token}/invoice.pdf`}
@@ -590,6 +598,16 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
           onError={(msg) => showToast(msg)}
         />
       )}
+
+      {paymentModalInvoice && (
+        <RecordPaymentModal
+          invoice={paymentModalInvoice}
+          isMobile={isMobile}
+          onClose={() => setPaymentModalInvoice(null)}
+          onRecorded={(msg) => { setPaymentModalInvoice(null); showToast(msg); load(); onRefresh(); }}
+          onError={(msg) => showToast(msg)}
+        />
+      )}
     </div>
   );
 }
@@ -622,7 +640,23 @@ function buildInvoiceTimeline(inv) {
     });
   }
   if (inv.paid_at) {
-    const method = [inv.card_brand || inv.payment_method, inv.card_last_four ? `•${inv.card_last_four}` : null].filter(Boolean).join(' ');
+    // Stripe payments carry card_brand / card_last_four; manual payments
+    // (cash/check/zelle/other) carry payment_method + payment_reference.
+    const MANUAL_LABELS = { cash: 'Cash', check: 'Check', zelle: 'Zelle', other: 'Other' };
+    let method;
+    if (inv.card_brand) {
+      method = [inv.card_brand, inv.card_last_four ? `•${inv.card_last_four}` : null].filter(Boolean).join(' ');
+    } else if (inv.payment_method && MANUAL_LABELS[inv.payment_method]) {
+      method = [
+        MANUAL_LABELS[inv.payment_method],
+        inv.payment_reference ? `· ${inv.payment_reference}` : null,
+        inv.payment_recorded_by ? `· logged by ${inv.payment_recorded_by}` : null,
+      ].filter(Boolean).join(' ');
+    } else if (inv.payment_method) {
+      method = inv.payment_method;
+    } else {
+      method = null;
+    }
     events.push({
       kind: 'paid',
       at: inv.paid_at,
@@ -803,6 +837,173 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
             style={{ ...sBtn(D.heading, D.white, isMobile), opacity: (!anyChannel || sending) ? 0.5 : 1 }}
           >
             {sending ? 'Sending…' : 'Send receipt'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Record Payment Modal ──
+// Square-parity flow: log cash / check / Zelle / other against an open
+// invoice, mark it paid, and (by default) fire the receipt in the same
+// call. Reference field captures check #, Zelle confirmation, etc.
+function RecordPaymentModal({ invoice, isMobile, onClose, onRecorded, onError }) {
+  const [method, setMethod] = useState('cash');
+  const [reference, setReference] = useState('');
+  const [note, setNote] = useState('');
+  const [sendReceipt, setSendReceipt] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  const referenceLabel = method === 'check'
+    ? 'Check number'
+    : method === 'zelle'
+    ? 'Zelle confirmation #'
+    : method === 'other'
+    ? 'Reference'
+    : 'Reference (optional)';
+
+  const referencePlaceholder = method === 'check'
+    ? 'e.g. 1042'
+    : method === 'zelle'
+    ? 'e.g. RP1ABCXYZ'
+    : method === 'other'
+    ? 'e.g. money order #, Venmo handle'
+    : '';
+
+  const hasContact = !!(invoice.email || invoice.phone);
+
+  const handleRecord = async () => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      const res = await adminFetch(`/admin/invoices/${invoice.id}/record-payment`, {
+        method: 'POST',
+        body: JSON.stringify({
+          method,
+          reference: reference.trim() || undefined,
+          note: note.trim() || undefined,
+          sendReceipt: sendReceipt && hasContact,
+        }),
+      });
+      const channels = [res.receipt?.email?.ok && 'email', res.receipt?.sms?.ok && 'sms'].filter(Boolean);
+      const msg = sendReceipt && hasContact && channels.length
+        ? `Payment recorded · receipt sent (${channels.join(' + ')})`
+        : 'Payment recorded';
+      onRecorded(msg);
+    } catch (err) {
+      onError(`Record payment failed: ${err.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const methodChoice = (key, label) => (
+    <button
+      key={key}
+      type="button"
+      onClick={() => setMethod(key)}
+      style={{
+        flex: 1, padding: '12px 10px',
+        background: method === key ? D.heading : D.card,
+        color: method === key ? D.white : D.text,
+        border: `1px solid ${method === key ? D.heading : D.border}`,
+        borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: 'pointer',
+        textTransform: 'uppercase', letterSpacing: '0.04em', minHeight: 44,
+      }}
+    >{label}</button>
+  );
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 400,
+        display: 'flex', alignItems: isMobile ? 'flex-end' : 'center', justifyContent: 'center',
+        padding: isMobile ? 0 : 20,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: D.card, borderRadius: isMobile ? '16px 16px 0 0' : 14,
+          width: '100%', maxWidth: 460, padding: isMobile ? '24px 20px 28px' : 28,
+          boxShadow: '0 20px 60px rgba(0,0,0,0.28)', maxHeight: '92vh', overflowY: 'auto',
+        }}
+      >
+        <div style={{ fontSize: 20, fontWeight: 700, color: D.heading, marginBottom: 4 }}>
+          Add payment
+        </div>
+        <div style={{ fontSize: 13, color: D.muted, marginBottom: 20 }}>
+          Invoice #{invoice.invoice_number} · ${parseFloat(invoice.total).toFixed(2)} · {invoice.first_name} {invoice.last_name}
+        </div>
+
+        <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: D.text, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+          Payment method
+        </label>
+        <div style={{ display: 'flex', gap: 6, marginBottom: 18, flexWrap: 'wrap' }}>
+          {methodChoice('cash', 'Cash')}
+          {methodChoice('check', 'Check')}
+          {methodChoice('zelle', 'Zelle')}
+          {methodChoice('other', 'Other')}
+        </div>
+
+        <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: D.text, marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+          {referenceLabel}
+        </label>
+        <input
+          value={reference}
+          onChange={(e) => setReference(e.target.value.slice(0, 200))}
+          placeholder={referencePlaceholder}
+          style={sInput(isMobile)}
+        />
+
+        <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: D.text, margin: '16px 0 6px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+          Note (optional)
+        </label>
+        <textarea
+          value={note}
+          onChange={(e) => setNote(e.target.value.slice(0, 400))}
+          placeholder="e.g. Customer dropped check off at the office"
+          rows={2}
+          style={{ ...sInput(isMobile), resize: 'vertical', minHeight: 56, fontFamily: 'inherit' }}
+        />
+        <div style={{ fontSize: 11, color: D.muted, textAlign: 'right', marginTop: 4, marginBottom: 14 }}>
+          {note.length}/400
+        </div>
+
+        <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: hasContact ? 'pointer' : 'not-allowed', opacity: hasContact ? 1 : 0.5 }}>
+          <input
+            type="checkbox"
+            checked={sendReceipt && hasContact}
+            disabled={!hasContact}
+            onChange={(e) => setSendReceipt(e.target.checked)}
+            style={{ width: 16, height: 16, accentColor: D.heading }}
+          />
+          <span style={{ fontSize: 14, color: D.text }}>
+            Send receipt now
+            {hasContact ? (
+              <span style={{ color: D.muted, marginLeft: 6 }}>
+                · {[invoice.email && 'email', invoice.phone && 'SMS'].filter(Boolean).join(' + ')}
+              </span>
+            ) : (
+              <span style={{ color: D.muted, marginLeft: 6, fontStyle: 'italic' }}>· no email or phone on file</span>
+            )}
+          </span>
+        </label>
+
+        <div style={{ marginTop: 14, padding: '10px 12px', background: '#F4F4F5', border: `1px solid ${D.border}`, borderRadius: 8, fontSize: 12, color: D.muted, lineHeight: 1.45 }}>
+          Marks this invoice paid and stops automated reminders. Use only after the money has actually arrived.
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 20 }}>
+          <button onClick={onClose} disabled={saving} style={sBtn('transparent', D.text, isMobile)}>Cancel</button>
+          <button
+            onClick={handleRecord}
+            disabled={saving}
+            style={{ ...sBtn(D.heading, D.white, isMobile), opacity: saving ? 0.5 : 1 }}
+          >
+            {saving ? 'Recording…' : sendReceipt && hasContact ? 'Record & send receipt' : 'Record payment'}
           </button>
         </div>
       </div>
