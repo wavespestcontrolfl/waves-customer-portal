@@ -52,6 +52,25 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   return d.toISOString().split('T')[0];
 }
 
+// Shift a YYYY-MM-DD off Saturday/Sunday when a customer doesn't want
+// weekend visits. direction='forward' pushes to Monday, direction='back'
+// pulls to Friday. No-op for weekdays or when skip is false.
+function shiftPastWeekend(dateStr, skip, direction) {
+  if (!skip || !dateStr) return dateStr;
+  const safe = String(dateStr).split('T')[0];
+  const d = new Date(safe + 'T12:00:00');
+  if (isNaN(d.getTime())) return dateStr;
+  const day = d.getDay(); // 0=Sun, 6=Sat
+  if (day !== 0 && day !== 6) return safe;
+  const dir = direction === 'back' ? 'back' : 'forward';
+  if (dir === 'forward') {
+    d.setDate(d.getDate() + (day === 6 ? 2 : 1)); // Sat→Mon, Sun→Mon
+  } else {
+    d.setDate(d.getDate() - (day === 6 ? 1 : 2)); // Sat→Fri, Sun→Fri
+  }
+  return d.toISOString().split('T')[0];
+}
+
 // Apply a discount to a price. Returns the discounted price (>= 0).
 function applyDiscount(price, type, amount) {
   if (price == null || !type || amount == null || amount === '' || isNaN(Number(amount))) return price;
@@ -458,6 +477,7 @@ router.post('/', async (req, res, next) => {
       customerId, technicianId, scheduledDate, windowStart, windowEnd,
       serviceType, timeWindow, notes, isRecurring, recurringPattern, recurringCount, recurringOngoing,
       recurringNth, recurringWeekday, recurringIntervalDays,
+      skipWeekends, weekendShift,
       discountType, discountAmount,
       createInvoice,
       sendConfirmation, serviceId, serviceAddons, assignmentMode,
@@ -535,6 +555,8 @@ router.post('/', async (req, res, next) => {
         if (cols.recurring_nth && recurringNth != null && recurringNth !== '' && !isNaN(parseInt(recurringNth))) insertData.recurring_nth = parseInt(recurringNth);
         if (cols.recurring_weekday && recurringWeekday != null && recurringWeekday !== '' && !isNaN(parseInt(recurringWeekday))) insertData.recurring_weekday = parseInt(recurringWeekday);
         if (cols.recurring_interval_days && recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) insertData.recurring_interval_days = parseInt(recurringIntervalDays);
+        if (cols.skip_weekends) insertData.skip_weekends = !!skipWeekends;
+        if (cols.weekend_shift && skipWeekends) insertData.weekend_shift = weekendShift === 'back' ? 'back' : 'forward';
       }
       if (cols.discount_type && discountType) insertData.discount_type = discountType;
       if (cols.discount_amount && discountAmount != null && discountAmount !== '') insertData.discount_amount = Number(discountAmount);
@@ -563,8 +585,10 @@ router.post('/', async (req, res, next) => {
      try {
       const cols = await db('scheduled_services').columnInfo();
       const rOpts = { nth: recurringNth, weekday: recurringWeekday, intervalDays: recurringIntervalDays };
+      const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
       for (let i = 1; i < plannedCount; i++) {
-        const nextDateStr = nextRecurringDate(scheduledDate, recurringPattern, i, rOpts);
+        const rawNext = nextRecurringDate(scheduledDate, recurringPattern, i, rOpts);
+        const nextDateStr = shiftPastWeekend(rawNext, !!skipWeekends, shiftDir);
         const childData = {
           customer_id: customerId, technician_id: resolvedTechId,
           scheduled_date: nextDateStr,
@@ -578,6 +602,8 @@ router.post('/', async (req, res, next) => {
         if (cols.recurring_nth && recurringNth != null && recurringNth !== '' && !isNaN(parseInt(recurringNth))) childData.recurring_nth = parseInt(recurringNth);
         if (cols.recurring_weekday && recurringWeekday != null && recurringWeekday !== '' && !isNaN(parseInt(recurringWeekday))) childData.recurring_weekday = parseInt(recurringWeekday);
         if (cols.recurring_interval_days && recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) childData.recurring_interval_days = parseInt(recurringIntervalDays);
+        if (cols.skip_weekends) childData.skip_weekends = !!skipWeekends;
+        if (cols.weekend_shift && skipWeekends) childData.weekend_shift = shiftDir;
         if (cols.estimated_price && finalPrice != null) childData.estimated_price = finalPrice;
         if (cols.discount_type && discountType) childData.discount_type = discountType;
         if (cols.discount_amount && discountAmount != null && discountAmount !== '') childData.discount_amount = Number(discountAmount);
@@ -635,6 +661,7 @@ router.put('/:id/update-details', async (req, res, next) => {
       windowStart, windowEnd, technicianId, notes, routeOrder, zone,
       isRecurring, recurringPattern, recurringCount, recurringOngoing,
       recurringNth, recurringWeekday, recurringIntervalDays,
+      skipWeekends, weekendShift,
       discountType, discountAmount, estimatedPrice,
       createInvoice,
     } = req.body;
@@ -657,6 +684,8 @@ router.put('/:id/update-details', async (req, res, next) => {
         if (cols.recurring_nth) updates.recurring_nth = (recurringNth != null && recurringNth !== '' && !isNaN(parseInt(recurringNth))) ? parseInt(recurringNth) : null;
         if (cols.recurring_weekday) updates.recurring_weekday = (recurringWeekday != null && recurringWeekday !== '' && !isNaN(parseInt(recurringWeekday))) ? parseInt(recurringWeekday) : null;
         if (cols.recurring_interval_days) updates.recurring_interval_days = (recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) ? parseInt(recurringIntervalDays) : null;
+        if (cols.skip_weekends && skipWeekends !== undefined) updates.skip_weekends = !!skipWeekends;
+        if (cols.weekend_shift && weekendShift !== undefined) updates.weekend_shift = weekendShift === 'back' ? 'back' : 'forward';
         if (cols.discount_type) updates.discount_type = discountType || null;
         if (cols.discount_amount) updates.discount_amount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
         if (cols.create_invoice_on_complete && createInvoice !== undefined) updates.create_invoice_on_complete = !!createInvoice;
@@ -705,8 +734,13 @@ router.put('/:id/update-details', async (req, res, next) => {
           weekday: recurringWeekday != null ? recurringWeekday : parent.recurring_weekday,
           intervalDays: recurringIntervalDays != null ? recurringIntervalDays : parent.recurring_interval_days,
         };
+        const skipParent = parent.skip_weekends != null ? !!parent.skip_weekends : false;
+        const dirParent = parent.weekend_shift === 'back' ? 'back' : 'forward';
+        const skipChild = skipWeekends !== undefined ? !!skipWeekends : skipParent;
+        const dirChild = (weekendShift !== undefined ? weekendShift : dirParent) === 'back' ? 'back' : 'forward';
         for (let i = 1; i < spawnCount; i++) {
-          const nextDateStr = nextRecurringDate(baseDateStr, recurringPattern, i, rOpts);
+          const rawNext = nextRecurringDate(baseDateStr, recurringPattern, i, rOpts);
+          const nextDateStr = shiftPastWeekend(rawNext, skipChild, dirChild);
           const childData = {
             customer_id: parent.customer_id,
             technician_id: parent.technician_id,
@@ -729,6 +763,8 @@ router.put('/:id/update-details', async (req, res, next) => {
             if (cols.recurring_nth) childData.recurring_nth = (rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) ? parseInt(rOpts.nth) : null;
             if (cols.recurring_weekday) childData.recurring_weekday = (rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) ? parseInt(rOpts.weekday) : null;
             if (cols.recurring_interval_days) childData.recurring_interval_days = (rOpts.intervalDays != null && rOpts.intervalDays !== '' && !isNaN(parseInt(rOpts.intervalDays))) ? parseInt(rOpts.intervalDays) : null;
+            if (cols.skip_weekends) childData.skip_weekends = skipChild;
+            if (cols.weekend_shift && skipChild) childData.weekend_shift = dirChild;
             const dType = discountType !== undefined ? discountType : parent.discount_type;
             const dAmt = discountAmount !== undefined ? discountAmount : parent.discount_amount;
             // parent.estimated_price is already discounted at save time — copy as-is to children
@@ -1112,7 +1148,10 @@ router.put('/:id/status', async (req, res, next) => {
             if (latest) {
               const latestStr = String(latest.scheduled_date).split('T')[0];
               const rOpts = { nth: parent.recurring_nth, weekday: parent.recurring_weekday, intervalDays: parent.recurring_interval_days };
-              const nextStr = nextRecurringDate(latestStr, parent.recurring_pattern, 1, rOpts);
+              const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, 1, rOpts);
+              const skipParent = cols.skip_weekends ? !!parent.skip_weekends : false;
+              const dirParent = cols.weekend_shift ? (parent.weekend_shift === 'back' ? 'back' : 'forward') : 'forward';
+              const nextStr = shiftPastWeekend(rawNext, skipParent, dirParent);
               const nextData = {
                 customer_id: parent.customer_id,
                 technician_id: parent.technician_id,
@@ -1125,6 +1164,8 @@ router.put('/:id/status', async (req, res, next) => {
                 recurring_parent_id: parentId,
               };
               if (cols.recurring_ongoing) nextData.recurring_ongoing = true;
+              if (cols.skip_weekends) nextData.skip_weekends = skipParent;
+              if (cols.weekend_shift && skipParent) nextData.weekend_shift = dirParent;
               if (cols.service_id && parent.service_id) nextData.service_id = parent.service_id;
               if (cols.estimated_price && parent.estimated_price != null) nextData.estimated_price = parent.estimated_price;
               await db('scheduled_services').insert(nextData);
