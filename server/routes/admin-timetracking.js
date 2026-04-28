@@ -684,7 +684,9 @@ router.post('/technicians', requireAdmin, async (req, res, next) => {
     if (autoFlipEnabled !== undefined) insertRow.auto_flip_enabled = !!autoFlipEnabled;
     applyPayrollProfileFields(insertRow, req.body);
     const [tech] = await db('technicians').insert(insertRow).returning('*');
-    logger.info(`[team] Added technician: ${tech.name} (auto_flip_enabled=${tech.auto_flip_enabled})`);
+    // Log id + structural state only; the row now carries payroll/PII
+    // so names stay out of logs per AGENTS.md.
+    logger.info(`[team] Added technician id=${tech.id} (auto_flip_enabled=${tech.auto_flip_enabled})`);
     res.json({ success: true, technician: tech });
   } catch (err) { next(err); }
 });
@@ -709,7 +711,7 @@ router.put('/technicians/:id', requireAdmin, async (req, res, next) => {
     updates.updated_at = new Date();
     await db('technicians').where({ id: req.params.id }).update(updates);
     const tech = await db('technicians').where({ id: req.params.id }).first();
-    logger.info(`[team] Updated technician: ${tech.name} (active=${tech.active}, auto_flip_enabled=${tech.auto_flip_enabled})`);
+    logger.info(`[team] Updated technician id=${tech.id} (active=${tech.active}, auto_flip_enabled=${tech.auto_flip_enabled})`);
     res.json({ success: true, technician: tech });
   } catch (err) { next(err); }
 });
