@@ -80,8 +80,8 @@ export default function InventoryPage() {
         </div>
       )}
 
-      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 20 }}>
-        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, flexWrap: 'wrap' }}>
+      <div className="tab-pill-scroll" style={{ display: 'flex', justifyContent: 'center', marginBottom: 20 }}>
+        <div className="tab-pill-scroll-inner" style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, flexWrap: 'wrap' }}>
           {tabs.map(t => (
             <button key={t.key} onClick={() => setTab(t.key)} style={{
               padding: '10px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500,
