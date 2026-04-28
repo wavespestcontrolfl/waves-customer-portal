@@ -838,8 +838,11 @@ router.post(
 
 // DELETE /technicians/:id — hard delete the technician row.
 // If related records exist (time entries, assignments) the DB FK
-// will error; the client surfaces that message.
-router.delete('/technicians/:id', async (req, res, next) => {
+// will error; the client surfaces that message. Admin only — the
+// row now carries payroll/PII and the ?force=true branch can purge
+// related records, so tech-role tokens have no business calling
+// this.
+router.delete('/technicians/:id', requireAdmin, async (req, res, next) => {
   const force = String(req.query.force || '') === 'true';
   try {
     if (!force) {
