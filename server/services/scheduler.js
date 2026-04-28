@@ -726,6 +726,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // HOURLY — Sync Google review content from Places API
+  // GBP performance sync (above) handles impressions / views, NOT review
+  // text. Without this hourly sync, the google_reviews table only ever
+  // contained the aggregate `_stats` rows seeded by syncAllReviews on
+  // first run, so the Reviews tab kept saying "0 reviews" while the GBP
+  // total counter climbed each time someone left feedback. The route
+  // handler at POST /api/admin/reviews/sync still exists for manual
+  // re-pulls — this just makes "Sync Reviews" no longer the only way
+  // for reviews to appear in the portal.
+  // =========================================================================
+  cron.schedule('0 * * * *', async () => {
+    logger.info('Running: Google review content sync');
+    try {
+      const GoogleBusiness = require('./google-business');
+      const result = await GoogleBusiness.syncAllReviews();
+      logger.info(`Review sync done: ${result.synced || 0} synced, ${result.new || 0} new`);
+    } catch (err) {
+      logger.error(`Review sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 8AM — AI Campaign Advisor (includes paid + organic)
   // =========================================================================
   cron.schedule('0 8 * * *', async () => {
