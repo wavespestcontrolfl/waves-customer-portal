@@ -369,20 +369,8 @@ export default function WavesSEODashboard() {
     <div style={{ color: WAVES_COLORS.textPrimary, fontFamily: "'DM Sans', -apple-system, sans-serif" }}>
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
 
-      {/* Header */}
-      <div style={{ marginBottom: 24 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 4 }}>
-          <span style={{ fontSize: 22, fontWeight: 800, letterSpacing: "-0.02em" }}>
-            <span style={{ color: WAVES_COLORS.accent }}>Waves</span> SEO Command Center
-          </span>
-        </div>
-        <div style={{ fontSize: 13, color: WAVES_COLORS.textMuted }}>
-          wavespestcontrol.com — Live data from DataForSEO + Google Search Console
-        </div>
-      </div>
-
       {/* Tab Switcher */}
-      <div style={{ display: "flex", gap: 4, marginBottom: 24, background: "#F4F4F5", borderRadius: 10, padding: 4, width: isMobile ? "100%" : "fit-content", border: `1px solid ${WAVES_COLORS.cardBorder}` }}>
+      <div style={{ display: "flex", justifyContent: "center", gap: 4, background: "#F4F4F5", borderRadius: 10, padding: 4, width: isMobile ? "100%" : "fit-content", margin: "0 auto 24px", border: `1px solid ${WAVES_COLORS.cardBorder}` }}>
         {[
           { id: "ai", label: "AI Visibility" },
           { id: "organic", label: "Organic Rankings" },
