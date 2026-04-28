@@ -498,11 +498,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (recurring.length === 0) return [];
     const parsedCount = Number.parseInt(recurringCount, 10);
     const isFixed = Number.isInteger(parsedCount) && parsedCount >= 2;
-    // Server treats recurringCount as TOTAL visits (initial + children), so
-    // for fixed plans only count - 1 children spawn. Match that here so the
-    // chip row never promises more visits than will exist.
-    const futureVisits = isFixed ? parsedCount - 1 : 4;
-    const limit = Math.min(futureVisits, 4);
+    // Server treats recurringCount as TOTAL visits (initial + children) and
+    // spawns plannedCount - 1 children in BOTH modes (ongoing pre-seeds a
+    // 4-visit rolling window = parent + 3 children; fixed-count count=N =
+    // parent + N-1 children). The preview shows future-only chips, so the
+    // chip count must match plannedCount - 1 for both modes.
+    const plannedCount = isFixed ? parsedCount : 4;
+    const limit = Math.min(Math.max(plannedCount - 1, 0), 4);
     const dir = weekendShift === 'back' ? 'back' : 'forward';
     return recurring.map((group) => {
       // Dedupe + iterate until we've collected `limit` unique dates so
