@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Phone, MessageSquare, Trash2 } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -706,7 +707,6 @@ function Pipeline({ customers, allCustomers, selectedIds, setSelectedIds, curren
                   <td style={tdStyle}><input type="checkbox" checked={isSelected} onChange={() => toggleSel(c.id)} style={{ accentColor: C.acc, cursor: 'pointer' }} /></td>
                   <td style={tdStyle}>
                     <div style={{ fontWeight: 500, fontSize: 13, color: C.t1 }}>{c.name}</div>
-                    <div style={{ fontSize: 12, color: C.t2 }}>{c.addr.substring(0, 40)}</div>
                   </td>
                   <td style={tdStyle}><Tag type="acc">{c.gbpName}</Tag></td>
                   <td style={tdStyle}>
@@ -734,8 +734,61 @@ function Pipeline({ customers, allCustomers, selectedIds, setSelectedIds, curren
                     {c.seqStep > 0 ? <Tag type="blu">Step {c.seqStep}/3</Tag> : <span style={{ color: C.t3, fontSize: 11 }}>—</span>}
                   </td>
                   <td style={{ ...tdStyle, whiteSpace: 'nowrap' }}>
-                    <Btn onClick={() => setDrawerCust(c)} style={{ padding: '4px 8px', fontSize: 10 }}>View</Btn>{' '}
-                    <Btn variant="primary" onClick={() => quickSend(c.id)} style={{ padding: '4px 8px', fontSize: 10 }}>📤</Btn>
+                    <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
+                      {c.phone && (
+                        <button
+                          type="button"
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            if (!window.confirm(`Call ${c.name} at ${c.phoneF || c.phone}?\n\nWaves will call your phone first — press 1 to connect.`)) return;
+                            try {
+                              const r = await adminFetch('/admin/communications/call', {
+                                method: 'POST',
+                                body: JSON.stringify({ to: c.phone, fromNumber: '+19412975749' }),
+                              });
+                              if (!r?.success) alert('Call failed: ' + (r?.error || 'unknown error'));
+                            } catch (err) { alert('Call failed: ' + err.message); }
+                          }}
+                          aria-label="Call via Waves"
+                          title="Call via Waves — rings your phone first, press 1 to connect"
+                          style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', height: 24, width: 24, border: `1px solid ${C.inputBorder}`, borderRadius: 4, color: C.t2, background: '#fff', cursor: 'pointer' }}
+                        >
+                          <Phone size={12} strokeWidth={1.75} />
+                        </button>
+                      )}
+                      {c.phone && (
+                        <a
+                          href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
+                          onClick={(e) => e.stopPropagation()}
+                          aria-label="SMS"
+                          title={`SMS ${c.phoneF || c.phone}`}
+                          style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', height: 24, width: 24, border: `1px solid ${C.inputBorder}`, borderRadius: 4, color: C.t2, background: '#fff', textDecoration: 'none' }}
+                        >
+                          <MessageSquare size={12} strokeWidth={1.75} />
+                        </a>
+                      )}
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); setDrawerCust(c); }}
+                        style={{ height: 24, padding: '0 8px', border: `1px solid ${C.inputBorder}`, borderRadius: 4, color: C.t2, background: '#fff', cursor: 'pointer', fontSize: 11, fontWeight: 500, fontFamily: C.sans, textTransform: 'uppercase', letterSpacing: '0.04em' }}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (!window.confirm(`Remove ${c.name} from the review pipeline?`)) return;
+                          updateCustomer(c.id, { suppressed: true, suppressReason: 'Manually removed' });
+                          showToast(`${c.name} removed from pipeline`);
+                        }}
+                        aria-label="Remove from pipeline"
+                        title="Remove from pipeline"
+                        style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', height: 24, width: 24, border: `1px solid ${C.red}33`, borderRadius: 4, color: C.red, background: '#fff', cursor: 'pointer' }}
+                      >
+                        <Trash2 size={12} strokeWidth={1.75} />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               );
