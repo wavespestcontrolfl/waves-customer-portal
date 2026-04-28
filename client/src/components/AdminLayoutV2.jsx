@@ -387,15 +387,19 @@ export default function AdminLayoutV2() {
         {/* Nav sections */}
         <nav style={{ flex: 1, padding: '4px 8px 12px' }}>
           {NAV_SECTIONS.map(({ section, items }) => (
-            <div key={section} style={{ marginBottom: 6 }}>
+            <div key={section} style={{ marginBottom: 10 }}>
               <div
                 style={{
-                  fontSize: 11,
-                  fontWeight: 500,
-                  color: 'var(--text-quaternary)',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.08em',
-                  padding: '10px 12px 4px',
+                  // Title-case section headers, weight 600 — heavier and
+                  // closer to body copy than the prior all-caps tracked
+                  // label, so the groupings read as section names rather
+                  // than utility labels.
+                  fontSize: 13,
+                  fontWeight: 600,
+                  color: 'var(--text-primary)',
+                  textTransform: 'none',
+                  letterSpacing: 0,
+                  padding: '14px 12px 6px',
                   userSelect: 'none',
                 }}
               >
@@ -412,15 +416,15 @@ export default function AdminLayoutV2() {
                     style={{
                       display: 'flex',
                       alignItems: 'center',
-                      gap: 10,
-                      padding: isMobile ? '10px 12px' : '7px 12px',
+                      gap: 12,
+                      padding: isMobile ? '10px 12px' : '8px 12px',
                       minHeight: isMobile ? 44 : undefined,
                       borderRadius: 6,
                       marginBottom: 1,
                       background: isActive ? 'var(--surface-active)' : 'transparent',
                       color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
-                      fontSize: isMobile ? 14 : 13,
-                      fontWeight: isActive ? 500 : 400,
+                      fontSize: isMobile ? 14 : 14,
+                      fontWeight: isActive ? 600 : 500,
                       textDecoration: 'none',
                       transition: 'background 0.1s ease',
                     }}
@@ -431,7 +435,7 @@ export default function AdminLayoutV2() {
                       if (!isActive) e.currentTarget.style.background = 'transparent';
                     }}
                   >
-                    <Icon size={16} strokeWidth={1.75} />
+                    <Icon size={18} strokeWidth={1.75} />
                     <span>{label}</span>
                   </Link>
                 );
