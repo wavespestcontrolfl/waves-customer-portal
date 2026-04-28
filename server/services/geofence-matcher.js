@@ -265,6 +265,40 @@ async function getActiveTimerDwellMinutes(techId) {
 }
 
 /**
+ * Per-customer opt-out for auto-flip specifically. Distinct from the
+ * existing notification_prefs.tech_en_route + sms_enabled gates which
+ * apply to ALL en_route SMS (manual + automated). This flag lets a
+ * customer keep manual en_route SMS while opting out of the
+ * departure-triggered auto-flip — a finer-grained preference.
+ *
+ * Returns true when auto-flip should be skipped for this customer:
+ *   - explicit auto_flip_en_route=false on their prefs row
+ * Returns false (proceed) when:
+ *   - flag is true (default)
+ *   - no prefs row exists at all (treat as opt-in default)
+ *   - lookup error (best-effort: don't block auto-flip on DB hiccup —
+ *     the SMS layer still has its own gates)
+ *
+ * Note: this only checks the auto-flip-specific flag. The SMS-layer
+ * gates (tech_en_route, sms_enabled) live inside sendTechEnRoute and
+ * still fire even when auto-flip proceeds — a customer with
+ * tech_en_route=false will get the state flip but no SMS.
+ */
+async function isAutoFlipDisabledForCustomer(customerId) {
+  if (!customerId) return false;
+  try {
+    const row = await db('notification_prefs')
+      .where({ customer_id: customerId })
+      .first('auto_flip_en_route');
+    if (!row) return false;
+    return row.auto_flip_en_route === false;
+  } catch (err) {
+    logger.error(`[geofence-matcher] isAutoFlipDisabledForCustomer failed: ${err.message}`);
+    return false;
+  }
+}
+
+/**
  * Check whether an auto-flip en-route SMS was already sent to this
  * customer recently. Reads `geofence_events` for action_taken values
  * that map to a sent SMS. Used to suppress departure-then-arrival
@@ -362,6 +396,7 @@ module.exports = {
   findScheduledJob,
   findNextScheduledJobForTech,
   isDuplicateEnter,
+  isAutoFlipDisabledForCustomer,
   isRecentAutoFlipForCustomer,
   getActiveJobTimer,
   getActiveTimerDwellMinutes,
