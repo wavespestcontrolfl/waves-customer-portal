@@ -11,9 +11,11 @@
  *   node server/scripts/dump-unmapped-call-numbers.js --period=mtd
  *   node server/scripts/dump-unmapped-call-numbers.js --period=all
  *
- * --period defaults to "mtd" to match the Dashboard widget. Pass "all"
- * to see every unmapped number ever seen in call_log (useful for
- * deciding which to seed vs. mark is_active=false).
+ * --period defaults to "mtd" and uses the same ET-day boundaries as the
+ * Dashboard widget (resolveAttributionWindow in admin-dashboard.js), so
+ * counts reconcile across UTC date rollovers. Accepts today | wtd | mtd
+ * | ytd | all. Pass "all" to see every unmapped number ever seen in
+ * call_log (useful for deciding which to seed vs. mark is_active=false).
  *
  * For prod: export DATABASE_URL to the prod DB before running, e.g.:
  *   export DATABASE_URL="$(railway variables --kv --service Postgres \
@@ -21,20 +23,24 @@
  */
 
 const db = require('../models/db');
+const { etDateString, etMonthStart, etYearStart, etWeekStart } = require('../utils/datetime-et');
 
 const periodArg = (process.argv.find((a) => a.startsWith('--period=')) || '').split('=')[1] || 'mtd';
 
+// Mirror resolveAttributionWindow() in server/routes/admin-dashboard.js so
+// reconciliation numbers line up with the widget. Day boundaries follow
+// America/New_York, not UTC.
 function windowFor(period) {
-  const now = new Date();
   if (period === 'all') return null;
-  if (period === 'mtd') {
-    const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-    return { from: from.toISOString().slice(0, 10), to: now.toISOString().slice(0, 10) };
+  const today = etDateString();
+  switch (String(period).toLowerCase()) {
+    case 'today': return { from: today,           to: today };
+    case 'wtd':   return { from: etWeekStart(),   to: today };
+    case 'ytd':   return { from: etYearStart(),   to: today };
+    case 'mtd':   return { from: etMonthStart(),  to: today };
+    default:
+      throw new Error(`unknown --period=${period} (use today|wtd|mtd|ytd|all)`);
   }
-  if (period === 'ytd') {
-    return { from: `${now.getUTCFullYear()}-01-01`, to: now.toISOString().slice(0, 10) };
-  }
-  throw new Error(`unknown --period=${period} (use mtd|ytd|all)`);
 }
 
 (async () => {
