@@ -2217,14 +2217,6 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
     const skipParent = cols.skip_weekends ? !!parent.skip_weekends : false;
     const dirParent = (cols.weekend_shift && parent.weekend_shift === 'back') ? 'back' : 'forward';
 
-    // Pull parent's add-on lines once so we can mirror them onto each new
-    // row spawned by extend / convert_ongoing — multi-service recurring
-    // appointments would otherwise lose their secondary services here.
-    let parentAddons = [];
-    try {
-      parentAddons = await db('scheduled_service_addons').where({ scheduled_service_id: parentId });
-    } catch (e) { /* table may not exist pre-migration — non-blocking */ }
-
     // Boosters share recurring_parent_id but have is_recurring=false;
     // exclude them so the next-date math keys off the true cadence.
     const latest = await db('scheduled_services')
@@ -2234,6 +2226,17 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
     const baseDateStr = latest?.scheduled_date
       ? String(latest.scheduled_date).split('T')[0]
       : etDateString();
+
+    // Pull add-on lines from the best recurring template row so extend /
+    // convert_ongoing keep multi-service plans intact.
+    let parentAddons = [];
+    try {
+      const templateVisitId = latest?.id || parentId;
+      parentAddons = await db('scheduled_service_addons').where({ scheduled_service_id: templateVisitId });
+      if (parentAddons.length === 0 && templateVisitId !== parentId) {
+        parentAddons = await db('scheduled_service_addons').where({ scheduled_service_id: parentId });
+      }
+    } catch (e) { /* table may not exist pre-migration — non-blocking */ }
 
     // Mirror parent's addon rows onto a freshly-inserted child. Non-blocking
     // — if it fails the child still exists and dispatch can re-add.
@@ -2279,7 +2282,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
         if (cols.estimated_price && parent.estimated_price != null) data.estimated_price = parent.estimated_price;
         if (cols.skip_weekends) data.skip_weekends = skipParent;
-        if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
+        if (cols.weekend_shift) data.weekend_shift = dirParent;
         const [row] = await db('scheduled_services').insert(data).returning('*');
         await mirrorAddons(row?.id);
         inserted++;
@@ -2326,7 +2329,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
         if (cols.estimated_price && parent.estimated_price != null) data.estimated_price = parent.estimated_price;
         if (cols.skip_weekends) data.skip_weekends = skipParent;
-        if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
+        if (cols.weekend_shift) data.weekend_shift = dirParent;
         const [row] = await db('scheduled_services').insert(data).returning('*');
         await mirrorAddons(row?.id);
         inserted++;
