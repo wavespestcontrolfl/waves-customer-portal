@@ -16,9 +16,9 @@
 // /admin/newsletter when newsletter-v1 was rolled out). Automations
 // renders EmailAutomationsPanelV2 directly.
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Badge, Button, Card, CardBody, cn } from '../../components/ui';
+import { Badge, Button, Card, CardBody } from '../../components/ui';
 import { Mail, Users, Zap, Calendar, FileText, TrendingUp, Sparkles, Upload, MapPin } from 'lucide-react';
 import { ComposeView, HistoryView, SubscribersView } from './NewsletterTabs';
 import EmailAutomationsPanelV2 from './EmailAutomationsPanelV2';
@@ -269,41 +269,39 @@ function RecentPosts({ posts, loading }) {
   );
 }
 
-function DashboardView({ onSelectTab, onDraftFromEvent }) {
-  const [stats, setStats] = useState({ subscribers: null, lastOpenRate: null, scheduledCount: null });
-  const [recentPosts, setRecentPosts] = useState([]);
-  const [loadingPosts, setLoadingPosts] = useState(true);
+function DashboardView({ onSelectTab, onDraftFromEvent, sendsData, sendsLoading, subscribersActive }) {
+  // Recent posts + Last open rate are derived from the sends payload owned
+  // by the parent (NewsletterPage) so the sends/subscribers fetches don't
+  // run twice on the default dashboard tab. Events stay local — only the
+  // dashboard uses them. `loadingPosts` is gated on the parent's loading
+  // flag (not `sendsData == null`) so a fetch error clears the spinner
+  // instead of leaving the panel stuck on "Loading…".
+  const recentPosts = useMemo(() => (sendsData?.sends || []).slice(0, 5), [sendsData]);
+  const lastOpenRate = useMemo(() => {
+    const sends = sendsData?.sends || [];
+    // Most recent sent row, regardless of delivered_count — a send to an
+    // empty segment can land with delivered_count=0, and the tile should
+    // reflect the *true* latest send (rendering '—' when there's nothing
+    // to compute), not skip to an older one.
+    const lastSent = sends.find((s) => s.status === 'sent');
+    return (lastSent && lastSent.delivered_count > 0)
+      ? lastSent.opened_count / lastSent.delivered_count
+      : null;
+  }, [sendsData]);
+  const scheduledCount = sendsData ? (sendsData.counts?.scheduled ?? 0) : null;
+  const loadingPosts = sendsLoading;
+
+  const stats = {
+    subscribers: subscribersActive,
+    lastOpenRate,
+    scheduledCount,
+  };
+
   const [events, setEvents] = useState([]);
   const [loadingEvents, setLoadingEvents] = useState(true);
 
   useEffect(() => {
     let ignore = false;
-    adminFetch('/admin/newsletter/subscribers?limit=1')
-      .then((d) => { if (!ignore) setStats((s) => ({ ...s, subscribers: d.counts?.active ?? null })); })
-      .catch(() => {});
-    // /sends returns the recent campaign list (capped at 500) plus an
-    // uncapped status breakdown in `counts` — use `counts.scheduled`
-    // for the queued-sends tile so we don't undercount when historical
-    // rows push scheduled drafts past the row cap. Recent posts (top 5)
-    // and Last open rate (most recent sent) come from the rows.
-    adminFetch('/admin/newsletter/sends')
-      .then((d) => {
-        if (ignore) return;
-        const sends = d.sends || [];
-        setRecentPosts(sends.slice(0, 5));
-        // Most recent sent row, regardless of delivered_count — a send
-        // to an empty segment can land with delivered_count=0, and the
-        // tile should reflect the *true* latest send (rendering '—'
-        // when there's nothing to compute), not skip to an older one.
-        const lastSent = sends.find((s) => s.status === 'sent');
-        const lastOpenRate = (lastSent && lastSent.delivered_count > 0)
-          ? lastSent.opened_count / lastSent.delivered_count
-          : null;
-        const scheduledCount = d.counts?.scheduled ?? 0;
-        setStats((s) => ({ ...s, lastOpenRate, scheduledCount }));
-        setLoadingPosts(false);
-      })
-      .catch(() => { if (!ignore) setLoadingPosts(false); });
     adminFetch('/admin/newsletter/events?days=14&limit=12')
       .then((d) => { if (!ignore) { setEvents(d.events || []); setLoadingEvents(false); } })
       .catch(() => { if (!ignore) setLoadingEvents(false); });
@@ -439,6 +437,57 @@ export default function NewsletterPage() {
   // clearPendingDraftEvent so reopening Compose later doesn't re-fire.
   const [pendingDraftEvent, setPendingDraftEvent] = useState(null);
 
+  // Sends + subscribers are fetched once at the page level and shared with
+  // DashboardView (avoids the duplicate /sends call on the default dashboard
+  // tab). Tab counts and dashboard panels are derived from the same payloads.
+  //   - sendsLoading=true   → badges hidden, dashboard shows "Loading…"
+  //   - sendsData present   → counts.sent ?? 0 (empty bucket → "(0)")
+  //   - fetch failed        → loading clears, sendsData stays null, badges hidden
+  // /sends and /subscribers group rows by status, so absent keys mean zero —
+  // coalesce missing keys to 0 on success rather than null, otherwise a
+  // brand-new install with no sent campaigns would silently drop the badge.
+  const [sendsData, setSendsData] = useState(null);
+  const [sendsLoading, setSendsLoading] = useState(true);
+  const [subscribersActive, setSubscribersActive] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  useEffect(() => {
+    let ignore = false;
+    setSendsLoading(true);
+    adminFetch('/admin/newsletter/sends')
+      .then((d) => { if (!ignore) { setSendsData(d || { sends: [], counts: {} }); setSendsLoading(false); } })
+      // Clear sendsData on error so a failed refresh doesn't silently keep
+      // showing stale History counts and recent-post data — the badge/stats
+      // disappearance signals to the admin that the refresh didn't land.
+      .catch(() => { if (!ignore) { setSendsData(null); setSendsLoading(false); } });
+    adminFetch('/admin/newsletter/subscribers?limit=1')
+      .then((d) => { if (!ignore) setSubscribersActive(d.counts?.active ?? 0); })
+      // Clear on error for the same reason as /sends — a failed refresh
+      // would otherwise keep the prior count in both the stats tile and
+      // the Subscribers tab badge with no signal that the refresh failed.
+      .catch(() => { if (!ignore) setSubscribersActive(null); });
+    return () => { ignore = true; };
+  }, [refreshKey]);
+
+  // Refetch on Dashboard re-entry — mirrors the prior per-tab DashboardView
+  // remount so a campaign sent in Compose or a subscriber added in Subscribers
+  // is reflected when the user returns to the dashboard. Skips refetch on
+  // tab switches that don't land on dashboard (e.g. Compose → Subscribers).
+  const prevTabRef = useRef(tab);
+  useEffect(() => {
+    if (tab === 'dashboard' && prevTabRef.current !== 'dashboard') {
+      setRefreshKey((k) => k + 1);
+    }
+    prevTabRef.current = tab;
+  }, [tab]);
+
+  // History badge is null while loading AND on fetch error — only show
+  // (0) when /sends actually succeeded with no sent rows, so an outage
+  // isn't read as "no sent campaigns".
+  const tabCounts = {
+    history: sendsData ? (sendsData.counts?.sent ?? 0) : null,
+    subscribers: subscribersActive,
+  };
+
   const setTab = (next) => {
     const newParams = new URLSearchParams(searchParams);
     if (next === 'dashboard') newParams.delete('tab');
@@ -455,13 +504,11 @@ export default function NewsletterPage() {
   return (
     <div>
       {/* Title + Create */}
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
-        <div>
-          <h1 className="text-28 font-normal tracking-h1 text-ink-primary">
-            <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Newsletter</span>
-            <span className="hidden md:inline">Newsletter</span>
-          </h1>
-        </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
+        <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: '#18181B', margin: 0 }}>
+          <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Newsletter</span>
+          <span className="hidden md:inline">Newsletter</span>
+        </h1>
         <button
           type="button"
           onClick={() => setTab('compose')}
@@ -476,27 +523,41 @@ export default function NewsletterPage() {
         </button>
       </div>
 
-      {/* Tab nav */}
-      <div className="flex justify-center gap-1.5 flex-wrap mb-5">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            type="button"
-            onClick={() => setTab(t.key)}
-            className={cn(
-              'h-8 px-3 text-11 uppercase font-medium tracking-label rounded-sm border-hairline u-focus-ring transition-colors',
-              tab === t.key
-                ? 'bg-zinc-900 text-white border-zinc-900'
-                : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50',
-            )}
-          >
-            {t.label}
-          </button>
-        ))}
+      {/* Tabs — pill group, matches Blog/Generate page tab style */}
+      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
+        <div style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
+          {TABS.map((t) => (
+            <button
+              key={t.key}
+              type="button"
+              onClick={() => setTab(t.key)}
+              style={{
+                padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
+                background: tab === t.key ? '#18181B' : 'transparent',
+                color: tab === t.key ? '#FFFFFF' : '#A1A1AA',
+                fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
+                fontFamily: "'DM Sans', sans-serif",
+              }}
+            >
+              {t.label}
+              {tabCounts[t.key] != null && (
+                <span style={{ marginLeft: 6, fontSize: 11, opacity: 0.7 }}>({tabCounts[t.key]})</span>
+              )}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Tab content */}
-      {tab === 'dashboard' && <DashboardView onSelectTab={setTab} onDraftFromEvent={onDraftFromEvent} />}
+      {tab === 'dashboard' && (
+        <DashboardView
+          onSelectTab={setTab}
+          onDraftFromEvent={onDraftFromEvent}
+          sendsData={sendsData}
+          sendsLoading={sendsLoading}
+          subscribersActive={subscribersActive}
+        />
+      )}
       {tab === 'compose' && <ComposeView pendingEvent={pendingDraftEvent} onPendingEventConsumed={clearPendingDraftEvent} />}
       {tab === 'history' && <HistoryView />}
       {tab === 'subscribers' && <SubscribersView />}
