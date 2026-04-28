@@ -212,15 +212,20 @@ router.post('/recording-status', async (req, res) => {
         logger.info(`Recording saved: ${CallSid} → ${RecordingSid} (${RecordingDuration}s)`);
       }
 
-      // Auto-process recording when ready
+      // Auto-process recording when ready.
+      // 10-minute delay: Twilio's recording-status:completed fires before the
+      // MP3 is reliably fetchable from their CDN, so the auth'd download in
+      // the processor can 404 or return a partial buffer and Gemini gets
+      // garbage. Mirrors the Zapier delay step that ran this flow reliably
+      // in production. The 5-min processAllPending cron in scheduler.js is
+      // the restart-safe backstop if this in-memory timer is lost.
       try {
         const processor = require('../services/call-recording-processor');
-        // Queue for processing (don't block the webhook response)
         setTimeout(async () => {
           try {
             await processor.processRecording(CallSid);
           } catch (e) { logger.error(`Auto-process recording failed: ${e.message}`); }
-        }, 5000); // 5 second delay to ensure recording is fully available
+        }, 10 * 60 * 1000);
       } catch (e) { logger.error(`Recording auto-process setup failed: ${e.message}`); }
     }
 
