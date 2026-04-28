@@ -62,6 +62,13 @@ The Tier 1 V2 redesign for Dashboard, Dispatch, Customers + Detail, Estimates + 
 - Use `components/ui` primitives + Tailwind zinc ramp + `border-hairline` chrome.
 - `alert-fg` (red) is reserved for genuine alerts only — never decoration.
 
+**Exception — Customers V2 status indicators (`/admin/customers` Directory + Customer 360):** colored decoration is intentional on the customers surface for at-a-glance triage. Specifically allowed:
+- **Health score** (HealthDot, HealthCircle, "Score: NN/100" label): green `#10B981` (≥70), amber `#F59E0B` (40–69), red `#C8312F` (<40).
+- **Tier badge** (Customer 360): metal-coded — Platinum `#E5E7EB`, Gold `#D4A017`, Silver `#9CA3AF`, Bronze `#A16207`.
+- **Stage badge** (Customer 360): green `#10B981` for `active_customer`/`won`; red `#C8312F` for everything else.
+
+Other admin surfaces still follow strict zinc + alert-fg-for-alerts-only rules.
+
 **Feature flag system:** `useFeatureFlag('<key>')` from `client/src/hooks/useFeatureFlag.js`. DB-backed via `user_feature_flags` table, session-cached in memory, fails closed (returns `false` if API unreachable). No localStorage persistence, no percentage rollouts, no environment variants — the schema is intentionally minimal. The retired V2 keys (`dashboard-v2`, `dispatch-v2`, `customers-v2`, `estimates-v2`, `comms-v2`, `mobile-shell-v2`, `admin-shell-v2`) are no longer read by the client; stale rows in `user_feature_flags` are inert.
 
 Full per-PR detail (endpoints touched, subcomponents shipped, alert-fg rules per page): `docs/design/DECISIONS.md`.
