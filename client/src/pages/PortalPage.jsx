@@ -2888,20 +2888,30 @@ function ScheduleTab({ customer }) {
           </div>
           <div style={{ padding: '6px 20px 16px' }}>
             <div style={{ fontSize: 12, color: B.grayMid, padding: '10px 0 6px' }}>Messages sent to {formatPhoneDisplay(customer.phone)}</div>
-            {[
-              { key: 'serviceReminder72h', label: '72-Hour Appointment Reminder', desc: 'Get a text 3 days before every visit', icon: 'smartphone', locked: false, defaultOn: true },
-              { key: 'serviceReminder24h', label: '24-Hour Service Reminder', desc: 'Get a text the day before every visit', icon: 'smartphone', locked: true },
-              { key: 'techEnRoute', label: 'Tech En Route Alert', desc: 'Know exactly when your tech is headed over — live GPS', icon: 'truck', locked: true },
-              { key: 'serviceCompleted', label: 'Service Complete Report', desc: 'Products applied, tech notes, and next steps', icon: 'checkCircle', locked: true },
-              { key: 'billingReminder', label: 'Billing Reminder', desc: '3-day heads up before your monthly charge', icon: 'card', locked: false },
-              { key: 'seasonalTips', label: 'Seasonal Lawn Tips', desc: 'Watering, mowing height, and care tips for SW Florida', icon: 'palm', locked: false },
-            ].map((p, i) => {
+            {(() => {
+              const items = [
+                { key: 'serviceReminder72h', label: '72-Hour Appointment Reminder', desc: 'Get a text 3 days before every visit', icon: 'smartphone', locked: false, defaultOn: true },
+                { key: 'serviceReminder24h', label: '24-Hour Service Reminder', desc: 'Get a text the day before every visit', icon: 'smartphone', locked: true },
+                { key: 'techEnRoute', label: 'Tech En Route Alert', desc: 'Know exactly when your tech is headed over — live GPS', icon: 'truck', locked: true },
+                // Phase 2E: per-customer auto-flip opt-out. Distinct
+                // from techEnRoute — that one fires when the tech taps
+                // "En Route". This one fires automatically when the
+                // tech's vehicle leaves the previous job. Default ON
+                // (column DEFAULT TRUE); user can toggle off to skip
+                // the auto-detected version while keeping the manual
+                // tap-triggered text.
+                { key: 'autoFlipEnRoute', label: 'Auto En Route from GPS', desc: "Send the en-route text the moment we detect your tech leaving the previous job", icon: 'truck', locked: false, defaultOn: true },
+                { key: 'serviceCompleted', label: 'Service Complete Report', desc: 'Products applied, tech notes, and next steps', icon: 'checkCircle', locked: true },
+                { key: 'billingReminder', label: 'Billing Reminder', desc: '3-day heads up before your monthly charge', icon: 'card', locked: false },
+                { key: 'seasonalTips', label: 'Seasonal Lawn Tips', desc: 'Watering, mowing height, and care tips for SW Florida', icon: 'palm', locked: false },
+              ];
+              return items.map((p, i) => {
               const isOn = p.locked ? true : (prefs[p.key] !== undefined ? prefs[p.key] : (p.defaultOn || false));
               return (
                 <div key={p.key} style={{
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                   padding: '12px 0',
-                  borderBottom: i < 5 ? `1px solid ${B.grayLight}` : 'none',
+                  borderBottom: i < items.length - 1 ? `1px solid ${B.grayLight}` : 'none',
                 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1 }}>
                     <Icon name={p.icon} size={18} strokeWidth={1.75} />
@@ -2933,7 +2943,8 @@ function ScheduleTab({ customer }) {
                   </div>
                 </div>
               );
-            })}
+              });
+            })()}
           </div>
         </div>
       )}
