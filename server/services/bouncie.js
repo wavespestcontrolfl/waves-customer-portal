@@ -368,9 +368,19 @@ class BouncieService {
           const data = await res.json();
           const element = data.rows?.[0]?.elements?.[0];
           if (element?.status === 'OK') {
-            const durationMin = Math.round((element.duration?.value || 900) / 60);
-            const distanceMi = element.distance?.value ? Math.round(element.distance.value / 1609.34 * 10) / 10 : null;
-            return { etaMinutes: durationMin, distanceMiles: distanceMi, source: 'google', vehicleName: loc.vehicleName };
+            // Nullish-only fallback: a real 0 (vehicle at the customer
+            // address right before arrival) must surface as ~0, not be
+            // converted to a 15-min default. Fall through to haversine
+            // only when the API genuinely omits the value. Mirrors the
+            // fix landed in calculateETAFromCoords (PR #361 followup).
+            const durationSec = element.duration?.value;
+            const distanceMeters = element.distance?.value;
+            if (durationSec != null) {
+              const distanceMi = distanceMeters != null
+                ? Math.round(distanceMeters / 1609.34 * 10) / 10
+                : null;
+              return { etaMinutes: Math.round(durationSec / 60), distanceMiles: distanceMi, source: 'google', vehicleName: loc.vehicleName };
+            }
           }
         }
       } catch { /* fall through to haversine */ }
