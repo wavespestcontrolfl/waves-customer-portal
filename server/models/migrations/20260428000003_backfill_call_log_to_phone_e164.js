@@ -17,7 +17,10 @@
  *
  * Skipped rows:
  *   - to_phone IS NULL (no source number captured)
- *   - to_phone already starts with '+' (already E.164)
+ *   - to_phone already matches canonical US E.164 ('^\+1\d{10}$').
+ *     Note this is stricter than "starts with +": legacy Sheet rows
+ *     may hold values like '+1 (941) 318-7612' that need normalization
+ *     even though they begin with '+'.
  *   - digit-stripped value < 10 chars (garbage / partial numbers; keep
  *     the original string for debugging rather than fabricate a fake)
  *
@@ -37,7 +40,7 @@ exports.up = async function up(knex) {
     UPDATE call_log
     SET to_phone = '+1' || RIGHT(REGEXP_REPLACE(to_phone, '\\D', '', 'g'), 10)
     WHERE to_phone IS NOT NULL
-      AND to_phone NOT LIKE '+%'
+      AND to_phone !~ '^\\+1\\d{10}$'
       AND LENGTH(REGEXP_REPLACE(to_phone, '\\D', '', 'g')) >= 10
   `);
 
