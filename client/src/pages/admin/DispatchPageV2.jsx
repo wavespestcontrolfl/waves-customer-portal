@@ -777,6 +777,25 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
   const [showMoreSheet, setShowMoreSheet] = useState(false);
+  // Aggregated stats from TimeGridDays for the currently-visible range
+  // (Day / 5-Day / Week). null until the grid mounts and emits the first
+  // batch — at which point we use these for the centered stats row so the
+  // numbers reflect the visible date range, not just `?date=…`.
+  const [gridStats, setGridStats] = useState(null);
+  const handleGridStatsChange = useCallback((stats) => {
+    setGridStats(stats);
+  }, []);
+
+  // Reset gridStats whenever the visible range changes (different date or
+  // a different viewMode). Otherwise the centered stats row keeps showing
+  // the prior range's totals until the new TimeGridDays fetch lands —
+  // e.g. switching Week → Day still showed the 7-day count for a beat.
+  // The cleared state falls back to the single-day `services` numbers
+  // (already date-correct via fetchSchedule) until the grid emits fresh
+  // stats.
+  useEffect(() => {
+    setGridStats(null);
+  }, [date, viewMode]);
 
   // Expose "open create modal" to AdminDispatchPage so the lifted "+ Add
   // Appointment" pill in its header can trigger this page's modal.
@@ -911,21 +930,49 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
   const zoneColors = data.zoneColors || {};
   const zoneLabels = data.zoneLabels || {};
 
-  const totalCount = services.length;
-  const completedCount = services.filter((s) => s.status === 'completed').length;
-  const skippedCount = services.filter((s) => s.status === 'skipped').length;
-  const remainingCount = totalCount - completedCount - skippedCount;
+  // Stats source by viewMode:
+  //   - Day:           single-day `services` from /admin/schedule?date=X.
+  //                    TimeGridDay (tech swimlanes) doesn't emit gridStats.
+  //   - 5-Day / Week:  gridStats from TimeGridDays' /admin/schedule/week
+  //                    aggregation. We never fall back to single-day data
+  //                    here — that would show one day's numbers labeled
+  //                    as "the week's totals". If the grid is still
+  //                    loading or the fetch failed, the stats row hides
+  //                    via `statsAvailable` instead.
+  //   - Month:         row hidden entirely.
+  const isDayView = viewMode === 'day';
+  const isMultiDayView = viewMode === '5day' || viewMode === 'week';
+  const useGridStats = isMultiDayView && !!gridStats;
+  const statsAvailable = isDayView || useGridStats;
 
   const AVG_SERVICE_MIN = 35;
+  const AVG_SERVICE_PRICE = 125;
+
+  const totalCount = useGridStats ? gridStats.totalCount : services.length;
+  const completedCount = useGridStats ? gridStats.completedCount : services.filter((s) => s.status === 'completed').length;
+  const skippedCount = useGridStats ? gridStats.skippedCount : services.filter((s) => s.status === 'skipped').length;
+  const remainingCount = useGridStats ? gridStats.remainingCount : (totalCount - completedCount - skippedCount);
+
   const estTotalMin = totalCount * AVG_SERVICE_MIN;
   const estTotalHrs = Math.floor(estTotalMin / 60);
   const estTotalMinRemainder = estTotalMin % 60;
   const estRemainingMin = remainingCount * AVG_SERVICE_MIN;
-  const estFinishTime = (() => {
+  // ETA is "now + remaining time" — only meaningful when looking at a
+  // single day; on multi-day views it's suppressed since the implied
+  // finish time spans days.
+  const estFinishTime = isDayView ? (() => {
     const finish = new Date(Date.now() + estRemainingMin * 60000);
     return finish.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-  })();
-  const estRevenue = services.reduce((sum, s) => sum + (s.price || 125), 0);
+  })() : null;
+  // Revenue: gridStats already sums per-service estimatedPrice with a
+  // fallback. For Day, sum from the single-day services with the same
+  // logic so the badge is accurate.
+  const estRevenue = useGridStats
+    ? gridStats.revenue
+    : services.reduce(
+        (sum, s) => sum + (typeof s.estimatedPrice === 'number' ? s.estimatedPrice : AVG_SERVICE_PRICE),
+        0,
+      );
 
   const unassignedCount = unassigned.length;
   const newCustomers = services.filter((s) => !s.lastServiceDate);
@@ -994,9 +1041,14 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
         </div>
       )}
 
-      {/* Centered stats badges — schedule grid sub-tab + day view only,
-          desktop only (mobile keeps a leaner header). */}
-      {viewMode === 'day' && activeTab === 'board' && (
+      {/* Centered stats badges — schedule grid sub-tab on Day / 5-Day /
+          Week (Month uses MonthViewV2 which has its own summary), desktop
+          only. Day uses the single-day services fetch; multi-day views
+          use TimeGridDays' aggregated stats. The row hides on multi-day
+          while the week fetch is still loading or failed (statsAvailable
+          guards), instead of falling back to single-day numbers that
+          would mislabel the visible range. */}
+      {statsAvailable && activeTab === 'board' && (
         <div className="hidden md:flex justify-center mb-4">
           <div className="flex gap-3 items-center text-12 text-ink-secondary bg-white px-3 py-2 rounded-sm border-hairline border-zinc-200 flex-wrap">
             <span><span className="u-nums font-medium text-zinc-900">{totalCount}</span> services</span>
@@ -1005,7 +1057,9 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
             <span className="pl-3 border-l-hairline border-zinc-200">
               ~{estTotalHrs}h{estTotalMinRemainder > 0 ? ` ${estTotalMinRemainder}m` : ''} total
             </span>
-            <span>ETA <span className="u-nums font-medium text-zinc-900">{estFinishTime}</span></span>
+            {estFinishTime && (
+              <span>ETA <span className="u-nums font-medium text-zinc-900">{estFinishTime}</span></span>
+            )}
             <span className="pl-3 border-l-hairline border-zinc-200">
               <span className="u-nums font-medium text-zinc-900">${estRevenue.toLocaleString()}</span> revenue
             </span>
@@ -1138,6 +1192,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
           refreshKey={scheduleRefreshKey}
           onEdit={(svc) => setEditingService(svc)}
           onChange={() => fetchSchedule(date)}
+          onStatsChange={handleGridStatsChange}
           onCreateSlot={({ date: slotDate, windowStart, windowEnd }) => {
             setNewApptDefaults({ date: slotDate, windowStart, durationMinutes: slotDurationMinutes(windowStart, windowEnd) });
             setShowNewAppt(true);
@@ -1153,6 +1208,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
           refreshKey={scheduleRefreshKey}
           onEdit={(svc) => setEditingService(svc)}
           onChange={() => fetchSchedule(date)}
+          onStatsChange={handleGridStatsChange}
           onCreateSlot={({ date: slotDate, windowStart, windowEnd }) => {
             setNewApptDefaults({ date: slotDate, windowStart, durationMinutes: slotDurationMinutes(windowStart, windowEnd) });
             setShowNewAppt(true);
@@ -1298,10 +1354,13 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
             );
           })()}
 
-          {/* Calendar-style time grid — desktop inline, mobile bottom sheet.
-              Desktop "+ New Appointment" CTA removed; the "+ Add Appointment"
-              pill in the page header (top right) is the canonical desktop
-              entry point for creating an appointment. */}
+          {/* Day view keeps the per-technician swimlane layout (TimeGridDay)
+              so dispatchers can drag jobs between tech lanes and create a
+              slot pre-bound to a specific tech — the core same-day
+              reassignment workflow. The 5-Day / Week / Month views use the
+              date-column TimeGridDays since tech-by-tech granularity isn't
+              meaningful across multiple days. Visual styling on TimeGridDay
+              already mirrors TimeGridDays. */}
           <div className="hidden md:block">
             <TimeGridDay
               date={date}
