@@ -277,7 +277,7 @@ router.get('/entries/:id', requireTechOrAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // PUT /entries/:id — admin edit (requires edit_reason)
 // ---------------------------------------------------------------------------
-router.put('/entries/:id', requireTechOrAdmin, async (req, res, next) => {
+router.put('/entries/:id', requireAdmin, async (req, res, next) => {
   try {
     const { clock_in, clock_out, entry_type, notes, edit_reason } = req.body;
     if (!edit_reason) return res.status(400).json({ error: 'edit_reason is required' });
@@ -324,7 +324,7 @@ router.put('/entries/:id', requireTechOrAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // DELETE /entries/:id — void entry
 // ---------------------------------------------------------------------------
-router.delete('/entries/:id', requireTechOrAdmin, async (req, res, next) => {
+router.delete('/entries/:id', requireAdmin, async (req, res, next) => {
   try {
     const { reason } = req.body || {};
     const voided = await timeTracking.voidEntry(req.params.id, {
@@ -398,7 +398,7 @@ async function notifyTechOfApproval(summary, action, reason) {
 // ---------------------------------------------------------------------------
 // PUT /daily/:id/approve — approve a daily summary
 // ---------------------------------------------------------------------------
-router.put('/daily/:id/approve', requireTechOrAdmin, async (req, res, next) => {
+router.put('/daily/:id/approve', requireAdmin, async (req, res, next) => {
   try {
     const prior = await db('time_entry_daily_summary').where({ id: req.params.id }).first();
     if (!prior) return res.status(404).json({ error: 'Summary not found' });
@@ -422,7 +422,7 @@ router.put('/daily/:id/approve', requireTechOrAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // PUT /daily/:id/reject — reject a daily summary with reason
 // ---------------------------------------------------------------------------
-router.put('/daily/:id/reject', requireTechOrAdmin, async (req, res, next) => {
+router.put('/daily/:id/reject', requireAdmin, async (req, res, next) => {
   try {
     const { reason } = req.body || {};
     if (!reason || !reason.trim()) {
@@ -454,7 +454,7 @@ router.put('/daily/:id/reject', requireTechOrAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // PUT /daily/:id/reopen — return an approved/rejected summary to pending
 // ---------------------------------------------------------------------------
-router.put('/daily/:id/reopen', requireTechOrAdmin, async (req, res, next) => {
+router.put('/daily/:id/reopen', requireAdmin, async (req, res, next) => {
   try {
     const prior = await db('time_entry_daily_summary').where({ id: req.params.id }).first();
     if (!prior) return res.status(404).json({ error: 'Summary not found' });
@@ -502,7 +502,7 @@ router.get('/daily/:id/history', requireTechOrAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // POST /daily/bulk-approve — approve multiple daily summaries
 // ---------------------------------------------------------------------------
-router.post('/daily/bulk-approve', requireTechOrAdmin, async (req, res, next) => {
+router.post('/daily/bulk-approve', requireAdmin, async (req, res, next) => {
   try {
     const { ids } = req.body;
     if (!ids || !Array.isArray(ids) || ids.length === 0) {
@@ -546,7 +546,7 @@ router.get('/weekly', requireTechOrAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /payroll-export — CSV export for a week
 // ---------------------------------------------------------------------------
-router.get('/payroll-export', requireTechOrAdmin, async (req, res, next) => {
+router.get('/payroll-export', requireAdmin, async (req, res, next) => {
   try {
     const { weekStart } = req.query;
     if (!weekStart) return res.status(400).json({ error: 'weekStart required (YYYY-MM-DD, Monday)' });
