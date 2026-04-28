@@ -66,9 +66,17 @@ export default function AdminDispatchPage() {
   // open it without lifting the state. DispatchPageV2 calls
   // setOpenCreateHandler on mount with its own (() => setShowNewAppt(true))
   // and clears it on unmount.
+  //
+  // `createReady` mirrors the ref into render state so the button can
+  // disable itself until the lazy-loaded DispatchPageV2 chunk finishes
+  // mounting. Without this, a direct load of /admin/dispatch?tab=schedule
+  // shows an immediately-clickable button whose clicks silently no-op
+  // until the chunk resolves.
   const openCreateRef = useRef(null);
+  const [createReady, setCreateReady] = useState(false);
   const setOpenCreateHandler = useCallback((handler) => {
     openCreateRef.current = handler || null;
+    setCreateReady(typeof handler === 'function');
   }, []);
   const handleAddAppointment = () => openCreateRef.current?.();
 
@@ -181,27 +189,41 @@ export default function AdminDispatchPage() {
           <span className="hidden md:inline">Schedule</span>
         </h1>
         <div className="flex items-center gap-3">
-          {/* Desktop "+ Add Appointment" — pill mirrors "+ Add Customer". */}
+          {/* Desktop "+ Add Appointment" — pill mirrors "+ Add Customer".
+              Disabled until DispatchPageV2 registers its open-create handler
+              (the chunk is lazy, so on first load there's a brief window
+              where the click would silently no-op). */}
           <button
             type="button"
             onClick={handleAddAppointment}
+            disabled={!createReady}
+            aria-disabled={!createReady}
             className="hidden md:inline-flex"
             style={{
               padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
-              background: '#18181B', color: '#fff', border: 'none', cursor: 'pointer',
+              background: '#18181B', color: '#fff', border: 'none',
+              cursor: createReady ? 'pointer' : 'not-allowed',
+              opacity: createReady ? 1 : 0.55,
               whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
               fontFamily: "'DM Sans', sans-serif",
             }}
           >
             + Add Appointment
           </button>
-          {/* Mobile "+" circle */}
+          {/* Mobile "+" circle (same disabled-until-ready guard). */}
           <button
             type="button"
             onClick={handleAddAppointment}
+            disabled={!createReady}
+            aria-disabled={!createReady}
             aria-label="New appointment"
             className="md:hidden flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring shrink-0"
-            style={{ width: 36, height: 36 }}
+            style={{
+              width: 36,
+              height: 36,
+              opacity: createReady ? 1 : 0.55,
+              cursor: createReady ? 'pointer' : 'not-allowed',
+            }}
           >
             <Plus size={20} strokeWidth={2} />
           </button>
