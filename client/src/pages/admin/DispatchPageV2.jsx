@@ -56,7 +56,7 @@ import CreateAppointmentModal from '../../components/schedule/CreateAppointmentM
 import HorizontalScroll from '../../components/HorizontalScroll';
 import useIsMobile from '../../hooks/useIsMobile';
 import { Button, Badge, Card, CardBody, cn } from '../../components/ui';
-import { etDateString, isETToday as isETTodayStr } from '../../lib/timezone';
+import { etDateString, etStartOfWeek, isETToday as isETTodayStr } from '../../lib/timezone';
 
 const TechMatchPanel = lazy(() => import('../../components/dispatch/TechMatchPanelV2'));
 const CSRPanel = lazy(() => import('../../components/dispatch/CSRPanelV2'));
@@ -949,14 +949,10 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
   // gridStats.startDate / dayCount to what TimeGridDays *would* compute
   // for the current date+viewMode rejects the stale frame synchronously.
   const expectedDayCount = viewMode === 'week' ? 7 : viewMode === '5day' ? 5 : 1;
-  const expectedStart = useMemo(() => {
-    if (!isMultiDayView) return null;
-    const d = new Date(date + 'T12:00:00');
-    const dow = d.getDay();
-    const monday = new Date(d);
-    monday.setDate(d.getDate() - (dow === 0 ? 6 : dow - 1));
-    return etDateString(monday);
-  }, [date, isMultiDayView]);
+  const expectedStart = useMemo(
+    () => (isMultiDayView ? etStartOfWeek(date) : null),
+    [date, isMultiDayView],
+  );
   const useGridStats = isMultiDayView
     && !!gridStats
     && gridStats.startDate === expectedStart

@@ -18,7 +18,7 @@ import {
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { cn } from '../ui';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
-import { etDateString } from '../../lib/timezone';
+import { etStartOfWeek } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -486,13 +486,8 @@ function UnassignedRail({ items, onEdit, collapsed, onToggleCollapsed }) {
   );
 }
 
-function startOfWeek(dateStr) {
-  const d = new Date(dateStr + 'T12:00:00');
-  const day = d.getDay();
-  const monday = new Date(d);
-  monday.setDate(d.getDate() - (day === 0 ? 6 : day - 1));
-  return etDateString(monday);
-}
+// Mon→Sun week start. ET-safe — see lib/timezone.etStartOfWeek.
+const startOfWeek = etStartOfWeek;
 
 export default function TimeGridDays({
   date,           // anchor date (any day in the visible range)
