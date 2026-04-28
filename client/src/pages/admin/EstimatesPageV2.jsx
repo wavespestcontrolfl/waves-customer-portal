@@ -1570,39 +1570,44 @@ export default function EstimatesPageV2() {
           Pipeline
         </h1>
       </div>
-      <div
-        style={{
-          display: 'flex',
-          flexWrap: 'wrap',
-          gap: 4,
-          marginBottom: 24,
-          background: '#F4F4F5',
-          borderRadius: 10,
-          padding: 4,
-          border: '1px solid #E4E4E7',
-        }}
-      >
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            type="button"
-            onClick={() => setActiveTab(t.key)}
-            style={{
-              padding: '10px 24px',
-              borderRadius: 8,
-              border: 'none',
-              cursor: 'pointer',
-              background: activeTab === t.key ? '#18181B' : 'transparent',
-              color: activeTab === t.key ? '#FFFFFF' : '#A1A1AA',
-              fontSize: 14,
-              fontWeight: 700,
-              transition: 'all 0.2s',
-              fontFamily: "'DM Sans', sans-serif",
-            }}
-          >
-            {t.label}
-          </button>
-        ))}
+      {/* Centered tab strip — wrapper centers the inline-flex pill bar
+          so it shrinks to its content and floats in the middle of the
+          page, matching the Customers view toggle. */}
+      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
+        <div
+          style={{
+            display: 'inline-flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            gap: 4,
+            background: '#F4F4F5',
+            borderRadius: 10,
+            padding: 4,
+            border: '1px solid #E4E4E7',
+          }}
+        >
+          {TABS.map((t) => (
+            <button
+              key={t.key}
+              type="button"
+              onClick={() => setActiveTab(t.key)}
+              style={{
+                padding: '10px 24px',
+                borderRadius: 8,
+                border: 'none',
+                cursor: 'pointer',
+                background: activeTab === t.key ? '#18181B' : 'transparent',
+                color: activeTab === t.key ? '#FFFFFF' : '#A1A1AA',
+                fontSize: 14,
+                fontWeight: 700,
+                transition: 'all 0.2s',
+                fontFamily: "'DM Sans', sans-serif",
+              }}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {activeTab === 'leads' && <LeadsSection />}
