@@ -189,7 +189,10 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
       title={`${service.customerName || 'Unassigned'} · ${service.serviceType || ''} · ${service.windowStart || ''}${service.technicianName ? ' · ' + service.technicianName : ''}`}
     >
       <div className="opacity-90 truncate text-10">
-        {service.windowStart || ''}
+        {(() => {
+          const min = parseHHMM(service.windowStart);
+          return min == null ? '' : minutesToLabel(min);
+        })()}
       </div>
       <div className="font-medium truncate">{service.customerName || 'Unassigned'}</div>
       {height > SLOT_HEIGHT && (
