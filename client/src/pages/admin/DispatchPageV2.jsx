@@ -915,7 +915,10 @@ export default function DispatchPageV2() {
       <div className="flex justify-between items-start mb-4 flex-wrap gap-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-start justify-between gap-3">
-            <h1 className="text-28 font-normal tracking-h1 text-zinc-900">Schedule</h1>
+            <h1 className="text-28 font-normal tracking-h1 text-zinc-900">
+              <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Schedule</span>
+              <span className="hidden md:inline">Schedule</span>
+            </h1>
             {/* Mobile "+" — matches the Customers pattern; opens CreateAppointmentModal. */}
             <button
               type="button"

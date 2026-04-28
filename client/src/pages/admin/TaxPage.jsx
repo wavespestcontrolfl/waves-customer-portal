@@ -1074,7 +1074,10 @@ export default function TaxPage() {
   return (
     <div style={{ maxWidth: 1200 }}>
       <div style={{ marginBottom: 20 }}>
-        <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>Tax Center</h1>
+        <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>
+          <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Tax Center</span>
+          <span className="hidden md:inline">Tax Center</span>
+        </h1>
       </div>
 
       {/* Dashboard stats */}

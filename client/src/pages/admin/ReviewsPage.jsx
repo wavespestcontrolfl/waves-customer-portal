@@ -1291,7 +1291,10 @@ export default function ReviewsPage() {
 
   return (
     <div>
-      <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: '0 0 16px' }}>Reviews</h1>
+      <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: '0 0 16px' }}>
+        <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Reviews</span>
+        <span className="hidden md:inline">Reviews</span>
+      </h1>
 
       {/* ====================== TAB TOGGLE ====================== */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 24, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>

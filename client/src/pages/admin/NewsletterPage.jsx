@@ -457,7 +457,10 @@ export default function NewsletterPage() {
       {/* Title + Create */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
         <div>
-          <h1 className="text-28 font-normal tracking-h1 text-ink-primary">Newsletter</h1>
+          <h1 className="text-28 font-normal tracking-h1 text-ink-primary">
+            <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Newsletter</span>
+            <span className="hidden md:inline">Newsletter</span>
+          </h1>
         </div>
         <button
           type="button"

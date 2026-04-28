@@ -1376,7 +1376,8 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
       {/* Title row — matches Customers header: h1 + round FAB when v3 flag on. */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
         <h1 className="text-28 font-normal tracking-h1 text-ink-primary">
-          Estimates
+          <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Estimates</span>
+          <span className="hidden md:inline">Estimates</span>
         </h1>
         <button
           type="button"

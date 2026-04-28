@@ -178,7 +178,7 @@ export default function DashboardPageV2() {
               {todayLabel}
             </div>
             <h1 className="text-28 font-normal tracking-h1 mt-1 max-md:mt-2">
-              <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, letterSpacing: '-0.015em', lineHeight: 1.1 }}>{greeting()}, Adam</span>
+              <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>{greeting()}, Adam</span>
               <span className="hidden md:inline">{greeting()}, Adam</span>
             </h1>
           </div>

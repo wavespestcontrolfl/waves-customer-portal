@@ -712,7 +712,10 @@ export default function CustomersPageV2() {
       {/* ======================= HEADER ======================= */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
         <div className="flex items-center justify-between gap-3 w-full sm:w-auto">
-          <h1 className="text-28 font-normal tracking-h1 text-ink-primary">Customers</h1>
+          <h1 className="text-28 font-normal tracking-h1 text-ink-primary">
+            <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Customers</span>
+            <span className="hidden md:inline">Customers</span>
+          </h1>
           {view === 'directory' && (
             <button
               type="button"

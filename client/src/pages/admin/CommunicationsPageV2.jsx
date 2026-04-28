@@ -1256,15 +1256,9 @@ export default function CommunicationsPageV2() {
     <div className="bg-surface-page min-h-full p-4 md:p-6 font-sans text-zinc-900 max-w-[1200px]">
       <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
         <div>
-          {/* Mobile h1 matches MobileSettingsPage Square style (inline 700 escapes V2 400/500 font restriction). Desktop stays on the V2 28/normal spec. */}
-          <h1
-            className="md:hidden text-zinc-900"
-            style={{ fontSize: 32, fontWeight: 700, letterSpacing: '-0.015em', lineHeight: 1.1, margin: 0 }}
-          >
-            Communications
-          </h1>
-          <h1 className="hidden md:block text-28 font-normal tracking-h1 text-zinc-900">
-            Communications
+          <h1 className="text-28 font-normal tracking-h1 text-zinc-900">
+            <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Communications</span>
+            <span className="hidden md:inline">Communications</span>
           </h1>
         </div>
       </div>
