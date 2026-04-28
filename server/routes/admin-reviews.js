@@ -102,22 +102,26 @@ router.get('/', async (req, res, next) => {
     const avgGoogleRating = Object.values(googleStats).length > 0
       ? (Object.values(googleStats).reduce((s, g) => s + (g.rating || 0), 0) / Object.values(googleStats).filter(g => g.rating).length).toFixed(1)
       : parseFloat(totals?.avg_rating || 0);
-    // True only when every configured location has a `_stats` row whose
-    // synced_at is recent. Places sync runs hourly and swallows
-    // per-location errors (services/google-business.js syncAllReviews),
-    // so a stale row from a previous successful run can outlive the
-    // failure. The 24h window absorbs transient sync hiccups while still
-    // catching multi-run outages — once a location goes a full day
-    // without a fresh _stats write, the client falls back to the
-    // responded+unresponded denominator instead of silently mismatching
-    // numerator and denominator populations.
+    // True only when every currently-configured location has a `_stats`
+    // row whose synced_at is recent. Places sync runs hourly and
+    // swallows per-location errors (services/google-business.js
+    // syncAllReviews), so a stale row from a previous successful run
+    // can outlive the failure. We check each WAVES_LOCATIONS ID
+    // explicitly (rather than aggregate row counts) so a stale row from
+    // a retired location can't satisfy the count while a newly added
+    // location has no row yet. The 24h window absorbs transient sync
+    // hiccups; once any configured location goes a full day without a
+    // fresh _stats write, the client falls back to the
+    // responded+unresponded denominator.
     const STATS_FRESH_MS = 24 * 60 * 60 * 1000;
     const now = Date.now();
-    const freshStatsCount = Object.values(googleStats).filter(g => {
-      const t = g.syncedAt ? new Date(g.syncedAt).getTime() : 0;
+    const isFresh = (locId) => {
+      const g = googleStats[locId];
+      if (!g?.syncedAt) return false;
+      const t = new Date(g.syncedAt).getTime();
       return t > 0 && (now - t) <= STATS_FRESH_MS;
-    }).length;
-    const googleStatsComplete = freshStatsCount === WAVES_LOCATIONS.length;
+    };
+    const googleStatsComplete = WAVES_LOCATIONS.every(loc => isFresh(loc.id));
 
     res.json({
       reviews: reviews.map(r => ({
