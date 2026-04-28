@@ -266,11 +266,14 @@ const CallRecordingProcessor = {
     // processRecording on a 5s delay. Without this atomic claim, both
     // race through extraction and both send the confirmation SMS. Atomic
     // UPDATE → conditional exit: the first run wins, the second bails.
-    // Track the latest updated_at this run wrote, so the catch-block release
-    // below can fence on ownership: if the row's updated_at no longer matches,
-    // the 10-min stale reclaim already handed the lock to another run and we
-    // must not touch processing_status (or we'd unlock a peer mid-flight).
-    let claimUpdatedAt = new Date();
+    // Owner fence for the catch-block release below: write a fresh random
+    // token at claim time, match it on release. Only this code path writes
+    // processing_token, so unrelated updates to call_log.updated_at (e.g.
+    // the Twilio transcription webhook in twilio-voice-webhook.js) can't
+    // accidentally invalidate the fence. When the 10-min stale reclaim
+    // hands the lock to a peer, the peer's claim overwrites the token and
+    // our catch-block UPDATE matches 0 rows — we leave the peer alone.
+    const procToken = crypto.randomBytes(16).toString('hex');
     if (!opts.force) {
       // Reclaim stale 'processing' rows older than 10 min — server crash or
       // Gemini hang between claim (this UPDATE) and terminal status write
@@ -283,11 +286,16 @@ const CallRecordingProcessor = {
           this.whereNot('processing_status', 'processing')
             .orWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
         })
-        .update({ processing_status: 'processing', updated_at: claimUpdatedAt });
+        .update({ processing_status: 'processing', processing_token: procToken, updated_at: new Date() });
       if (claimed === 0) {
         logger.info(`[call-proc] Concurrent run detected for ${callSid} — skipping`);
         return { success: true, skipped: true, reason: 'already_processing' };
       }
+    } else {
+      // force=true skips the claim entirely (admin Reprocess on a row that's
+      // already 'processed'). Still stamp our token so the catch-block fence
+      // works if this run throws — without it, the WHERE matches no row.
+      await db('call_log').where({ twilio_call_sid: callSid }).update({ processing_token: procToken });
     }
 
     logger.info(`[call-proc] Processing recording for ${callSid}`);
@@ -304,13 +312,11 @@ const CallRecordingProcessor = {
     if (call.recording_url) {
       transcription = await transcribeWithGemini(call.recording_url);
       if (transcription) {
-        const transcriptionAt = new Date();
         await db('call_log').where({ id: call.id }).update({
           transcription,
           transcription_status: 'completed',
-          updated_at: transcriptionAt,
+          updated_at: new Date(),
         });
-        claimUpdatedAt = transcriptionAt;
         logger.info(`[call-proc] Gemini transcription complete: ${transcription.length} chars`);
       }
     }
@@ -331,6 +337,7 @@ const CallRecordingProcessor = {
       logger.warn(`[call-proc] No transcription available for ${callSid}`);
       await db('call_log').where({ id: call.id }).update({
         processing_status: 'no_transcription',
+        processing_token: null,
         updated_at: new Date(),
       });
       return { success: false, error: 'No transcription available' };
@@ -344,6 +351,7 @@ const CallRecordingProcessor = {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
       await db('call_log').where({ id: call.id }).update({
         processing_status: 'extraction_failed',
+        processing_token: null,
         updated_at: new Date(),
       });
       return { success: false, error: `AI extraction failed: ${err.message}` };
@@ -354,6 +362,7 @@ const CallRecordingProcessor = {
       await db('call_log').where({ id: call.id }).update({
         ai_extraction: JSON.stringify(extracted),
         processing_status: extracted.is_spam ? 'spam' : 'voicemail',
+        processing_token: null,
         updated_at: new Date(),
       });
       logger.info(`[call-proc] Skipping ${callSid}: ${extracted.is_spam ? 'spam' : 'voicemail'}`);
@@ -444,6 +453,7 @@ const CallRecordingProcessor = {
       sentiment: extracted.sentiment || null,
       lead_quality: extracted.lead_quality || null,
       processing_status: 'processed',
+      processing_token: null,
       updated_at: new Date(),
     });
 
@@ -822,18 +832,16 @@ const CallRecordingProcessor = {
     } catch (procErr) {
       logger.error(`[call-proc] Unhandled error processing ${callSid}: ${procErr.message}\n${procErr.stack || ''}`);
       try {
-        // Fence on ownership: only release the lock if the row is still in
-        // 'processing' AND updated_at matches the timestamp this run wrote
-        // most recently (claim, or transcription write). If it doesn't match,
-        // the 10-min stale reclaim already gave the lock to a peer and we
-        // must leave it alone — touching it would let yet another run claim
-        // while the peer is mid-flight, duplicating side effects.
+        // Fence on processing_token (owner-only column). If the 10-min stale
+        // reclaim handed the lock to a peer, the peer's claim overwrote our
+        // token and this UPDATE matches 0 rows — we log and bail without
+        // disturbing the peer's lock or duplicating side effects.
         const released = await db('call_log')
           .where({ id: call.id })
-          .where('processing_status', 'processing')
-          .where('updated_at', claimUpdatedAt)
+          .where('processing_token', procToken)
           .update({
             processing_status: 'extraction_failed',
+            processing_token: null,
             updated_at: new Date(),
           });
         if (released === 0) {
