@@ -339,7 +339,7 @@ export default function EmailPage() {
   ];
 
   return (
-    <div style={{ padding: '24px 32px' }}>
+    <div style={{ padding: '24px 32px', maxWidth: 1200, margin: '0 auto' }}>
       {/* Header — mailbox subtitle + last-sync timestamp + Sync Now
           button all removed. The page tab itself labels the surface,
           and scheduler.js syncs Gmail → PostgreSQL every 2 min so a
