@@ -911,17 +911,19 @@ export default function DispatchPageV2() {
 
   return (
     <div className="bg-surface-page min-h-full p-4 md:p-6 font-sans text-zinc-900">
-      {/* Header */}
+      {/* Header — page heading lives in AdminDispatchPage now (above the
+          Board/Schedule tab strip). This block keeps the mobile "+ New
+          appointment" button right-aligned at the top of the Schedule
+          content; on desktop the same button lives in the date-nav row
+          below. */}
       <div className="flex justify-between items-start mb-4 flex-wrap gap-3">
         <div className="flex-1 min-w-0">
-          <div className="flex items-start justify-between gap-3">
-            <h1 className="text-28 font-normal tracking-h1 text-zinc-900">Schedule</h1>
-            {/* Mobile "+" — matches the Customers pattern; opens CreateAppointmentModal. */}
+          <div className="flex items-start justify-end gap-3 md:hidden">
             <button
               type="button"
               onClick={() => setShowNewAppt(true)}
               aria-label="New appointment"
-              className="md:hidden flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring shrink-0"
+              className="flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring shrink-0"
               style={{ width: 36, height: 36 }}
             >
               <Plus size={20} strokeWidth={2} />

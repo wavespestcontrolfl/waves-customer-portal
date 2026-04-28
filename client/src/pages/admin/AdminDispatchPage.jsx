@@ -76,6 +76,12 @@ export default function AdminDispatchPage() {
 
   return (
     <div className="flex flex-col bg-surface-page min-h-[calc(100vh-64px)]">
+      {/* Page heading — owned by AdminDispatchPage now (was duplicated
+          inside DispatchPageV2). Sits above the tab strip so the title
+          stays anchored regardless of which view is active. */}
+      <div className="px-4 md:px-6 pt-4 md:pt-6">
+        <h1 className="text-28 font-normal tracking-h1 text-zinc-900">Schedule</h1>
+      </div>
       {/* Centered Pipeline-page tab strip — mirrors the
           Leads/Estimates/Create/Pricing pill (EstimatesPageV2) so
           the dispatcher's two top-level views read consistently with
