@@ -163,7 +163,7 @@ const EstimateConverter = {
     await db('activity_log').insert({
       customer_id: customerId,
       action: 'estimate_converted',
-      description: `Estimate #${estimateId} converted: ${customer.first_name} ${customer.last_name} → ${tier} WaveGuard at $${monthlyRate.toFixed(2)}/mo (${serviceCount} services, ${scheduledCount} scheduled)`,
+      description: `Estimate #${estimateId} converted: ${customer.first_name} ${customer.last_name} → WaveGuard ${tier} at $${monthlyRate.toFixed(2)}/mo (${serviceCount} services, ${scheduledCount} scheduled)`,
       metadata: JSON.stringify({
         estimateId, tier, discount, monthlyRate, serviceCount, scheduledCount,
       }),
