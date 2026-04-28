@@ -243,29 +243,49 @@ export function WeekViewV2({ startDate, onDateClick }) {
 
 // ─── MONTH VIEW ──────────────────────────────────────────────────
 
+// Square-style month-cell chip: solid blue pill with "time · customer"
+// stacked across the row. Mirrors the appointment-block palette in
+// TimeGridDay/TimeGridDays so the calendar reads as one visual system.
 function MonthServiceChip({ service }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `msvc-${service.id}`,
     data: { service },
   });
+  const startMin = parseHHMM(service.windowStart);
+  const time = startMin != null ? minutesToLabelMonth(startMin) : '';
+  const completed = service.status === 'completed';
+  const fill = completed
+    ? null                    // bg-zinc-200 via class — faded done state
+    : service.status === 'en_route'
+      ? '#1E40AF'             // deeper blue — actively heading
+      : service.status === 'on_site'
+        ? '#18181B'           // black — active here
+        : service.status === 'skipped'
+          ? null              // class handles alert-bg/alert-fg
+          : '#3B82F6';        // Square default
+
   return (
     <div
       ref={setNodeRef}
       {...attributes}
       {...listeners}
       className={cn(
-        'text-11 truncate leading-tight cursor-grab active:cursor-grabbing select-none',
-        service.status === 'completed' ? 'line-through text-ink-tertiary' : 'text-ink-primary',
+        'text-11 truncate leading-tight cursor-grab active:cursor-grabbing select-none px-1.5 py-0.5 rounded-xs',
+        completed && 'bg-zinc-200 text-zinc-500 line-through',
+        service.status === 'skipped' && 'bg-alert-bg text-alert-fg',
+        !completed && service.status !== 'skipped' && 'text-white',
         isDragging && 'opacity-60'
       )}
       style={{
+        background: fill || undefined,
         transform: transform ? `translate3d(${transform.x}px, ${transform.y}px, 0)` : undefined,
         zIndex: isDragging ? 50 : undefined,
       }}
       title={`${service.customerName} · ${service.serviceType || ''} · ${service.windowStart || ''}${service.techName ? ' · ' + service.techName : ''}`}
       onClick={(e) => e.stopPropagation()}
     >
-      {service.customerName?.split(' ')[0] || '—'}
+      {time && <span className="font-medium mr-1">{time}</span>}
+      <span>{service.customerName || '—'}</span>
     </div>
   );
 }
@@ -285,14 +305,14 @@ function MonthDayCell({ day, di, onDateClick }) {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onDateClick(day.date); }
       }}
       className={cn(
-        'text-left min-h-[56px] md:min-h-[90px] p-1 md:p-2 transition-colors u-focus-ring cursor-pointer',
+        'text-left min-h-[56px] md:min-h-[120px] p-1 md:p-1.5 transition-colors u-focus-ring cursor-pointer',
         day.isToday ? 'bg-zinc-50' : 'bg-white hover:bg-zinc-50',
         !day.isCurrentMonth && 'opacity-40',
         isOver && 'bg-zinc-100 ring-1 ring-zinc-400 ring-inset'
       )}
       style={di < 6 ? { borderRight: '1px solid #E4E4E7' } : undefined}
     >
-      {/* Day number + count */}
+      {/* Day number */}
       <div className="flex items-center justify-between mb-1">
         <span
           className={cn(
@@ -305,34 +325,23 @@ function MonthDayCell({ day, di, onDateClick }) {
           {day.dayNum}
         </span>
         {day.count > 0 && (
-          <span className="u-nums text-11 font-medium text-zinc-900">
+          <span className="u-nums text-11 font-medium text-ink-tertiary">
             {day.count}
           </span>
         )}
       </div>
 
-      {/* Category dots */}
-      {day.count > 0 && Object.keys(day.categoryCounts || {}).length > 0 && (
-        <div className="flex gap-1 flex-wrap mb-1">
-          {Object.entries(day.categoryCounts).map(([cat, count]) => (
-            <span
-              key={cat}
-              title={`${cat}: ${count}`}
-              className="u-dot u-dot--filled"
-            />
-          ))}
-        </div>
-      )}
-
-      {/* Draggable service list (first 3) — desktop only; mobile cells keep just dots + count */}
-      <div className="hidden md:block space-y-0.5">
-        {day.services.slice(0, 3).map((s) => (
+      {/* Square-style chip stack — desktop only; mobile cells keep just the
+          day number + total. Chips show time + customer name on a solid
+          blue pill, mirroring the swimlane block palette. */}
+      <div className="hidden md:block space-y-1">
+        {day.services.slice(0, 6).map((s) => (
           <MonthServiceChip key={s.id} service={s} />
         ))}
       </div>
-      {day.count > 3 && (
-        <div className="hidden md:block text-11 text-ink-tertiary mt-0.5">
-          +{day.count - 3}
+      {day.count > 6 && (
+        <div className="hidden md:block text-11 text-ink-tertiary mt-1">
+          +{day.count - 6} more
         </div>
       )}
     </div>
