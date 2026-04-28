@@ -84,8 +84,13 @@ router.get('/', async (req, res, next) => {
       } catch { /* ignore */ }
     }
 
-    // Aggregate stats from actual reviews (excluding _stats rows)
-    const reviewsOnly = db('google_reviews').where('reviewer_name', '!=', '_stats');
+    // Aggregate stats from actual reviews (excluding _stats rows).
+    // Scoped to currently-configured WAVES_LOCATIONS so unreplied reviews
+    // from retired/renamed GBPs don't pad the unresponded count and
+    // skew the response-rate math (denominator already excludes them).
+    const reviewsOnly = db('google_reviews')
+      .where('reviewer_name', '!=', '_stats')
+      .whereIn('location_id', activeLocationIds);
     const [totals, unresponded, respondedCountRow, thisMonth, perLocation] = await Promise.all([
       reviewsOnly.clone().select(
         db.raw('COUNT(*) as total'),
@@ -100,8 +105,12 @@ router.get('/', async (req, res, next) => {
         .groupBy('location_id'),
     ]);
 
-    // Star breakdown (exclude stats rows)
-    const breakdown = await db('google_reviews').where('reviewer_name', '!=', '_stats').select('star_rating').count('* as count').groupBy('star_rating').orderBy('star_rating', 'desc');
+    // Star breakdown (exclude stats rows; scope to active locations).
+    const breakdown = await db('google_reviews')
+      .where('reviewer_name', '!=', '_stats')
+      .whereIn('location_id', activeLocationIds)
+      .select('star_rating').count('* as count')
+      .groupBy('star_rating').orderBy('star_rating', 'desc');
 
     // Use Google's real totals if available
     const totalGoogleReviews = Object.values(googleStats).reduce((s, g) => s + (g.totalReviews || 0), 0);
