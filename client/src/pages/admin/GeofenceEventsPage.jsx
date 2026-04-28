@@ -97,10 +97,15 @@ function variantClasses(variant) {
   }
 }
 
+// Pinned to America/New_York. The portal is ET-only by policy
+// (CLAUDE.md), and an admin reading auto-flip events from a phone
+// in another timezone would otherwise see shifted timestamps and
+// misclassify rollout behavior.
 function fmtTime(iso) {
   if (!iso) return '—';
   try {
     return new Date(iso).toLocaleString('en-US', {
+      timeZone: 'America/New_York',
       month: 'short', day: 'numeric',
       hour: 'numeric', minute: '2-digit',
     });
@@ -126,8 +131,13 @@ export default function GeofenceEventsPage() {
     setLoading(true);
     setError(null);
     try {
+      // Send a full ISO timestamp, not YYYY-MM-DD. The backend
+      // applies `event_timestamp >= startDate` directly, and rounding
+      // to calendar day would let "Last 24 hours" return up to ~48
+      // hours of data depending on local time — disagreeing with the
+      // summary endpoint's exact rolling-hour cutoff.
       const startDate = new Date(Date.now() - sinceHours * 60 * 60 * 1000)
-        .toISOString().slice(0, 10);
+        .toISOString();
       const params = new URLSearchParams({
         startDate,
         limit: '100',
