@@ -39,18 +39,31 @@ const formatDay = formatETDay;
 const formatDate = formatETDate;
 const formatTime = formatETTime;
 
+// Strip admin-disambiguation suffixes ("(Bi-Monthly)", " — Heavy") from a
+// service name before it lands in customer-facing SMS. Catalog rows carry the
+// frequency/tier in the name so admin tables can disambiguate; the customer
+// just needs the base service name. No-op on already-clean strings.
+function smsServiceLabel(name) {
+  if (!name) return 'service';
+  const cleaned = String(name)
+    .replace(/\s+[—–]\s+.+$/, '')
+    .replace(/\s*\([^)]*\)\s*$/, '')
+    .trim();
+  return cleaned || String(name);
+}
+
 // Joined service label for multi-service appointments. Returns the parent name
 // alone for single-service visits, "A & B" for two, and Oxford-comma style
 // "A, B, and C" for three or more. The result is persisted into
 // appointment_reminders.service_type so the cron / reschedule / cancel paths
 // inherit it automatically without re-querying addons.
 async function buildServiceLabel(scheduledServiceId, parentName) {
-  const fallback = parentName || 'service';
+  const fallback = smsServiceLabel(parentName);
   try {
     const addons = await db('scheduled_service_addons')
       .where({ scheduled_service_id: scheduledServiceId })
       .pluck('service_name');
-    const all = [parentName, ...addons].map(s => (s || '').trim()).filter(Boolean);
+    const all = [parentName, ...addons].map(s => smsServiceLabel(s)).filter(Boolean);
     if (all.length <= 1) return fallback;
     if (all.length === 2) return `${all[0]} & ${all[1]}`;
     return `${all.slice(0, -1).join(', ')}, and ${all[all.length - 1]}`;
@@ -290,10 +303,11 @@ const AppointmentReminders = {
             const date = formatDate(apptTime);
             const time = formatTime(apptTime);
 
+            const serviceLabel = smsServiceLabel(r.service_type);
             const body = await renderTemplate(
               'reminder_72h',
-              { first_name: firstName, service_type: r.service_type, day, date, time },
-              `Hello ${firstName}! This is a reminder from Waves that your ${r.service_type} appointment is scheduled for ${day} at ${time}.\n\nExpect your technician to arrive within a two-hour window of your scheduled start time. Need to reschedule? Log into your Waves Customer Portal at portal.wavespestcontrol.com.\n\nIf you have any questions or need assistance, simply reply to this message.`,
+              { first_name: firstName, service_type: serviceLabel, day, date, time },
+              `Hello ${firstName}! This is a reminder from Waves that your ${serviceLabel} appointment is scheduled for ${day} at ${time}.\n\nExpect your technician to arrive within a two-hour window of your scheduled start time. Need to reschedule? Log into your Waves Customer Portal at portal.wavespestcontrol.com.\n\nIf you have any questions or need assistance, simply reply to this message.`,
             );
 
             await safeSend(r.customer_id, contact.phone, body);
@@ -330,10 +344,11 @@ const AppointmentReminders = {
             const firstName = contact.name || customer?.first_name || 'there';
             const time = formatTime(apptTime);
 
+            const serviceLabel = smsServiceLabel(r.service_type);
             const body = await renderTemplate(
               'reminder_24h',
-              { first_name: firstName, service_type: r.service_type, time },
-              `Hello ${firstName}! This is a reminder from Waves that your ${r.service_type} appointment is scheduled for tomorrow at ${time}.\n\nExpect your technician to arrive within a two-hour window of your scheduled start time. Your tech will text you when they are 15 minutes out.\n\nIf you have any questions or need assistance, simply reply to this message.`,
+              { first_name: firstName, service_type: serviceLabel, time },
+              `Hello ${firstName}! This is a reminder from Waves that your ${serviceLabel} appointment is scheduled for tomorrow at ${time}.\n\nExpect your technician to arrive within a two-hour window of your scheduled start time. Your tech will text you when they are 15 minutes out.\n\nIf you have any questions or need assistance, simply reply to this message.`,
             );
 
             await safeSend(r.customer_id, contact.phone, body);
@@ -403,10 +418,11 @@ const AppointmentReminders = {
         const date = formatDate(newApptTime);
         const time = formatTime(newApptTime);
 
+        const serviceLabel = smsServiceLabel(record.service_type);
         const body = await renderTemplate(
           'appointment_rescheduled',
-          { first_name: firstName, service_type: record.service_type, day, date, time },
-          `Hello ${firstName}! Your ${record.service_type} with Waves has been rescheduled to ${day}, ${date} at ${time}.\n\n` +
+          { first_name: firstName, service_type: serviceLabel, day, date, time },
+          `Hello ${firstName}! Your ${serviceLabel} with Waves has been rescheduled to ${day}, ${date} at ${time}.\n\n` +
             `Please ensure gates are unlocked and pets are secured before we arrive.\n\n` +
             `Questions? Reply to this message.\nThank you for choosing Waves!`,
         );
@@ -449,10 +465,11 @@ const AppointmentReminders = {
         const day = formatDay(apptTime);
         const date = formatDate(apptTime);
 
+        const serviceLabel = smsServiceLabel(record.service_type);
         const body = await renderTemplate(
           'appointment_cancelled',
-          { first_name: firstName, service_type: record.service_type, day, date },
-          `Hello ${firstName}! Your ${record.service_type} with Waves scheduled for ${day}, ${date} has been cancelled.\n\n` +
+          { first_name: firstName, service_type: serviceLabel, day, date },
+          `Hello ${firstName}! Your ${serviceLabel} with Waves scheduled for ${day}, ${date} has been cancelled.\n\n` +
             `Need to rebook? Reply to this message and we'll get you scheduled.\nThank you for choosing Waves!`,
         );
 
