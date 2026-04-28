@@ -1055,8 +1055,9 @@ export default function SEOPage() {
     <div>
       <style>{`
         @media (max-width: 640px) {
-          .seo-tab-bar { overflow-x: auto !important; -webkit-overflow-scrolling: touch !important; flex-wrap: nowrap !important; scrollbar-width: none; }
+          .seo-tab-bar { overflow-x: auto !important; -webkit-overflow-scrolling: touch !important; justify-content: flex-start !important; scrollbar-width: none; }
           .seo-tab-bar::-webkit-scrollbar { display: none; }
+          .seo-tab-bar-inner { flex-wrap: nowrap !important; }
           .seo-tab-bar button { padding: 8px 12px !important; font-size: 12px !important; flex-shrink: 0 !important; }
           .seo-kpi-grid-4 { grid-template-columns: repeat(2, 1fr) !important; }
           .seo-kpi-grid-5 { grid-template-columns: repeat(2, 1fr) !important; }
@@ -1081,8 +1082,8 @@ export default function SEOPage() {
         <div style={{ fontSize: 12, color: D.muted, fontFamily: MONO }}>wavespestcontrol.com</div>
       </div>
 
-      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
-        <div className="seo-tab-bar" style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
+      <div className="seo-tab-bar" style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
+        <div className="seo-tab-bar-inner" style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
           {tabs.map(t => (
             <button key={t.key} onClick={() => setTab(t.key)} style={{
               padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
