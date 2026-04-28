@@ -397,12 +397,12 @@ function SortHeaderV2({ label, sortKey, currentSort, currentDir, onSort, classNa
 // --- View toggle (flat pill row, no emoji) ---
 // Mobile lands on Directory with no visible toggle (it's the only
 // mobile view). Desktop also defaults to Directory (list-first),
-// with Map / Pipeline / Health / AI Advisor as secondary tabs in
-// the pill strip.
+// with Map / Health / AI Advisor as secondary tabs in the pill
+// strip. Pipeline lives on its own page (`/admin/estimates`) — the
+// nav link is the canonical surface, no need for a duplicate tab here.
 const VIEWS = [
   { key: 'directory', label: 'Directory', desktopOnly: true },
   { key: 'map', label: 'Map', desktopOnly: true },
-  { key: 'pipeline', label: 'Pipeline', desktopOnly: true },
   { key: 'health', label: 'Health', desktopOnly: true },
   { key: 'intelligence', label: 'AI Advisor', desktopOnly: true },
 ];
