@@ -69,6 +69,15 @@ const CADENCE_OPTIONS = [
   { value: 'custom', label: 'Custom (every N days)' },
 ];
 
+// Booster months — extra visits on top of a recurring base. Common pattern:
+// quarterly pest + boosters in Jun/Aug. Months are 1-indexed.
+const MONTH_CHIPS = [
+  { value: 1, label: 'J' }, { value: 2, label: 'F' }, { value: 3, label: 'M' },
+  { value: 4, label: 'A' }, { value: 5, label: 'M' }, { value: 6, label: 'J' },
+  { value: 7, label: 'J' }, { value: 8, label: 'A' }, { value: 9, label: 'S' },
+  { value: 10, label: 'O' }, { value: 11, label: 'N' }, { value: 12, label: 'D' },
+];
+
 const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 16, fontFamily: 'inherit', fontWeight: 400, outline: 'none', boxSizing: 'border-box', minHeight: 44, colorScheme: 'light' };
 const labelStyle = { fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 500, display: 'block', marginBottom: 4 };
 const sectionStyle = { background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}`, marginBottom: 12 };
@@ -199,6 +208,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const updateServiceInterval = (idx, val) => {
     setServices((arr) => arr.map((s, i) => (i === idx ? { ...s, intervalDays: val } : s)));
   };
+  const toggleBoosterMonth = (idx, month) => {
+    setServices((arr) => arr.map((s, i) => {
+      if (i !== idx) return s;
+      const current = Array.isArray(s.boosterMonths) ? s.boosterMonths : [];
+      const next = current.includes(month) ? current.filter((m) => m !== month) : [...current, month].sort((a, b) => a - b);
+      return { ...s, boosterMonths: next };
+    }));
+  };
   const removeServiceAt = (idx) => {
     setServices((arr) => arr.filter((_, i) => i !== idx));
   };
@@ -211,6 +228,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         price: defaultPrice ? String(defaultPrice) : '',
         cadence: 'one_time',
         intervalDays: 30,
+        boosterMonths: [],
       },
     ]);
     setServiceSearch('');
@@ -425,6 +443,22 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           recurringIntervalDays: isRecurring && group.cadence === 'custom' ? group.intervalDays : undefined,
           skipWeekends: isRecurring ? !!skipWeekends : undefined,
           weekendShift: isRecurring && skipWeekends ? weekendShift : undefined,
+          boosterMonths: isRecurring
+            ? (() => {
+                // Union of every line's booster month picks in this cadence
+                // group. Operators most often configure boosters on the
+                // primary, but if they tag chips on add-on lines too, those
+                // months should also produce booster visits.
+                const set = new Set();
+                for (const s of group.lines) {
+                  if (Array.isArray(s.boosterMonths)) {
+                    for (const m of s.boosterMonths) set.add(parseInt(m));
+                  }
+                }
+                const arr = Array.from(set).filter((m) => m >= 1 && m <= 12).sort((a, b) => a - b);
+                return arr.length > 0 ? arr : undefined;
+              })()
+            : undefined,
           discountType: discountType || undefined,
           discountAmount: discountType && discountAmount !== '' ? Number(discountAmount) : undefined,
           createInvoice: true,
@@ -650,6 +684,32 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   </div>
                 )}
               </div>
+              {svc.cadence && svc.cadence !== 'one_time' && (
+                <div style={{ marginTop: 10 }}>
+                  <label style={labelStyle}>Booster months (optional)</label>
+                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                    {MONTH_CHIPS.map((m) => {
+                      const on = (svc.boosterMonths || []).includes(m.value);
+                      return (
+                        <button
+                          key={m.value}
+                          type="button"
+                          onClick={() => toggleBoosterMonth(idx, m.value)}
+                          aria-label={`Booster month ${m.value}`}
+                          style={{
+                            width: 32, height: 32, borderRadius: 6, fontSize: 12,
+                            fontWeight: 600, cursor: 'pointer',
+                            background: on ? D.teal : 'transparent',
+                            color: on ? '#fff' : D.muted,
+                            border: `1px solid ${on ? D.teal : D.border}`,
+                            padding: 0,
+                          }}
+                        >{m.label}</button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           ))}
 
