@@ -1334,6 +1334,13 @@ function EarningsModal({ tech, onClose, showToast }) {
   const [thisWeek, setThisWeek] = useState(null);
   const [lastWeek, setLastWeek] = useState(null);
   const [loading, setLoading] = useState(true);
+  // Keep a stable handle on showToast so the fetch effect can stay
+  // keyed only on tech.id. The parent recreates showToast on every
+  // render; if we depended on it directly, a failed fetch would call
+  // it, the parent would re-render with a new identity, the effect
+  // would re-fire, and we'd loop the API.
+  const showToastRef = useRef(showToast);
+  useEffect(() => { showToastRef.current = showToast; }, [showToast]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1350,12 +1357,16 @@ function EarningsModal({ tech, onClose, showToast }) {
         ]);
         if (!cancelled) { setThisWeek(a); setLastWeek(b); }
       } catch (e) {
-        if (!cancelled) showToast('Earnings failed: ' + e.message);
+        // Use the latest showToast via ref so this effect doesn't
+        // depend on showToast's identity. Parent re-renders recreate
+        // showToast, and a failed fetch that called it directly here
+        // would re-trigger the effect → loop.
+        if (!cancelled) showToastRef.current('Earnings failed: ' + e.message);
       }
       if (!cancelled) setLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [tech.id, showToast]);
+  }, [tech.id]);
 
   return (
     <div

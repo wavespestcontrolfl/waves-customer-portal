@@ -274,8 +274,19 @@ router.post('/sign-week', async (req, res, next) => {
     if (!signature || !String(signature).trim()) {
       return res.status(400).json({ error: 'signature required (typed name)' });
     }
-    if (weekStart && !/^\d{4}-\d{2}-\d{2}$/.test(weekStart)) {
-      return res.status(400).json({ error: 'weekStart must be YYYY-MM-DD' });
+    if (weekStart) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(weekStart)) {
+        return res.status(400).json({ error: 'weekStart must be YYYY-MM-DD' });
+      }
+      // Calendar-validity check — regex passes 2026-02-31, but
+      // parseETDateTime / Date.UTC silently overflow that to 2026-03-03,
+      // letting a malformed payload sign the wrong week. Round-trip
+      // the parsed parts and reject if they don't match the input.
+      const [y, m, d] = weekStart.split('-').map(Number);
+      const dt = new Date(Date.UTC(y, m - 1, d));
+      if (dt.getUTCFullYear() !== y || dt.getUTCMonth() + 1 !== m || dt.getUTCDate() !== d) {
+        return res.status(400).json({ error: 'weekStart must be a valid calendar date' });
+      }
     }
     const start = mondayOfET(weekStart);
 

@@ -855,11 +855,19 @@ router.get('/technicians/:id/earnings', requireAdmin, async (req, res, next) => 
       to = addCalendarDaysToYMD(from, 6);
     }
     if (!from || !to) return res.status(400).json({ error: 'from+to (YYYY-MM-DD) or period=this-week|last-week required' });
-    // Validate shape before parseETDateTime — bad input would
-    // otherwise throw "Invalid time value" and surface as a 500.
-    const ymd = /^\d{4}-\d{2}-\d{2}$/;
-    if (!ymd.test(from) || !ymd.test(to)) {
-      return res.status(400).json({ error: 'from/to must be YYYY-MM-DD' });
+    // Validate shape AND calendar-validity before parseETDateTime —
+    // bad shape (`from=bad`) would throw "Invalid time value" → 500;
+    // an invalid date like `2026-02-31` would silently overflow to
+    // `2026-03-03` and return earnings for the wrong window.
+    const ymdRe = /^\d{4}-\d{2}-\d{2}$/;
+    const realDate = (s) => {
+      if (!ymdRe.test(s)) return false;
+      const [y, m, d] = s.split('-').map(Number);
+      const dt = new Date(Date.UTC(y, m - 1, d));
+      return dt.getUTCFullYear() === y && dt.getUTCMonth() + 1 === m && dt.getUTCDate() === d;
+    };
+    if (!realDate(from) || !realDate(to)) {
+      return res.status(400).json({ error: 'from/to must be a valid YYYY-MM-DD calendar date' });
     }
     if (from > to) {
       return res.status(400).json({ error: 'from must be on or before to' });
