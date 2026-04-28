@@ -168,8 +168,13 @@ router.get('/', async (req, res, next) => {
       // Phone-digit fallback: stored phones carry formatting (e.g. "(941)
       // 555-1234" or "+19415551234"), so a literal ILIKE on `phone` misses
       // when the operator types a bare 10-digit number. Mirrors the dedupe
-      // check used by /quick-add.
-      const phoneDigits = String(search).replace(/\D/g, '');
+      // check used by /quick-add. Only fires when the *whole* search term
+      // is phone-shaped (digits + standard separators) — otherwise mixed
+      // queries like "Acme 941" or "123 Main St" would pull in every
+      // customer whose phone happens to contain those digits, and in 941
+      // that's all of them.
+      const isPhoneLike = /^[\d\s().+\-]+$/.test(search);
+      const phoneDigits = isPhoneLike ? String(search).replace(/\D/g, '') : '';
       query = query.where(function () {
         this.whereILike('first_name', s).orWhereILike('last_name', s)
           .orWhereILike('phone', s).orWhereILike('email', s)
