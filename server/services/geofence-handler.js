@@ -411,9 +411,8 @@ async function handleDeparture({ tech, customer, job, lat, lng, eventTime, imei,
   });
 
   // Auto-flip the next scheduled job to en_route when configured.
-  // Pass the dwell minutes from the timer we just stopped — that's
-  // our "tech actually serviced this customer" signal. Errors here
-  // never disrupt the EXIT processing above; auto-flip is best-effort.
+  // Errors here never disrupt the EXIT processing above; auto-flip
+  // is best-effort.
   //
   // Pass `activeTimer` so maybeAutoFlipNextJob can use the timer's
   // customer/job identity as the exclusion key. In dense neighborhoods
@@ -422,9 +421,17 @@ async function handleDeparture({ tech, customer, job, lat, lng, eventTime, imei,
   // identity could leave the just-serviced job eligible as "next" and
   // re-flip it to en_route. Same trap the auto-complete branch above
   // already calls out.
-  const dwellMinutes = stopped && stopped.duration_minutes
-    ? Math.round(Number(stopped.duration_minutes))
-    : Math.round((eventTime - new Date(activeTimer.clock_in)) / 60000);
+  //
+  // Dwell is computed from (eventTime - clock_in) — the actual on-site
+  // duration AT departure — never from `stopped.duration_minutes`,
+  // which endJob() computes at `now()`. Under delayed webhook delivery
+  // those values diverge and the latter inflates short visits above
+  // the dwell threshold. The guardrail's purpose is to filter GPS
+  // jitter at the EXIT moment, so the EXIT-time computation is the
+  // semantically correct one.
+  const dwellMinutes = activeTimer && activeTimer.clock_in
+    ? Math.max(0, Math.round((new Date(eventTime).getTime() - new Date(activeTimer.clock_in).getTime()) / 60000))
+    : null;
   try {
     await maybeAutoFlipNextJob({
       tech,
@@ -480,6 +487,10 @@ async function maybeAutoFlipNextJob({ tech, exitedCustomer, activeTimer, eventTi
   // as "next" and re-flipped to en_route.
   const servicedCustomerId = (activeTimer && activeTimer.customer_id) || exitedCustomer.id;
 
+  // time_entry_id stamps every auto-flip log row with the active
+  // timer's id. The dedupe gate below uses this column to detect
+  // a re-entrant call for the same departure (Bouncie retry / split
+  // webhook delivery / racing handler invocations).
   const baseLog = {
     bouncie_imei: imei,
     technician_id: tech.id,
@@ -487,9 +498,33 @@ async function maybeAutoFlipNextJob({ tech, exitedCustomer, activeTimer, eventTi
     latitude: lat,
     longitude: lng,
     matched_customer_id: exitedCustomer.id,
+    time_entry_id: (activeTimer && activeTimer.id) || null,
     raw_payload: payload,
     event_timestamp: eventTime,
   };
+
+  // Guardrail 0: idempotency. If a prior auto_flip_* row already
+  // exists for this active timer, this is a duplicate EXIT — skip
+  // and log. Without this, two concurrent EXIT webhooks could each
+  // pass the in-flight check, both call findNextScheduledJobForTech,
+  // and end up flipping job-1 (request A) and job-2 (request B —
+  // sees job-1 already en_route, picks the one after) — sending an
+  // SMS to the wrong customer. Race window is small but real on
+  // Bouncie's at-least-once delivery semantics.
+  //
+  // Best-effort: if the dedupe lookup itself fails the helper
+  // returns false and we proceed; the cooldown + markEnRoute
+  // idempotency still mostly contains the blast radius.
+  if (activeTimer && activeTimer.id) {
+    const already = await matcher.isAutoFlipAlreadyEvaluatedForTimer(activeTimer.id);
+    if (already) {
+      await matcher.logEvent({
+        ...baseLog,
+        action_taken: 'auto_flip_skipped_dedupe',
+      });
+      return;
+    }
+  }
 
   // Guardrail 2: minimum dwell at the customer just exited. Filters
   // GPS jitter and brief stops (red light, bathroom, off-route lunch).
