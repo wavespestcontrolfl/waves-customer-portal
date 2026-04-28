@@ -690,7 +690,12 @@ export default function TimeGridDays({
               onToggleCollapsed={() => setUnassignedCollapsed((v) => !v)}
             />
           )}
-          <div className="overflow-auto flex-1">
+          {/* min-w-0 lets the flex item shrink below its intrinsic content
+              width so overflow-auto can actually scroll horizontally; without
+              it the inner grid pushes past the parent (which has overflow-
+              hidden), and the user sees the week clipped at Friday with no
+              scrollbar to reach Saturday/Sunday. */}
+          <div className="overflow-auto flex-1 min-w-0">
             <div className="flex" style={{ minWidth: TIME_AXIS_WIDTH + days.length * COL_MIN_WIDTH }}>
               <TimeAxis headerHeight={36} />
               {days.map((day) => (
