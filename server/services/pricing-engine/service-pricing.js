@@ -454,7 +454,9 @@ function priceMosquito(property, options = {}) {
 // ============================================================
 function priceTermiteBait(property, options = {}) {
   const {
-    system = 'trelona',
+    // Default switched to Advance Apr 2026 (was 'trelona') for competitive
+    // doorstep pricing. Trelona remains available as the premium upgrade.
+    system = 'advance',
     monitoringTier = 'basic',
     modifiers = {},
   } = options;
@@ -471,7 +473,11 @@ function priceTermiteBait(property, options = {}) {
   const conMult = modifiers.termiteConstructionMult || 1.0;
   const foundAdj = modifiers.termiteFoundationAdj || 0;
   const installMaterialCost = stations * (sys.stationCost + sys.laborMaterial + sys.misc);
-  const installLabor = stations * 0.25 * GLOBAL.LABOR_RATE; // ~15 min per station
+  // 5 min per station — calibrated Apr 2026 against All U Need invoice
+  // (21 Sentricon stations installed in 78 min by one tech = 3.7 min/sta).
+  // Prior value was 0.25 hr (15 min/sta), ~4x the observed pace, which made
+  // reported install margin look artificially negative under the 1.45x mult.
+  const installLabor = stations * 0.083 * GLOBAL.LABOR_RATE;
   const installCost = installMaterialCost + installLabor;
   const installPrice = Math.round(installMaterialCost * TERMITE.installMultiplier * conMult + foundAdj);
   const installMargin = installPrice > 0 ? (installPrice - installCost) / installPrice : 0;

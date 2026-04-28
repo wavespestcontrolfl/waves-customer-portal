@@ -178,7 +178,7 @@ function generateEstimate(input) {
   // Termite Bait
   if (services.termite) {
     const result = priceTermiteBait(property, {
-      system: services.termite.system || 'trelona',
+      system: services.termite.system || 'advance',
       monitoringTier: services.termite.monitoringTier || 'basic',
       modifiers,
     });
