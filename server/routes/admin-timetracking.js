@@ -8,20 +8,24 @@ const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-// Columns on `technicians` that are admin-only — payroll, personal,
-// emergency contact. Tech-role tokens hitting GET /technicians get
-// the row with these stripped so a tech can still see "who's on the
-// team" (id, name, photo, contact, role) without leaking each
-// coworker's wage, DOB, address, SSN, etc.
-const PRIVATE_TECH_FIELDS = [
-  'pay_rate', 'hire_date', 'job_title', 'employment_type',
-  'address', 'dob', 'ssn_last4',
-  'emergency_contact_name', 'emergency_contact_phone',
+// Allowlist of `technicians` columns safe to expose to tech-role
+// callers (other techs hitting GET /technicians for a roster view).
+// Allowlist over denylist — an unknown future column added to the
+// table (auth tokens, password resets, anything HR adds) defaults to
+// "not exposed" instead of "leaked until somebody updates the
+// denylist." password_hash specifically lives on this table.
+const PUBLIC_TECH_FIELDS = [
+  'id', 'name', 'phone', 'email', 'role',
+  'active', 'auto_flip_enabled',
+  'avatar_url',
+  'created_at', 'updated_at',
 ];
 
 function sanitizeTechForNonAdmin(tech) {
-  const out = { ...tech };
-  for (const f of PRIVATE_TECH_FIELDS) delete out[f];
+  const out = {};
+  for (const f of PUBLIC_TECH_FIELDS) {
+    if (f in tech) out[f] = tech[f];
+  }
   return out;
 }
 
