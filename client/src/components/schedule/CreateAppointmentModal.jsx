@@ -482,6 +482,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // a retry click skips the keys that landed so we don't double-book the
   // customer. Reset on successful close.
   const createdGroupKeysRef = useRef(new Set());
+  // For one-time discounts (fixed_amount / free_service) we send the
+  // discount on the FIRST POSTed group only. Persist across retries so a
+  // transient failure between groups can't re-send the discount on the
+  // next attempt's first not-yet-created group. Reset on successful close.
+  const discountConsumedRef = useRef(false);
 
   // Recurring preview — for each cadence group, produce up to 4 future
   // dates Virginia will land on. Honors skip-weekends shift so what's
@@ -544,7 +549,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     //     otherwise mixed-cadence ($50 off applied to monthly AND quarterly)
     //     would multiply the discount.
     const discountAppliesToAll = discountType === 'percentage';
-    let discountAlreadySent = false;
     for (const group of groups) {
       const key = groupKey(group);
       // Skip groups already created in a prior attempt of this submit
@@ -621,8 +625,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 return arr.length > 0 ? arr : undefined;
               })()
             : undefined,
-          discountType: (discountType && (discountAppliesToAll || !discountAlreadySent)) ? discountType : undefined,
-          discountAmount: (discountType && discountAmount !== '' && (discountAppliesToAll || !discountAlreadySent))
+          discountType: (discountType && (discountAppliesToAll || !discountConsumedRef.current)) ? discountType : undefined,
+          discountAmount: (discountType && discountAmount !== '' && (discountAppliesToAll || !discountConsumedRef.current))
             ? Number(discountAmount)
             : undefined,
           createInvoice: true,
@@ -630,7 +634,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         };
         const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
         createdGroupKeysRef.current.add(key);
-        if (discountType && !discountAppliesToAll) discountAlreadySent = true;
+        if (discountType && !discountAppliesToAll) discountConsumedRef.current = true;
         results.push(r);
       } catch (e) {
         firstError = { label: groupLabel(group), message: e.message };
@@ -655,6 +659,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setToast(message);
     setTimeout(() => {
       createdGroupKeysRef.current = new Set();
+      discountConsumedRef.current = false;
       onCreated?.({ id: results[0]?.id, scheduledDate: apptDate });
     }, 1200);
   };
