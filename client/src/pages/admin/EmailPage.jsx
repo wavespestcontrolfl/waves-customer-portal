@@ -76,7 +76,6 @@ export default function EmailPage() {
   const [page, setPage] = useState(1);
   const [selectedEmail, setSelectedEmail] = useState(null);
   const [thread, setThread] = useState([]);
-  const [syncing, setSyncing] = useState(false);
   const [replyText, setReplyText] = useState('');
   const [sending, setSending] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
@@ -142,17 +141,6 @@ export default function EmailPage() {
   useEffect(() => {
     if (status?.connected) { loadStats(); loadEmails(); loadDigest(); }
   }, [status, loadStats, loadEmails, loadDigest]);
-
-  const handleSync = async () => {
-    setSyncing(true);
-    try {
-      await adminFetch('/api/admin/email/sync', { method: 'POST' });
-      await loadEmails();
-      await loadStats();
-      await loadDigest();
-    } catch { /* ignore */ }
-    setSyncing(false);
-  };
 
   const openEmail = async (email) => {
     setSelectedEmail(email);
@@ -326,21 +314,12 @@ export default function EmailPage() {
 
   return (
     <div style={{ padding: '24px 32px' }}>
-      {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-        <div>
-          <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>Email</h1>
-          <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>
-            contact@wavespestcontrol.com
-            {status?.lastSync && ` \u2014 synced ${timeAgo(status.lastSync)}`}
-          </div>
-        </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={handleSync} disabled={syncing} style={{
-            padding: '8px 20px', background: D.teal, color: '#fff', border: 'none', borderRadius: 8,
-            fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: syncing ? 0.6 : 1,
-          }}>{syncing ? 'Syncing...' : 'Sync Now'}</button>
-        </div>
+      {/* Header — mailbox subtitle + last-sync timestamp + Sync Now
+          button all removed. The page tab itself labels the surface,
+          and scheduler.js syncs Gmail → PostgreSQL every 2 min so a
+          "synced just now" chip carried no real signal. */}
+      <div style={{ marginBottom: 20 }}>
+        <h1 style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}>Email</h1>
       </div>
 
       {/* Daily digest card */}
