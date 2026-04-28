@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import api from '../utils/api';
-import { COLORS as B, TIER, FONTS, BUTTON_BASE, HALFTONE_PATTERN, HALFTONE_SIZE } from '../theme-brand';
+import { COLORS as B, TIER, FONTS, BUTTON_BASE, GOLD_CTA, HALFTONE_PATTERN, HALFTONE_SIZE } from '../theme-brand';
 import NotificationBell from '../components/NotificationBell';
 import AutopayCard from '../components/billing/AutopayCard';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
@@ -5793,35 +5793,48 @@ function EnRouteLiveMap({ techPosition, customerLocation, techName }) {
         disableDefaultUI: true,
         zoomControl: true,
         gestureHandling: 'cooperative',
+        clickableIcons: false,
+        // Hide all POI types (not just businesses) and transit so the
+        // map reads as "where is my tech" rather than a cluttered city
+        // map. Matches the styling used on the public /track page.
         styles: [
-          { featureType: 'poi.business', stylers: [{ visibility: 'off' }] },
+          { featureType: 'poi', stylers: [{ visibility: 'off' }] },
           { featureType: 'transit', stylers: [{ visibility: 'off' }] },
         ],
       });
       mapInstRef.current = map;
 
+      // Property marker: small navy house-roof shape (was a green
+      // circle). Gives a directional anchor that visually distinguishes
+      // it from the moving tech pin without relying on color alone.
       customerMarkerRef.current = new window.google.maps.Marker({
         map,
         position: customerLocation,
         title: 'Your property',
         icon: {
-          path: window.google.maps.SymbolPath.CIRCLE,
-          scale: 11,
-          fillColor: '#16A34A',
+          path: 'M -10,4 L -10,-4 L 0,-12 L 10,-4 L 10,4 Z',
+          scale: 1,
+          fillColor: B.blueDeeper,
           fillOpacity: 1,
           strokeColor: '#fff',
-          strokeWeight: 3,
+          strokeWeight: 2,
         },
+        zIndex: 1,
       });
 
-      // Fit map to both points with a little padding.
+      // Fit map to both points with breathing room. 80px matches the
+      // /track page so the same tech vehicle pin sits ~the same
+      // distance from the chrome on both surfaces.
       const bounds = new window.google.maps.LatLngBounds();
       bounds.extend({ lat: techPosition.lat, lng: techPosition.lng });
       bounds.extend(customerLocation);
-      map.fitBounds(bounds, 48);
+      map.fitBounds(bounds, 80);
     }
 
-    // Truck marker — create on first render, update position afterward.
+    // Truck marker — Waves-blue circle on white halo. Replaces the
+    // earlier rotated rectangle; the rotation telegraphed direction
+    // but at the typical zoom level read as a small smudge. Circle
+    // matches the /track page treatment.
     const truckPos = { lat: techPosition.lat, lng: techPosition.lng };
     if (!truckMarkerRef.current) {
       truckMarkerRef.current = new window.google.maps.Marker({
@@ -5829,21 +5842,17 @@ function EnRouteLiveMap({ techPosition, customerLocation, techName }) {
         position: truckPos,
         title: `${techName || 'Tech'} is on the way`,
         icon: {
-          path: 'M -1.6,-1 L 1.6,-1 L 1.8,-0.5 L 1.8,0.7 L 1.6,1 L -1.6,1 L -1.8,0.7 L -1.8,-0.5 Z',
-          scale: 9,
-          fillColor: '#1B2C5B',
+          path: window.google.maps.SymbolPath.CIRCLE,
+          scale: 11,
+          fillColor: B.wavesBlue,
           fillOpacity: 1,
-          strokeColor: '#FFD700',
-          strokeWeight: 2,
-          rotation: techPosition.heading || 0,
+          strokeColor: '#fff',
+          strokeWeight: 4,
         },
+        zIndex: 2,
       });
     } else {
       truckMarkerRef.current.setPosition(truckPos);
-      if (techPosition.heading != null) {
-        const icon = truckMarkerRef.current.getIcon();
-        truckMarkerRef.current.setIcon({ ...icon, rotation: techPosition.heading });
-      }
     }
   }, [mapReady, techPosition, customerLocation, techName]);
 
@@ -5855,11 +5864,11 @@ function EnRouteLiveMap({ techPosition, customerLocation, techName }) {
       aria-label="Live tech location map"
       style={{
         width: '100%',
-        height: 240,
-        borderRadius: 12,
+        height: 320,
+        borderRadius: 16,
         overflow: 'hidden',
-        background: '#E3F5FD',
-        border: '1px solid #E7E2D7',
+        background: B.blueLight,
+        boxShadow: '0 2px 12px rgba(15, 23, 42, 0.08)',
       }}
     />
   );
@@ -6110,12 +6119,32 @@ function ServiceTracker() {
               techName={techName}
             />
           )}
-          {/* ETA */}
+          {/* ETA hero — Anton condensed display, large readable number.
+              Replaces the small horizontal progress bar. Matches the
+              /track/<token> public tracking page so authenticated and
+              public customers see the same en-route treatment. */}
           {step === 3 && eta && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
-              <Icon name="truck" size={18} strokeWidth={1.75} />
-              <div style={{ flex: 1 }}><div style={{ height: 5, borderRadius: 3, background: B.grayLight, overflow: 'hidden' }}><div style={{ height: '100%', borderRadius: 3, background: `linear-gradient(90deg, ${B.wavesBlue}, ${B.green})`, width: `${Math.max(10, 100 - eta * 3)}%`, transition: 'width 1s ease' }} /></div></div>
-              <span style={{ fontSize: 16, fontWeight: 900, color: B.navy, fontFamily: FONTS.ui }}>~{eta}m</span>
+            <div style={{ padding: '12px 16px', borderRadius: 12, background: B.white, border: `1px solid ${B.bluePale}` }}>
+              <div style={{ fontSize: 14, color: B.textBody, marginBottom: 2 }}>
+                {techName} arrives in
+              </div>
+              <div style={{
+                fontFamily: FONTS.display,
+                fontSize: 'clamp(40px, 10vw, 64px)',
+                fontWeight: 700,
+                color: B.blueDeeper,
+                lineHeight: 1,
+                letterSpacing: '0.02em',
+                display: 'flex',
+                alignItems: 'baseline',
+                gap: 10,
+              }}>
+                <span>{eta}</span>
+                <span style={{
+                  fontSize: 18, color: B.textCaption,
+                  fontFamily: FONTS.body, fontWeight: 600, letterSpacing: '0.02em',
+                }}>min</span>
+              </div>
             </div>
           )}
 
@@ -6133,6 +6162,20 @@ function ServiceTracker() {
               <span style={{ display: 'inline-block', fontSize: 9, fontWeight: 600, padding: '2px 7px', borderRadius: 8, background: B.yellow, color: B.blueDeeper, fontFamily: FONTS.ui, marginTop: 1 }}>{svcType}</span>
             </div>
           </div>
+
+          {/* Gold "TEXT WAVES" CTA — only while EN ROUTE. Routes to the
+              office's SMS line (per-office, not the central dispatch
+              number) so the customer's text lands on the team handling
+              their service. Mirrors the same gold sms: CTA on the
+              public /track/<token> page. */}
+          {step === 3 && office?.phone && (
+            <a
+              href={`sms:${office.phone.replace(/\D/g, '')}`}
+              style={{ ...GOLD_CTA, width: '100%', boxSizing: 'border-box' }}
+            >
+              TEXT WAVES
+            </a>
+          )}
 
           {/* Office card */}
           <div style={{ padding: '8px 12px', borderRadius: 10, background: B.white, border: `1px solid ${B.bluePale}` }}>
