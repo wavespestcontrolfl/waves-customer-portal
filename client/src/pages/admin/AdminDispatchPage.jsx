@@ -20,7 +20,6 @@
  * surfaces, no inline D palette.
  */
 import React, { Suspense, useState, useEffect, useRef } from 'react';
-import { flushSync } from 'react-dom';
 import { useSearchParams } from 'react-router-dom';
 import DispatchBoardPage from './DispatchBoardPage';
 
@@ -71,12 +70,7 @@ export default function AdminDispatchPage() {
     if (nextIdx == null) return;
     e.preventDefault();
     const nextKey = TAB_LIST[nextIdx].key;
-    // The pill swaps DOM parents between Board (top of page) and Schedule
-    // (under DispatchPageV2's h1), so the old pill unmounts and the new one
-    // mounts in a single React commit. flushSync forces that commit to
-    // complete *before* we call .focus(), so refs point at the new
-    // (mounted) DOM node rather than the old (about-to-unmount) one.
-    flushSync(() => setTab(nextKey));
+    setTab(nextKey);
     tabRefs.current[nextKey]?.focus();
   };
 
@@ -134,15 +128,15 @@ export default function AdminDispatchPage() {
 
   return (
     <div className="flex flex-col bg-surface-page min-h-[calc(100vh-64px)]">
-      {/* Board tab keeps the top-of-page pill (no h1 inside the board layout
-          to anchor it under). The Schedule tab renders the same pill below
-          its h1 via the `tabSwitcher` slot, so the dispatcher sees the
-          switcher in a position that reads as "tabs of this page". */}
-      {tab === TABS.BOARD && (
-        <div style={{ display: 'flex', justifyContent: 'center', padding: '12px 16px' }}>
-          {tabPill}
-        </div>
-      )}
+      {/* Tab pill renders here for both Board and Schedule. We previously
+          slotted it under DispatchPageV2's h1 on Schedule, but DispatchPageV2
+          is React.lazy — during the chunk-load window the slot doesn't exist,
+          which (a) leaves no Board/Schedule controls visible and (b) drops
+          keyboard focus on tab-arrow nav since the new pill DOM hasn't
+          mounted yet. Persistent top placement avoids both regressions. */}
+      <div style={{ display: 'flex', justifyContent: 'center', padding: '12px 16px' }}>
+        {tabPill}
+      </div>
       <div
         role="tabpanel"
         id={`dispatch-tabpanel-${tab}`}
@@ -159,7 +153,7 @@ export default function AdminDispatchPage() {
               </div>
             }
           >
-            <DispatchPageV2 tabSwitcher={tabPill} />
+            <DispatchPageV2 />
           </Suspense>
         )}
       </div>

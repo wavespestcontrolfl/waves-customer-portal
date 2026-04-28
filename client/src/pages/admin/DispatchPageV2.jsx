@@ -715,7 +715,7 @@ function MobileScheduleSheet({ children, serviceCount, completedCount }) {
   );
 }
 
-export default function DispatchPageV2({ tabSwitcher = null } = {}) {
+export default function DispatchPageV2() {
   const isMobile = useIsMobile();
   const [activeTab, setActiveTab] = useState('board');
 
@@ -942,15 +942,6 @@ export default function DispatchPageV2({ tabSwitcher = null } = {}) {
               <Plus size={20} strokeWidth={2} />
             </button>
           </div>
-
-          {/* Board ↔ Schedule tab pill (rendered by AdminDispatchPage and
-              passed in as a slot) — sits directly under the h1 so it reads
-              as the tabs *of this page*, not a global header element. */}
-          {tabSwitcher && (
-            <div className="mt-3">
-              {tabSwitcher}
-            </div>
-          )}
 
           {/* Mobile: Schedule + More pills — above the date nav so users can switch tools first */}
           {viewMode === 'day' && (
