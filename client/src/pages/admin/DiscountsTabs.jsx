@@ -10,11 +10,15 @@ function af(path, opts = {}) {
 }
 
 const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' };
+// Flat table wrapper for the catalog view — no boxed-card chrome, just
+// a hairline border so the list reads as a continuous sortable surface.
+const sTableWrap = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, overflow: 'hidden' };
 const sBtn = (bg, c) => ({ padding: '8px 16px', background: bg, color: c, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' });
 const sBadge = (bg, c) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color: c, fontWeight: 600, display: 'inline-block' });
 const sInput = { padding: '8px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', width: '100%', boxSizing: 'border-box' };
-const thS = { fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, textAlign: 'left', padding: '8px 10px', borderBottom: `1px solid ${D.border}` };
-const tdS = { padding: '10px', borderBottom: `1px solid ${D.border}22`, fontSize: 13, color: D.text };
+// Table header / cell — title-case labels, hairline divider, more vertical breathing room.
+const thS = { fontSize: 11, color: D.muted, fontWeight: 600, textAlign: 'left', padding: '12px 14px', background: '#F8F8F8', borderBottom: `1px solid ${D.border}` };
+const tdS = { padding: '12px 14px', borderTop: `1px solid ${D.border}`, fontSize: 13, color: D.text, verticalAlign: 'middle' };
 
 const TYPE_COLORS = { percentage: { bg: '#F4F4F5', c: '#18181B' }, fixed_amount: { bg: '#FEF3C7', c: '#A16207' }, variable_amount: { bg: '#F4F4F5', c: '#3F3F46' }, variable_percentage: { bg: '#DCFCE7', c: '#15803D' }, free_service: { bg: '#DCFCE7', c: '#15803D' } };
 const TYPE_LABELS = { percentage: 'Percentage (%)', fixed_amount: 'Amount ($)', variable_amount: 'Variable ($)', variable_percentage: 'Variable (%)', free_service: 'Free Service' };
@@ -90,48 +94,89 @@ function DiscountsSection() {
   const upd = (k, v) => setForm(p => ({ ...p, [k]: v }));
   const chk = (k) => <input type="checkbox" checked={form[k]} onChange={e => upd(k, e.target.checked)} />;
 
+  // Catalog rows are sorted alphabetically by name to match the flat-list
+  // pattern operators are used to. Inactive discounts stay in the list at
+  // reduced opacity rather than being hidden, since "off" is editorial state.
+  const sortedDiscounts = [...discounts].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div style={{ fontSize: 15, fontWeight: 600, color: D.muted }}>Manage discounts, promo codes, and pricing rules</div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', marginBottom: 16 }}>
         <button style={sBtn(D.teal, D.white)} onClick={() => { setEditing(null); setForm({ ...EMPTY }); setTab('form'); }}>+ New Discount</button>
       </div>
 
       {toast && <div style={{ ...sCard, background: D.teal + '20', color: D.teal, textAlign: 'center', fontSize: 13 }}>{toast}</div>}
 
       <div style={{ display: 'flex', gap: 6, marginBottom: 16 }}>
-        {tabs.map(t => <button key={t.key} onClick={() => setTab(t.key)} style={{ ...sBtn(tab === t.key ? D.teal : 'transparent', tab === t.key ? D.white : D.muted), border: tab === t.key ? 'none' : `1px solid ${D.border}` }}>{t.label}</button>)}
+        {tabs
+          // Hide the "Create / Edit Discount" pill from the visible tab strip
+          // unless the user is actually in form mode — the "+ New Discount"
+          // CTA above is the canonical entry point, so showing the form tab
+          // when not in use is just visual noise.
+          .filter(t => t.key !== 'form' || tab === 'form')
+          .map(t => <button key={t.key} onClick={() => setTab(t.key)} style={{ ...sBtn(tab === t.key ? D.teal : 'transparent', tab === t.key ? D.white : D.muted), border: tab === t.key ? 'none' : `1px solid ${D.border}` }}>{t.label}</button>)}
       </div>
 
       {tab === 'catalog' && (
-        <div style={sCard}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead><tr>
-              {['', 'Name', 'Type', 'Amount', 'Eligibility', 'Stack', 'Auto', 'Used', 'Total Given', 'Active', ''].map(h => <th key={h} style={thS}>{h}</th>)}
-            </tr></thead>
-            <tbody>
-              {discounts.map(d => {
-                const tc = TYPE_COLORS[d.discount_type] || TYPE_COLORS.percentage;
-                const rules = [d.requires_military && 'Military', d.requires_senior && 'Senior', d.requires_multi_home && 'Multi-home', d.requires_new_customer && 'New', d.requires_prepayment && 'Prepay', d.requires_referral && 'Referral', d.requires_waveguard_tier && d.requires_waveguard_tier].filter(Boolean);
-                return (
-                  <tr key={d.id} style={{ opacity: d.is_active ? 1 : 0.45 }}>
-                    <td style={tdS}>{d.icon || ''}</td>
-                    <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>{d.name}</td>
-                    <td style={tdS}><span style={sBadge(tc.bg, tc.c)}>{TYPE_LABELS[d.discount_type] || d.discount_type}</span></td>
-                    <td style={tdS}>{d.discount_type.includes('percentage') ? `${d.amount}%` : d.discount_type.includes('amount') || d.discount_type === 'fixed_amount' ? `$${Number(d.amount).toFixed(2)}` : 'Free'}</td>
-                    <td style={{ ...tdS, fontSize: 11 }}>{rules.length ? rules.join(', ') : <span style={{ color: D.muted }}>None</span>}</td>
-                    <td style={{ ...tdS, fontSize: 11 }}>{d.stack_group || <span style={{ color: D.muted }}>-</span>}</td>
-                    <td style={tdS}>{d.is_auto_apply ? <span style={sBadge(D.green + '20', D.green)}>Auto</span> : <span style={{ color: D.muted }}>Manual</span>}</td>
-                    <td style={tdS}>{d.times_applied || 0}</td>
-                    <td style={tdS}>${Number(d.total_discount_given || 0).toFixed(2)}</td>
-                    <td style={tdS}><button style={{ ...sBtn(d.is_active ? D.green + '20' : D.red + '20', d.is_active ? D.green : D.red), fontSize: 11 }} onClick={() => toggleActive(d)}>{d.is_active ? 'On' : 'Off'}</button></td>
-                    <td style={tdS}><button style={sBtn('transparent', D.teal)} onClick={() => startEdit(d)}>Edit</button></td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        sortedDiscounts.length === 0 ? (
+          <div style={{ ...sTableWrap, padding: '40px 20px', textAlign: 'center', color: D.muted, fontSize: 13 }}>
+            No discounts yet. Click <strong>+ New Discount</strong> to add your first one.
+          </div>
+        ) : (
+          <div style={sTableWrap}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr>
+                  {[
+                    { label: '', w: 32 },
+                    { label: 'Name' },
+                    { label: 'Type' },
+                    { label: 'Amount', align: 'right' },
+                    { label: 'Eligibility' },
+                    { label: 'Stack' },
+                    { label: 'Auto' },
+                    { label: 'Used', align: 'right' },
+                    { label: 'Total Given', align: 'right' },
+                    { label: 'Active', align: 'center' },
+                    { label: '', w: 60 },
+                  ].map((h, i) => (
+                    <th key={i} style={{ ...thS, textAlign: h.align || 'left', width: h.w || undefined }}>{h.label}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {sortedDiscounts.map(d => {
+                  const tc = TYPE_COLORS[d.discount_type] || TYPE_COLORS.percentage;
+                  const rules = [d.requires_military && 'Military', d.requires_senior && 'Senior', d.requires_multi_home && 'Multi-home', d.requires_new_customer && 'New', d.requires_prepayment && 'Prepay', d.requires_referral && 'Referral', d.requires_waveguard_tier && d.requires_waveguard_tier].filter(Boolean);
+                  const amount = d.discount_type.includes('percentage')
+                    ? `${d.amount}%`
+                    : d.discount_type.includes('amount') || d.discount_type === 'fixed_amount'
+                      ? `$${Number(d.amount).toFixed(2)}`
+                      : 'Free';
+                  return (
+                    <tr key={d.id} style={{ opacity: d.is_active ? 1 : 0.45 }}>
+                      <td style={tdS}>{d.icon || ''}</td>
+                      <td style={{ ...tdS, fontWeight: 600, color: D.heading }}>{d.name}</td>
+                      <td style={tdS}><span style={sBadge(tc.bg, tc.c)}>{TYPE_LABELS[d.discount_type] || d.discount_type}</span></td>
+                      <td style={{ ...tdS, textAlign: 'right', fontWeight: 600, color: D.heading }}>{amount}</td>
+                      <td style={{ ...tdS, fontSize: 11 }}>{rules.length ? rules.join(', ') : <span style={{ color: D.muted }}>None</span>}</td>
+                      <td style={{ ...tdS, fontSize: 11 }}>{d.stack_group || <span style={{ color: D.muted }}>—</span>}</td>
+                      <td style={tdS}>{d.is_auto_apply ? <span style={sBadge(D.green + '20', D.green)}>Auto</span> : <span style={{ color: D.muted, fontSize: 11 }}>Manual</span>}</td>
+                      <td style={{ ...tdS, textAlign: 'right' }}>{d.times_applied || 0}</td>
+                      <td style={{ ...tdS, textAlign: 'right' }}>${Number(d.total_discount_given || 0).toFixed(2)}</td>
+                      <td style={{ ...tdS, textAlign: 'center' }}>
+                        <button style={{ ...sBtn(d.is_active ? D.green + '20' : D.red + '20', d.is_active ? D.green : D.red), fontSize: 11, padding: '4px 10px' }} onClick={() => toggleActive(d)}>{d.is_active ? 'On' : 'Off'}</button>
+                      </td>
+                      <td style={{ ...tdS, textAlign: 'right' }}>
+                        <button style={sBtn('transparent', D.teal)} onClick={() => startEdit(d)}>Edit</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )
       )}
 
       {tab === 'form' && (
