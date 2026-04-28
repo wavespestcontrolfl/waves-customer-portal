@@ -946,118 +946,134 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab } = {}) 
 
   return (
     <div className="bg-surface-page min-h-full p-4 md:p-6 font-sans text-zinc-900">
-      {/* Header */}
-      <div className="flex justify-between items-start mb-4 flex-wrap gap-3">
-        <div className="flex-1 min-w-0">
-          {/* Top-right "new appointment" CTAs — desktop pill + mobile "+" circle.
-              The "Schedule" h1 that used to share this row now lives in
-              AdminDispatchPage so the Board ↔ Schedule pill can render
-              directly under it. */}
-          <div className="flex items-center justify-end gap-3">
-            {/* Desktop "+ Add Appointment" — pill mirrors "+ Add Customer"; opens CreateAppointmentModal. */}
-            <button
-              type="button"
-              onClick={() => setShowNewAppt(true)}
-              className="hidden md:inline-flex"
-              style={{
-                padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
-                background: '#18181B', color: '#fff', border: 'none', cursor: 'pointer',
-                whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
-                fontFamily: "'DM Sans', sans-serif",
-              }}
-            >
-              + Add Appointment
-            </button>
-            {/* Mobile "+" — matches the Customers pattern; opens CreateAppointmentModal. */}
-            <button
-              type="button"
-              onClick={() => setShowNewAppt(true)}
-              aria-label="New appointment"
-              className="md:hidden flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring shrink-0"
-              style={{ width: 36, height: 36 }}
-            >
-              <Plus size={20} strokeWidth={2} />
-            </button>
-          </div>
-
-          {/* Mobile: Schedule + More pills — above the date nav so users can switch tools first.
-              Hidden in controlled mode: AdminDispatchPage's top-level pill replaces them. */}
-          {!isControlled && viewMode === 'day' && (
-            <div className="md:hidden mt-3 flex items-center gap-2">
-              <button
-                onClick={() => setActiveTab('board')}
-                className={cn(
-                  'flex-1 inline-flex items-center justify-center u-label px-3 h-11 rounded-sm border-hairline u-focus-ring transition-colors',
-                  activeTab === 'board' ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-ink-secondary border-zinc-300'
-                )}
-              >
-                Schedule
-              </button>
-              <button
-                onClick={() => setShowMoreSheet(true)}
-                className={cn(
-                  'flex-1 inline-flex items-center justify-center u-label px-3 h-11 rounded-sm border-hairline u-focus-ring transition-colors',
-                  activeTab !== 'board' ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-ink-secondary border-zinc-300'
-                )}
-              >
-                {activeTab === 'board' ? 'More' : SCHEDULE_TABS.find((t) => t.id === activeTab)?.label || 'More'}
-              </button>
-            </div>
-          )}
-
-          <div className="flex items-center gap-2 mt-2 justify-between flex-wrap">
-            <div className="flex md:inline-flex w-full md:w-auto items-center gap-1.5">
+      {/* Page-header row: Schedule h1 left, "+ Add Appointment" pill right
+          (matches CustomersPageV2's pattern). h1 only renders on the
+          schedule grid sub-tab; on Protocols/Tech Match/CSR/Job Scores/
+          Insights it's hidden so those panels can own their own headings.
+          The right side swaps to "↻ Sync AI Data" on those non-board tabs. */}
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+        {activeTab === 'board' ? (
+          <h1 className="text-28 font-normal tracking-h1 text-zinc-900">
+            <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Schedule</span>
+            <span className="hidden md:inline">Schedule</span>
+          </h1>
+        ) : (
+          // Spacer keeps `justify-between` pushing the right-side action to
+          // the right edge when the h1 isn't rendered.
+          <span aria-hidden="true" />
+        )}
+        <div className="flex items-center gap-3">
+          {activeTab === 'board' ? (
+            <>
+              {/* Desktop "+ Add Appointment" — pill mirrors "+ Add Customer". */}
               <button
                 type="button"
-                onClick={() => shiftDate(-1)}
-                className="w-11 h-11 md:w-8 md:h-8 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 text-14 md:text-12 u-focus-ring hover:bg-zinc-50 inline-flex items-center justify-center flex-shrink-0"
-                title="Previous"
+                onClick={() => setShowNewAppt(true)}
+                className="hidden md:inline-flex"
+                style={{
+                  padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
+                  background: '#18181B', color: '#fff', border: 'none', cursor: 'pointer',
+                  whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
+                  fontFamily: "'DM Sans', sans-serif",
+                }}
               >
-                ◀
+                + Add Appointment
               </button>
-              <span className="flex-1 md:flex-none u-nums text-14 md:text-13 font-medium text-zinc-900 text-center px-1 md:min-w-[220px]">
-                {dateHeader}
-              </span>
+              {/* Mobile "+" circle */}
               <button
                 type="button"
-                onClick={() => shiftDate(1)}
-                className="w-11 h-11 md:w-8 md:h-8 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 text-14 md:text-12 u-focus-ring hover:bg-zinc-50 inline-flex items-center justify-center flex-shrink-0"
-                title="Next"
+                onClick={() => setShowNewAppt(true)}
+                aria-label="New appointment"
+                className="md:hidden flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring shrink-0"
+                style={{ width: 36, height: 36 }}
               >
-                ▶
+                <Plus size={20} strokeWidth={2} />
               </button>
-              {!isToday(date) && (
-                <Button size="sm" variant="secondary" onClick={() => setDate(formatDateISO(new Date()))}>Today</Button>
-              )}
-            </div>
-            {!isMobile && (
-              <ViewModeSelectorV2 viewMode={viewMode} onViewModeChange={(m) => { setViewMode(m); if (m === 'day') setActiveTab('board'); }} />
-            )}
-          </div>
-        </div>
-
-        <div className="hidden md:flex gap-2 items-center flex-wrap">
-          {viewMode === 'day' && activeTab === 'board' && (
-            <div className="flex gap-3 items-center text-12 text-ink-secondary bg-white px-3 py-2 rounded-sm border-hairline border-zinc-200 flex-wrap">
-              <span><span className="u-nums font-medium text-zinc-900">{totalCount}</span> services</span>
-              <span><span className="u-nums font-medium text-zinc-900">{completedCount}</span> done</span>
-              <span><span className={cn('u-nums font-medium', remainingCount > 0 ? 'text-zinc-900' : 'text-ink-secondary')}>{remainingCount}</span> left</span>
-              <span className="pl-3 border-l-hairline border-zinc-200">
-                ~{estTotalHrs}h{estTotalMinRemainder > 0 ? `${estTotalMinRemainder}m` : ''} total
-              </span>
-              <span>ETA <span className="u-nums font-medium text-zinc-900">{estFinishTime}</span></span>
-              <span className="pl-3 border-l-hairline border-zinc-200">
-                <span className="u-nums font-medium text-zinc-900">${estRevenue.toLocaleString()}</span> revenue
-              </span>
-            </div>
-          )}
-          {viewMode === 'day' && activeTab !== 'board' && (
-            <Button variant="secondary" onClick={syncDispatchAI} disabled={syncing}>
+            </>
+          ) : viewMode === 'day' ? (
+            <Button variant="secondary" onClick={syncDispatchAI} disabled={syncing} className="hidden md:inline-flex">
               {syncing ? 'Syncing…' : '↻ Sync AI Data'}
             </Button>
-          )}
+          ) : null}
         </div>
       </div>
+
+      {/* Mobile: Schedule + More pills. Hidden in controlled mode (top-level
+          pill in AdminDispatchPage replaces them). */}
+      {!isControlled && viewMode === 'day' && (
+        <div className="md:hidden mb-4 flex items-center gap-2">
+          <button
+            onClick={() => setActiveTab('board')}
+            className={cn(
+              'flex-1 inline-flex items-center justify-center u-label px-3 h-11 rounded-sm border-hairline u-focus-ring transition-colors',
+              activeTab === 'board' ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-ink-secondary border-zinc-300'
+            )}
+          >
+            Schedule
+          </button>
+          <button
+            onClick={() => setShowMoreSheet(true)}
+            className={cn(
+              'flex-1 inline-flex items-center justify-center u-label px-3 h-11 rounded-sm border-hairline u-focus-ring transition-colors',
+              activeTab !== 'board' ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-ink-secondary border-zinc-300'
+            )}
+          >
+            {activeTab === 'board' ? 'More' : SCHEDULE_TABS.find((t) => t.id === activeTab)?.label || 'More'}
+          </button>
+        </div>
+      )}
+
+      {/* Centered stats badges — schedule grid sub-tab + day view only,
+          desktop only (mobile keeps a leaner header). */}
+      {viewMode === 'day' && activeTab === 'board' && (
+        <div className="hidden md:flex justify-center mb-4">
+          <div className="flex gap-3 items-center text-12 text-ink-secondary bg-white px-3 py-2 rounded-sm border-hairline border-zinc-200 flex-wrap">
+            <span><span className="u-nums font-medium text-zinc-900">{totalCount}</span> services</span>
+            <span><span className="u-nums font-medium text-zinc-900">{completedCount}</span> done</span>
+            <span><span className={cn('u-nums font-medium', remainingCount > 0 ? 'text-zinc-900' : 'text-ink-secondary')}>{remainingCount}</span> left</span>
+            <span className="pl-3 border-l-hairline border-zinc-200">
+              ~{estTotalHrs}h{estTotalMinRemainder > 0 ? `${estTotalMinRemainder}m` : ''} total
+            </span>
+            <span>ETA <span className="u-nums font-medium text-zinc-900">{estFinishTime}</span></span>
+            <span className="pl-3 border-l-hairline border-zinc-200">
+              <span className="u-nums font-medium text-zinc-900">${estRevenue.toLocaleString()}</span> revenue
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Centered date nav — every tab. */}
+      <div className="flex justify-center items-center gap-1.5 mb-4 flex-wrap">
+        <button
+          type="button"
+          onClick={() => shiftDate(-1)}
+          className="w-11 h-11 md:w-8 md:h-8 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 text-14 md:text-12 u-focus-ring hover:bg-zinc-50 inline-flex items-center justify-center flex-shrink-0"
+          title="Previous"
+        >
+          ◀
+        </button>
+        <span className="u-nums text-14 md:text-13 font-medium text-zinc-900 text-center px-2 md:min-w-[220px]">
+          {dateHeader}
+        </span>
+        <button
+          type="button"
+          onClick={() => shiftDate(1)}
+          className="w-11 h-11 md:w-8 md:h-8 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 text-14 md:text-12 u-focus-ring hover:bg-zinc-50 inline-flex items-center justify-center flex-shrink-0"
+          title="Next"
+        >
+          ▶
+        </button>
+        {!isToday(date) && (
+          <Button size="sm" variant="secondary" onClick={() => setDate(formatDateISO(new Date()))}>Today</Button>
+        )}
+      </div>
+
+      {/* Centered view-mode selector — schedule grid sub-tab + desktop only. */}
+      {!isMobile && activeTab === 'board' && (
+        <div className="flex justify-center mb-4">
+          <ViewModeSelectorV2 viewMode={viewMode} onViewModeChange={(m) => { setViewMode(m); if (m === 'day') setActiveTab('board'); }} />
+        </div>
+      )}
 
       {syncMsg && <div className="text-11 text-ink-secondary mb-2">{syncMsg}</div>}
 
