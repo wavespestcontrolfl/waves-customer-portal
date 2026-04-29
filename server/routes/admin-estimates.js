@@ -264,36 +264,93 @@ router.get('/', async (req, res, next) => {
       clickStats = new Map(rows.map((r) => [r.entity_id, r]));
     }
 
+    // Cross-reference confirmed appointments so the UI can flag estimates
+    // whose customer is already on the schedule. Two paths in priority order:
+    //   1) Linked: call-recording-processor stitches the scheduled_services.id
+    //      it just created into estimate.estimate_data.scheduled_service_id
+    //      when the same call produced both. That's an exact match.
+    //   2) Fallback: the customer simply has *some* upcoming confirmed
+    //      service. Less precise (e.g. an unrelated quarterly visit), but
+    //      still a useful signal — flagged with linked:false so the UI can
+    //      soften the wording.
+    const customerIdsForAppt = [...new Set(estimates.map((e) => e.customer_id).filter(Boolean))];
+    const linkedSvcIds = new Set();
+    for (const e of estimates) {
+      let data = e.estimate_data;
+      if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+      if (data?.scheduled_service_id) linkedSvcIds.add(data.scheduled_service_id);
+    }
+    const apptByLinkedId = new Map();
+    const nextApptByCustomer = new Map();
+    if (customerIdsForAppt.length || linkedSvcIds.size) {
+      // Compare scheduled_date (YYYY-MM-DD in ET) against today in ET so a
+      // late-night UTC server doesn't show today's appointment as past.
+      const todayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+      const apptRows = await db('scheduled_services')
+        .where('status', 'confirmed')
+        .where('scheduled_date', '>=', todayET)
+        .where(function () {
+          if (customerIdsForAppt.length) this.whereIn('customer_id', customerIdsForAppt);
+          if (linkedSvcIds.size) this.orWhereIn('id', [...linkedSvcIds]);
+        })
+        .orderBy('scheduled_date', 'asc')
+        .orderBy('window_start', 'asc')
+        .select('id', 'customer_id', 'scheduled_date', 'window_start', 'window_display', 'service_type');
+      for (const row of apptRows) {
+        apptByLinkedId.set(row.id, row);
+        if (row.customer_id && !nextApptByCustomer.has(row.customer_id)) {
+          nextApptByCustomer.set(row.customer_id, row);
+        }
+      }
+    }
+
     res.json({
-      estimates: estimates.map(e => ({
-        id: e.id, status: e.status, customerName: e.customer_name,
-        customerId: e.customer_id,
-        customerPhone: e.customer_phone, address: e.address,
-        updatedAt: e.updated_at,
-        monthlyTotal: parseFloat(e.monthly_total || 0),
-        tier: e.waveguard_tier, createdBy: e.created_by_name,
-        sentAt: e.sent_at, viewedAt: e.viewed_at, acceptedAt: e.accepted_at,
-        declinedAt: e.declined_at,
-        viewCount: e.view_count || 0,
-        lastViewedAt: e.last_viewed_at,
-        clickCount: parseInt(clickStats.get(e.id)?.click_count || 0, 10),
-        lastClickedAt: clickStats.get(e.id)?.last_clicked_at || null,
-        createdAt: e.created_at,
-        source: e.source || 'manual',
-        serviceInterest: e.service_interest,
-        leadSource: e.lead_source,
-        leadSourceDetail: e.lead_source_detail,
-        isPriority: e.is_priority,
-        description: e.service_interest || e.notes,
-        notes: e.notes,
-        followUpCount: e.follow_up_count || 0,
-        lastFollowUpAt: e.last_follow_up_at,
-        declineReason: e.decline_reason,
-        token: e.token,
-        archivedAt: e.archived_at,
-        showOneTimeOption: e.show_one_time_option,
-        billByInvoice: e.bill_by_invoice,
-      })),
+      estimates: estimates.map(e => {
+        let estData = e.estimate_data;
+        if (typeof estData === 'string') { try { estData = JSON.parse(estData); } catch { estData = null; } }
+        const linkedSvcId = estData?.scheduled_service_id || null;
+        const linkedAppt = linkedSvcId ? apptByLinkedId.get(linkedSvcId) : null;
+        const fallbackAppt = e.customer_id ? nextApptByCustomer.get(e.customer_id) : null;
+        const apptRow = linkedAppt || fallbackAppt;
+        const confirmedAppointment = apptRow ? {
+          id: apptRow.id,
+          scheduledDate: apptRow.scheduled_date,
+          windowDisplay: apptRow.window_display,
+          windowStart: apptRow.window_start,
+          serviceType: apptRow.service_type,
+          linked: !!(linkedAppt && linkedAppt.id === apptRow.id),
+        } : null;
+        return {
+          id: e.id, status: e.status, customerName: e.customer_name,
+          customerId: e.customer_id,
+          customerPhone: e.customer_phone, address: e.address,
+          updatedAt: e.updated_at,
+          monthlyTotal: parseFloat(e.monthly_total || 0),
+          tier: e.waveguard_tier, createdBy: e.created_by_name,
+          sentAt: e.sent_at, viewedAt: e.viewed_at, acceptedAt: e.accepted_at,
+          declinedAt: e.declined_at,
+          viewCount: e.view_count || 0,
+          lastViewedAt: e.last_viewed_at,
+          clickCount: parseInt(clickStats.get(e.id)?.click_count || 0, 10),
+          lastClickedAt: clickStats.get(e.id)?.last_clicked_at || null,
+          createdAt: e.created_at,
+          source: e.source || 'manual',
+          serviceInterest: e.service_interest,
+          leadSource: e.lead_source,
+          leadSourceDetail: e.lead_source_detail,
+          isPriority: e.is_priority,
+          description: e.service_interest || e.notes,
+          notes: e.notes,
+          followUpCount: e.follow_up_count || 0,
+          lastFollowUpAt: e.last_follow_up_at,
+          declineReason: e.decline_reason,
+          token: e.token,
+          archivedAt: e.archived_at,
+          showOneTimeOption: e.show_one_time_option,
+          billByInvoice: e.bill_by_invoice,
+          confirmedAppointment,
+        };
+      }),
     });
   } catch (err) { next(err); }
 });
