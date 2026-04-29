@@ -177,7 +177,15 @@ const limiter = rateLimit({
   max: config.rateLimit.max,
   message: { error: 'Too many requests, please try again later.' },
   keyGenerator: rateLimitKey,
-  skip: () => process.env.NODE_ENV !== 'production',
+  // Third-party webhook callbacks (Twilio SMS/voice, SendGrid, Resend,
+  // lead intake) must never be throttled — providers retry on non-2xx
+  // and a 429 JSON body would corrupt Twilio's expected TwiML response.
+  // Each webhook route validates its own signatures / source. Reject
+  // path-traversal forms so a crafted `/api/webhooks/../admin/...` URL
+  // can't bypass the limiter on a non-webhook route.
+  skip: (req) => process.env.NODE_ENV !== 'production'
+    || (req.originalUrl.startsWith('/api/webhooks/')
+      && !req.originalUrl.includes('..')),
 });
 app.use('/api/', limiter);
 
