@@ -478,11 +478,14 @@ export function calculateEstimate(inputs) {
       ACRE:    { b: 140, s: 155, g: 180, p: 200 },
     };
     const b = bp[sz] || bp.SMALL;
+    // Visit counts mirror server constants.MOSQUITO.tierVisits — Platinum
+    // is 17 (not 18) since Session 11a alignment. Source of truth:
+    // server/services/pricing-engine/constants.js.
     const mt = [
-      { n: 'Bronze', pv: Math.round(b.b * pr), v: 12 },
-      { n: 'Silver', pv: Math.round(b.s * pr), v: 12 },
-      { n: 'Gold', pv: Math.round(b.g * pr), v: 15 },
-      { n: 'Platinum', pv: Math.round(b.p * pr), v: 18 },
+      { n: 'Bronze',   pv: Math.round(b.b * pr), v: 12 },
+      { n: 'Silver',   pv: Math.round(b.s * pr), v: 12 },
+      { n: 'Gold',     pv: Math.round(b.g * pr), v: 15 },
+      { n: 'Platinum', pv: Math.round(b.p * pr), v: 17 },
     ];
     let ri = 1;
     if (treeDensity === 'HEAVY') ri = 2;
@@ -847,8 +850,15 @@ export function calculateEstimate(inputs) {
   }
   if (R.tmBait) { ac++; ra += 35 * 12; lineItems.push({ name: 'Termite Bait', ann: 420 }); }
 
+  // WaveGuard tier discounts — must match server
+  // pricing-engine/constants.WAVEGUARD.tiers (see docs/pricing/POLICY.md).
+  // Platinum was 0.18 here for ages while the server quoted 0.20, so
+  // Platinum customers were activated 2pp below their quoted discount.
+  // This file is deprecated (Session 11 retirement); kept in sync as a
+  // hardcoded literal until then since the server constants can't be
+  // imported into the browser bundle.
   let wt = 'Bronze', wd = 0;
-  if (ac >= 4) { wt = 'Platinum'; wd = 0.18; }
+  if (ac >= 4) { wt = 'Platinum'; wd = 0.20; }
   else if (ac === 3) { wt = 'Gold'; wd = 0.15; }
   else if (ac === 2) { wt = 'Silver'; wd = 0.10; }
   else if (ac === 1) { wt = 'Bronze'; wd = 0; }

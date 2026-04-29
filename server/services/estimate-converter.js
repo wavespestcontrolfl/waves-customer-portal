@@ -10,6 +10,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const AvailabilityEngine = require('./availability');
+const { WAVEGUARD } = require('./pricing-engine/constants');
 
 /**
  * Pick the first service date for a freshly-converted customer.
@@ -49,16 +50,24 @@ async function pickFirstServiceDate(customer, estimateId) {
 
 /**
  * Determine WaveGuard tier based on number of recurring services selected.
- * 1 service = Bronze (0% discount)
- * 2 services = Silver (10% discount)
- * 3 services = Gold (15% discount)
- * 4+ services = Platinum (18% discount)
+ *
+ * Discount values + min-service thresholds are sourced from
+ * `pricing-engine/constants.WAVEGUARD.tiers` — the single source of truth
+ * (see docs/pricing/POLICY.md). Returns title-cased tier names because
+ * `customers.waveguard_tier` and the admin UI both expect
+ * 'Bronze'/'Silver'/'Gold'/'Platinum'.
+ *
+ * Earlier this file defined a local table with Platinum=0.18, which drifted
+ * from the engine's 0.20 — Platinum customers were being activated at 2pp
+ * less than they were quoted. Now derived live so any future tier change
+ * lands in one place.
  */
 function determineTier(serviceCount) {
-  if (serviceCount >= 4) return { tier: 'Platinum', discount: 0.18 };
-  if (serviceCount >= 3) return { tier: 'Gold', discount: 0.15 };
-  if (serviceCount >= 2) return { tier: 'Silver', discount: 0.10 };
-  if (serviceCount >= 1) return { tier: 'Bronze', discount: 0 };
+  const t = WAVEGUARD.tiers;
+  if (serviceCount >= t.platinum.minServices) return { tier: 'Platinum', discount: t.platinum.discount };
+  if (serviceCount >= t.gold.minServices)     return { tier: 'Gold',     discount: t.gold.discount };
+  if (serviceCount >= t.silver.minServices)   return { tier: 'Silver',   discount: t.silver.discount };
+  if (serviceCount >= t.bronze.minServices)   return { tier: 'Bronze',   discount: t.bronze.discount };
   return { tier: 'none', discount: 0 };
 }
 
