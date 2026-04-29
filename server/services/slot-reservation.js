@@ -13,7 +13,7 @@
  *      → commitReservation() sets customer_id, payment_method_preference,
  *      clears reservation_expires_at.
  *   3. Abandoned reservations get reclaimed by releaseExpiredReservations()
- *      (ships with this service; cron wiring lands separately).
+ *      Wired to a 15-min cron in services/scheduler.js.
  *
  * Race safety: reserveSlot runs conflict-check + insert in one transaction.
  * Two customers tapping the same slot in the same second: one succeeds,
@@ -276,10 +276,9 @@ async function releaseReservation({ scheduledServiceId, estimateId }) {
  * idx_scheduled_services_reservation_cleanup partial index (only rows
  * where reservation_expires_at IS NOT NULL) makes this scan narrow.
  *
- * Function exported and callable today but NOT wired to a cron in
- * PR B.1. Callers that need it today (admin debug, tests) can invoke
- * directly; scheduled cleanup wiring lands in a later PR alongside the
- * other reservation-adjacent operational work.
+ * Wired to a 15-min cron in services/scheduler.js (matching the
+ * reservation TTL so worst-case stale-hold lifetime is ~30 min).
+ * Callers can also invoke directly for admin debug or tests.
  *
  * Returns: { released: number }
  */

@@ -375,6 +375,30 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 15 MIN — Release expired slot reservations
+  //
+  // Reserve→accept holds set scheduled_services.reservation_expires_at to
+  // NOW() + 15min. When a customer abandons before accepting (closes tab,
+  // network drops, sits past the countdown) the row sticks around marked
+  // as occupied for that (tech, date, window) tuple, blocking other
+  // customers from picking the slot. Cadence matches the 15-min TTL so
+  // worst-case stale-hold lifetime is ~30 min (TTL + cleanup interval).
+  //
+  // releaseExpiredReservations() is a narrow DELETE on rows where
+  // reservation_expires_at < NOW() — see slot-reservation.js for the
+  // index that keeps the scan cheap.
+  // =========================================================================
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      const { releaseExpiredReservations } = require('./slot-reservation');
+      const result = await releaseExpiredReservations();
+      if (result.released > 0) logger.info(`[slot-reservation] released ${result.released} expired reservation(s)`);
+    } catch (err) {
+      logger.error(`Slot reservation cleanup failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // Dashboard alerts — every 5 minutes, detect transitions in operational
   // alerts and fan out Web Push (always) + SMS to owner (critical only).
   // See server/services/dashboard-alerts-cron.js for the diff logic.
