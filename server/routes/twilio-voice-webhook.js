@@ -14,18 +14,31 @@ function capitalizeName(name) {
     .replace(/\bO'(\w)/g, (_, c) => "O'" + c.toUpperCase());
 }
 
-// Normalize a phone string to canonical US E.164 (+1XXXXXXXXXX) before
-// writing to call_log. Twilio webhooks usually deliver E.164 already,
-// but recording-status / transcription callbacks have intermittently
-// arrived with raw 10/11-digit strings. Mirroring the
-// 20260428000003_backfill_call_log_to_phone_e164 normalization here
-// stops new rows from drifting back out of E.164 and breaking the
-// dashboard's exact-string JOIN against lead_sources.
+// Normalize a phone string to canonical E.164 before writing to call_log.
+// Twilio webhooks usually deliver E.164 already, but recording-status /
+// transcription callbacks have intermittently arrived with raw 10/11-digit
+// strings. Mirroring the 20260428000003_backfill_call_log_to_phone_e164
+// normalization here stops new rows from drifting back out of E.164 and
+// breaking the dashboard's exact-string JOIN against lead_sources.
+//
+// Rules:
+//   1. Anything that starts with `+` is treated as already-E.164 — strip
+//      formatting characters (spaces / parens / dashes) but preserve the
+//      country code. Critical for non-NANP callers (e.g. UK +44…) that
+//      Twilio's Lookup-enriched Caller ID sometimes surfaces — assuming
+//      NANP would silently rewrite +442079460958 to +12079460958.
+//   2. No `+` prefix → assume NANP/US, take the last 10 digits.
+//   3. Garbage (<10 digits) → preserve raw for debugging rather than
+//      fabricate a fake number.
 function toE164(raw) {
   if (!raw) return null;
-  if (/^\+1\d{10}$/.test(raw)) return raw;
-  const digits = String(raw).replace(/\D/g, '');
-  if (digits.length < 10) return raw; // garbage; preserve for debugging
+  const s = String(raw).trim();
+  if (s.startsWith('+')) {
+    const stripped = '+' + s.slice(1).replace(/\D/g, '');
+    return /^\+\d{8,15}$/.test(stripped) ? stripped : raw;
+  }
+  const digits = s.replace(/\D/g, '');
+  if (digits.length < 10) return raw;
   return '+1' + digits.slice(-10);
 }
 
