@@ -416,7 +416,7 @@ const CallRecordingProcessor = {
 
         try {
           // Parse address if AI extracted a full address string
-          let addrLine = extracted.address_line1 || extracted.address || '';
+          let addrLine = extracted.address_line1 || '';
           let addrCity = extracted.city || '';
           let addrState = extracted.state || 'FL';
           let addrZip = extracted.zip || '';
@@ -452,28 +452,42 @@ const CallRecordingProcessor = {
           customerId = newCust.id;
           logger.info(`[call-proc] Created customer: ${extracted.first_name} ${extracted.last_name} (${customerId})`);
 
-          // Auto-create Stripe customer
+          // Auto-create Stripe customer (non-blocking, but log failures so a
+          // misconfigured Stripe key surfaces in the logs instead of silently
+          // skipping every new customer's billing record)
           try {
             const StripeService = require('./stripe');
             await StripeService.ensureStripeCustomer(customerId);
-          } catch (e) { /* non-blocking */ }
+          } catch (e) {
+            logger.warn(`[call-proc] Stripe customer create failed for ${customerId}: ${e.message}`);
+          }
         } catch (err) {
           logger.error(`[call-proc] Customer creation failed: ${err.message}`);
         }
       }
     }
 
-    // Step 4: Update call log with extraction results
+    // Step 4: Update call log with extraction results.
+    // If we extracted a name but couldn't create/match a customer, mark the
+    // row 'customer_creation_failed' instead of 'processed' so admin can
+    // see and retry it — leaving it 'processed' silently orphans the call
+    // (no lead, no estimate, no SMS, no flag).
+    const customerExpected = !!(extracted.first_name && !extracted.is_voicemail && !extracted.is_spam);
+    const customerLanded = !!customerId;
+    const finalStatus = (customerExpected && !customerLanded) ? 'customer_creation_failed' : 'processed';
     await db('call_log').where({ id: call.id }).update({
       customer_id: customerId || call.customer_id,
       ai_extraction: JSON.stringify(extracted),
       call_summary: extracted.call_summary || null,
       sentiment: extracted.sentiment || null,
       lead_quality: extracted.lead_quality || null,
-      processing_status: 'processed',
+      processing_status: finalStatus,
       processing_token: null,
       updated_at: new Date(),
     });
+    if (finalStatus === 'customer_creation_failed') {
+      logger.warn(`[call-proc] Marked ${callSid} customer_creation_failed — extracted name="${extracted.first_name}" but no customerId`);
+    }
 
     // Step 4b: Create lead in leads table for pipeline tracking
     // Note: we create the lead DIRECTLY here instead of going through lead-attribution,
@@ -489,17 +503,34 @@ const CallRecordingProcessor = {
           leadId = existingLead.id;
           logger.info(`[call-proc] Found existing lead ${leadId} for ${phone}`);
         } else {
-          // Resolve lead source from the Twilio number
+          // Resolve lead source from the Twilio number. Match every plausible
+          // shape of `lead_sources.twilio_phone_number` because that column has
+          // historically been hand-entered (E.164 `+19413187612`, 11-digit
+          // `19413187612`, 10-digit `9413187612`, formatted `(941) 318-7612`).
+          // The previous implementation produced `+1${digits}` from an already-
+          // E.164 input (`+119413187612`) — always invalid — so on E.164-stored
+          // rows only the exact match worked, and on non-E.164-stored rows
+          // nothing matched and lead_source_id silently went null.
           let leadSourceId = null;
           try {
-            const normalizedTo = (call.to_phone || '').replace(/\D/g, '');
-            const ls = await db('lead_sources').where('is_active', true).andWhere(function() {
-              this.where('twilio_phone_number', call.to_phone)
-                .orWhere('twilio_phone_number', `+${normalizedTo}`)
-                .orWhere('twilio_phone_number', `+1${normalizedTo}`);
-            }).first();
+            const digits = (call.to_phone || '').replace(/\D/g, '');
+            const ten = digits.length >= 10 ? digits.slice(-10) : null;
+            const variants = new Set([call.to_phone].filter(Boolean));
+            if (ten) {
+              variants.add(ten);
+              variants.add(`1${ten}`);
+              variants.add(`+1${ten}`);
+              variants.add(`(${ten.slice(0, 3)}) ${ten.slice(3, 6)}-${ten.slice(6)}`);
+            }
+            const ls = await db('lead_sources')
+              .where('is_active', true)
+              .whereIn('twilio_phone_number', [...variants])
+              .first();
             if (ls) leadSourceId = ls.id;
-          } catch { /* non-critical */ }
+            else logger.warn(`[call-proc] No lead_source matched ${call.to_phone} (variants tried: ${[...variants].join(', ')})`);
+          } catch (e) {
+            logger.warn(`[call-proc] lead_source lookup failed: ${e.message}`);
+          }
 
           const [newLead] = await db('leads').insert({
             lead_source_id: leadSourceId,
@@ -520,24 +551,36 @@ const CallRecordingProcessor = {
           logger.info(`[call-proc] Created new lead ${leadId} for ${extracted.first_name} ${extracted.last_name}`);
         }
 
-        // Enrich lead with AI-extracted data
+        // Enrich lead with AI-extracted data. For an existing lead, only fill
+        // fields that are still empty so we don't clobber Virginia's manual
+        // edits when a follow-up call comes in. For a brand-new lead (just
+        // inserted above) every column we'd touch is null, so the
+        // empty-only rule is equivalent to "fill everything" anyway.
         if (leadId) {
+          const current = existingLead || (await db('leads').where({ id: leadId }).first());
+          const isEmpty = (v) => v === null || v === undefined || v === '';
           const leadUpdates = {};
-          if (extracted.first_name) leadUpdates.first_name = capitalizeName(extracted.first_name);
-          if (extracted.last_name) leadUpdates.last_name = capitalizeName(extracted.last_name);
-          if (extracted.email) leadUpdates.email = extracted.email;
-          if (extracted.address_line1) leadUpdates.address = extracted.address_line1;
-          if (extracted.city) leadUpdates.city = extracted.city;
-          if (extracted.zip) leadUpdates.zip = extracted.zip;
-          if (extracted.matched_service) leadUpdates.service_interest = extracted.matched_service;
-          if (extracted.lead_quality) leadUpdates.urgency = extracted.lead_quality === 'hot' ? 'urgent' : 'normal';
-          leadUpdates.transcript_summary = extracted.call_summary;
+          if (extracted.first_name && isEmpty(current?.first_name)) leadUpdates.first_name = capitalizeName(extracted.first_name);
+          if (extracted.last_name && isEmpty(current?.last_name)) leadUpdates.last_name = capitalizeName(extracted.last_name);
+          if (extracted.email && isEmpty(current?.email)) leadUpdates.email = extracted.email;
+          if (extracted.address_line1 && isEmpty(current?.address)) leadUpdates.address = extracted.address_line1;
+          if (extracted.city && isEmpty(current?.city)) leadUpdates.city = extracted.city;
+          if (extracted.zip && isEmpty(current?.zip)) leadUpdates.zip = extracted.zip;
+          if (extracted.matched_service && isEmpty(current?.service_interest)) leadUpdates.service_interest = extracted.matched_service;
+          if (extracted.lead_quality && isEmpty(current?.urgency)) {
+            leadUpdates.urgency = extracted.lead_quality === 'hot' ? 'urgent' : 'normal';
+          }
+          // Always refresh the rolling AI-derived fields — they're a snapshot
+          // of the latest call, not user-curated content.
+          if (extracted.call_summary) leadUpdates.transcript_summary = extracted.call_summary;
           leadUpdates.extracted_data = JSON.stringify({
             pain_points: extracted.pain_points,
             preferred_date_time: extracted.preferred_date_time,
             sentiment: extracted.sentiment,
           });
-          leadUpdates.is_qualified = extracted.lead_quality !== 'spam';
+          // is_qualified: hot/warm only. Spam was already early-returned, so
+          // checking != 'spam' would mark cold leads qualified.
+          leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality);
           leadUpdates.customer_id = customerId;
           leadUpdates.updated_at = new Date();
           await db('leads').where({ id: leadId }).update(leadUpdates);
@@ -682,31 +725,36 @@ const CallRecordingProcessor = {
             if (existing) alreadySent = true;
           } catch { /* sms_log query issue — send anyway */ }
 
-          if (!alreadySent) {
-            await TwilioService.sendSMS(customer.phone, smsBody, { messageType: 'confirmation' });
-            logger.info(`[call-proc] Appointment SMS sent to ${customer.phone}`);
-          } else {
-            logger.info(`[call-proc] Skipping duplicate appointment SMS to ${customer.phone} (sent within last 10 min)`);
-          }
-
-          // Create the scheduled_services record so it appears on the schedule
+          // Create the scheduled_services record FIRST. Previously we sent
+          // the SMS first and inserted the schedule row afterward — if the
+          // insert threw, the customer received "your appointment is booked"
+          // for an appointment that never landed on the schedule. Now: insert
+          // first, send only if it succeeded.
+          let scheduledServiceId = null;
+          let scheduledDateForLog = null;
+          let windowStartForLog = null;
           try {
-            const parsedDate = parseETDateTime(extracted.preferred_date_time);
+            const parsedDt = parseETDateTime(extracted.preferred_date_time);
             let scheduledDate, windowStart;
-            if (!isNaN(parsedDate.getTime())) {
+            if (!isNaN(parsedDt.getTime())) {
               // Render the absolute moment back into ET wall-clock components.
               const etOptions = { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false };
-              const etDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(parsedDate);
+              const etDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(parsedDt);
               scheduledDate = etDate; // YYYY-MM-DD in Eastern
-              const etTime = new Intl.DateTimeFormat('en-US', etOptions).format(parsedDate);
+              const etTime = new Intl.DateTimeFormat('en-US', etOptions).format(parsedDt);
               windowStart = etTime;
             } else {
-              // Fallback: try to extract date and time from the string
+              // Fallback: extract date + time from the raw string. Pin parsing
+              // to noon so a UTC server's `new Date('April 30 2026')` (which
+              // becomes UTC midnight) can't roll the calendar date back a day
+              // when we re-render it in ET.
               const dateMatch = extracted.preferred_date_time.match(/(\w+ \d{1,2}(?:,?\s*\d{4})?)/);
               const timeMatch = extracted.preferred_date_time.match(/(\d{1,2}(?::\d{2})?\s*(?:am|pm))/i);
               if (dateMatch) {
-                const d = new Date(dateMatch[1]);
-                if (!isNaN(d.getTime())) scheduledDate = d.toISOString().split('T')[0];
+                const d = new Date(`${dateMatch[1]} 12:00`);
+                if (!isNaN(d.getTime())) {
+                  scheduledDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(d);
+                }
               }
               if (timeMatch) {
                 const t = timeMatch[1].toLowerCase();
@@ -742,15 +790,29 @@ const CallRecordingProcessor = {
                 notes: `Booked via phone call. ${extracted.call_summary || ''}`.trim(),
                 booking_source: 'phone_call',
               }).returning('*');
+              scheduledServiceId = svc.id;
+              scheduledDateForLog = scheduledDate;
+              windowStartForLog = windowStart;
               logger.info(`[call-proc] Scheduled service created: ${svc.id} on ${scheduledDate} at ${windowStart}`);
-              appointmentResult = { smsSent: true, scheduledServiceId: svc.id, service: serviceType, dateTime: extracted.preferred_date_time };
             } else {
-              logger.warn(`[call-proc] Could not parse date from: ${extracted.preferred_date_time}`);
-              appointmentResult = { smsSent: true, service: serviceType, dateTime: extracted.preferred_date_time, scheduleCreated: false };
+              logger.warn(`[call-proc] Could not parse date from: ${extracted.preferred_date_time}; skipping schedule + SMS`);
+              appointmentResult = { service: serviceType, dateTime: extracted.preferred_date_time, scheduleCreated: false, smsSent: false };
             }
           } catch (schedErr) {
-            logger.error(`[call-proc] Failed to create scheduled service: ${schedErr.message}`);
-            appointmentResult = { smsSent: true, service: serviceType, dateTime: extracted.preferred_date_time, scheduleError: schedErr.message };
+            logger.error(`[call-proc] Failed to create scheduled service: ${schedErr.message}; skipping SMS so customer isn't told about an appointment that doesn't exist`);
+            appointmentResult = { service: serviceType, dateTime: extracted.preferred_date_time, scheduleError: schedErr.message, smsSent: false };
+          }
+
+          // Only send the confirmation SMS if the schedule row landed.
+          if (scheduledServiceId) {
+            if (!alreadySent) {
+              await TwilioService.sendSMS(customer.phone, smsBody, { messageType: 'confirmation' });
+              logger.info(`[call-proc] Appointment SMS sent to ${customer.phone}`);
+              appointmentResult = { smsSent: true, scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog };
+            } else {
+              logger.info(`[call-proc] Skipping duplicate appointment SMS to ${customer.phone} (sent within last 10 min)`);
+              appointmentResult = { smsSent: false, smsSkippedReason: 'duplicate', scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time };
+            }
           }
         }
       } catch (err) {
@@ -770,8 +832,8 @@ const CallRecordingProcessor = {
           templateKey: 'new_lead',
           customer: {
             email: extracted.email,
-            first_name: extracted.first_name,
-            last_name: extracted.last_name,
+            first_name: capitalizeName(extracted.first_name),
+            last_name: capitalizeName(extracted.last_name),
             id: customerId,
           },
         });
@@ -810,13 +872,17 @@ const CallRecordingProcessor = {
       }
     }
 
-    // Step 8: CSR Coach scoring — auto-score every transcribed call
+    // Step 8: CSR Coach scoring — auto-score every transcribed call.
+    // We don't know which CSR actually answered (the inbound <Dial> forwards
+    // to a single number that may ring multiple people). Score against
+    // 'Unknown' so analytics aren't all silently booked to one name; fix
+    // properly when we add per-CSR routing.
     let csrScoreResult = null;
     if (transcription && transcription.length > 50) {
       try {
         const CSRCoach = require('./csr/csr-coach');
         const scoreResult = await CSRCoach.scoreCall({
-          csrName: 'Adam',
+          csrName: 'Unknown',
           customerId: customerId || null,
           callDirection: 'inbound',
           callSource: call.to_phone || 'unknown',
