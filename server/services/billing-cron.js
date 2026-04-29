@@ -166,7 +166,50 @@ const BillingCron = {
         logger.info(`[billing-cron] Charged $${customer.monthly_rate} for ${customer.first_name} ${customer.last_name}`);
       } catch (err) {
         failed++;
-        logger.error(`[billing-cron] Failed to charge ${customer.first_name} ${customer.last_name} (${customer.id}): ${err.message}`);
+        logger.error(`[billing-cron] Failed to charge customer id=${customer.id}: ${err.message}`);
+
+        // STRIPE_CHARGED_DB_FAILED — Stripe accepted the charge but the
+        // payments-table write failed; the orphan was already recorded
+        // in stripe_orphan_charges by the service. The customer was
+        // billed, so DO NOT schedule a retry (would double-charge),
+        // DO NOT send the "your card failed, update it" SMS, DO surface
+        // the orphan for manual reconciliation.
+        if (err.code === 'STRIPE_CHARGED_DB_FAILED') {
+          await logAutopay(customer.id, 'orphan_charge', {
+            amountCents: Math.round(parseFloat(customer.monthly_rate) * 100),
+            paymentMethodId: customer.autopay_payment_method_id || null,
+            details: { source: 'autopay', stripe_payment_intent_id: err.stripePaymentIntentId, reason: err.message },
+          }).catch(() => {});
+
+          try {
+            await db('customer_health_alerts').insert({
+              customer_id: customer.id,
+              alert_type: 'stripe_orphan_charge',
+              severity: 'high',
+              title: `Charge succeeded but unrecorded — $${err.amount} (PI ${err.stripePaymentIntentId})`,
+              description: `Stripe accepted the autopay charge but our DB ledger insert failed. The customer WAS billed; reconcile via stripe_orphan_charges before next month's run. DO NOT manually retry — that would double-charge.`,
+              metadata: JSON.stringify({
+                stripe_payment_intent_id: err.stripePaymentIntentId,
+                amount: err.amount,
+                source: 'autopay_orphan',
+              }),
+            });
+          } catch (alertErr) {
+            logger.error(`[billing-cron] Orphan alert creation failed: ${alertErr.message}`);
+          }
+
+          try {
+            await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
+              `🚨 Stripe orphan charge: customer id=${customer.id} — $${err.amount} charged via PI ${err.stripePaymentIntentId} but not in our DB. Reconcile via stripe_orphan_charges. DO NOT retry.`,
+            );
+          } catch (smsErr) {
+            logger.error(`[billing-cron] Office orphan SMS failed: ${smsErr.message}`);
+          }
+
+          // Skip the retry-scheduling + customer-facing failure SMS.
+          // From the customer's perspective the charge succeeded.
+          continue;
+        }
 
         // Schedule first retry (Day 3)
         const retryAt = new Date();

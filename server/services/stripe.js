@@ -373,18 +373,44 @@ const StripeService = {
       logger.info(`[stripe] Charge processed: base=$${baseAmount} surcharge=$${surchargeAmount} total=$${totalAmount} for ${customerId}, PI: ${paymentIntent.id}`);
       return paymentRecord;
     } catch (dbErr) {
-      // CRITICAL: Stripe charged the customer but DB insert failed
+      // CRITICAL: Stripe charged the customer but our payments-table
+      // write failed. Returning a synthetic success record (the prior
+      // behavior) was unsafe — the autopay cron treated it as success
+      // and on a real DB outage the next retry-sweep run would charge
+      // the customer AGAIN since no payments row exists to dedupe
+      // against.
+      //
+      // Recovery plan:
+      //   1. Insert into stripe_orphan_charges so an admin queue can
+      //      drive manual reconciliation. Uses minimal columns so it's
+      //      far less likely to hit the same constraint that broke the
+      //      `payments` insert.
+      //   2. Throw with code='STRIPE_CHARGED_DB_FAILED' so the autopay
+      //      cron's catch block can detect this case and skip retry
+      //      scheduling (retry would double-charge).
+      //   3. The PI id rides on the error so the cron can include it
+      //      in the admin alert.
       logger.error(`[stripe] CRITICAL: Charge succeeded (PI: ${paymentIntent.id}) but DB insert failed: ${dbErr.message}`);
-      return {
-        customer_id: customerId,
-        payment_method_id: card.id,
-        processor: 'stripe',
-        stripe_payment_intent_id: paymentIntent.id,
-        amount: totalAmount,
-        status,
-        description,
-        _db_error: dbErr.message,
-      };
+      try {
+        await db('stripe_orphan_charges').insert({
+          stripe_payment_intent_id: paymentIntent.id,
+          stripe_charge_id: paymentIntent.latest_charge || null,
+          customer_id: customerId,
+          amount: totalAmount,
+          source: metadata?.type === 'monthly_autopay' ? 'autopay_charge' : 'manual_charge',
+          original_db_error: String(dbErr.message).slice(0, 1000),
+        });
+      } catch (orphanErr) {
+        // Belt-and-suspenders failure — even the orphan record write
+        // failed. Log loud; the only durable trail at this point is
+        // Stripe's side + this log line.
+        logger.error(`[stripe] DOUBLE FAILURE: orphan-charges insert also failed for PI ${paymentIntent.id}: ${orphanErr.message}`);
+      }
+      const err = new Error(`Stripe charge ${paymentIntent.id} succeeded but DB insert failed`);
+      err.code = 'STRIPE_CHARGED_DB_FAILED';
+      err.stripePaymentIntentId = paymentIntent.id;
+      err.amount = totalAmount;
+      throw err;
     }
   },
 
@@ -503,33 +529,62 @@ const StripeService = {
       throw new Error(err.message || 'Card charge failed');
     }
 
-    // Link the PI to the invoice so the webhook can mark it paid.
-    await db('invoices')
-      .where({ id: invoiceId })
-      .update({
+    // Link the PI to the invoice + write the payments-table ledger row.
+    // BOTH writes happen after Stripe has already accepted the charge,
+    // so a DB failure here leaves a Stripe-collected payment with no
+    // local record (orphan PI). Wrap in try/catch + record into
+    // stripe_orphan_charges + throw STRIPE_CHARGED_DB_FAILED so the
+    // caller (admin Card-on-File flow) sees a clear "charged but
+    // unrecorded" error instead of a generic 500.
+    const status = paymentIntent.status === 'succeeded' ? 'paid' : 'processing';
+    let paymentRecord;
+    try {
+      await db('invoices')
+        .where({ id: invoiceId })
+        .update({
+          processor: 'stripe',
+          stripe_payment_intent_id: paymentIntent.id,
+        });
+
+      [paymentRecord] = await db('payments').insert({
+        customer_id: invoice.customer_id,
+        payment_method_id: card.id,
         processor: 'stripe',
         stripe_payment_intent_id: paymentIntent.id,
-      });
-
-    const status = paymentIntent.status === 'succeeded' ? 'paid' : 'processing';
-    const [paymentRecord] = await db('payments').insert({
-      customer_id: invoice.customer_id,
-      payment_method_id: card.id,
-      processor: 'stripe',
-      stripe_payment_intent_id: paymentIntent.id,
-      stripe_charge_id: paymentIntent.latest_charge || null,
-      payment_date: etDateString(),
-      amount: total,
-      status,
-      description: surcharge > 0
-        ? `Invoice ${invoice.invoice_number} — card on file (includes $${surcharge.toFixed(2)} fee)`
-        : `Invoice ${invoice.invoice_number} — card on file`,
-      metadata: JSON.stringify({
-        base_amount: base,
-        card_surcharge: surcharge,
-        source: 'admin_card_on_file',
-      }),
-    }).returning('*');
+        stripe_charge_id: paymentIntent.latest_charge || null,
+        payment_date: etDateString(),
+        amount: total,
+        status,
+        description: surcharge > 0
+          ? `Invoice ${invoice.invoice_number} — card on file (includes $${surcharge.toFixed(2)} fee)`
+          : `Invoice ${invoice.invoice_number} — card on file`,
+        metadata: JSON.stringify({
+          base_amount: base,
+          card_surcharge: surcharge,
+          source: 'admin_card_on_file',
+        }),
+      }).returning('*');
+    } catch (dbErr) {
+      logger.error(`[stripe] CRITICAL: chargeInvoiceWithSavedCard succeeded at Stripe (PI ${paymentIntent.id}) but DB write failed: ${dbErr.message}`);
+      try {
+        await db('stripe_orphan_charges').insert({
+          stripe_payment_intent_id: paymentIntent.id,
+          stripe_charge_id: paymentIntent.latest_charge || null,
+          customer_id: invoice.customer_id,
+          invoice_id: invoiceId,
+          amount: total,
+          source: 'invoice_card_on_file',
+          original_db_error: String(dbErr.message).slice(0, 1000),
+        });
+      } catch (orphanErr) {
+        logger.error(`[stripe] DOUBLE FAILURE: orphan-charges insert also failed for PI ${paymentIntent.id}: ${orphanErr.message}`);
+      }
+      const err = new Error(`Stripe charge ${paymentIntent.id} succeeded but DB write failed for invoice ${invoice.invoice_number}`);
+      err.code = 'STRIPE_CHARGED_DB_FAILED';
+      err.stripePaymentIntentId = paymentIntent.id;
+      err.amount = total;
+      throw err;
+    }
 
     logger.info(`[stripe] Card-on-file charge succeeded: $${total} for invoice ${invoice.invoice_number}, PI ${paymentIntent.id}`);
     return {
@@ -734,8 +789,21 @@ const StripeService = {
     const { base, surcharge, total } = computeChargeAmount(parseFloat(invoice.total), methodCategory);
     const amountCents = Math.round(total * 100);
 
+    // Lock the PI's payment_method_types to the claimed family. Without
+    // this, the PI was created with automatic_payment_methods=enabled
+    // and the client could call /update-amount with
+    // methodCategory='us_bank_account' (no surcharge) and then confirm
+    // the PI with a card on the Payment Element — paying base price,
+    // skipping the 3.99% surcharge that compensates Waves for Stripe's
+    // card fee. Restricting to one type at the time of amount update
+    // means Stripe rejects a confirm with the wrong method, and a
+    // method switch must round-trip through this endpoint and recompute
+    // the surcharge.
+    const restrictedTypes = isCardMethodType(methodCategory) ? ['card'] : ['us_bank_account'];
+
     const updateParams = {
       amount: amountCents,
+      payment_method_types: restrictedTypes,
       metadata: {
         waves_invoice_id: invoiceId,
         invoice_number: invoice.invoice_number,
@@ -826,6 +894,7 @@ const StripeService = {
       // tender into receipts and downstream reporting.
       let resolvedPaymentMethod = pi.payment_method_types?.[0] || 'card';
       let bankLastFour = null;
+      let pmdType = null;
 
       // Get receipt and card info from the charge
       if (charge) {
@@ -835,6 +904,7 @@ const StripeService = {
             : charge;
           receiptUrl = chargeObj.receipt_url || null;
           const pmd = chargeObj.payment_method_details;
+          pmdType = pmd?.type || null;
           if (pmd?.card) {
             resolvedPaymentMethod = 'card';
             cardBrand = pmd.card.brand?.toUpperCase();
@@ -847,6 +917,45 @@ const StripeService = {
           }
         } catch {
           // Non-critical — continue without receipt details
+        }
+      }
+
+      // Defense-in-depth surcharge-bypass detection. The
+      // payment_method_types lock at /update-amount time is the primary
+      // defense — Stripe rejects a confirm with the wrong method family.
+      // If somehow a charge succeeds for less than the expected amount
+      // for its actual method (Stripe API drift, a race with the lock,
+      // a flow we haven't anticipated), the charge is already settled
+      // and we can't unwind it cheaply. Log critical + create a health
+      // alert so an operator can decide whether to follow up.
+      if (pmdType) {
+        const expected = computeChargeAmount(parseFloat(invoice.total), pmdType);
+        const expectedCents = Math.round(expected.total * 100);
+        const actualCents = Number(pi.amount) || 0;
+        if (actualCents + 1 < expectedCents) {  // 1-cent tolerance for rounding
+          logger.error(
+            `[stripe] CRITICAL: Surcharge-bypass detected on PI ${paymentIntentId}. ` +
+            `Method=${pmdType}, expected=$${expected.total.toFixed(2)} (${expectedCents}c), ` +
+            `actual=$${(actualCents / 100).toFixed(2)} (${actualCents}c). Invoice ${invoice.invoice_number}.`,
+          );
+          try {
+            await db('customer_health_alerts').insert({
+              customer_id: invoice.customer_id,
+              alert_type: 'stripe_surcharge_bypass',
+              severity: 'high',
+              title: `Surcharge bypass detected — invoice ${invoice.invoice_number}`,
+              description: `Customer paid $${(actualCents / 100).toFixed(2)} via ${pmdType}, expected $${expected.total.toFixed(2)} (3.99% card surcharge missing). PI: ${paymentIntentId}.`,
+              metadata: JSON.stringify({
+                stripe_payment_intent_id: paymentIntentId,
+                method: pmdType,
+                expected_total: expected.total,
+                actual_total: actualCents / 100,
+                shortfall: expected.total - (actualCents / 100),
+              }),
+            });
+          } catch (alertErr) {
+            logger.error(`[stripe] Surcharge-bypass alert insert failed: ${alertErr.message}`);
+          }
         }
       }
 
