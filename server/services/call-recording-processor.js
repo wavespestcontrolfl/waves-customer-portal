@@ -567,8 +567,17 @@ const CallRecordingProcessor = {
           if (extracted.city && isEmpty(current?.city)) leadUpdates.city = extracted.city;
           if (extracted.zip && isEmpty(current?.zip)) leadUpdates.zip = extracted.zip;
           if (extracted.matched_service && isEmpty(current?.service_interest)) leadUpdates.service_interest = extracted.matched_service;
-          if (extracted.lead_quality && isEmpty(current?.urgency)) {
-            leadUpdates.urgency = extracted.lead_quality === 'hot' ? 'urgent' : 'normal';
+          // Urgency is a triage signal, not a hand-edited field — and the
+          // leads schema defaults it to 'normal' at insert (migration
+          // 20260401000095_lead_attribution.js:43), so an empty-only guard
+          // here would never upgrade a freshly-inserted hot lead. Treat it
+          // as upgrade-only: a hot extraction always promotes to 'urgent';
+          // otherwise only fill if still empty so we don't downgrade an
+          // already-urgent lead when a cold follow-up call comes in.
+          if (extracted.lead_quality === 'hot') {
+            leadUpdates.urgency = 'urgent';
+          } else if (extracted.lead_quality && isEmpty(current?.urgency)) {
+            leadUpdates.urgency = 'normal';
           }
           // Always refresh the rolling AI-derived fields — they're a snapshot
           // of the latest call, not user-curated content.
