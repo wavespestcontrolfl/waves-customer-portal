@@ -61,7 +61,8 @@ function windowFor(period) {
     .orderByRaw('COUNT(*) DESC');
 
   if (win) {
-    q = q.whereBetween('c.created_at', [`${win.from}T00:00:00`, `${win.to}T23:59:59`]);
+    q = q.whereRaw("c.created_at >= ?::timestamp AT TIME ZONE 'America/New_York'", [`${win.from}T00:00:00`])
+         .whereRaw("c.created_at <  (?::timestamp + INTERVAL '1 day') AT TIME ZONE 'America/New_York'", [`${win.to}T00:00:00`]);
   }
 
   const rows = await q;
