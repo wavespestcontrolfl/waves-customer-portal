@@ -723,6 +723,12 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
 
     if (notifyCustomer !== false) {
       const result = await RescheduleSMS.sendRescheduleRequest(req.params.serviceId, reasonCode || 'admin', reasonText);
+      // Service returns { success: false, reason } when there's no SMS to send
+      // (e.g., no reschedule options available). Map to a non-2xx so admin
+      // clients that only check r.ok don't treat it as silent success.
+      if (result && result.success === false) {
+        return res.status(422).json(result);
+      }
       return res.json(result);
     }
 
