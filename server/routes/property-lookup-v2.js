@@ -1248,7 +1248,23 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   // Step 2b-3: when recurring pest carries roachModifier='GERMAN', auto-add
   // the $100 germanRoachInitial one-time (mirrors pricing-engine-v2.js:481-483).
   // Urgency/afterHours/recurringCustomer multipliers applied inside priceGermanRoachInitial.
-  if (sel.has('ROACH')) services.germanRoach = {};
+  //
+  // Standalone Cockroach Treatment routes by the form's roachType selector:
+  //   GERMAN  → priceGermanRoach (3-visit specialty, $450+)
+  //   REGULAR → pricePestInitialRoach('regular') — single-visit native
+  //             knockdown ($119/$139/$169 by footprint), same sliding scale
+  //             as the auto-fire alongside recurring pest.
+  // Skip the standalone REGULAR fire when recurring pest already auto-fires
+  // the same knockdown via roachModifier='REGULAR' so the same service isn't
+  // billed twice.
+  const standaloneRoach = String(o.roachType || 'REGULAR').toUpperCase();
+  if (sel.has('ROACH')) {
+    if (standaloneRoach === 'GERMAN') {
+      services.germanRoach = {};
+    } else if (!(sel.has('PEST') && rawRoach === 'REGULAR')) {
+      services.pestInitialRoach = { roachType: 'regular' };
+    }
+  }
   if (sel.has('PEST') && rawRoach === 'GERMAN') {
     services.germanRoachInitial = { urgency, afterHours, isRecurringCustomer: recurringCustomer };
   }

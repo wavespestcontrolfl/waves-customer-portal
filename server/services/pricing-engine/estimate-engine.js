@@ -256,6 +256,15 @@ function generateEstimate(input) {
     const result = priceGermanRoach(property);
     lineItems.push(result);
   }
+  // Standalone Initial Roach Knockdown — fires when the customer wants the
+  // single-visit knockdown without recurring pest. Same sliding-scale pricing
+  // as the auto-fire above. Translator skips this when recurring pest already
+  // auto-fires the same knockdown via roachModifier, so no double-charge.
+  if (services.pestInitialRoach) {
+    const roachTypeRaw = (services.pestInitialRoach.roachType || 'regular').toLowerCase();
+    const result = pricePestInitialRoach(property, { roachType: roachTypeRaw });
+    if (result) lineItems.push(result);
+  }
   // Session 11a Step 2b-3: v2-parity auto-fire for recurring pest with
   // roachModifier='GERMAN'. Flat $100 one-time (urgency/afterHours/rc baked
   // inside priceGermanRoachInitial via a single Math.round, matching v2's
