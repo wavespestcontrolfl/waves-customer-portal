@@ -161,10 +161,36 @@ async function subscribeOrResubscribe({
 }
 
 /**
+ * Read-only token lookup. Used by the GET confirm-page render path —
+ * scanners and link previews would trip a state change if GET were
+ * mutating, defeating double-opt-in. The actual flip lives in
+ * confirmByToken (POST only).
+ *
+ * Returns { subscriber, action } where action is one of:
+ *   'pending'        — row exists at status='pending', ready to confirm
+ *   'already_active' — row was already active (idempotent re-visit)
+ *   'unsubscribed'   — row is unsubscribed; nothing to do
+ *   'not_found'      — token doesn't match any row
+ */
+async function lookupByToken(token) {
+  if (!token) return { subscriber: null, action: 'not_found' };
+  const sub = await db('newsletter_subscribers').where({ confirmation_token: token }).first();
+  if (!sub) return { subscriber: null, action: 'not_found' };
+  if (sub.status === 'active') return { subscriber: sub, action: 'already_active' };
+  if (sub.status === 'unsubscribed') return { subscriber: sub, action: 'unsubscribed' };
+  return { subscriber: sub, action: 'pending' };
+}
+
+/**
  * Confirm a pending subscriber by token. Idempotent: confirming an
  * already-active row is a no-op (returns the existing subscriber);
  * confirming an unsubscribed row leaves status alone (the user already
  * opted out — confirming would be wrong).
+ *
+ * Mutates state — only invoke from a non-GET request handler. Email
+ * link scanners and corporate-gateway preview fetchers blast every URL
+ * in a message with GET; running this on GET would let them confirm
+ * pending rows before the human recipient consents.
  *
  * Returns { subscriber, action } where action is one of:
  *   'confirmed'      — pending → active
@@ -173,19 +199,16 @@ async function subscribeOrResubscribe({
  *   'not_found'      — token doesn't match any row
  */
 async function confirmByToken(token) {
-  if (!token) return { subscriber: null, action: 'not_found' };
-  const sub = await db('newsletter_subscribers').where({ confirmation_token: token }).first();
-  if (!sub) return { subscriber: null, action: 'not_found' };
-  if (sub.status === 'active') return { subscriber: sub, action: 'already_active' };
-  if (sub.status === 'unsubscribed') return { subscriber: sub, action: 'unsubscribed' };
+  const initial = await lookupByToken(token);
+  if (initial.action !== 'pending') return initial;
   // status === 'pending' — flip to active.
-  await db('newsletter_subscribers').where({ id: sub.id }).update({
+  await db('newsletter_subscribers').where({ id: initial.subscriber.id }).update({
     status: 'active',
     confirmed_at: new Date(),
     updated_at: new Date(),
   });
-  await linkToCustomer(sub.email);
-  const fresh = await db('newsletter_subscribers').where({ id: sub.id }).first();
+  await linkToCustomer(initial.subscriber.email);
+  const fresh = await db('newsletter_subscribers').where({ id: initial.subscriber.id }).first();
   return { subscriber: fresh, action: 'confirmed' };
 }
 
@@ -215,4 +238,4 @@ async function linkToCustomer(email) {
   );
 }
 
-module.exports = { subscribeOrResubscribe, confirmByToken, linkToCustomer, EMAIL_RE };
+module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, EMAIL_RE };

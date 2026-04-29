@@ -13,7 +13,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
-const { subscribeOrResubscribe, confirmByToken, EMAIL_RE } = require('../services/newsletter-subscribers');
+const { subscribeOrResubscribe, lookupByToken, confirmByToken, EMAIL_RE } = require('../services/newsletter-subscribers');
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 
 // Per-IP rate limiter on POST /subscribe. The global /api/ limiter in
@@ -175,34 +175,10 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
   }
 });
 
-// GET /api/public/newsletter/confirm/:token
-// Human-visible double-opt-in confirmation. User clicks the link from the
-// confirmation email; we flip status pending → active and render a small
-// HTML success page (mirrors the unsubscribe pattern: no template engine,
-// no client code, survives outages of everything else).
-//
-// Idempotent: hitting the URL twice (browser back/forward, link cached
-// in a preview pane) shows the same success page and never errors.
-router.get('/confirm/:token', async (req, res) => {
-  try {
-    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.token);
-    const result = isUuid ? await confirmByToken(req.params.token) : { subscriber: null, action: 'not_found' };
-
-    if (result.action === 'confirmed') {
-      logger.info(`[newsletter] Confirmed subscriber id=${result.subscriber.id}`);
-    }
-
-    const email = result.subscriber ? escapeHtml(result.subscriber.email) : '';
-    const heading = result.action === 'unsubscribed' ? "You're unsubscribed."
-      : result.action === 'not_found' ? "Link expired or invalid."
-      : "You're in!";
-    const body = result.action === 'unsubscribed'
-      ? `<p>This email is currently unsubscribed${email ? ` (<span class="email">${email}</span>)` : ''}. To start receiving the newsletter again, sign up at <a href="https://portal.wavespestcontrol.com/newsletter">/newsletter</a>.</p>`
-      : result.action === 'not_found'
-        ? `<p>This confirmation link doesn't match a pending subscription. The link may have already been used or it may have expired.</p><p style="margin-bottom:0">Sign up again at <a href="https://portal.wavespestcontrol.com/newsletter">/newsletter</a>.</p>`
-        : `<p>We'll send the next issue${email ? ` to <span class="email">${email}</span>` : ''}.</p><p style="margin-bottom:0">Local SWFL events, seasonal pest tips, and lawn-care timing — straight from our trucks.</p>`;
-
-    res.type('html').send(`
+// Shared HTML page wrapper for the confirm flow's GET + POST renders.
+// Single self-contained document — no template engine, no client code.
+function renderConfirmPage(heading, bodyHtml) {
+  return `
       <!doctype html>
       <html>
       <head>
@@ -216,17 +192,63 @@ router.get('/confirm/:token', async (req, res) => {
           .box { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 24px; margin-top: 24px; }
           .email { font-family: monospace; color: #111; }
           a { color: #1B2C5B; }
+          .btn { display:inline-block; background:#FFD700; color:#1B2C5B; border:2px solid #1B2C5B; border-radius:10px; padding:12px 22px; font-weight:800; letter-spacing:0.04em; text-transform:uppercase; cursor:pointer; font-size:14px; }
+          .btn:hover { box-shadow: 4px 4px 0 #1B2C5B; transform: translate(-2px, -2px); }
+          form { margin: 0; padding: 0; }
         </style>
       </head>
       <body>
         <h1>${heading}</h1>
         <div class="box">
-          ${body}
+          ${bodyHtml}
         </div>
         <p style="margin-top:32px; font-size:13px; color:#999;">Waves Pest Control &amp; Lawn Care · Bradenton, FL</p>
       </body>
       </html>
-    `);
+    `;
+}
+
+// GET /api/public/newsletter/confirm/:token
+// Read-only — renders a confirm-button form for pending rows; status-
+// appropriate page for already-active / unsubscribed / unknown tokens.
+//
+// Why GET cannot mutate: corporate mail gateways (Defender, Mimecast,
+// Proofpoint, Outlook safe-link rewriting, etc.) routinely pre-fetch
+// every URL in incoming mail to scan for malicious content. A mutating
+// GET would let those scanners confirm pending rows BEFORE the human
+// recipient consents, defeating double-opt-in. The actual state flip
+// lives in POST below; the form here is the deliberate user gesture
+// that scanners typically don't simulate.
+router.get('/confirm/:token', async (req, res) => {
+  try {
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.token);
+    const result = isUuid ? await lookupByToken(req.params.token) : { subscriber: null, action: 'not_found' };
+
+    const email = result.subscriber ? escapeHtml(result.subscriber.email) : '';
+    const tokenSafe = escapeHtml(req.params.token);
+
+    let heading; let bodyHtml;
+    if (result.action === 'pending') {
+      heading = 'One last click.';
+      bodyHtml = `
+          <p>Confirm the subscription${email ? ` for <span class="email">${email}</span>` : ''} to start receiving the Waves Newsletter.</p>
+          <form method="POST" action="/api/public/newsletter/confirm/${tokenSafe}">
+            <button type="submit" class="btn">Confirm subscription</button>
+          </form>
+          <p style="margin-bottom:0; font-size:12px; color:#888;">If you didn't sign up, just close this tab — nothing happens until you click the button.</p>
+        `;
+    } else if (result.action === 'already_active') {
+      heading = "You're already in.";
+      bodyHtml = `<p>This email${email ? ` (<span class="email">${email}</span>)` : ''} is already confirmed and on the list.</p>`;
+    } else if (result.action === 'unsubscribed') {
+      heading = "You're unsubscribed.";
+      bodyHtml = `<p>This email is currently unsubscribed${email ? ` (<span class="email">${email}</span>)` : ''}. To start receiving the newsletter again, sign up at <a href="https://portal.wavespestcontrol.com/newsletter">/newsletter</a>.</p>`;
+    } else {
+      heading = 'Link expired or invalid.';
+      bodyHtml = `<p>This confirmation link doesn't match a pending subscription. The link may have already been used or it may have expired.</p><p style="margin-bottom:0">Sign up again at <a href="https://portal.wavespestcontrol.com/newsletter">/newsletter</a>.</p>`;
+    }
+
+    res.type('html').send(renderConfirmPage(heading, bodyHtml));
   } catch (err) {
     logger.error(`[newsletter] confirm GET failed: ${err.message}`);
     res.status(500).type('text').send('Something went wrong. Email contact@wavespestcontrol.com if you meant to confirm a subscription.');
@@ -234,14 +256,41 @@ router.get('/confirm/:token', async (req, res) => {
 });
 
 // POST /api/public/newsletter/confirm/:token
-// JSON variant for any future client-side confirm flow. Returns the same
-// idempotent shape as confirmByToken's action enum so the frontend can
-// pick its own messaging.
+// Performs the actual pending → active transition. Two response shapes
+// based on Accept: HTML (form submission from the GET page) or JSON
+// (any future fetch()-based client). The GET page above is the only
+// in-tree caller; the JSON shape is left in place because the audit
+// out-of-scope list mentions a future client-side flow.
 router.post('/confirm/:token', async (req, res) => {
   try {
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.token);
     const result = isUuid ? await confirmByToken(req.params.token) : { subscriber: null, action: 'not_found' };
-    res.json({ success: true, action: result.action });
+
+    if (result.action === 'confirmed') {
+      logger.info(`[newsletter] Confirmed subscriber id=${result.subscriber.id}`);
+    }
+
+    // Render HTML when the request came from a browser form (default
+    // Accept includes text/html). Fall back to JSON for fetch() callers.
+    const wantsHtml = req.accepts(['html', 'json']) === 'html';
+    if (!wantsHtml) {
+      return res.json({ success: true, action: result.action });
+    }
+
+    const email = result.subscriber ? escapeHtml(result.subscriber.email) : '';
+    let heading; let bodyHtml;
+    if (result.action === 'confirmed' || result.action === 'already_active') {
+      heading = "You're in!";
+      bodyHtml = `<p>We'll send the next issue${email ? ` to <span class="email">${email}</span>` : ''}.</p><p style="margin-bottom:0">Local SWFL events, seasonal pest tips, and lawn-care timing — straight from our trucks.</p>`;
+    } else if (result.action === 'unsubscribed') {
+      heading = "You're unsubscribed.";
+      bodyHtml = `<p>This email is currently unsubscribed${email ? ` (<span class="email">${email}</span>)` : ''}. To start receiving the newsletter again, sign up at <a href="https://portal.wavespestcontrol.com/newsletter">/newsletter</a>.</p>`;
+    } else {
+      heading = 'Link expired or invalid.';
+      bodyHtml = `<p>This confirmation link doesn't match a pending subscription. The link may have already been used or it may have expired.</p><p style="margin-bottom:0">Sign up again at <a href="https://portal.wavespestcontrol.com/newsletter">/newsletter</a>.</p>`;
+    }
+
+    res.type('html').send(renderConfirmPage(heading, bodyHtml));
   } catch (err) {
     logger.error(`[newsletter] confirm POST failed: ${err.message}`);
     res.status(500).json({ error: 'confirm failed' });

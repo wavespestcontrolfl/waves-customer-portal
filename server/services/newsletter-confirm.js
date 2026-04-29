@@ -15,6 +15,17 @@ const sendgrid = require('./sendgrid-mail');
 const { wrapEmail } = require('./email-template');
 const logger = require('./logger');
 
+// Local HTML escape — wrapEmail() interpolates intro/heading/lines as
+// raw HTML, so any caller that includes user-controlled data (here:
+// subscriber.first_name from the public signup form) MUST escape it
+// first. Mirrors the implementation in routes/public-newsletter.js.
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 function confirmationUrl(token) {
   const baseUrl = process.env.PUBLIC_PORTAL_URL || 'https://portal.wavespestcontrol.com';
   return `${baseUrl}/api/public/newsletter/confirm/${token}`;
@@ -39,19 +50,23 @@ async function sendConfirmationEmail(subscriber) {
 
   const url = confirmationUrl(subscriber.confirmation_token);
   const firstName = (subscriber.first_name || '').trim();
-  const greeting = firstName ? `Hey ${firstName} —` : 'Hey there —';
+  // Plain-text greeting is safe inline; HTML greeting must escape so a
+  // crafted first_name (e.g. `<img src=x onerror=…>`) can't inject
+  // markup into the trusted-sender confirmation email body.
+  const greetingText = firstName ? `Hey ${firstName} —` : 'Hey there —';
+  const greetingHtml = firstName ? `Hey ${escapeHtml(firstName)} —` : 'Hey there —';
 
   const html = wrapEmail({
     preheader: "One click and you're on the list.",
     heading: 'Confirm your subscription',
-    intro: `${greeting} thanks for signing up for The Waves Newsletter. Click the button below to confirm your email — no other steps, you're done after this.`,
+    intro: `${greetingHtml} thanks for signing up for The Waves Newsletter. Click the button below to confirm your email — no other steps, you're done after this.`,
     ctaHref: url,
     ctaLabel: 'Confirm subscription',
     footerNote: `If you didn't sign up, ignore this email and we'll never message you again. The link expires after a single use.`,
   });
 
   const text = [
-    greeting,
+    greetingText,
     '',
     `Thanks for signing up for The Waves Newsletter. Confirm your email by visiting the link below:`,
     '',
