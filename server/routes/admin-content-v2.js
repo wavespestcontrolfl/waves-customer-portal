@@ -63,6 +63,26 @@ Landscape orientation, 1200x630px aspect ratio.`;
 }
 
 // =========================================================================
+// AUTHORS — read-through to the Astro `authors` collection (cached)
+// =========================================================================
+//
+// The admin Blog editor populates its Author + Reviewer dropdowns from
+// here. The data lives in wavespestcontrol-astro/src/content/authors so
+// bylines, photos, and FDACS license metadata stay in one place; this
+// endpoint hits a 5-minute cache via author-service.js. Keep this above
+// the /blog routes so it can never be shadowed by a parametric route.
+router.get('/authors', async (_req, res) => {
+  try {
+    const authorService = require('../services/content-astro/author-service');
+    const authors = await authorService.listAuthors();
+    res.json({ authors });
+  } catch (err) {
+    logger.warn(`[content] authors list failed: ${err.message}`);
+    res.json({ authors: [], error: err.message });
+  }
+});
+
+// =========================================================================
 // BLOG POSTS — CRUD + FILTERING
 // =========================================================================
 

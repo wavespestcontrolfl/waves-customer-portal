@@ -32,7 +32,7 @@ export default function ContentCalendar() {
     const end = etDateString(new Date(month.year, month.month + 1, 0, 12));
     try {
       const data = await adminFetch(`/admin/content/calendar?start=${start}&end=${end}`);
-      setItems(data.items || []);
+      setItems(data.calendar || data.items || []);
     } catch { setItems([]); }
     setLoading(false);
   }, [month]);
