@@ -1048,28 +1048,86 @@ function Stat({ label, value, alert }) {
 
 // ── Subscribers ───────────────────────────────────────────────────
 
+const SUBSCRIBERS_PAGE_SIZE = 100;
+
 export function SubscribersView() {
   const [subs, setSubs] = useState([]);
   const [counts, setCounts] = useState({});
   const [filter, setFilter] = useState('active');
   const [q, setQ] = useState('');
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [offset, setOffset] = useState(0);
   const [status, setStatus] = useState('');
 
+  // Initial / filter-changed fetch — resets the list. Re-runs whenever
+  // the filter or search query changes (via the useEffect below).
   const load = useCallback(() => {
     setLoading(true);
     const qs = new URLSearchParams();
     if (filter !== 'all') qs.set('status', filter);
     if (q) qs.set('q', q);
+    qs.set('limit', String(SUBSCRIBERS_PAGE_SIZE));
+    qs.set('offset', '0');
     adminFetch(`/admin/newsletter/subscribers?${qs}`)
       .then((d) => {
-        setSubs(d.subscribers || []);
+        const next = d.subscribers || [];
+        setSubs(next);
         setCounts(d.counts || {});
+        setOffset(next.length);
+        setHasMore(next.length === SUBSCRIBERS_PAGE_SIZE);
       })
-      .catch(() => setSubs([]))
+      .catch(() => { setSubs([]); setHasMore(false); })
       .finally(() => setLoading(false));
   }, [filter, q]);
   useEffect(() => { load(); }, [load]);
+
+  const loadMore = async () => {
+    setLoadingMore(true);
+    const qs = new URLSearchParams();
+    if (filter !== 'all') qs.set('status', filter);
+    if (q) qs.set('q', q);
+    qs.set('limit', String(SUBSCRIBERS_PAGE_SIZE));
+    qs.set('offset', String(offset));
+    try {
+      const d = await adminFetch(`/admin/newsletter/subscribers?${qs}`);
+      const next = d.subscribers || [];
+      setSubs((prev) => [...prev, ...next]);
+      setOffset((cur) => cur + next.length);
+      setHasMore(next.length === SUBSCRIBERS_PAGE_SIZE);
+    } catch (e) {
+      setStatus('Load more failed: ' + e.message);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  const exportCsv = async () => {
+    setStatus('Building CSV…');
+    try {
+      const qs = new URLSearchParams();
+      if (filter !== 'all') qs.set('status', filter);
+      if (q) qs.set('q', q);
+      // Bypass adminFetch's JSON parsing — this returns text/csv.
+      const res = await fetch(`${API_BASE}/admin/newsletter/subscribers.csv?${qs}`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      const url = URL.createObjectURL(new Blob([text], { type: 'text/csv' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `newsletter-subscribers-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setStatus('CSV downloaded.');
+    } catch (e) {
+      setStatus('Export failed: ' + e.message);
+    }
+  };
 
   const addSubscriber = async () => {
     const email = prompt('Email address to add:');
@@ -1095,9 +1153,12 @@ export function SubscribersView() {
 
   return (
     <Card className="p-5">
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <h3 className="text-16 font-medium text-zinc-900">Subscribers</h3>
-        <Button onClick={addSubscriber} variant="secondary">+ Add subscriber</Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={exportCsv} variant="secondary">Export CSV</Button>
+          <Button onClick={addSubscriber} variant="secondary">+ Add subscriber</Button>
+        </div>
       </div>
 
       <div className="flex items-center gap-2 mb-3 flex-wrap">
@@ -1164,6 +1225,18 @@ export function SubscribersView() {
               )}
             </div>
           ))}
+          {hasMore && (
+            <div className="px-5 py-4 text-center">
+              <Button onClick={loadMore} variant="secondary" disabled={loadingMore}>
+                {loadingMore ? 'Loading…' : `Load ${SUBSCRIBERS_PAGE_SIZE} more`}
+              </Button>
+            </div>
+          )}
+          {!hasMore && subs.length > SUBSCRIBERS_PAGE_SIZE && (
+            <div className="px-5 py-4 text-center text-11 text-ink-tertiary">
+              Showing all {subs.length} subscriber{subs.length === 1 ? '' : 's'} in this filter.
+            </div>
+          )}
         </div>
       )}
     </Card>

@@ -106,8 +106,8 @@ router.post('/subscribers', async (req, res, next) => {
 
     const existing = await db('newsletter_subscribers').where({ email: lc }).first();
     if (existing) {
-      // Resubscribe path — flip status back to active.
-      if (existing.status !== 'active') {
+      const wasInactive = existing.status !== 'active';
+      if (wasInactive) {
         await db('newsletter_subscribers').where({ id: existing.id }).update({
           status: 'active',
           resubscribed_at: new Date(),
@@ -116,7 +116,10 @@ router.post('/subscribers', async (req, res, next) => {
         });
       }
       await linkToCustomer(lc);
-      return res.json({ success: true, subscriber: existing, resubscribed: existing.status !== 'active' });
+      // Re-read so callers see the post-update shape (status='active' on
+      // resubscribe, fresh customer_id link, etc.).
+      const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
+      return res.json({ success: true, subscriber: fresh, resubscribed: wasInactive });
     }
 
     const [row] = await db('newsletter_subscribers').insert({
@@ -129,6 +132,46 @@ router.post('/subscribers', async (req, res, next) => {
 
     await linkToCustomer(lc);
     res.json({ success: true, subscriber: row });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/newsletter/subscribers.csv — full filtered export.
+// Streamed as text/csv; filename includes today's date so multiple
+// exports the same day distinguish themselves in the operator's
+// downloads folder. Uses the same status filter semantics as the JSON
+// list endpoint above (including the synthetic 'bounced' filter).
+router.get('/subscribers.csv', async (req, res, next) => {
+  try {
+    const { status, q } = req.query;
+    const query = db('newsletter_subscribers').orderBy('subscribed_at', 'desc');
+    if (status === 'bounced') {
+      query.where('bounce_count', '>', 0);
+    } else if (status) {
+      query.where({ status });
+    }
+    if (q) query.where('email', 'ilike', `%${q}%`);
+    const rows = await query;
+
+    const escape = (v) => v == null ? '' : `"${String(v).replace(/"/g, '""')}"`;
+    const stamp = new Date().toISOString().slice(0, 10);
+    res.type('text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="newsletter-subscribers-${stamp}.csv"`);
+    res.write('email,first_name,last_name,status,source,bounce_count,customer_id,tags,subscribed_at,unsubscribed_at\n');
+    for (const r of rows) {
+      res.write([
+        escape(r.email),
+        escape(r.first_name),
+        escape(r.last_name),
+        escape(r.status),
+        escape(r.source),
+        escape(r.bounce_count ?? 0),
+        escape(r.customer_id),
+        escape(Array.isArray(r.tags) ? r.tags.join('|') : ''),
+        escape(r.subscribed_at instanceof Date ? r.subscribed_at.toISOString() : r.subscribed_at),
+        escape(r.unsubscribed_at instanceof Date ? r.unsubscribed_at.toISOString() : r.unsubscribed_at),
+      ].join(',') + '\n');
+    }
+    res.end();
   } catch (err) { next(err); }
 });
 
