@@ -958,8 +958,17 @@ function initScheduledJobs() {
 
   // =========================================================================
   // STRIPE BILLING — Monthly autopay + payment retries
+  //
+  // Runs DAILY at 8 AM ET. processMonthlyBilling() walks every active
+  // autopay customer and skips those whose billing_day !== today, so the
+  // per-customer `billing_day` (1–28) the AutopayCard exposes actually
+  // fires on the day the customer picked. Previously this cron ran only
+  // on the 1st, which meant any customer with billing_day !== 1 was
+  // never charged at all — silent revenue loss. The idempotency guard
+  // (existingCharge query in billing-cron.js) keeps the daily cadence
+  // safe against re-running on the same calendar day.
   // =========================================================================
-  cron.schedule('0 8 1 * *', async () => {
+  cron.schedule('0 8 * * *', async () => {
     logger.info('Running: monthly billing (Stripe)');
     try {
       const BillingCron = require('./billing-cron');

@@ -23,28 +23,14 @@ function getStripe() {
 // ═══════════════════════════════════════════════════════════════
 // Credit card processing surcharge
 // ACH pays the quoted amount; cards / wallets pay base × 1.0399.
+// Pure helpers live in ./stripe-pricing so they can be unit-tested
+// without the Stripe SDK; one source of truth for surcharge math.
 // ═══════════════════════════════════════════════════════════════
-const CARD_SURCHARGE_RATE = 0.0399;
-
-// Accepts a stored payment_methods.method_type ('card' | 'ach')
-// OR a Stripe Payment Element type ('card' | 'us_bank_account' | 'apple_pay' | 'google_pay' | 'link')
-function isCardMethodType(methodType) {
-  if (!methodType) return false;
-  const m = String(methodType).toLowerCase();
-  if (m === 'ach' || m === 'us_bank_account' || m === 'bank' || m === 'bank_account') return false;
-  // card, apple_pay, google_pay, link, and anything else default to card-family (surcharged)
-  return true;
-}
-
-function computeChargeAmount(baseAmountDollars, methodType) {
-  const base = Math.round(Number(baseAmountDollars) * 100) / 100;
-  if (!isCardMethodType(methodType)) {
-    return { base, surcharge: 0, total: base };
-  }
-  const surcharge = Math.round(base * CARD_SURCHARGE_RATE * 100) / 100;
-  const total = Math.round((base + surcharge) * 100) / 100;
-  return { base, surcharge, total };
-}
+const {
+  CARD_SURCHARGE_RATE,
+  isCardMethodType,
+  computeChargeAmount,
+} = require('./stripe-pricing');
 
 const StripeService = {
   // =========================================================================
@@ -470,6 +456,18 @@ const StripeService = {
 
     let paymentIntent;
     try {
+      // Idempotency-Key bound to invoice + amount + pm + 60-second
+      // bucket. The bucket dedupes a double-click within the same
+      // minute (we'd reuse the existing PI instead of charging twice)
+      // but lets a deliberate admin retry a minute later get a fresh
+      // attempt — Stripe replays cached responses for ~24 h on reused
+      // keys, including failures, so a deterministic key would freeze
+      // the admin "Charge card on file" flow on a transient decline
+      // until the cache TTL expired (Codex P2 #490). Amount + pm
+      // components mean re-totaling the invoice or switching cards
+      // also yields a fresh key as expected.
+      const minuteBucket = Math.floor(Date.now() / 60_000);
+      const idempotencyKey = `inv_card_on_file_${invoiceId}_${amountCents}_${card.id}_${minuteBucket}`;
       paymentIntent = await stripe.paymentIntents.create({
         amount: amountCents,
         currency: 'usd',
@@ -486,7 +484,7 @@ const StripeService = {
           card_surcharge: String(surcharge),
           source: 'admin_card_on_file',
         },
-      });
+      }, { idempotencyKey });
     } catch (err) {
       logger.error(`[stripe] chargeInvoiceWithSavedCard failed for invoice ${invoice.invoice_number}: ${err.message}`);
       // Record failure for audit
@@ -802,10 +800,32 @@ const StripeService = {
         throw new Error(`PaymentIntent status is "${pi.status}", expected "succeeded"`);
       }
 
+      // Bind PI ↔ invoice via the metadata that createInvoicePaymentIntent
+      // wrote at mint time. Without this check, a caller who knows another
+      // invoice's token can submit a successful PI from a DIFFERENT
+      // invoice and mark THIS invoice paid — Invoice A would settle
+      // against Invoice B's actual charge, with both rows pointing at the
+      // same PI. createInvoicePaymentIntent always sets waves_invoice_id;
+      // a missing-metadata PI cannot belong to this flow.
+      const piInvoiceId = pi.metadata?.waves_invoice_id;
+      if (!piInvoiceId || String(piInvoiceId) !== String(invoiceId)) {
+        logger.warn(
+          `[stripe] confirmInvoicePayment refused — PI ${paymentIntentId} ` +
+          `metadata.waves_invoice_id=${piInvoiceId || 'null'} does not match invoice ${invoiceId}`,
+        );
+        throw new Error('PaymentIntent does not belong to this invoice');
+      }
+
       const charge = pi.latest_charge;
       let receiptUrl = null;
       let cardBrand = null;
       let cardLastFour = null;
+      // Derive payment_method from the actual charge details rather than
+      // hardcoding 'card' — an ACH (us_bank_account) confirm used to land
+      // on the invoice as payment_method='card', which leaked the wrong
+      // tender into receipts and downstream reporting.
+      let resolvedPaymentMethod = pi.payment_method_types?.[0] || 'card';
+      let bankLastFour = null;
 
       // Get receipt and card info from the charge
       if (charge) {
@@ -814,9 +834,16 @@ const StripeService = {
             ? await stripe.charges.retrieve(charge)
             : charge;
           receiptUrl = chargeObj.receipt_url || null;
-          if (chargeObj.payment_method_details?.card) {
-            cardBrand = chargeObj.payment_method_details.card.brand?.toUpperCase();
-            cardLastFour = chargeObj.payment_method_details.card.last4;
+          const pmd = chargeObj.payment_method_details;
+          if (pmd?.card) {
+            resolvedPaymentMethod = 'card';
+            cardBrand = pmd.card.brand?.toUpperCase();
+            cardLastFour = pmd.card.last4;
+          } else if (pmd?.us_bank_account) {
+            resolvedPaymentMethod = 'us_bank_account';
+            bankLastFour = pmd.us_bank_account.last4 || null;
+          } else if (pmd?.type) {
+            resolvedPaymentMethod = pmd.type;
           }
         } catch {
           // Non-critical — continue without receipt details
@@ -833,9 +860,12 @@ const StripeService = {
             processor: 'stripe',
             stripe_payment_intent_id: paymentIntentId,
             stripe_charge_id: typeof charge === 'string' ? charge : null,
-            payment_method: 'card',
+            payment_method: resolvedPaymentMethod,
             card_brand: cardBrand,
-            card_last_four: cardLastFour,
+            // For card payments this is the card last4; for ACH we store
+            // the bank-account last4 in the same column so the receipt
+            // template can render "Bank •1234" via {card_line}.
+            card_last_four: cardLastFour || bankLastFour,
             receipt_url: receiptUrl,
           });
 

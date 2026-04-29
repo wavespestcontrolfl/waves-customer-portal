@@ -515,6 +515,17 @@ router.post('/:id/record-payment', async (req, res, next) => {
     if (invoice.status === 'paid') {
       return res.status(400).json({ error: 'Invoice is already paid' });
     }
+    // ACH PIs sit at status='processing' for 3–5 business days while
+    // the bank transfer clears. Recording a manual cash/check/Zelle
+    // payment in that window double-collects: Stripe later succeeds
+    // and the webhook flips the invoice paid against the ACH PI.
+    // Make the operator wait for the ACH to settle (or fail) before
+    // recording a manual payment.
+    if (invoice.status === 'processing') {
+      return res.status(409).json({
+        error: 'Invoice has a payment in flight (ACH clearing) — wait for it to settle before recording a manual payment',
+      });
+    }
     // Refuse to mark a $0 invoice paid — surfaces upstream creation bugs
     // instead of silently producing "$0.00 PAID" rows that misreport revenue.
     if (parseFloat(invoice.total || 0) <= 0) {
@@ -539,7 +550,7 @@ router.post('/:id/record-payment', async (req, res, next) => {
     // run a second time.
     const [updatedInvoice] = await db('invoices')
       .where({ id })
-      .whereNotIn('status', ['paid', 'void'])
+      .whereNotIn('status', ['paid', 'void', 'processing'])
       .update({
         status: 'paid',
         paid_at: db.fn.now(),

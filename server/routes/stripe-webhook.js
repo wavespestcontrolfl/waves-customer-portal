@@ -4,6 +4,7 @@ const Stripe = require('stripe');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const stripeConfig = require('../config/stripe-config');
+const { classifyExistingWebhookEvent, STALE_CLAIM_WINDOW_MS } = require('./stripe-webhook-helpers');
 
 /**
  * Stripe Webhook Handler
@@ -43,30 +44,94 @@ router.post(
       return res.status(400).send(`Webhook Error: ${err.message}`);
     }
 
-    // ── Idempotency check ─────────────────────────────────────
+    // ── Idempotency claim (atomic) ────────────────────────────
+    //
+    // Two concurrent retries from Stripe (or a manual replay racing a live
+    // delivery) used to both pass a SELECT-then-INSERT check and run the
+    // event handler twice — duplicating dispute / payout admin
+    // notifications, double-attempting save-card persistence, etc. The
+    // per-row `processed` flag below filters the trivial case where a
+    // retry arrives after we finished, but the SELECT-then-INSERT window
+    // before the row exists is what we couldn't cover.
+    //
+    // Replace with a single atomic claim: INSERT … ON CONFLICT(id) DO
+    // NOTHING. If we get a row back, we own this event and proceed.
+    // Otherwise another worker has it; check the existing row's processed
+    // flag and return 200 (already done) or 503 (still in flight — let
+    // Stripe retry once the other worker finishes / fails).
+    let claimed = false;
     try {
-      const existing = await db('stripe_webhook_events')
-        .where({ id: event.id })
-        .first();
-
-      if (existing && existing.processed) {
-        logger.info(`[stripe-webhook] Duplicate event ${event.id} — skipping`);
-        return res.status(200).json({ received: true, duplicate: true });
-      }
-
-      // Record the event
-      if (!existing) {
-        await db('stripe_webhook_events').insert({
+      const inserted = await db('stripe_webhook_events')
+        .insert({
           id: event.id,
           event_type: event.type,
           processed: false,
           payload: JSON.stringify(event.data),
           received_at: new Date().toISOString(),
-        });
-      }
+        })
+        .onConflict('id')
+        .ignore()
+        .returning('id');
+      claimed = inserted.length > 0;
     } catch (dbErr) {
-      logger.error(`[stripe-webhook] DB idempotency check failed: ${dbErr.message}`);
-      // Continue processing — better to process twice than miss an event
+      logger.error(`[stripe-webhook] Idempotency claim insert failed: ${dbErr.message}`);
+      // Fall through — without a successful claim we can't safely run
+      // side effects, but we also can't tell whether a duplicate exists.
+      // Return 503 so Stripe retries.
+      return res.status(503).json({ error: 'Idempotency claim failed' });
+    }
+
+    if (!claimed) {
+      const existing = await db('stripe_webhook_events').where({ id: event.id }).first().catch(() => null);
+      const classification = classifyExistingWebhookEvent(existing);
+
+      if (classification === 'duplicate') {
+        logger.info(`[stripe-webhook] Duplicate event ${event.id} — already processed, skipping`);
+        return res.status(200).json({ received: true, duplicate: true });
+      }
+
+      if (classification === 'reclaim') {
+        // Two re-claim sub-cases handled by one atomic UPDATE:
+        //   (a) failed-attempt reclaim — catch block below recorded
+        //       `error` and returned 500 so Stripe retries. Without
+        //       a way out of the in-flight 503 path, events stay
+        //       permanently unapplied after a transient DB blip.
+        //   (b) stale-claim reclaim — a worker claimed the row, then
+        //       crashed before writing either processed=true or an
+        //       error. We use `received_at` as the lease timestamp;
+        //       anything older than STALE_CLAIM_WINDOW_MS is assumed
+        //       abandoned. Without this, a crash mid-handler stranded
+        //       the event forever (Codex P1 #490).
+        //
+        // The UPDATE's WHERE matches the union of both cases; we also
+        // bump received_at to refresh the lease for the new attempt.
+        // Two concurrent retries arriving here race for rowcount=1 —
+        // only one wins and re-runs the handler.
+        const staleCutoff = new Date(Date.now() - STALE_CLAIM_WINDOW_MS).toISOString();
+        const reclaimed = await db('stripe_webhook_events')
+          .where({ id: event.id, processed: false })
+          .where(function () {
+            this.whereNotNull('error').orWhere('received_at', '<', staleCutoff);
+          })
+          .update({ error: null, received_at: new Date().toISOString() });
+        if (reclaimed > 0) {
+          const reason = existing.error ? `prior error: ${existing.error}` : 'stale claim (worker likely crashed)';
+          logger.warn(`[stripe-webhook] Re-claiming event ${event.id} — ${reason}`);
+          // Fall through to the handler dispatch — we now own the row.
+        } else {
+          // Lost the re-claim race to another worker.
+          logger.warn(`[stripe-webhook] Event ${event.id} re-claim lost — asking Stripe to retry`);
+          return res.status(503).json({ error: 'Event re-claim race lost, retry' });
+        }
+      } else {
+        // True in-flight — another worker holds the row, no failed
+        // marker, claim is fresh. Tell Stripe to retry. By the time
+        // the retry lands, the other worker will have either committed
+        // processed=true (we 200), written `error` (we re-claim), or
+        // gone past the stale window (we re-claim).
+        logger.warn(`[stripe-webhook] Event ${event.id} in-flight on another worker — asking Stripe to retry`);
+        return res.status(503).json({ error: 'Event in-flight, retry' });
+      }
     }
 
     // ── Handle event ──────────────────────────────────────────
