@@ -56,7 +56,7 @@ router.post('/unsubscribe/:token', async (req, res) => {
         unsubscribed_at: new Date(),
         updated_at: new Date(),
       });
-      logger.info(`[newsletter] One-click unsubscribe for ${sub.email}`);
+      logger.info(`[newsletter] One-click unsubscribe for subscriber id=${sub.id}`);
     }
     res.status(200).json({ success: true });
   } catch (err) {
@@ -85,7 +85,7 @@ router.get('/unsubscribe/:token', async (req, res) => {
         unsubscribed_at: new Date(),
         updated_at: new Date(),
       });
-      logger.info(`[newsletter] GET unsubscribe for ${sub.email}`);
+      logger.info(`[newsletter] GET unsubscribe for subscriber id=${sub.id}`);
     }
 
     // Minimal self-contained HTML page — no template engine, no client code.
@@ -154,7 +154,7 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
       try {
         await sendConfirmationEmail(result.subscriber);
       } catch (e) {
-        logger.error(`[newsletter] confirmation email failed for ${result.subscriber?.email}: ${e.message}`);
+        logger.error(`[newsletter] confirmation email failed for subscriber id=${result.subscriber?.id}: ${e.message}`);
       }
       return res.json({
         success: true,
@@ -189,7 +189,7 @@ router.get('/confirm/:token', async (req, res) => {
     const result = isUuid ? await confirmByToken(req.params.token) : { subscriber: null, action: 'not_found' };
 
     if (result.action === 'confirmed') {
-      logger.info(`[newsletter] Confirmed ${result.subscriber.email}`);
+      logger.info(`[newsletter] Confirmed subscriber id=${result.subscriber.id}`);
     }
 
     const email = result.subscriber ? escapeHtml(result.subscriber.email) : '';

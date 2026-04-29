@@ -73,7 +73,8 @@ async function sendConfirmationEmail(subscriber) {
     categories: ['newsletter_confirm'],
     asmGroupId: 0,
   });
-  logger.info(`[newsletter-confirm] Confirmation email queued for ${subscriber.email} (msgId=${result.messageId || 'n/a'})`);
+  // ID-only logging per AGENTS.md (no PII in logs).
+  logger.info(`[newsletter-confirm] Confirmation email queued for subscriber id=${subscriber.id} (msgId=${result.messageId || 'n/a'})`);
   return result;
 }
 
