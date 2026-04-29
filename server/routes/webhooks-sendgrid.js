@@ -110,7 +110,7 @@ async function handleEvent(ev) {
   // filter by email — otherwise events for recipient B silently update
   // recipient A's row.
   const newsletterDelivery = email ? await db('newsletter_send_deliveries')
-    .where({ resend_message_id: messageId, email })
+    .where({ provider_message_id: messageId, email })
     .first() : null;
   // Automation step sends are always single-recipient (one customer per
   // step), so message id alone is unique there. Belt-and-suspenders email
