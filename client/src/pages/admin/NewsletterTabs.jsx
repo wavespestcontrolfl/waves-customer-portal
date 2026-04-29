@@ -166,7 +166,7 @@ function buildEventPrompt(event) {
   return lines.join('\n');
 }
 
-export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
+export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComplete } = {}) {
   const [draftId, setDraftId] = useState(null);
   const [subject, setSubject] = useState('');
   const [subjectB, setSubjectB] = useState('');
@@ -194,6 +194,10 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
   // the campaign — the column is JSONB with no enum.
   const [segmentTags, setSegmentTags] = useState([]);
   const [tagDraft, setTagDraft] = useState('');
+  // Existing distinct tags pulled from the DB — fed into the tag input's
+  // <datalist> so the operator picks an existing tag instead of typing
+  // a near-miss that matches zero subscribers.
+  const [tagSuggestions, setTagSuggestions] = useState([]);
 
   // Schedule
   const [scheduleAt, setScheduleAt] = useState('');
@@ -250,6 +254,9 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
     adminFetch('/admin/auth/me')
       .then((me) => { if (me?.email) setTestEmail(me.email); })
       .catch(() => { /* leave blank, operator types */ });
+    adminFetch('/admin/newsletter/tags')
+      .then((d) => setTagSuggestions(Array.isArray(d?.tags) ? d.tags : []))
+      .catch(() => setTagSuggestions([]));
   }, []);
 
   // Recalculate segment match count when the filter changes.
@@ -322,8 +329,12 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
       // clicks). Operator polls History for the final delivered/failed
       // counts.
       await adminFetch(`/admin/newsletter/sends/${draftId}/send`, { method: 'POST' });
-      setStatus(`Send queued. Open the History tab in a moment to track delivery.`);
+      setStatus(`Send queued. Opening History…`);
       resetForm();
+      // Brief delay so the operator sees the status before the tab
+      // switches; History view will refresh when the parent flips
+      // refreshKey, surfacing the new row at status='sending'.
+      if (onSendComplete) setTimeout(onSendComplete, 1200);
     } catch (e) { setStatus('Send failed: ' + e.message); }
   };
 
@@ -508,6 +519,7 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
                 type="text"
                 value={tagDraft}
                 onChange={(e) => setTagDraft(e.target.value)}
+                list="newsletter-tag-suggestions"
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ',') {
                     e.preventDefault();
@@ -521,6 +533,11 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
                 placeholder={segmentTags.length ? 'add another…' : 'e.g. platinum-tier, hurricane-prep'}
                 className="h-7 flex-1 min-w-[160px] bg-white border-hairline border-zinc-300 rounded-full px-3 text-11 text-zinc-900 placeholder:text-ink-tertiary focus:outline-none focus:border-zinc-900"
               />
+              <datalist id="newsletter-tag-suggestions">
+                {tagSuggestions
+                  .filter((t) => !segmentTags.includes(t))
+                  .map((t) => <option key={t} value={t} />)}
+              </datalist>
             </div>
             <div className="text-11 text-ink-tertiary mt-1">
               Press Enter or comma to add. Matches subscribers tagged with ANY of the listed tags.

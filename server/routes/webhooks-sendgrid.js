@@ -271,9 +271,13 @@ async function handleAutomationEvent(ev, sendRow) {
         failure_reason: (ev.reason || ev.response || ev.type || '').toString().slice(0, 500),
         updated_at: now,
       });
-      // Hard-bounce → cancel ALL active enrollments for this email. The
-      // address is undeliverable across any automation group.
-      if (ev.type === 'bounce' || ev.type === 'blocked' || ev.event === 'dropped') {
+      // Cancel active enrollments only on TRUE hard bounce (ev.type='bounce').
+      // SendGrid 'blocked' = receiver-side rate-limit / IP block (transient,
+      // often recoverable on retry). 'dropped' = SG never sent it because
+      // the address was already suppressed — no signal that the address is
+      // bad, just that we already knew. Cancelling on either was destructive
+      // since enrollment.status='cancelled' is terminal.
+      if (ev.type === 'bounce') {
         await cancelActiveEnrollments({ email: ev.email, reason: 'hard_bounce' });
       }
       break;

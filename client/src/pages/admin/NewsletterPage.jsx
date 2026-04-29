@@ -558,7 +558,13 @@ export default function NewsletterPage() {
           subscribersActive={subscribersActive}
         />
       )}
-      {tab === 'compose' && <ComposeView pendingEvent={pendingDraftEvent} onPendingEventConsumed={clearPendingDraftEvent} />}
+      {tab === 'compose' && (
+        <ComposeView
+          pendingEvent={pendingDraftEvent}
+          onPendingEventConsumed={clearPendingDraftEvent}
+          onSendComplete={() => { setRefreshKey((k) => k + 1); setTab('history'); }}
+        />
+      )}
       {tab === 'history' && <HistoryView />}
       {tab === 'subscribers' && <SubscribersView />}
       {tab === 'automations' && <EmailAutomationsPanelV2 />}

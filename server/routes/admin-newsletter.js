@@ -457,6 +457,23 @@ router.post('/sends/:id/cancel-schedule', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/newsletter/tags — distinct tag values across the
+// subscriber list. Used by the Compose tag input as a datalist source so
+// the operator picks an existing tag instead of typing a near-miss
+// (case/typo) that won't match any subscriber.
+router.get('/tags', async (req, res, next) => {
+  try {
+    const result = await db.raw(`
+      SELECT DISTINCT jsonb_array_elements_text(tags) AS tag
+        FROM newsletter_subscribers
+       WHERE jsonb_typeof(tags) = 'array'
+       ORDER BY tag ASC
+    `);
+    const tags = (result.rows || []).map((r) => r.tag).filter(Boolean);
+    res.json({ tags });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/newsletter/segment-preview — count subscribers matching a segment
 router.post('/segment-preview', async (req, res, next) => {
   try {
