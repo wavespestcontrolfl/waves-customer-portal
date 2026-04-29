@@ -306,7 +306,10 @@ const StripeService = {
       computeChargeAmount(amountDollars, card.method_type);
     const amountCents = Math.round(totalAmount * 100);
 
-    // Step 1: Charge via Stripe
+    // Step 1: Charge via Stripe. Expand latest_charge so we can read
+    // receipt_url off it directly (the prior `paymentIntent.charges.data`
+    // path was removed by Stripe's 2022-11-15 API; latest_charge is the
+    // supported replacement and survives future API bumps).
     let paymentIntent;
     try {
       paymentIntent = await stripe.paymentIntents.create({
@@ -316,6 +319,7 @@ const StripeService = {
         payment_method: card.stripe_payment_method_id,
         off_session: true,
         confirm: true,
+        expand: ['latest_charge'],
         description: surchargeAmount > 0
           ? `${description} (includes $${surchargeAmount.toFixed(2)} card processing fee)`
           : description,
@@ -329,34 +333,70 @@ const StripeService = {
     } catch (err) {
       // Stripe charge failed — record the failure
       logger.error(`[stripe] Charge failed for ${customerId}: ${err.message}`);
+
+      // Detect SCA / step-up authentication required. Off-session
+      // PaymentIntents can land in `requires_action` when the cardholder's
+      // bank demands 3DS — Stripe surfaces it as code/decline_code
+      // 'authentication_required' on the thrown error and the PI exists in
+      // requires_action state. The customer SMS path is already wired via
+      // payment_intent.requires_action in the webhook handler; the cron
+      // just needs to NOT schedule a retry against the same wall.
+      const authCode = err.code || err.raw?.code || err.decline_code || err.raw?.decline_code;
+      const requiresAction = authCode === 'authentication_required';
+      const piIdFromErr = err.payment_intent?.id || err.raw?.payment_intent?.id || null;
+
       const [failedRecord] = await db('payments').insert({
         customer_id: customerId,
         payment_method_id: card.id,
         processor: 'stripe',
+        stripe_payment_intent_id: piIdFromErr,
         payment_date: etDateString(),
         amount: totalAmount,
+        // payments.status is a Postgres enum (upcoming/processing/paid/
+        // failed/refunded) — DON'T introduce a new value here, the
+        // insert would raise enum_invalid and tank the whole catch path.
+        // billing-cron skip-retry keys off the thrown STRIPE_REQUIRES_
+        // ACTION code below; admin dashboards surface SCA via the
+        // description suffix + metadata.requires_action flag.
         status: 'failed',
-        description: `${description} — FAILED`,
+        description: requiresAction ? `${description} — REQUIRES AUTH` : `${description} — FAILED`,
         failure_reason: err.message,
         metadata: JSON.stringify({
           error: err.message,
-          code: err.code,
+          code: authCode || null,
+          requires_action: requiresAction,
           base_amount: baseAmount,
           card_surcharge: surchargeAmount,
         }),
       }).returning('*');
+
+      if (requiresAction) {
+        const sca = new Error('Customer authentication required');
+        sca.code = 'STRIPE_REQUIRES_ACTION';
+        sca.stripePaymentIntentId = piIdFromErr;
+        sca.paymentRecord = failedRecord;
+        throw sca;
+      }
       throw Object.assign(new Error('Payment processing failed'), { paymentRecord: failedRecord });
     }
 
     // Step 2: Stripe charge succeeded — record in DB
     const status = paymentIntent.status === 'succeeded' ? 'paid' : 'processing';
     try {
+      // latest_charge is the expanded charge object (we passed
+      // expand:['latest_charge'] above). Stripe also returns the bare
+      // charge id on this field when not expanded — read defensively
+      // either way so a future SDK change can't strip the receipt URL.
+      const latestCharge = paymentIntent.latest_charge;
+      const stripeChargeId = typeof latestCharge === 'string' ? latestCharge : (latestCharge?.id || null);
+      const stripeReceiptUrl = typeof latestCharge === 'object' && latestCharge ? (latestCharge.receipt_url || null) : null;
+
       const [paymentRecord] = await db('payments').insert({
         customer_id: customerId,
         payment_method_id: card.id,
         processor: 'stripe',
         stripe_payment_intent_id: paymentIntent.id,
-        stripe_charge_id: paymentIntent.latest_charge || null,
+        stripe_charge_id: stripeChargeId,
         payment_date: etDateString(),
         amount: totalAmount,
         status,
@@ -364,7 +404,7 @@ const StripeService = {
           ? `${description} (includes $${surchargeAmount.toFixed(2)} card processing fee)`
           : description,
         metadata: JSON.stringify({
-          stripe_receipt_url: paymentIntent.charges?.data?.[0]?.receipt_url || null,
+          stripe_receipt_url: stripeReceiptUrl,
           base_amount: baseAmount,
           card_surcharge: surchargeAmount,
         }),
@@ -391,10 +431,18 @@ const StripeService = {
       //   3. The PI id rides on the error so the cron can include it
       //      in the admin alert.
       logger.error(`[stripe] CRITICAL: Charge succeeded (PI: ${paymentIntent.id}) but DB insert failed: ${dbErr.message}`);
+      // latest_charge is now expanded to a Charge object (we passed
+      // expand:['latest_charge'] on create), but stripe_orphan_charges
+      // .stripe_charge_id is a string column. Read defensively so the
+      // reconciliation row carries the real charge id either way.
+      const orphanLatestCharge = paymentIntent.latest_charge;
+      const orphanChargeId = typeof orphanLatestCharge === 'string'
+        ? orphanLatestCharge
+        : (orphanLatestCharge?.id || null);
       try {
         await db('stripe_orphan_charges').insert({
           stripe_payment_intent_id: paymentIntent.id,
-          stripe_charge_id: paymentIntent.latest_charge || null,
+          stripe_charge_id: orphanChargeId,
           customer_id: customerId,
           amount: totalAmount,
           source: metadata?.type === 'monthly_autopay' ? 'autopay_charge' : 'manual_charge',

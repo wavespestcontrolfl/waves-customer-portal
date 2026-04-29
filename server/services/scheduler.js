@@ -96,6 +96,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 3:45AM ET — Sweep payment_method_consents whose FK to
+  // payment_methods never got backfilled. The webhook does the link in
+  // real time, but a missed webhook past Stripe's 72h retry window
+  // leaves the row orphaned. Nightly sweep tries to match by
+  // stripe_payment_method_id and links any payment_methods row that
+  // landed without firing the webhook hook.
+  // =========================================================================
+  cron.schedule('45 3 * * *', async () => {
+    try {
+      const { sweepOrphanConsents } = require('./payment-method-consents');
+      const result = await sweepOrphanConsents({ olderThanHours: 24, staleAfterDays: 30 });
+      if (result.linked > 0 || result.stale > 0) {
+        logger.info(`[consents-sweep] ${result.total} orphan(s); linked ${result.linked}; ${result.stale} stale beyond 30d`);
+      }
+    } catch (err) {
+      logger.error(`Consents sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:30AM ET — Purge stripe_webhook_events older than 90 days.
   // Stripe's retry window is 72h max, so anything past 90d is just historical
   // noise; the table grows ~50–500 rows/day and never shrinks otherwise.
