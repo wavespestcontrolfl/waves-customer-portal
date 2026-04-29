@@ -238,7 +238,7 @@ async function optimizeAllRoutes(input) {
     })),
   };
 
-  if (!confirmed) {
+  if (confirmed !== true) {
     return {
       proposal: true,
       ...summary,
@@ -308,7 +308,7 @@ async function optimizeTechRoute(input) {
     })),
   };
 
-  if (!confirmed) {
+  if (confirmed !== true) {
     return {
       proposal: true,
       ...summary,
@@ -355,7 +355,7 @@ async function assignTechnician(input) {
     current_tech: s.current_tech_name || 'Unassigned',
   }));
 
-  if (!confirmed) {
+  if (confirmed !== true) {
     return {
       proposal: true,
       would_assign_to: tech.name,
@@ -401,7 +401,7 @@ async function moveStopsToDay(input) {
     new_date: newDate,
   }));
 
-  if (!confirmed) {
+  if (confirmed !== true) {
     return {
       proposal: true,
       would_move_to: newDate,
@@ -443,7 +443,7 @@ async function swapTechAssignments(input) {
   const aServices = await db('scheduled_services').where({ scheduled_date: date, technician_id: techA.id }).whereNotIn('status', ['cancelled', 'completed', 'rescheduled']);
   const bServices = await db('scheduled_services').where({ scheduled_date: date, technician_id: techB.id }).whereNotIn('status', ['cancelled', 'completed', 'rescheduled']);
 
-  if (!confirmed) {
+  if (confirmed !== true) {
     return {
       proposal: true,
       date,
