@@ -332,14 +332,19 @@ const TERMITE = {
 // ============================================================
 // RODENT
 // ============================================================
-// Pricing realigned Apr 2026 to match actual operating model:
-// - Bait stations: quarterly visits (4/yr), billed monthly
-// - Trapping: setup + 1 follow-up included; additional follow-ups billed
-// - Sanitation: bleach + manual wipe scope, three tiers
-// - Setup fee waived in standard recurring sign-up flow
-// - Inspection fee waived when any rodent service is opted in
+// Staged-remediation pricing model (Apr 2026 v2):
+//   1. Inspection / diagnosis (creditable)
+//   2. Active trapping (setup + 2 follow-ups, with home/lot/pressure adj)
+//   3. Exclusion (per-point with home-size minimums + access multipliers)
+//   4. Sanitation (light / standard / heavy with sqft + debris scaling)
+//   5. Bundle discount (7% / 5% / 10% with floors)
+//   6. Optional annual guarantee (gated; 3 tiers by complexity)
+//
+// Bait stations (recurring monthly) stay at the values from the prior
+// realignment: quarterly visits, $49/$59/$69, post-exclusion modifier, etc.
 // ============================================================
 const RODENT = {
+  // ── Bait stations (unchanged from prior realignment) ──────
   baitScoreFactors: {
     footprint_2500plus: 2, footprint_1800plus: 1,
     lot_20000plus: 2, lot_12000plus: 1,
@@ -350,32 +355,124 @@ const RODENT = {
     medium: { maxScore: 2, monthly: r(59), label: 'Medium' },
     large:  { maxScore: Infinity, monthly: r(69), label: 'Large' },
   },
-  baitVisitsPerYear: 4,            // Quarterly visits, billed monthly
-  baitSetupFee: r(199),            // Waived with any recurring plan
+  baitVisitsPerYear: 4,
+  baitSetupFee: r(199),
   baitPostExclusion: {
     multiplier: 0.72,
     floorMonthly: r(39),
   },
-  baitPerStationOverage: r(8),     // Per extra station beyond tier default, monthly
+  baitPerStationOverage: r(8),
+
+  // ── Inspection / diagnosis ────────────────────────────────
+  inspection: {
+    fee: r(125),
+    creditableWithinDays: 14,
+    waiveIfApprovedTotalOver: r(995),
+  },
+
+  // ── Trapping ──────────────────────────────────────────────
   trapping: {
-    base: r(295),                  // Setup + 1 follow-up included
-    floor: r(295),
-    footprintAdj: [ // [sqft, adjustment]
-      [800, -r(25)], [1200, -r(15)], [1500, -r(8)], [2000, 0],
-      [2500, r(10)], [3000, r(20)], [4000, r(40)], [5500, r(65)],
+    base: r(395),                       // Includes 2 follow-up checks
+    floor: r(350),
+    ceilingBeforeCustom: r(795),
+    includedFollowUps: 2,
+    additionalFollowUpRate: r(95),
+    homeSizeAdjustments: [
+      { maxSqFt: 1200,     adjustment: -r(25) },
+      { maxSqFt: 2500,     adjustment: 0 },
+      { maxSqFt: 4000,     adjustment: r(50) },
+      { maxSqFt: 6000,     adjustment: r(95) },
+      { maxSqFt: Infinity, adjustment: r(150), customRecommended: true },
     ],
-    lotAdj: [
-      [5000, 0], [10000, r(10)], [15000, r(20)], [20000, r(35)],
+    lotAdjustments: [
+      { maxLotSqFt: 10000,    adjustment: 0 },
+      { maxLotSqFt: 20000,    adjustment: r(35) },
+      { maxLotSqFt: 43560,    adjustment: r(75) },     // 1 acre
+      { maxLotSqFt: Infinity, adjustment: r(125), customRecommended: true },
     ],
-    followupRate: r(95),           // Per additional follow-up visit
-    followup3PackRate: r(245),     // Saves $40 vs 3 individual
+    pressureAdjustments: {
+      light:    -r(25),
+      normal:    0,
+      moderate:  r(35),
+      heavy:     r(75),
+      severe:    r(150),
+    },
+    emergencyMultiplier: 1.20,           // OR fixed surcharge, whichever is greater
+    emergencyMinimumSurcharge: r(75),
   },
+
+  // ── Sanitation (bleach + wipe; tier-based) ────────────────
   sanitation: {
-    light:  { base: r(195), floor: r(145), durationMin: 30,  label: 'Light' },
-    medium: { base: r(295), floor: r(245), durationMin: 75,  label: 'Medium' },
-    heavy:  { base: r(395), floor: r(345), durationMin: 150, label: 'Heavy' },
-    footprintAdj: { light: 25, medium: 50, heavy: 75 },
+    light: {
+      base: r(395),
+      floor: r(395),
+      includedSqFt: 300,
+      additionalPerSqFt: 0.20,
+      includedDebrisCuFt: 0,
+      additionalDebrisPerCuFt: r(12),
+      durationMin: 120,
+      label: 'Light',
+    },
+    standard: {
+      base: r(695),
+      floor: r(695),
+      includedSqFt: 750,
+      additionalPerSqFt: 0.30,
+      includedDebrisCuFt: 10,
+      additionalDebrisPerCuFt: r(12),
+      durationMin: 240,
+      label: 'Standard',
+    },
+    heavy: {
+      base: r(995),
+      floor: r(995),
+      includedSqFt: 750,
+      additionalPerSqFt: 0.55,
+      includedDebrisCuFt: 25,
+      additionalDebrisPerCuFt: r(12),
+      crawlspaceMultiplier: 1.15,
+      tightAccessMultiplier: 1.25,
+      durationMin: 420,
+      label: 'Heavy',
+    },
+    // Backward-compat alias for code paths still referring to 'medium'.
+    // Resolves to standard. Do NOT add new references to 'medium'.
+    legacyAliases: { medium: 'standard' },
   },
+
+  // ── Bundle discount rules (applied in estimate orchestrator) ─
+  bundles: {
+    trapExclusion: {
+      discount: 0.07,
+      floor: r(895),
+    },
+    trapSanitation: {
+      discount: 0.05,
+      floor: r(895),
+    },
+    fullRemediation: {
+      discount: 0.10,
+      floors: {
+        light:    r(1195),
+        standard: r(1495),
+        heavy:    r(1995),
+      },
+    },
+  },
+
+  // ── Annual rodent guarantee (gated) ───────────────────────
+  guarantee: {
+    standard:  r(199),  // ≤2,500 sf, one-story, ≤8 sealed points
+    complex:   r(249),  // 2,501–4,000 sf, two-story/tile, or 9–15 points
+    estate:    r(299),  // >4,000 sf or >15 points (custom OK)
+    eligibilityRequires: [
+      'trappingCompleted',
+      'exclusionCompleted',
+      'sanitationCompletedOrPhotoBaseline',
+      'noActivityAfterFinalTrapCheck',
+    ],
+  },
+
   // WaveGuard rules: NOT a tier qualifier, excluded from % discounts
   tierQualifier: false,
   excludeFromPctDiscount: true,
@@ -536,10 +633,31 @@ const SPECIALTY = {
     freeWithRecurringPest: true,
   },
   exclusion: {
-    perPoint: { simple: r(75), moderate: r(125), advanced: r(175) },
-    floor: r(195),
-    inspectionFee: r(125),   // Auto-waived when any rodent service opted in
-    rodentGuarantee: r(199), // per year with trapping + exclusion
+    // Per-point rates. Simple = caulk/foam/copper mesh interior gap.
+    // Moderate = mesh + sealant on accessible exterior penetration.
+    // Advanced = roofline / soffit / fascia (ladder + risk premium).
+    // Specialty = custom-quoted ($275+) for garage sweep, crawl door, etc.
+    perPoint: {
+      simple:   r(50),
+      moderate: r(95),
+      advanced: r(195),
+      specialtyMinimum: r(275),
+    },
+    // Home-size minimum floors (override per-point subtotal when small).
+    minimumsByHomeSqFt: [
+      { maxSqFt: 1500,     minimum: r(395) },
+      { maxSqFt: 2500,     minimum: r(595) },
+      { maxSqFt: 4000,     minimum: r(895) },
+      { maxSqFt: Infinity, minimum: r(1295), customRecommended: true },
+    ],
+    // Access multipliers — applied to (moderate + advanced) subtotal only.
+    storyMultipliers:        { one: 1.00, two: 1.15, three: 1.30 },
+    roofMultipliers:         { shingle: 1.00, flat: 1.00, metal: 1.15, tile: 1.25, steep_or_fragile: 1.35 },
+    constructionMultipliers: { block: 1.00, stucco: 1.05, frame: 1.10, mixed: 1.10 },
+    // Inspection fee — sourced from RODENT.inspection.fee in V2 callers.
+    // Kept here for V1 backward compat; new callers should read RODENT.inspection.
+    inspectionFee: r(125),
+    rodentGuarantee: r(199), // legacy reference; new gating in RODENT.guarantee
   },
   wdo: {
     brackets: [
