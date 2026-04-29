@@ -16,7 +16,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const logger = require('../services/logger');
 const sendgrid = require('../services/sendgrid-mail');
 const NewsletterSender = require('../services/newsletter-sender');
-const { linkToCustomer } = require('../services/newsletter-subscribers');
+const { linkToCustomer, subscribeOrResubscribe } = require('../services/newsletter-subscribers');
 const { wrapNewsletter } = require('../services/email-template');
 const MODELS = require('../config/models');
 
@@ -98,41 +98,32 @@ router.get('/subscribers', async (req, res, next) => {
 
 // POST /api/admin/newsletter/subscribers
 // Body: { email, firstName?, lastName?, source? }
+//
+// Routes through services/newsletter-subscribers.js#subscribeOrResubscribe
+// — same flow as the public signup and quote-wizard dual-write. strict=false
+// preserves the historical behavior (admin can paste anything that looks
+// vaguely like an email; the public path is stricter).
 router.post('/subscribers', async (req, res, next) => {
   try {
     const { email, firstName, lastName, source } = req.body;
-    if (!email) return res.status(400).json({ error: 'email required' });
-    const lc = String(email).trim().toLowerCase();
-
-    const existing = await db('newsletter_subscribers').where({ email: lc }).first();
-    if (existing) {
-      const wasInactive = existing.status !== 'active';
-      if (wasInactive) {
-        await db('newsletter_subscribers').where({ id: existing.id }).update({
-          status: 'active',
-          resubscribed_at: new Date(),
-          unsubscribed_at: null,
-          updated_at: new Date(),
-        });
-      }
-      await linkToCustomer(lc);
-      // Re-read so callers see the post-update shape (status='active' on
-      // resubscribe, fresh customer_id link, etc.).
-      const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
-      return res.json({ success: true, subscriber: fresh, resubscribed: wasInactive });
-    }
-
-    const [row] = await db('newsletter_subscribers').insert({
-      email: lc,
-      first_name: firstName || null,
-      last_name: lastName || null,
+    const result = await subscribeOrResubscribe({
+      email,
+      firstName: firstName || null,
+      lastName: lastName || null,
       source: source || 'admin_manual',
-      status: 'active',
-    }).returning('*');
-
-    await linkToCustomer(lc);
-    res.json({ success: true, subscriber: row });
-  } catch (err) { next(err); }
+      strict: false,
+    });
+    res.json({
+      success: true,
+      subscriber: result.subscriber,
+      resubscribed: result.action === 'resubscribed',
+    });
+  } catch (err) {
+    if (err.code === 'EMAIL_REQUIRED' || err.code === 'INVALID_EMAIL') {
+      return res.status(400).json({ error: err.message });
+    }
+    next(err);
+  }
 });
 
 // GET /api/admin/newsletter/subscribers.csv — full filtered export.

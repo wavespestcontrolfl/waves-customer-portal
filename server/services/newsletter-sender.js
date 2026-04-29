@@ -169,7 +169,7 @@ async function sendCampaign(sendId, opts = {}) {
           .whereIn('subscriber_id', subscriberIds)
           .update({
             status: 'sent',
-            resend_message_id: result.messageId,
+            provider_message_id: result.messageId,
             sent_at: new Date(),
             updated_at: new Date(),
           });

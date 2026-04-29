@@ -2,12 +2,12 @@
  * Resend Event Webhook — placeholder, wired for future migration.
  *
  * Mirror of webhooks-sendgrid.js but for Resend.com. The newsletter
- * sender currently ships through SendGrid; the schema columns
- * `resend_message_id` / `resend_broadcast_id` / `resend_contact_id`
- * exist for an eventual switch (originally scoped, deferred). When
- * NewsletterSender flips its provider, the webhook is already in
- * place and will start populating opens/clicks/bounces on the same
- * `newsletter_send_deliveries` rows.
+ * sender currently ships through SendGrid; the schema column
+ * `provider_message_id` (was `resend_message_id` until 20260429000003)
+ * is intentionally provider-neutral so a switch back to Resend wouldn't
+ * require another rename. When NewsletterSender flips its provider,
+ * this webhook is already in place and will start populating
+ * opens/clicks/bounces on the same `newsletter_send_deliveries` rows.
  *
  * Mounted BEFORE express.json() in index.js because Resend's webhook
  * signature (Svix-format HMAC-SHA256) is computed over the raw body.
@@ -105,7 +105,7 @@ async function handleEvent(ev) {
   if (!messageId) return;
 
   const delivery = await db('newsletter_send_deliveries')
-    .where({ resend_message_id: messageId })
+    .where({ provider_message_id: messageId })
     .first();
   if (!delivery) return;  // untracked send — ignore
 
