@@ -10,15 +10,24 @@ const db = require('../models/db');
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
- * Subscribe (or resubscribe) an email. Idempotent across the three
- * call sites. Returns { subscriber, action } where action is one of:
- *   'created'         — new row inserted
- *   'resubscribed'    — existing row was unsubscribed; flipped to active
- *   'already_active'  — existing active row, no change
+ * Subscribe (or resubscribe) an email. Idempotent across all call sites.
  *
- * Each caller adapts the result to its own response shape (admin
- * returns the subscriber, public route exposes only success flags,
- * quote-wizard logs + ignores).
+ * Returns { subscriber, action } where action is one of:
+ *   'created'             — new active row inserted (auto-confirmed path)
+ *   'resubscribed'        — unsubscribed row flipped back to active
+ *   'already_active'      — existing active row, no change
+ *   'already_pending'     — existing pending row, no resend triggered
+ *                           (caller passed requireConfirmation=false on
+ *                           a row that's mid-DOI; we don't auto-promote)
+ *   'confirmation_sent'   — new pending row inserted; caller must send
+ *                           the confirmation email (the subscriber row
+ *                           contains the freshly-issued confirmation_token)
+ *   'confirmation_resent' — existing pending row's confirmation_sent_at
+ *                           was bumped; caller resends the email with
+ *                           the SAME token (the user may already have
+ *                           the prior link)
+ *   'confirmed'           — pending row was auto-confirmed without
+ *                           sending an email (admin/quote bypass path)
  *
  * Validation tier:
  *   strict=true (default) — full email regex; throws if invalid
@@ -29,6 +38,13 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
  *
  * `linkCustomer` defaults true; pass false if the caller prefers to
  * batch the customer-link query for many emails (the bulk-import path).
+ *
+ * `requireConfirmation` (default false): when true, new and resubscribe
+ * paths land at status='pending' and the caller is expected to send the
+ * confirmation email keyed off subscriber.confirmation_token. When
+ * false, paths land directly at status='active' (admin add + quote-
+ * wizard dual-write — both are trusted/transactional contexts where the
+ * email is already in use).
  */
 async function subscribeOrResubscribe({
   email,
@@ -37,6 +53,7 @@ async function subscribeOrResubscribe({
   source = 'public_form',
   strict = true,
   linkCustomer = true,
+  requireConfirmation = false,
 } = {}) {
   if (!email) {
     const err = new Error('email required');
@@ -60,37 +77,116 @@ async function subscribeOrResubscribe({
   const existing = await db('newsletter_subscribers').where({ email: lc }).first();
 
   if (existing) {
-    if (existing.status === 'unsubscribed') {
+    // Pending → still mid-DOI. Resend the confirmation email if the
+    // caller is requesting one (the user re-submitted the form because
+    // they didn't see the original); auto-promote if the caller is
+    // trusted (admin add or quote-wizard signup of a previously
+    // public-form-pending row).
+    if (existing.status === 'pending') {
+      if (requireConfirmation) {
+        await db('newsletter_subscribers').where({ id: existing.id }).update({
+          confirmation_sent_at: new Date(),
+          updated_at: new Date(),
+        });
+        if (linkCustomer) await linkToCustomer(lc);
+        const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
+        return { subscriber: fresh, action: 'confirmation_resent' };
+      }
+      // Trusted-context promotion: flip pending to active.
       await db('newsletter_subscribers').where({ id: existing.id }).update({
         status: 'active',
-        resubscribed_at: new Date(),
-        unsubscribed_at: null,
+        confirmed_at: new Date(),
         updated_at: new Date(),
       });
       if (linkCustomer) await linkToCustomer(lc);
       const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
-      return { subscriber: fresh, action: 'resubscribed' };
+      return { subscriber: fresh, action: 'confirmed' };
     }
+
+    if (existing.status === 'unsubscribed') {
+      const updates = {
+        resubscribed_at: new Date(),
+        unsubscribed_at: null,
+        updated_at: new Date(),
+      };
+      if (requireConfirmation) {
+        updates.status = 'pending';
+        updates.confirmation_sent_at = new Date();
+        updates.confirmation_token = db.raw('gen_random_uuid()');
+        updates.confirmed_at = null;
+      } else {
+        updates.status = 'active';
+        updates.confirmed_at = new Date();
+      }
+      await db('newsletter_subscribers').where({ id: existing.id }).update(updates);
+      if (linkCustomer) await linkToCustomer(lc);
+      const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
+      return {
+        subscriber: fresh,
+        action: requireConfirmation ? 'confirmation_sent' : 'resubscribed',
+      };
+    }
+
+    // status === 'active' — already confirmed. No-op aside from the
+    // customer-link refresh (in case the row predates the customer
+    // signup and the link is newly possible).
     if (linkCustomer) await linkToCustomer(lc);
-    // Re-read so callers see the current row (customer_id may have
-    // just been populated by the link).
     const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
     return { subscriber: fresh, action: 'already_active' };
   }
 
-  const [row] = await db('newsletter_subscribers').insert({
+  // New row.
+  const insertRow = {
     email: lc,
     first_name: firstName,
     last_name: lastName,
     source,
-    status: 'active',
-  }).returning('*');
+    status: requireConfirmation ? 'pending' : 'active',
+  };
+  if (requireConfirmation) {
+    insertRow.confirmation_sent_at = new Date();
+  } else {
+    insertRow.confirmed_at = new Date();
+  }
+  const [row] = await db('newsletter_subscribers').insert(insertRow).returning('*');
 
   if (linkCustomer) await linkToCustomer(lc);
   // Re-read for the same reason — surfaces the freshly populated
   // customer_id without requiring callers to know the link runs.
   const fresh = await db('newsletter_subscribers').where({ id: row.id }).first();
-  return { subscriber: fresh, action: 'created' };
+  return {
+    subscriber: fresh,
+    action: requireConfirmation ? 'confirmation_sent' : 'created',
+  };
+}
+
+/**
+ * Confirm a pending subscriber by token. Idempotent: confirming an
+ * already-active row is a no-op (returns the existing subscriber);
+ * confirming an unsubscribed row leaves status alone (the user already
+ * opted out — confirming would be wrong).
+ *
+ * Returns { subscriber, action } where action is one of:
+ *   'confirmed'      — pending → active
+ *   'already_active' — row was already active
+ *   'unsubscribed'   — row is unsubscribed; nothing to do
+ *   'not_found'      — token doesn't match any row
+ */
+async function confirmByToken(token) {
+  if (!token) return { subscriber: null, action: 'not_found' };
+  const sub = await db('newsletter_subscribers').where({ confirmation_token: token }).first();
+  if (!sub) return { subscriber: null, action: 'not_found' };
+  if (sub.status === 'active') return { subscriber: sub, action: 'already_active' };
+  if (sub.status === 'unsubscribed') return { subscriber: sub, action: 'unsubscribed' };
+  // status === 'pending' — flip to active.
+  await db('newsletter_subscribers').where({ id: sub.id }).update({
+    status: 'active',
+    confirmed_at: new Date(),
+    updated_at: new Date(),
+  });
+  await linkToCustomer(sub.email);
+  const fresh = await db('newsletter_subscribers').where({ id: sub.id }).first();
+  return { subscriber: fresh, action: 'confirmed' };
 }
 
 /**
@@ -119,4 +215,4 @@ async function linkToCustomer(email) {
   );
 }
 
-module.exports = { subscribeOrResubscribe, linkToCustomer, EMAIL_RE };
+module.exports = { subscribeOrResubscribe, confirmByToken, linkToCustomer, EMAIL_RE };

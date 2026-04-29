@@ -15,10 +15,15 @@
 // Prior states the form can land in:
 //   idle       — initial
 //   loading    — POST in flight
-//   success    — newly subscribed
-//   already    — server reported alreadySubscribed
-//   resubbed   — server reported resubscribed (came back after unsub)
+//   pending    — server queued a confirmation email (double-opt-in)
+//   resent     — confirmation email re-fired for an already-pending row
+//   already    — server reported alreadySubscribed (already-active row)
 //   error      — bad email or network/server failure
+//
+// Note: the success/resubbed states from the legacy single-opt-in flow
+// are gone — the public path now requires double-opt-in, so the form
+// can never land at status='active' directly. 'already' still happens
+// for grandfathered rows that confirmed under the old flow.
 
 import { useState } from 'react';
 import { COLORS as B, FONTS } from '../theme-brand';
@@ -50,12 +55,14 @@ export default function NewsletterSignup({
 
   const submit = async (e) => {
     e.preventDefault();
-    if (state === 'loading' || state === 'success' || state === 'already' || state === 'resubbed') return;
+    if (state === 'loading' || state === 'pending' || state === 'resent' || state === 'already') return;
     setError('');
 
     if (company.trim()) {
-      // Bot tripped the honeypot — pretend success, drop the request.
-      setState('success');
+      // Bot tripped the honeypot — pretend pending, drop the request.
+      // Same lock state as legitimate pending so the bot can't
+      // distinguish.
+      setState('pending');
       return;
     }
     const trimmed = email.trim();
@@ -75,8 +82,8 @@ export default function NewsletterSignup({
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
       if (data.alreadySubscribed) setState('already');
-      else if (data.resubscribed) setState('resubbed');
-      else setState('success');
+      else if (data.resent) setState('resent');
+      else setState('pending');
     } catch (err) {
       setError(err.message || 'Something went wrong. Try again in a moment.');
       setState('error');
@@ -84,12 +91,12 @@ export default function NewsletterSignup({
   };
 
   const message = {
-    success: "You're in. Check your inbox for the next issue.",
+    pending: "Almost there — check your inbox for a confirmation email.",
+    resent: "We re-sent the confirmation. Check your inbox (and spam folder).",
     already: "You're already on the list — thanks for sticking with us.",
-    resubbed: 'Welcome back. We resubscribed you.',
   }[state];
 
-  const locked = state === 'success' || state === 'already' || state === 'resubbed';
+  const locked = state === 'pending' || state === 'resent' || state === 'already';
 
   return (
     <div style={{

@@ -13,7 +13,8 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
-const { subscribeOrResubscribe, EMAIL_RE } = require('../services/newsletter-subscribers');
+const { subscribeOrResubscribe, confirmByToken, EMAIL_RE } = require('../services/newsletter-subscribers');
+const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 
 // Per-IP rate limiter on POST /subscribe. The global /api/ limiter in
 // index.js is shared across every public endpoint, so a subscribe-spam
@@ -125,10 +126,15 @@ router.get('/unsubscribe/:token', async (req, res) => {
 
 // POST /api/public/newsletter/subscribe
 // Body: { email, firstName?, lastName?, source? }
+//
+// Double-opt-in: new + resubscribe paths land at status='pending' and
+// trigger a confirmation email. The recipient must click the link in
+// that email (GET /confirm/:token below) before the row goes active.
+// Existing active subscribers are grandfathered (no re-confirmation).
+//
 // Layered rate-limited: global /api/ limiter (index.js) plus the per-IP
 // subscribeLimiter above to cap signup-spam without affecting other
-// public endpoints. PR 6 will layer on a confirmation email and a
-// customer-facing signup form.
+// public endpoints.
 router.post('/subscribe', subscribeLimiter, async (req, res) => {
   try {
     const result = await subscribeOrResubscribe({
@@ -137,9 +143,28 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
       lastName: req.body.lastName || null,
       source: req.body.source || 'public_form',
       strict: true,
+      requireConfirmation: true,
     });
-    if (result.action === 'resubscribed') return res.json({ success: true, resubscribed: true });
+
+    // Send (or resend) the confirmation email when the row is in the
+    // pending state. Errors here are best-effort: we still return 200
+    // because the row is queued and the operator can resend manually,
+    // and we don't want to leak SendGrid status to the public form.
+    if (result.action === 'confirmation_sent' || result.action === 'confirmation_resent') {
+      try {
+        await sendConfirmationEmail(result.subscriber);
+      } catch (e) {
+        logger.error(`[newsletter] confirmation email failed for ${result.subscriber?.email}: ${e.message}`);
+      }
+      return res.json({
+        success: true,
+        pending: true,
+        resent: result.action === 'confirmation_resent',
+      });
+    }
     if (result.action === 'already_active') return res.json({ success: true, alreadySubscribed: true });
+    // 'resubscribed' / 'created' / 'confirmed' shouldn't happen on this
+    // path since requireConfirmation=true, but cover them for safety.
     res.json({ success: true });
   } catch (err) {
     if (err.code === 'INVALID_EMAIL' || err.code === 'EMAIL_REQUIRED') {
@@ -147,6 +172,79 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
     }
     logger.error(`[newsletter] subscribe failed: ${err.message}`);
     res.status(500).json({ error: 'subscribe failed' });
+  }
+});
+
+// GET /api/public/newsletter/confirm/:token
+// Human-visible double-opt-in confirmation. User clicks the link from the
+// confirmation email; we flip status pending → active and render a small
+// HTML success page (mirrors the unsubscribe pattern: no template engine,
+// no client code, survives outages of everything else).
+//
+// Idempotent: hitting the URL twice (browser back/forward, link cached
+// in a preview pane) shows the same success page and never errors.
+router.get('/confirm/:token', async (req, res) => {
+  try {
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.token);
+    const result = isUuid ? await confirmByToken(req.params.token) : { subscriber: null, action: 'not_found' };
+
+    if (result.action === 'confirmed') {
+      logger.info(`[newsletter] Confirmed ${result.subscriber.email}`);
+    }
+
+    const email = result.subscriber ? escapeHtml(result.subscriber.email) : '';
+    const heading = result.action === 'unsubscribed' ? "You're unsubscribed."
+      : result.action === 'not_found' ? "Link expired or invalid."
+      : "You're in!";
+    const body = result.action === 'unsubscribed'
+      ? `<p>This email is currently unsubscribed${email ? ` (<span class="email">${email}</span>)` : ''}. To start receiving the newsletter again, sign up at <a href="https://portal.wavespestcontrol.com/newsletter">/newsletter</a>.</p>`
+      : result.action === 'not_found'
+        ? `<p>This confirmation link doesn't match a pending subscription. The link may have already been used or it may have expired.</p><p style="margin-bottom:0">Sign up again at <a href="https://portal.wavespestcontrol.com/newsletter">/newsletter</a>.</p>`
+        : `<p>We'll send the next issue${email ? ` to <span class="email">${email}</span>` : ''}.</p><p style="margin-bottom:0">Local SWFL events, seasonal pest tips, and lawn-care timing — straight from our trucks.</p>`;
+
+    res.type('html').send(`
+      <!doctype html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <title>${heading} — Waves Pest Control</title>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 60px auto; padding: 0 20px; color: #111; }
+          h1 { font-size: 24px; margin-bottom: 8px; }
+          p { line-height: 1.5; color: #555; }
+          .box { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 24px; margin-top: 24px; }
+          .email { font-family: monospace; color: #111; }
+          a { color: #1B2C5B; }
+        </style>
+      </head>
+      <body>
+        <h1>${heading}</h1>
+        <div class="box">
+          ${body}
+        </div>
+        <p style="margin-top:32px; font-size:13px; color:#999;">Waves Pest Control &amp; Lawn Care · Bradenton, FL</p>
+      </body>
+      </html>
+    `);
+  } catch (err) {
+    logger.error(`[newsletter] confirm GET failed: ${err.message}`);
+    res.status(500).type('text').send('Something went wrong. Email contact@wavespestcontrol.com if you meant to confirm a subscription.');
+  }
+});
+
+// POST /api/public/newsletter/confirm/:token
+// JSON variant for any future client-side confirm flow. Returns the same
+// idempotent shape as confirmByToken's action enum so the frontend can
+// pick its own messaging.
+router.post('/confirm/:token', async (req, res) => {
+  try {
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.token);
+    const result = isUuid ? await confirmByToken(req.params.token) : { subscriber: null, action: 'not_found' };
+    res.json({ success: true, action: result.action });
+  } catch (err) {
+    logger.error(`[newsletter] confirm POST failed: ${err.message}`);
+    res.status(500).json({ error: 'confirm failed' });
   }
 });
 
