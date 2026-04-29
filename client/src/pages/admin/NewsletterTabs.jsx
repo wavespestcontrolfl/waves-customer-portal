@@ -176,7 +176,10 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
   const [textBody, setTextBody] = useState('');
   const [fromName, setFromName] = useState('Waves Pest Control');
   const [fromEmail, setFromEmail] = useState('newsletter@wavespestcontrol.com');
-  const [testEmail, setTestEmail] = useState('contact@wavespestcontrol.com');
+  // Defaults to the logged-in admin's email (populated below) so test
+  // sends don't fire into the shared contact@ inbox by default. Falls
+  // back to '' if /me is unreachable — operator types their own.
+  const [testEmail, setTestEmail] = useState('');
   const [status, setStatus] = useState('');
   const [activeCount, setActiveCount] = useState(null);
   const [segmentCount, setSegmentCount] = useState(null);
@@ -194,6 +197,9 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
 
   // Schedule
   const [scheduleAt, setScheduleAt] = useState('');
+
+  // Send confirm dialog
+  const [sendConfirmOpen, setSendConfirmOpen] = useState(false);
 
   // AI modal
   const [aiOpen, setAiOpen] = useState(false);
@@ -241,6 +247,9 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
     adminFetch('/admin/newsletter/subscribers?status=active&limit=1')
       .then((d) => setActiveCount(d.counts?.active || 0))
       .catch(() => setActiveCount(null));
+    adminFetch('/admin/auth/me')
+      .then((me) => { if (me?.email) setTestEmail(me.email); })
+      .catch(() => { /* leave blank, operator types */ });
   }, []);
 
   // Recalculate segment match count when the filter changes.
@@ -296,10 +305,16 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
     } catch (e) { setStatus('Test failed: ' + e.message); }
   };
 
-  const sendNow = async () => {
+  // Open the typed-confirm modal. The actual fetch happens in confirmSend
+  // once the operator types SEND and clicks the button.
+  const sendNow = () => {
     if (!draftId) { setStatus('Save a draft first.'); return; }
+    setSendConfirmOpen(true);
+  };
+
+  const confirmSend = async () => {
+    setSendConfirmOpen(false);
     const audience = segmentCount ?? activeCount ?? '?';
-    if (!confirm(`Send "${subject}" to ${audience} subscriber${audience === 1 ? '' : 's'}? This cannot be undone.`)) return;
     setStatus(`Queuing send to ${audience} subscribers...`);
     try {
       // Server returns 202 — campaign runs asynchronously now (a long
@@ -573,7 +588,7 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
               className="bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-12 text-zinc-900 font-mono w-56"
               placeholder="test@wavespestcontrol.com"
             />
-            <Button onClick={sendTest} variant="secondary" disabled={!draftId}>Send test</Button>
+            <Button onClick={sendTest} variant="secondary" disabled={!draftId || !testEmail}>Send test</Button>
             <Button onClick={sendNow} disabled={!draftId || !htmlBody || segmentCount === 0}>Send to all</Button>
           </div>
         </div>
@@ -615,7 +630,128 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
           onDraft={handleAiDraft}
         />
       )}
+
+      {sendConfirmOpen && (
+        <SendConfirmDialog
+          subject={subject}
+          subjectB={abEnabled ? subjectB : null}
+          previewText={previewText}
+          fromName={fromName}
+          fromEmail={fromEmail}
+          audience={segmentCount ?? activeCount ?? null}
+          activeCount={activeCount}
+          segmentFilter={segmentFilter}
+          htmlBody={htmlBody}
+          onCancel={() => setSendConfirmOpen(false)}
+          onConfirm={confirmSend}
+        />
+      )}
     </Card>
+  );
+}
+
+// ── Send confirm dialog ──────────────────────────────────────────────
+//
+// Replaces window.confirm() for the most consequential button in the admin
+// app. Shows a rendered preview of the body, the resolved audience, and a
+// type-SEND gate — the goal is to make a destructive double-click much
+// less likely than a stray Enter on the browser modal.
+
+function SendConfirmDialog({
+  subject, subjectB, previewText, fromName, fromEmail,
+  audience, activeCount, segmentFilter, htmlBody,
+  onCancel, onConfirm,
+}) {
+  const [typed, setTyped] = useState('');
+  const ready = typed.trim().toUpperCase() === 'SEND' && audience > 0;
+
+  const segmentSummary = useMemo(() => {
+    if (!segmentFilter) return `All active (${activeCount ?? '?'})`;
+    const parts = [];
+    if (segmentFilter.customersOnly) parts.push('Customers only');
+    else if (segmentFilter.leadsOnly) parts.push('Non-customers only');
+    if (Array.isArray(segmentFilter.sources) && segmentFilter.sources.length) {
+      parts.push(`Sources: ${segmentFilter.sources.join(', ')}`);
+    }
+    if (Array.isArray(segmentFilter.tags) && segmentFilter.tags.length) {
+      parts.push(`Tags: ${segmentFilter.tags.join(', ')}`);
+    }
+    return parts.length ? parts.join(' · ') : 'Filtered';
+  }, [segmentFilter, activeCount]);
+
+  // Body-only preview — no chrome wrap. The wrap is server-side and
+  // identical for every campaign, so the operator's review value is
+  // entirely in the body. Sandbox tight (no scripts, no same-origin)
+  // since the operator authored the HTML and may have pasted anything.
+  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><base target="_blank"><style>html,body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:15px;line-height:1.55;color:#0F172A;}body{padding:14px;}h1,h2,h3,h4{line-height:1.25;}img{max-width:100%;height:auto;}*{box-sizing:border-box;}</style></head><body>${htmlBody || '<em style="color:#64748B">(empty body)</em>'}</body></html>`;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onCancel}>
+      <div
+        className="bg-white border-hairline border-zinc-300 rounded-sm shadow-xl w-full max-w-2xl flex flex-col"
+        style={{ maxHeight: '90vh' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="p-5 border-b border-hairline border-zinc-200 flex items-start justify-between flex-shrink-0">
+          <div className="min-w-0">
+            <h3 className="text-16 font-medium text-zinc-900">Send to {audience != null ? audience.toLocaleString() : '?'} subscriber{audience === 1 ? '' : 's'}?</h3>
+            <p className="text-12 text-ink-secondary mt-0.5">This can't be undone. Each recipient is contacted at the SendGrid send below.</p>
+          </div>
+          <button type="button" onClick={onCancel} className="text-ink-tertiary hover:text-zinc-900 text-14 ml-3" aria-label="Close">✕</button>
+        </div>
+
+        <div className="px-5 py-4 overflow-y-auto flex-1 space-y-3">
+          <ConfirmRow label="Subject" value={subject || <em className="text-ink-tertiary">(missing)</em>} />
+          {subjectB && <ConfirmRow label="Subject (B)" value={subjectB} hint="A/B 50/50 random split" />}
+          {previewText && <ConfirmRow label="Preview text" value={previewText} />}
+          <ConfirmRow label="From" value={`${fromName} <${fromEmail}>`} />
+          <ConfirmRow label="Audience" value={segmentSummary} />
+
+          <div>
+            <div className="text-11 uppercase tracking-label text-ink-secondary mb-1">Body preview</div>
+            <iframe
+              title="Body preview"
+              srcDoc={srcDoc}
+              sandbox=""
+              style={{ width: '100%', height: 320, border: '1px solid #E4E4E7', borderRadius: 4, background: '#fff' }}
+            />
+            <p className="text-11 text-ink-tertiary mt-1">
+              Body only — Waves header + unsubscribe footer are added server-side. Send a test if you want to see the full chrome.
+            </p>
+          </div>
+        </div>
+
+        <div className="px-5 py-4 border-t border-hairline border-zinc-200 flex items-center gap-3 flex-shrink-0 flex-wrap">
+          <label className="text-12 text-ink-secondary flex-shrink-0">Type SEND to confirm:</label>
+          <input
+            type="text"
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            autoFocus
+            spellCheck={false}
+            autoComplete="off"
+            className="bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-13 text-zinc-900 font-mono w-32"
+            placeholder="SEND"
+          />
+          <div className="ml-auto flex items-center gap-2">
+            <Button onClick={onCancel} variant="secondary">Cancel</Button>
+            <Button onClick={onConfirm} disabled={!ready}>Send to all</Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConfirmRow({ label, value, hint }) {
+  return (
+    <div className="flex items-baseline gap-3">
+      <div className="text-11 uppercase tracking-label text-ink-secondary w-28 flex-shrink-0">{label}</div>
+      <div className="flex-1 min-w-0">
+        <div className="text-13 text-zinc-900 break-words">{value}</div>
+        {hint && <div className="text-11 text-ink-tertiary mt-0.5">{hint}</div>}
+      </div>
+    </div>
   );
 }
 

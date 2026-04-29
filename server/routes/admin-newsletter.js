@@ -328,7 +328,10 @@ router.post('/sends/:id/test', async (req, res) => {
     const send = await db('newsletter_sends').where({ id: req.params.id }).first();
     if (!send) return res.status(404).json({ error: 'not found' });
 
-    const testEmail = req.body.email || 'contact@wavespestcontrol.com';
+    // Default to the logged-in admin's own email so an empty test-email
+    // input doesn't fire into the shared contact@ inbox where Virginia
+    // works real customer replies.
+    const testEmail = req.body.email || req.technician?.email || 'contact@wavespestcontrol.com';
     // Demo unsubscribe URL — won't resolve to a real subscriber but the link
     // renders correctly and Gmail/Apple Mail will show the native unsub UI.
     const demoUrl = sendgrid.unsubscribeUrl('test-' + send.id);
