@@ -14,6 +14,34 @@ function capitalizeName(name) {
     .replace(/\bO'(\w)/g, (_, c) => "O'" + c.toUpperCase());
 }
 
+// Normalize a phone string to canonical E.164 before writing to call_log.
+// Twilio webhooks usually deliver E.164 already, but recording-status /
+// transcription callbacks have intermittently arrived with raw 10/11-digit
+// strings. Mirroring the 20260428000003_backfill_call_log_to_phone_e164
+// normalization here stops new rows from drifting back out of E.164 and
+// breaking the dashboard's exact-string JOIN against lead_sources.
+//
+// Rules:
+//   1. Anything that starts with `+` is treated as already-E.164 — strip
+//      formatting characters (spaces / parens / dashes) but preserve the
+//      country code. Critical for non-NANP callers (e.g. UK +44…) that
+//      Twilio's Lookup-enriched Caller ID sometimes surfaces — assuming
+//      NANP would silently rewrite +442079460958 to +12079460958.
+//   2. No `+` prefix → assume NANP/US, take the last 10 digits.
+//   3. Garbage (<10 digits) → preserve raw for debugging rather than
+//      fabricate a fake number.
+function toE164(raw) {
+  if (!raw) return null;
+  const s = String(raw).trim();
+  if (s.startsWith('+')) {
+    const stripped = '+' + s.slice(1).replace(/\D/g, '');
+    return /^\+\d{8,15}$/.test(stripped) ? stripped : raw;
+  }
+  const digits = s.replace(/\D/g, '');
+  if (digits.length < 10) return raw;
+  return '+1' + digits.slice(-10);
+}
+
 // =========================================================================
 // POST /api/webhooks/twilio/voice — Inbound voice call webhook
 //
@@ -88,8 +116,8 @@ router.post('/voice', async (req, res) => {
     await db('call_log').insert({
       customer_id: customer?.id || null,
       direction: 'inbound',
-      from_phone: From,
-      to_phone: To,
+      from_phone: toE164(From),
+      to_phone: toE164(To),
       twilio_call_sid: CallSid,
       status: CallStatus || 'ringing',
       metadata: JSON.stringify({
@@ -194,40 +222,71 @@ router.post('/recording-status', async (req, res) => {
         updated_at: new Date(),
       };
 
-      // Update existing call_log entry, or create one if missing
-      const updated = await db('call_log').where('twilio_call_sid', CallSid).update(recordingData);
+      // For inbound calls answered via <Dial record="record-from-answer-dual">,
+      // Twilio attaches the recording to the *child* dial leg — its CallSid
+      // differs from the parent inbound CallSid we wrote at /voice. The
+      // recording-status callback also carries `ParentCallSid`, which lets
+      // us land the recording on the correct parent row. Trying parent
+      // first means the by-CallSid match below only catches the rare
+      // single-leg / non-dial cases (e.g. voicemail recording on the parent).
+      const ParentCallSid = req.body.ParentCallSid || null;
+
+      let updated = 0;
+      let matchedSid = null;
+      if (ParentCallSid) {
+        updated = await db('call_log')
+          .where('twilio_call_sid', ParentCallSid)
+          .update(recordingData);
+        if (updated > 0) matchedSid = ParentCallSid;
+      }
       if (updated === 0) {
-        // No call_log entry exists — create one so the recording isn't orphaned
-        await db('call_log').insert({
-          twilio_call_sid: CallSid,
-          call_sid: CallSid,
-          from_phone: req.body.From || null,
-          to_phone: req.body.To || null,
-          direction: 'inbound',
-          status: 'completed',
-          ...recordingData,
-        }).catch(e => logger.error(`[recording-status] Fallback insert failed: ${e.message}`));
-        logger.info(`Recording saved (new call_log entry): ${CallSid} → ${RecordingSid} (${RecordingDuration}s)`);
-      } else {
-        logger.info(`Recording saved: ${CallSid} → ${RecordingSid} (${RecordingDuration}s)`);
+        updated = await db('call_log')
+          .where('twilio_call_sid', CallSid)
+          .update(recordingData);
+        if (updated > 0) matchedSid = CallSid;
       }
 
-      // Auto-process recording when ready.
-      // 10-minute delay: Twilio's recording-status:completed fires before the
-      // MP3 is reliably fetchable from their CDN, so the auth'd download in
-      // the processor can 404 or return a partial buffer and Gemini gets
-      // garbage. Empirically ~10 min is the propagation window where the
-      // download stabilizes. The 5-min processAllPending cron in scheduler.js
-      // is the restart-safe backstop if this in-memory timer is lost — it
-      // applies the same age gate, so it will not fire ahead of the window.
-      try {
-        const processor = require('../services/call-recording-processor');
-        setTimeout(async () => {
-          try {
-            await processor.processRecording(CallSid);
-          } catch (e) { logger.error(`Auto-process recording failed: ${e.message}`); }
-        }, 10 * 60 * 1000);
-      } catch (e) { logger.error(`Recording auto-process setup failed: ${e.message}`); }
+      if (updated > 0) {
+        logger.info(`Recording saved: ${matchedSid} → ${RecordingSid} (${RecordingDuration}s)`);
+      } else {
+        // No parent row found by either SID. The previous fallback inserted
+        // a synthetic row using req.body.To/From, but on the dial-leg
+        // callback those are the *forwarding* leg — the Twilio number ↔ the
+        // forwarded-to destination (e.g. Adam's cell). Inserting that row
+        // attributed every forwarded call to the destination number, which
+        // polluted the dashboard's calls-by-source JOIN with phantom
+        // "Unmapped — +19415993489" rows. Match the status_callback
+        // handler's defensive pattern: log and skip rather than synthesize
+        // a wrongly-attributed row.
+        logger.warn(
+          `[recording-status] No parent call_log row for CallSid=${CallSid} ParentCallSid=${ParentCallSid || 'none'}; skipping orphan insert (recording=${RecordingSid})`
+        );
+      }
+
+      // Auto-process recording when ready. Use the SID we actually
+      // landed the recording on — for forwarded inbound calls that's
+      // the parent CallSid, not the child dial leg's CallSid that
+      // Twilio sent on this webhook. Skip auto-processing entirely if
+      // we couldn't attach the recording to any row above.
+      //
+      // 10-minute delay (PR #467): Twilio's recording-status:completed
+      // fires before the MP3 is reliably fetchable from their CDN, so the
+      // auth'd download in the processor can 404 or return a partial
+      // buffer and Gemini gets garbage. Empirically ~10 min is the
+      // propagation window where the download stabilizes. The 5-min
+      // processAllPending cron in scheduler.js is the restart-safe
+      // backstop if this in-memory timer is lost — it applies the same
+      // age gate, so it will not fire ahead of the window.
+      if (matchedSid) {
+        try {
+          const processor = require('../services/call-recording-processor');
+          setTimeout(async () => {
+            try {
+              await processor.processRecording(matchedSid);
+            } catch (e) { logger.error(`Auto-process recording failed: ${e.message}`); }
+          }, 10 * 60 * 1000);
+        } catch (e) { logger.error(`Recording auto-process setup failed: ${e.message}`); }
+      }
     }
 
     res.sendStatus(200);
@@ -245,13 +304,33 @@ router.post('/transcription', async (req, res) => {
     const { CallSid, RecordingSid, TranscriptionText, TranscriptionStatus } = req.body;
 
     if (TranscriptionText && CallSid) {
-      await db('call_log').where('twilio_call_sid', CallSid).update({
+      // Same parent-vs-child SID story as /recording-status: for inbound
+      // calls answered via <Dial>, the transcription callback arrives with
+      // the child dial-leg CallSid, but the row we want to update is keyed
+      // by the parent CallSid. Try ParentCallSid first, fall back to
+      // CallSid for non-dial single-leg cases.
+      const ParentCallSid = req.body.ParentCallSid || null;
+      const update = {
         transcription: TranscriptionText,
         transcription_status: TranscriptionStatus === 'completed' ? 'completed' : 'failed',
         updated_at: new Date(),
-      });
+      };
 
-      logger.info(`Transcription received: ${CallSid} (${TranscriptionText.length} chars)`);
+      let updated = 0;
+      if (ParentCallSid) {
+        updated = await db('call_log').where('twilio_call_sid', ParentCallSid).update(update);
+      }
+      if (updated === 0) {
+        updated = await db('call_log').where('twilio_call_sid', CallSid).update(update);
+      }
+
+      if (updated > 0) {
+        logger.info(`Transcription received: ${CallSid} (${TranscriptionText.length} chars)`);
+      } else {
+        logger.warn(
+          `[transcription] No call_log row for CallSid=${CallSid} ParentCallSid=${ParentCallSid || 'none'}; transcription dropped (recording=${RecordingSid})`
+        );
+      }
     }
 
     res.sendStatus(200);
