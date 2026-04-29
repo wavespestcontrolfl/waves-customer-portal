@@ -143,22 +143,13 @@ async function syncConstantsFromDB(dbInstance) {
     }
 
     // ── Rodent ───────────────────────────────────────────────
+    // Bait stations (recurring monthly)
     if (config.rodent_monthly) {
       const rm = config.rodent_monthly;
       if (rm.small) constants.RODENT.baitMonthly.small.monthly = r(rm.small);
       if (rm.medium) constants.RODENT.baitMonthly.medium.monthly = r(rm.medium);
       if (rm.large) constants.RODENT.baitMonthly.large.monthly = r(rm.large);
       if (rm.visits_per_year) constants.RODENT.baitVisitsPerYear = Number(rm.visits_per_year);
-    }
-    if (config.rodent_trapping?.base) {
-      constants.RODENT.trapping.base = r(config.rodent_trapping.base);
-      constants.RODENT.trapping.floor = r(config.rodent_trapping.base);
-    }
-    if (config.rodent_trapping?.followup_rate) {
-      constants.RODENT.trapping.followupRate = r(config.rodent_trapping.followup_rate);
-    }
-    if (config.rodent_trapping?.followup_3pack_rate) {
-      constants.RODENT.trapping.followup3PackRate = r(config.rodent_trapping.followup_3pack_rate);
     }
     if (config.rodent_setup_fee?.value) {
       constants.RODENT.baitSetupFee = r(config.rodent_setup_fee.value);
@@ -168,14 +159,97 @@ async function syncConstantsFromDB(dbInstance) {
       if (pe.multiplier) constants.RODENT.baitPostExclusion.multiplier = pe.multiplier;
       if (pe.floor_monthly) constants.RODENT.baitPostExclusion.floorMonthly = r(pe.floor_monthly);
     }
+
+    // Inspection
+    if (config.rodent_inspection) {
+      const i = config.rodent_inspection;
+      if (i.fee != null) constants.RODENT.inspection.fee = r(i.fee);
+      if (i.creditable_within_days != null) constants.RODENT.inspection.creditableWithinDays = Number(i.creditable_within_days);
+      if (i.waive_if_approved_total_over != null) constants.RODENT.inspection.waiveIfApprovedTotalOver = r(i.waive_if_approved_total_over);
+    }
+
+    // Trapping (new structure)
+    if (config.rodent_trapping) {
+      const t = config.rodent_trapping;
+      if (t.base != null) constants.RODENT.trapping.base = r(t.base);
+      if (t.floor != null) constants.RODENT.trapping.floor = r(t.floor);
+      if (t.ceiling_before_custom != null) constants.RODENT.trapping.ceilingBeforeCustom = r(t.ceiling_before_custom);
+      if (t.included_followups != null) constants.RODENT.trapping.includedFollowUps = Number(t.included_followups);
+      if (t.additional_followup_rate != null) constants.RODENT.trapping.additionalFollowUpRate = r(t.additional_followup_rate);
+      if (t.emergency_multiplier != null) constants.RODENT.trapping.emergencyMultiplier = Number(t.emergency_multiplier);
+      if (t.emergency_minimum_surcharge != null) constants.RODENT.trapping.emergencyMinimumSurcharge = r(t.emergency_minimum_surcharge);
+      if (Array.isArray(t.home_size_adjustments)) {
+        constants.RODENT.trapping.homeSizeAdjustments = t.home_size_adjustments.map(b => ({
+          maxSqFt: b.max_sqft === null || b.max_sqft === 'Infinity' ? Infinity : Number(b.max_sqft),
+          adjustment: b.adjustment >= 0 ? r(b.adjustment) : -r(Math.abs(b.adjustment)),
+          customRecommended: !!b.custom_recommended,
+        }));
+      }
+      if (Array.isArray(t.lot_adjustments)) {
+        constants.RODENT.trapping.lotAdjustments = t.lot_adjustments.map(b => ({
+          maxLotSqFt: b.max_lot_sqft === null || b.max_lot_sqft === 'Infinity' ? Infinity : Number(b.max_lot_sqft),
+          adjustment: b.adjustment >= 0 ? r(b.adjustment) : -r(Math.abs(b.adjustment)),
+          customRecommended: !!b.custom_recommended,
+        }));
+      }
+      if (t.pressure_adjustments && typeof t.pressure_adjustments === 'object') {
+        for (const [key, val] of Object.entries(t.pressure_adjustments)) {
+          if (constants.RODENT.trapping.pressureAdjustments[key] !== undefined) {
+            constants.RODENT.trapping.pressureAdjustments[key] = val >= 0 ? r(val) : -r(Math.abs(val));
+          }
+        }
+      }
+    }
+
+    // Sanitation (light / standard / heavy)
     if (config.rodent_sanitation) {
       const sa = config.rodent_sanitation;
-      ['light', 'medium', 'heavy'].forEach(tier => {
+      ['light', 'standard', 'heavy'].forEach(tier => {
         if (sa[tier]) {
-          if (sa[tier].base !== undefined) constants.RODENT.sanitation[tier].base = r(sa[tier].base);
-          if (sa[tier].floor !== undefined) constants.RODENT.sanitation[tier].floor = r(sa[tier].floor);
+          const t = sa[tier];
+          if (t.base !== undefined) constants.RODENT.sanitation[tier].base = r(t.base);
+          if (t.floor !== undefined) constants.RODENT.sanitation[tier].floor = r(t.floor);
+          if (t.included_sqft !== undefined) constants.RODENT.sanitation[tier].includedSqFt = Number(t.included_sqft);
+          if (t.additional_per_sqft !== undefined) constants.RODENT.sanitation[tier].additionalPerSqFt = Number(t.additional_per_sqft);
+          if (t.included_debris_cuft !== undefined) constants.RODENT.sanitation[tier].includedDebrisCuFt = Number(t.included_debris_cuft);
+          if (t.additional_debris_per_cuft !== undefined) constants.RODENT.sanitation[tier].additionalDebrisPerCuFt = r(t.additional_debris_per_cuft);
         }
       });
+      if (sa.heavy) {
+        if (sa.heavy.crawlspace_multiplier !== undefined) constants.RODENT.sanitation.heavy.crawlspaceMultiplier = Number(sa.heavy.crawlspace_multiplier);
+        if (sa.heavy.tight_access_multiplier !== undefined) constants.RODENT.sanitation.heavy.tightAccessMultiplier = Number(sa.heavy.tight_access_multiplier);
+      }
+    }
+
+    // Bundle discounts
+    if (config.rodent_bundles) {
+      const b = config.rodent_bundles;
+      if (b.trap_exclusion) {
+        if (b.trap_exclusion.discount != null) constants.RODENT.bundles.trapExclusion.discount = Number(b.trap_exclusion.discount);
+        if (b.trap_exclusion.floor != null) constants.RODENT.bundles.trapExclusion.floor = r(b.trap_exclusion.floor);
+      }
+      if (b.trap_sanitation) {
+        if (b.trap_sanitation.discount != null) constants.RODENT.bundles.trapSanitation.discount = Number(b.trap_sanitation.discount);
+        if (b.trap_sanitation.floor != null) constants.RODENT.bundles.trapSanitation.floor = r(b.trap_sanitation.floor);
+      }
+      if (b.full_remediation) {
+        if (b.full_remediation.discount != null) constants.RODENT.bundles.fullRemediation.discount = Number(b.full_remediation.discount);
+        if (b.full_remediation.floors) {
+          for (const tier of ['light', 'standard', 'heavy']) {
+            if (b.full_remediation.floors[tier] != null) {
+              constants.RODENT.bundles.fullRemediation.floors[tier] = r(b.full_remediation.floors[tier]);
+            }
+          }
+        }
+      }
+    }
+
+    // Guarantee tiers
+    if (config.rodent_guarantee) {
+      const g = config.rodent_guarantee;
+      if (g.standard != null) constants.RODENT.guarantee.standard = r(g.standard);
+      if (g.complex != null) constants.RODENT.guarantee.complex = r(g.complex);
+      if (g.estate != null) constants.RODENT.guarantee.estate = r(g.estate);
     }
 
     // ── WaveGuard ────────────────────────────────────────────
@@ -269,8 +343,36 @@ async function syncConstantsFromDB(dbInstance) {
       if (ex.simple) constants.SPECIALTY.exclusion.perPoint.simple = r(ex.simple);
       if (ex.moderate) constants.SPECIALTY.exclusion.perPoint.moderate = r(ex.moderate);
       if (ex.advanced) constants.SPECIALTY.exclusion.perPoint.advanced = r(ex.advanced);
-      if (ex.floor) constants.SPECIALTY.exclusion.floor = r(ex.floor);
+      if (ex.specialty_minimum) constants.SPECIALTY.exclusion.perPoint.specialtyMinimum = r(ex.specialty_minimum);
       if (ex.inspection) constants.SPECIALTY.exclusion.inspectionFee = r(ex.inspection);
+      if (Array.isArray(ex.minimums_by_home_sqft)) {
+        constants.SPECIALTY.exclusion.minimumsByHomeSqFt = ex.minimums_by_home_sqft.map(b => ({
+          maxSqFt: b.max_sqft === null || b.max_sqft === 'Infinity' ? Infinity : Number(b.max_sqft),
+          minimum: r(b.minimum),
+          customRecommended: !!b.custom_recommended,
+        }));
+      }
+      if (ex.story_multipliers && typeof ex.story_multipliers === 'object') {
+        for (const [k, v] of Object.entries(ex.story_multipliers)) {
+          if (constants.SPECIALTY.exclusion.storyMultipliers[k] !== undefined) {
+            constants.SPECIALTY.exclusion.storyMultipliers[k] = Number(v);
+          }
+        }
+      }
+      if (ex.roof_multipliers && typeof ex.roof_multipliers === 'object') {
+        for (const [k, v] of Object.entries(ex.roof_multipliers)) {
+          if (constants.SPECIALTY.exclusion.roofMultipliers[k] !== undefined) {
+            constants.SPECIALTY.exclusion.roofMultipliers[k] = Number(v);
+          }
+        }
+      }
+      if (ex.construction_multipliers && typeof ex.construction_multipliers === 'object') {
+        for (const [k, v] of Object.entries(ex.construction_multipliers)) {
+          if (constants.SPECIALTY.exclusion.constructionMultipliers[k] !== undefined) {
+            constants.SPECIALTY.exclusion.constructionMultipliers[k] = Number(v);
+          }
+        }
+      }
     }
 
     // ── Lawn Care Brackets (all 4 grass tracks) ──────────────

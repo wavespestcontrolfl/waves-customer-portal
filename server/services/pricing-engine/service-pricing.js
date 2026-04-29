@@ -589,89 +589,170 @@ function priceRodentBait(property, options = {}) {
 // ============================================================
 // RODENT TRAPPING (One-Time)
 // ============================================================
-// Base price = setup visit + 1 follow-up trap check.
-// Additional follow-ups billed via priceRodentTrappingFollowups().
-function priceRodentTrapping(property) {
-  const footprint = property.footprint;
-  const lotSqFt = property.lotSqFt;
+// Base price = setup visit + 2 included follow-up trap checks. Final price
+// adjusts for home size, lot size, rodent pressure, and optional emergency
+// surcharge. Additional follow-ups beyond the 2 included billed via
+// priceRodentTrappingFollowups().
+//
+// Inputs:
+//   property: { footprint, lotSqFt, features }
+//   options:
+//     pressure: 'light' | 'normal' | 'moderate' | 'heavy' | 'severe'
+//     emergency: boolean — same-day / urgent surcharge
+//
+// Pressure inferred from property.features when not provided:
+//   trees=heavy + nearWater  → heavy
+//   trees=heavy or nearWater → moderate
+//   default                  → normal
+function _bracketLookup(value, brackets, key) {
+  for (const b of brackets) {
+    if (value <= b[key]) return b;
+  }
+  return brackets[brackets.length - 1];
+}
+
+function priceRodentTrapping(property, options = {}) {
+  const cfg = RODENT.trapping;
+  const footprint = property.footprint || 0;
+  const lotSqFt = property.lotSqFt || 0;
   const f = property.features || {};
+  const { emergency = false } = options;
 
-  const footprintAdj = interpolate(footprint, RODENT.trapping.footprintAdj);
-  const lotAdj = interpolate(lotSqFt, RODENT.trapping.lotAdj);
+  // Default pressure inference from property features.
+  let pressure = options.pressure;
+  if (!pressure) {
+    if (f.trees === 'heavy' && f.nearWater) pressure = 'heavy';
+    else if (f.trees === 'heavy' || f.nearWater) pressure = 'moderate';
+    else pressure = 'normal';
+  }
 
-  let base = RODENT.trapping.base + Math.round(footprintAdj) + Math.round(lotAdj);
-  if (f.trees === 'heavy') base += 10;
-  if (f.trees === 'moderate') base += 5;
+  const homeBracket = _bracketLookup(footprint, cfg.homeSizeAdjustments, 'maxSqFt');
+  const lotBracket = _bracketLookup(lotSqFt, cfg.lotAdjustments, 'maxLotSqFt');
+  const homeAdj = homeBracket.adjustment;
+  const lotAdj = lotBracket.adjustment;
+  const pressureAdj = cfg.pressureAdjustments[pressure] ?? 0;
 
-  const price = Math.max(RODENT.trapping.floor, base);
+  let raw = cfg.base + homeAdj + lotAdj + pressureAdj;
 
-  return { service: 'rodent_trapping', price, footprintAdj: Math.round(footprintAdj), lotAdj: Math.round(lotAdj) };
+  // Emergency surcharge: 20% of subtotal OR fixed minimum, whichever is higher.
+  let emergencySurcharge = 0;
+  if (emergency) {
+    const pctSurcharge = raw * (cfg.emergencyMultiplier - 1);
+    emergencySurcharge = Math.max(pctSurcharge, cfg.emergencyMinimumSurcharge);
+    raw += emergencySurcharge;
+  }
+
+  const rounded = Math.round(raw / 5) * 5;
+  const customRecommended = !!(homeBracket.customRecommended || lotBracket.customRecommended);
+  const price = Math.max(cfg.floor, Math.min(cfg.ceilingBeforeCustom, rounded));
+
+  return {
+    service: 'rodent_trapping',
+    price,
+    base: cfg.base,
+    homeAdj,
+    lotAdj,
+    pressure,
+    pressureAdj,
+    emergency,
+    emergencySurcharge: Math.round(emergencySurcharge),
+    includedFollowUps: cfg.includedFollowUps,
+    customRecommended,
+    detail: `Setup + ${cfg.includedFollowUps} follow-ups | ${pressure} pressure${emergency ? ' | EMERGENCY' : ''}`,
+  };
 }
 
 // ============================================================
 // RODENT TRAPPING — ADDITIONAL FOLLOW-UP VISITS
 // ============================================================
-// Base trapping price includes setup + 1 follow-up. Use this for
-// additional checks on active infestations. 3-pack saves $40 vs
-// three individual follow-ups.
+// Base trapping price includes setup + 2 follow-ups. Use this for additional
+// checks on active infestations beyond the included visits.
 function priceRodentTrappingFollowups(count = 1) {
   const n = Math.max(0, Math.floor(count));
   if (n === 0) return null;
 
-  const perVisit = RODENT.trapping.followupRate;
-  const packRate = RODENT.trapping.followup3PackRate;
-
-  // Apply the 3-pack discount to every full block of 3 visits, not just the
-  // first one. e.g., 6 visits = 2 packs ($490), not 1 pack + 3 singles ($530).
-  const packs = Math.floor(n / 3);
-  const remainder = n - packs * 3;
-  const usePack = packs > 0;
-  const price = packs * packRate + remainder * perVisit;
+  const perVisit = RODENT.trapping.additionalFollowUpRate;
+  const price = n * perVisit;
 
   return {
     service: 'rodent_trapping_followup',
     count: n,
     perVisit,
-    usePack,
-    packs,
-    remainder,
     price,
-    detail: usePack
-      ? `${n} follow-up${n === 1 ? '' : 's'} (${packs}× 3-pack${remainder ? ` + ${remainder} extra` : ''})`
-      : `${n} follow-up${n === 1 ? '' : 's'} @ $${perVisit}/ea`,
+    detail: `${n} additional follow-up${n === 1 ? '' : 's'} @ $${perVisit}/ea`,
   };
 }
 
 // ============================================================
-// RODENT SANITATION (bleach + manual wipe)
+// RODENT SANITATION (bleach + wipe; CDC-aligned cleanup)
 // ============================================================
-// Three tiers, scope is bleach + manual wipe-down (NOT enzyme/fogger).
-// Footprint adjustment scales with attic size beyond 1500 sf baseline.
-//   light  — single room or small zone, ~30 min on site
-//   medium — multiple rooms or attic perimeter, ~75 min on site
-//   heavy  — whole attic or multi-zone problem, ~150 min on site
+// Three tiers — light / standard / heavy — with affected-sqft scaling
+// and per-cu-ft contaminated-debris pricing.
+//
+// Inputs:
+//   tier:                  'light' | 'standard' | 'heavy' (alias 'medium' → 'standard')
+//   affectedSqFt:          actual cleanup area on site
+//   insulationRemovalCuFt: contaminated debris volume to dispose
+//   accessType:            'normal' | 'crawlspace' | 'tight' (heavy tier only)
+//
+// Pricing formula:
+//   tier base
+//   + max(0, affectedSqFt - includedSqFt)   * additionalPerSqFt
+//   + max(0, debrisCuFt    - includedDebris) * additionalDebrisPerCuFt
+//   * accessMultiplier (heavy tier)
+//
+// Heavy tier requires custom-quote review when debris > 25 cu ft (this is
+// the cutoff at which most real attic insulation removal jobs need a sub
+// or HEPA truck — we flag rather than silently underprice).
 function priceSanitation(options = {}) {
-  const { tier = 'medium', atticSqFt = 1500 } = options;
-  const cfg = RODENT.sanitation[tier];
-  if (!cfg) {
-    throw new Error(`Unknown sanitation tier: ${tier}`);
+  const {
+    tier: rawTier = 'standard',
+    affectedSqFt = 0,
+    insulationRemovalCuFt = 0,
+    accessType = 'normal',
+  } = options;
+
+  const aliasedTier = RODENT.sanitation.legacyAliases?.[rawTier] || rawTier;
+  const cfg = RODENT.sanitation[aliasedTier];
+  if (!cfg || aliasedTier === 'legacyAliases') {
+    throw new Error(`Unknown sanitation tier: ${rawTier}`);
   }
 
-  const baseline = 1500;
-  const step = 500;
-  const adjPerStep = RODENT.sanitation.footprintAdj?.[tier] || 0;
-  const stepsAbove = Math.max(-2, Math.round((atticSqFt - baseline) / step));
-  const footprintAdj = stepsAbove * adjPerStep;
+  const sqFtOverage = Math.max(0, affectedSqFt - cfg.includedSqFt);
+  const debrisOverage = Math.max(0, insulationRemovalCuFt - (cfg.includedDebrisCuFt || 0));
+  const sqFtCharge = sqFtOverage * cfg.additionalPerSqFt;
+  const debrisCharge = debrisOverage * (cfg.additionalDebrisPerCuFt || 0);
 
-  const price = Math.max(cfg.floor, cfg.base + footprintAdj);
+  let raw = cfg.base + sqFtCharge + debrisCharge;
+
+  // Heavy-tier access multipliers
+  let accessMult = 1.0;
+  if (aliasedTier === 'heavy') {
+    if (accessType === 'crawlspace') accessMult = cfg.crawlspaceMultiplier || 1.0;
+    else if (accessType === 'tight') accessMult = cfg.tightAccessMultiplier || 1.0;
+  }
+  raw *= accessMult;
+
+  const price = Math.max(cfg.floor, Math.round(raw / 5) * 5);
+
+  // Flag for custom quote when debris exceeds heavy-tier ceiling
+  const customQuoteRecommended = aliasedTier === 'heavy' && insulationRemovalCuFt > 25 + 25;
 
   return {
     service: 'rodent_sanitation',
-    tier,
+    tier: aliasedTier,
     name: `Rodent Sanitation (${cfg.label})`,
     price,
-    footprintAdj,
-    detail: `${cfg.label} — ${cfg.durationMin} min, ${atticSqFt} sf attic`,
+    base: cfg.base,
+    sqFtOverage,
+    debrisOverage,
+    sqFtCharge: Math.round(sqFtCharge * 100) / 100,
+    debrisCharge: Math.round(debrisCharge),
+    accessMult,
+    customQuoteRecommended,
+    detail: `${cfg.label} — ${cfg.durationMin} min | ${affectedSqFt} sf affected`
+      + (debrisOverage > 0 ? ` | +${debrisOverage} cu ft debris` : '')
+      + (accessMult > 1 ? ` | ${accessType} access ×${accessMult}` : ''),
   };
 }
 
@@ -1066,48 +1147,171 @@ function priceStingingInsect(options = {}) {
 // ============================================================
 // EXCLUSION (rodent entry-point sealing)
 // ============================================================
-// v2 parity: urgency applied to points subtotal, NOT to inspection fee.
-// Inspection fee auto-waived when caller signals any rodent service is
-// being purchased alongside (`hasServiceOptIn: true`).
+// V1+V2 unified pricer: per-entry-point structure (V1) with home-size
+// minimums and story/roof/construction multipliers (V2).
+//
+// Multipliers apply to the (moderate + advanced) subtotal only — simple
+// interior gaps don't scale by structure access.
+//
+// Inputs:
+//   simple/moderate/advanced: entry-point counts
+//   specialty:                 specialty repair count (custom $275+ each)
+//   homeSqFt:                  for minimum-floor lookup
+//   stories:                   1 / 2 / 3+ (numeric)
+//   roofType:                  shingle / flat / metal / tile / steep_or_fragile
+//   constructionType:          block / stucco / frame / mixed
+//   waiveInspection:           caller-controlled
+//   hasServiceOptIn:           legacy auto-waive (any rodent service)
+//   approvedTotalForWaiver:    waive if total approved work exceeds $995
+//   urgency / afterHours:      passed to applyUrgency
 function priceExclusion(options = {}) {
   const {
-    simple = 0, moderate = 0, advanced = 0,
+    simple = 0,
+    moderate = 0,
+    advanced = 0,
+    specialty = 0,
+    specialtyCustomTotal = 0,   // caller-supplied custom amount when specialty > 0
+    homeSqFt = 2000,
+    stories = 1,
+    roofType = 'shingle',
+    constructionType = 'block',
     waiveInspection = false,
     hasServiceOptIn = false,
+    approvedTotalForWaiver = 0,
     urgency = 'ROUTINE', afterHours = false,
   } = options;
+
   const cfg = SPECIALTY.exclusion;
-  const sc = simple * cfg.perPoint.simple + moderate * cfg.perPoint.moderate + advanced * cfg.perPoint.advanced;
-  const ep = Math.max(cfg.floor, Math.round(sc));
-  const inspectionWaived = waiveInspection || hasServiceOptIn;
-  const insp = inspectionWaived ? 0 : cfg.inspectionFee;
-  const total = applyUrgency(ep, urgency, afterHours) + insp;
+  const ins = RODENT.inspection || { fee: cfg.inspectionFee, waiveIfApprovedTotalOver: 995 };
+
+  const simpleSubtotal = simple * cfg.perPoint.simple;
+  const accessSubtotal = (moderate * cfg.perPoint.moderate) + (advanced * cfg.perPoint.advanced);
+
+  const storyKey = stories >= 3 ? 'three' : (stories === 2 ? 'two' : 'one');
+  const storyMult = cfg.storyMultipliers?.[storyKey] ?? 1.0;
+  const roofMult = cfg.roofMultipliers?.[roofType] ?? 1.0;
+  const constructionMult = cfg.constructionMultipliers?.[constructionType] ?? 1.0;
+
+  const accessAdjusted = accessSubtotal * storyMult * roofMult * constructionMult;
+
+  // Specialty: caller may provide a custom total; otherwise charge the floor per unit
+  const specialtyTotal = specialty > 0
+    ? Math.max(specialtyCustomTotal, specialty * cfg.perPoint.specialtyMinimum)
+    : 0;
+
+  const rawSubtotal = simpleSubtotal + accessAdjusted + specialtyTotal;
+
+  // Home-size minimum lookup
+  const minBracket = _bracketLookup(homeSqFt, cfg.minimumsByHomeSqFt, 'maxSqFt');
+  const minimumFloor = minBracket.minimum;
+
+  const epSubtotal = Math.max(minimumFloor, Math.round(rawSubtotal / 10) * 10);
+  const subtotalWithUrgency = applyUrgency(epSubtotal, urgency, afterHours);
+
+  // Inspection waiver: explicit waive, OR any-rodent-service opt-in (legacy),
+  // OR approved-total over the waiver threshold.
+  const inspectionWaived =
+    waiveInspection ||
+    hasServiceOptIn ||
+    (approvedTotalForWaiver >= ins.waiveIfApprovedTotalOver);
+  const insp = inspectionWaived ? 0 : ins.fee;
+
+  const total = subtotalWithUrgency + insp;
+
   let tier = 'Basic';
   if (advanced > 0) tier = 'Advanced (Roof)';
   else if (moderate > 0) tier = 'Moderate';
+  if (specialty > 0) tier += ' + Specialty';
+
   const inspectDetail = insp > 0
     ? ` + $${insp} inspect`
-    : (hasServiceOptIn ? ' (inspect waived w/ service)' : ' (inspect waived)');
+    : (inspectionWaived ? ' (inspect waived)' : '');
+
   return {
     service: 'exclusion',
     name: 'Rodent Exclusion',
     price: total,
-    detail: `${tier} — ${simple + moderate + advanced} points${inspectDetail}`,
-    points: { simple, moderate, advanced }, inspectionFee: insp, tier,
+    detail: `${tier} — ${simple + moderate + advanced + specialty} points${inspectDetail}`,
+    points: { simple, moderate, advanced, specialty },
+    subtotalBeforeMin: Math.round(rawSubtotal),
+    minimumFloor,
+    inspectionFee: insp,
     inspectionWaived,
+    tier,
+    storyMult,
+    roofMult,
+    constructionMult,
+    customRecommended: !!minBracket.customRecommended,
   };
 }
 
 // ============================================================
-// RODENT GUARANTEE (combo bundle: trap + exclusion)
+// RODENT INSPECTION (standalone diagnostic visit)
 // ============================================================
-function priceRodentGuarantee() {
-  const price = SPECIALTY.exclusion.rodentGuarantee;
+// Creditable toward exclusion or full remediation when approved within 14
+// days. Used when a customer wants a paid inspection without committing to
+// remediation work upfront.
+function priceRodentInspection() {
+  const ins = RODENT.inspection;
+  return {
+    service: 'rodent_inspection',
+    name: 'Rodent Inspection',
+    price: ins.fee,
+    creditableWithinDays: ins.creditableWithinDays,
+    detail: `$${ins.fee} inspection (creditable for ${ins.creditableWithinDays} days toward remediation work)`,
+  };
+}
+
+// ============================================================
+// RODENT GUARANTEE (gated, 3 tiers by complexity)
+// ============================================================
+// Eligibility: trap + exclusion + (sanitation OR photo baseline) + no
+// activity after final trap check. Caller passes the eligibility flags
+// and home-complexity facts; we determine tier and price.
+function priceRodentGuarantee(options = {}) {
+  const {
+    homeSqFt = 2000,
+    stories = 1,
+    roofType = 'shingle',
+    sealedPoints = 0,
+    eligibility = {},
+  } = options;
+
+  const cfg = RODENT.guarantee;
+
+  // Eligibility check — caller signals each flag; missing = not eligible
+  const required = cfg.eligibilityRequires;
+  const missing = required.filter(flag => !eligibility[flag]);
+  const eligible = missing.length === 0;
+
+  // Tier selection by complexity:
+  //   estate  — >4,000 sf or >15 sealed points
+  //   complex — 2,501–4,000 sf, two-story, tile roof, or 9–15 sealed points
+  //   standard — everything else
+  let tier = 'standard';
+  if (homeSqFt > 4000 || sealedPoints > 15) {
+    tier = 'estate';
+  } else if (
+    homeSqFt > 2500 ||
+    stories >= 2 ||
+    roofType === 'tile' ||
+    sealedPoints >= 9
+  ) {
+    tier = 'complex';
+  }
+
+  const price = cfg[tier];
+
   return {
     service: 'rodent_guarantee',
-    name: 'Rodent Guarantee',
+    name: `Rodent Guarantee (${tier})`,
     price,
-    detail: `$${price}/yr — unlimited callbacks + re-sealing for 12 months`,
+    tier,
+    eligible,
+    eligibilityMissing: missing,
+    detail: eligible
+      ? `$${price}/yr — 12-month re-entry warranty (${tier} tier)`
+      : `INELIGIBLE — missing: ${missing.join(', ')}`,
   };
 }
 
@@ -1325,10 +1529,44 @@ function calculateRodentGuaranteeCombo(config = {}) {
   };
 }
 
+// ============================================================
+// RODENT BUNDLE DISCOUNTS (combo selector)
+// ============================================================
+// Given the priced components present in the estimate, returns the
+// discount factor and floor that should apply, plus the bundle name.
+// Returns null when no bundle qualifies.
+function selectRodentBundle({ hasTrapping, hasExclusion, hasSanitation, sanitationTier }) {
+  const cfg = RODENT.bundles;
+  if (hasTrapping && hasExclusion && hasSanitation) {
+    const tier = RODENT.sanitation.legacyAliases?.[sanitationTier] || sanitationTier || 'standard';
+    const floor = cfg.fullRemediation.floors[tier] || cfg.fullRemediation.floors.standard;
+    return { kind: 'fullRemediation', discount: cfg.fullRemediation.discount, floor };
+  }
+  if (hasTrapping && hasExclusion) {
+    return { kind: 'trapExclusion', discount: cfg.trapExclusion.discount, floor: cfg.trapExclusion.floor };
+  }
+  if (hasTrapping && hasSanitation) {
+    return { kind: 'trapSanitation', discount: cfg.trapSanitation.discount, floor: cfg.trapSanitation.floor };
+  }
+  return null;
+}
+
+function applyRodentBundle(componentTotal, bundle) {
+  if (!bundle) return { discounted: componentTotal, savings: 0 };
+  const discounted = componentTotal * (1 - bundle.discount);
+  const floored = Math.max(bundle.floor, Math.round(discounted / 10) * 10);
+  return {
+    discounted: floored,
+    savings: Math.round(componentTotal - floored),
+  };
+}
+
 module.exports = {
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
+  priceRodentInspection,
+  selectRodentBundle, applyRodentBundle,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
   priceTrenching, priceBoraCare, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceWDO, priceFlea,

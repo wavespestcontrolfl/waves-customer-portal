@@ -10,6 +10,7 @@ const {
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
+  priceRodentInspection, selectRodentBundle, applyRodentBundle,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
   priceTrenching, priceBoraCare, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceWDO, priceFlea,
@@ -240,7 +241,11 @@ function generateEstimate(input) {
 
   // Specialty services
   if (services.rodentTrapping) {
-    const result = priceRodentTrapping(property);
+    const opts = typeof services.rodentTrapping === 'object' ? services.rodentTrapping : {};
+    const result = priceRodentTrapping(property, {
+      pressure: opts.pressure,
+      emergency: !!opts.emergency,
+    });
     lineItems.push(result);
   }
   if (services.trenching) {
@@ -353,8 +358,8 @@ function generateEstimate(input) {
   }
   if (services.exclusion) {
     // Auto-waive inspection fee when any rodent service is opted in
-    // alongside exclusion (trap, bait, sanitation). Only the rare
-    // standalone-inspection case still incurs the $125 fee.
+    // alongside exclusion (trap, bait, sanitation). Standalone exclusion
+    // with no other rodent service still incurs the $125 inspection.
     const hasRodentServiceOptIn = !!(
       services.rodentTrapping || services.rodentBait || services.sanitation
     );
@@ -362,30 +367,48 @@ function generateEstimate(input) {
       simple: services.exclusion.simple || 0,
       moderate: services.exclusion.moderate || 0,
       advanced: services.exclusion.advanced || 0,
+      specialty: services.exclusion.specialty || 0,
+      specialtyCustomTotal: services.exclusion.specialtyCustomTotal || 0,
+      homeSqFt: services.exclusion.homeSqFt || property.footprint || 2000,
+      stories: services.exclusion.stories || property.stories || 1,
+      roofType: services.exclusion.roofType || property.roofType || 'shingle',
+      constructionType: services.exclusion.constructionType
+        || property.constructionMaterial || 'block',
       waiveInspection: services.exclusion.waiveInspection || false,
       hasServiceOptIn: hasRodentServiceOptIn,
+      approvedTotalForWaiver: services.exclusion.approvedTotal || 0,
       urgency: services.exclusion.urgency || 'ROUTINE',
       afterHours: services.exclusion.afterHours || false,
     });
     lineItems.push(result);
   }
 
-  // Rodent sanitation (bleach + wipe; tier = light/medium/heavy)
+  // Rodent sanitation (bleach + wipe; tier = light/standard/heavy)
+  // Legacy 'medium' resolves to 'standard' inside priceSanitation.
   if (services.sanitation) {
     const result = priceSanitation({
-      tier: services.sanitation.tier || 'medium',
-      atticSqFt: services.sanitation.atticSqFt || property.footprint,
+      tier: services.sanitation.tier || 'standard',
+      affectedSqFt: services.sanitation.affectedSqFt
+        || services.sanitation.atticSqFt
+        || property.footprint || 0,
+      insulationRemovalCuFt: services.sanitation.insulationRemovalCuFt || 0,
+      accessType: services.sanitation.accessType || 'normal',
     });
     lineItems.push(result);
   }
 
-  // Additional trap follow-up visits beyond the 1 included in base trapping
+  // Additional trap follow-up visits beyond the 2 included in base trapping
   if (services.rodentTrappingFollowups) {
     const count = typeof services.rodentTrappingFollowups === 'number'
       ? services.rodentTrappingFollowups
       : (services.rodentTrappingFollowups.count || 0);
     const result = priceRodentTrappingFollowups(count);
     if (result) lineItems.push(result);
+  }
+
+  // Standalone rodent inspection (paid diagnostic, creditable)
+  if (services.rodentInspection) {
+    lineItems.push(priceRodentInspection());
   }
 
   // Bait station setup fee — waived when any recurring plan is on the
@@ -402,12 +425,55 @@ function generateEstimate(input) {
     if (setup.price > 0) lineItems.push(setup);
   }
 
-  // Rodent Guarantee fires automatically when BOTH trap + exclusion are present
-  if (services.rodentTrapping && services.exclusion) {
-    const exc = services.exclusion;
-    if ((exc.simple || 0) + (exc.moderate || 0) + (exc.advanced || 0) > 0) {
-      lineItems.push(priceRodentGuarantee());
+  // ── Rodent bundle discount ──────────────────────────────────
+  // Apply bundle discount when 2+ rodent service categories are present.
+  // Replaces the old "auto-fire $199 guarantee on any trap+exclusion" behavior.
+  // Adjusts the trap/exclusion/sanitation line item prices in-place to reflect
+  // the bundled total, with savings tracked in the bundle line item.
+  {
+    const trapItem = lineItems.find(i => i.service === 'rodent_trapping');
+    const exclItem = lineItems.find(i => i.service === 'exclusion');
+    const sanItem = lineItems.find(i => i.service === 'rodent_sanitation');
+    const bundle = selectRodentBundle({
+      hasTrapping: !!trapItem,
+      hasExclusion: !!exclItem,
+      hasSanitation: !!sanItem,
+      sanitationTier: sanItem?.tier,
+    });
+    if (bundle) {
+      const componentTotal = (trapItem?.price || 0) + (exclItem?.price || 0) + (sanItem?.price || 0);
+      const { discounted, savings } = applyRodentBundle(componentTotal, bundle);
+      lineItems.push({
+        service: 'rodent_bundle_discount',
+        name: `Rodent ${bundle.kind} bundle`,
+        price: -savings,
+        bundleKind: bundle.kind,
+        discount: bundle.discount,
+        floor: bundle.floor,
+        bundledTotal: discounted,
+        componentTotal,
+        detail: `${bundle.kind} bundle: $${componentTotal} → $${discounted} (saves $${savings})`,
+      });
     }
+  }
+
+  // Rodent guarantee — gated. Caller must pass eligibility flags explicitly;
+  // we no longer auto-fire on any trap + exclusion presence. Caller signals
+  // intent by setting services.rodentGuarantee = { eligibility: {...} }.
+  if (services.rodentGuarantee) {
+    const opts = typeof services.rodentGuarantee === 'object' ? services.rodentGuarantee : {};
+    const result = priceRodentGuarantee({
+      homeSqFt: opts.homeSqFt || property.footprint || 2000,
+      stories: opts.stories || property.stories || 1,
+      roofType: opts.roofType || property.roofType || 'shingle',
+      sealedPoints: opts.sealedPoints || (
+        (services.exclusion?.simple || 0)
+        + (services.exclusion?.moderate || 0)
+        + (services.exclusion?.advanced || 0)
+      ),
+      eligibility: opts.eligibility || {},
+    });
+    if (result.eligible) lineItems.push(result);
   }
 
   // ── Spec-version services (v2 missing-services spec, Apr 2026) ──

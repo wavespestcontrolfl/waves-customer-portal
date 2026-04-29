@@ -312,18 +312,18 @@
       "tmBait": null
     },
     "oneTime": {
-      "total": 725,
+      "total": 595,
       "tmInstall": 0,
       "items": [],
       "specItems": [
         {
           "name": "Exclusion",
-          "price": 725
+          "price": 595
         }
       ]
     },
     "totals": {
-      "year1": 725,
+      "year1": 595,
       "year2": 0
     }
   },
