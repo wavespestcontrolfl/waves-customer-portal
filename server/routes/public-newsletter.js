@@ -215,4 +215,9 @@ router.get('/posts/:id', async (req, res) => {
   }
 });
 
+// Default export is the router (used by index.js mount). Helpers are
+// exposed as named properties so the test suite can exercise them
+// without spinning up Express.
 module.exports = router;
+module.exports.EMAIL_RE = EMAIL_RE;
+module.exports.escapeHtml = escapeHtml;
