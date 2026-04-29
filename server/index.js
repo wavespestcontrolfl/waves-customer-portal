@@ -19,6 +19,7 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 const jwt = require('jsonwebtoken');
+const { isIP } = require('node:net');
 const path = require('path');
 
 const config = require('./config');
@@ -135,10 +136,25 @@ app.use(cors({
 
 // Rate limiting
 // Key authenticated requests by JWT subject so each admin/tech/customer gets
-// their own bucket. Falls back to IP for unauthenticated traffic. Without
-// this, a single busy admin session (dispatch page + grid + per-action
+// their own bucket. Falls back to a /64-collapsed client IP for
+// unauthenticated traffic — keying by raw req.ip would let an IPv6 client
+// rotate addresses within their subnet to evade the limit. Without per-user
+// keying, a single busy admin session (dispatch page + grid + per-action
 // refreshes) can exhaust the per-IP allowance and lock everyone behind the
 // same NAT out of the API.
+function ipFallbackKey(ip) {
+  if (!ip) return ip;
+  const v = ip.startsWith('::ffff:') && isIP(ip.slice(7)) === 4 ? ip.slice(7) : ip;
+  if (isIP(v) !== 6) return v;
+  const [head, tail] = v.split('::');
+  const headParts = head ? head.split(':') : [];
+  const tailParts = tail !== undefined ? (tail ? tail.split(':') : []) : [];
+  const missing = v.includes('::') ? Math.max(0, 8 - headParts.length - tailParts.length) : 0;
+  const fillers = Array(missing).fill('0');
+  const groups = v.includes('::') ? [...headParts, ...fillers, ...tailParts] : v.split(':');
+  return `${groups.slice(0, 4).join(':')}::/64`;
+}
+
 function rateLimitKey(req) {
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ') && config.jwt.secret) {
@@ -148,7 +164,7 @@ function rateLimitKey(req) {
       if (decoded.customerId) return `cust:${decoded.customerId}`;
     } catch (_err) { /* fall through to IP */ }
   }
-  return req.ip;
+  return ipFallbackKey(req.ip);
 }
 
 const limiter = rateLimit({
