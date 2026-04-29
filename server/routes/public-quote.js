@@ -6,7 +6,7 @@ const logger = require('../services/logger');
 const { generateEstimate } = require('../services/pricing-engine');
 const TwilioService = require('../services/twilio');
 const { shortenOrPassthrough } = require('../services/short-url');
-const { linkToCustomer } = require('../services/newsletter-subscribers');
+const { subscribeOrResubscribe } = require('../services/newsletter-subscribers');
 const smsTemplatesRouter = require('./admin-sms-templates');
 
 const WAVES_ADMIN_PHONE = '+19413187612';
@@ -225,36 +225,24 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         logger.info(`[public-quote] enrolled ${emailLc} in new_lead: ${JSON.stringify(r)}`);
       } catch (e) { logger.error(`[public-quote] new_lead enroll failed: ${e.message}`); }
 
-      // SendGrid side: dual-write into newsletter_subscribers. Mirrors
-      // /api/public/newsletter/subscribe — resubscribe if previously unsubbed,
-      // no-op if already active, fresh insert otherwise.
+      // SendGrid side: dual-write into newsletter_subscribers via the
+      // shared helper (audit §9.3 — single source of truth for the
+      // resub/insert/customer-link flow). strict=false because the quote
+      // form's own validation already gated the email shape; we don't
+      // want to block a quote on a subtle regex difference.
       try {
-        const existing = await db('newsletter_subscribers').where({ email: emailLc }).first();
-        if (existing) {
-          if (existing.status === 'unsubscribed') {
-            await db('newsletter_subscribers').where({ id: existing.id }).update({
-              status: 'active',
-              resubscribed_at: new Date(),
-              unsubscribed_at: null,
-              updated_at: new Date(),
-            });
-            logger.info(`[public-quote] SendGrid: resubscribed ${emailLc} via quote wizard`);
-          }
-        } else {
-          await db('newsletter_subscribers').insert({
-            email: emailLc,
-            first_name: firstName || null,
-            last_name: lastName || null,
-            source: 'quote_wizard',
-            status: 'active',
-          });
+        const result = await subscribeOrResubscribe({
+          email: emailLc,
+          firstName: firstName || null,
+          lastName: lastName || null,
+          source: 'quote_wizard',
+          strict: false,
+        });
+        if (result.action === 'resubscribed') {
+          logger.info(`[public-quote] SendGrid: resubscribed ${emailLc} via quote wizard`);
+        } else if (result.action === 'created') {
           logger.info(`[public-quote] SendGrid: subscribed ${emailLc} via quote wizard`);
         }
-        // Link to the customer row that this quote will create / has
-        // created. The quote wizard creates customer rows in a sibling
-        // path; matching by email after the dual-write catches both the
-        // already-existing-customer case and the just-inserted one.
-        await linkToCustomer(emailLc);
       } catch (e) { logger.error(`[public-quote] newsletter_subscribers dual-write failed: ${e.message}`); }
     }
 

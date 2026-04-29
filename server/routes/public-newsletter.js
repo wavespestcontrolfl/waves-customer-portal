@@ -13,12 +13,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
-const { linkToCustomer } = require('../services/newsletter-subscribers');
-
-// Mirrors the client-side regex in NewsletterSignup.jsx so a row can't make
-// it into the DB with HTML-special characters that would later reflect into
-// the unsub confirmation page.
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const { subscribeOrResubscribe, EMAIL_RE } = require('../services/newsletter-subscribers');
 
 // Per-IP rate limiter on POST /subscribe. The global /api/ limiter in
 // index.js is shared across every public endpoint, so a subscribe-spam
@@ -136,38 +131,20 @@ router.get('/unsubscribe/:token', async (req, res) => {
 // customer-facing signup form.
 router.post('/subscribe', subscribeLimiter, async (req, res) => {
   try {
-    const email = (req.body.email || '').trim().toLowerCase();
-    if (!EMAIL_RE.test(email)) {
-      return res.status(400).json({ error: 'valid email required' });
-    }
-
-    const existing = await db('newsletter_subscribers').where({ email }).first();
-    if (existing) {
-      if (existing.status === 'unsubscribed') {
-        await db('newsletter_subscribers').where({ id: existing.id }).update({
-          status: 'active',
-          resubscribed_at: new Date(),
-          unsubscribed_at: null,
-          updated_at: new Date(),
-        });
-        await linkToCustomer(email);
-        return res.json({ success: true, resubscribed: true });
-      }
-      await linkToCustomer(email);
-      return res.json({ success: true, alreadySubscribed: true });
-    }
-
-    await db('newsletter_subscribers').insert({
-      email,
-      first_name: req.body.firstName || null,
-      last_name: req.body.lastName || null,
+    const result = await subscribeOrResubscribe({
+      email: req.body.email,
+      firstName: req.body.firstName || null,
+      lastName: req.body.lastName || null,
       source: req.body.source || 'public_form',
-      status: 'active',
+      strict: true,
     });
-    await linkToCustomer(email);
-
+    if (result.action === 'resubscribed') return res.json({ success: true, resubscribed: true });
+    if (result.action === 'already_active') return res.json({ success: true, alreadySubscribed: true });
     res.json({ success: true });
   } catch (err) {
+    if (err.code === 'INVALID_EMAIL' || err.code === 'EMAIL_REQUIRED') {
+      return res.status(400).json({ error: err.message });
+    }
     logger.error(`[newsletter] subscribe failed: ${err.message}`);
     res.status(500).json({ error: 'subscribe failed' });
   }
