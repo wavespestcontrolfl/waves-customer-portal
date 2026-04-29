@@ -101,13 +101,20 @@ router.post('/events', express.raw({ type: '*/*' }), async (req, res) => {
 async function handleEvent(ev) {
   const messageId = ev.sg_message_id ? ev.sg_message_id.split('.')[0] : null;
   if (!messageId) return;
+  const email = ev.email || null;
 
   // Events can belong to a newsletter broadcast delivery, an automation
   // step send, or neither (transactional sends we don't track). Try each
-  // table by message id.
-  const newsletterDelivery = await db('newsletter_send_deliveries')
-    .where({ resend_message_id: messageId })
-    .first();
+  // table by (message id, email): batched newsletter sends share the same
+  // X-Message-Id across all recipients in a chunk, so the lookup MUST also
+  // filter by email — otherwise events for recipient B silently update
+  // recipient A's row.
+  const newsletterDelivery = email ? await db('newsletter_send_deliveries')
+    .where({ resend_message_id: messageId, email })
+    .first() : null;
+  // Automation step sends are always single-recipient (one customer per
+  // step), so message id alone is unique there. Belt-and-suspenders email
+  // filter anyway.
   const automationSend = !newsletterDelivery ? await db('automation_step_sends')
     .where({ sendgrid_message_id: messageId })
     .first() : null;

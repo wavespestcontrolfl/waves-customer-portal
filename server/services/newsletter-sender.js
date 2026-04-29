@@ -50,10 +50,18 @@ async function sendCampaign(sendId) {
 
   const send = await db('newsletter_sends').where({ id: sendId }).first();
   if (!send) throw new Error('not found');
-  if (!['draft', 'scheduled'].includes(send.status)) throw new Error('already sent or in progress');
   if (!send.html_body && !send.text_body) throw new Error('body required');
 
-  await db('newsletter_sends').where({ id: send.id }).update({ status: 'sending', updated_at: new Date() });
+  // Atomic claim: only one caller can flip draft/scheduled → sending.
+  // Returning the rows lets us distinguish 'lost the race' (0 rows) from
+  // 'won' (1 row). Without this guard, the immediate-send route + the
+  // scheduler tick can both pick up the same row and double-send.
+  const claimed = await db('newsletter_sends')
+    .where({ id: send.id })
+    .whereIn('status', ['draft', 'scheduled'])
+    .update({ status: 'sending', updated_at: new Date() })
+    .returning('id');
+  if (!claimed.length) throw new Error('already sent or in progress');
 
   const subscribers = await buildSubscriberQuery(send.segment_filter);
   logger.info(`[newsletter] send ${send.id} → ${subscribers.length} subscribers (segment=${send.segment_filter ? JSON.stringify(send.segment_filter) : 'all'})`);
@@ -106,7 +114,11 @@ async function sendCampaign(sendId) {
       }));
 
       try {
-        const result = await sendgrid.sendBatch({
+        // sendBroadcast = sendBatch with the SENDGRID_ASM_GROUP_NEWSLETTER
+        // group attached by default. Newsletter unsubs land in the
+        // newsletter group only — service emails (invoices, reminders)
+        // keep flowing.
+        const result = await sendgrid.sendBroadcast({
           recipients,
           fromEmail: send.from_email,
           fromName: send.from_name,

@@ -13,6 +13,18 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
 
+// Mirrors the client-side regex in NewsletterSignup.jsx so a row can't make
+// it into the DB with HTML-special characters that would later reflect into
+// the unsub confirmation page.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 // POST /api/public/newsletter/unsubscribe/:token
 // RFC 8058 one-click: mail clients POST here with no auth + no form body.
 // Must return 200 quickly or Gmail/Apple Mail will treat the unsub as failed.
@@ -66,7 +78,10 @@ router.get('/unsubscribe/:token', async (req, res) => {
     }
 
     // Minimal self-contained HTML page — no template engine, no client code.
-    const email = sub ? sub.email : '';
+    // Escape the email even though signup validation rejects HTML-special
+    // chars now (see EMAIL_RE) — historic rows pre-dating that validation
+    // could still contain anything.
+    const email = sub ? escapeHtml(sub.email) : '';
     res.type('html').send(`
       <!doctype html>
       <html>
@@ -106,7 +121,7 @@ router.get('/unsubscribe/:token', async (req, res) => {
 router.post('/subscribe', async (req, res) => {
   try {
     const email = (req.body.email || '').trim().toLowerCase();
-    if (!email || !email.includes('@')) {
+    if (!EMAIL_RE.test(email)) {
       return res.status(400).json({ error: 'valid email required' });
     }
 

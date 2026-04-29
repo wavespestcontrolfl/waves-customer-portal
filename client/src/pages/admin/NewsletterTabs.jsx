@@ -300,10 +300,14 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
     if (!draftId) { setStatus('Save a draft first.'); return; }
     const audience = segmentCount ?? activeCount ?? '?';
     if (!confirm(`Send "${subject}" to ${audience} subscriber${audience === 1 ? '' : 's'}? This cannot be undone.`)) return;
-    setStatus(`Sending to ${audience} subscribers...`);
+    setStatus(`Queuing send to ${audience} subscribers...`);
     try {
-      const res = await adminFetch(`/admin/newsletter/sends/${draftId}/send`, { method: 'POST' });
-      setStatus(`Sent: ${res.delivered}/${res.recipients} delivered (${res.failed} failed).`);
+      // Server returns 202 — campaign runs asynchronously now (a long
+      // synchronous send was timing out the proxy and prompting double-
+      // clicks). Operator polls History for the final delivered/failed
+      // counts.
+      await adminFetch(`/admin/newsletter/sends/${draftId}/send`, { method: 'POST' });
+      setStatus(`Send queued. Open the History tab in a moment to track delivery.`);
       resetForm();
     } catch (e) { setStatus('Send failed: ' + e.message); }
   };

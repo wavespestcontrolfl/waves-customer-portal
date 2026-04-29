@@ -87,21 +87,36 @@ router.post('/subscribers/import', async (req, res, next) => {
       return res.status(400).json({ error: 'subscribers[] required' });
     }
 
-    let inserted = 0, skipped = 0;
+    // Two-pass: filter to valid rows in JS (so we have a clean count of
+    // bad inputs), then a single bulk INSERT ... ON CONFLICT DO NOTHING
+    // for everything that survived. Postgres dedupes against the existing
+    // unique index on email — we don't pre-query.
+    const seen = new Set();
+    const rows = [];
     for (const s of subscribers) {
       const email = (s.email || '').trim().toLowerCase();
-      if (!email || !email.includes('@')) { skipped++; continue; }
-      const existing = await db('newsletter_subscribers').where({ email }).first();
-      if (existing) { skipped++; continue; }
-      await db('newsletter_subscribers').insert({
+      if (!email || !email.includes('@')) continue;
+      if (seen.has(email)) continue;  // dedupe within this CSV
+      seen.add(email);
+      rows.push({
         email,
         first_name: s.firstName || s.first_name || null,
         last_name: s.lastName || s.last_name || null,
         source,
         status: 'active',
       });
-      inserted++;
     }
+
+    let inserted = 0;
+    if (rows.length) {
+      const result = await db('newsletter_subscribers')
+        .insert(rows)
+        .onConflict('email')
+        .ignore()
+        .returning('id');
+      inserted = result.length;
+    }
+    const skipped = subscribers.length - inserted;
 
     res.json({ success: true, inserted, skipped, total: subscribers.length });
   } catch (err) { next(err); }
@@ -256,6 +271,9 @@ router.post('/sends/:id/test', async (req, res) => {
         'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
       },
       categories: ['newsletter_test', `send_${send.id}`],
+      // Match the live broadcast's ASM group so the test renders the same
+      // unsub UI the operator will see in production.
+      asmGroupId: sendgrid.newsletterGroupId(),
     });
 
     res.json({ success: true, messageId: result.messageId });
@@ -266,13 +284,37 @@ router.post('/sends/:id/test', async (req, res) => {
 });
 
 // POST /api/admin/newsletter/sends/:id/send — send to all matching active subscribers
+//
+// Returns 202 + dispatches sendCampaign asynchronously. The synchronous
+// version held the request open for the duration of the send (~30s+ for a
+// 5k list with per-recipient DB updates) which timed out at the proxy and
+// led operators to retry, double-blasting recipients. sendCampaign's atomic
+// status claim (draft/scheduled → sending) is the double-click guard now.
+// Errors during the background run flip status to 'failed' so the History
+// tab surfaces them.
 router.post('/sends/:id/send', async (req, res) => {
   try {
-    const result = await NewsletterSender.sendCampaign(req.params.id);
-    res.json({ success: true, sendId: req.params.id, ...result });
+    const send = await db('newsletter_sends').where({ id: req.params.id }).first();
+    if (!send) return res.status(404).json({ error: 'not found' });
+    if (!['draft', 'scheduled'].includes(send.status)) {
+      return res.status(400).json({ error: 'already sent or in progress' });
+    }
+    if (!send.html_body && !send.text_body) {
+      return res.status(400).json({ error: 'body required' });
+    }
+
+    // Fire-and-forget. Don't await — the response should land before the
+    // first recipient is queued.
+    NewsletterSender.sendCampaign(req.params.id).catch(async (err) => {
+      logger.error(`[newsletter] background send ${req.params.id} failed: ${err.message}`, { stack: err.stack });
+      try {
+        await db('newsletter_sends').where({ id: req.params.id }).update({ status: 'failed' });
+      } catch { /* swallow */ }
+    });
+
+    res.status(202).json({ accepted: true, sendId: req.params.id, status: 'sending' });
   } catch (err) {
-    logger.error(`[newsletter] send failed: ${err.message}`, { stack: err.stack });
-    try { await db('newsletter_sends').where({ id: req.params.id }).update({ status: 'failed' }); } catch { /* swallow */ }
+    logger.error(`[newsletter] send dispatch failed: ${err.message}`, { stack: err.stack });
     res.status(500).json({ error: err.message });
   }
 });
