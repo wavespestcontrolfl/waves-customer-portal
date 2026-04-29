@@ -279,11 +279,16 @@ const CallRecordingProcessor = {
       // Gemini hang between claim (this UPDATE) and terminal status write
       // would otherwise wedge the row forever, since both the claim guard
       // below and processAllPending's filter exclude 'processing'.
+      // IS DISTINCT FROM (not !=): rows with processing_status IS NULL —
+      // the state of every fresh, never-claimed row — must pass these
+      // predicates. PostgreSQL's `<>` returns NULL when either side is NULL,
+      // and WHERE treats NULL as falsy, so a plain `!=` filter would silently
+      // exclude NULL rows and leave them stuck forever.
       const claimed = await db('call_log')
         .where({ twilio_call_sid: callSid })
-        .whereNot('processing_status', 'processed')
+        .whereRaw("processing_status IS DISTINCT FROM 'processed'")
         .where(function () {
-          this.whereNot('processing_status', 'processing')
+          this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
             .orWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
         })
         .update({ processing_status: 'processing', processing_token: procToken, updated_at: new Date() });
@@ -303,10 +308,13 @@ const CallRecordingProcessor = {
       // Use the same atomic claim as the non-force path, minus the
       // exclude-'processed' filter: in-flight peers (and not-yet-stale
       // 'processing' rows) still block; everything else flows through.
+      // Same IS DISTINCT FROM rationale as the non-force claim above: NULL
+      // processing_status must pass so a force-reprocess on a never-claimed
+      // row can take the lock.
       const claimed = await db('call_log')
         .where({ twilio_call_sid: callSid })
         .where(function () {
-          this.whereNot('processing_status', 'processing')
+          this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
             .orWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
         })
         .update({ processing_status: 'processing', processing_token: procToken, updated_at: new Date() });
