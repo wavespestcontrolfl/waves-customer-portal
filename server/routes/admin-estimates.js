@@ -21,6 +21,49 @@ async function renderTemplate(templateKey, vars, fallback) {
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// Allowed estimates.status values — must stay aligned with the CHECK
+// constraint installed by 20260426000008_relax_estimates_status_enum.
+const ESTIMATE_STATUSES = ['draft', 'scheduled', 'sent', 'viewed', 'accepted', 'declined', 'expired'];
+
+// Statuses driven by customer action, not admin. estimate-public.js owns
+// these transitions; an admin PATCH to either is almost always a bug
+// (e.g. flipping back to 'viewed' to re-trigger follow-ups). Force it
+// through the right code path instead.
+const CUSTOMER_DRIVEN_STATUSES = new Set(['viewed', 'accepted']);
+
+// Terminal statuses where flipping out via PATCH would be silently
+// catastrophic — 'accepted' has downstream side effects (customer record
+// updated, scheduled_services created, invoices drafted by the converter)
+// that this endpoint can't undo. Operations team can intervene at the
+// customer-record level if a real reopen is needed.
+const TERMINAL_LOCKED_STATUSES = new Set(['accepted']);
+
+// Validate a requested status transition. Returns null on success, or an
+// object { httpStatus, error } on rejection. Caller is responsible for
+// short-circuiting the response.
+function validateStatusChange(from, to) {
+  if (!ESTIMATE_STATUSES.includes(to)) {
+    return {
+      httpStatus: 400,
+      error: `status must be one of: ${ESTIMATE_STATUSES.join(', ')}`,
+    };
+  }
+  if (from === to) return null; // no-op; nothing to enforce
+  if (TERMINAL_LOCKED_STATUSES.has(from)) {
+    return {
+      httpStatus: 409,
+      error: `Cannot change status from terminal state '${from}' via PATCH. Contact ops if a real reopen is needed.`,
+    };
+  }
+  if (CUSTOMER_DRIVEN_STATUSES.has(to)) {
+    return {
+      httpStatus: 409,
+      error: `Status '${to}' is customer-driven; admin PATCH cannot set it.`,
+    };
+  }
+  return null;
+}
+
 // POST /api/admin/estimates — create estimate
 router.post('/', async (req, res, next) => {
   try {
@@ -433,8 +476,12 @@ router.patch('/:id', async (req, res, next) => {
     if (req.body.showOneTimeOption !== undefined) updates.show_one_time_option = !!req.body.showOneTimeOption;
     if (req.body.billByInvoice !== undefined) updates.bill_by_invoice = !!req.body.billByInvoice;
     if (req.body.status !== undefined) {
-      updates.status = req.body.status;
-      if (req.body.status === 'declined') updates.declined_at = db.fn.now();
+      const reject = validateStatusChange(estimate.status, req.body.status);
+      if (reject) return res.status(reject.httpStatus).json({ error: reject.error });
+      if (req.body.status !== estimate.status) {
+        updates.status = req.body.status;
+        if (req.body.status === 'declined') updates.declined_at = db.fn.now();
+      }
     }
 
     if (Object.keys(updates).length === 0) return res.json({ success: true });
