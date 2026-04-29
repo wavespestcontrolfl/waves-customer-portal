@@ -9,6 +9,7 @@
  */
 
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
@@ -22,6 +23,40 @@ let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+// Per-admin rate limiter on /draft-ai. Each call hits Anthropic with up
+// to 2k output tokens on the FLAGSHIP/WORKHORSE model — without a cap a
+// compromised admin token (or a runaway client) can rack up real spend
+// in minutes. Keyed by technicianId so two admins drafting concurrently
+// don't share the bucket.
+const aiDraftLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,  // 1 hour
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `tech_${req.technicianId || req.ip}`,
+  message: { error: 'Too many AI drafts in the last hour. Try again later.' },
+});
+
+// Server-side allowlist for newsletter from-email. SendGrid's domain auth
+// (DKIM/SPF) is on wavespestcontrol.com, so a typo to a subdomain or
+// adjacent domain sends unsigned and lands in spam — and the operator
+// has no UI signal that anything went wrong. Defaults cover the three
+// canonical sender mailboxes; override via env when adding new ones.
+const FROM_EMAIL_ALLOWLIST = (process.env.NEWSLETTER_FROM_ALLOWLIST
+  || 'newsletter@wavespestcontrol.com,events@wavespestcontrol.com,weekly@wavespestcontrol.com'
+).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+
+function normalizeFromEmail(email) {
+  if (!email) return 'newsletter@wavespestcontrol.com';
+  const lc = String(email).trim().toLowerCase();
+  if (!FROM_EMAIL_ALLOWLIST.includes(lc)) {
+    const err = new Error(`from_email must be one of: ${FROM_EMAIL_ALLOWLIST.join(', ')}`);
+    err.status = 400;
+    throw err;
+  }
+  return lc;
+}
 
 // ── Subscribers ──────────────────────────────────────────────────
 
@@ -181,6 +216,10 @@ router.post('/sends', async (req, res, next) => {
     const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt } = req.body;
     if (!subject) return res.status(400).json({ error: 'subject required' });
 
+    let normalizedFromEmail;
+    try { normalizedFromEmail = normalizeFromEmail(fromEmail); }
+    catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
+
     const [row] = await db('newsletter_sends').insert({
       subject,
       subject_b: subjectB || null,
@@ -188,7 +227,7 @@ router.post('/sends', async (req, res, next) => {
       text_body: textBody || null,
       preview_text: previewText || null,
       from_name: fromName || 'Waves Pest Control',
-      from_email: fromEmail || 'newsletter@wavespestcontrol.com',
+      from_email: normalizedFromEmail,
       reply_to: replyTo || 'contact@wavespestcontrol.com',
       status: 'draft',
       segment_filter: segmentFilter || null,
@@ -208,6 +247,16 @@ router.patch('/sends/:id', async (req, res, next) => {
     if (!['draft', 'scheduled'].includes(send.status)) return res.status(400).json({ error: 'can only edit drafts or scheduled' });
 
     const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt } = req.body;
+
+    // Validate from_email only when the caller is changing it. Skipping
+    // validation on PATCHes that don't touch the field keeps existing
+    // drafts editable even if the allowlist contracts.
+    let nextFromEmail = send.from_email;
+    if (fromEmail !== undefined) {
+      try { nextFromEmail = normalizeFromEmail(fromEmail); }
+      catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
+    }
+
     await db('newsletter_sends').where({ id: req.params.id }).update({
       subject: subject ?? send.subject,
       subject_b: subjectB !== undefined ? subjectB : send.subject_b,
@@ -215,7 +264,7 @@ router.patch('/sends/:id', async (req, res, next) => {
       text_body: textBody ?? send.text_body,
       preview_text: previewText ?? send.preview_text,
       from_name: fromName ?? send.from_name,
-      from_email: fromEmail ?? send.from_email,
+      from_email: nextFromEmail,
       reply_to: replyTo ?? send.reply_to,
       segment_filter: segmentFilter !== undefined ? segmentFilter : send.segment_filter,
       ai_prompt: aiPrompt !== undefined ? aiPrompt : send.ai_prompt,
@@ -374,7 +423,7 @@ router.post('/segment-preview', async (req, res, next) => {
 //             structure + voice block that's appended to the system
 //             prompt — the templates themselves live in
 //             client/src/pages/admin/NewsletterTabs.jsx.
-router.post('/draft-ai', async (req, res) => {
+router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
   try {
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
       return res.status(400).json({ error: 'Anthropic API not configured' });
@@ -382,6 +431,12 @@ router.post('/draft-ai', async (req, res) => {
     const { prompt, template, audience, tone, includeCTA } = req.body;
     if (!prompt || prompt.trim().length < 8) {
       return res.status(400).json({ error: 'prompt required (min 8 chars)' });
+    }
+    // Bound prompt length so a runaway client can't pass a 50k-char prompt
+    // and balloon the input-token bill. 2000 chars comfortably fits the
+    // event-seeded prompts the dashboard generates.
+    if (prompt.length > 2000) {
+      return res.status(400).json({ error: 'prompt too long (max 2000 chars)' });
     }
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
