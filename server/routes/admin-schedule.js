@@ -12,6 +12,68 @@ const {
 } = require('../utils/service-normalizer');
 const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
 
+// ─── Destructive maintenance endpoints ──────────────────────────────────────
+// Defined BEFORE the router-level auth chain so `devOnly` runs first and
+// returns 404 in production for unauthenticated callers (external scanners
+// must not even see a 401 here). Pattern matches `admin-dev-dispatch-alert.js`.
+function devOnly(req, res, next) {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+}
+
+// POST /api/admin/schedule/cleanup-duplicates — remove duplicate scheduled_services.
+// Dedupe key intentionally excludes cancelled/rescheduled rows so a cancelled+rebooked
+// pair doesn't collide; preserves the row with FK references (invoices, service_records)
+// where possible by ordering oldest-still-linked last.
+router.post('/cleanup-duplicates', devOnly, adminAuthenticate, requireAdmin, async (req, res, next) => {
+  try {
+    const dupes = await db.raw(`
+      DELETE FROM scheduled_services
+      WHERE id IN (
+        SELECT id FROM (
+          SELECT s.id, ROW_NUMBER() OVER (
+            PARTITION BY s.customer_id, s.scheduled_date, s.window_start
+            ORDER BY
+              (EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = s.id)) DESC,
+              s.created_at ASC
+          ) as rn
+          FROM scheduled_services s
+          WHERE s.customer_id IS NOT NULL
+            AND s.status NOT IN ('cancelled', 'rescheduled')
+        ) ranked
+        WHERE rn > 1
+      )
+    `);
+    const deleted = dupes.rowCount || 0;
+    logger.info(`[cleanup] Removed ${deleted} duplicate scheduled_services`);
+    res.json({ success: true, deleted });
+  } catch (err) {
+    logger.error(`[cleanup] Failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/schedule/fix-service-types — replace legacy catalog IDs with "Service"
+router.post('/fix-service-types', devOnly, adminAuthenticate, requireAdmin, async (req, res, next) => {
+  try {
+    const result = await db.raw(`
+      UPDATE scheduled_services
+      SET service_type = 'Service'
+      WHERE service_type ~ '^[A-Z0-9]{15,}$'
+    `);
+    const fixed = result.rowCount || 0;
+    logger.info(`[cleanup] Fixed ${fixed} legacy ID service_types`);
+    res.json({ success: true, fixed });
+  } catch (err) {
+    logger.error(`[cleanup] fix-service-types failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Router-level auth ──────────────────────────────────────────────────────
+// Everything below requires admin OR tech.
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 // Legacy wrapper — kept for backwards compat in other code paths
@@ -1769,64 +1831,6 @@ router.get('/eta/:serviceId', async (req, res, next) => {
     res.json(eta);
   } catch (err) {
     res.json({ etaMinutes: 15, source: 'default', error: err.message });
-  }
-});
-
-// Destructive maintenance endpoints below are gated to non-prod + admin only.
-// 404 (not 403) in production so external scanners don't see them.
-function devOnly(req, res, next) {
-  if (process.env.NODE_ENV === 'production') {
-    return res.status(404).json({ error: 'Not found' });
-  }
-  next();
-}
-
-// POST /api/admin/schedule/cleanup-duplicates — remove duplicate scheduled_services.
-// Dedupe key intentionally excludes cancelled/rescheduled rows so a cancelled+rebooked
-// pair doesn't collide; preserves the row with FK references (invoices, service_records)
-// where possible by ordering oldest-still-linked last.
-router.post('/cleanup-duplicates', devOnly, requireAdmin, async (req, res, next) => {
-  try {
-    const dupes = await db.raw(`
-      DELETE FROM scheduled_services
-      WHERE id IN (
-        SELECT id FROM (
-          SELECT s.id, ROW_NUMBER() OVER (
-            PARTITION BY s.customer_id, s.scheduled_date, s.window_start
-            ORDER BY
-              (EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = s.id)) DESC,
-              s.created_at ASC
-          ) as rn
-          FROM scheduled_services s
-          WHERE s.customer_id IS NOT NULL
-            AND s.status NOT IN ('cancelled', 'rescheduled')
-        ) ranked
-        WHERE rn > 1
-      )
-    `);
-    const deleted = dupes.rowCount || 0;
-    logger.info(`[cleanup] Removed ${deleted} duplicate scheduled_services`);
-    res.json({ success: true, deleted });
-  } catch (err) {
-    logger.error(`[cleanup] Failed: ${err.message}`);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// POST /api/admin/schedule/fix-service-types — replace legacy catalog IDs with "Service"
-router.post('/fix-service-types', devOnly, requireAdmin, async (req, res, next) => {
-  try {
-    const result = await db.raw(`
-      UPDATE scheduled_services
-      SET service_type = 'Service'
-      WHERE service_type ~ '^[A-Z0-9]{15,}$'
-    `);
-    const fixed = result.rowCount || 0;
-    logger.info(`[cleanup] Fixed ${fixed} legacy ID service_types`);
-    res.json({ success: true, fixed });
-  } catch (err) {
-    logger.error(`[cleanup] fix-service-types failed: ${err.message}`);
-    res.status(500).json({ error: err.message });
   }
 });
 
