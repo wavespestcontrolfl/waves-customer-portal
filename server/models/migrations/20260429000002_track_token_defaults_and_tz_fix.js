@@ -6,11 +6,13 @@
  * remember to call into a token-generation helper:
  *
  *   1. Mopup any NULL track_view_token / track_token_expires_at rows
- *      for today/future customer-linked services that slipped through
- *      paths inserted between 20260422000009 and now (none of the 8
- *      INSERT callsites under server/ generate either column
- *      explicitly; the comment in slot-reservation.js claiming a DB
- *      default existed was wrong).
+ *      for today/future scheduled_services that slipped through INSERT
+ *      paths between 20260422000009 and now (none of the 8 INSERT
+ *      callsites under server/ generate either column explicitly; the
+ *      comment in slot-reservation.js claiming a DB default existed
+ *      was wrong). Includes reservation rows (customer_id NULL) so a
+ *      pre-deploy reservation committed post-deploy doesn't end up
+ *      permanently token-less. Date filter is ET-correct.
  *   2. Add a column DEFAULT for track_view_token so every future
  *      INSERT auto-generates one.
  *   3. Forward-fill TZ-correct expiry on INSERT via BEFORE-INSERT
@@ -29,11 +31,26 @@
  */
 
 exports.up = async function up(knex) {
-  // 1. Mopup. Mirrors the original 20260422000009 backfill scope (today
-  // and future) but adds the customer_id IS NOT NULL filter — open
-  // availability slots and draft holds don't surface a customer-facing
-  // /track link. Backfills BOTH columns to handle rows where one or
-  // the other slipped through.
+  // 1. Mopup. Backfills BOTH columns (token and expiry) for any
+  // today/future row missing either, regardless of customer_id state.
+  //
+  // Two scope decisions worth calling out:
+  //
+  //   - Date filter uses (NOW() AT TIME ZONE 'America/New_York')::date,
+  //     not CURRENT_DATE. Postgres evaluates CURRENT_DATE in the
+  //     session timezone (UTC on Railway), so a deploy firing between
+  //     00:00–03:59 UTC (= 20:00–23:59 ET previous day) would treat
+  //     today's ET services as "yesterday" and skip them. Same TZ-leak
+  //     shape we're fixing elsewhere in this PR.
+  //
+  //   - No customer_id IS NOT NULL filter. Slot-reservation rows
+  //     insert with customer_id = NULL and get committed later by
+  //     commitReservation (which only updates customer_id +
+  //     reservation_expires_at, not the tracking columns). A
+  //     reservation alive at deploy time, committed afterward, would
+  //     otherwise end up permanently token-less. The cost of minting
+  //     tokens on reservations that ultimately expire is a few wasted
+  //     bytes per row — cheap defense in depth.
   await knex.raw(`
     UPDATE scheduled_services
        SET track_view_token = COALESCE(
@@ -47,8 +64,7 @@ exports.up = async function up(knex) {
              + INTERVAL '1 day'
            )
      WHERE (track_view_token IS NULL OR track_token_expires_at IS NULL)
-       AND scheduled_date >= CURRENT_DATE
-       AND customer_id IS NOT NULL
+       AND scheduled_date >= (NOW() AT TIME ZONE 'America/New_York')::date
   `);
 
   // 2. Forward-leak fix for the token. Every new row gets one via
