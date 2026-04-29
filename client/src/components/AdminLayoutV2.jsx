@@ -394,7 +394,7 @@ export default function AdminLayoutV2() {
                   // closer to body copy than the prior all-caps tracked
                   // label, so the groupings read as section names rather
                   // than utility labels.
-                  fontSize: 13,
+                  fontSize: 15,
                   fontWeight: 600,
                   color: 'var(--text-primary)',
                   textTransform: 'none',
