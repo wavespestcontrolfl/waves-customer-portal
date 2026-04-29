@@ -131,92 +131,86 @@ async function handleEvent(ev) {
   return;
 }
 
-async function handleNewsletterEvent(ev, delivery) {
-  const now = new Date();
-
+/**
+ * Pure function: maps a SendGrid event + the matched delivery row to a
+ * structured updates plan. Extracted so the per-event logic is unit-
+ * testable without a DB; the handler below performs the actual writes.
+ *
+ * Returns null when the event is a no-op for our state (already delivered,
+ * already bounced, etc., or an event type we ignore like 'processed').
+ *
+ * Update shape:
+ *   delivery       — fields to write to newsletter_send_deliveries
+ *   sendIncrement  — column on newsletter_sends to increment by 1
+ *   subscriberAction — one of:
+ *     'bounce_increment'    bounce_count++ + last_bounced_at
+ *     'force_unsubscribe'   status='unsubscribed' regardless of prior state
+ *     'unsubscribe_if_active' status='unsubscribed' UNLESS already unsubbed
+ *   subscriberAt   — timestamp to use for the subscriber-side write
+ */
+function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
   switch (ev.event) {
     case 'delivered':
-      if (!delivery.delivered_at) {
-        await db('newsletter_send_deliveries').where({ id: delivery.id }).update({
-          status: 'delivered', delivered_at: now, updated_at: now,
-        });
-        await db('newsletter_sends').where({ id: delivery.send_id }).increment('delivered_count', 1);
-      }
-      break;
+      if (delivery.delivered_at) return null;
+      return {
+        delivery: { status: 'delivered', delivered_at: now, updated_at: now },
+        sendIncrement: 'delivered_count',
+      };
 
     case 'bounce':
     case 'blocked':
     case 'dropped':
-      if (!delivery.bounced_at) {
-        await db('newsletter_send_deliveries').where({ id: delivery.id }).update({
+      if (delivery.bounced_at) return null;
+      return {
+        delivery: {
           status: 'bounced',
           bounced_at: now,
           bounce_reason: (ev.reason || ev.response || ev.type || '').toString().slice(0, 500),
           updated_at: now,
-        });
-        await db('newsletter_sends').where({ id: delivery.send_id }).increment('bounced_count', 1);
-        if (delivery.subscriber_id) {
-          await db('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
-            bounce_count: db.raw('COALESCE(bounce_count,0) + 1'),
-            last_bounced_at: now,
-            updated_at: now,
-          });
-        }
-      }
-      break;
+        },
+        sendIncrement: 'bounced_count',
+        subscriberAction: delivery.subscriber_id ? 'bounce_increment' : null,
+        subscriberAt: now,
+      };
 
     case 'open':
-      if (!delivery.opened_at) {
-        await db('newsletter_send_deliveries').where({ id: delivery.id }).update({
-          opened_at: now, updated_at: now,
-        });
-        // Don't downgrade status once delivered.
-        await db('newsletter_sends').where({ id: delivery.send_id }).increment('opened_count', 1);
-      }
-      break;
+      if (delivery.opened_at) return null;
+      // Don't downgrade status once delivered — only stamp the timestamp.
+      return {
+        delivery: { opened_at: now, updated_at: now },
+        sendIncrement: 'opened_count',
+      };
 
     case 'click':
-      if (!delivery.clicked_at) {
-        await db('newsletter_send_deliveries').where({ id: delivery.id }).update({
-          clicked_at: now, updated_at: now,
-        });
-        await db('newsletter_sends').where({ id: delivery.send_id }).increment('clicked_count', 1);
-      }
-      break;
+      if (delivery.clicked_at) return null;
+      return {
+        delivery: { clicked_at: now, updated_at: now },
+        sendIncrement: 'clicked_count',
+      };
 
     case 'spamreport':
-      if (!delivery.complained_at) {
-        await db('newsletter_send_deliveries').where({ id: delivery.id }).update({
-          status: 'complained', complained_at: now, updated_at: now,
-        });
-        await db('newsletter_sends').where({ id: delivery.send_id }).increment('complained_count', 1);
-        // Complaint = auto-unsubscribe. Protects sender reputation.
-        if (delivery.subscriber_id) {
-          await db('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
-            status: 'unsubscribed',
-            unsubscribed_at: now,
-            updated_at: now,
-          });
-        }
-      }
-      break;
+      if (delivery.complained_at) return null;
+      // Complaint = auto-unsubscribe (sender-reputation defense). Force
+      // path so a previously-active subscriber gets flipped even if they
+      // somehow re-subscribed in the same window.
+      return {
+        delivery: { status: 'complained', complained_at: now, updated_at: now },
+        sendIncrement: 'complained_count',
+        subscriberAction: delivery.subscriber_id ? 'force_unsubscribe' : null,
+        subscriberAt: now,
+      };
 
     case 'unsubscribe':
     case 'group_unsubscribe':
       // Primary unsub path is our own token endpoint; this catches SendGrid-
-      // initiated unsubs (rare — we disable subscription_tracking).
-      await db('newsletter_sends').where({ id: delivery.send_id }).increment('unsubscribed_count', 1);
-      if (delivery.subscriber_id) {
-        await db('newsletter_subscribers')
-          .where({ id: delivery.subscriber_id })
-          .whereNot({ status: 'unsubscribed' })
-          .update({
-            status: 'unsubscribed',
-            unsubscribed_at: now,
-            updated_at: now,
-          });
-      }
-      break;
+      // initiated unsubs (rare — we disable subscription_tracking). Only
+      // flip if not already unsubbed so the unsubscribed_at timestamp
+      // captures the FIRST unsub, not subsequent re-fires.
+      return {
+        sendIncrement: 'unsubscribed_count',
+        subscriberAction: delivery.subscriber_id ? 'unsubscribe_if_active' : null,
+        subscriberAt: now,
+      };
 
     case 'processed':
     case 'deferred':
@@ -225,7 +219,44 @@ async function handleNewsletterEvent(ev, delivery) {
       // processed = accepted by SG (already "sent" in our model)
       // deferred = temporary fail, SG will retry — don't update row
       // group_resubscribe = we don't use SG groups
-      break;
+      return null;
+  }
+}
+
+async function handleNewsletterEvent(ev, delivery) {
+  const updates = computeNewsletterEventUpdates(ev, delivery);
+  if (!updates) return;
+
+  if (updates.delivery) {
+    await db('newsletter_send_deliveries').where({ id: delivery.id }).update(updates.delivery);
+  }
+  if (updates.sendIncrement) {
+    await db('newsletter_sends').where({ id: delivery.send_id }).increment(updates.sendIncrement, 1);
+  }
+  if (updates.subscriberAction && delivery.subscriber_id) {
+    const at = updates.subscriberAt;
+    if (updates.subscriberAction === 'bounce_increment') {
+      await db('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
+        bounce_count: db.raw('COALESCE(bounce_count,0) + 1'),
+        last_bounced_at: at,
+        updated_at: at,
+      });
+    } else if (updates.subscriberAction === 'force_unsubscribe') {
+      await db('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
+        status: 'unsubscribed',
+        unsubscribed_at: at,
+        updated_at: at,
+      });
+    } else if (updates.subscriberAction === 'unsubscribe_if_active') {
+      await db('newsletter_subscribers')
+        .where({ id: delivery.subscriber_id })
+        .whereNot({ status: 'unsubscribed' })
+        .update({
+          status: 'unsubscribed',
+          unsubscribed_at: at,
+          updated_at: at,
+        });
+    }
   }
 }
 
@@ -344,4 +375,7 @@ async function cancelActiveEnrollments({ email, reason, asmGroup }) {
   logger.info(`[sendgrid-webhook] cancelled ${rows.length} enrollment(s) for ${email} reason=${reason}${asmGroup ? ` group=${asmGroup}` : ''}`);
 }
 
+// Default export is the Express router; the pure event-mapping function
+// is hung off as a property so the test suite can exercise it directly.
 module.exports = router;
+module.exports.computeNewsletterEventUpdates = computeNewsletterEventUpdates;
