@@ -12,3 +12,6 @@ coverage/
 
 # Reconcile-script outputs — contain row-level subscriber PII. Never commit.
 tmp-beehiiv-reconcile-*.json
+
+# Playwright MCP screenshot output — design-study artifacts live in ~/Downloads, not the repo
+.playwright-mcp/
