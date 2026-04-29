@@ -4,6 +4,16 @@ const TwilioService = require('./twilio');
 const RULES = require('../config/reschedule-rules');
 const logger = require('./logger');
 
+// How long after sending a request we still consider it "pending" for the
+// purposes of matching customer replies. Older rows are treated as expired
+// and never auto-handled — operator can still see the message in the inbox.
+const RESPONSE_WINDOW_HOURS = RULES.escalation.customer_response_timeout_hours;
+
+// How long after sending we treat another send for the same service as a
+// duplicate and skip Twilio. Guards against admin double-click and any
+// short-window retry (transient 5xx, scheduler re-fire).
+const DUPLICATE_SEND_WINDOW_MINUTES = 30;
+
 class RescheduleSMS {
   async sendRescheduleRequest(serviceId, reasonCode, reasonText) {
     const service = await db('scheduled_services')
@@ -14,20 +24,50 @@ class RescheduleSMS {
 
     if (!service) throw new Error('Service not found');
 
+    // Idempotency guard: if we already sent a reschedule request for this
+    // service in the last DUPLICATE_SEND_WINDOW_MINUTES that's still pending
+    // (no customer response yet), don't send again. Returns the existing
+    // log row so the caller can surface that to the operator.
+    const recentPending = await db('reschedule_log')
+      .where({ scheduled_service_id: serviceId })
+      .whereNull('customer_response')
+      .where('sms_sent_at', '>', db.raw(`NOW() - INTERVAL '${DUPLICATE_SEND_WINDOW_MINUTES} minutes'`))
+      .orderBy('sms_sent_at', 'desc')
+      .first();
+
+    if (recentPending) {
+      logger.info(`[reschedule-sms] Skipping duplicate send for service ${serviceId} — pending log ${recentPending.id} sent at ${recentPending.sms_sent_at}`);
+      return { success: true, skipped: 'duplicate_within_window', logId: recentPending.id };
+    }
+
     const options = await SmartRebooker.findRescheduleOptions(serviceId, reasonCode);
+    if (!options || !options.length) {
+      logger.warn(`[reschedule-sms] No reschedule options available for service ${serviceId} (reason ${reasonCode})`);
+      return { success: false, reason: 'no_options_available' };
+    }
+
     const opt1 = options[0];
-    const opt2 = options[1] || options[0];
+    const opt2 = options[1] || null; // explicit null — never duplicate opt1
 
     const originalDate = new Date(typeof service.scheduled_date === 'string' ? service.scheduled_date + 'T12:00:00' : service.scheduled_date)
       .toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
 
+    // Build the option block — single-option layout when only one slot is available.
+    const optionsBlock = opt2
+      ? `1️⃣ ${opt1.displayDate}, ${opt1.suggestedWindow.display}\n2️⃣ ${opt2.displayDate}, ${opt2.suggestedWindow.display}`
+      : `1️⃣ ${opt1.displayDate}, ${opt1.suggestedWindow.display}`;
+
+    const replyPrompt = opt2
+      ? 'Reply 1 or 2'
+      : 'Reply 1 to confirm';
+
     let smsBody;
     if (reasonCode.startsWith('weather')) {
-      smsBody = `Hi ${service.first_name}, due to weather your ${service.service_type.toLowerCase()} on ${originalDate} needs to move.\n\nWe have:\n1️⃣ ${opt1.displayDate}, ${opt1.suggestedWindow.display}\n2️⃣ ${opt2.displayDate}, ${opt2.suggestedWindow.display}\n\nReply 1 or 2, or suggest a day. — Waves 🌊`;
+      smsBody = `Hi ${service.first_name}, due to weather your ${service.service_type.toLowerCase()} on ${originalDate} needs to move.\n\nWe have:\n${optionsBlock}\n\n${replyPrompt}, or suggest a day. — Waves 🌊`;
     } else if (reasonCode === 'customer_noshow' || reasonCode === 'gate_locked') {
-      smsBody = `Hi ${service.first_name}, we stopped by for your ${service.service_type.toLowerCase()} but ${reasonCode === 'gate_locked' ? 'the gate was locked' : "couldn't access the property"}. We can come back:\n\n1️⃣ ${opt1.displayDate}, ${opt1.suggestedWindow.display}\n2️⃣ ${opt2.displayDate}, ${opt2.suggestedWindow.display}\n\nReply 1 or 2. — Adam, Waves`;
+      smsBody = `Hi ${service.first_name}, we stopped by for your ${service.service_type.toLowerCase()} but ${reasonCode === 'gate_locked' ? 'the gate was locked' : "couldn't access the property"}. We can come back:\n\n${optionsBlock}\n\n${replyPrompt}. — Adam, Waves`;
     } else {
-      smsBody = `Hi ${service.first_name}, your ${service.service_type.toLowerCase()} on ${originalDate} needs to be rescheduled.${reasonText ? ' ' + reasonText : ''}\n\n1️⃣ ${opt1.displayDate}, ${opt1.suggestedWindow.display}\n2️⃣ ${opt2.displayDate}, ${opt2.suggestedWindow.display}\n\nReply 1 or 2. — Waves`;
+      smsBody = `Hi ${service.first_name}, your ${service.service_type.toLowerCase()} on ${originalDate} needs to be rescheduled.${reasonText ? ' ' + reasonText : ''}\n\n${optionsBlock}\n\n${replyPrompt}. — Waves`;
     }
 
     await TwilioService.sendSMS(service.phone, smsBody, {
@@ -44,22 +84,41 @@ class RescheduleSMS {
       sms_sent_at: db.fn.now(),
       notes: JSON.stringify({
         option1: { date: opt1.date, window: opt1.suggestedWindow },
-        option2: { date: opt2.date, window: opt2.suggestedWindow },
+        option2: opt2 ? { date: opt2.date, window: opt2.suggestedWindow } : null,
       }),
     }).returning('id');
 
-    logger.info(`Reschedule SMS sent to ${service.first_name} for service ${serviceId}`);
-    return { success: true, options: [opt1, opt2], logId: logEntry.id || logEntry };
+    logger.info(`Reschedule SMS sent to ${service.first_name} for service ${serviceId} (${opt2 ? '2 options' : '1 option'})`);
+    return { success: true, options: opt2 ? [opt1, opt2] : [opt1], logId: logEntry.id || logEntry };
   }
 
   async handleRescheduleReply(customerId, messageBody) {
-    const pending = await db('reschedule_log')
+    // Only match rows still inside the response window. Older pending rows
+    // are treated as expired — a customer reply that arrives 5 days later
+    // shouldn't silently re-trigger a reschedule from a forgotten thread.
+    const pendingRows = await db('reschedule_log')
       .where({ customer_id: customerId })
       .whereNull('customer_response')
-      .orderBy('created_at', 'desc')
-      .first();
+      .where('sms_sent_at', '>', db.raw(`NOW() - INTERVAL '${RESPONSE_WINDOW_HOURS} hours'`))
+      .orderBy('sms_sent_at', 'desc');
 
-    if (!pending) return null;
+    if (!pendingRows.length) return null;
+
+    // Multiple simultaneously-pending requests for the same customer — e.g.,
+    // two services rescheduled in quick succession. We can't reliably tell
+    // which one a bare "1" reply refers to, so escalate to the operator
+    // rather than guessing the most-recent.
+    if (pendingRows.length > 1) {
+      logger.warn(`[reschedule-sms] Customer ${customerId} has ${pendingRows.length} pending reschedule rows — needs operator disambiguation`);
+      return {
+        handled: false,
+        action: 'needs_disambiguation',
+        pending_count: pendingRows.length,
+        reply: messageBody,
+      };
+    }
+
+    const pending = pendingRows[0];
 
     let options = {};
     try {
@@ -77,8 +136,13 @@ class RescheduleSMS {
       selectedOption = options.option1;
       responseType = 'option_1';
     } else if (reply === '2' || reply === 'two' || reply.startsWith('2 ') || reply.startsWith('2.')) {
-      selectedOption = options.option2;
-      responseType = 'option_2';
+      // Only honor "2" when option2 was actually offered. If we sent a
+      // single-option SMS and the customer says "2" anyway, fall through
+      // to freeform so the operator can sort it out.
+      if (options.option2) {
+        selectedOption = options.option2;
+        responseType = 'option_2';
+      }
     } else if (reply.includes('call') || reply.includes('phone')) {
       responseType = 'call_requested';
     }
