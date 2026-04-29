@@ -138,6 +138,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Customer state
   const [customerSearch, setCustomerSearch] = useState('');
   const [customerResults, setCustomerResults] = useState([]);
+  const [customerLoading, setCustomerLoading] = useState(false);
   const [selectedCustomer, setSelectedCustomer] = useState(defaultCustomer);
   const [showQuickAdd, setShowQuickAdd] = useState(false);
   const [quickAdd, setQuickAdd] = useState({ firstName: '', lastName: '', phone: '', email: '', address: '', city: '', zip: '' });
@@ -340,15 +341,20 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setDiscountAmount(String(d.amount ?? ''));
   };
 
-  // Customer search
+  // Customer search. Tracks loading so the dropdown can show "Searching…"
+  // and "No matches" states — without them, a slow network or zero-hit
+  // query looks identical to a broken search (no UI ever appears) and
+  // operators report it as "the search vanished".
   const doSearch = async (val) => {
     setCustomerSearch(val);
     if (val.length >= 2) {
+      setCustomerLoading(true);
       try {
         const r = await adminFetch(`/admin/customers?search=${encodeURIComponent(val)}&limit=8`);
         setCustomerResults(r.customers || []);
       } catch { setCustomerResults([]); }
-    } else { setCustomerResults([]); }
+      finally { setCustomerLoading(false); }
+    } else { setCustomerResults([]); setCustomerLoading(false); }
   };
 
   const selectCustomer = (c) => {
@@ -755,19 +761,53 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         <div style={sectionStyle}>
           <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B', marginBottom: 10 }}>Customer</div>
           {!selectedCustomer ? (
-            <div style={{ position: 'relative' }}>
-              <input ref={searchRef} type="text" value={customerSearch} onChange={(e) => doSearch(e.target.value)} placeholder="Search by name or phone..." style={inputStyle} />
-              {customerResults.length > 0 && (
-                <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: '0 0 10px 10px', maxHeight: 240, overflowY: 'auto', zIndex: 20 }}>
-                  {customerResults.map(c => (
-                    <div key={c.id} onClick={() => selectCustomer(c)} className="waves-sq-row" style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 48, display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <strong>{c.firstName} {c.lastName}</strong>
-                      <span style={{ color: D.muted, fontSize: 12 }}>{c.phone || ''}</span>
-                      {c.tier && <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 6, background: `${TIER_COLORS[c.tier] || D.teal}22`, color: TIER_COLORS[c.tier] || D.teal }}>{c.tier}</span>}
-                    </div>
-                  ))}
-                </div>
-              )}
+            <div>
+              {/* Inner relative wrapper so the dropdown anchors to the
+                  input — not to the whole block (the "+ New customer"
+                  button used to push the dropdown below itself). */}
+              <div style={{ position: 'relative' }}>
+                <input
+                  ref={searchRef}
+                  type="text"
+                  value={customerSearch}
+                  onChange={(e) => doSearch(e.target.value)}
+                  placeholder="Search by name or phone..."
+                  style={inputStyle}
+                  // iOS Safari treats a bare <input type="text"> as a generic field
+                  // and offers password / card / address autofill via the QuickType
+                  // bar. That bar overlaps the results dropdown and auto-corrects
+                  // typed text, so operators report "the search vanished". These
+                  // attributes opt out of every iOS autofill / autocorrect path.
+                  name="appt-customer-search"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  inputMode="search"
+                  enterKeyHint="search"
+                />
+                {customerSearch.trim().length >= 2 && (
+                  <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: '0 0 10px 10px', maxHeight: 240, overflowY: 'auto', WebkitOverflowScrolling: 'touch', zIndex: 20 }}>
+                    {customerResults.map(c => (
+                      <div key={c.id} onClick={() => selectCustomer(c)} className="waves-sq-row" style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 48, display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <strong>{c.firstName} {c.lastName}</strong>
+                        <span style={{ color: D.muted, fontSize: 12 }}>{c.phone || ''}</span>
+                        {c.tier && <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 6, background: `${TIER_COLORS[c.tier] || D.teal}22`, color: TIER_COLORS[c.tier] || D.teal }}>{c.tier}</span>}
+                      </div>
+                    ))}
+                    {!customerLoading && customerResults.length === 0 && (
+                      <div style={{ padding: '14px', textAlign: 'center', color: D.muted, fontSize: 13 }}>
+                        No customers match &ldquo;{customerSearch}&rdquo;
+                      </div>
+                    )}
+                    {customerLoading && customerResults.length === 0 && (
+                      <div style={{ padding: '14px', textAlign: 'center', color: D.muted, fontSize: 13 }}>
+                        Searching…
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
               <button onClick={() => setShowQuickAdd(!showQuickAdd)} style={{ background: 'none', border: 'none', color: D.text, fontSize: 13, fontWeight: 500, cursor: 'pointer', marginTop: 6, padding: '4px 0', minHeight: 44, display: 'inline-flex', alignItems: 'center', textDecoration: 'underline', textUnderlineOffset: 3 }}>+ New customer</button>
               {showQuickAdd && (
                 <div style={{ marginTop: 8, padding: 12, background: '#FFFFFF', borderRadius: 10, border: `1px solid #E4E4E7` }}>
@@ -943,6 +983,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 placeholder={services.length === 0 ? 'Search by service name...' : 'Search to add another service...'}
                 style={inputStyle}
                 autoFocus={addingService}
+                // See customer-search input for the iOS autofill rationale.
+                name="appt-service-search"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                inputMode="search"
+                enterKeyHint="search"
               />
               {serviceSearch.trim().length > 0 && (
                 <div style={{ marginTop: 8, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, maxHeight: 280, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
