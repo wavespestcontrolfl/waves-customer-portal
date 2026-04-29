@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const trackTransitions = require('../services/track-transitions');
@@ -1772,19 +1772,34 @@ router.get('/eta/:serviceId', async (req, res, next) => {
   }
 });
 
-// POST /api/admin/schedule/cleanup-duplicates — remove duplicate scheduled_services
-router.post('/cleanup-duplicates', async (req, res, next) => {
+// Destructive maintenance endpoints below are gated to non-prod + admin only.
+// 404 (not 403) in production so external scanners don't see them.
+function devOnly(req, res, next) {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+}
+
+// POST /api/admin/schedule/cleanup-duplicates — remove duplicate scheduled_services.
+// Dedupe key intentionally excludes cancelled/rescheduled rows so a cancelled+rebooked
+// pair doesn't collide; preserves the row with FK references (invoices, service_records)
+// where possible by ordering oldest-still-linked last.
+router.post('/cleanup-duplicates', devOnly, requireAdmin, async (req, res, next) => {
   try {
     const dupes = await db.raw(`
       DELETE FROM scheduled_services
       WHERE id IN (
         SELECT id FROM (
-          SELECT id, ROW_NUMBER() OVER (
-            PARTITION BY customer_id, scheduled_date, window_start
-            ORDER BY created_at ASC
+          SELECT s.id, ROW_NUMBER() OVER (
+            PARTITION BY s.customer_id, s.scheduled_date, s.window_start
+            ORDER BY
+              (EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = s.id)) DESC,
+              s.created_at ASC
           ) as rn
-          FROM scheduled_services
-          WHERE customer_id IS NOT NULL
+          FROM scheduled_services s
+          WHERE s.customer_id IS NOT NULL
+            AND s.status NOT IN ('cancelled', 'rescheduled')
         ) ranked
         WHERE rn > 1
       )
@@ -1799,7 +1814,7 @@ router.post('/cleanup-duplicates', async (req, res, next) => {
 });
 
 // POST /api/admin/schedule/fix-service-types — replace legacy catalog IDs with "Service"
-router.post('/fix-service-types', async (req, res, next) => {
+router.post('/fix-service-types', devOnly, requireAdmin, async (req, res, next) => {
   try {
     const result = await db.raw(`
       UPDATE scheduled_services
