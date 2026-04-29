@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Waves Admin — Claude design options</title>
+<style>
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:'Inter', ui-sans-serif, system-ui, sans-serif; -webkit-font-smoothing:antialiased; }
+
+  .option-frame {
+    border-bottom: 8px solid #1A1A1A;
+  }
+  .option-tag {
+    background:#1A1A1A; color:white;
+    padding: 10px 32px;
+    display:flex; gap:24px; align-items:baseline;
+    font-family:'Inter', system-ui, sans-serif;
+  }
+  .option-tag .num { font-size:11px; font-weight:500; color:#D97757; letter-spacing:0.12em; text-transform:uppercase; }
+  .option-tag .name { font-size:16px; font-weight:500; }
+  .option-tag .desc { font-size:12px; color:#A1A1AA; flex:1; }
+
+  /* ============================================================
+     SHARED COMPONENT STRUCTURES (each variant overrides tokens)
+     ============================================================ */
+
+  .variant {
+    padding: 32px;
+    font-size:14px; font-weight:400; line-height:1.55;
+  }
+  .variant .hdr { display:flex; align-items:flex-end; justify-content:space-between; gap:24px; margin-bottom:24px; flex-wrap:wrap; }
+  .variant .label { font-size:11px; font-weight:500; text-transform:uppercase; letter-spacing:0.1em; }
+  .variant .h1 { line-height:1.05; }
+  .variant .seg { display:inline-flex; padding:3px; gap:2px; }
+  .variant .seg button { border:0; background:transparent; height:32px; padding:0 16px; font-size:12px; font-weight:500; cursor:pointer; font-family:inherit; }
+  .variant .btn-primary { height:40px; padding:0 20px; border:0; font-size:13px; font-weight:500; cursor:pointer; font-family:inherit; color:white; }
+
+  .variant .grid-kpi { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:24px; }
+  .variant .grid-pair { display:grid; grid-template-columns:2fr 1fr; gap:16px; }
+
+  .variant .tile { padding:20px; display:flex; flex-direction:column; gap:14px; min-height:152px; }
+  .variant .tile .metric { font-size:32px; font-weight:400; letter-spacing:-0.02em; font-variant-numeric:tabular-nums; line-height:1; }
+  .variant .tile .sub { font-size:12px; margin-top:auto; }
+
+  .variant .card .ch { padding:16px 20px 12px; }
+  .variant .card .cb { padding:0 20px 20px; }
+  .variant .card .ct { font-size:13px; font-weight:500; }
+  .variant .caption { font-size:12px; }
+  .variant .delta { font-size:13px; font-weight:500; display:inline-flex; gap:6px; }
+
+  /* sparkline placeholders — color set per variant via CSS var */
+  .variant .spark { height:36px; border-radius:6px; position:relative; overflow:hidden; }
+  .variant .spark::after {
+    content:''; position:absolute; inset:0;
+    background-repeat:no-repeat; background-position:center; background-size:100% 100%;
+  }
+  .variant .chart {
+    height:200px; border-radius:8px; position:relative;
+  }
+  .variant .chart::after {
+    content:''; position:absolute; inset:0;
+    background-repeat:no-repeat; background-position:center; background-size:100% 100%;
+  }
+
+  /* ============================================================
+     OPTION A — EDITORIAL (current pure Claude)
+     ============================================================ */
+  .v-a {
+    background:#F5F2ED; color:#181818;
+  }
+  .v-a .h1 { font-family:'Tiempos Headline','Charter','Iowan Old Style',Georgia,serif; font-size:44px; font-weight:400; letter-spacing:-0.022em; }
+  .v-a .label { color:#8E8E8E; }
+  .v-a .seg { background:#FAF9F6; border:1px solid #E0DCD2; border-radius:9999px; }
+  .v-a .seg button { color:#5C5C5C; border-radius:9999px; }
+  .v-a .seg button.active { background:#181818; color:#FAF9F6; }
+  .v-a .btn-primary { background:#D97757; border-radius:9999px; }
+  .v-a .tile, .v-a .card { background:#FAF9F6; border:1px solid #E0DCD2; border-radius:12px; }
+  .v-a .delta { color:#5A8B5C; }
+  .v-a .caption, .v-a .sub { color:#8E8E8E; }
+  .v-a .spark { background: linear-gradient(180deg, rgba(217,119,87,0.16) 0%, rgba(217,119,87,0.04) 60%, transparent 100%); }
+  .v-a .spark::after { background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 36' preserveAspectRatio='none'><polyline points='0,28 10,24 20,26 30,18 40,20 50,12 60,14 70,8 80,10 90,4 100,6' fill='none' stroke='%23D97757' stroke-width='1.5' stroke-linejoin='round'/></svg>"); }
+  .v-a .chart { background: linear-gradient(180deg, rgba(217,119,87,0.16) 0%, rgba(217,119,87,0.05) 60%, transparent 100%), repeating-linear-gradient(0deg, transparent 0 39px, #E0DCD2 39px 40px); }
+  .v-a .chart::after { background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 200' preserveAspectRatio='none'><polyline points='0,170 30,160 60,150 90,140 120,155 150,130 180,125 210,108 240,118 270,86 300,80 330,62 360,50 400,40' fill='none' stroke='%23D97757' stroke-width='2' stroke-linejoin='round'/></svg>"); }
+  .v-a .alert { color:#B0463C; }
+
+  /* ============================================================
+     OPTION B — WORKHORSE (Inter H1, denser, same coral)
+     ============================================================ */
+  .v-b {
+    background:#F5F2ED; color:#181818;
+    padding: 24px;
+    --gap-card: 12px;
+  }
+  .v-b .h1 { font-family:'Inter', system-ui, sans-serif; font-size:24px; font-weight:500; letter-spacing:-0.01em; }
+  .v-b .label { color:#8E8E8E; }
+  .v-b .seg { background:#FAF9F6; border:1px solid #E0DCD2; border-radius:6px; padding:0; }
+  .v-b .seg button { color:#5C5C5C; height:30px; padding:0 12px; font-size:11px; text-transform:uppercase; letter-spacing:0.06em; border-radius:0; border-right:1px solid #E0DCD2; }
+  .v-b .seg button:last-child { border-right:0; }
+  .v-b .seg button.active { background:#181818; color:#FAF9F6; }
+  .v-b .btn-primary { background:#D97757; border-radius:6px; height:32px; padding:0 14px; font-size:12px; }
+  .v-b .grid-kpi, .v-b .grid-pair { gap:12px; margin-bottom:16px; }
+  .v-b .tile { background:#FAF9F6; border:1px solid #E0DCD2; border-radius:8px; padding:14px; min-height:120px; gap:10px; }
+  .v-b .tile .metric { font-size:24px; }
+  .v-b .card { background:#FAF9F6; border:1px solid #E0DCD2; border-radius:8px; }
+  .v-b .card .ch { padding:12px 16px 8px; }
+  .v-b .card .cb { padding:0 16px 16px; }
+  .v-b .delta { color:#5A8B5C; font-size:11px; }
+  .v-b .caption, .v-b .sub { color:#8E8E8E; font-size:11px; }
+  .v-b .spark { background: linear-gradient(180deg, rgba(217,119,87,0.16) 0%, transparent 100%); height:28px; }
+  .v-b .spark::after { background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 28' preserveAspectRatio='none'><polyline points='0,22 10,19 20,20 30,14 40,16 50,9 60,11 70,6 80,8 90,3 100,4' fill='none' stroke='%23D97757' stroke-width='1.5'/></svg>"); }
+  .v-b .chart { height:160px; background: linear-gradient(180deg, rgba(217,119,87,0.16) 0%, transparent 100%), repeating-linear-gradient(0deg, transparent 0 31px, #E0DCD2 31px 32px); }
+  .v-b .chart::after { background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 160' preserveAspectRatio='none'><polyline points='0,135 30,128 60,120 90,112 120,124 150,104 180,100 210,86 240,94 270,68 300,64 330,50 360,40 400,32' fill='none' stroke='%23D97757' stroke-width='1.8'/></svg>"); }
+
+  /* ============================================================
+     OPTION C — MONOCHROME (no coral, alert-red only)
+     ============================================================ */
+  .v-c {
+    background:#F5F2ED; color:#181818;
+  }
+  .v-c .h1 { font-family:'Tiempos Headline','Charter',Georgia,serif; font-size:44px; font-weight:400; letter-spacing:-0.022em; }
+  .v-c .label { color:#8E8E8E; }
+  .v-c .seg { background:#FAF9F6; border:1px solid #E0DCD2; border-radius:9999px; }
+  .v-c .seg button { color:#5C5C5C; border-radius:9999px; }
+  .v-c .seg button.active { background:#181818; color:#FAF9F6; }
+  .v-c .btn-primary { background:#181818; border-radius:9999px; }
+  .v-c .tile, .v-c .card { background:#FAF9F6; border:1px solid #E0DCD2; border-radius:12px; }
+  .v-c .delta { color:#5C5C5C; }
+  .v-c .caption, .v-c .sub { color:#8E8E8E; }
+  .v-c .spark { background: linear-gradient(180deg, rgba(24,24,24,0.10) 0%, transparent 100%); }
+  .v-c .spark::after { background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 36' preserveAspectRatio='none'><polyline points='0,28 10,24 20,26 30,18 40,20 50,12 60,14 70,8 80,10 90,4 100,6' fill='none' stroke='%23181818' stroke-width='1.5' stroke-linejoin='round'/></svg>"); }
+  .v-c .chart { background: linear-gradient(180deg, rgba(24,24,24,0.08) 0%, transparent 100%), repeating-linear-gradient(0deg, transparent 0 39px, #E0DCD2 39px 40px); }
+  .v-c .chart::after { background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 200' preserveAspectRatio='none'><polyline points='0,170 30,160 60,150 90,140 120,155 150,130 180,125 210,108 240,118 270,86 300,80 330,62 360,50 400,40' fill='none' stroke='%23181818' stroke-width='2' stroke-linejoin='round'/></svg>"); }
+  .v-c .alert { color:#B0463C; font-weight:500; }
+
+  /* ============================================================
+     OPTION D — BRAND BRIDGE (Claude warmth + Waves Blue accent)
+     ============================================================ */
+  .v-d {
+    background:#FDF6EC; color:#1B2C5B;
+  }
+  .v-d .h1 { font-family:'Tiempos Headline','Charter',Georgia,serif; font-size:44px; font-weight:400; letter-spacing:-0.022em; color:#1B2C5B; }
+  .v-d .label { color:#64748B; }
+  .v-d .seg { background:#FFFFFF; border:1px solid #E8DCC1; border-radius:9999px; }
+  .v-d .seg button { color:#334155; border-radius:9999px; }
+  .v-d .seg button.active { background:#1B2C5B; color:#FFFFFF; }
+  .v-d .btn-primary { background:#009CDE; border-radius:9999px; }
+  .v-d .tile, .v-d .card { background:#FFFFFF; border:1px solid #E8DCC1; border-radius:12px; }
+  .v-d .delta { color:#16A34A; }
+  .v-d .caption, .v-d .sub { color:#64748B; }
+  .v-d .spark { background: linear-gradient(180deg, rgba(0,156,222,0.16) 0%, transparent 100%); }
+  .v-d .spark::after { background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 36' preserveAspectRatio='none'><polyline points='0,28 10,24 20,26 30,18 40,20 50,12 60,14 70,8 80,10 90,4 100,6' fill='none' stroke='%23009CDE' stroke-width='1.5' stroke-linejoin='round'/></svg>"); }
+  .v-d .chart { background: linear-gradient(180deg, rgba(0,156,222,0.16) 0%, transparent 100%), repeating-linear-gradient(0deg, transparent 0 39px, #E8DCC1 39px 40px); }
+  .v-d .chart::after { background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 200' preserveAspectRatio='none'><polyline points='0,170 30,160 60,150 90,140 120,155 150,130 180,125 210,108 240,118 270,86 300,80 330,62 360,50 400,40' fill='none' stroke='%23009CDE' stroke-width='2' stroke-linejoin='round'/></svg>"); }
+  .v-d .alert { color:#C8102E; font-weight:500; }
+</style>
+</head>
+<body>
+
+<!-- ============================================================
+     OPTION A — EDITORIAL
+============================================================ -->
+<div class="option-frame">
+  <div class="option-tag">
+    <span class="num">Option A</span>
+    <span class="name">Editorial</span>
+    <span class="desc">Tiempos serif H1 · cream · coral accent · pill controls · 32px padding · 12px radius. Pure claude.ai.</span>
+  </div>
+  <div class="variant v-a">
+    <div class="hdr">
+      <div>
+        <div class="label">Wednesday, April 29, 2026</div>
+        <h1 class="h1" style="margin-top:8px">Good morning, Adam</h1>
+      </div>
+      <div style="display:flex; gap:12px; align-items:center;">
+        <div class="seg"><button>Today</button><button>WTD</button><button class="active">MTD</button><button>YTD</button></div>
+        <button class="btn-primary">+ New estimate</button>
+      </div>
+    </div>
+    <div class="grid-kpi">
+      <div class="tile"><div class="label">Revenue MTD</div><div class="metric">$184,250</div><div class="spark"></div><div class="sub"><span class="delta">↑ 12.4%</span> vs last month</div></div>
+      <div class="tile"><div class="label">Active Customers</div><div class="metric">1,247</div><div class="spark"></div><div class="sub">+38 new this month</div></div>
+      <div class="tile"><div class="label">MRR</div><div class="metric">$72,840</div><div class="spark"></div><div class="sub">ARR $874K</div></div>
+      <div class="tile"><div class="label">NPS</div><div class="metric">68</div><div class="spark"></div><div class="sub">42 responses · 8.7/10 avg</div></div>
+    </div>
+    <div class="grid-pair">
+      <div class="card">
+        <div class="ch" style="display:flex; justify-content:space-between;">
+          <div><div class="ct">Revenue — April</div><div class="caption" style="margin-top:4px">↑ 12.4% vs last month</div></div>
+          <div class="caption" style="text-align:right">MRR<br><span style="color:#181818; font-weight:500; font-size:16px; font-variant-numeric:tabular-nums;">$72,840</span></div>
+        </div>
+        <div class="cb"><div class="chart"></div></div>
+      </div>
+      <div class="card">
+        <div class="ch"><div class="ct">AR Days</div><div class="caption" style="margin-top:4px">12 invoices overdue</div></div>
+        <div class="cb" style="display:flex; align-items:center; justify-content:center; min-height:200px;">
+          <div style="text-align:center;">
+            <div class="metric alert" style="font-size:64px; font-weight:400; letter-spacing:-0.02em; font-variant-numeric:tabular-nums;">34d</div>
+            <div class="sub" style="margin-top:8px;">$28K open</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     OPTION B — WORKHORSE
+============================================================ -->
+<div class="option-frame">
+  <div class="option-tag">
+    <span class="num">Option B</span>
+    <span class="name">Workhorse</span>
+    <span class="desc">Inter H1 · same cream · coral · square controls · 24px padding · 8px radius. Density-first for 8-hour days.</span>
+  </div>
+  <div class="variant v-b">
+    <div class="hdr">
+      <div>
+        <div class="label">Wednesday, April 29, 2026</div>
+        <h1 class="h1" style="margin-top:6px">Good morning, Adam</h1>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <div class="seg"><button>Today</button><button>WTD</button><button class="active">MTD</button><button>YTD</button></div>
+        <button class="btn-primary">+ New estimate</button>
+      </div>
+    </div>
+    <div class="grid-kpi">
+      <div class="tile"><div class="label">Revenue MTD</div><div class="metric">$184,250</div><div class="spark"></div><div class="sub"><span class="delta">↑ 12.4%</span> vs last month</div></div>
+      <div class="tile"><div class="label">Active Customers</div><div class="metric">1,247</div><div class="spark"></div><div class="sub">+38 new this month</div></div>
+      <div class="tile"><div class="label">MRR</div><div class="metric">$72,840</div><div class="spark"></div><div class="sub">ARR $874K</div></div>
+      <div class="tile"><div class="label">NPS</div><div class="metric">68</div><div class="spark"></div><div class="sub">42 responses · 8.7/10 avg</div></div>
+    </div>
+    <div class="grid-pair">
+      <div class="card">
+        <div class="ch" style="display:flex; justify-content:space-between;">
+          <div><div class="ct">Revenue — April</div><div class="caption" style="margin-top:2px">↑ 12.4% vs last month</div></div>
+          <div class="caption" style="text-align:right">MRR <span style="color:#181818; font-weight:500; font-size:13px; font-variant-numeric:tabular-nums;">$72,840</span></div>
+        </div>
+        <div class="cb"><div class="chart"></div></div>
+      </div>
+      <div class="card">
+        <div class="ch"><div class="ct">AR Days</div><div class="caption" style="margin-top:2px">12 invoices overdue</div></div>
+        <div class="cb" style="display:flex; align-items:center; justify-content:center; min-height:160px;">
+          <div style="text-align:center;">
+            <div class="metric" style="color:#B0463C; font-weight:500; font-size:48px; letter-spacing:-0.02em; font-variant-numeric:tabular-nums;">34d</div>
+            <div class="sub" style="margin-top:4px;">$28K open</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     OPTION C — MONOCHROME
+============================================================ -->
+<div class="option-frame">
+  <div class="option-tag">
+    <span class="num">Option C</span>
+    <span class="name">Monochrome</span>
+    <span class="desc">Same Editorial bones · zero coral · alert-red only · CTAs in near-black. Maximum restraint.</span>
+  </div>
+  <div class="variant v-c">
+    <div class="hdr">
+      <div>
+        <div class="label">Wednesday, April 29, 2026</div>
+        <h1 class="h1" style="margin-top:8px">Good morning, Adam</h1>
+      </div>
+      <div style="display:flex; gap:12px; align-items:center;">
+        <div class="seg"><button>Today</button><button>WTD</button><button class="active">MTD</button><button>YTD</button></div>
+        <button class="btn-primary">+ New estimate</button>
+      </div>
+    </div>
+    <div class="grid-kpi">
+      <div class="tile"><div class="label">Revenue MTD</div><div class="metric">$184,250</div><div class="spark"></div><div class="sub"><span class="delta">↑ 12.4%</span> vs last month</div></div>
+      <div class="tile"><div class="label">Active Customers</div><div class="metric">1,247</div><div class="spark"></div><div class="sub">+38 new this month</div></div>
+      <div class="tile"><div class="label">MRR</div><div class="metric">$72,840</div><div class="spark"></div><div class="sub">ARR $874K</div></div>
+      <div class="tile"><div class="label">NPS</div><div class="metric">68</div><div class="spark"></div><div class="sub">42 responses · 8.7/10 avg</div></div>
+    </div>
+    <div class="grid-pair">
+      <div class="card">
+        <div class="ch" style="display:flex; justify-content:space-between;">
+          <div><div class="ct">Revenue — April</div><div class="caption" style="margin-top:4px">↑ 12.4% vs last month</div></div>
+          <div class="caption" style="text-align:right">MRR<br><span style="color:#181818; font-weight:500; font-size:16px; font-variant-numeric:tabular-nums;">$72,840</span></div>
+        </div>
+        <div class="cb"><div class="chart"></div></div>
+      </div>
+      <div class="card">
+        <div class="ch"><div class="ct">AR Days</div><div class="caption" style="margin-top:4px">12 invoices overdue</div></div>
+        <div class="cb" style="display:flex; align-items:center; justify-content:center; min-height:200px;">
+          <div style="text-align:center;">
+            <div class="metric alert" style="font-size:64px; font-weight:400; letter-spacing:-0.02em; font-variant-numeric:tabular-nums;">34d</div>
+            <div class="sub" style="margin-top:8px;">$28K open</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     OPTION D — BRAND BRIDGE
+============================================================ -->
+<div class="option-frame">
+  <div class="option-tag">
+    <span class="num">Option D</span>
+    <span class="name">Brand Bridge</span>
+    <span class="desc">Editorial bones + Waves brand: Sand surface · Blue Deeper ink · Waves Blue accent · brand red alert.</span>
+  </div>
+  <div class="variant v-d">
+    <div class="hdr">
+      <div>
+        <div class="label">Wednesday, April 29, 2026</div>
+        <h1 class="h1" style="margin-top:8px">Good morning, Adam</h1>
+      </div>
+      <div style="display:flex; gap:12px; align-items:center;">
+        <div class="seg"><button>Today</button><button>WTD</button><button class="active">MTD</button><button>YTD</button></div>
+        <button class="btn-primary">+ New estimate</button>
+      </div>
+    </div>
+    <div class="grid-kpi">
+      <div class="tile"><div class="label">Revenue MTD</div><div class="metric">$184,250</div><div class="spark"></div><div class="sub"><span class="delta">↑ 12.4%</span> vs last month</div></div>
+      <div class="tile"><div class="label">Active Customers</div><div class="metric">1,247</div><div class="spark"></div><div class="sub">+38 new this month</div></div>
+      <div class="tile"><div class="label">MRR</div><div class="metric">$72,840</div><div class="spark"></div><div class="sub">ARR $874K</div></div>
+      <div class="tile"><div class="label">NPS</div><div class="metric">68</div><div class="spark"></div><div class="sub">42 responses · 8.7/10 avg</div></div>
+    </div>
+    <div class="grid-pair">
+      <div class="card">
+        <div class="ch" style="display:flex; justify-content:space-between;">
+          <div><div class="ct">Revenue — April</div><div class="caption" style="margin-top:4px">↑ 12.4% vs last month</div></div>
+          <div class="caption" style="text-align:right">MRR<br><span style="color:#1B2C5B; font-weight:500; font-size:16px; font-variant-numeric:tabular-nums;">$72,840</span></div>
+        </div>
+        <div class="cb"><div class="chart"></div></div>
+      </div>
+      <div class="card">
+        <div class="ch"><div class="ct">AR Days</div><div class="caption" style="margin-top:4px">12 invoices overdue</div></div>
+        <div class="cb" style="display:flex; align-items:center; justify-content:center; min-height:200px;">
+          <div style="text-align:center;">
+            <div class="metric alert" style="font-size:64px; font-weight:400; letter-spacing:-0.02em; font-variant-numeric:tabular-nums;">34d</div>
+            <div class="sub" style="margin-top:8px;">$28K open</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
