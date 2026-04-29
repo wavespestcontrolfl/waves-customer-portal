@@ -188,7 +188,7 @@ async function optimizeAllRoutes(date) {
 
   const services = await db('scheduled_services')
     .where({ scheduled_date: date })
-    .whereNotIn('status', ['cancelled', 'completed'])
+    .whereNotIn('status', ['cancelled', 'completed', 'rescheduled'])
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .select(
       'scheduled_services.*',
@@ -250,7 +250,7 @@ async function optimizeTechRoute(date, techName) {
 
   const services = await db('scheduled_services')
     .where({ scheduled_date: date, technician_id: tech.id })
-    .whereNotIn('status', ['cancelled', 'completed'])
+    .whereNotIn('status', ['cancelled', 'completed', 'rescheduled'])
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .select(
       'scheduled_services.*',
@@ -369,8 +369,8 @@ async function swapTechAssignments(date, techAName, techBName) {
   if (!techB) return { error: `Tech "${techBName}" not found` };
 
   // Get both sets of services
-  const aServices = await db('scheduled_services').where({ scheduled_date: date, technician_id: techA.id }).whereNotIn('status', ['cancelled', 'completed']);
-  const bServices = await db('scheduled_services').where({ scheduled_date: date, technician_id: techB.id }).whereNotIn('status', ['cancelled', 'completed']);
+  const aServices = await db('scheduled_services').where({ scheduled_date: date, technician_id: techA.id }).whereNotIn('status', ['cancelled', 'completed', 'rescheduled']);
+  const bServices = await db('scheduled_services').where({ scheduled_date: date, technician_id: techB.id }).whereNotIn('status', ['cancelled', 'completed', 'rescheduled']);
 
   // Swap assignments atomically
   await db.transaction(async trx => {
@@ -402,7 +402,7 @@ async function findScheduleGaps(input) {
 
   const services = await db('scheduled_services')
     .whereBetween('scheduled_date', [from, to])
-    .whereNotIn('status', ['cancelled'])
+    .whereNotIn('status', ['cancelled', 'rescheduled'])
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .select('scheduled_services.scheduled_date', 'scheduled_services.technician_id', 'scheduled_services.service_type', 'customers.city');
 
@@ -456,7 +456,7 @@ async function findScheduleGaps(input) {
 async function getDaySummary(date) {
   const services = await db('scheduled_services')
     .where({ 'scheduled_services.scheduled_date': date })
-    .whereNotIn('scheduled_services.status', ['cancelled'])
+    .whereNotIn('scheduled_services.status', ['cancelled', 'rescheduled'])
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
     .select(
@@ -477,7 +477,7 @@ async function getDaySummary(date) {
     byZone[zone] = (byZone[zone] || 0) + 1;
 
     if (s.status === 'completed') completed++;
-    estRevenue += (s.price || 125);
+    estRevenue += (parseFloat(s.estimated_price) || 125);
 
     if (!s.tech_name) {
       unassigned.push({
@@ -540,7 +540,7 @@ async function getDaySummary(date) {
 async function getZoneDensity(date) {
   const services = await db('scheduled_services')
     .where({ 'scheduled_services.scheduled_date': date })
-    .whereNotIn('scheduled_services.status', ['cancelled'])
+    .whereNotIn('scheduled_services.status', ['cancelled', 'rescheduled'])
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
     .select(
@@ -633,7 +633,7 @@ async function cancelAndRescheduleFarOut(input) {
 
   let query = db('scheduled_services')
     .where('scheduled_date', '>', cutoffStr)
-    .whereNotIn('status', ['cancelled', 'completed'])
+    .whereNotIn('status', ['cancelled', 'completed', 'rescheduled'])
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .select(
       'scheduled_services.id', 'scheduled_services.scheduled_date',
