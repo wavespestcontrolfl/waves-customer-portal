@@ -654,9 +654,9 @@ export default function EstimateToolViewV2({
         if (form.svcMosquito) selectedServices.push('MOSQUITO');
         if (form.svcTermiteBait) selectedServices.push('TERMITE_BAIT');
         if (form.svcRodentBait) selectedServices.push('RODENT_BAIT');
-        if (form.svcOnetimePest) selectedServices.push('ONETIME_PEST');
-        if (form.svcOnetimeLawn) selectedServices.push('ONETIME_LAWN');
-        if (form.svcOnetimeMosquito) selectedServices.push('ONETIME_MOSQUITO');
+        if (form.svcOnetimePest) selectedServices.push('OT_PEST');
+        if (form.svcOnetimeLawn) selectedServices.push('OT_LAWN');
+        if (form.svcOnetimeMosquito) selectedServices.push('OT_MOSQUITO');
         if (form.svcPlugging) selectedServices.push('PLUGGING');
         if (form.svcTopdress) selectedServices.push('TOPDRESS');
         if (form.svcDethatch) selectedServices.push('DETHATCH');
