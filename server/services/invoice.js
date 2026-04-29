@@ -139,19 +139,28 @@ const InvoiceService = {
         dollars: Math.round(m.dollars * factor * 100) / 100,
       }));
       // Absorb cents-rounding remainder so the audit rows sum to exactly subtotal.
+      // Apply the remainder to the row with the most headroom — never the smallest —
+      // so a -0.01 adjustment can't drive a near-zero row negative and then
+      // decrement discounts.total_discount_given via .increment() in
+      // DiscountEngine.recordInvoiceDiscounts.
       const scaledSum = Math.round(
         (scaledTierDiscountAmount + scaledManualDiscounts.reduce((s, m) => s + m.dollars, 0)) * 100
       ) / 100;
       const remainder = Math.round((subtotal - scaledSum) * 100) / 100;
       if (remainder !== 0) {
-        if (scaledManualDiscounts.length > 0) {
-          const last = scaledManualDiscounts[scaledManualDiscounts.length - 1];
-          scaledManualDiscounts[scaledManualDiscounts.length - 1] = {
-            ...last,
-            dollars: Math.round((last.dollars + remainder) * 100) / 100,
-          };
-        } else {
+        let targetIdx = -1; // -1 = tier slot, >=0 = manual index
+        let targetDollars = scaledTierDiscountAmount;
+        scaledManualDiscounts.forEach((m, i) => {
+          if (m.dollars > targetDollars) { targetIdx = i; targetDollars = m.dollars; }
+        });
+        if (targetIdx === -1) {
           scaledTierDiscountAmount = Math.round((scaledTierDiscountAmount + remainder) * 100) / 100;
+        } else {
+          const m = scaledManualDiscounts[targetIdx];
+          scaledManualDiscounts[targetIdx] = {
+            ...m,
+            dollars: Math.round((m.dollars + remainder) * 100) / 100,
+          };
         }
       }
       discountAmount = subtotal;
