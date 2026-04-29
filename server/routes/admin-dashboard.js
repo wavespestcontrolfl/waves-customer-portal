@@ -761,7 +761,8 @@ router.get('/calls-by-source', async (req, res, next) => {
       // attribution panel. Keep the seed row for registry purposes and
       // drop it from the dashboard instead.
       .where((qb) => qb.where('s.is_active', true).orWhereNull('s.is_active'))
-      .whereBetween('c.created_at', [`${win.from}T00:00:00`, `${win.to}T23:59:59`])
+      .whereRaw("c.created_at >= ?::timestamp AT TIME ZONE 'America/New_York'", [`${win.from}T00:00:00`])
+      .whereRaw("c.created_at <  (?::timestamp + INTERVAL '1 day') AT TIME ZONE 'America/New_York'", [`${win.to}T00:00:00`])
       .select(
         db.raw("COALESCE(s.name, 'Unmapped — ' || c.to_phone) as name"),
         db.raw("s.source_type as source_type"),
