@@ -4,6 +4,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
+const { auditPaymentReconcile, ipFromReq, uaFromReq } = require('../services/audit-log');
 
 const stripeKey = process.env.STRIPE_SECRET_KEY;
 const stripe = stripeKey ? require('stripe')(stripeKey) : null;
@@ -138,6 +139,22 @@ router.post('/reconcile', async (req, res, next) => {
     }
 
     logger.info(`[reconcile] invoice ${invoice.invoice_number} marked paid via ${collectedVia}${stripeChargeId ? ` (${stripeChargeId})` : ''}`);
+
+    // CRITICAL audit row — money flows through this endpoint and a missing
+    // row makes a "charged but unpaid" reconciliation drift impossible to
+    // trace later. await + let errors bubble (the route's existing try/catch
+    // surfaces them); we'd rather 500 the request than silently lose the
+    // audit trail.
+    await auditPaymentReconcile({
+      tech_user_id: req.technicianId || null,
+      invoice_id: invoiceId,
+      invoice_number: invoice.invoice_number,
+      collected_via: collectedVia,
+      stripe_charge_id: stripeChargeId || null,
+      amount: amount != null ? Number(amount) : parseFloat(invoice.total),
+      ip_address: ipFromReq(req),
+      user_agent: uaFromReq(req),
+    });
 
     const refreshed = await db('invoices').where({ id: invoiceId }).first();
     res.json({ success: true, invoice: refreshed, stripe_charge: chargeDetails ? {

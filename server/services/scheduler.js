@@ -96,6 +96,29 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 3:30AM ET — Purge stripe_webhook_events older than 90 days.
+  // Stripe's retry window is 72h max, so anything past 90d is just historical
+  // noise; the table grows ~50–500 rows/day and never shrinks otherwise.
+  // Keeps idempotency lookups fast and PG vacuum manageable. The retention
+  // window is generous on purpose — operators can still grep for an event
+  // ID weeks later without hitting a hole.
+  // =========================================================================
+  cron.schedule('30 3 * * *', async () => {
+    try {
+      const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+      const db = require('../models/db');
+      const purged = await db('stripe_webhook_events')
+        .where('received_at', '<', cutoff)
+        .del();
+      if (purged > 0) {
+        logger.info(`[stripe-webhook-purge] Removed ${purged} stripe_webhook_events row(s) older than 90 days`);
+      }
+    } catch (err) {
+      logger.error(`Stripe webhook events purge failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 5AM — Newsletter event normalization (P3b leg 3). One hour
   // after ingestion so newly-pulled rows get Claude venue extraction +
   // Google geocoding in the same day. Capped at 50 rows per run so the

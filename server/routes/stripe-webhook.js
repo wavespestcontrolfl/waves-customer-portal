@@ -17,6 +17,21 @@ const { classifyExistingWebhookEvent, STALE_CLAIM_WINDOW_MS } = require('./strip
  *   app.use(express.json()); // <-- after webhook route
  */
 
+// Cached Stripe SDK. Two prior callers (signature verify + card_present
+// charge enrichment) constructed `new Stripe(secret)` per request, which
+// instantiates a new HTTP agent each time and skipped the apiVersion
+// pin — so the webhook's reads were on whatever default version Stripe's
+// account was last set to (drift hazard). Match services/stripe.js's
+// pinned version exactly so behavior across the two SDK sites is
+// identical.
+let _stripe;
+function getStripe() {
+  if (_stripe) return _stripe;
+  if (!stripeConfig.secretKey) return null;
+  _stripe = new Stripe(stripeConfig.secretKey, { apiVersion: '2024-12-18.acacia' });
+  return _stripe;
+}
+
 // Use express.raw() for Stripe signature verification
 router.post(
   '/',
@@ -37,7 +52,11 @@ router.post(
     // ── Verify signature ──────────────────────────────────────
     let event;
     try {
-      const stripe = new Stripe(stripeConfig.secretKey);
+      const stripe = getStripe();
+      if (!stripe) {
+        logger.error('[stripe-webhook] STRIPE_SECRET_KEY not set — cannot verify signature');
+        return res.status(500).send('Stripe not configured');
+      }
       event = stripe.webhooks.constructEvent(req.body, sig, stripeConfig.webhookSecret);
     } catch (err) {
       logger.error(`[stripe-webhook] Signature verification failed: ${err.message}`);
@@ -321,7 +340,8 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
     paymentIntent.metadata?.source === 'tap_to_pay';
   if (isCardPresent && paymentIntent.latest_charge) {
     try {
-      const stripe = new Stripe(stripeConfig.secretKey);
+      const stripe = getStripe();
+      if (!stripe) throw new Error('Stripe SDK not configured');
       const charge = await stripe.charges.retrieve(paymentIntent.latest_charge);
       const cp = charge?.payment_method_details?.card_present;
       if (cp) {
@@ -557,26 +577,79 @@ async function handleAchFailure(paymentIntent, failureReason) {
     const customer = await db('customers').where({ id: payment.customer_id }).first();
     if (!customer) return;
 
-    // Log the failure
-    try {
-      await db('ach_failure_log').insert({
-        customer_id: customer.id,
-        stripe_payment_intent_id: piId,
-        failure_reason: failureReason,
-      });
-    } catch { /* table may not exist yet */ }
-
-    // Count recent ACH failures (last 90 days)
+    // Insert + count + state-update wrapped in one transaction with a
+    // per-customer advisory lock. Two concurrent ACH failures (e.g.,
+    // an autopay charge and a one-off invoice failing within seconds
+    // of each other) used to both insert into ach_failure_log, both
+    // run a separate count, and could both see the same recentFailures
+    // value — escalating twice or skipping a step. Same advisory-lock
+    // pattern as the terminal handoff mint serialization.
     let recentFailures = 0;
-    try {
-      recentFailures = Number((await db('ach_failure_log')
-        .where({ customer_id: customer.id, resolved: false })
-        .where('failure_date', '>=', new Date(Date.now() - 90 * 24 * 60 * 60 * 1000))
-        .count('* as cnt')
-        .first())?.cnt || 0);
-    } catch { /* table may not exist */ }
+    await db.transaction(async (trx) => {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['ach.escalation', String(customer.id)],
+      );
 
-    // Send SMS notification
+      try {
+        await trx('ach_failure_log').insert({
+          customer_id: customer.id,
+          stripe_payment_intent_id: piId,
+          failure_reason: failureReason,
+        });
+      } catch { /* table may not exist yet */ }
+
+      // Count is now guaranteed to include the just-inserted row because
+      // the advisory lock serialized this whole block per customer.
+      try {
+        recentFailures = Number((await trx('ach_failure_log')
+          .where({ customer_id: customer.id, resolved: false })
+          .where('failure_date', '>=', new Date(Date.now() - 90 * 24 * 60 * 60 * 1000))
+          .count('* as cnt')
+          .first())?.cnt || 0);
+      } catch { /* table may not exist */ }
+
+      // ACH status update lives inside the transaction so the customer
+      // row's ach_status / ach_failure_count match the count we just
+      // computed. A concurrent failure handler waiting on the lock
+      // will see this state when it acquires next.
+      try {
+        if (recentFailures >= 3) {
+          await trx('customers').where({ id: customer.id }).update({
+            ach_status: 'suspended',
+            ach_failure_count: recentFailures,
+          });
+          const cardMethod = await trx('payment_methods')
+            .where({ customer_id: customer.id, method_type: 'card' })
+            .first();
+          if (cardMethod) {
+            await trx('payment_methods')
+              .where({ customer_id: customer.id })
+              .update({ is_default: false });
+            await trx('payment_methods')
+              .where({ id: cardMethod.id })
+              .update({ is_default: true });
+          }
+          logger.warn(`[stripe-webhook] ACH suspended for customer ${customer.id} — 3+ failures in 90 days`);
+        } else if (recentFailures >= 2) {
+          await trx('customers').where({ id: customer.id }).update({
+            ach_status: 'needs_verification',
+            ach_failure_count: recentFailures,
+          });
+          logger.warn(`[stripe-webhook] ACH needs verification for customer ${customer.id}`);
+        } else {
+          await trx('customers').where({ id: customer.id }).update({
+            ach_failure_count: recentFailures,
+          });
+        }
+      } catch (dbErr) {
+        logger.error(`[stripe-webhook] ACH status update failed: ${dbErr.message}`);
+        throw dbErr;
+      }
+    });
+
+    // Send SMS — outside the transaction so a slow Twilio call doesn't
+    // hold the per-customer advisory lock against concurrent failures.
     try {
       const twilio = require('../services/twilio');
       const phone = customer.phone;
@@ -600,42 +673,6 @@ async function handleAchFailure(paymentIntent, failureReason) {
       }
     } catch (smsErr) {
       logger.error(`[stripe-webhook] ACH failure SMS failed: ${smsErr.message}`);
-    }
-
-    // Update customer ACH status based on failure count
-    try {
-      if (recentFailures >= 3) {
-        // Suspend ACH — switch default to card
-        await db('customers').where({ id: customer.id }).update({
-          ach_status: 'suspended',
-          ach_failure_count: recentFailures,
-        });
-        // Try to set card as default payment method
-        const cardMethod = await db('payment_methods')
-          .where({ customer_id: customer.id, method_type: 'card' })
-          .first();
-        if (cardMethod) {
-          await db('payment_methods')
-            .where({ customer_id: customer.id })
-            .update({ is_default: false });
-          await db('payment_methods')
-            .where({ id: cardMethod.id })
-            .update({ is_default: true });
-        }
-        logger.warn(`[stripe-webhook] ACH suspended for customer ${customer.id} — 3+ failures in 90 days`);
-      } else if (recentFailures >= 2) {
-        await db('customers').where({ id: customer.id }).update({
-          ach_status: 'needs_verification',
-          ach_failure_count: recentFailures,
-        });
-        logger.warn(`[stripe-webhook] ACH needs verification for customer ${customer.id}`);
-      } else {
-        await db('customers').where({ id: customer.id }).update({
-          ach_failure_count: recentFailures,
-        });
-      }
-    } catch (dbErr) {
-      logger.error(`[stripe-webhook] ACH status update failed: ${dbErr.message}`);
     }
 
     // Notify the per-invoice follow-up engine — increments autopay-hold counters
