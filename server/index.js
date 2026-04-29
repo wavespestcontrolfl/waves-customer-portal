@@ -18,6 +18,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
+const jwt = require('jsonwebtoken');
 const path = require('path');
 
 const config = require('./config');
@@ -133,10 +134,28 @@ app.use(cors({
 }));
 
 // Rate limiting
+// Key authenticated requests by JWT subject so each admin/tech/customer gets
+// their own bucket. Falls back to IP for unauthenticated traffic. Without
+// this, a single busy admin session (dispatch page + grid + per-action
+// refreshes) can exhaust the per-IP allowance and lock everyone behind the
+// same NAT out of the API.
+function rateLimitKey(req) {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ') && config.jwt.secret) {
+    try {
+      const decoded = jwt.verify(authHeader.split(' ')[1], config.jwt.secret);
+      if (decoded.technicianId) return `tech:${decoded.technicianId}`;
+      if (decoded.customerId) return `cust:${decoded.customerId}`;
+    } catch (_err) { /* fall through to IP */ }
+  }
+  return req.ip;
+}
+
 const limiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
   max: config.rateLimit.max,
   message: { error: 'Too many requests, please try again later.' },
+  keyGenerator: rateLimitKey,
   skip: () => process.env.NODE_ENV !== 'production',
 });
 app.use('/api/', limiter);
