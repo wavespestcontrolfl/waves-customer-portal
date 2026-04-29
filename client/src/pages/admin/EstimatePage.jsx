@@ -251,7 +251,7 @@ function EstimateToolView() {
 
     // Tier logic
     const tierMap = { 0: { name: 'None', discount: 0 }, 1: { name: 'Bronze', discount: 0 }, 2: { name: 'Silver', discount: 0.10 }, 3: { name: 'Gold', discount: 0.15 } };
-    const tier = recurringCount >= 4 ? { name: 'Platinum', discount: 0.18 } : (tierMap[recurringCount] || tierMap[0]);
+    const tier = recurringCount >= 4 ? { name: 'Platinum', discount: 0.20 } : (tierMap[recurringCount] || tierMap[0]);
 
     // Approximate monthly costs for recurring (rough averages based on typical property)
     const sqft = Number(form.homeSqFt) || 2000;

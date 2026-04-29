@@ -188,6 +188,54 @@ async function syncConstantsFromDB(dbInstance) {
       }
     }
 
+    // ── Mosquito ─────────────────────────────────────────────
+    // Replaces whole-cloth — admin edits in the Pricing Logic Mosquito tab are
+    // authoritative. Schema mirrors the migration seed in
+    // 20260414000026_pricing_config_jsonb.js (4 rows: base_prices, lot_sizes,
+    // visits, pressure). lot_sizes is read but not yet applied to the engine —
+    // bucket thresholds still live in property-calculator.getLotCategory.
+    if (config.mosquito_base_prices) {
+      const next = { ...constants.MOSQUITO.basePrices };
+      for (const [lot, tierMap] of Object.entries(config.mosquito_base_prices)) {
+        if (tierMap && typeof tierMap === 'object' && constants.MOSQUITO.basePrices[lot]) {
+          next[lot] = [
+            r(Number(tierMap.bronze ?? constants.MOSQUITO.basePrices[lot][0])),
+            r(Number(tierMap.silver ?? constants.MOSQUITO.basePrices[lot][1])),
+            r(Number(tierMap.gold   ?? constants.MOSQUITO.basePrices[lot][2])),
+            r(Number(tierMap.platinum ?? constants.MOSQUITO.basePrices[lot][3])),
+          ];
+        }
+      }
+      constants.MOSQUITO.basePrices = next;
+    }
+    if (config.mosquito_visits) {
+      for (const tier of ['bronze', 'silver', 'gold', 'platinum']) {
+        if (config.mosquito_visits[tier] != null) {
+          constants.MOSQUITO.tierVisits[tier] = Number(config.mosquito_visits[tier]);
+        }
+      }
+    }
+    if (config.mosquito_pressure) {
+      const p = config.mosquito_pressure;
+      const pf = constants.MOSQUITO.pressureFactors;
+      // DB uses snake_case `near_water`; engine uses camelCase `nearWater`.
+      // All other keys are snake_case in both places.
+      const KEY_MAP = { near_water: 'nearWater' };
+      for (const [k, v] of Object.entries(p)) {
+        if (k === 'cap') continue;
+        const target = KEY_MAP[k] || k;
+        if (target in pf && typeof v === 'number') pf[target] = v;
+      }
+      if (typeof p.cap === 'number') constants.MOSQUITO.pressureCap = p.cap;
+    }
+    if (config.onetime_mosquito) {
+      const next = { ...constants.ONE_TIME.mosquito };
+      for (const lot of ['SMALL', 'QUARTER', 'THIRD', 'HALF', 'ACRE']) {
+        if (config.onetime_mosquito[lot] != null) next[lot] = r(Number(config.onetime_mosquito[lot]));
+      }
+      constants.ONE_TIME.mosquito = next;
+    }
+
     // ── One-Time / Specialty ─────────────────────────────────
     if (config.onetime_urgency) {
       if (config.onetime_urgency.soon) constants.URGENCY.SOON.standard = config.onetime_urgency.soon;
