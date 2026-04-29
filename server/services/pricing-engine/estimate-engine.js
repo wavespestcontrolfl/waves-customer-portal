@@ -470,6 +470,7 @@ function generateEstimate(input) {
         (services.exclusion?.simple || 0)
         + (services.exclusion?.moderate || 0)
         + (services.exclusion?.advanced || 0)
+        + (services.exclusion?.specialty || 0)
       ),
       eligibility: opts.eligibility || {},
     });

@@ -250,6 +250,9 @@ async function syncConstantsFromDB(dbInstance) {
       if (g.standard != null) constants.RODENT.guarantee.standard = r(g.standard);
       if (g.complex != null) constants.RODENT.guarantee.complex = r(g.complex);
       if (g.estate != null) constants.RODENT.guarantee.estate = r(g.estate);
+      if (Array.isArray(g.eligibility_requires)) {
+        constants.RODENT.guarantee.eligibilityRequires = g.eligibility_requires.map(String);
+      }
     }
 
     // ── WaveGuard ────────────────────────────────────────────

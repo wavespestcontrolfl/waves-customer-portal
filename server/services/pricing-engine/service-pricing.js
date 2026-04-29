@@ -1187,7 +1187,8 @@ function priceExclusion(options = {}) {
   const simpleSubtotal = simple * cfg.perPoint.simple;
   const accessSubtotal = (moderate * cfg.perPoint.moderate) + (advanced * cfg.perPoint.advanced);
 
-  const storyKey = stories >= 3 ? 'three' : (stories === 2 ? 'two' : 'one');
+  const storiesNum = Number(stories) || 1;
+  const storyKey = storiesNum >= 3 ? 'three' : (storiesNum === 2 ? 'two' : 'one');
   const storyMult = cfg.storyMultipliers?.[storyKey] ?? 1.0;
   const roofMult = cfg.roofMultipliers?.[roofType] ?? 1.0;
   const constructionMult = cfg.constructionMultipliers?.[constructionType] ?? 1.0;
@@ -1288,14 +1289,17 @@ function priceRodentGuarantee(options = {}) {
   //   estate  — >4,000 sf or >15 sealed points
   //   complex — 2,501–4,000 sf, two-story, tile roof, or 9–15 sealed points
   //   standard — everything else
+  const storiesNum = Number(stories) || 1;
+  const homeSqFtNum = Number(homeSqFt) || 0;
+  const sealedPointsNum = Number(sealedPoints) || 0;
   let tier = 'standard';
-  if (homeSqFt > 4000 || sealedPoints > 15) {
+  if (homeSqFtNum > 4000 || sealedPointsNum > 15) {
     tier = 'estate';
   } else if (
-    homeSqFt > 2500 ||
-    stories >= 2 ||
+    homeSqFtNum > 2500 ||
+    storiesNum >= 2 ||
     roofType === 'tile' ||
-    sealedPoints >= 9
+    sealedPointsNum >= 9
   ) {
     tier = 'complex';
   }
