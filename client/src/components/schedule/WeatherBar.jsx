@@ -8,7 +8,7 @@ export default function WeatherBar({ date }) {
 
   useEffect(() => {
     if (!date) return;
-    const token = localStorage.getItem('adminToken');
+    const token = localStorage.getItem('waves_admin_token');
     fetch(`${API}/admin/dashboard-ops/weather?date=${date}`, {
       headers: { Authorization: `Bearer ${token}` },
     })
