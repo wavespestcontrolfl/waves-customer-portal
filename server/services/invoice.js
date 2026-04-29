@@ -30,6 +30,8 @@ async function nextInvoiceNumber() {
 // Fallback map only used if discount-engine import fails
 const TIER_DISCOUNTS_FALLBACK = { 'One-Time': 0, Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
 
+const { INVOICE_UPDATE_ALLOWED_FIELDS, assertInvoiceVoidable } = require('./invoice-helpers');
+
 // ══════════════════════════════════════════════════════════════
 // INVOICE SERVICE
 // ══════════════════════════════════════════════════════════════
@@ -454,7 +456,13 @@ const InvoiceService = {
   },
 
   async update(id, updates) {
-    const allowed = ['title', 'notes', 'due_date', 'line_items', 'status', 'tax_rate'];
+    // `status` deliberately omitted — admins must use the explicit
+    // /void, /charge-card, /record-payment, /archive, /unarchive routes
+    // to transition state. Allowing a free-form `status` write here
+    // lets a tech mark an invoice "paid" with no Stripe charge / no
+    // payments-ledger row, or flip a paid invoice back to "draft" and
+    // erase the audit trail. See INVOICE_UPDATE_ALLOWED_FIELDS export.
+    const allowed = INVOICE_UPDATE_ALLOWED_FIELDS;
     const data = { updated_at: new Date() };
     for (const key of allowed) {
       if (updates[key] !== undefined) {
@@ -500,6 +508,16 @@ const InvoiceService = {
   },
 
   async voidInvoice(id) {
+    // Refuse to void a paid invoice. A paid invoice has a payments-ledger
+    // row + (usually) a Stripe charge; flipping it to "void" silently
+    // hides the revenue from dashboards but leaves the money collected
+    // — the right path is a refund via StripeService.refund. ACH in
+    // flight is also off-limits; assertInvoiceVoidable encodes the
+    // transition matrix so the unit tests can verify it without DB.
+    const current = await db('invoices').where({ id }).first();
+    if (!current) throw new Error('Invoice not found');
+    assertInvoiceVoidable(current.status);
+    if (current.status === 'void') return current;
     const [invoice] = await db('invoices').where({ id }).update({ status: 'void', updated_at: new Date() }).returning('*');
     logger.info(`[invoice] Voided: ${invoice.invoice_number}`);
     return invoice;

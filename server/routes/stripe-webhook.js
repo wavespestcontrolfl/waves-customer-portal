@@ -43,30 +43,54 @@ router.post(
       return res.status(400).send(`Webhook Error: ${err.message}`);
     }
 
-    // ── Idempotency check ─────────────────────────────────────
+    // ── Idempotency claim (atomic) ────────────────────────────
+    //
+    // Two concurrent retries from Stripe (or a manual replay racing a live
+    // delivery) used to both pass a SELECT-then-INSERT check and run the
+    // event handler twice — duplicating dispute / payout admin
+    // notifications, double-attempting save-card persistence, etc. The
+    // per-row `processed` flag below filters the trivial case where a
+    // retry arrives after we finished, but the SELECT-then-INSERT window
+    // before the row exists is what we couldn't cover.
+    //
+    // Replace with a single atomic claim: INSERT … ON CONFLICT(id) DO
+    // NOTHING. If we get a row back, we own this event and proceed.
+    // Otherwise another worker has it; check the existing row's processed
+    // flag and return 200 (already done) or 503 (still in flight — let
+    // Stripe retry once the other worker finishes / fails).
+    let claimed = false;
     try {
-      const existing = await db('stripe_webhook_events')
-        .where({ id: event.id })
-        .first();
-
-      if (existing && existing.processed) {
-        logger.info(`[stripe-webhook] Duplicate event ${event.id} — skipping`);
-        return res.status(200).json({ received: true, duplicate: true });
-      }
-
-      // Record the event
-      if (!existing) {
-        await db('stripe_webhook_events').insert({
+      const inserted = await db('stripe_webhook_events')
+        .insert({
           id: event.id,
           event_type: event.type,
           processed: false,
           payload: JSON.stringify(event.data),
           received_at: new Date().toISOString(),
-        });
-      }
+        })
+        .onConflict('id')
+        .ignore()
+        .returning('id');
+      claimed = inserted.length > 0;
     } catch (dbErr) {
-      logger.error(`[stripe-webhook] DB idempotency check failed: ${dbErr.message}`);
-      // Continue processing — better to process twice than miss an event
+      logger.error(`[stripe-webhook] Idempotency claim insert failed: ${dbErr.message}`);
+      // Fall through — without a successful claim we can't safely run
+      // side effects, but we also can't tell whether a duplicate exists.
+      // Return 503 so Stripe retries.
+      return res.status(503).json({ error: 'Idempotency claim failed' });
+    }
+
+    if (!claimed) {
+      const existing = await db('stripe_webhook_events').where({ id: event.id }).first().catch(() => null);
+      if (existing?.processed) {
+        logger.info(`[stripe-webhook] Duplicate event ${event.id} — already processed, skipping`);
+        return res.status(200).json({ received: true, duplicate: true });
+      }
+      // Another worker holds the row but hasn't finished. Tell Stripe to
+      // retry — by the time the retry lands, the other worker will have
+      // either committed processed=true (we 200) or crashed (we claim).
+      logger.warn(`[stripe-webhook] Event ${event.id} in-flight on another worker — asking Stripe to retry`);
+      return res.status(503).json({ error: 'Event in-flight, retry' });
     }
 
     // ── Handle event ──────────────────────────────────────────

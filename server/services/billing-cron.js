@@ -20,6 +20,8 @@ const smsTemplatesRouter = require('../routes/admin-sms-templates');
 // Retry schedule: Day 1 → retry Day 3, Day 3 → retry Day 5
 const RETRY_DELAYS_DAYS = [2, 2]; // cumulative: +2, +2 more
 
+const { isBillingDayMatch } = require('./billing-helpers');
+
 const WAVES_OFFICE_PHONE = '+19413187612';
 const BILLING_PORTAL_URL = 'https://portal.wavespestcontrol.com/?tab=billing';
 
@@ -91,11 +93,12 @@ const BillingCron = {
           continue;
         }
 
-        // GUARD 3: wrong billing day — skip silently (no log; not an anomaly)
-        // Note: the cron currently runs only on the 1st, so this only matters
-        // for customers whose billing_day is NOT 1. When scheduler flips to
-        // daily, this guard activates for all custom days.
-        if (customer.billing_day && customer.billing_day !== todayDay) {
+        // GUARD 3: wrong billing day — skip silently (no log; not an anomaly).
+        // The cron now runs daily (scheduler.js), so this guard is what
+        // shapes "charge today vs. skip" for every customer regardless
+        // of their billing_day. See isBillingDayMatch for the NULL-default
+        // contract.
+        if (!isBillingDayMatch(customer.billing_day, todayDay)) {
           continue;
         }
 
