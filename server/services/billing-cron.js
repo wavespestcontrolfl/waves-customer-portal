@@ -163,7 +163,7 @@ const BillingCron = {
           logger.error(`[billing-cron] Payment confirmation SMS failed: ${smsErr.message}`);
         }
 
-        logger.info(`[billing-cron] Charged $${customer.monthly_rate} for ${customer.first_name} ${customer.last_name}`);
+        logger.info(`[billing-cron] Charged $${customer.monthly_rate} for customer id=${customer.id}`);
       } catch (err) {
         failed++;
         logger.error(`[billing-cron] Failed to charge customer id=${customer.id}: ${err.message}`);
@@ -347,12 +347,12 @@ const BillingCron = {
           logger.error(`[billing-cron] Success SMS failed: ${smsErr.message}`);
         }
 
-        logger.info(`[billing-cron] Retry succeeded for ${customer.first_name} ${customer.last_name}: $${amount}`);
+        logger.info(`[billing-cron] Retry succeeded for customer id=${customer.id}: $${amount}`);
       } catch (err) {
         failedAgain++;
         const newRetryCount = payment.retry_count + 1;
 
-        logger.error(`[billing-cron] Retry #${newRetryCount} failed for ${customer.first_name} ${customer.last_name}: ${err.message}`);
+        logger.error(`[billing-cron] Retry #${newRetryCount} failed for customer id=${customer.id}: ${err.message}`);
 
         if (newRetryCount >= 3) {
           // Final failure — escalate
@@ -426,7 +426,7 @@ const BillingCron = {
             details: { source: 'autopay', retry_count: newRetryCount, reason: err.message, final: true, service_paused: true },
           });
 
-          logger.warn(`[billing-cron] ESCALATED: ${customer.first_name} ${customer.last_name} — 3 retries exhausted, service paused`);
+          logger.warn(`[billing-cron] ESCALATED: customer id=${customer.id} — 3 retries exhausted, service paused`);
         } else {
           // Schedule next retry
           const nextRetry = new Date();

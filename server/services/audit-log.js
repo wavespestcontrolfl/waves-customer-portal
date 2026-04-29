@@ -142,6 +142,30 @@ async function auditTerminalHandoffValidate({ tech_user_id, invoice_id, jti, out
   });
 }
 
+/**
+ * Manual payment reconciliation. Called from POST /api/admin/payments/reconcile
+ * after the admin marks an invoice paid via Tap to Pay (Path A) or via a
+ * cash/check/off-platform collection. CRITICAL audit — a missing row here
+ * makes a charged-but-not-paid drift impossible to trace later. Caller awaits
+ * and lets failures bubble.
+ */
+async function auditPaymentReconcile({
+  tech_user_id, invoice_id, invoice_number, collected_via,
+  stripe_charge_id, amount, ip_address, user_agent,
+}) {
+  return recordAuditEvent({
+    actor_type: 'technician',
+    actor_id: tech_user_id || null,
+    action: 'payment.reconcile',
+    resource_type: 'invoice',
+    resource_id: invoice_id,
+    metadata: { invoice_number, collected_via, stripe_charge_id: stripe_charge_id || null, amount: amount ?? null },
+    ip_address,
+    user_agent,
+    critical: true,
+  });
+}
+
 function ipFromReq(req) {
   return (req.headers?.['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || null;
 }
@@ -155,6 +179,7 @@ module.exports = {
   auditTerminalHandoffMint,
   auditTerminalHandoffRateLimited,
   auditTerminalHandoffValidate,
+  auditPaymentReconcile,
   ipFromReq,
   uaFromReq,
 };
