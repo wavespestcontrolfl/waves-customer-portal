@@ -186,7 +186,6 @@ export default function AdminLayoutV2() {
         display: 'flex',
         minHeight: '100vh',
         background: 'var(--surface-page)',
-        fontFamily: "'DM Sans', sans-serif",
         color: 'var(--text-primary)',
       }}
     >
