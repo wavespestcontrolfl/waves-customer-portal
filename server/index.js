@@ -146,13 +146,18 @@ function ipFallbackKey(ip) {
   if (!ip) return ip;
   const v = ip.startsWith('::ffff:') && isIP(ip.slice(7)) === 4 ? ip.slice(7) : ip;
   if (isIP(v) !== 6) return v;
-  const [head, tail] = v.split('::');
+  // Canonicalize before slicing the /64 — equivalent textual forms
+  // (uppercase, leading zeros, "::" placement) must yield the same bucket
+  // key, otherwise a single client could rotate notation to evade the limit.
+  const lower = v.toLowerCase();
+  const [head, tail] = lower.split('::');
   const headParts = head ? head.split(':') : [];
   const tailParts = tail !== undefined ? (tail ? tail.split(':') : []) : [];
-  const missing = v.includes('::') ? Math.max(0, 8 - headParts.length - tailParts.length) : 0;
+  const missing = lower.includes('::') ? Math.max(0, 8 - headParts.length - tailParts.length) : 0;
   const fillers = Array(missing).fill('0');
-  const groups = v.includes('::') ? [...headParts, ...fillers, ...tailParts] : v.split(':');
-  return `${groups.slice(0, 4).join(':')}::/64`;
+  const groups = lower.includes('::') ? [...headParts, ...fillers, ...tailParts] : lower.split(':');
+  const prefix = groups.slice(0, 4).map((g) => parseInt(g, 16).toString(16)).join(':');
+  return `${prefix}::/64`;
 }
 
 function rateLimitKey(req) {
