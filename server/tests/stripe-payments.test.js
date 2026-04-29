@@ -30,6 +30,7 @@ const {
   INVOICE_UPDATE_ALLOWED_FIELDS,
   assertInvoiceVoidable,
 } = require('../services/invoice-helpers');
+const { classifyExistingWebhookEvent } = require('../routes/stripe-webhook-helpers');
 
 describe('stripe computeChargeAmount', () => {
   test('ACH (us_bank_account) pays the quoted amount with no surcharge', () => {
@@ -126,6 +127,44 @@ describe('invoice INVOICE_UPDATE_ALLOWED_FIELDS', () => {
 
   test('allowlist is frozen — accidental mutation throws in strict mode', () => {
     expect(Object.isFrozen(INVOICE_UPDATE_ALLOWED_FIELDS)).toBe(true);
+  });
+});
+
+describe('stripe-webhook classifyExistingWebhookEvent', () => {
+  // The atomic claim path inserts ON CONFLICT DO NOTHING. When the claim
+  // loses, the route reads the existing row and routes by classification:
+  //   processed=true                → duplicate (200, skip handler)
+  //   processed=false, error=set    → reclaim  (try to re-run handler)
+  //   processed=false, error=null   → inflight (503, ask Stripe to retry)
+  //
+  // The "reclaim" branch fixes the bug Codex flagged on PR #490: without
+  // it, a single transient handler failure leaves the row stuck at
+  // processed=false forever and every subsequent Stripe retry returns
+  // 503, so payment_intent.succeeded events stay permanently unapplied.
+
+  test('processed row → duplicate (handler must NOT re-run)', () => {
+    expect(classifyExistingWebhookEvent({ processed: true, error: null })).toBe('duplicate');
+    expect(classifyExistingWebhookEvent({ processed: true, error: 'old' })).toBe('duplicate');
+  });
+
+  test('failed previous attempt → reclaim (handler MUST re-run)', () => {
+    expect(classifyExistingWebhookEvent({ processed: false, error: 'db blip' })).toBe('reclaim');
+  });
+
+  test('truly in-flight (no error yet) → inflight (503, retry later)', () => {
+    expect(classifyExistingWebhookEvent({ processed: false, error: null })).toBe('inflight');
+  });
+
+  test('missing row defaults to inflight (fail closed, never double-run)', () => {
+    expect(classifyExistingWebhookEvent(null)).toBe('inflight');
+    expect(classifyExistingWebhookEvent(undefined)).toBe('inflight');
+  });
+
+  test('empty-string error is NOT a failure marker (treat as in-flight)', () => {
+    // Defensive — guard against a NULL/empty mismatch from a future
+    // migration. Only a non-empty error value should trigger reclaim,
+    // otherwise we could re-run handlers that haven't actually failed.
+    expect(classifyExistingWebhookEvent({ processed: false, error: '' })).toBe('inflight');
   });
 });
 

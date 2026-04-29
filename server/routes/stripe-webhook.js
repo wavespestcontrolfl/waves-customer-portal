@@ -4,6 +4,7 @@ const Stripe = require('stripe');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const stripeConfig = require('../config/stripe-config');
+const { classifyExistingWebhookEvent } = require('./stripe-webhook-helpers');
 
 /**
  * Stripe Webhook Handler
@@ -82,15 +83,51 @@ router.post(
 
     if (!claimed) {
       const existing = await db('stripe_webhook_events').where({ id: event.id }).first().catch(() => null);
-      if (existing?.processed) {
+      const classification = classifyExistingWebhookEvent(existing);
+
+      if (classification === 'duplicate') {
         logger.info(`[stripe-webhook] Duplicate event ${event.id} — already processed, skipping`);
         return res.status(200).json({ received: true, duplicate: true });
       }
-      // Another worker holds the row but hasn't finished. Tell Stripe to
-      // retry — by the time the retry lands, the other worker will have
-      // either committed processed=true (we 200) or crashed (we claim).
-      logger.warn(`[stripe-webhook] Event ${event.id} in-flight on another worker — asking Stripe to retry`);
-      return res.status(503).json({ error: 'Event in-flight, retry' });
+
+      if (classification === 'reclaim') {
+        // Previous handler attempt failed (catch block below recorded
+        // `error` and returned 500 so Stripe retries). Without this
+        // branch, every subsequent retry would land on the in-flight
+        // 503 path and never re-run the handler — events like
+        // payment_intent.succeeded would stay permanently unapplied
+        // after one transient DB blip. Atomic UPDATE clears the error
+        // and acts as the lease — if two retries arrive at once, only
+        // one wins the rowcount=1 and proceeds.
+        const reclaimed = await db('stripe_webhook_events')
+          .where({ id: event.id, processed: false })
+          .whereNotNull('error')
+          .update({ error: null });
+        if (reclaimed > 0) {
+          logger.warn(
+            `[stripe-webhook] Re-claiming previously-failed event ${event.id} ` +
+            `(prior error: ${existing.error})`,
+          );
+          // Fall through to the handler dispatch — we now own the row.
+        } else {
+          // Lost the re-claim race to another worker.
+          logger.warn(`[stripe-webhook] Event ${event.id} re-claim lost — asking Stripe to retry`);
+          return res.status(503).json({ error: 'Event re-claim race lost, retry' });
+        }
+      } else {
+        // True in-flight — another worker holds the row and hasn't
+        // recorded a failure yet. Tell Stripe to retry. By the time
+        // the retry lands, the other worker will have either committed
+        // processed=true (we 200) or written `error` (we re-claim above).
+        //
+        // Caveat: a worker that CRASHES before its catch block can write
+        // `error` leaves the row stuck in this state. Stripe gives up
+        // after ~3 days of retries; the row stays as forensic evidence.
+        // Operators can manually reclaim by clearing the row or setting
+        // error='manual reclaim' to surface it through the reclaim path.
+        logger.warn(`[stripe-webhook] Event ${event.id} in-flight on another worker — asking Stripe to retry`);
+        return res.status(503).json({ error: 'Event in-flight, retry' });
+      }
     }
 
     // ── Handle event ──────────────────────────────────────────
