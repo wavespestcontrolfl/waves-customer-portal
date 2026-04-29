@@ -157,14 +157,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [serviceSearch, setServiceSearch] = useState('');
   const [serviceResults, setServiceResults] = useState([]);
   const [serviceLoading, setServiceLoading] = useState(false);
+  const [serviceError, setServiceError] = useState('');
   const [addingService, setAddingService] = useState(false);
   const selectedService = services[0] || null;
 
   // Debounced Service Library search (same endpoint + filters as /admin/services catalog).
   useEffect(() => {
     const q = serviceSearch.trim();
-    if (!q) { setServiceResults([]); setServiceLoading(false); return; }
+    if (!q) { setServiceResults([]); setServiceLoading(false); setServiceError(''); return; }
     setServiceLoading(true);
+    setServiceError('');
     const handle = setTimeout(async () => {
       try {
         const params = new URLSearchParams();
@@ -182,8 +184,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           base_price: s.base_price,
           default_duration_minutes: s.default_duration_minutes,
         })));
-      } catch {
+      } catch (err) {
+        // Surface real failures (401 expired token, 500, network) so a
+        // service-library-data problem isn't indistinguishable from a
+        // search-pipeline problem in operators' bug reports.
         setServiceResults([]);
+        setServiceError(err?.message || 'Search failed');
       } finally {
         setServiceLoading(false);
       }
@@ -1004,9 +1010,20 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                       <span style={{ flex: 1, fontWeight: 500 }}>{svc.name}</span>
                     </div>
                   ))}
-                  {!serviceLoading && serviceResults.length === 0 && (
+                  {!serviceLoading && !serviceError && serviceResults.length === 0 && (
                     <div style={{ padding: '14px', textAlign: 'center', color: D.muted, fontSize: 13 }}>
-                      No services match &ldquo;{serviceSearch}&rdquo;
+                      No active services match &ldquo;{serviceSearch}&rdquo;
+                      <div style={{ fontSize: 11, marginTop: 4 }}>
+                        Check Service Library — only active, unarchived services appear here.
+                      </div>
+                    </div>
+                  )}
+                  {!serviceLoading && serviceError && (
+                    <div style={{ padding: '14px', textAlign: 'center', color: D.red, fontSize: 13 }}>
+                      Search failed: {serviceError}
+                      <div style={{ fontSize: 11, marginTop: 4, color: D.muted }}>
+                        Token may have expired — log out + back in, then retry.
+                      </div>
                     </div>
                   )}
                   {serviceLoading && serviceResults.length === 0 && (
