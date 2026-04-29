@@ -456,12 +456,18 @@ const StripeService = {
 
     let paymentIntent;
     try {
-      // Idempotency-Key bound to invoice + amount + pm so a double-click
-      // (or a network retry that lands twice) returns the original PI
-      // instead of charging the customer twice. The amount/pm components
-      // mean a re-attempt against a different card or a re-totaled
-      // invoice generates a fresh key as expected.
-      const idempotencyKey = `inv_card_on_file_${invoiceId}_${amountCents}_${card.id}`;
+      // Idempotency-Key bound to invoice + amount + pm + 60-second
+      // bucket. The bucket dedupes a double-click within the same
+      // minute (we'd reuse the existing PI instead of charging twice)
+      // but lets a deliberate admin retry a minute later get a fresh
+      // attempt — Stripe replays cached responses for ~24 h on reused
+      // keys, including failures, so a deterministic key would freeze
+      // the admin "Charge card on file" flow on a transient decline
+      // until the cache TTL expired (Codex P2 #490). Amount + pm
+      // components mean re-totaling the invoice or switching cards
+      // also yields a fresh key as expected.
+      const minuteBucket = Math.floor(Date.now() / 60_000);
+      const idempotencyKey = `inv_card_on_file_${invoiceId}_${amountCents}_${card.id}_${minuteBucket}`;
       paymentIntent = await stripe.paymentIntents.create({
         amount: amountCents,
         currency: 'usd',

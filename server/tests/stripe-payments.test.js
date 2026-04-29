@@ -30,7 +30,10 @@ const {
   INVOICE_UPDATE_ALLOWED_FIELDS,
   assertInvoiceVoidable,
 } = require('../services/invoice-helpers');
-const { classifyExistingWebhookEvent } = require('../routes/stripe-webhook-helpers');
+const {
+  classifyExistingWebhookEvent,
+  STALE_CLAIM_WINDOW_MS,
+} = require('../routes/stripe-webhook-helpers');
 
 describe('stripe computeChargeAmount', () => {
   test('ACH (us_bank_account) pays the quoted amount with no surcharge', () => {
@@ -164,7 +167,71 @@ describe('stripe-webhook classifyExistingWebhookEvent', () => {
     // Defensive — guard against a NULL/empty mismatch from a future
     // migration. Only a non-empty error value should trigger reclaim,
     // otherwise we could re-run handlers that haven't actually failed.
-    expect(classifyExistingWebhookEvent({ processed: false, error: '' })).toBe('inflight');
+    const fresh = new Date().toISOString();
+    expect(classifyExistingWebhookEvent({ processed: false, error: '', received_at: fresh })).toBe('inflight');
+  });
+
+  // Stale-claim recovery — addresses Codex P1 follow-up: a worker that
+  // crashes between claim and (processed=true | error=set) leaves the
+  // row stuck at processed=false / error=null. Using received_at as
+  // the lease timestamp lets the next Stripe retry past the stale
+  // window re-claim cleanly.
+
+  test('STALE_CLAIM_WINDOW_MS is exported and reasonable (1–60 minutes)', () => {
+    expect(STALE_CLAIM_WINDOW_MS).toBeGreaterThanOrEqual(60_000);
+    expect(STALE_CLAIM_WINDOW_MS).toBeLessThanOrEqual(60 * 60_000);
+  });
+
+  test('processed=false / error=null / received_at within window → inflight', () => {
+    const now = Date.now();
+    const fresh = new Date(now - 30_000).toISOString(); // 30s ago
+    expect(
+      classifyExistingWebhookEvent({ processed: false, error: null, received_at: fresh }, { now }),
+    ).toBe('inflight');
+  });
+
+  test('processed=false / error=null / received_at older than window → reclaim (stale)', () => {
+    const now = Date.now();
+    const stale = new Date(now - (STALE_CLAIM_WINDOW_MS + 60_000)).toISOString();
+    expect(
+      classifyExistingWebhookEvent({ processed: false, error: null, received_at: stale }, { now }),
+    ).toBe('reclaim');
+  });
+
+  test('exactly at the stale boundary stays inflight (strict >, not ≥)', () => {
+    const now = Date.now();
+    const boundary = new Date(now - STALE_CLAIM_WINDOW_MS).toISOString();
+    expect(
+      classifyExistingWebhookEvent({ processed: false, error: null, received_at: boundary }, { now }),
+    ).toBe('inflight');
+  });
+
+  test('error trumps stale check — error path is the authoritative reclaim signal', () => {
+    const now = Date.now();
+    const fresh = new Date(now - 1000).toISOString();
+    // A handler that wrote `error` 1 second ago is still a reclaim
+    // candidate — we don't gate the failed-attempt path on the lease.
+    expect(
+      classifyExistingWebhookEvent({ processed: false, error: 'db blip', received_at: fresh }, { now }),
+    ).toBe('reclaim');
+  });
+
+  test('staleWindowMs override lets callers tune the lease for tests', () => {
+    const now = Date.now();
+    const tenSecondsAgo = new Date(now - 10_000).toISOString();
+    expect(
+      classifyExistingWebhookEvent(
+        { processed: false, error: null, received_at: tenSecondsAgo },
+        { now, staleWindowMs: 5_000 },
+      ),
+    ).toBe('reclaim');
+  });
+
+  test('missing received_at falls back to inflight (can\'t prove staleness)', () => {
+    const now = Date.now();
+    expect(
+      classifyExistingWebhookEvent({ processed: false, error: null, received_at: null }, { now }),
+    ).toBe('inflight');
   });
 });
 
