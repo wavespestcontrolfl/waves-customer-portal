@@ -13,6 +13,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
+const { linkToCustomer } = require('../services/newsletter-subscribers');
 
 // Mirrors the client-side regex in NewsletterSignup.jsx so a row can't make
 // it into the DB with HTML-special characters that would later reflect into
@@ -149,8 +150,10 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
           unsubscribed_at: null,
           updated_at: new Date(),
         });
+        await linkToCustomer(email);
         return res.json({ success: true, resubscribed: true });
       }
+      await linkToCustomer(email);
       return res.json({ success: true, alreadySubscribed: true });
     }
 
@@ -161,6 +164,7 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
       source: req.body.source || 'public_form',
       status: 'active',
     });
+    await linkToCustomer(email);
 
     res.json({ success: true });
   } catch (err) {

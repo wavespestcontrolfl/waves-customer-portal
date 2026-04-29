@@ -587,7 +587,19 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
             className="bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-12 text-zinc-900 font-mono"
           />
           <Button onClick={schedule} variant="secondary" disabled={!draftId || !scheduleAt || !htmlBody}>Schedule send</Button>
-          <span className="text-11 text-ink-tertiary ml-auto">America/New_York · fires within 1 min of target</span>
+          {/* The datetime-local input is parsed in the browser's local
+              timezone — show the resolved ET equivalent so an operator
+              on PT/CT can verify it lands on the wall-clock minute they
+              meant before clicking Schedule. */}
+          <span className="text-11 text-ink-tertiary ml-auto">
+            {scheduleAt
+              ? `Fires ${new Date(scheduleAt).toLocaleString('en-US', {
+                  timeZone: 'America/New_York',
+                  month: 'short', day: 'numeric',
+                  hour: 'numeric', minute: '2-digit',
+                })} ET (within 1 min)`
+              : 'America/New_York · fires within 1 min of target'}
+          </span>
         </div>
 
         {status && (

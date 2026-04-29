@@ -16,6 +16,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const logger = require('../services/logger');
 const sendgrid = require('../services/sendgrid-mail');
 const NewsletterSender = require('../services/newsletter-sender');
+const { linkToCustomer } = require('../services/newsletter-subscribers');
 const { wrapNewsletter } = require('../services/email-template');
 const MODELS = require('../config/models');
 
@@ -60,12 +61,23 @@ function normalizeFromEmail(email) {
 
 // ── Subscribers ──────────────────────────────────────────────────
 
-// GET /api/admin/newsletter/subscribers?status=active&q=search
+// GET /api/admin/newsletter/subscribers?status=active|unsubscribed|bounced&q=search
+//
+// `bounced` is a synthetic filter: there's no status='bounced' in the table
+// (the webhook handler only flips status to 'unsubscribed' on hard
+// complaints, otherwise just increments bounce_count). Surface every
+// subscriber whose recent sends have bounced via bounce_count > 0 instead.
 router.get('/subscribers', async (req, res, next) => {
   try {
-    const { status, q, limit = 200, offset = 0 } = req.query;
-    const query = db('newsletter_subscribers').orderBy('subscribed_at', 'desc').limit(Math.min(+limit, 1000)).offset(+offset);
-    if (status) query.where({ status });
+    const { status, q } = req.query;
+    const limit = Math.min(Number(req.query.limit) || 200, 1000);
+    const offset = Math.max(Number(req.query.offset) || 0, 0);
+    const query = db('newsletter_subscribers').orderBy('subscribed_at', 'desc').limit(limit).offset(offset);
+    if (status === 'bounced') {
+      query.where('bounce_count', '>', 0);
+    } else if (status) {
+      query.where({ status });
+    }
     if (q) query.where('email', 'ilike', `%${q}%`);
     const rows = await query;
 
@@ -74,8 +86,13 @@ router.get('/subscribers', async (req, res, next) => {
       .count('* as count')
       .groupBy('status');
     const byStatus = Object.fromEntries(counts.map((r) => [r.status, Number(r.count)]));
+    // Synthetic 'bounced' tally — see filter above.
+    const bouncedRow = await db('newsletter_subscribers')
+      .where('bounce_count', '>', 0)
+      .count('* as count').first();
+    byStatus.bounced = Number(bouncedRow?.count || 0);
 
-    res.json({ subscribers: rows, counts: byStatus, total: rows.length });
+    res.json({ subscribers: rows, counts: byStatus });
   } catch (err) { next(err); }
 });
 
@@ -85,8 +102,9 @@ router.post('/subscribers', async (req, res, next) => {
   try {
     const { email, firstName, lastName, source } = req.body;
     if (!email) return res.status(400).json({ error: 'email required' });
+    const lc = String(email).trim().toLowerCase();
 
-    const existing = await db('newsletter_subscribers').where({ email: email.toLowerCase() }).first();
+    const existing = await db('newsletter_subscribers').where({ email: lc }).first();
     if (existing) {
       // Resubscribe path — flip status back to active.
       if (existing.status !== 'active') {
@@ -97,17 +115,19 @@ router.post('/subscribers', async (req, res, next) => {
           updated_at: new Date(),
         });
       }
+      await linkToCustomer(lc);
       return res.json({ success: true, subscriber: existing, resubscribed: existing.status !== 'active' });
     }
 
     const [row] = await db('newsletter_subscribers').insert({
-      email: email.toLowerCase(),
+      email: lc,
       first_name: firstName || null,
       last_name: lastName || null,
       source: source || 'admin_manual',
       status: 'active',
     }).returning('*');
 
+    await linkToCustomer(lc);
     res.json({ success: true, subscriber: row });
   } catch (err) { next(err); }
 });
@@ -150,6 +170,19 @@ router.post('/subscribers/import', async (req, res, next) => {
         .ignore()
         .returning('id');
       inserted = result.length;
+
+      // Bulk customer auto-link covers both fresh inserts AND rows that
+      // already existed (the onConflict path) — running over the full
+      // imported email set, idempotent on already-linked rows. One query.
+      await db.raw(
+        `UPDATE newsletter_subscribers ns
+            SET customer_id = c.id, updated_at = NOW()
+            FROM customers c
+           WHERE ns.email = ANY(?)
+             AND ns.customer_id IS NULL
+             AND LOWER(c.email) = ns.email`,
+        [rows.map((r) => r.email)],
+      );
     }
     const skipped = subscribers.length - inserted;
 
