@@ -82,39 +82,53 @@ async function reserveSlot({ estimateId, slotId, holdMinutes = DEFAULT_HOLD_MINU
   const { date, windowStart, techId } = parsed;
   const windowEnd = addMinutesToTime(windowStart, durationMinutes);
 
-  const estimate = await db('estimates').where({ id: estimateId }).first();
-  if (!estimate) {
-    const err = new Error('estimate not found');
-    err.code = 'ESTIMATE_NOT_FOUND';
-    throw err;
-  }
-  if (estimate.expires_at && new Date(estimate.expires_at) < new Date()) {
-    const err = new Error('estimate expired');
-    err.code = 'ESTIMATE_EXPIRED';
-    throw err;
-  }
-  if (['accepted', 'declined', 'expired'].includes(estimate.status)) {
-    const err = new Error(`estimate in terminal state '${estimate.status}'`);
-    err.code = 'ESTIMATE_TERMINAL';
-    throw err;
-  }
-
-  const now = new Date();
-  const expiresAt = new Date(now.getTime() + holdMinutes * 60 * 1000);
+  // Numeric coerce + bound the hold window so we can safely interpolate it
+  // into a Postgres INTERVAL string below.
+  const holdMins = Math.max(1, Math.min(120, Number(holdMinutes) || DEFAULT_HOLD_MINUTES));
 
   try {
     return await db.transaction(async (trx) => {
-      // Conflict check: any non-cancelled row on this (tech, date, windowStart)
-      // that isn't an expired reservation. Expired reservations are harmless
-      // cruft — releaseExpiredReservations() reclaims them, and the new
-      // reservation can overlap safely.
+      // SELECT … FOR UPDATE on the estimate row serializes concurrent
+      // reserves/accepts/declines for this estimate. Without this lock,
+      // status/expiry checks could be made against committed state that
+      // changes by the time we INSERT below. The `_expired` derived flag
+      // does the expiry comparison in Postgres so server clock skew across
+      // app instances can't bypass the gate.
+      const estimate = await trx('estimates')
+        .where({ id: estimateId })
+        .select('*', trx.raw('(expires_at IS NOT NULL AND expires_at < NOW()) AS _expired'))
+        .forUpdate()
+        .first();
+
+      if (!estimate) {
+        const err = new Error('estimate not found');
+        err.code = 'ESTIMATE_NOT_FOUND';
+        throw err;
+      }
+      if (estimate._expired) {
+        const err = new Error('estimate expired');
+        err.code = 'ESTIMATE_EXPIRED';
+        throw err;
+      }
+      if (['accepted', 'declined', 'expired', 'void'].includes(estimate.status)) {
+        const err = new Error(`estimate in terminal state '${estimate.status}'`);
+        err.code = 'ESTIMATE_TERMINAL';
+        throw err;
+      }
+
+      // Conflict check + insert in the same txn so a concurrent reserve on
+      // the same (tech, date, windowStart) can't slip past us. Expired
+      // reservations are harmless cruft — releaseExpiredReservations()
+      // reclaims them, and the new reservation can overlap safely. Use
+      // NOW() server-side instead of a JS-side `new Date()` to keep the
+      // inequality consistent with the timestamp the INSERT will set.
       const conflict = await trx('scheduled_services')
         .where({ scheduled_date: date, window_start: windowStart })
         .modify((q) => { if (techId) q.where('technician_id', techId); })
         .whereNotIn('status', ['cancelled'])
         .andWhere((q) => {
           q.whereNull('reservation_expires_at')
-            .orWhere('reservation_expires_at', '>', now);
+            .orWhereRaw('reservation_expires_at > NOW()');
         })
         .first('id');
 
@@ -137,7 +151,9 @@ async function reserveSlot({ estimateId, slotId, holdMinutes = DEFAULT_HOLD_MINU
         service_type: estimate.service_interest || 'Estimate service',
         status: 'pending',
         source_estimate_id: estimateId,
-        reservation_expires_at: expiresAt,
+        // DB-side expiry timestamp. holdMins is clamped above; safe to
+        // splice into the INTERVAL string.
+        reservation_expires_at: trx.raw(`NOW() + INTERVAL '${holdMins} minutes'`),
         payment_method_preference: null,
         estimated_duration_minutes: durationMinutes,
         // track_state uses its DB default ('scheduled'). track_view_token
@@ -145,11 +161,13 @@ async function reserveSlot({ estimateId, slotId, holdMinutes = DEFAULT_HOLD_MINU
         // there's nothing to track. commitReservation can mint a token
         // later if needed; Phase 1 track backfill only covered rows at
         // migration time.
-      }).returning('id');
+      }).returning(['id', 'reservation_expires_at']);
 
       const scheduledServiceId = row.id || row;
+      const expiresAt = row.reservation_expires_at || null;
       logger.info('[slot-reservation] reserved', {
-        estimateId, slotId, scheduledServiceId, expiresAt: expiresAt.toISOString(),
+        estimateId, slotId, scheduledServiceId,
+        expiresAt: expiresAt instanceof Date ? expiresAt.toISOString() : expiresAt,
       });
 
       return { scheduledServiceId, expiresAt };
@@ -171,43 +189,55 @@ async function reserveSlot({ estimateId, slotId, holdMinutes = DEFAULT_HOLD_MINU
  * returns: updated scheduled_services row
  */
 async function commitReservation({ scheduledServiceId, customerId, paymentMethodPreference, trx }) {
-  const client = trx || db;
-  const row = await client('scheduled_services').where({ id: scheduledServiceId }).first();
-  if (!row) {
-    const err = new Error('reservation not found');
-    err.code = 'RESERVATION_NOT_FOUND';
-    throw err;
-  }
-  if (!row.reservation_expires_at) {
-    // Already committed. Idempotent — return the existing row rather
-    // than throw; a double-click on accept shouldn't fail.
-    return row;
-  }
-  if (new Date(row.reservation_expires_at) < new Date()) {
-    const err = new Error('reservation expired');
-    err.code = 'RESERVATION_EXPIRED';
-    throw err;
-  }
+  // Body is shared between the "caller already has a txn" path (use it) and
+  // the "no caller txn" path (open our own). Either way the SELECT runs
+  // FOR UPDATE so a concurrent commit/release/expiry-cleanup can't race
+  // with us, and the expiry comparison runs in Postgres (NOW()) so server
+  // clock skew can't let an expired reservation slip through.
+  const run = async (client) => {
+    const row = await client('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .select('*', client.raw('(reservation_expires_at IS NOT NULL AND reservation_expires_at < NOW()) AS _expired'))
+      .forUpdate()
+      .first();
+    if (!row) {
+      const err = new Error('reservation not found');
+      err.code = 'RESERVATION_NOT_FOUND';
+      throw err;
+    }
+    if (!row.reservation_expires_at) {
+      // Already committed. Idempotent — return the existing row rather
+      // than throw; a double-click on accept shouldn't fail.
+      return row;
+    }
+    if (row._expired) {
+      const err = new Error('reservation expired');
+      err.code = 'RESERVATION_EXPIRED';
+      throw err;
+    }
 
-  const updates = {
-    customer_id: customerId,
-    reservation_expires_at: null,
-    updated_at: new Date(),
+    const updates = {
+      customer_id: customerId,
+      reservation_expires_at: null,
+      updated_at: new Date(),
+    };
+    if (paymentMethodPreference) {
+      updates.payment_method_preference = paymentMethodPreference;
+    }
+
+    const [updated] = await client('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .update(updates)
+      .returning('*');
+
+    logger.info('[slot-reservation] committed', {
+      scheduledServiceId, customerId, paymentMethodPreference: paymentMethodPreference || null,
+    });
+
+    return updated;
   };
-  if (paymentMethodPreference) {
-    updates.payment_method_preference = paymentMethodPreference;
-  }
 
-  const [updated] = await client('scheduled_services')
-    .where({ id: scheduledServiceId })
-    .update(updates)
-    .returning('*');
-
-  logger.info('[slot-reservation] committed', {
-    scheduledServiceId, customerId, paymentMethodPreference: paymentMethodPreference || null,
-  });
-
-  return updated;
+  return trx ? run(trx) : db.transaction(run);
 }
 
 /**
