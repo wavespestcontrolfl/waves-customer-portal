@@ -580,7 +580,7 @@ router.get('/:id', async (req, res, next) => {
       db('service_records').where({ customer_id: c.id }).orderBy('service_date', 'desc').limit(20),
       db('estimates').where({ customer_id: c.id }).orderBy('created_at', 'desc'),
       db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', 'payment_methods.card_brand', 'payment_methods.last_four').orderBy('payment_date', 'desc').limit(20),
-      db('payments').where({ customer_id: c.id, status: 'paid' }).sum(db.raw('amount - COALESCE(refund_amount, 0) as net')).first().catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
+      db('payments').where({ customer_id: c.id, status: 'paid' }).first(db.raw('COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0)::float as net')).catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
       db('scheduled_services').where({ customer_id: c.id }).orderBy('scheduled_date').limit(10),
       db('sms_log').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(20),
       db('customer_health_scores').where({ customer_id: c.id }).orderBy('scored_at', 'desc').first().catch(e => { logger.warn(`[customers:${c.id}] health_scores: ${e.message}`); return null; }),
