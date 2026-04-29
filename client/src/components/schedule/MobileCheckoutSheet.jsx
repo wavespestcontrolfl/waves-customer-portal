@@ -32,11 +32,13 @@ import MobileItemDiscountPickerSheet from './MobileItemDiscountPickerSheet';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
+// Source of truth: server/services/pricing-engine/constants.js
+// WAVEGUARD.tiers (see docs/pricing/POLICY.md). Keep aligned on change.
 const TIER_DISCOUNT = {
   bronze: 0,
   silver: 0.10,
   gold: 0.15,
-  platinum: 0.18,
+  platinum: 0.20,
 };
 
 function tierLabel(t) {
