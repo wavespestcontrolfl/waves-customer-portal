@@ -11,4 +11,5 @@ export { Table, THead, TBody, TR, TH, TD } from './Table';
 export { Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter } from './Dialog';
 export { Sheet, SheetHeader, SheetBody, SheetFooter } from './Sheet';
 export { Tabs, TabList, Tab, TabPanel } from './Tabs';
+export { Text } from './Text';
 export { cn } from './cn';
