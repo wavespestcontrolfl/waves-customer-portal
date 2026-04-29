@@ -152,7 +152,19 @@ router.get('/subscribers.csv', async (req, res, next) => {
     if (q) query.where('email', 'ilike', `%${q}%`);
     const rows = await query;
 
-    const escape = (v) => v == null ? '' : `"${String(v).replace(/"/g, '""')}"`;
+    // CSV formula-injection defense: Excel / Google Sheets execute cells
+    // starting with =, +, -, @, tab, or CR as formulas. first_name,
+    // last_name, source, and tags are subscriber-controlled via the
+    // public signup path, so a malicious value would fire as a formula
+    // the moment Waves opens the export. Leading apostrophe forces text
+    // mode without rendering inside the cell. Applied uniformly via the
+    // `escape` helper — harmless on legitimate values.
+    const escape = (v) => {
+      if (v == null) return '';
+      let s = String(v);
+      if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+      return `"${s.replace(/"/g, '""')}"`;
+    };
     const stamp = new Date().toISOString().slice(0, 10);
     res.type('text/csv');
     res.setHeader('Content-Disposition', `attachment; filename="newsletter-subscribers-${stamp}.csv"`);
