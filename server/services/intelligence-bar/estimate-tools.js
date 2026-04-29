@@ -439,10 +439,10 @@ async function createPendingEstimate(input) {
     return { error: 'Missing required fields: customerName, address, engineResult.monthlyTotal' };
   }
 
+  // Same token shape as POST /api/admin/estimates: 16 random bytes hex.
+  // Old `name-slug-${4 bytes}` format was guessable.
   const crypto = require('crypto');
-  const shortId = crypto.randomBytes(4).toString('hex');
-  const nameSlug = String(customerName).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-  const token = `${nameSlug}-${shortId}`;
+  const token = crypto.randomBytes(16).toString('hex');
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + 7);
 

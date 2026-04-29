@@ -26,9 +26,11 @@ router.post('/', async (req, res, next) => {
   try {
     const { customerId, estimateData, address, customerName, customerPhone, customerEmail, monthlyTotal, annualTotal, onetimeTotal, waveguardTier, notes, satelliteUrl, showOneTimeOption, billByInvoice } = req.body;
 
-    const shortId = crypto.randomBytes(4).toString('hex');
-    const nameSlug = (customerName || 'customer').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    const token = `${nameSlug}-${shortId}`;
+    // 16 bytes = 128 bits of entropy. Old format (`name-slug-${4 bytes}`)
+    // was guessable: customer name is public-ish and 32 bits is brute-forceable
+    // in days at modest QPS. Existing rows keep their old tokens (DB lookup
+    // is a string match), so this is forward-only.
+    const token = crypto.randomBytes(16).toString('hex');
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 7);
 
