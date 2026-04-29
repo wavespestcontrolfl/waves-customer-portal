@@ -1189,6 +1189,14 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
           <div className="flex items-center gap-2 flex-wrap">
             <span className="u-nums text-11 text-ink-tertiary">{amount}</span>
             <StatusPillV3 status={estimate.status} />
+            {estimate.viewCount > 1 && (
+              <span
+                className="u-nums text-11 text-ink-tertiary"
+                title={estimate.lastViewedAt ? `Last viewed ${timeAgo(estimate.lastViewedAt)}` : undefined}
+              >
+                {estimate.viewCount}× viewed
+              </span>
+            )}
             <span className="u-nums text-11 text-ink-tertiary">#{shortEstimateRef(estimate.id)}</span>
           </div>
         ) : (
@@ -1197,6 +1205,14 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
             <span className={cn('ml-2 font-medium', mobileStatusClass(estimate.status))}>
               {cfg.label}
             </span>
+            {estimate.viewCount > 1 && (
+              <span
+                className="ml-2 u-nums"
+                title={estimate.lastViewedAt ? `Last viewed ${timeAgo(estimate.lastViewedAt)}` : undefined}
+              >
+                {estimate.viewCount}×
+              </span>
+            )}
             <span className="ml-2 u-nums">#{shortEstimateRef(estimate.id)}</span>
           </div>
         )}
