@@ -39,6 +39,35 @@
   }
 }
 
+/* /admin/dashboard: force muted body text to pure black so labels, sublabels,
+   and metric captions read at the same weight as the values. Targets the
+   400–700 muted ramps of zinc / stone / slate (the three Tailwind greys
+   in use across the V2 admin) plus the .text-ink-* semantic tokens.
+   Semantic colors — alert red, success green, etc. — are explicitly NOT in
+   the list, so positive/negative numbers keep their meaning. Excludes
+   <button>, .btn, and anything with role=button so action chrome keeps its
+   tonal hierarchy. Scoped to .dashboard-blackout (root of DashboardPageV2);
+   other admin pages keep the default zinc ramp. */
+.dashboard-blackout :where(
+  .text-ink-secondary,
+  .text-ink-tertiary,
+  .text-ink-disabled,
+  .text-zinc-400,
+  .text-zinc-500,
+  .text-zinc-600,
+  .text-zinc-700,
+  .text-stone-400,
+  .text-stone-500,
+  .text-stone-600,
+  .text-stone-700,
+  .text-slate-400,
+  .text-slate-500,
+  .text-slate-600,
+  .text-slate-700
+):not(button):not(.btn):not([role="button"]):not(button *):not(.btn *):not([role="button"] *) {
+  color: #000 !important;
+}
+
 /* Global focus-visible ring for interactive elements. The .btn system in
    buttons.css already has its own focus style; this catches every inline
    <button> and <a> (customer portal is full of them) so keyboard users

@@ -170,7 +170,7 @@ export default function DashboardPageV2() {
   ];
 
   return (
-    <div className="font-sans bg-surface-page min-h-full p-3 sm:p-6 text-zinc-900">
+    <div className="dashboard-blackout font-sans bg-surface-page min-h-full p-3 sm:p-6 text-zinc-900">
       <header className="mb-5 max-md:mb-6">
         <div className="flex items-start justify-between flex-wrap gap-3">
           <div>
