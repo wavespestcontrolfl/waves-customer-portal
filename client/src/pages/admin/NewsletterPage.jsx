@@ -19,7 +19,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Badge, Button, Card, CardBody } from '../../components/ui';
-import { Mail, Users, Zap, Calendar, FileText, TrendingUp, Sparkles, Upload, MapPin } from 'lucide-react';
+import { Users, Zap, Calendar, FileText, TrendingUp, Sparkles, Upload, MapPin } from 'lucide-react';
 import { ComposeView, HistoryView, SubscribersView } from './NewsletterTabs';
 import EmailAutomationsPanelV2 from './EmailAutomationsPanelV2';
 
@@ -386,37 +386,23 @@ function DashboardView({ onSelectTab, onDraftFromEvent, sendsData, sendsLoading,
         <RecentPosts posts={recentPosts} loading={loadingPosts} />
       </div>
 
-      {/* Sub-page tiles — Automations + Distribution */}
+      {/* Sub-page tile — Automations */}
       <div className="mb-6">
         <SectionHeader title="Manage" hint="Jump straight to a section" />
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <Card
-            className="cursor-pointer hover:bg-zinc-50 transition-colors"
-            onClick={() => onSelectTab('automations')}
-          >
-            <CardBody>
-              <div className="flex items-center gap-2 mb-2">
-                <Zap size={18} strokeWidth={1.75} className="text-zinc-900" />
-                <span className="text-14 font-medium text-ink-primary">Automations</span>
-              </div>
-              <div className="text-12 text-ink-tertiary">
-                Automated flows like Referral Nudge, Payment Failed, New Appointment Booked.
-              </div>
-            </CardBody>
-          </Card>
-          <Card>
-            <CardBody>
-              <div className="flex items-center gap-2 mb-2">
-                <Mail size={18} strokeWidth={1.75} className="text-zinc-900" />
-                <span className="text-14 font-medium text-ink-primary">Distribution channels</span>
-                <Badge tone="neutral">Preview</Badge>
-              </div>
-              <div className="text-12 text-ink-tertiary">
-                Connect IG, Facebook, LinkedIn so a published newsletter auto-posts a teaser. Ships with the Blog Content Engine integration.
-              </div>
-            </CardBody>
-          </Card>
-        </div>
+        <Card
+          className="cursor-pointer hover:bg-zinc-50 transition-colors"
+          onClick={() => onSelectTab('automations')}
+        >
+          <CardBody>
+            <div className="flex items-center gap-2 mb-2">
+              <Zap size={18} strokeWidth={1.75} className="text-zinc-900" />
+              <span className="text-14 font-medium text-ink-primary">Automations</span>
+            </div>
+            <div className="text-12 text-ink-tertiary">
+              Automated flows like Referral Nudge, Payment Failed, New Appointment Booked.
+            </div>
+          </CardBody>
+        </Card>
       </div>
     </div>
   );
@@ -558,7 +544,13 @@ export default function NewsletterPage() {
           subscribersActive={subscribersActive}
         />
       )}
-      {tab === 'compose' && <ComposeView pendingEvent={pendingDraftEvent} onPendingEventConsumed={clearPendingDraftEvent} />}
+      {tab === 'compose' && (
+        <ComposeView
+          pendingEvent={pendingDraftEvent}
+          onPendingEventConsumed={clearPendingDraftEvent}
+          onSendComplete={() => { setRefreshKey((k) => k + 1); setTab('history'); }}
+        />
+      )}
       {tab === 'history' && <HistoryView />}
       {tab === 'subscribers' && <SubscribersView />}
       {tab === 'automations' && <EmailAutomationsPanelV2 />}

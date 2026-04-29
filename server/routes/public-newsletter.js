@@ -8,10 +8,37 @@
  */
 
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
+const { linkToCustomer } = require('../services/newsletter-subscribers');
+
+// Mirrors the client-side regex in NewsletterSignup.jsx so a row can't make
+// it into the DB with HTML-special characters that would later reflect into
+// the unsub confirmation page.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Per-IP rate limiter on POST /subscribe. The global /api/ limiter in
+// index.js is shared across every public endpoint, so a subscribe-spam
+// botnet can eat the budget for legitimate portal traffic. This caps
+// signup at 5 per minute per IP — enough for legitimate retries on a
+// shared NAT, well below what a flood attempt needs.
+const subscribeLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many subscribe attempts. Try again in a minute.' },
+});
+
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
 
 // POST /api/public/newsletter/unsubscribe/:token
 // RFC 8058 one-click: mail clients POST here with no auth + no form body.
@@ -66,7 +93,10 @@ router.get('/unsubscribe/:token', async (req, res) => {
     }
 
     // Minimal self-contained HTML page — no template engine, no client code.
-    const email = sub ? sub.email : '';
+    // Escape the email even though signup validation rejects HTML-special
+    // chars now (see EMAIL_RE) — historic rows pre-dating that validation
+    // could still contain anything.
+    const email = sub ? escapeHtml(sub.email) : '';
     res.type('html').send(`
       <!doctype html>
       <html>
@@ -100,13 +130,14 @@ router.get('/unsubscribe/:token', async (req, res) => {
 
 // POST /api/public/newsletter/subscribe
 // Body: { email, firstName?, lastName?, source? }
-// Basic public signup — rate-limited at the app level via express-rate-limit
-// in index.js. PR 6 will layer on a confirmation email and a customer-facing
-// signup form.
-router.post('/subscribe', async (req, res) => {
+// Layered rate-limited: global /api/ limiter (index.js) plus the per-IP
+// subscribeLimiter above to cap signup-spam without affecting other
+// public endpoints. PR 6 will layer on a confirmation email and a
+// customer-facing signup form.
+router.post('/subscribe', subscribeLimiter, async (req, res) => {
   try {
     const email = (req.body.email || '').trim().toLowerCase();
-    if (!email || !email.includes('@')) {
+    if (!EMAIL_RE.test(email)) {
       return res.status(400).json({ error: 'valid email required' });
     }
 
@@ -119,8 +150,10 @@ router.post('/subscribe', async (req, res) => {
           unsubscribed_at: null,
           updated_at: new Date(),
         });
+        await linkToCustomer(email);
         return res.json({ success: true, resubscribed: true });
       }
+      await linkToCustomer(email);
       return res.json({ success: true, alreadySubscribed: true });
     }
 
@@ -131,6 +164,7 @@ router.post('/subscribe', async (req, res) => {
       source: req.body.source || 'public_form',
       status: 'active',
     });
+    await linkToCustomer(email);
 
     res.json({ success: true });
   } catch (err) {
@@ -181,4 +215,9 @@ router.get('/posts/:id', async (req, res) => {
   }
 });
 
+// Default export is the router (used by index.js mount). Helpers are
+// exposed as named properties so the test suite can exercise them
+// without spinning up Express.
 module.exports = router;
+module.exports.EMAIL_RE = EMAIL_RE;
+module.exports.escapeHtml = escapeHtml;

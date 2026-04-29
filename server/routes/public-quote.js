@@ -6,6 +6,7 @@ const logger = require('../services/logger');
 const { generateEstimate } = require('../services/pricing-engine');
 const TwilioService = require('../services/twilio');
 const { shortenOrPassthrough } = require('../services/short-url');
+const { linkToCustomer } = require('../services/newsletter-subscribers');
 const smsTemplatesRouter = require('./admin-sms-templates');
 
 const WAVES_ADMIN_PHONE = '+19413187612';
@@ -249,6 +250,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           });
           logger.info(`[public-quote] SendGrid: subscribed ${emailLc} via quote wizard`);
         }
+        // Link to the customer row that this quote will create / has
+        // created. The quote wizard creates customer rows in a sibling
+        // path; matching by email after the dual-write catches both the
+        // already-existing-customer case and the just-inserted one.
+        await linkToCustomer(emailLc);
       } catch (e) { logger.error(`[public-quote] newsletter_subscribers dual-write failed: ${e.message}`); }
     }
 

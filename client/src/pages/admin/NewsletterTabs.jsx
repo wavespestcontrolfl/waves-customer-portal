@@ -166,7 +166,7 @@ function buildEventPrompt(event) {
   return lines.join('\n');
 }
 
-export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
+export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComplete } = {}) {
   const [draftId, setDraftId] = useState(null);
   const [subject, setSubject] = useState('');
   const [subjectB, setSubjectB] = useState('');
@@ -176,7 +176,10 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
   const [textBody, setTextBody] = useState('');
   const [fromName, setFromName] = useState('Waves Pest Control');
   const [fromEmail, setFromEmail] = useState('newsletter@wavespestcontrol.com');
-  const [testEmail, setTestEmail] = useState('contact@wavespestcontrol.com');
+  // Defaults to the logged-in admin's email (populated below) so test
+  // sends don't fire into the shared contact@ inbox by default. Falls
+  // back to '' if /me is unreachable — operator types their own.
+  const [testEmail, setTestEmail] = useState('');
   const [status, setStatus] = useState('');
   const [activeCount, setActiveCount] = useState(null);
   const [segmentCount, setSegmentCount] = useState(null);
@@ -191,9 +194,21 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
   // the campaign — the column is JSONB with no enum.
   const [segmentTags, setSegmentTags] = useState([]);
   const [tagDraft, setTagDraft] = useState('');
+  // Existing distinct tags pulled from the DB — fed into the tag input's
+  // <datalist> so the operator picks an existing tag instead of typing
+  // a near-miss that matches zero subscribers.
+  const [tagSuggestions, setTagSuggestions] = useState([]);
 
   // Schedule
   const [scheduleAt, setScheduleAt] = useState('');
+
+  // Preview dialog
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewHtml, setPreviewHtml] = useState('');
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  // Send confirm dialog
+  const [sendConfirmOpen, setSendConfirmOpen] = useState(false);
 
   // AI modal
   const [aiOpen, setAiOpen] = useState(false);
@@ -241,6 +256,12 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
     adminFetch('/admin/newsletter/subscribers?status=active&limit=1')
       .then((d) => setActiveCount(d.counts?.active || 0))
       .catch(() => setActiveCount(null));
+    adminFetch('/admin/auth/me')
+      .then((me) => { if (me?.email) setTestEmail(me.email); })
+      .catch(() => { /* leave blank, operator types */ });
+    adminFetch('/admin/newsletter/tags')
+      .then((d) => setTagSuggestions(Array.isArray(d?.tags) ? d.tags : []))
+      .catch(() => setTagSuggestions([]));
   }, []);
 
   // Recalculate segment match count when the filter changes.
@@ -287,6 +308,23 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
     } catch (e) { setStatus('Save failed: ' + e.message); }
   };
 
+  const openPreview = async () => {
+    setPreviewOpen(true);
+    setPreviewLoading(true);
+    setPreviewHtml('');
+    try {
+      const res = await adminFetch('/admin/newsletter/preview', {
+        method: 'POST',
+        body: JSON.stringify({ htmlBody, previewText }),
+      });
+      setPreviewHtml(res.html || '');
+    } catch (e) {
+      setPreviewHtml(`<p style="font-family:sans-serif;color:#C8312F;padding:20px;">Preview failed: ${e.message}</p>`);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
   const sendTest = async () => {
     if (!draftId) { setStatus('Save a draft first.'); return; }
     setStatus(`Sending test to ${testEmail}...`);
@@ -296,15 +334,29 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
     } catch (e) { setStatus('Test failed: ' + e.message); }
   };
 
-  const sendNow = async () => {
+  // Open the typed-confirm modal. The actual fetch happens in confirmSend
+  // once the operator types SEND and clicks the button.
+  const sendNow = () => {
     if (!draftId) { setStatus('Save a draft first.'); return; }
+    setSendConfirmOpen(true);
+  };
+
+  const confirmSend = async () => {
+    setSendConfirmOpen(false);
     const audience = segmentCount ?? activeCount ?? '?';
-    if (!confirm(`Send "${subject}" to ${audience} subscriber${audience === 1 ? '' : 's'}? This cannot be undone.`)) return;
-    setStatus(`Sending to ${audience} subscribers...`);
+    setStatus(`Queuing send to ${audience} subscribers...`);
     try {
-      const res = await adminFetch(`/admin/newsletter/sends/${draftId}/send`, { method: 'POST' });
-      setStatus(`Sent: ${res.delivered}/${res.recipients} delivered (${res.failed} failed).`);
+      // Server returns 202 — campaign runs asynchronously now (a long
+      // synchronous send was timing out the proxy and prompting double-
+      // clicks). Operator polls History for the final delivered/failed
+      // counts.
+      await adminFetch(`/admin/newsletter/sends/${draftId}/send`, { method: 'POST' });
+      setStatus(`Send queued. Opening History…`);
       resetForm();
+      // Brief delay so the operator sees the status before the tab
+      // switches; History view will refresh when the parent flips
+      // refreshKey, surfacing the new row at status='sending'.
+      if (onSendComplete) setTimeout(onSendComplete, 1200);
     } catch (e) { setStatus('Send failed: ' + e.message); }
   };
 
@@ -489,6 +541,7 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
                 type="text"
                 value={tagDraft}
                 onChange={(e) => setTagDraft(e.target.value)}
+                list="newsletter-tag-suggestions"
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ',') {
                     e.preventDefault();
@@ -502,6 +555,11 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
                 placeholder={segmentTags.length ? 'add another…' : 'e.g. platinum-tier, hurricane-prep'}
                 className="h-7 flex-1 min-w-[160px] bg-white border-hairline border-zinc-300 rounded-full px-3 text-11 text-zinc-900 placeholder:text-ink-tertiary focus:outline-none focus:border-zinc-900"
               />
+              <datalist id="newsletter-tag-suggestions">
+                {tagSuggestions
+                  .filter((t) => !segmentTags.includes(t))
+                  .map((t) => <option key={t} value={t} />)}
+              </datalist>
             </div>
             <div className="text-11 text-ink-tertiary mt-1">
               Press Enter or comma to add. Matches subscribers tagged with ANY of the listed tags.
@@ -561,6 +619,7 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
           <Button onClick={saveDraft} variant="secondary" disabled={!subject}>
             {draftId ? 'Update draft' : 'Save draft'}
           </Button>
+          <Button onClick={openPreview} variant="secondary" disabled={!htmlBody}>Preview</Button>
           <div className="flex items-center gap-2 ml-auto">
             <input
               type="text"
@@ -569,8 +628,8 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
               className="bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-12 text-zinc-900 font-mono w-56"
               placeholder="test@wavespestcontrol.com"
             />
-            <Button onClick={sendTest} variant="secondary" disabled={!draftId}>Send test</Button>
-            <Button onClick={sendNow} disabled={!draftId || !htmlBody}>Send to all</Button>
+            <Button onClick={sendTest} variant="secondary" disabled={!draftId || !testEmail}>Send test</Button>
+            <Button onClick={sendNow} disabled={!draftId || !htmlBody || segmentCount === 0}>Send to all</Button>
           </div>
         </div>
 
@@ -583,7 +642,19 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
             className="bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-12 text-zinc-900 font-mono"
           />
           <Button onClick={schedule} variant="secondary" disabled={!draftId || !scheduleAt || !htmlBody}>Schedule send</Button>
-          <span className="text-11 text-ink-tertiary ml-auto">America/New_York · fires within 1 min of target</span>
+          {/* The datetime-local input is parsed in the browser's local
+              timezone — show the resolved ET equivalent so an operator
+              on PT/CT can verify it lands on the wall-clock minute they
+              meant before clicking Schedule. */}
+          <span className="text-11 text-ink-tertiary ml-auto">
+            {scheduleAt
+              ? `Fires ${new Date(scheduleAt).toLocaleString('en-US', {
+                  timeZone: 'America/New_York',
+                  month: 'short', day: 'numeric',
+                  hour: 'numeric', minute: '2-digit',
+                })} ET (within 1 min)`
+              : 'America/New_York · fires within 1 min of target'}
+          </span>
         </div>
 
         {status && (
@@ -599,7 +670,180 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
           onDraft={handleAiDraft}
         />
       )}
+
+      {previewOpen && (
+        <PreviewDialog
+          html={previewHtml}
+          loading={previewLoading}
+          onClose={() => setPreviewOpen(false)}
+        />
+      )}
+
+      {sendConfirmOpen && (
+        <SendConfirmDialog
+          subject={subject}
+          subjectB={abEnabled ? subjectB : null}
+          previewText={previewText}
+          fromName={fromName}
+          fromEmail={fromEmail}
+          audience={segmentCount ?? activeCount ?? null}
+          activeCount={activeCount}
+          segmentFilter={segmentFilter}
+          htmlBody={htmlBody}
+          onCancel={() => setSendConfirmOpen(false)}
+          onConfirm={confirmSend}
+        />
+      )}
     </Card>
+  );
+}
+
+// ── Send confirm dialog ──────────────────────────────────────────────
+//
+// Replaces window.confirm() for the most consequential button in the admin
+// app. Shows a rendered preview of the body, the resolved audience, and a
+// type-SEND gate — the goal is to make a destructive double-click much
+// less likely than a stray Enter on the browser modal.
+
+function SendConfirmDialog({
+  subject, subjectB, previewText, fromName, fromEmail,
+  audience, activeCount, segmentFilter, htmlBody,
+  onCancel, onConfirm,
+}) {
+  const [typed, setTyped] = useState('');
+  const ready = typed.trim().toUpperCase() === 'SEND' && audience > 0;
+
+  const segmentSummary = useMemo(() => {
+    if (!segmentFilter) return `All active (${activeCount ?? '?'})`;
+    const parts = [];
+    if (segmentFilter.customersOnly) parts.push('Customers only');
+    else if (segmentFilter.leadsOnly) parts.push('Non-customers only');
+    if (Array.isArray(segmentFilter.sources) && segmentFilter.sources.length) {
+      parts.push(`Sources: ${segmentFilter.sources.join(', ')}`);
+    }
+    if (Array.isArray(segmentFilter.tags) && segmentFilter.tags.length) {
+      parts.push(`Tags: ${segmentFilter.tags.join(', ')}`);
+    }
+    return parts.length ? parts.join(' · ') : 'Filtered';
+  }, [segmentFilter, activeCount]);
+
+  // Body-only preview — no chrome wrap. The wrap is server-side and
+  // identical for every campaign, so the operator's review value is
+  // entirely in the body. Sandbox tight (no scripts, no same-origin)
+  // since the operator authored the HTML and may have pasted anything.
+  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><base target="_blank"><style>html,body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:15px;line-height:1.55;color:#0F172A;}body{padding:14px;}h1,h2,h3,h4{line-height:1.25;}img{max-width:100%;height:auto;}*{box-sizing:border-box;}</style></head><body>${htmlBody || '<em style="color:#64748B">(empty body)</em>'}</body></html>`;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onCancel}>
+      <div
+        className="bg-white border-hairline border-zinc-300 rounded-sm shadow-xl w-full max-w-2xl flex flex-col"
+        style={{ maxHeight: '90vh' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="p-5 border-b border-hairline border-zinc-200 flex items-start justify-between flex-shrink-0">
+          <div className="min-w-0">
+            <h3 className="text-16 font-medium text-zinc-900">Send to {audience != null ? audience.toLocaleString() : '?'} subscriber{audience === 1 ? '' : 's'}?</h3>
+            <p className="text-12 text-ink-secondary mt-0.5">This can't be undone. Each recipient is contacted at the SendGrid send below.</p>
+          </div>
+          <button type="button" onClick={onCancel} className="text-ink-tertiary hover:text-zinc-900 text-14 ml-3" aria-label="Close">✕</button>
+        </div>
+
+        <div className="px-5 py-4 overflow-y-auto flex-1 space-y-3">
+          <ConfirmRow label="Subject" value={subject || <em className="text-ink-tertiary">(missing)</em>} />
+          {subjectB && <ConfirmRow label="Subject (B)" value={subjectB} hint="A/B 50/50 random split" />}
+          {previewText && <ConfirmRow label="Preview text" value={previewText} />}
+          <ConfirmRow label="From" value={`${fromName} <${fromEmail}>`} />
+          <ConfirmRow label="Audience" value={segmentSummary} />
+
+          <div>
+            <div className="text-11 uppercase tracking-label text-ink-secondary mb-1">Body preview</div>
+            <iframe
+              title="Body preview"
+              srcDoc={srcDoc}
+              sandbox=""
+              style={{ width: '100%', height: 320, border: '1px solid #E4E4E7', borderRadius: 4, background: '#fff' }}
+            />
+            <p className="text-11 text-ink-tertiary mt-1">
+              Body only — Waves header + unsubscribe footer are added server-side. Send a test if you want to see the full chrome.
+            </p>
+          </div>
+        </div>
+
+        <div className="px-5 py-4 border-t border-hairline border-zinc-200 flex items-center gap-3 flex-shrink-0 flex-wrap">
+          <label className="text-12 text-ink-secondary flex-shrink-0">Type SEND to confirm:</label>
+          <input
+            type="text"
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            autoFocus
+            spellCheck={false}
+            autoComplete="off"
+            className="bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-13 text-zinc-900 font-mono w-32"
+            placeholder="SEND"
+          />
+          <div className="ml-auto flex items-center gap-2">
+            <Button onClick={onCancel} variant="secondary">Cancel</Button>
+            <Button onClick={onConfirm} disabled={!ready}>Send to all</Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Preview dialog ───────────────────────────────────────────────────
+//
+// Renders the operator's draft inside the same chrome the live send uses
+// (server returns the wrapped HTML from POST /admin/newsletter/preview).
+// Sandboxed iframe — no scripts, no same-origin — since the body is
+// operator-authored.
+
+function PreviewDialog({ html, loading, onClose }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div
+        className="bg-white border-hairline border-zinc-300 rounded-sm shadow-xl w-full max-w-3xl flex flex-col"
+        style={{ maxHeight: '90vh' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="p-5 border-b border-hairline border-zinc-200 flex items-center justify-between flex-shrink-0">
+          <div>
+            <h3 className="text-16 font-medium text-zinc-900">Preview</h3>
+            <p className="text-12 text-ink-secondary mt-0.5">
+              How the email looks with header + footer chrome. Unsubscribe link is a demo token; real recipients get their own.
+            </p>
+          </div>
+          <button type="button" onClick={onClose} className="text-ink-tertiary hover:text-zinc-900 text-14 ml-3" aria-label="Close">✕</button>
+        </div>
+        <div className="overflow-y-auto flex-1 bg-zinc-50 p-3">
+          {loading ? (
+            <div className="text-13 text-ink-secondary p-8 text-center">Rendering…</div>
+          ) : (
+            <iframe
+              title="Newsletter preview"
+              srcDoc={html}
+              sandbox=""
+              style={{ width: '100%', minHeight: '60vh', border: '1px solid #E4E4E7', borderRadius: 4, background: '#fff' }}
+            />
+          )}
+        </div>
+        <div className="px-5 py-3 border-t border-hairline border-zinc-200 flex justify-end flex-shrink-0">
+          <Button onClick={onClose} variant="secondary">Close</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConfirmRow({ label, value, hint }) {
+  return (
+    <div className="flex items-baseline gap-3">
+      <div className="text-11 uppercase tracking-label text-ink-secondary w-28 flex-shrink-0">{label}</div>
+      <div className="flex-1 min-w-0">
+        <div className="text-13 text-zinc-900 break-words">{value}</div>
+        {hint && <div className="text-11 text-ink-tertiary mt-0.5">{hint}</div>}
+      </div>
+    </div>
   );
 }
 
@@ -707,6 +951,10 @@ function AiDraftModal({ initialTemplate, initialPrompt, onClose, onDraft }) {
 export function HistoryView() {
   const [sends, setSends] = useState([]);
   const [loading, setLoading] = useState(true);
+  // Per-send variant breakdown (a vs b counts) — fetched lazily when the
+  // operator expands an A/B row, then cached.
+  const [variantStats, setVariantStats] = useState({});
+  const [expandedId, setExpandedId] = useState(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -725,6 +973,21 @@ export function HistoryView() {
     } catch (e) { alert('Cancel failed: ' + e.message); }
   };
 
+  // Toggle the A/B breakdown panel. First open lazy-loads /sends/:id (the
+  // detail endpoint includes variantStats); subsequent toggles read from
+  // the cache.
+  const toggleVariants = async (id) => {
+    if (expandedId === id) { setExpandedId(null); return; }
+    setExpandedId(id);
+    if (variantStats[id]) return;
+    try {
+      const d = await adminFetch(`/admin/newsletter/sends/${id}`);
+      if (d.variantStats) {
+        setVariantStats((prev) => ({ ...prev, [id]: d.variantStats }));
+      }
+    } catch { /* surfaces as 'no breakdown available' below */ }
+  };
+
   return (
     <Card className="p-5">
       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
@@ -740,48 +1003,136 @@ export function HistoryView() {
         <div className="space-y-0 -mx-5">
           {sends.map((s) => {
             const pct = s.recipient_count ? Math.round((s.delivered_count / s.recipient_count) * 100) : 0;
+            const isAb = !!s.subject_b;
+            const isOpen = expandedId === s.id;
             return (
-              <div key={s.id} className="px-5 py-3 border-b border-hairline border-zinc-200 flex items-start gap-4">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1 flex-wrap">
-                    <span className="text-14 font-medium text-zinc-900 truncate">{s.subject}</span>
-                    {s.subject_b && <Badge tone="muted">A/B</Badge>}
-                    {s.segment_filter && <Badge tone="muted">Segmented</Badge>}
-                    <StatusChip status={s.status} />
+              <div key={s.id} className="border-b border-hairline border-zinc-200">
+                <div className="px-5 py-3 flex items-start gap-4">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1 flex-wrap">
+                      <span className="text-14 font-medium text-zinc-900 truncate">{s.subject}</span>
+                      {isAb && (
+                        <button
+                          type="button"
+                          onClick={() => toggleVariants(s.id)}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-sm bg-zinc-100 text-11 font-medium text-zinc-700 hover:bg-zinc-200 u-focus-ring"
+                          title={isOpen ? 'Hide A/B breakdown' : 'Show A/B breakdown'}
+                        >
+                          A/B {isOpen ? '▾' : '▸'}
+                        </button>
+                      )}
+                      {s.segment_filter && <Badge tone="muted">Segmented</Badge>}
+                      <StatusChip status={s.status} />
+                    </div>
+                    <div className="text-11 text-ink-tertiary">
+                      {s.created_by_name || 'Admin'} · {
+                        s.status === 'scheduled' && s.scheduled_for
+                          ? `scheduled for ${new Date(s.scheduled_for).toLocaleString()}`
+                          : s.sent_at ? new Date(s.sent_at).toLocaleString() : 'draft (not sent)'
+                      }
+                    </div>
+                    {isAb && (
+                      <div className="text-11 text-ink-tertiary mt-0.5 truncate">B: {s.subject_b}</div>
+                    )}
                   </div>
-                  <div className="text-11 text-ink-tertiary">
-                    {s.created_by_name || 'Admin'} · {
-                      s.status === 'scheduled' && s.scheduled_for
-                        ? `scheduled for ${new Date(s.scheduled_for).toLocaleString()}`
-                        : s.sent_at ? new Date(s.sent_at).toLocaleString() : 'draft (not sent)'
-                    }
+                  <div className="flex items-center gap-5 text-12 flex-shrink-0">
+                    {s.status === 'scheduled' ? (
+                      <button
+                        type="button"
+                        onClick={() => cancelSchedule(s.id)}
+                        className="text-11 px-2 py-1 border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-zinc-900 hover:border-zinc-900 u-focus-ring"
+                      >Cancel schedule</button>
+                    ) : (
+                      <>
+                        <Stat label="Sent" value={s.recipient_count || 0} />
+                        <Stat label="Delivered" value={`${s.delivered_count || 0} (${pct}%)`} />
+                        <Stat label="Bounced" value={s.bounced_count || 0} alert={s.bounced_count > 0} />
+                        <Stat label="Unsub" value={s.unsubscribed_count || 0} />
+                      </>
+                    )}
                   </div>
-                  {s.subject_b && (
-                    <div className="text-11 text-ink-tertiary mt-0.5 truncate">B: {s.subject_b}</div>
-                  )}
                 </div>
-                <div className="flex items-center gap-5 text-12 flex-shrink-0">
-                  {s.status === 'scheduled' ? (
-                    <button
-                      type="button"
-                      onClick={() => cancelSchedule(s.id)}
-                      className="text-11 px-2 py-1 border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-zinc-900 hover:border-zinc-900 u-focus-ring"
-                    >Cancel schedule</button>
-                  ) : (
-                    <>
-                      <Stat label="Sent" value={s.recipient_count || 0} />
-                      <Stat label="Delivered" value={`${s.delivered_count || 0} (${pct}%)`} />
-                      <Stat label="Bounced" value={s.bounced_count || 0} alert={s.bounced_count > 0} />
-                      <Stat label="Unsub" value={s.unsubscribed_count || 0} />
-                    </>
-                  )}
-                </div>
+                {isAb && isOpen && (
+                  <VariantBreakdown
+                    stats={variantStats[s.id]}
+                    subjectA={s.subject}
+                    subjectB={s.subject_b}
+                  />
+                )}
               </div>
             );
           })}
         </div>
       )}
     </Card>
+  );
+}
+
+// ── A/B variant breakdown ────────────────────────────────────────────
+//
+// Per-variant counts pulled from /sends/:id (server aggregates the
+// deliveries table grouped by ab_variant). "Winner" is whichever variant
+// has the higher open rate among delivered messages — same heuristic
+// most ESPs use; falls back to no-winner when both rates are within
+// half a percentage point.
+
+function VariantBreakdown({ stats, subjectA, subjectB }) {
+  if (!stats) {
+    return (
+      <div className="px-5 pb-3 -mt-2 text-11 text-ink-tertiary">
+        Loading variant breakdown…
+      </div>
+    );
+  }
+  const a = stats.a;
+  const b = stats.b;
+  if (!a && !b) {
+    return (
+      <div className="px-5 pb-3 -mt-2 text-11 text-ink-tertiary">
+        No A/B delivery rows yet — open rates appear once SendGrid events arrive.
+      </div>
+    );
+  }
+  const openRate = (v) => v && v.delivered ? v.opened / v.delivered : null;
+  const aRate = openRate(a);
+  const bRate = openRate(b);
+  let winner = null;
+  if (aRate != null && bRate != null && Math.abs(aRate - bRate) >= 0.005) {
+    winner = aRate > bRate ? 'a' : 'b';
+  }
+
+  return (
+    <div className="px-5 pb-4 -mt-1 grid grid-cols-1 sm:grid-cols-2 gap-3">
+      <VariantCell letter="A" subject={subjectA} stats={a} rate={aRate} isWinner={winner === 'a'} />
+      <VariantCell letter="B" subject={subjectB} stats={b} rate={bRate} isWinner={winner === 'b'} />
+    </div>
+  );
+}
+
+function VariantCell({ letter, subject, stats, rate, isWinner }) {
+  return (
+    <div
+      className={cn(
+        'border-hairline rounded-sm p-3 bg-white',
+        isWinner ? 'border-zinc-900' : 'border-zinc-200',
+      )}
+    >
+      <div className="flex items-center gap-2 mb-1 flex-wrap">
+        <span className="text-11 uppercase tracking-label text-ink-secondary">Variant {letter}</span>
+        {isWinner && <Badge tone="strong">Winner</Badge>}
+      </div>
+      <div className="text-12 text-zinc-900 mb-2 truncate" title={subject}>{subject || <em className="text-ink-tertiary">(missing)</em>}</div>
+      {!stats ? (
+        <div className="text-11 text-ink-tertiary">No deliveries recorded.</div>
+      ) : (
+        <div className="grid grid-cols-4 gap-2">
+          <Stat label="Sent" value={stats.total} />
+          <Stat label="Delivered" value={stats.delivered} />
+          <Stat label="Opens" value={`${stats.opened}${rate != null ? ` (${(rate * 100).toFixed(0)}%)` : ''}`} />
+          <Stat label="Clicks" value={stats.clicked} />
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -804,28 +1155,86 @@ function Stat({ label, value, alert }) {
 
 // ── Subscribers ───────────────────────────────────────────────────
 
+const SUBSCRIBERS_PAGE_SIZE = 100;
+
 export function SubscribersView() {
   const [subs, setSubs] = useState([]);
   const [counts, setCounts] = useState({});
   const [filter, setFilter] = useState('active');
   const [q, setQ] = useState('');
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [offset, setOffset] = useState(0);
   const [status, setStatus] = useState('');
 
+  // Initial / filter-changed fetch — resets the list. Re-runs whenever
+  // the filter or search query changes (via the useEffect below).
   const load = useCallback(() => {
     setLoading(true);
     const qs = new URLSearchParams();
     if (filter !== 'all') qs.set('status', filter);
     if (q) qs.set('q', q);
+    qs.set('limit', String(SUBSCRIBERS_PAGE_SIZE));
+    qs.set('offset', '0');
     adminFetch(`/admin/newsletter/subscribers?${qs}`)
       .then((d) => {
-        setSubs(d.subscribers || []);
+        const next = d.subscribers || [];
+        setSubs(next);
         setCounts(d.counts || {});
+        setOffset(next.length);
+        setHasMore(next.length === SUBSCRIBERS_PAGE_SIZE);
       })
-      .catch(() => setSubs([]))
+      .catch(() => { setSubs([]); setHasMore(false); })
       .finally(() => setLoading(false));
   }, [filter, q]);
   useEffect(() => { load(); }, [load]);
+
+  const loadMore = async () => {
+    setLoadingMore(true);
+    const qs = new URLSearchParams();
+    if (filter !== 'all') qs.set('status', filter);
+    if (q) qs.set('q', q);
+    qs.set('limit', String(SUBSCRIBERS_PAGE_SIZE));
+    qs.set('offset', String(offset));
+    try {
+      const d = await adminFetch(`/admin/newsletter/subscribers?${qs}`);
+      const next = d.subscribers || [];
+      setSubs((prev) => [...prev, ...next]);
+      setOffset((cur) => cur + next.length);
+      setHasMore(next.length === SUBSCRIBERS_PAGE_SIZE);
+    } catch (e) {
+      setStatus('Load more failed: ' + e.message);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  const exportCsv = async () => {
+    setStatus('Building CSV…');
+    try {
+      const qs = new URLSearchParams();
+      if (filter !== 'all') qs.set('status', filter);
+      if (q) qs.set('q', q);
+      // Bypass adminFetch's JSON parsing — this returns text/csv.
+      const res = await fetch(`${API_BASE}/admin/newsletter/subscribers.csv?${qs}`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      const url = URL.createObjectURL(new Blob([text], { type: 'text/csv' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `newsletter-subscribers-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setStatus('CSV downloaded.');
+    } catch (e) {
+      setStatus('Export failed: ' + e.message);
+    }
+  };
 
   const addSubscriber = async () => {
     const email = prompt('Email address to add:');
@@ -851,9 +1260,12 @@ export function SubscribersView() {
 
   return (
     <Card className="p-5">
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <h3 className="text-16 font-medium text-zinc-900">Subscribers</h3>
-        <Button onClick={addSubscriber} variant="secondary">+ Add subscriber</Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={exportCsv} variant="secondary">Export CSV</Button>
+          <Button onClick={addSubscriber} variant="secondary">+ Add subscriber</Button>
+        </div>
       </div>
 
       <div className="flex items-center gap-2 mb-3 flex-wrap">
@@ -920,6 +1332,18 @@ export function SubscribersView() {
               )}
             </div>
           ))}
+          {hasMore && (
+            <div className="px-5 py-4 text-center">
+              <Button onClick={loadMore} variant="secondary" disabled={loadingMore}>
+                {loadingMore ? 'Loading…' : `Load ${SUBSCRIBERS_PAGE_SIZE} more`}
+              </Button>
+            </div>
+          )}
+          {!hasMore && subs.length > SUBSCRIBERS_PAGE_SIZE && (
+            <div className="px-5 py-4 text-center text-11 text-ink-tertiary">
+              Showing all {subs.length} subscriber{subs.length === 1 ? '' : 's'} in this filter.
+            </div>
+          )}
         </div>
       )}
     </Card>

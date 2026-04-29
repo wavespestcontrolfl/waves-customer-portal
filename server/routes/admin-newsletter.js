@@ -9,12 +9,14 @@
  */
 
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const sendgrid = require('../services/sendgrid-mail');
 const NewsletterSender = require('../services/newsletter-sender');
+const { linkToCustomer } = require('../services/newsletter-subscribers');
 const { wrapNewsletter } = require('../services/email-template');
 const MODELS = require('../config/models');
 
@@ -23,14 +25,59 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// Per-admin rate limiter on /draft-ai. Each call hits Anthropic with up
+// to 2k output tokens on the FLAGSHIP/WORKHORSE model — without a cap a
+// compromised admin token (or a runaway client) can rack up real spend
+// in minutes. Keyed by technicianId so two admins drafting concurrently
+// don't share the bucket.
+const aiDraftLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,  // 1 hour
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `tech_${req.technicianId || req.ip}`,
+  message: { error: 'Too many AI drafts in the last hour. Try again later.' },
+});
+
+// Server-side allowlist for newsletter from-email. SendGrid's domain auth
+// (DKIM/SPF) is on wavespestcontrol.com, so a typo to a subdomain or
+// adjacent domain sends unsigned and lands in spam — and the operator
+// has no UI signal that anything went wrong. Defaults cover the three
+// canonical sender mailboxes; override via env when adding new ones.
+const FROM_EMAIL_ALLOWLIST = (process.env.NEWSLETTER_FROM_ALLOWLIST
+  || 'newsletter@wavespestcontrol.com,events@wavespestcontrol.com,weekly@wavespestcontrol.com'
+).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+
+function normalizeFromEmail(email) {
+  if (!email) return 'newsletter@wavespestcontrol.com';
+  const lc = String(email).trim().toLowerCase();
+  if (!FROM_EMAIL_ALLOWLIST.includes(lc)) {
+    const err = new Error(`from_email must be one of: ${FROM_EMAIL_ALLOWLIST.join(', ')}`);
+    err.status = 400;
+    throw err;
+  }
+  return lc;
+}
+
 // ── Subscribers ──────────────────────────────────────────────────
 
-// GET /api/admin/newsletter/subscribers?status=active&q=search
+// GET /api/admin/newsletter/subscribers?status=active|unsubscribed|bounced&q=search
+//
+// `bounced` is a synthetic filter: there's no status='bounced' in the table
+// (the webhook handler only flips status to 'unsubscribed' on hard
+// complaints, otherwise just increments bounce_count). Surface every
+// subscriber whose recent sends have bounced via bounce_count > 0 instead.
 router.get('/subscribers', async (req, res, next) => {
   try {
-    const { status, q, limit = 200, offset = 0 } = req.query;
-    const query = db('newsletter_subscribers').orderBy('subscribed_at', 'desc').limit(Math.min(+limit, 1000)).offset(+offset);
-    if (status) query.where({ status });
+    const { status, q } = req.query;
+    const limit = Math.min(Number(req.query.limit) || 200, 1000);
+    const offset = Math.max(Number(req.query.offset) || 0, 0);
+    const query = db('newsletter_subscribers').orderBy('subscribed_at', 'desc').limit(limit).offset(offset);
+    if (status === 'bounced') {
+      query.where('bounce_count', '>', 0);
+    } else if (status) {
+      query.where({ status });
+    }
     if (q) query.where('email', 'ilike', `%${q}%`);
     const rows = await query;
 
@@ -39,8 +86,13 @@ router.get('/subscribers', async (req, res, next) => {
       .count('* as count')
       .groupBy('status');
     const byStatus = Object.fromEntries(counts.map((r) => [r.status, Number(r.count)]));
+    // Synthetic 'bounced' tally — see filter above.
+    const bouncedRow = await db('newsletter_subscribers')
+      .where('bounce_count', '>', 0)
+      .count('* as count').first();
+    byStatus.bounced = Number(bouncedRow?.count || 0);
 
-    res.json({ subscribers: rows, counts: byStatus, total: rows.length });
+    res.json({ subscribers: rows, counts: byStatus });
   } catch (err) { next(err); }
 });
 
@@ -50,11 +102,12 @@ router.post('/subscribers', async (req, res, next) => {
   try {
     const { email, firstName, lastName, source } = req.body;
     if (!email) return res.status(400).json({ error: 'email required' });
+    const lc = String(email).trim().toLowerCase();
 
-    const existing = await db('newsletter_subscribers').where({ email: email.toLowerCase() }).first();
+    const existing = await db('newsletter_subscribers').where({ email: lc }).first();
     if (existing) {
-      // Resubscribe path — flip status back to active.
-      if (existing.status !== 'active') {
+      const wasInactive = existing.status !== 'active';
+      if (wasInactive) {
         await db('newsletter_subscribers').where({ id: existing.id }).update({
           status: 'active',
           resubscribed_at: new Date(),
@@ -62,18 +115,75 @@ router.post('/subscribers', async (req, res, next) => {
           updated_at: new Date(),
         });
       }
-      return res.json({ success: true, subscriber: existing, resubscribed: existing.status !== 'active' });
+      await linkToCustomer(lc);
+      // Re-read so callers see the post-update shape (status='active' on
+      // resubscribe, fresh customer_id link, etc.).
+      const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
+      return res.json({ success: true, subscriber: fresh, resubscribed: wasInactive });
     }
 
     const [row] = await db('newsletter_subscribers').insert({
-      email: email.toLowerCase(),
+      email: lc,
       first_name: firstName || null,
       last_name: lastName || null,
       source: source || 'admin_manual',
       status: 'active',
     }).returning('*');
 
+    await linkToCustomer(lc);
     res.json({ success: true, subscriber: row });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/newsletter/subscribers.csv — full filtered export.
+// Streamed as text/csv; filename includes today's date so multiple
+// exports the same day distinguish themselves in the operator's
+// downloads folder. Uses the same status filter semantics as the JSON
+// list endpoint above (including the synthetic 'bounced' filter).
+router.get('/subscribers.csv', async (req, res, next) => {
+  try {
+    const { status, q } = req.query;
+    const query = db('newsletter_subscribers').orderBy('subscribed_at', 'desc');
+    if (status === 'bounced') {
+      query.where('bounce_count', '>', 0);
+    } else if (status) {
+      query.where({ status });
+    }
+    if (q) query.where('email', 'ilike', `%${q}%`);
+    const rows = await query;
+
+    // CSV formula-injection defense: Excel / Google Sheets execute cells
+    // starting with =, +, -, @, tab, or CR as formulas. first_name,
+    // last_name, source, and tags are subscriber-controlled via the
+    // public signup path, so a malicious value would fire as a formula
+    // the moment Waves opens the export. Leading apostrophe forces text
+    // mode without rendering inside the cell. Applied uniformly via the
+    // `escape` helper — harmless on legitimate values.
+    const escape = (v) => {
+      if (v == null) return '';
+      let s = String(v);
+      if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+      return `"${s.replace(/"/g, '""')}"`;
+    };
+    const stamp = new Date().toISOString().slice(0, 10);
+    res.type('text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="newsletter-subscribers-${stamp}.csv"`);
+    res.write('email,first_name,last_name,status,source,bounce_count,customer_id,tags,subscribed_at,unsubscribed_at\n');
+    for (const r of rows) {
+      res.write([
+        escape(r.email),
+        escape(r.first_name),
+        escape(r.last_name),
+        escape(r.status),
+        escape(r.source),
+        escape(r.bounce_count ?? 0),
+        escape(r.customer_id),
+        escape(Array.isArray(r.tags) ? r.tags.join('|') : ''),
+        escape(r.subscribed_at instanceof Date ? r.subscribed_at.toISOString() : r.subscribed_at),
+        escape(r.unsubscribed_at instanceof Date ? r.unsubscribed_at.toISOString() : r.unsubscribed_at),
+      ].join(',') + '\n');
+    }
+    res.end();
   } catch (err) { next(err); }
 });
 
@@ -87,21 +197,49 @@ router.post('/subscribers/import', async (req, res, next) => {
       return res.status(400).json({ error: 'subscribers[] required' });
     }
 
-    let inserted = 0, skipped = 0;
+    // Two-pass: filter to valid rows in JS (so we have a clean count of
+    // bad inputs), then a single bulk INSERT ... ON CONFLICT DO NOTHING
+    // for everything that survived. Postgres dedupes against the existing
+    // unique index on email — we don't pre-query.
+    const seen = new Set();
+    const rows = [];
     for (const s of subscribers) {
       const email = (s.email || '').trim().toLowerCase();
-      if (!email || !email.includes('@')) { skipped++; continue; }
-      const existing = await db('newsletter_subscribers').where({ email }).first();
-      if (existing) { skipped++; continue; }
-      await db('newsletter_subscribers').insert({
+      if (!email || !email.includes('@')) continue;
+      if (seen.has(email)) continue;  // dedupe within this CSV
+      seen.add(email);
+      rows.push({
         email,
         first_name: s.firstName || s.first_name || null,
         last_name: s.lastName || s.last_name || null,
         source,
         status: 'active',
       });
-      inserted++;
     }
+
+    let inserted = 0;
+    if (rows.length) {
+      const result = await db('newsletter_subscribers')
+        .insert(rows)
+        .onConflict('email')
+        .ignore()
+        .returning('id');
+      inserted = result.length;
+
+      // Bulk customer auto-link covers both fresh inserts AND rows that
+      // already existed (the onConflict path) — running over the full
+      // imported email set, idempotent on already-linked rows. One query.
+      await db.raw(
+        `UPDATE newsletter_subscribers ns
+            SET customer_id = c.id, updated_at = NOW()
+            FROM customers c
+           WHERE ns.email = ANY(?)
+             AND ns.customer_id IS NULL
+             AND LOWER(c.email) = ns.email`,
+        [rows.map((r) => r.email)],
+      );
+    }
+    const skipped = subscribers.length - inserted;
 
     res.json({ success: true, inserted, skipped, total: subscribers.length });
   } catch (err) { next(err); }
@@ -156,7 +294,37 @@ router.get('/sends/:id', async (req, res, next) => {
       .orderBy('created_at', 'desc')
       .limit(1000);
 
-    res.json({ send, deliveries });
+    // Per-variant aggregate for A/B sends — operator currently has to
+    // run a DB query to know which subject won. Computed via COUNT
+    // (column) which excludes nulls, so each timestamp column counts
+    // the recipients who reached that step. Skipped entirely on
+    // non-A/B campaigns to save the round trip.
+    let variantStats = null;
+    if (send.subject_b) {
+      const rows = await db('newsletter_send_deliveries')
+        .where({ send_id: req.params.id })
+        .select('ab_variant')
+        .count('* as total')
+        .count('delivered_at as delivered')
+        .count('opened_at as opened')
+        .count('clicked_at as clicked')
+        .count('bounced_at as bounced')
+        .groupBy('ab_variant');
+      variantStats = { a: null, b: null };
+      for (const r of rows) {
+        if (r.ab_variant === 'a' || r.ab_variant === 'b') {
+          variantStats[r.ab_variant] = {
+            total: Number(r.total),
+            delivered: Number(r.delivered),
+            opened: Number(r.opened),
+            clicked: Number(r.clicked),
+            bounced: Number(r.bounced),
+          };
+        }
+      }
+    }
+
+    res.json({ send, deliveries, variantStats });
   } catch (err) { next(err); }
 });
 
@@ -166,6 +334,10 @@ router.post('/sends', async (req, res, next) => {
     const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt } = req.body;
     if (!subject) return res.status(400).json({ error: 'subject required' });
 
+    let normalizedFromEmail;
+    try { normalizedFromEmail = normalizeFromEmail(fromEmail); }
+    catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
+
     const [row] = await db('newsletter_sends').insert({
       subject,
       subject_b: subjectB || null,
@@ -173,7 +345,7 @@ router.post('/sends', async (req, res, next) => {
       text_body: textBody || null,
       preview_text: previewText || null,
       from_name: fromName || 'Waves Pest Control',
-      from_email: fromEmail || 'newsletter@wavespestcontrol.com',
+      from_email: normalizedFromEmail,
       reply_to: replyTo || 'contact@wavespestcontrol.com',
       status: 'draft',
       segment_filter: segmentFilter || null,
@@ -193,6 +365,16 @@ router.patch('/sends/:id', async (req, res, next) => {
     if (!['draft', 'scheduled'].includes(send.status)) return res.status(400).json({ error: 'can only edit drafts or scheduled' });
 
     const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt } = req.body;
+
+    // Validate from_email only when the caller is changing it. Skipping
+    // validation on PATCHes that don't touch the field keeps existing
+    // drafts editable even if the allowlist contracts.
+    let nextFromEmail = send.from_email;
+    if (fromEmail !== undefined) {
+      try { nextFromEmail = normalizeFromEmail(fromEmail); }
+      catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
+    }
+
     await db('newsletter_sends').where({ id: req.params.id }).update({
       subject: subject ?? send.subject,
       subject_b: subjectB !== undefined ? subjectB : send.subject_b,
@@ -200,7 +382,7 @@ router.patch('/sends/:id', async (req, res, next) => {
       text_body: textBody ?? send.text_body,
       preview_text: previewText ?? send.preview_text,
       from_name: fromName ?? send.from_name,
-      from_email: fromEmail ?? send.from_email,
+      from_email: nextFromEmail,
       reply_to: replyTo ?? send.reply_to,
       segment_filter: segmentFilter !== undefined ? segmentFilter : send.segment_filter,
       ai_prompt: aiPrompt !== undefined ? aiPrompt : send.ai_prompt,
@@ -231,7 +413,10 @@ router.post('/sends/:id/test', async (req, res) => {
     const send = await db('newsletter_sends').where({ id: req.params.id }).first();
     if (!send) return res.status(404).json({ error: 'not found' });
 
-    const testEmail = req.body.email || 'contact@wavespestcontrol.com';
+    // Default to the logged-in admin's own email so an empty test-email
+    // input doesn't fire into the shared contact@ inbox where Virginia
+    // works real customer replies.
+    const testEmail = req.body.email || req.technician?.email || 'contact@wavespestcontrol.com';
     // Demo unsubscribe URL — won't resolve to a real subscriber but the link
     // renders correctly and Gmail/Apple Mail will show the native unsub UI.
     const demoUrl = sendgrid.unsubscribeUrl('test-' + send.id);
@@ -256,6 +441,9 @@ router.post('/sends/:id/test', async (req, res) => {
         'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
       },
       categories: ['newsletter_test', `send_${send.id}`],
+      // Match the live broadcast's ASM group so the test renders the same
+      // unsub UI the operator will see in production.
+      asmGroupId: sendgrid.newsletterGroupId(),
     });
 
     res.json({ success: true, messageId: result.messageId });
@@ -266,13 +454,59 @@ router.post('/sends/:id/test', async (req, res) => {
 });
 
 // POST /api/admin/newsletter/sends/:id/send — send to all matching active subscribers
+//
+// Returns 202 + dispatches sendCampaign asynchronously. The synchronous
+// version held the request open for the duration of the send (~30s+ for a
+// 5k list with per-recipient DB updates) which timed out at the proxy and
+// led operators to retry, double-blasting recipients. sendCampaign's atomic
+// status claim (draft/scheduled → sending) is the double-click guard now.
+// Errors during the background run flip status to 'failed' so the History
+// tab surfaces them.
 router.post('/sends/:id/send', async (req, res) => {
   try {
-    const result = await NewsletterSender.sendCampaign(req.params.id);
-    res.json({ success: true, sendId: req.params.id, ...result });
+    const send = await db('newsletter_sends').where({ id: req.params.id }).first();
+    if (!send) return res.status(404).json({ error: 'not found' });
+    if (!['draft', 'scheduled'].includes(send.status)) {
+      return res.status(400).json({ error: 'already sent or in progress' });
+    }
+    if (!send.html_body && !send.text_body) {
+      return res.status(400).json({ error: 'body required' });
+    }
+
+    // Pre-flight 0-recipient guard for synchronous feedback. sendCampaign
+    // itself re-checks (defense in depth + scheduler-tick coverage), but
+    // doing it here lets us 400 immediately with the force=true hint
+    // instead of returning 202 + later landing as 'failed'.
+    const force = !!req.body?.force;
+    if (!force) {
+      const segCount = await NewsletterSender.buildSubscriberQuery(send.segment_filter).count('* as c').first();
+      if (Number(segCount?.c || 0) === 0) {
+        return res.status(400).json({
+          error: 'segment matches 0 active subscribers; pass { force: true } to send anyway',
+        });
+      }
+    }
+
+    // Fire-and-forget. Don't await — the response should land before the
+    // first recipient is queued.
+    NewsletterSender.sendCampaign(req.params.id, { force }).catch(async (err) => {
+      // ALREADY_CLAIMED = another worker (scheduler tick, or a second
+      // manual click that beat us to the atomic claim) is actively
+      // sending this row. Do NOT flip to 'failed' or we'd overwrite an
+      // in-flight campaign — let the winner finish and stamp 'sent'.
+      if (err.code === 'ALREADY_CLAIMED') {
+        logger.info(`[newsletter] background send ${req.params.id} already claimed by another worker — no-op`);
+        return;
+      }
+      logger.error(`[newsletter] background send ${req.params.id} failed: ${err.message}`, { stack: err.stack });
+      try {
+        await db('newsletter_sends').where({ id: req.params.id }).update({ status: 'failed' });
+      } catch { /* swallow */ }
+    });
+
+    res.status(202).json({ accepted: true, sendId: req.params.id, status: 'sending' });
   } catch (err) {
-    logger.error(`[newsletter] send failed: ${err.message}`, { stack: err.stack });
-    try { await db('newsletter_sends').where({ id: req.params.id }).update({ status: 'failed' }); } catch { /* swallow */ }
+    logger.error(`[newsletter] send dispatch failed: ${err.message}`, { stack: err.stack });
     res.status(500).json({ error: err.message });
   }
 });
@@ -317,6 +551,43 @@ router.post('/sends/:id/cancel-schedule', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/newsletter/preview — wrap the operator's HTML body in
+// the same chrome the live send uses (header, logo, footer with a demo
+// unsub link) so the Compose modal can render the final email without
+// requiring a saved draft or a test send. Stateless: no DB read/write.
+router.post('/preview', async (req, res) => {
+  try {
+    const { htmlBody, previewText } = req.body || {};
+    const demoUrl = sendgrid.unsubscribeUrl('preview-demo-token');
+    const html = wrapNewsletter({
+      body: htmlBody || '',
+      unsubscribeUrl: demoUrl,
+      preheader: previewText || undefined,
+    });
+    res.json({ html });
+  } catch (err) {
+    logger.error(`[newsletter] preview failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/admin/newsletter/tags — distinct tag values across the
+// subscriber list. Used by the Compose tag input as a datalist source so
+// the operator picks an existing tag instead of typing a near-miss
+// (case/typo) that won't match any subscriber.
+router.get('/tags', async (req, res, next) => {
+  try {
+    const result = await db.raw(`
+      SELECT DISTINCT jsonb_array_elements_text(tags) AS tag
+        FROM newsletter_subscribers
+       WHERE jsonb_typeof(tags) = 'array'
+       ORDER BY tag ASC
+    `);
+    const tags = (result.rows || []).map((r) => r.tag).filter(Boolean);
+    res.json({ tags });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/newsletter/segment-preview — count subscribers matching a segment
 router.post('/segment-preview', async (req, res, next) => {
   try {
@@ -332,7 +603,7 @@ router.post('/segment-preview', async (req, res, next) => {
 //             structure + voice block that's appended to the system
 //             prompt — the templates themselves live in
 //             client/src/pages/admin/NewsletterTabs.jsx.
-router.post('/draft-ai', async (req, res) => {
+router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
   try {
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
       return res.status(400).json({ error: 'Anthropic API not configured' });
@@ -340,6 +611,12 @@ router.post('/draft-ai', async (req, res) => {
     const { prompt, template, audience, tone, includeCTA } = req.body;
     if (!prompt || prompt.trim().length < 8) {
       return res.status(400).json({ error: 'prompt required (min 8 chars)' });
+    }
+    // Bound prompt length so a runaway client can't pass a 50k-char prompt
+    // and balloon the input-token bill. 2000 chars comfortably fits the
+    // event-seeded prompts the dashboard generates.
+    if (prompt.length > 2000) {
+      return res.status(400).json({ error: 'prompt too long (max 2000 chars)' });
     }
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
