@@ -110,7 +110,7 @@ function getInitials(nameOrPhone) {
   if (!nameOrPhone) return '?';
   const trimmed = String(nameOrPhone).trim();
   if (!trimmed) return '?';
-  const hasLetters = /[a-zA-Z]/.test(trimmed);
+  const hasLetters = /\p{L}/u.test(trimmed);
   if (!hasLetters) {
     const digits = trimmed.replace(/\D/g, '');
     return digits.slice(-2) || '#';
