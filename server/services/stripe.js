@@ -352,7 +352,13 @@ const StripeService = {
         stripe_payment_intent_id: piIdFromErr,
         payment_date: etDateString(),
         amount: totalAmount,
-        status: requiresAction ? 'requires_action' : 'failed',
+        // payments.status is a Postgres enum (upcoming/processing/paid/
+        // failed/refunded) — DON'T introduce a new value here, the
+        // insert would raise enum_invalid and tank the whole catch path.
+        // billing-cron skip-retry keys off the thrown STRIPE_REQUIRES_
+        // ACTION code below; admin dashboards surface SCA via the
+        // description suffix + metadata.requires_action flag.
+        status: 'failed',
         description: requiresAction ? `${description} — REQUIRES AUTH` : `${description} — FAILED`,
         failure_reason: err.message,
         metadata: JSON.stringify({
