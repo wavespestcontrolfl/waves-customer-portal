@@ -99,9 +99,28 @@ async function renderTemplate(templateKey, vars, fallback) {
   return fallback;
 }
 
+// Atomic stage claim. Flips the stage flag from false/NULL → true and returns
+// true only if THIS caller won the race. Two concurrent crons (server restart,
+// overlapping runs) both load the same candidate row; the one whose UPDATE
+// affects 1 row sends, the other gets 0 rows and skips. Prevents duplicate
+// SMS/email to the customer.
+async function claimStage(estId, flag) {
+  const affected = await db('estimates')
+    .where({ id: estId })
+    .where(q => q.where(flag, false).orWhereNull(flag))
+    .update({ [flag]: true });
+  return affected === 1;
+}
+
+// Reverses a claim when the send fails on every channel, so the next cron
+// tick retries instead of permanently burning the stage.
+async function releaseStage(estId, flag) {
+  await db('estimates').where({ id: estId }).update({ [flag]: false });
+}
+
 // Shared sender — fires SMS if phone exists, email if email exists. Returns
 // true if at least one channel attempted (callers use this to decide whether
-// to flip the stage flag).
+// to keep the stage claim or release it).
 async function sendDualChannel(est, { sms, email }) {
   let attempted = false;
   if (est.customer_phone) {
@@ -145,12 +164,18 @@ const EstimateFollowUp = {
         .where(q => q.where('followup_unviewed_sent', false).orWhereNull('followup_unviewed_sent'));
 
       for (const est of unviewed) {
+        let claimed = false;
         try {
           const gate = await safetyGate(est);
           if (gate.skip) {
             logger.info(`[est-followup] Unviewed skip ${est.id}: ${gate.reason}`);
             continue;
           }
+          if (!(await claimStage(est.id, 'followup_unviewed_sent'))) {
+            logger.info(`[est-followup] Unviewed skip ${est.id}: lost-claim`);
+            continue;
+          }
+          claimed = true;
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
           const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
           const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
@@ -169,13 +194,21 @@ const EstimateFollowUp = {
           });
           if (ok) {
             await db('estimates').where({ id: est.id }).update({
-              followup_unviewed_sent: true,
               follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
               last_follow_up_at: db.fn.now(),
             });
             sent++;
+            claimed = false; // success path keeps the flag set
           }
-        } catch (e) { logger.error(`[est-followup] Unviewed send failed: ${e.message}`); }
+          // !ok → claim stays true; finally releases so next tick retries
+        } catch (e) {
+          logger.error(`[est-followup] Unviewed send failed: ${e.message}`);
+        } finally {
+          if (claimed) {
+            try { await releaseStage(est.id, 'followup_unviewed_sent'); }
+            catch (e) { logger.error(`[est-followup] Unviewed release failed: ${e.message}`); }
+          }
+        }
       }
     } catch { /* columns may not exist */ }
 
@@ -190,12 +223,18 @@ const EstimateFollowUp = {
         .where(q => q.where('followup_viewed_sent', false).orWhereNull('followup_viewed_sent'));
 
       for (const est of viewedNotAccepted) {
+        let claimed = false;
         try {
           const gate = await safetyGate(est);
           if (gate.skip) {
             logger.info(`[est-followup] Viewed skip ${est.id}: ${gate.reason}`);
             continue;
           }
+          if (!(await claimStage(est.id, 'followup_viewed_sent'))) {
+            logger.info(`[est-followup] Viewed skip ${est.id}: lost-claim`);
+            continue;
+          }
+          claimed = true;
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
           const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
           const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
@@ -214,13 +253,20 @@ const EstimateFollowUp = {
           });
           if (ok) {
             await db('estimates').where({ id: est.id }).update({
-              followup_viewed_sent: true,
               follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
               last_follow_up_at: db.fn.now(),
             });
             sent++;
+            claimed = false;
           }
-        } catch (e) { logger.error(`[est-followup] Viewed-not-accepted send failed: ${e.message}`); }
+        } catch (e) {
+          logger.error(`[est-followup] Viewed-not-accepted send failed: ${e.message}`);
+        } finally {
+          if (claimed) {
+            try { await releaseStage(est.id, 'followup_viewed_sent'); }
+            catch (e) { logger.error(`[est-followup] Viewed release failed: ${e.message}`); }
+          }
+        }
       }
     } catch { /* columns may not exist */ }
 
@@ -235,12 +281,18 @@ const EstimateFollowUp = {
         .where(q => q.where('followup_final_sent', false).orWhereNull('followup_final_sent'));
 
       for (const est of finalNudge) {
+        let claimed = false;
         try {
           const gate = await safetyGate(est);
           if (gate.skip) {
             logger.info(`[est-followup] Final skip ${est.id}: ${gate.reason}`);
             continue;
           }
+          if (!(await claimStage(est.id, 'followup_final_sent'))) {
+            logger.info(`[est-followup] Final skip ${est.id}: lost-claim`);
+            continue;
+          }
+          claimed = true;
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
           const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
           const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
@@ -259,13 +311,20 @@ const EstimateFollowUp = {
           });
           if (ok) {
             await db('estimates').where({ id: est.id }).update({
-              followup_final_sent: true,
               follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
               last_follow_up_at: db.fn.now(),
             });
             sent++;
+            claimed = false;
           }
-        } catch (e) { logger.error(`[est-followup] Final nudge send failed: ${e.message}`); }
+        } catch (e) {
+          logger.error(`[est-followup] Final nudge send failed: ${e.message}`);
+        } finally {
+          if (claimed) {
+            try { await releaseStage(est.id, 'followup_final_sent'); }
+            catch (e) { logger.error(`[est-followup] Final release failed: ${e.message}`); }
+          }
+        }
       }
     } catch { /* columns may not exist */ }
 
@@ -282,12 +341,18 @@ const EstimateFollowUp = {
         .where(q => q.where('followup_expiring_sent', false).orWhereNull('followup_expiring_sent'));
 
       for (const est of expiring) {
+        let claimed = false;
         try {
           const gate = await safetyGate(est);
           if (gate.skip) {
             logger.info(`[est-followup] Expiring skip ${est.id}: ${gate.reason}`);
             continue;
           }
+          if (!(await claimStage(est.id, 'followup_expiring_sent'))) {
+            logger.info(`[est-followup] Expiring skip ${est.id}: lost-claim`);
+            continue;
+          }
+          claimed = true;
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
           const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
           const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
@@ -307,13 +372,20 @@ const EstimateFollowUp = {
           });
           if (ok) {
             await db('estimates').where({ id: est.id }).update({
-              followup_expiring_sent: true,
               follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
               last_follow_up_at: db.fn.now(),
             });
             sent++;
+            claimed = false;
           }
-        } catch (e) { logger.error(`[est-followup] Expiry reminder failed: ${e.message}`); }
+        } catch (e) {
+          logger.error(`[est-followup] Expiry reminder failed: ${e.message}`);
+        } finally {
+          if (claimed) {
+            try { await releaseStage(est.id, 'followup_expiring_sent'); }
+            catch (e) { logger.error(`[est-followup] Expiring release failed: ${e.message}`); }
+          }
+        }
       }
     } catch { /* columns may not exist */ }
 
