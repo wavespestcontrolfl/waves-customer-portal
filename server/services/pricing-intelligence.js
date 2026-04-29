@@ -10,9 +10,19 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { WAVEGUARD } = require('./pricing-engine/constants');
 
-// WaveGuard tier discounts
-const TIER_DISCOUNT = { 'One-Time': 0, Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.18 };
+// WaveGuard tier discounts — sourced from pricing-engine/constants
+// (see docs/pricing/POLICY.md). Earlier this had Platinum=0.18 hardcoded,
+// which drifted from the engine's 0.20 and produced wrong upsell-savings
+// numbers in /admin/pricing-strategy.
+const TIER_DISCOUNT = {
+  'One-Time': 0,
+  Bronze:   WAVEGUARD.tiers.bronze.discount,
+  Silver:   WAVEGUARD.tiers.silver.discount,
+  Gold:     WAVEGUARD.tiers.gold.discount,
+  Platinum: WAVEGUARD.tiers.platinum.discount,
+};
 // Case-insensitive tier lookup — DB may store 'platinum' or 'Platinum'
 function tierDiscount(t) {
   if (!t) return 0;

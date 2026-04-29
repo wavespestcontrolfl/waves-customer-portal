@@ -9,6 +9,7 @@ const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { shortenOrPassthrough } = require('../services/short-url');
+const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
 const slotReservation = require('../services/slot-reservation');
 const rateLimit = require('express-rate-limit');
 const { generateEstimate } = require('../services/pricing-engine');
@@ -126,7 +127,16 @@ function shellQuestionsBar() {
   </div>`;
 }
 
-const TIER_DISCOUNTS = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.18 };
+// WaveGuard tier discounts — read live from the pricing engine's constants
+// module (see docs/pricing/POLICY.md). Read on every access (not snapshotted
+// at module load) so values that db-bridge syncs from pricing_config or that
+// admin updates trigger via /admin/pricing-config flow through immediately.
+// Earlier this had Platinum hardcoded at 0.18, drifting from the WaveGuard
+// Platinum bundle's 20% discount.
+function tierDiscount(tier) {
+  const key = String(tier || '').toLowerCase();
+  return PRICING_WAVEGUARD.tiers[key]?.discount ?? 0;
+}
 
 // ── Service-preference pricing modifiers ──────────────────────
 // Customers can opt out of interior spraying or exterior (eave/cobweb)
@@ -348,7 +358,7 @@ function renderPage(token, estimate, estData) {
 
   const tierPrices = {};
   ['Bronze', 'Silver', 'Gold', 'Platinum'].forEach((t) => {
-    tierPrices[t] = Math.max(0, Math.round((baseMonthly * (1 - TIER_DISCOUNTS[t]) - prefMonthlyOff) * 100) / 100);
+    tierPrices[t] = Math.max(0, Math.round((baseMonthly * (1 - tierDiscount(t)) - prefMonthlyOff) * 100) / 100);
   });
 
   const monthlyTotal = Math.max(0, Number(est.monthlyTotal || 0) - prefMonthlyOff);
@@ -393,7 +403,7 @@ function renderPage(token, estimate, estData) {
 
   const recurringRows = recurring.map((s) => {
     const mo = Number(s.mo || s.monthly || 0);
-    const discounted = Math.round(mo * (1 - TIER_DISCOUNTS[tier]) * 100) / 100;
+    const discounted = Math.round(mo * (1 - tierDiscount(tier)) * 100) / 100;
     return `<tr><td>${escapeHtml(s.name)}</td><td style="text-align:right">${fmtMoney(discounted)}/mo</td></tr>`;
   }).join('');
 
@@ -1675,7 +1685,7 @@ router.put('/:token/select-tier', async (req, res, next) => {
     catch { parsedData = {}; }
 
     const baseMonthly = Number(parsedData.baseMonthly || parsedData.preDiscountMonthly || estimate.monthly_total || 0);
-    const discount = TIER_DISCOUNTS[selectedTier] || 0;
+    const discount = tierDiscount(selectedTier);
     const monthlyTotal = Math.round(baseMonthly * (1 - discount) * 100) / 100;
     const annualTotal = Math.round(monthlyTotal * 12 * 100) / 100;
 
@@ -1750,16 +1760,16 @@ router.put('/:token/preferences', async (req, res, next) => {
       : Number(estimate.monthly_total || 0);
 
     const currentTier = estimate.waveguard_tier || 'Bronze';
-    const tierDiscount = TIER_DISCOUNTS[currentTier] || 0;
+    const currentDiscount = tierDiscount(currentTier);
 
     const { monthlyOff, oneTimeOff } = computePrefDiscount(nextPrefs, pestRecurring, hasPestOneTime, pestOneTimeTotal);
-    const monthlyTotal = Math.max(0, Math.round((baseMonthly * (1 - tierDiscount) - monthlyOff) * 100) / 100);
+    const monthlyTotal = Math.max(0, Math.round((baseMonthly * (1 - currentDiscount) - monthlyOff) * 100) / 100);
     const annualTotal  = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
     const onetimeBase = Number(parsedData.onetimeTotalBase || estimate.onetime_total || 0);
     const onetimeTotal = Math.max(0, Math.round((onetimeBase - oneTimeOff) * 100) / 100);
     const tierPrices = {};
     ['Bronze', 'Silver', 'Gold', 'Platinum'].forEach((t) => {
-      tierPrices[t] = Math.max(0, Math.round((baseMonthly * (1 - TIER_DISCOUNTS[t]) - monthlyOff) * 100) / 100);
+      tierPrices[t] = Math.max(0, Math.round((baseMonthly * (1 - tierDiscount(t)) - monthlyOff) * 100) / 100);
     });
 
     // Persist — merge new prefs + self-healed baseMonthly back onto the blob.

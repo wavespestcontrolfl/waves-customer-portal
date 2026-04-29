@@ -31,8 +31,11 @@ function adminFetch(path, options = {}) {
   }).then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 }
 
-// WaveGuard tier → discount fraction. Source: server/services/estimate-converter.js.
-const TIER_DISCOUNT = { bronze: 0, silver: 0.10, gold: 0.15, platinum: 0.18 };
+// WaveGuard tier → discount fraction. Source of truth:
+// server/services/pricing-engine/constants.js WAVEGUARD.tiers
+// (see docs/pricing/POLICY.md). Hardcoded here because the client bundle
+// can't import server constants directly — keep aligned on every change.
+const TIER_DISCOUNT = { bronze: 0, silver: 0.10, gold: 0.15, platinum: 0.20 };
 
 function tierLabel(t) {
   if (!t) return '';
