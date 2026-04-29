@@ -202,6 +202,11 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComple
   // Schedule
   const [scheduleAt, setScheduleAt] = useState('');
 
+  // Preview dialog
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewHtml, setPreviewHtml] = useState('');
+  const [previewLoading, setPreviewLoading] = useState(false);
+
   // Send confirm dialog
   const [sendConfirmOpen, setSendConfirmOpen] = useState(false);
 
@@ -301,6 +306,23 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComple
         setStatus('Draft saved.');
       }
     } catch (e) { setStatus('Save failed: ' + e.message); }
+  };
+
+  const openPreview = async () => {
+    setPreviewOpen(true);
+    setPreviewLoading(true);
+    setPreviewHtml('');
+    try {
+      const res = await adminFetch('/admin/newsletter/preview', {
+        method: 'POST',
+        body: JSON.stringify({ htmlBody, previewText }),
+      });
+      setPreviewHtml(res.html || '');
+    } catch (e) {
+      setPreviewHtml(`<p style="font-family:sans-serif;color:#C8312F;padding:20px;">Preview failed: ${e.message}</p>`);
+    } finally {
+      setPreviewLoading(false);
+    }
   };
 
   const sendTest = async () => {
@@ -597,6 +619,7 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComple
           <Button onClick={saveDraft} variant="secondary" disabled={!subject}>
             {draftId ? 'Update draft' : 'Save draft'}
           </Button>
+          <Button onClick={openPreview} variant="secondary" disabled={!htmlBody}>Preview</Button>
           <div className="flex items-center gap-2 ml-auto">
             <input
               type="text"
@@ -645,6 +668,14 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComple
           initialPrompt={aiInitialPrompt}
           onClose={() => { setAiOpen(false); setAiInitialPrompt(''); }}
           onDraft={handleAiDraft}
+        />
+      )}
+
+      {previewOpen && (
+        <PreviewDialog
+          html={previewHtml}
+          loading={previewLoading}
+          onClose={() => setPreviewOpen(false)}
         />
       )}
 
@@ -754,6 +785,50 @@ function SendConfirmDialog({
             <Button onClick={onCancel} variant="secondary">Cancel</Button>
             <Button onClick={onConfirm} disabled={!ready}>Send to all</Button>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Preview dialog ───────────────────────────────────────────────────
+//
+// Renders the operator's draft inside the same chrome the live send uses
+// (server returns the wrapped HTML from POST /admin/newsletter/preview).
+// Sandboxed iframe — no scripts, no same-origin — since the body is
+// operator-authored.
+
+function PreviewDialog({ html, loading, onClose }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div
+        className="bg-white border-hairline border-zinc-300 rounded-sm shadow-xl w-full max-w-3xl flex flex-col"
+        style={{ maxHeight: '90vh' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="p-5 border-b border-hairline border-zinc-200 flex items-center justify-between flex-shrink-0">
+          <div>
+            <h3 className="text-16 font-medium text-zinc-900">Preview</h3>
+            <p className="text-12 text-ink-secondary mt-0.5">
+              How the email looks with header + footer chrome. Unsubscribe link is a demo token; real recipients get their own.
+            </p>
+          </div>
+          <button type="button" onClick={onClose} className="text-ink-tertiary hover:text-zinc-900 text-14 ml-3" aria-label="Close">✕</button>
+        </div>
+        <div className="overflow-y-auto flex-1 bg-zinc-50 p-3">
+          {loading ? (
+            <div className="text-13 text-ink-secondary p-8 text-center">Rendering…</div>
+          ) : (
+            <iframe
+              title="Newsletter preview"
+              srcDoc={html}
+              sandbox=""
+              style={{ width: '100%', minHeight: '60vh', border: '1px solid #E4E4E7', borderRadius: 4, background: '#fff' }}
+            />
+          )}
+        </div>
+        <div className="px-5 py-3 border-t border-hairline border-zinc-200 flex justify-end flex-shrink-0">
+          <Button onClick={onClose} variant="secondary">Close</Button>
         </div>
       </div>
     </div>

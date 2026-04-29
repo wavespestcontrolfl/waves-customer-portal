@@ -457,6 +457,26 @@ router.post('/sends/:id/cancel-schedule', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/newsletter/preview — wrap the operator's HTML body in
+// the same chrome the live send uses (header, logo, footer with a demo
+// unsub link) so the Compose modal can render the final email without
+// requiring a saved draft or a test send. Stateless: no DB read/write.
+router.post('/preview', async (req, res) => {
+  try {
+    const { htmlBody, previewText } = req.body || {};
+    const demoUrl = sendgrid.unsubscribeUrl('preview-demo-token');
+    const html = wrapNewsletter({
+      body: htmlBody || '',
+      unsubscribeUrl: demoUrl,
+      preheader: previewText || undefined,
+    });
+    res.json({ html });
+  } catch (err) {
+    logger.error(`[newsletter] preview failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/admin/newsletter/tags — distinct tag values across the
 // subscriber list. Used by the Compose tag input as a datalist source so
 // the operator picks an existing tag instead of typing a near-miss
