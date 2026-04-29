@@ -106,6 +106,21 @@ function formatTimestamp(dateStr) {
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
+function getInitials(nameOrPhone) {
+  if (!nameOrPhone) return '?';
+  const trimmed = String(nameOrPhone).trim();
+  if (!trimmed) return '?';
+  const hasLetters = /\p{L}/u.test(trimmed);
+  if (!hasLetters) {
+    const digits = trimmed.replace(/\D/g, '');
+    return digits.slice(-2) || '#';
+  }
+  const parts = trimmed.split(/\s+/).filter(Boolean);
+  const first = parts[0]?.[0] || '';
+  const last = parts.length > 1 ? parts[parts.length - 1][0] : '';
+  return (first + last).toUpperCase() || trimmed[0].toUpperCase();
+}
+
 const TABS = [
   { key: 'sms', label: 'SMS' },
   { key: 'calls', label: 'Calls' },
@@ -1143,7 +1158,8 @@ function SmsTab() {
                 const lastReadAt = threadReadAt[threadKey];
                 const hasUnseen = t.unanswered
                   && (!lastReadAt || new Date(t.lastTimestamp) > new Date(lastReadAt));
-                const isUnknown = !t.customerName;
+                const displayName = t.customerName || t.contactPhone;
+                const initials = getInitials(t.customerName || t.contactPhone);
                 return (
                   <div
                     key={i}
@@ -1164,57 +1180,66 @@ function SmsTab() {
                       });
                     }}
                     className={cn(
-                      'w-full text-left px-3.5 py-3.5 md:py-3 border-b border-hairline border-zinc-200 flex items-start gap-3 cursor-pointer',
+                      'w-full text-left px-3.5 py-3.5 md:py-3 border-b border-hairline border-zinc-200 flex items-center gap-3 cursor-pointer',
                       'hover:bg-zinc-50 transition-colors',
-                      hasUnseen && 'bg-alert-bg/40',
+                      hasUnseen && 'bg-zinc-50',
                     )}
                   >
-                    <div className="w-2.5 flex-shrink-0 mt-2">
-                      {hasUnseen && (
-                        <span
-                          className="block w-2 h-2 rounded-full bg-alert-fg"
-                          aria-label="Unread"
-                        />
-                      )}
+                    <div
+                      className="flex-shrink-0 flex items-center justify-center h-10 w-10 rounded-full bg-zinc-100 text-zinc-700 text-13 font-medium tracking-tight u-nums"
+                      aria-hidden
+                    >
+                      {initials}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between mb-0.5">
+                      <div className="flex items-center justify-between gap-2 mb-0.5">
                         <div className="flex items-center gap-1.5 min-w-0">
                           {t.customerName && t.customerId ? (
                             <button
                               type="button"
                               onClick={(e) => { e.stopPropagation(); setSelected360Id(t.customerId); }}
-                              className="text-16 md:text-14 font-medium text-zinc-900 truncate hover:underline text-left"
+                              className={cn(
+                                'text-16 md:text-14 truncate hover:underline text-left text-zinc-900',
+                                hasUnseen ? 'font-medium' : 'font-normal',
+                              )}
                               title="Open customer profile"
                             >
                               {t.customerName}
                             </button>
                           ) : (
-                            <span className="text-16 md:text-14 font-medium text-zinc-900 truncate">
-                              {t.customerName || t.contactPhone}
+                            <span
+                              className={cn(
+                                'text-16 md:text-14 truncate text-zinc-900',
+                                hasUnseen ? 'font-medium' : 'font-normal',
+                              )}
+                            >
+                              {displayName}
                             </span>
                           )}
-                          {isUnknown && <Badge tone="neutral">Unknown</Badge>}
                         </div>
-                        <span className="font-mono text-12 md:text-11 text-ink-tertiary flex-shrink-0 ml-2">
+                        <span className="font-mono text-12 md:text-11 text-ink-tertiary flex-shrink-0">
                           {timeAgo(t.lastTimestamp)}
                         </span>
                       </div>
-                      {t.customerName && (
-                        <div className="font-mono text-13 md:text-11 text-ink-tertiary mb-0.5">
-                          {t.contactPhone}
-                        </div>
-                      )}
-                      <div className="text-15 md:text-12 text-ink-secondary truncate leading-snug">
-                        <span className="mr-1" aria-hidden>
-                          {t.lastDirection === 'inbound' ? '↓' : '↑'}
-                        </span>
-                        {preview}
+                      <div
+                        className={cn(
+                          'text-15 md:text-12 truncate leading-snug',
+                          hasUnseen ? 'text-zinc-900' : 'text-ink-secondary',
+                        )}
+                      >
+                        {preview || (
+                          <span className="text-ink-tertiary italic">No messages</span>
+                        )}
                       </div>
                     </div>
-                    <span className="hidden md:inline font-mono text-11 text-ink-tertiary u-nums flex-shrink-0 mt-0.5">
-                      {t.messages.length} msg{t.messages.length !== 1 ? 's' : ''}
-                    </span>
+                    <div className="w-2 flex-shrink-0 flex justify-center">
+                      {hasUnseen && (
+                        <span
+                          className="block w-2 h-2 rounded-full bg-zinc-900"
+                          aria-label="Unread"
+                        />
+                      )}
+                    </div>
                   </div>
                 );
               })
