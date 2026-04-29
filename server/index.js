@@ -18,6 +18,8 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
+const jwt = require('jsonwebtoken');
+const { isIP } = require('node:net');
 const path = require('path');
 
 const config = require('./config');
@@ -133,10 +135,48 @@ app.use(cors({
 }));
 
 // Rate limiting
+// Key authenticated requests by JWT subject so each admin/tech/customer gets
+// their own bucket. Falls back to a /64-collapsed client IP for
+// unauthenticated traffic — keying by raw req.ip would let an IPv6 client
+// rotate addresses within their subnet to evade the limit. Without per-user
+// keying, a single busy admin session (dispatch page + grid + per-action
+// refreshes) can exhaust the per-IP allowance and lock everyone behind the
+// same NAT out of the API.
+function ipFallbackKey(ip) {
+  if (!ip) return ip;
+  const v = ip.startsWith('::ffff:') && isIP(ip.slice(7)) === 4 ? ip.slice(7) : ip;
+  if (isIP(v) !== 6) return v;
+  // Canonicalize before slicing the /64 — equivalent textual forms
+  // (uppercase, leading zeros, "::" placement) must yield the same bucket
+  // key, otherwise a single client could rotate notation to evade the limit.
+  const lower = v.toLowerCase();
+  const [head, tail] = lower.split('::');
+  const headParts = head ? head.split(':') : [];
+  const tailParts = tail !== undefined ? (tail ? tail.split(':') : []) : [];
+  const missing = lower.includes('::') ? Math.max(0, 8 - headParts.length - tailParts.length) : 0;
+  const fillers = Array(missing).fill('0');
+  const groups = lower.includes('::') ? [...headParts, ...fillers, ...tailParts] : lower.split(':');
+  const prefix = groups.slice(0, 4).map((g) => parseInt(g, 16).toString(16)).join(':');
+  return `${prefix}::/64`;
+}
+
+function rateLimitKey(req) {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ') && config.jwt.secret) {
+    try {
+      const decoded = jwt.verify(authHeader.split(' ')[1], config.jwt.secret);
+      if (decoded.technicianId) return `tech:${decoded.technicianId}`;
+      if (decoded.customerId) return `cust:${decoded.customerId}`;
+    } catch (_err) { /* fall through to IP */ }
+  }
+  return ipFallbackKey(req.ip);
+}
+
 const limiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
   max: config.rateLimit.max,
   message: { error: 'Too many requests, please try again later.' },
+  keyGenerator: rateLimitKey,
   skip: () => process.env.NODE_ENV !== 'production',
 });
 app.use('/api/', limiter);
