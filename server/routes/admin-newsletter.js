@@ -477,6 +477,14 @@ router.post('/sends/:id/send', async (req, res) => {
     // Fire-and-forget. Don't await — the response should land before the
     // first recipient is queued.
     NewsletterSender.sendCampaign(req.params.id).catch(async (err) => {
+      // ALREADY_CLAIMED = another worker (scheduler tick, or a second
+      // manual click that beat us to the atomic claim) is actively
+      // sending this row. Do NOT flip to 'failed' or we'd overwrite an
+      // in-flight campaign — let the winner finish and stamp 'sent'.
+      if (err.code === 'ALREADY_CLAIMED') {
+        logger.info(`[newsletter] background send ${req.params.id} already claimed by another worker — no-op`);
+        return;
+      }
       logger.error(`[newsletter] background send ${req.params.id} failed: ${err.message}`, { stack: err.stack });
       try {
         await db('newsletter_sends').where({ id: req.params.id }).update({ status: 'failed' });

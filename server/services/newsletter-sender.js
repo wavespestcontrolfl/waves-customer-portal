@@ -56,12 +56,18 @@ async function sendCampaign(sendId) {
   // Returning the rows lets us distinguish 'lost the race' (0 rows) from
   // 'won' (1 row). Without this guard, the immediate-send route + the
   // scheduler tick can both pick up the same row and double-send.
+  // The race-loser is tagged so dispatch-side catch handlers can skip
+  // the 'failed' flip — the row is actively sending under the winner.
   const claimed = await db('newsletter_sends')
     .where({ id: send.id })
     .whereIn('status', ['draft', 'scheduled'])
     .update({ status: 'sending', updated_at: new Date() })
     .returning('id');
-  if (!claimed.length) throw new Error('already sent or in progress');
+  if (!claimed.length) {
+    const err = new Error('already sent or in progress');
+    err.code = 'ALREADY_CLAIMED';
+    throw err;
+  }
 
   const subscribers = await buildSubscriberQuery(send.segment_filter);
   logger.info(`[newsletter] send ${send.id} → ${subscribers.length} subscribers (segment=${send.segment_filter ? JSON.stringify(send.segment_filter) : 'all'})`);
@@ -222,6 +228,13 @@ async function processScheduledSends() {
       await sendCampaign(row.id);
       processed++;
     } catch (err) {
+      // ALREADY_CLAIMED = another tick / manual send picked up this row
+      // first. The other worker is actively sending — do NOT flip status
+      // to failed or we'd overwrite an in-flight campaign.
+      if (err.code === 'ALREADY_CLAIMED') {
+        logger.info(`[newsletter-scheduler] send ${row.id} already claimed by another worker — skipping`);
+        continue;
+      }
       logger.error(`[newsletter-scheduler] send ${row.id} failed: ${err.message}`);
       try { await db('newsletter_sends').where({ id: row.id }).update({ status: 'failed' }); } catch { /* swallow */ }
     }
