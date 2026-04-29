@@ -79,12 +79,12 @@ router.get('/:id', async (req, res, next) => {
 // POST / — create invoice manually
 router.post('/', async (req, res, next) => {
   try {
-    const { customerId, serviceRecordId, title, lineItems, notes, dueDate, taxRate } = req.body;
+    const { customerId, serviceRecordId, title, lineItems, notes, dueDate, taxRate, discountIds } = req.body;
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
     if (!lineItems?.length) return res.status(400).json({ error: 'lineItems required' });
 
     const invoice = await InvoiceService.create({
-      customerId, serviceRecordId, title, lineItems, notes, dueDate, taxRate,
+      customerId, serviceRecordId, title, lineItems, notes, dueDate, taxRate, discountIds,
     });
 
     const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';

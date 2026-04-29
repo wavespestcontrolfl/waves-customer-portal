@@ -41,7 +41,7 @@ const InvoiceService = {
    * Create an invoice — optionally linked to a service record.
    * If serviceRecordId is provided, pulls products, photos, tech info automatically.
    */
-  async create({ customerId, serviceRecordId, scheduledServiceId, title, lineItems, notes, dueDate, taxRate }) {
+  async create({ customerId, serviceRecordId, scheduledServiceId, title, lineItems, notes, dueDate, taxRate, discountIds }) {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) throw new Error('Customer not found');
 
@@ -94,10 +94,43 @@ const InvoiceService = {
     } catch {
       tierDiscount = TIER_DISCOUNTS_FALLBACK[customer.waveguard_tier] || 0;
     }
-    const discountAmount = Math.round(subtotal * tierDiscount * 100) / 100;
-    const discountLabel = tierDiscount > 0
+    const tierDiscountAmount = Math.round(subtotal * tierDiscount * 100) / 100;
+    const tierDiscountLabel = tierDiscount > 0
       ? `${customer.waveguard_tier} WaveGuard — ${Math.round(tierDiscount * 100)}% off`
       : null;
+
+    // Manually-selected discounts from the invoice form. Mirrors discount-engine math
+    // so the stored total matches what the admin previewed. Server-side filters mirror
+    // the client picker so a crafted request can't apply hidden or tier discounts.
+    const manualDiscountRows = Array.isArray(discountIds) && discountIds.length
+      ? await db('discounts')
+          .whereIn('id', discountIds)
+          .where({ is_active: true, show_in_invoices: true, is_waveguard_tier_discount: false })
+      : [];
+    const manualDiscounts = manualDiscountRows.map(d => {
+      const amt = Number(d.amount) || 0;
+      let dollars = 0;
+      if (d.discount_type === 'percentage' || d.discount_type === 'variable_percentage') {
+        dollars = Math.round(subtotal * (amt / 100) * 100) / 100;
+        if (d.max_discount_dollars) dollars = Math.min(dollars, Number(d.max_discount_dollars));
+      } else if (d.discount_type === 'fixed_amount' || d.discount_type === 'variable_amount') {
+        dollars = amt;
+      } else if (d.discount_type === 'free_service') {
+        dollars = subtotal;
+      }
+      return { row: d, dollars: Math.round(dollars * 100) / 100 };
+    });
+    const manualDiscountAmount = manualDiscounts.reduce((s, m) => s + m.dollars, 0);
+
+    // Cap combined discount at subtotal so total never goes negative.
+    let discountAmount = Math.round((tierDiscountAmount + manualDiscountAmount) * 100) / 100;
+    if (discountAmount > subtotal) discountAmount = subtotal;
+
+    const labelParts = [
+      tierDiscountLabel,
+      ...manualDiscounts.map(m => m.row.name),
+    ].filter(Boolean);
+    const discountLabel = labelParts.length ? labelParts.join(' + ') : null;
 
     const afterDiscount = subtotal - discountAmount;
 
@@ -151,22 +184,38 @@ const InvoiceService = {
 
     // Record applied discounts in invoice_discounts table
     try {
-      if (discountAmount > 0) {
+      const auditRows = [];
+      if (tierDiscountAmount > 0) {
         const tierDiscountRow = await db('discounts')
           .where({ is_waveguard_tier_discount: true, requires_waveguard_tier: customer.waveguard_tier, is_active: true })
           .first();
-        await DiscountEngine.recordInvoiceDiscounts(invoice.id, [{
+        auditRows.push({
           id: tierDiscountRow?.id || null,
-          name: discountLabel,
+          name: tierDiscountLabel,
           discount_type: 'percentage',
           amount: tierDiscount * 100,
-          discount_dollars: discountAmount,
-        }], 'system');
+          discount_dollars: tierDiscountAmount,
+        });
       }
-      // Also record any non-tier discounts assigned to this customer
+      for (const m of manualDiscounts) {
+        auditRows.push({
+          id: m.row.id,
+          name: m.row.name,
+          discount_type: m.row.discount_type,
+          amount: Number(m.row.amount) || 0,
+          discount_dollars: m.dollars,
+        });
+      }
+      if (auditRows.length > 0) {
+        await DiscountEngine.recordInvoiceDiscounts(invoice.id, auditRows, 'system');
+      }
+      // Also record any non-tier discounts auto-applied or assigned to this customer
+      // (kept for backwards compatibility — these don't reduce the invoice total).
+      const manualIds = new Set(manualDiscounts.map(m => m.row.id));
       const extraResult = await DiscountEngine.calculateDiscounts(customerId, { subtotal, isEstimate: false });
-      if (extraResult.discounts.length > 0) {
-        await DiscountEngine.recordInvoiceDiscounts(invoice.id, extraResult.discounts, 'system');
+      const extraToRecord = extraResult.discounts.filter(d => !manualIds.has(d.id));
+      if (extraToRecord.length > 0) {
+        await DiscountEngine.recordInvoiceDiscounts(invoice.id, extraToRecord, 'system');
       }
     } catch (err) {
       logger.warn(`[invoice] Could not record invoice_discounts: ${err.message}`);
