@@ -100,9 +100,12 @@ const InvoiceService = {
       : null;
 
     // Manually-selected discounts from the invoice form. Mirrors discount-engine math
-    // so the stored total matches what the admin previewed.
+    // so the stored total matches what the admin previewed. Server-side filters mirror
+    // the client picker so a crafted request can't apply hidden or tier discounts.
     const manualDiscountRows = Array.isArray(discountIds) && discountIds.length
-      ? await db('discounts').whereIn('id', discountIds).where({ is_active: true })
+      ? await db('discounts')
+          .whereIn('id', discountIds)
+          .where({ is_active: true, show_in_invoices: true, is_waveguard_tier_discount: false })
       : [];
     const manualDiscounts = manualDiscountRows.map(d => {
       const amt = Number(d.amount) || 0;
