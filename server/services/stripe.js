@@ -431,10 +431,18 @@ const StripeService = {
       //   3. The PI id rides on the error so the cron can include it
       //      in the admin alert.
       logger.error(`[stripe] CRITICAL: Charge succeeded (PI: ${paymentIntent.id}) but DB insert failed: ${dbErr.message}`);
+      // latest_charge is now expanded to a Charge object (we passed
+      // expand:['latest_charge'] on create), but stripe_orphan_charges
+      // .stripe_charge_id is a string column. Read defensively so the
+      // reconciliation row carries the real charge id either way.
+      const orphanLatestCharge = paymentIntent.latest_charge;
+      const orphanChargeId = typeof orphanLatestCharge === 'string'
+        ? orphanLatestCharge
+        : (orphanLatestCharge?.id || null);
       try {
         await db('stripe_orphan_charges').insert({
           stripe_payment_intent_id: paymentIntent.id,
-          stripe_charge_id: paymentIntent.latest_charge || null,
+          stripe_charge_id: orphanChargeId,
           customer_id: customerId,
           amount: totalAmount,
           source: metadata?.type === 'monthly_autopay' ? 'autopay_charge' : 'manual_charge',
