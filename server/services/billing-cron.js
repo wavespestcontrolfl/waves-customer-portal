@@ -211,6 +211,24 @@ const BillingCron = {
           continue;
         }
 
+        // STRIPE_REQUIRES_ACTION — cardholder bank requires 3DS / step-up
+        // auth. The PI lands in requires_action state and Stripe fires
+        // payment_intent.requires_action, which the webhook handler
+        // already turns into a customer SMS asking them to log in and
+        // authenticate. Do NOT schedule a retry — the next cron tick
+        // would hit the exact same SCA wall and burn the retry slot
+        // without ever reaching a card-update path.
+        if (err.code === 'STRIPE_REQUIRES_ACTION') {
+          await logAutopay(customer.id, 'sca_required', {
+            amountCents: Math.round(parseFloat(customer.monthly_rate) * 100),
+            paymentMethodId: customer.autopay_payment_method_id || null,
+            paymentId: err.paymentRecord?.id || null,
+            details: { source: 'autopay', stripe_payment_intent_id: err.stripePaymentIntentId },
+          }).catch(() => {});
+          logger.warn(`[billing-cron] SCA required for customer id=${customer.id} — webhook handles SMS, skipping retry`);
+          continue;
+        }
+
         // Schedule first retry (Day 3)
         const retryAt = new Date();
         retryAt.setDate(retryAt.getDate() + RETRY_DELAYS_DAYS[0]);

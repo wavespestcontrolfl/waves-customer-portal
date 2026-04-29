@@ -1,4 +1,5 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const db = require('../models/db');
@@ -11,6 +12,20 @@ const stripe = stripeKey ? require('stripe')(stripeKey) : null;
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// Per-admin rate limit on /recent-charges. Each call hits Stripe's
+// charges.list endpoint with limit=40 — admin clicking refresh
+// repeatedly burns the per-account API quota that the rest of the
+// portal shares (webhook reads, autopay charges, refunds). 30/min
+// per tech is generous for legitimate UI use, well under the cap.
+const recentChargesLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `tech_${req.technicianId || req.ip}`,
+  message: { error: 'Too many recent-charges requests. Try again in a minute.' },
+});
+
 /**
  * Stripe Tap to Pay — Path A reconciliation
  *
@@ -20,7 +35,7 @@ router.use(adminAuthenticate, requireTechOrAdmin);
  */
 
 // GET /recent-charges — last 20 Stripe charges not yet linked to an invoice
-router.get('/recent-charges', async (req, res, next) => {
+router.get('/recent-charges', recentChargesLimiter, async (req, res, next) => {
   try {
     if (!stripe) return res.status(503).json({ error: 'Stripe not configured' });
 
