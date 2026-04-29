@@ -99,9 +99,28 @@ async function renderTemplate(templateKey, vars, fallback) {
   return fallback;
 }
 
+// Atomic stage claim. Flips the stage flag from false/NULL → true and returns
+// true only if THIS caller won the race. Two concurrent crons (server restart,
+// overlapping runs) both load the same candidate row; the one whose UPDATE
+// affects 1 row sends, the other gets 0 rows and skips. Prevents duplicate
+// SMS/email to the customer.
+async function claimStage(estId, flag) {
+  const affected = await db('estimates')
+    .where({ id: estId })
+    .where(q => q.where(flag, false).orWhereNull(flag))
+    .update({ [flag]: true });
+  return affected === 1;
+}
+
+// Reverses a claim when the send fails on every channel, so the next cron
+// tick retries instead of permanently burning the stage.
+async function releaseStage(estId, flag) {
+  await db('estimates').where({ id: estId }).update({ [flag]: false });
+}
+
 // Shared sender — fires SMS if phone exists, email if email exists. Returns
 // true if at least one channel attempted (callers use this to decide whether
-// to flip the stage flag).
+// to keep the stage claim or release it).
 async function sendDualChannel(est, { sms, email }) {
   let attempted = false;
   if (est.customer_phone) {
@@ -151,6 +170,10 @@ const EstimateFollowUp = {
             logger.info(`[est-followup] Unviewed skip ${est.id}: ${gate.reason}`);
             continue;
           }
+          if (!(await claimStage(est.id, 'followup_unviewed_sent'))) {
+            logger.info(`[est-followup] Unviewed skip ${est.id}: lost-claim`);
+            continue;
+          }
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
           const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
           const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
@@ -169,11 +192,12 @@ const EstimateFollowUp = {
           });
           if (ok) {
             await db('estimates').where({ id: est.id }).update({
-              followup_unviewed_sent: true,
               follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
               last_follow_up_at: db.fn.now(),
             });
             sent++;
+          } else {
+            await releaseStage(est.id, 'followup_unviewed_sent');
           }
         } catch (e) { logger.error(`[est-followup] Unviewed send failed: ${e.message}`); }
       }
@@ -196,6 +220,10 @@ const EstimateFollowUp = {
             logger.info(`[est-followup] Viewed skip ${est.id}: ${gate.reason}`);
             continue;
           }
+          if (!(await claimStage(est.id, 'followup_viewed_sent'))) {
+            logger.info(`[est-followup] Viewed skip ${est.id}: lost-claim`);
+            continue;
+          }
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
           const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
           const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
@@ -214,11 +242,12 @@ const EstimateFollowUp = {
           });
           if (ok) {
             await db('estimates').where({ id: est.id }).update({
-              followup_viewed_sent: true,
               follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
               last_follow_up_at: db.fn.now(),
             });
             sent++;
+          } else {
+            await releaseStage(est.id, 'followup_viewed_sent');
           }
         } catch (e) { logger.error(`[est-followup] Viewed-not-accepted send failed: ${e.message}`); }
       }
@@ -241,6 +270,10 @@ const EstimateFollowUp = {
             logger.info(`[est-followup] Final skip ${est.id}: ${gate.reason}`);
             continue;
           }
+          if (!(await claimStage(est.id, 'followup_final_sent'))) {
+            logger.info(`[est-followup] Final skip ${est.id}: lost-claim`);
+            continue;
+          }
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
           const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
           const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
@@ -259,11 +292,12 @@ const EstimateFollowUp = {
           });
           if (ok) {
             await db('estimates').where({ id: est.id }).update({
-              followup_final_sent: true,
               follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
               last_follow_up_at: db.fn.now(),
             });
             sent++;
+          } else {
+            await releaseStage(est.id, 'followup_final_sent');
           }
         } catch (e) { logger.error(`[est-followup] Final nudge send failed: ${e.message}`); }
       }
@@ -288,6 +322,10 @@ const EstimateFollowUp = {
             logger.info(`[est-followup] Expiring skip ${est.id}: ${gate.reason}`);
             continue;
           }
+          if (!(await claimStage(est.id, 'followup_expiring_sent'))) {
+            logger.info(`[est-followup] Expiring skip ${est.id}: lost-claim`);
+            continue;
+          }
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
           const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
           const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
@@ -307,11 +345,12 @@ const EstimateFollowUp = {
           });
           if (ok) {
             await db('estimates').where({ id: est.id }).update({
-              followup_expiring_sent: true,
               follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
               last_follow_up_at: db.fn.now(),
             });
             sent++;
+          } else {
+            await releaseStage(est.id, 'followup_expiring_sent');
           }
         } catch (e) { logger.error(`[est-followup] Expiry reminder failed: ${e.message}`); }
       }
