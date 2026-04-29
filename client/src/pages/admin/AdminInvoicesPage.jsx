@@ -1024,6 +1024,26 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const [sendAfterCreate, setSendAfterCreate] = useState(true);
   const [serviceSearchIdx, setServiceSearchIdx] = useState(null);
   const [serviceResults, setServiceResults] = useState([]);
+  const [availableDiscounts, setAvailableDiscounts] = useState([]);
+  const [selectedDiscountIds, setSelectedDiscountIds] = useState([]);
+
+  // Load active, invoice-visible, non-tier discounts once. Tier discount is auto-applied
+  // server-side from the customer's WaveGuard tier, so we exclude it from the picker.
+  useEffect(() => {
+    adminFetch('/admin/discounts')
+      .then(d => {
+        const list = (Array.isArray(d) ? d : d.discounts || [])
+          .filter(x => x.is_active && x.show_in_invoices && !x.is_waveguard_tier_discount);
+        setAvailableDiscounts(list);
+      })
+      .catch(() => {});
+  }, []);
+
+  const toggleDiscount = (id) => {
+    setSelectedDiscountIds(prev =>
+      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+    );
+  };
 
   // Customer search
   useEffect(() => {
@@ -1082,7 +1102,24 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   // WAVEGUARD.tiers (see docs/pricing/POLICY.md).
   const tierDiscount = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 }[selectedCustomer?.waveguard_tier] || 0;
   const discountAmt = subtotal * tierDiscount;
-  const afterDiscount = subtotal - discountAmt;
+
+  // Mirror server discount-engine math so the preview matches stored totals.
+  const previewDiscount = (disc) => {
+    const amt = Number(disc.amount) || 0;
+    if (disc.discount_type === 'percentage' || disc.discount_type === 'variable_percentage') {
+      let dollars = subtotal * (amt / 100);
+      if (disc.max_discount_dollars) dollars = Math.min(dollars, Number(disc.max_discount_dollars));
+      return dollars;
+    }
+    if (disc.discount_type === 'fixed_amount' || disc.discount_type === 'variable_amount') return amt;
+    if (disc.discount_type === 'free_service') return subtotal;
+    return 0;
+  };
+  const selectedDiscounts = availableDiscounts.filter(d => selectedDiscountIds.includes(d.id));
+  const manualDiscountAmt = selectedDiscounts.reduce((sum, d) => sum + previewDiscount(d), 0);
+  const totalDiscountAmt = Math.min(subtotal, discountAmt + manualDiscountAmt);
+
+  const afterDiscount = subtotal - totalDiscountAmt;
   const isCommercial = selectedCustomer?.property_type === 'commercial' || selectedCustomer?.property_type === 'business';
   const taxRate = isCommercial ? 0.07 : 0;
   const tax = afterDiscount * taxRate;
@@ -1101,6 +1138,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
           ...i, amount: i.quantity * i.unit_price,
         })),
         notes: notes || null,
+        discountIds: selectedDiscountIds,
       };
 
       const invoice = await adminFetch('/admin/invoices', { method: 'POST', body: JSON.stringify(body) });
@@ -1226,6 +1264,44 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             <button onClick={addLineItem} style={{ ...sBtn('transparent', D.teal, isMobile), padding: isMobile ? '12px 14px' : '6px 12px', fontSize: isMobile ? 14 : 12 }}>+ Add line item</button>
           </div>
 
+          {/* Discounts */}
+          {availableDiscounts.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8, display: 'block', marginBottom: 8 }}>Discounts (optional)</label>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {availableDiscounts.map(d => {
+                  const active = selectedDiscountIds.includes(d.id);
+                  const label = d.discount_type === 'percentage' || d.discount_type === 'variable_percentage'
+                    ? `${Number(d.amount)}%`
+                    : d.discount_type === 'fixed_amount' || d.discount_type === 'variable_amount'
+                    ? `$${Number(d.amount).toFixed(2)}`
+                    : d.discount_type === 'free_service'
+                    ? 'free'
+                    : '';
+                  return (
+                    <button
+                      key={d.id}
+                      type="button"
+                      onClick={() => toggleDiscount(d.id)}
+                      style={{
+                        background: active ? D.green : 'transparent',
+                        color: active ? D.white : D.text,
+                        border: `1px solid ${active ? D.green : D.border}`,
+                        borderRadius: 16,
+                        padding: isMobile ? '8px 12px' : '6px 10px',
+                        fontSize: 12,
+                        cursor: 'pointer',
+                        minHeight: isMobile ? 36 : undefined,
+                      }}
+                    >
+                      {active ? '- ' : '+ '}{d.name}{label ? ` (${label})` : ''}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Notes */}
           <div style={{ marginBottom: 16 }}>
             <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8, display: 'block', marginBottom: 4 }}>Notes (optional)</label>
@@ -1265,6 +1341,11 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                 <span>{selectedCustomer?.waveguard_tier} -{Math.round(tierDiscount * 100)}%</span><span>-${discountAmt.toFixed(2)}</span>
               </div>
             )}
+            {selectedDiscounts.map(d => (
+              <div key={d.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: D.green, marginBottom: 4 }}>
+                <span>{d.name}</span><span>-${previewDiscount(d).toFixed(2)}</span>
+              </div>
+            ))}
             {tax > 0 && (
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: D.muted, marginBottom: 4 }}>
                 <span>Tax ({Math.round(taxRate * 100)}%)</span><span>${tax.toFixed(2)}</span>
