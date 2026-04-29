@@ -803,6 +803,30 @@ const CallRecordingProcessor = {
               scheduledDateForLog = scheduledDate;
               windowStartForLog = windowStart;
               logger.info(`[call-proc] Scheduled service created: ${svc.id} on ${scheduledDate} at ${windowStart}`);
+
+              // Stitch the schedule row back into the draft estimate's
+              // estimate_data JSON when the same call produced both, so the
+              // Estimates list can show "Already scheduled · …" pointing at
+              // exactly this appointment (vs. a vague "customer has SOME
+              // upcoming appointment" fallback). Read-merge-write because
+              // estimate_data is a JSON-stringified text column, not jsonb.
+              if (estimateQueueResult?.created && estimateQueueResult.estimateId) {
+                try {
+                  const linkedEst = await db('estimates').where({ id: estimateQueueResult.estimateId }).first();
+                  let data = linkedEst?.estimate_data;
+                  if (typeof data === 'string') {
+                    try { data = JSON.parse(data); } catch { data = {}; }
+                  }
+                  data = { ...(data || {}), scheduled_service_id: svc.id, scheduled_date: scheduledDate, window_start: windowStart };
+                  await db('estimates').where({ id: estimateQueueResult.estimateId }).update({
+                    estimate_data: JSON.stringify(data),
+                    updated_at: new Date(),
+                  });
+                  logger.info(`[call-proc] Linked draft estimate ${estimateQueueResult.estimateId} → scheduled_service ${svc.id}`);
+                } catch (linkErr) {
+                  logger.warn(`[call-proc] Failed to link estimate to schedule: ${linkErr.message}`);
+                }
+              }
             } else {
               logger.warn(`[call-proc] Could not parse date from: ${extracted.preferred_date_time}; skipping schedule + SMS`);
               appointmentResult = { service: serviceType, dateTime: extracted.preferred_date_time, scheduleCreated: false, smsSent: false };

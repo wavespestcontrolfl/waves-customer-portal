@@ -35,7 +35,7 @@ import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { Badge, Button, Card, CardBody, cn } from '../../components/ui';
 import {
   Flag, Globe, Users, Bot, Phone, MessageSquare, Send, FilePlus2, SlidersHorizontal,
-  Check, X, ArrowLeft, Plus, Trash2,
+  Check, X, ArrowLeft, Plus, Trash2, CalendarCheck,
 } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -335,6 +335,19 @@ function fmtDate(d) {
     day: 'numeric',
     year: 'numeric',
   });
+}
+
+// Formats an appointment row from /admin/estimates as a short label like
+// "Tue 5/12 · 9:00 AM". scheduledDate is YYYY-MM-DD in ET, so we render it
+// in ET to keep day-of-week consistent regardless of viewer locale.
+function formatApptShort(appt) {
+  if (!appt?.scheduledDate) return '';
+  // Pin the date to noon ET so day-of-week never flips on a locale shift.
+  const dt = new Date(`${appt.scheduledDate}T12:00:00-05:00`);
+  const dow = dt.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' });
+  const md = dt.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', timeZone: 'America/New_York' });
+  const t = appt.windowDisplay ? ` · ${appt.windowDisplay}` : '';
+  return `${dow} ${md}${t}`;
 }
 
 function timeAgo(d) {
@@ -665,6 +678,19 @@ function EstimatePipelineViewV2() {
                     )}
                     {e.declineReason && (
                       <Badge tone="alert">{e.declineReason}</Badge>
+                    )}
+                    {e.confirmedAppointment && (
+                      <Badge
+                        tone="neutral"
+                        title={
+                          e.confirmedAppointment.linked
+                            ? `This call also booked an appointment on ${formatApptShort(e.confirmedAppointment)} — review the schedule before sending a fresh quote.`
+                            : `Customer already has a confirmed appointment on ${formatApptShort(e.confirmedAppointment)}.`
+                        }
+                      >
+                        <CalendarCheck size={11} strokeWidth={1.75} aria-hidden />
+                        {e.confirmedAppointment.linked ? 'Already scheduled' : 'Has appointment'} · {formatApptShort(e.confirmedAppointment)}
+                      </Badge>
                     )}
                   </div>
                   <div className="text-13 sm:text-12 text-ink-secondary mt-0.5 truncate">
@@ -1197,6 +1223,18 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
                 {estimate.viewCount}× viewed
               </span>
             )}
+            {estimate.confirmedAppointment && (
+              <span
+                className="text-11 text-ink-tertiary truncate"
+                title={
+                  estimate.confirmedAppointment.linked
+                    ? `This call also booked ${formatApptShort(estimate.confirmedAppointment)} — review the schedule before sending a fresh quote.`
+                    : `Customer has a confirmed appointment ${formatApptShort(estimate.confirmedAppointment)}.`
+                }
+              >
+                <CalendarCheck size={11} strokeWidth={1.75} className="inline-block align-text-top" aria-hidden /> {formatApptShort(estimate.confirmedAppointment)}
+              </span>
+            )}
             <span className="u-nums text-11 text-ink-tertiary">#{shortEstimateRef(estimate.id)}</span>
           </div>
         ) : (
@@ -1211,6 +1249,18 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
                 title={estimate.lastViewedAt ? `Last viewed ${timeAgo(estimate.lastViewedAt)}` : undefined}
               >
                 {estimate.viewCount}×
+              </span>
+            )}
+            {estimate.confirmedAppointment && (
+              <span
+                className="ml-2"
+                title={
+                  estimate.confirmedAppointment.linked
+                    ? `This call also booked ${formatApptShort(estimate.confirmedAppointment)} — review the schedule before sending a fresh quote.`
+                    : `Customer has a confirmed appointment ${formatApptShort(estimate.confirmedAppointment)}.`
+                }
+              >
+                <CalendarCheck size={11} strokeWidth={1.75} className="inline-block align-text-top" aria-hidden /> {formatApptShort(estimate.confirmedAppointment)}
               </span>
             )}
             <span className="ml-2 u-nums">#{shortEstimateRef(estimate.id)}</span>
