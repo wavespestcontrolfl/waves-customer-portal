@@ -574,7 +574,7 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed } = {}) {
               placeholder="test@wavespestcontrol.com"
             />
             <Button onClick={sendTest} variant="secondary" disabled={!draftId}>Send test</Button>
-            <Button onClick={sendNow} disabled={!draftId || !htmlBody}>Send to all</Button>
+            <Button onClick={sendNow} disabled={!draftId || !htmlBody || segmentCount === 0}>Send to all</Button>
           </div>
         </div>
 

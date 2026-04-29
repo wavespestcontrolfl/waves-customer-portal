@@ -385,6 +385,19 @@ router.post('/sends/:id/send', async (req, res) => {
       return res.status(400).json({ error: 'body required' });
     }
 
+    // Refuse sends that target 0 subscribers unless the operator passes
+    // { force: true } — almost always a mis-segmentation. Without this
+    // guard the campaign lands as 'sent' with recipient_count=0 and no
+    // signal to the operator that nothing actually went out.
+    if (!req.body?.force) {
+      const segCount = await NewsletterSender.buildSubscriberQuery(send.segment_filter).count('* as c').first();
+      if (Number(segCount?.c || 0) === 0) {
+        return res.status(400).json({
+          error: 'segment matches 0 active subscribers; pass { force: true } to send anyway',
+        });
+      }
+    }
+
     // Fire-and-forget. Don't await — the response should land before the
     // first recipient is queued.
     NewsletterSender.sendCampaign(req.params.id).catch(async (err) => {

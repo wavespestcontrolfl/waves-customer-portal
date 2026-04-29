@@ -91,14 +91,20 @@ async function sendCampaign(sendId) {
 
   let delivered = 0, failed = 0;
 
+  // O(1) variant lookup per subscriber. The previous .filter().find() was
+  // O(n²) — at 5k subscribers that's 25M comparisons before the first
+  // SendGrid call.
+  const variantBySub = new Map(deliveryRows.map((d) => [d.subscriber_id, d.ab_variant]));
+
+  // Body for customer touchpoints — pure function on the campaign body,
+  // hoisted out of the loop. Same for every recipient.
+  const touchpointBody = send.text_body || stripHtml(send.html_body);
+
   // Split by variant so each batch uses the right subject line. When A/B is
   // off every delivery gets variant=null and we just ship one group.
   const variants = useAb ? ['a', 'b'] : [null];
   for (const variant of variants) {
-    const group = subscribers.filter((s) => {
-      const row = deliveryRows.find((d) => d.subscriber_id === s.id);
-      return (row?.ab_variant ?? null) === variant;
-    });
+    const group = subscribers.filter((s) => (variantBySub.get(s.id) ?? null) === variant);
     if (!group.length) continue;
 
     const subjectForGroup = variant === 'b' ? send.subject_b : send.subject;
@@ -112,6 +118,7 @@ async function sendCampaign(sendId) {
         email: s.email,
         unsubscribeUrl: sendgrid.unsubscribeUrl(s.unsubscribe_token),
       }));
+      const subscriberIds = chunk.map((s) => s.id);
 
       try {
         // sendBroadcast = sendBatch with the SENDGRID_ASM_GROUP_NEWSLETTER
@@ -129,19 +136,29 @@ async function sendCampaign(sendId) {
           categories: ['newsletter', `send_${send.id}`, variant ? `variant_${variant}` : 'variant_none'],
         });
 
-        for (const s of chunk) {
-          await db('newsletter_send_deliveries')
-            .where({ send_id: send.id, subscriber_id: s.id })
-            .update({
-              status: 'sent',
-              resend_message_id: result.messageId,
-              sent_at: new Date(),
-              updated_at: new Date(),
-            });
-          delivered++;
+        // Single bulk UPDATE per chunk instead of N per-row updates. Knex
+        // returns the affected row count so the delivered tally stays
+        // accurate. The (send_id, subscriber_id) unique constraint
+        // guarantees one row per subscriber.
+        const updated = await db('newsletter_send_deliveries')
+          .where({ send_id: send.id })
+          .whereIn('subscriber_id', subscriberIds)
+          .update({
+            status: 'sent',
+            resend_message_id: result.messageId,
+            sent_at: new Date(),
+            updated_at: new Date(),
+          });
+        delivered += updated;
 
-          if (s.customer_id) {
-            await recordTouchpoint({
+        // Customer touchpoints in parallel — one per linked customer in
+        // the chunk. Promise.allSettled so a single touchpoint failure
+        // doesn't fail the campaign (touchpoints are best-effort comms
+        // history; SendGrid already accepted the actual mail).
+        const customerSubs = chunk.filter((s) => s.customer_id);
+        if (customerSubs.length) {
+          const tpResults = await Promise.allSettled(customerSubs.map((s) =>
+            recordTouchpoint({
               customerId: s.customer_id,
               channel: 'newsletter',
               direction: 'outbound',
@@ -149,24 +166,26 @@ async function sendCampaign(sendId) {
               adminUserId: send.created_by,
               contactEmail: s.email,
               subject: subjectForGroup,
-              body: send.text_body || stripHtml(send.html_body),
+              body: touchpointBody,
               metadata: {
                 send_id: send.id,
                 sendgrid_message_id: result.messageId,
                 campaign_subject: subjectForGroup,
                 ab_variant: variant,
               },
-            });
+            })));
+          const tpFailed = tpResults.filter((r) => r.status === 'rejected').length;
+          if (tpFailed) {
+            logger.warn(`[newsletter] ${tpFailed}/${customerSubs.length} touchpoint records failed for send ${send.id} (chunk size ${chunk.length})`);
           }
         }
       } catch (err) {
         logger.error(`[newsletter] batch failed for send ${send.id} variant=${variant}: ${err.message}`);
-        for (const s of chunk) {
-          await db('newsletter_send_deliveries')
-            .where({ send_id: send.id, subscriber_id: s.id })
-            .update({ status: 'failed', bounce_reason: err.message.slice(0, 500), updated_at: new Date() });
-          failed++;
-        }
+        const updated = await db('newsletter_send_deliveries')
+          .where({ send_id: send.id })
+          .whereIn('subscriber_id', subscriberIds)
+          .update({ status: 'failed', bounce_reason: err.message.slice(0, 500), updated_at: new Date() });
+        failed += updated;
       }
     }
   }
