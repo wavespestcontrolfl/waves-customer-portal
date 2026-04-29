@@ -270,9 +270,14 @@ router.post('/confirm/:token', async (req, res) => {
       logger.info(`[newsletter] Confirmed subscriber id=${result.subscriber.id}`);
     }
 
-    // Render HTML when the request came from a browser form (default
-    // Accept includes text/html). Fall back to JSON for fetch() callers.
-    const wantsHtml = req.accepts(['html', 'json']) === 'html';
+    // Detect a form submission via Content-Type — that's the
+    // definitive signal we came from the GET-page <form>. Anything
+    // else (fetch() default Accept of */*, curl, explicit JSON API
+    // client) gets JSON. Looking at Accept alone misclassifies
+    // Accept: */* as HTML.
+    const isFormSubmission = req.is('application/x-www-form-urlencoded')
+      || req.is('multipart/form-data');
+    const wantsHtml = !!isFormSubmission;
     if (!wantsHtml) {
       return res.json({ success: true, action: result.action });
     }
