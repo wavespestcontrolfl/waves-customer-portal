@@ -14,61 +14,66 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 const SCHEDULE_TOOLS = [
   {
     name: 'optimize_all_routes',
-    description: `Run full route optimization for a date using Google Routes API. Reorders all technician stops to minimize total drive time and distance. Returns before/after comparison with miles saved.`,
+    description: `Run full route optimization for a date using Google Routes API. Reorders all technician stops to minimize total drive time and distance. Two-step pattern: call WITHOUT \`confirmed\` first to preview the new ordering and miles saved, then re-call WITH \`confirmed: true\` after the operator approves to actually write the new route_order. Always preview first.`,
     input_schema: {
       type: 'object',
       properties: {
         date: { type: 'string', description: 'YYYY-MM-DD to optimize' },
+        confirmed: { type: 'boolean', description: 'Set true ONLY after the operator has approved the proposed reorder. Defaults to false (preview only).' },
       },
       required: ['date'],
     },
   },
   {
     name: 'optimize_tech_route',
-    description: `Optimize route for a single technician on a given date. Reorders just their stops.`,
+    description: `Optimize route for a single technician on a given date. Reorders just their stops. Two-step pattern: call WITHOUT \`confirmed\` first to preview, then re-call WITH \`confirmed: true\` after the operator approves.`,
     input_schema: {
       type: 'object',
       properties: {
         date: { type: 'string', description: 'YYYY-MM-DD' },
         technician_name: { type: 'string', description: 'Tech name (Adam, Jose, Jacob)' },
+        confirmed: { type: 'boolean', description: 'Set true ONLY after the operator has approved the proposed reorder. Defaults to false (preview only).' },
       },
       required: ['date', 'technician_name'],
     },
   },
   {
     name: 'assign_technician',
-    description: `Assign a technician to one or more unassigned services. Useful when the operator says "give those to Adam" or "assign the Parrish stops to Jose."`,
+    description: `Assign a technician to one or more unassigned services. Useful when the operator says "give those to Adam" or "assign the Parrish stops to Jose." Two-step pattern: call WITHOUT \`confirmed\` first to show which stops would be reassigned, then re-call WITH \`confirmed: true\` after the operator approves.`,
     input_schema: {
       type: 'object',
       properties: {
         service_ids: { type: 'array', items: { type: 'string' }, description: 'Scheduled service IDs to assign' },
         technician_name: { type: 'string' },
+        confirmed: { type: 'boolean', description: 'Set true ONLY after the operator has approved the assignment. Defaults to false (preview only).' },
       },
       required: ['service_ids', 'technician_name'],
     },
   },
   {
     name: 'move_stops_to_day',
-    description: `Move one or more scheduled services to a different date. Use when operator says "move the Lakewood stops to Thursday" or "push these to next week."`,
+    description: `Move one or more scheduled services to a different date. Use when operator says "move the Lakewood stops to Thursday" or "push these to next week." Two-step pattern: call WITHOUT \`confirmed\` first to preview the moves, then re-call WITH \`confirmed: true\` after the operator approves.`,
     input_schema: {
       type: 'object',
       properties: {
         service_ids: { type: 'array', items: { type: 'string' }, description: 'Scheduled service IDs to move' },
         new_date: { type: 'string', description: 'YYYY-MM-DD target date' },
         reason: { type: 'string' },
+        confirmed: { type: 'boolean', description: 'Set true ONLY after the operator has approved the moves. Defaults to false (preview only).' },
       },
       required: ['service_ids', 'new_date'],
     },
   },
   {
     name: 'swap_tech_assignments',
-    description: `Swap all stops between two technicians for a date. Use when "give Adam's route to Jose and Jose's to Adam."`,
+    description: `Swap all stops between two technicians for a date. Use when "give Adam's route to Jose and Jose's to Adam." Two-step pattern: call WITHOUT \`confirmed\` first to preview the swap counts, then re-call WITH \`confirmed: true\` after the operator approves. This touches every stop for both techs on the date — preview is essential.`,
     input_schema: {
       type: 'object',
       properties: {
         date: { type: 'string' },
         tech_a_name: { type: 'string' },
         tech_b_name: { type: 'string' },
+        confirmed: { type: 'boolean', description: 'Set true ONLY after the operator has approved the swap. Defaults to false (preview only).' },
       },
       required: ['date', 'tech_a_name', 'tech_b_name'],
     },
@@ -147,11 +152,11 @@ Use for: "find time for", "when can we schedule", "best slot for", "fit in a new
 async function executeScheduleTool(toolName, input) {
   try {
     switch (toolName) {
-      case 'optimize_all_routes': return await optimizeAllRoutes(input.date);
-      case 'optimize_tech_route': return await optimizeTechRoute(input.date, input.technician_name);
-      case 'assign_technician': return await assignTechnician(input.service_ids, input.technician_name);
-      case 'move_stops_to_day': return await moveStopsToDay(input.service_ids, input.new_date, input.reason);
-      case 'swap_tech_assignments': return await swapTechAssignments(input.date, input.tech_a_name, input.tech_b_name);
+      case 'optimize_all_routes': return await optimizeAllRoutes(input);
+      case 'optimize_tech_route': return await optimizeTechRoute(input);
+      case 'assign_technician': return await assignTechnician(input);
+      case 'move_stops_to_day': return await moveStopsToDay(input);
+      case 'swap_tech_assignments': return await swapTechAssignments(input);
       case 'find_schedule_gaps': return await findScheduleGaps(input);
       case 'find_available_slots': return await findAvailableSlotsTool(input);
       case 'get_day_summary': return await getDaySummary(input.date);
@@ -180,7 +185,8 @@ function getZone(city) {
 }
 
 
-async function optimizeAllRoutes(date) {
+async function optimizeAllRoutes(input) {
+  const { date, confirmed } = input;
   let RouteOptimizer;
   try { RouteOptimizer = require('../route-optimizer'); } catch {
     return { error: 'Route optimizer not available' };
@@ -211,22 +217,12 @@ async function optimizeAllRoutes(date) {
     { startLat: RouteOptimizer.HQ.lat, startLng: RouteOptimizer.HQ.lng, endAtStart: true },
   );
 
-  // Apply the new order
-  if (result.orderedStops) {
-    for (let i = 0; i < result.orderedStops.length; i++) {
-      await db('scheduled_services').where('id', result.orderedStops[i].id).update({ route_order: i + 1, updated_at: new Date() });
-    }
-  }
-
   const savedMiles = Math.max(0, Math.round((result.unoptimizedDistanceMeters - result.totalDistanceMeters) / 1609.34));
   const savedPct = result.unoptimizedDistanceMeters > 0
     ? Math.round(((result.unoptimizedDistanceMeters - result.totalDistanceMeters) / result.unoptimizedDistanceMeters) * 100)
     : 0;
 
-  logger.info(`[intelligence-bar:schedule] Optimized routes for ${date}: saved ${savedMiles} miles (${savedPct}%)`);
-
-  return {
-    success: true,
+  const summary = {
     date,
     total_stops: stopsWithCoords.length,
     total_miles_before: Math.round(result.unoptimizedDistanceMeters / 1609.34),
@@ -235,11 +231,35 @@ async function optimizeAllRoutes(date) {
     percent_saved: savedPct,
     total_drive_minutes: Math.round((result.totalDurationSeconds || 0) / 60),
     source: result.source, // 'google_routes' or 'nearest_neighbor'
+    ordered_stops: (result.orderedStops || []).map((s, i) => ({
+      position: i + 1,
+      customer: s.customerName,
+      service: s.serviceType,
+    })),
   };
+
+  if (confirmed !== true) {
+    return {
+      proposal: true,
+      ...summary,
+      note: `Would reorder ${stopsWithCoords.length} stops, saving ~${savedMiles} miles. Re-call with confirmed:true to apply.`,
+    };
+  }
+
+  if (result.orderedStops) {
+    for (let i = 0; i < result.orderedStops.length; i++) {
+      await db('scheduled_services').where('id', result.orderedStops[i].id).update({ route_order: i + 1, updated_at: new Date() });
+    }
+  }
+
+  logger.info(`[intelligence-bar:schedule] Optimized routes for ${date}: saved ${savedMiles} miles (${savedPct}%)`);
+
+  return { success: true, ...summary };
 }
 
 
-async function optimizeTechRoute(date, techName) {
+async function optimizeTechRoute(input) {
+  const { date, technician_name: techName, confirmed } = input;
   const tech = await db('technicians').whereILike('name', `%${techName}%`).first();
   if (!tech) return { error: `Technician "${techName}" not found` };
 
@@ -271,16 +291,9 @@ async function optimizeTechRoute(date, techName) {
     { startLat: RouteOptimizer.HQ.lat, startLng: RouteOptimizer.HQ.lng, endAtStart: true },
   );
 
-  if (result.orderedStops) {
-    for (let i = 0; i < result.orderedStops.length; i++) {
-      await db('scheduled_services').where('id', result.orderedStops[i].id).update({ route_order: i + 1, updated_at: new Date() });
-    }
-  }
-
   const savedMiles = Math.max(0, Math.round((result.unoptimizedDistanceMeters - result.totalDistanceMeters) / 1609.34));
 
-  return {
-    success: true,
+  const summary = {
     tech: tech.name,
     date,
     stops: stopsWithCoords.length,
@@ -288,26 +301,73 @@ async function optimizeTechRoute(date, techName) {
     miles_after: Math.round(result.totalDistanceMeters / 1609.34),
     miles_saved: savedMiles,
     drive_minutes: Math.round((result.totalDurationSeconds || 0) / 60),
-    ordered_stops: (result.orderedStops || []).map(s => ({
+    ordered_stops: (result.orderedStops || []).map((s, i) => ({
+      position: i + 1,
       customer: s.customerName,
       service: s.serviceType,
     })),
   };
+
+  if (confirmed !== true) {
+    return {
+      proposal: true,
+      ...summary,
+      note: `Would reorder ${tech.name}'s ${stopsWithCoords.length} stops, saving ~${savedMiles} miles. Re-call with confirmed:true to apply.`,
+    };
+  }
+
+  if (result.orderedStops) {
+    for (let i = 0; i < result.orderedStops.length; i++) {
+      await db('scheduled_services').where('id', result.orderedStops[i].id).update({ route_order: i + 1, updated_at: new Date() });
+    }
+  }
+
+  logger.info(`[intelligence-bar:schedule] Optimized ${tech.name}'s route for ${date}: saved ${savedMiles} miles`);
+
+  return { success: true, ...summary };
 }
 
 
-async function assignTechnician(serviceIds, techName) {
+async function assignTechnician(input) {
+  const { service_ids: serviceIds, technician_name: techName, confirmed } = input;
   const tech = await db('technicians').whereILike('name', `%${techName}%`).first();
   if (!tech) return { error: `Technician "${techName}" not found` };
+
+  const services = await db('scheduled_services')
+    .whereIn('scheduled_services.id', serviceIds)
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .leftJoin('technicians as cur_tech', 'scheduled_services.technician_id', 'cur_tech.id')
+    .select(
+      'scheduled_services.id',
+      'customers.first_name', 'customers.last_name',
+      'scheduled_services.service_type',
+      'scheduled_services.scheduled_date',
+      'cur_tech.name as current_tech_name',
+    );
+
+  if (!services.length) return { error: 'No services found for the given IDs' };
+
+  const stops = services.map(s => ({
+    id: s.id,
+    customer: `${s.first_name || ''} ${s.last_name || ''}`.trim(),
+    service_type: s.service_type,
+    scheduled_date: s.scheduled_date,
+    current_tech: s.current_tech_name || 'Unassigned',
+  }));
+
+  if (confirmed !== true) {
+    return {
+      proposal: true,
+      would_assign_to: tech.name,
+      stop_count: stops.length,
+      stops,
+      note: `Would reassign ${stops.length} stop(s) to ${tech.name}. Re-call with confirmed:true to apply.`,
+    };
+  }
 
   const count = await db('scheduled_services')
     .whereIn('id', serviceIds)
     .update({ technician_id: tech.id, updated_at: new Date() });
-
-  const services = await db('scheduled_services')
-    .whereIn('id', serviceIds)
-    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-    .select('scheduled_services.id', 'customers.first_name', 'customers.last_name', 'scheduled_services.service_type');
 
   logger.info(`[intelligence-bar:schedule] Assigned ${count} services to ${tech.name}`);
 
@@ -315,16 +375,13 @@ async function assignTechnician(serviceIds, techName) {
     success: true,
     assigned_count: count,
     technician: tech.name,
-    services: services.map(s => ({
-      id: s.id,
-      customer: `${s.first_name} ${s.last_name}`,
-      service_type: s.service_type,
-    })),
+    stops,
   };
 }
 
 
-async function moveStopsToDay(serviceIds, newDate, reason) {
+async function moveStopsToDay(input) {
+  const { service_ids: serviceIds, new_date: newDate, reason, confirmed } = input;
   const services = await db('scheduled_services')
     .whereIn('id', serviceIds)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -333,7 +390,28 @@ async function moveStopsToDay(serviceIds, newDate, reason) {
       'customers.first_name', 'customers.last_name', 'customers.city',
     );
 
-  const moved = [];
+  if (!services.length) return { error: 'No services found for the given IDs' };
+
+  const stops = services.map(s => ({
+    id: s.id,
+    customer: `${s.first_name || ''} ${s.last_name || ''}`.trim(),
+    city: s.city,
+    service_type: s.service_type,
+    old_date: s.scheduled_date,
+    new_date: newDate,
+  }));
+
+  if (confirmed !== true) {
+    return {
+      proposal: true,
+      would_move_to: newDate,
+      stop_count: stops.length,
+      reason: reason || null,
+      stops,
+      note: `Would move ${stops.length} stop(s) to ${newDate}. Re-call with confirmed:true to apply.`,
+    };
+  }
+
   for (const s of services) {
     const oldDate = s.scheduled_date;
     await db('scheduled_services').where('id', s.id).update({
@@ -341,28 +419,21 @@ async function moveStopsToDay(serviceIds, newDate, reason) {
       notes: reason ? `${s.notes || ''}\nMoved from ${oldDate}: ${reason}`.trim() : s.notes,
       updated_at: new Date(),
     });
-    moved.push({
-      id: s.id,
-      customer: `${s.first_name} ${s.last_name}`,
-      city: s.city,
-      service_type: s.service_type,
-      old_date: oldDate,
-      new_date: newDate,
-    });
   }
 
-  logger.info(`[intelligence-bar:schedule] Moved ${moved.length} stops to ${newDate}`);
+  logger.info(`[intelligence-bar:schedule] Moved ${stops.length} stops to ${newDate}`);
 
   return {
     success: true,
-    moved_count: moved.length,
+    moved_count: stops.length,
     new_date: newDate,
-    stops: moved,
+    stops,
   };
 }
 
 
-async function swapTechAssignments(date, techAName, techBName) {
+async function swapTechAssignments(input) {
+  const { date, tech_a_name: techAName, tech_b_name: techBName, confirmed } = input;
   const techA = await db('technicians').whereILike('name', `%${techAName}%`).first();
   const techB = await db('technicians').whereILike('name', `%${techBName}%`).first();
   if (!techA) return { error: `Tech "${techAName}" not found` };
@@ -372,12 +443,28 @@ async function swapTechAssignments(date, techAName, techBName) {
   const aServices = await db('scheduled_services').where({ scheduled_date: date, technician_id: techA.id }).whereNotIn('status', ['cancelled', 'completed', 'rescheduled']);
   const bServices = await db('scheduled_services').where({ scheduled_date: date, technician_id: techB.id }).whereNotIn('status', ['cancelled', 'completed', 'rescheduled']);
 
-  // Swap assignments atomically
+  if (confirmed !== true) {
+    return {
+      proposal: true,
+      date,
+      swap: {
+        [techA.name]: { current_count: aServices.length, after_swap: bServices.length },
+        [techB.name]: { current_count: bServices.length, after_swap: aServices.length },
+      },
+      note: `Would swap ${aServices.length} stop(s) from ${techA.name} with ${bServices.length} stop(s) from ${techB.name}. Re-call with confirmed:true to apply.`,
+    };
+  }
+
+  // Swap assignments atomically. Park A's services on NULL (allowed — the FK
+  // is nullable for unassigned stops), then redirect B's to A and the parked
+  // A-set to B. Earlier code parked on a hard-coded UUID, which violated the
+  // technician_id FK if the swap ever ran.
+  const aIds = aServices.map(s => s.id);
+  const bIds = bServices.map(s => s.id);
   await db.transaction(async trx => {
-    const tempId = '00000000-0000-0000-0000-000000000000';
-    await trx('scheduled_services').whereIn('id', aServices.map(s => s.id)).update({ technician_id: tempId });
-    await trx('scheduled_services').whereIn('id', bServices.map(s => s.id)).update({ technician_id: techA.id });
-    await trx('scheduled_services').whereIn('id', aServices.map(s => s.id)).update({ technician_id: techB.id });
+    if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: null, updated_at: new Date() });
+    if (bIds.length) await trx('scheduled_services').whereIn('id', bIds).update({ technician_id: techA.id, updated_at: new Date() });
+    if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: techB.id, updated_at: new Date() });
   });
 
   return {
