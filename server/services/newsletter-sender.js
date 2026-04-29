@@ -43,14 +43,32 @@ function assignAbVariant() {
  * scheduler tick. Idempotent-ish: refuses to re-send non-draft/non-scheduled
  * rows, and flips status to 'sending' before doing any external work.
  *
+ * opts.force — bypass the 0-recipient guard. The route layer also
+ *   pre-validates so the operator gets a 400 with a force=true hint;
+ *   this in-sender check covers the scheduler-tick path (which has no
+ *   pre-flight) and the rare race where the segment empties between
+ *   pre-flight and dispatch.
+ *
  * Returns { recipients, delivered, failed }.
  */
-async function sendCampaign(sendId) {
+async function sendCampaign(sendId, opts = {}) {
   if (!sendgrid.isConfigured()) throw new Error('SendGrid not configured (SENDGRID_API_KEY missing)');
 
   const send = await db('newsletter_sends').where({ id: sendId }).first();
   if (!send) throw new Error('not found');
   if (!send.html_body && !send.text_body) throw new Error('body required');
+
+  // 0-recipient guard — runs BEFORE the atomic claim so a no-op send
+  // doesn't burn the row's status from draft/scheduled to sending only
+  // to immediately land as 'sent' with recipient_count=0.
+  if (!opts.force) {
+    const c = await buildSubscriberQuery(send.segment_filter).count('* as c').first();
+    if (Number(c?.c || 0) === 0) {
+      const err = new Error('segment matches 0 active subscribers');
+      err.code = 'EMPTY_SEGMENT';
+      throw err;
+    }
+  }
 
   // Atomic claim: only one caller can flip draft/scheduled → sending.
   // Returning the rows lets us distinguish 'lost the race' (0 rows) from
