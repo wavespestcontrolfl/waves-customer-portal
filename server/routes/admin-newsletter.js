@@ -282,7 +282,37 @@ router.get('/sends/:id', async (req, res, next) => {
       .orderBy('created_at', 'desc')
       .limit(1000);
 
-    res.json({ send, deliveries });
+    // Per-variant aggregate for A/B sends — operator currently has to
+    // run a DB query to know which subject won. Computed via COUNT
+    // (column) which excludes nulls, so each timestamp column counts
+    // the recipients who reached that step. Skipped entirely on
+    // non-A/B campaigns to save the round trip.
+    let variantStats = null;
+    if (send.subject_b) {
+      const rows = await db('newsletter_send_deliveries')
+        .where({ send_id: req.params.id })
+        .select('ab_variant')
+        .count('* as total')
+        .count('delivered_at as delivered')
+        .count('opened_at as opened')
+        .count('clicked_at as clicked')
+        .count('bounced_at as bounced')
+        .groupBy('ab_variant');
+      variantStats = { a: null, b: null };
+      for (const r of rows) {
+        if (r.ab_variant === 'a' || r.ab_variant === 'b') {
+          variantStats[r.ab_variant] = {
+            total: Number(r.total),
+            delivered: Number(r.delivered),
+            opened: Number(r.opened),
+            clicked: Number(r.clicked),
+            bounced: Number(r.bounced),
+          };
+        }
+      }
+    }
+
+    res.json({ send, deliveries, variantStats });
   } catch (err) { next(err); }
 });
 

@@ -951,6 +951,10 @@ function AiDraftModal({ initialTemplate, initialPrompt, onClose, onDraft }) {
 export function HistoryView() {
   const [sends, setSends] = useState([]);
   const [loading, setLoading] = useState(true);
+  // Per-send variant breakdown (a vs b counts) — fetched lazily when the
+  // operator expands an A/B row, then cached.
+  const [variantStats, setVariantStats] = useState({});
+  const [expandedId, setExpandedId] = useState(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -969,6 +973,21 @@ export function HistoryView() {
     } catch (e) { alert('Cancel failed: ' + e.message); }
   };
 
+  // Toggle the A/B breakdown panel. First open lazy-loads /sends/:id (the
+  // detail endpoint includes variantStats); subsequent toggles read from
+  // the cache.
+  const toggleVariants = async (id) => {
+    if (expandedId === id) { setExpandedId(null); return; }
+    setExpandedId(id);
+    if (variantStats[id]) return;
+    try {
+      const d = await adminFetch(`/admin/newsletter/sends/${id}`);
+      if (d.variantStats) {
+        setVariantStats((prev) => ({ ...prev, [id]: d.variantStats }));
+      }
+    } catch { /* surfaces as 'no breakdown available' below */ }
+  };
+
   return (
     <Card className="p-5">
       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
@@ -984,48 +1003,136 @@ export function HistoryView() {
         <div className="space-y-0 -mx-5">
           {sends.map((s) => {
             const pct = s.recipient_count ? Math.round((s.delivered_count / s.recipient_count) * 100) : 0;
+            const isAb = !!s.subject_b;
+            const isOpen = expandedId === s.id;
             return (
-              <div key={s.id} className="px-5 py-3 border-b border-hairline border-zinc-200 flex items-start gap-4">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1 flex-wrap">
-                    <span className="text-14 font-medium text-zinc-900 truncate">{s.subject}</span>
-                    {s.subject_b && <Badge tone="muted">A/B</Badge>}
-                    {s.segment_filter && <Badge tone="muted">Segmented</Badge>}
-                    <StatusChip status={s.status} />
+              <div key={s.id} className="border-b border-hairline border-zinc-200">
+                <div className="px-5 py-3 flex items-start gap-4">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1 flex-wrap">
+                      <span className="text-14 font-medium text-zinc-900 truncate">{s.subject}</span>
+                      {isAb && (
+                        <button
+                          type="button"
+                          onClick={() => toggleVariants(s.id)}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-sm bg-zinc-100 text-11 font-medium text-zinc-700 hover:bg-zinc-200 u-focus-ring"
+                          title={isOpen ? 'Hide A/B breakdown' : 'Show A/B breakdown'}
+                        >
+                          A/B {isOpen ? '▾' : '▸'}
+                        </button>
+                      )}
+                      {s.segment_filter && <Badge tone="muted">Segmented</Badge>}
+                      <StatusChip status={s.status} />
+                    </div>
+                    <div className="text-11 text-ink-tertiary">
+                      {s.created_by_name || 'Admin'} · {
+                        s.status === 'scheduled' && s.scheduled_for
+                          ? `scheduled for ${new Date(s.scheduled_for).toLocaleString()}`
+                          : s.sent_at ? new Date(s.sent_at).toLocaleString() : 'draft (not sent)'
+                      }
+                    </div>
+                    {isAb && (
+                      <div className="text-11 text-ink-tertiary mt-0.5 truncate">B: {s.subject_b}</div>
+                    )}
                   </div>
-                  <div className="text-11 text-ink-tertiary">
-                    {s.created_by_name || 'Admin'} · {
-                      s.status === 'scheduled' && s.scheduled_for
-                        ? `scheduled for ${new Date(s.scheduled_for).toLocaleString()}`
-                        : s.sent_at ? new Date(s.sent_at).toLocaleString() : 'draft (not sent)'
-                    }
+                  <div className="flex items-center gap-5 text-12 flex-shrink-0">
+                    {s.status === 'scheduled' ? (
+                      <button
+                        type="button"
+                        onClick={() => cancelSchedule(s.id)}
+                        className="text-11 px-2 py-1 border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-zinc-900 hover:border-zinc-900 u-focus-ring"
+                      >Cancel schedule</button>
+                    ) : (
+                      <>
+                        <Stat label="Sent" value={s.recipient_count || 0} />
+                        <Stat label="Delivered" value={`${s.delivered_count || 0} (${pct}%)`} />
+                        <Stat label="Bounced" value={s.bounced_count || 0} alert={s.bounced_count > 0} />
+                        <Stat label="Unsub" value={s.unsubscribed_count || 0} />
+                      </>
+                    )}
                   </div>
-                  {s.subject_b && (
-                    <div className="text-11 text-ink-tertiary mt-0.5 truncate">B: {s.subject_b}</div>
-                  )}
                 </div>
-                <div className="flex items-center gap-5 text-12 flex-shrink-0">
-                  {s.status === 'scheduled' ? (
-                    <button
-                      type="button"
-                      onClick={() => cancelSchedule(s.id)}
-                      className="text-11 px-2 py-1 border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-zinc-900 hover:border-zinc-900 u-focus-ring"
-                    >Cancel schedule</button>
-                  ) : (
-                    <>
-                      <Stat label="Sent" value={s.recipient_count || 0} />
-                      <Stat label="Delivered" value={`${s.delivered_count || 0} (${pct}%)`} />
-                      <Stat label="Bounced" value={s.bounced_count || 0} alert={s.bounced_count > 0} />
-                      <Stat label="Unsub" value={s.unsubscribed_count || 0} />
-                    </>
-                  )}
-                </div>
+                {isAb && isOpen && (
+                  <VariantBreakdown
+                    stats={variantStats[s.id]}
+                    subjectA={s.subject}
+                    subjectB={s.subject_b}
+                  />
+                )}
               </div>
             );
           })}
         </div>
       )}
     </Card>
+  );
+}
+
+// ── A/B variant breakdown ────────────────────────────────────────────
+//
+// Per-variant counts pulled from /sends/:id (server aggregates the
+// deliveries table grouped by ab_variant). "Winner" is whichever variant
+// has the higher open rate among delivered messages — same heuristic
+// most ESPs use; falls back to no-winner when both rates are within
+// half a percentage point.
+
+function VariantBreakdown({ stats, subjectA, subjectB }) {
+  if (!stats) {
+    return (
+      <div className="px-5 pb-3 -mt-2 text-11 text-ink-tertiary">
+        Loading variant breakdown…
+      </div>
+    );
+  }
+  const a = stats.a;
+  const b = stats.b;
+  if (!a && !b) {
+    return (
+      <div className="px-5 pb-3 -mt-2 text-11 text-ink-tertiary">
+        No A/B delivery rows yet — open rates appear once SendGrid events arrive.
+      </div>
+    );
+  }
+  const openRate = (v) => v && v.delivered ? v.opened / v.delivered : null;
+  const aRate = openRate(a);
+  const bRate = openRate(b);
+  let winner = null;
+  if (aRate != null && bRate != null && Math.abs(aRate - bRate) >= 0.005) {
+    winner = aRate > bRate ? 'a' : 'b';
+  }
+
+  return (
+    <div className="px-5 pb-4 -mt-1 grid grid-cols-1 sm:grid-cols-2 gap-3">
+      <VariantCell letter="A" subject={subjectA} stats={a} rate={aRate} isWinner={winner === 'a'} />
+      <VariantCell letter="B" subject={subjectB} stats={b} rate={bRate} isWinner={winner === 'b'} />
+    </div>
+  );
+}
+
+function VariantCell({ letter, subject, stats, rate, isWinner }) {
+  return (
+    <div
+      className={cn(
+        'border-hairline rounded-sm p-3 bg-white',
+        isWinner ? 'border-zinc-900' : 'border-zinc-200',
+      )}
+    >
+      <div className="flex items-center gap-2 mb-1 flex-wrap">
+        <span className="text-11 uppercase tracking-label text-ink-secondary">Variant {letter}</span>
+        {isWinner && <Badge tone="strong">Winner</Badge>}
+      </div>
+      <div className="text-12 text-zinc-900 mb-2 truncate" title={subject}>{subject || <em className="text-ink-tertiary">(missing)</em>}</div>
+      {!stats ? (
+        <div className="text-11 text-ink-tertiary">No deliveries recorded.</div>
+      ) : (
+        <div className="grid grid-cols-4 gap-2">
+          <Stat label="Sent" value={stats.total} />
+          <Stat label="Delivered" value={stats.delivered} />
+          <Stat label="Opens" value={`${stats.opened}${rate != null ? ` (${(rate * 100).toFixed(0)}%)` : ''}`} />
+          <Stat label="Clicks" value={stats.clicked} />
+        </div>
+      )}
+    </div>
   );
 }
 
