@@ -224,6 +224,39 @@ function normalizePrefs(raw) {
 // own floors (PEST.floor for recurring per-visit, ONE_TIME.pest.floor
 // for one-time). Without the clamp, a small pest estimate could be
 // dragged to $0 via the toggles.
+// Resolve the pre-discount monthly base from an estimate row + parsed
+// estimate_data blob, in priority order:
+//   1. estimate_data.baseMonthly / preDiscountMonthly  (explicit, set by
+//      a prior /preferences self-heal or by the engine when it rendered
+//      the estimate)
+//   2. engine result's annualBeforeDiscount / 12
+//   3. sum of recurring.services[].mo (per-service pre-discount monthlies)
+//   4. estimate.monthly_total — DISCOUNTED. Last-resort fallback. Stale
+//      after a tier change since it reflects the previous tier's discount;
+//      callers that need to recompute under a new tier should treat this
+//      branch as a smell.
+//
+// Returns { baseMonthly, source } so callers can see which branch fired
+// and decide whether to persist baseMonthly back to estimate_data
+// (self-heal). The source string is one of:
+//   'explicit' | 'engine' | 'summed' | 'fallback-discounted'
+function resolveBaseMonthly(estimate, parsedData) {
+  const explicit = Number(parsedData?.baseMonthly || parsedData?.preDiscountMonthly || 0);
+  if (explicit > 0) return { baseMonthly: explicit, source: 'explicit' };
+
+  const estResult = parsedData?.result || parsedData || {};
+  const engineDerived = Number(estResult?.recurring?.annualBeforeDiscount || 0) / 12;
+  if (engineDerived > 0) {
+    return { baseMonthly: Math.round(engineDerived * 100) / 100, source: 'engine' };
+  }
+
+  const recurring = estResult?.recurring?.services || [];
+  const summed = recurring.reduce((s, x) => s + Number(x.mo || x.monthly || 0), 0);
+  if (summed > 0) return { baseMonthly: Math.round(summed * 100) / 100, source: 'summed' };
+
+  return { baseMonthly: Number(estimate.monthly_total || 0), source: 'fallback-discounted' };
+}
+
 function computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTotal = 0) {
   let monthlyOff = 0;
   let oneTimeOff = 0;
@@ -1679,22 +1712,38 @@ router.put('/:token/select-tier', async (req, res, next) => {
 
     const previousTier = estimate.waveguard_tier || 'Bronze';
 
-    // Server-side pricing — never trust client totals
+    // Server-side pricing — never trust client totals.
     let parsedData = {};
     try { parsedData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); }
     catch { parsedData = {}; }
 
-    const baseMonthly = Number(parsedData.baseMonthly || parsedData.preDiscountMonthly || estimate.monthly_total || 0);
+    // Resolve base via the shared helper. Critical here: an unguarded
+    // fallback to estimate.monthly_total compounds the discount (Silver→
+    // Platinum on $90 gives $72 instead of the correct $80 from a $100
+    // base). The helper prefers explicit baseMonthly → engine-derived →
+    // summed → discounted-fallback. We persist the derived value back
+    // below so the next tier flip on this row is a no-op for resolution.
+    const { baseMonthly, source: baseSource } = resolveBaseMonthly(estimate, parsedData);
     const discount = tierDiscount(selectedTier);
-    const monthlyTotal = Math.round(baseMonthly * (1 - discount) * 100) / 100;
-    const annualTotal = Math.round(monthlyTotal * 12 * 100) / 100;
+    const monthlyTotal = Math.max(0, Math.round(baseMonthly * (1 - discount) * 100) / 100);
+    const annualTotal = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
 
-    await db('estimates').where({ id: estimate.id }).update({
+    // Self-heal estimate_data.baseMonthly when we resolved it from the
+    // engine result or summed services. Doesn't write when source is
+    // 'explicit' (no change) or 'fallback-discounted' (unsafe to persist
+    // a discounted value as if it were a base).
+    const writes = {
       waveguard_tier: selectedTier,
       monthly_total: monthlyTotal,
       annual_total: annualTotal,
       updated_at: db.fn.now(),
-    });
+    };
+    if ((baseSource === 'engine' || baseSource === 'summed') && baseMonthly > 0
+        && Number(parsedData.baseMonthly || 0) !== baseMonthly) {
+      parsedData.baseMonthly = baseMonthly;
+      writes.estimate_data = JSON.stringify(parsedData);
+    }
+    await db('estimates').where({ id: estimate.id }).update(writes);
 
     // Notify admin of tier selection
     try {
@@ -1744,20 +1793,10 @@ router.put('/:token/preferences', async (req, res, next) => {
     const hasPestOneTime = detectPestOneTime(oneTimeItems);
     const pestOneTimeTotal = hasPestOneTime ? pestOneTimeBase(oneTimeItems) : 0;
 
-    // baseMonthly resolution, ordered so legacy rows self-heal:
-    //   1. explicit estData.baseMonthly / preDiscountMonthly
-    //   2. derive from engine result: annualBeforeDiscount / 12
-    //   3. sum of recurring.services[].mo (pre-discount per-service monthlies)
-    //   4. estimate.monthly_total (DISCOUNTED — last-resort; stale if tier has changed)
-    // The derived value is persisted back to estimate_data.baseMonthly below
-    // so subsequent toggles on this row don't need to re-derive.
-    const explicitBase = Number(parsedData.baseMonthly || parsedData.preDiscountMonthly || 0);
-    const engineDerivedBase = Number(estResult?.recurring?.annualBeforeDiscount || 0) / 12;
-    const summedBase = recurring.reduce((s, x) => s + Number(x.mo || x.monthly || 0), 0);
-    const baseMonthly = explicitBase > 0 ? explicitBase
-      : engineDerivedBase > 0 ? Math.round(engineDerivedBase * 100) / 100
-      : summedBase > 0 ? Math.round(summedBase * 100) / 100
-      : Number(estimate.monthly_total || 0);
+    // baseMonthly resolution via shared helper (see resolveBaseMonthly).
+    // Persisted back to estimate_data.baseMonthly below so subsequent
+    // toggles + tier flips on this row are a no-op for resolution.
+    const { baseMonthly } = resolveBaseMonthly(estimate, parsedData);
 
     const currentTier = estimate.waveguard_tier || 'Bronze';
     const currentDiscount = tierDiscount(currentTier);
