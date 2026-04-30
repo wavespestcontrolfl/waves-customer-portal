@@ -142,6 +142,15 @@ async function loadContactState(input) {
       if (cust) {
         state.customer = cust;
         state.prefs = await db('notification_prefs').where({ customer_id: cust.id }).first();
+        // Phone-match recovery: if the customerId path threw above
+        // (setting lookupFailed=true) but we successfully loaded the
+        // customer here via phone, contact state IS now valid — clear
+        // the flag so checkConsentForPurpose evaluates against actual
+        // prefs instead of hard-failing on CONSENT_LOOKUP_FAILED.
+        // Codex P2 on PR #545: previously a transient blip on the
+        // customerId lookup poisoned the result even when the
+        // phone-match fallback recovered.
+        state.lookupFailed = false;
       }
     } catch (err) {
       logger.warn(`[messaging:consent] phone-match lookup failed: ${err.message}`);
