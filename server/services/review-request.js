@@ -263,14 +263,18 @@ const ReviewService = {
         await db('review_requests').where({ id: requestId }).update({
           status: 'suppressed',
         });
-        // PII: ID-only logging per AGENTS.md.
-        logger.warn(`[review] SMS BLOCKED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'}): ${result.code} — ${result.reason}`);
+        // PII: ID-only logging per AGENTS.md. Drop result.reason —
+        // upstream provider/guard error strings can include the recipient
+        // phone or message body. Operators read full context from
+        // messaging_audit_log keyed on auditLogId + code.
+        logger.warn(`[review] SMS BLOCKED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'} code=${result.code})`);
       } else {
         // Provider failure (Twilio/network). Leave status='pending' so the
         // cron retries on the next tick. Permanent suppression for transient
         // provider errors would silently drop legitimate review requests.
-        // PII: ID-only logging per AGENTS.md.
-        logger.error(`[review] SMS PROVIDER FAILURE (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'}): ${result.code} — ${result.reason} (will retry)`);
+        // PII: ID-only logging per AGENTS.md, no result.reason for the
+        // same reason as the BLOCKED branch above.
+        logger.error(`[review] SMS PROVIDER FAILURE (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'} code=${result.code}) (will retry)`);
       }
     } catch (err) {
       logger.error(`[review] SMS failed: ${err.message}`);
