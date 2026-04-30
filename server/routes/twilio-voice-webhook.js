@@ -133,10 +133,7 @@ router.post('/voice', async (req, res) => {
     // FALLBACK that runs when (a) the Studio Flow is bypassed (rare),
     // (b) an inbound number is provisioned but not yet wired into the
     // flow, or (c) the call_log contract-test harness exercises this
-    // path directly. We keep its behavior aligned with the Studio Flow
-    // so a fallback caller hears the same greeting and reaches the
-    // same handlers (Adam + Virginia simul-ring, 30s timeout, Lakewood
-    // Ranch HQ as last resort).
+    // path directly.
     //
     // FL §934.03 (2025) — interception lawful when all parties have
     // given prior consent. The greeting MP3 is the operative
@@ -148,11 +145,26 @@ router.post('/voice', async (req, res) => {
     const greetingUrl = process.env.WAVES_GREETING_URL
       || 'https://jet-wolverine-3713.twil.io/assets/ElevenLabs_2025-09-20T05_54_14_Veda%20Sky%20-%20Customer%20Care%20Agent_pvc_sp114_s58_sb72_se89_b_m2.mp3';
 
-    // Mirror the Studio Flow's `forward_call` widget: simul-ring Adam +
-    // Virginia. Comma-separated env override lets ops add/remove
-    // numbers without a code change.
+    // Forward target list. Personal cells are NEVER hardcoded as a
+    // default in route code (codex review on PR #523, AGENTS.md:
+    // hardcoded Twilio numbers drift when numbers move). Source of
+    // truth is the WAVES_FALLBACK_FORWARD_NUMBERS env var (CSV of
+    // E.164). When unset, we fall back to the existing per-number
+    // forwardTo value from twilio-numbers config — which today is also
+    // unset for every entry, so the dial degrades to "no targets" and
+    // the call falls through to call-complete without ringing anyone
+    // unintentionally. That's the correct fail-closed behavior: if
+    // ops hasn't configured the env var AND the per-number forwardTo
+    // is missing, we'd rather drop into voicemail than silently ring
+    // stale cells from a past configuration.
     const fallbackForwardCsv = process.env.WAVES_FALLBACK_FORWARD_NUMBERS
-      || '+19415993489,+17206334021';
+      || numberConfig?.forwardTo
+      || '';
+    if (!fallbackForwardCsv) {
+      logger.warn(
+        `[voice-fallback] No forward targets configured for ${To}. Set WAVES_FALLBACK_FORWARD_NUMBERS or numberConfig.forwardTo. Falling through to call-complete (voicemail).`
+      );
+    }
     const numberXml = fallbackForwardCsv
       .split(',')
       .map(n => n.trim())
