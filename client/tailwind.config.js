@@ -56,6 +56,7 @@ export default {
       fontWeight: {
         normal: '400',
         medium: '500',
+        bold: '700',
       },
       fontSize: {
         '11': ['11px', { lineHeight: '1.4' }],

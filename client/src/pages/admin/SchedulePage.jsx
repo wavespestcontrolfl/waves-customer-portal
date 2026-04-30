@@ -317,7 +317,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
     setSaving(false);
   };
 
-  const labelStyle = { fontSize: 12, fontWeight: 600, color: D.muted, marginBottom: 4, display: 'block' };
+  const labelStyle = { fontSize: 12, color: '#000', marginBottom: 4, display: 'block' };
   const inputStyle = {
     width: '100%', padding: '10px 12px', borderRadius: 8, background: D.input,
     color: '#000', border: `1px solid ${D.inputBorder}`, fontSize: 14, outline: 'none', boxSizing: 'border-box',
@@ -328,13 +328,16 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
       position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.55)', zIndex: 1000,
       display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
     }}>
-      <div onClick={e => e.stopPropagation()} style={{
-        background: D.card, borderRadius: 14, border: `1px solid ${D.border}`,
-        width: '100%', maxWidth: 560, maxHeight: '90vh', overflow: 'auto', padding: 24,
-        color: '#000',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 4 }}>
-          <div style={{ fontSize: 18, fontWeight: 700, color: '#000' }}>Edit Service</div>
+      <div
+        onClick={e => e.stopPropagation()}
+        className="font-bold"
+        style={{
+          background: D.card, borderRadius: 14, border: `1px solid ${D.border}`,
+          width: '100%', maxWidth: 560, maxHeight: '90vh', overflow: 'auto', padding: 24,
+          color: '#000', fontFamily: 'Roboto, system-ui, sans-serif',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-end', gap: 12, marginBottom: 4 }}>
           <button
             type="button"
             onClick={onClose}
@@ -349,26 +352,26 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
             ×
           </button>
         </div>
-        <div style={{ fontSize: 13, color: D.muted, marginBottom: 18 }}>
+        <div style={{ fontSize: 13, color: '#000', marginBottom: 18 }}>
           {service.customerName} — {service.address || ''}
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
           <div>
             <label style={labelStyle}>Date</label>
-            <input type="date" value={form.scheduledDate} onChange={e => update('scheduledDate', e.target.value)} style={inputStyle} />
+            <input type="date" value={form.scheduledDate} onChange={e => update('scheduledDate', e.target.value)} className="font-bold" style={inputStyle} />
           </div>
           <div>
             <label style={labelStyle}>Duration (min)</label>
-            <input type="number" value={form.estimatedDuration} onChange={e => update('estimatedDuration', e.target.value)} style={inputStyle} />
+            <input type="number" value={form.estimatedDuration} onChange={e => update('estimatedDuration', e.target.value)} className="font-bold" style={inputStyle} />
           </div>
           <div>
             <label style={labelStyle}>Window Start</label>
-            <input type="time" value={form.windowStart} onChange={e => update('windowStart', e.target.value)} style={inputStyle} />
+            <input type="time" value={form.windowStart} onChange={e => update('windowStart', e.target.value)} className="font-bold" style={inputStyle} />
           </div>
           <div>
             <label style={labelStyle}>Window End</label>
-            <input type="time" value={form.windowEnd} onChange={e => update('windowEnd', e.target.value)} style={inputStyle} />
+            <input type="time" value={form.windowEnd} onChange={e => update('windowEnd', e.target.value)} className="font-bold" style={inputStyle} />
           </div>
         </div>
 
@@ -376,12 +379,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
           <label style={labelStyle}>Service Type</label>
           {!editingServiceType ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, background: '#F8FAFC', borderRadius: 8, padding: '10px 12px', border: `1px solid ${D.inputBorder}` }}>
-              <div style={{ flex: 1, fontSize: 14, color: '#000', fontWeight: 600 }}>
-                {form.serviceType || <span style={{ color: D.muted, fontWeight: 400 }}>— Select service —</span>}
+              <div style={{ flex: 1, fontSize: 14, color: '#000' }}>
+                {form.serviceType || <span style={{ color: '#000' }}>— Select service —</span>}
               </div>
-              <button type="button" onClick={() => setEditingServiceType(true)} style={{
-                padding: '6px 12px', borderRadius: 6, background: `${D.teal}15`, color: D.teal,
-                border: `1px solid ${D.teal}55`, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+              <button type="button" onClick={() => setEditingServiceType(true)} className="font-bold" style={{
+                padding: '6px 12px', borderRadius: 6, background: `${D.teal}15`, color: '#000',
+                border: `1px solid ${D.teal}55`, fontSize: 12, cursor: 'pointer',
               }}>Change</button>
             </div>
           ) : (
@@ -390,13 +393,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                 const isOpen = expandedCategory === group.category;
                 return (
                   <div key={group.category} style={{ marginBottom: 4 }}>
-                    <button type="button" onClick={() => setExpandedCategory(isOpen ? null : group.category)} style={{
+                    <button type="button" onClick={() => setExpandedCategory(isOpen ? null : group.category)} className="font-bold" style={{
                       width: '100%', textAlign: 'left', padding: '8px 10px', borderRadius: 6,
                       background: isOpen ? `${D.teal}15` : D.card, border: `1px solid ${D.border}`,
-                      color: '#000', fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                      color: '#000', fontSize: 13, cursor: 'pointer',
                       display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                     }}>
-                      <span>{EDIT_CATEGORY_EMOJI[group.category] || '📦'} {EDIT_CATEGORY_LABELS[group.category] || group.category} <span style={{ color: D.muted, fontWeight: 400, marginLeft: 4 }}>({group.items.length})</span></span>
+                      <span>{EDIT_CATEGORY_EMOJI[group.category] || '📦'} {EDIT_CATEGORY_LABELS[group.category] || group.category} <span style={{ color: '#000', marginLeft: 4 }}>({group.items.length})</span></span>
                       <span style={{ color: D.muted, fontSize: 11 }}>{isOpen ? '▾' : '▸'}</span>
                     </button>
                     {isOpen && (
@@ -409,7 +412,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                             }
                             setEditingServiceType(false);
                             setExpandedCategory(null);
-                          }} style={{
+                          }} className="font-bold" style={{
                             padding: '8px 10px', background: D.card, border: `1px solid ${D.border}`,
                             borderRadius: 6, color: '#000', fontSize: 13, cursor: 'pointer', textAlign: 'left',
                           }}>{svc.name}</button>
@@ -425,7 +428,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
 
         <div style={{ marginBottom: 12 }}>
           <label style={labelStyle}>Technician</label>
-          <select value={form.technicianId} onChange={e => update('technicianId', e.target.value)} style={inputStyle}>
+          <select value={form.technicianId} onChange={e => update('technicianId', e.target.value)} className="font-bold" style={inputStyle}>
             <option value="">— Unassigned —</option>
             {(technicians || []).map(t => (
               <option key={t.id} value={t.id}>{t.name}</option>
@@ -435,10 +438,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
 
         <div style={{ marginBottom: 12 }}>
           <label style={labelStyle}>Price ($)</label>
-          <input type="number" min={0} step={0.01} value={form.price} onChange={e => update('price', e.target.value)} placeholder="0.00" style={inputStyle} />
+          <input type="number" min={0} step={0.01} value={form.price} onChange={e => update('price', e.target.value)} placeholder="0.00" className="font-bold" style={inputStyle} />
           {discountType && discountAmount !== '' && form.price !== '' && !isNaN(parseFloat(form.price)) && (
-            <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
-              After discount: <span style={{ color: D.green, fontWeight: 700 }}>${Math.max(0, discountType === 'percentage' ? parseFloat(form.price) * (1 - Number(discountAmount) / 100) : parseFloat(form.price) - Number(discountAmount)).toFixed(2)}</span>
+            <div style={{ fontSize: 11, color: '#000', marginTop: 4 }}>
+              After discount: <span style={{ color: D.green }}>${Math.max(0, discountType === 'percentage' ? parseFloat(form.price) * (1 - Number(discountAmount) / 100) : parseFloat(form.price) - Number(discountAmount)).toFixed(2)}</span>
             </div>
           )}
         </div>
@@ -447,36 +450,36 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
         <div style={{ marginBottom: 12, padding: 12, background: '#F8FAFC', border: `1px solid ${D.border}`, borderRadius: 8 }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: isRecurring ? 10 : 0 }}>
             <input type="checkbox" checked={isRecurring} onChange={e => setIsRecurring(e.target.checked)} style={{ width: 16, height: 16, accentColor: D.teal }} />
-            <span style={{ fontSize: 13, color: '#000', fontWeight: 600 }}>Make Recurring</span>
-            <span style={{ fontSize: 11, color: D.muted }}>— creates future appointments from this date</span>
+            <span style={{ fontSize: 13, color: '#000' }}>Make Recurring</span>
+            <span style={{ fontSize: 11, color: '#000' }}>— creates future appointments from this date</span>
           </label>
           {isRecurring && (
             <div>
               <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
-                <button type="button" onClick={() => setRecurringOngoing(true)} style={{
-                  flex: 1, padding: '8px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                <button type="button" onClick={() => setRecurringOngoing(true)} className="font-bold" style={{
+                  flex: 1, padding: '8px 10px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
                   background: recurringOngoing ? D.teal : 'transparent',
-                  color: recurringOngoing ? '#fff' : D.muted,
+                  color: recurringOngoing ? '#fff' : '#000',
                   border: `1px solid ${recurringOngoing ? D.teal : D.border}`,
                 }}>Ongoing (auto-extend)</button>
-                <button type="button" onClick={() => setRecurringOngoing(false)} style={{
-                  flex: 1, padding: '8px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                <button type="button" onClick={() => setRecurringOngoing(false)} className="font-bold" style={{
+                  flex: 1, padding: '8px 10px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
                   background: !recurringOngoing ? D.teal : 'transparent',
-                  color: !recurringOngoing ? '#fff' : D.muted,
+                  color: !recurringOngoing ? '#fff' : '#000',
                   border: `1px solid ${!recurringOngoing ? D.teal : D.border}`,
                 }}>Fixed count</button>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: recurringOngoing ? '1fr' : '2fr 1fr', gap: 8, marginBottom: 8 }}>
                 <div>
                   <label style={labelStyle}>Frequency</label>
-                  <select value={recurringFreq} onChange={e => setRecurringFreq(e.target.value)} style={inputStyle}>
+                  <select value={recurringFreq} onChange={e => setRecurringFreq(e.target.value)} className="font-bold" style={inputStyle}>
                     {EDIT_FREQUENCIES.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
                   </select>
                 </div>
                 {!recurringOngoing && (
                   <div>
                     <label style={labelStyle}>Count</label>
-                    <input type="number" min={2} max={24} value={recurringCount} onChange={e => setRecurringCount(parseInt(e.target.value) || 4)} style={inputStyle} />
+                    <input type="number" min={2} max={24} value={recurringCount} onChange={e => setRecurringCount(parseInt(e.target.value) || 4)} className="font-bold" style={inputStyle} />
                   </div>
                 )}
               </div>
@@ -484,13 +487,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
                   <div>
                     <label style={labelStyle}>Nth</label>
-                    <select value={recurringNth} onChange={e => setRecurringNth(parseInt(e.target.value))} style={inputStyle}>
+                    <select value={recurringNth} onChange={e => setRecurringNth(parseInt(e.target.value))} className="font-bold" style={inputStyle}>
                       {EDIT_NTH_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                     </select>
                   </div>
                   <div>
                     <label style={labelStyle}>Weekday</label>
-                    <select value={recurringWeekday} onChange={e => setRecurringWeekday(parseInt(e.target.value))} style={inputStyle}>
+                    <select value={recurringWeekday} onChange={e => setRecurringWeekday(parseInt(e.target.value))} className="font-bold" style={inputStyle}>
                       {EDIT_WEEKDAY_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                     </select>
                   </div>
@@ -499,12 +502,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
               {recurringFreq === 'custom' && (
                 <div style={{ marginBottom: 8 }}>
                   <label style={labelStyle}>Every N days</label>
-                  <input type="number" min={1} max={365} value={recurringIntervalDays} onChange={e => setRecurringIntervalDays(parseInt(e.target.value) || 30)} style={inputStyle} />
+                  <input type="number" min={1} max={365} value={recurringIntervalDays} onChange={e => setRecurringIntervalDays(parseInt(e.target.value) || 30)} className="font-bold" style={inputStyle} />
                 </div>
               )}
               <div style={{ marginBottom: 8 }}>
                 <label style={labelStyle}>Manual Discount (optional)</label>
-                <select value={discountPresetId} onChange={e => applyDiscountPreset(e.target.value)} style={inputStyle}>
+                <select value={discountPresetId} onChange={e => applyDiscountPreset(e.target.value)} className="font-bold" style={inputStyle}>
                   <option value="">None</option>
                   {discountPresets.map(d => (
                     <option key={d.id} value={d.id}>
@@ -518,7 +521,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
                   <div>
                     <label style={labelStyle}>Type</label>
-                    <select value={discountType} onChange={e => setDiscountType(e.target.value)} style={inputStyle}>
+                    <select value={discountType} onChange={e => setDiscountType(e.target.value)} className="font-bold" style={inputStyle}>
                       <option value="">—</option>
                       <option value="percentage">Percentage (%)</option>
                       <option value="fixed_amount">Amount ($)</option>
@@ -527,19 +530,19 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                   {discountType && (
                     <div>
                       <label style={labelStyle}>{discountType === 'percentage' ? 'Amount (%)' : 'Amount ($)'}</label>
-                      <input type="number" min={0} step={discountType === 'percentage' ? 1 : 0.01} value={discountAmount} onChange={e => setDiscountAmount(e.target.value)} style={inputStyle} />
+                      <input type="number" min={0} step={discountType === 'percentage' ? 1 : 0.01} value={discountAmount} onChange={e => setDiscountAmount(e.target.value)} className="font-bold" style={inputStyle} />
                     </div>
                   )}
                 </div>
               )}
               {recurringPreview() && (
-                <div style={{ fontSize: 11, color: D.muted, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                <div style={{ fontSize: 11, color: '#000', display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                   {recurringPreview().map((d, i) => (
-                    <span key={i} style={{ padding: '2px 6px', background: `${D.teal}15`, borderRadius: 4, color: D.teal, fontWeight: 600 }}>{d}</span>
+                    <span key={i} style={{ padding: '2px 6px', background: `${D.teal}15`, borderRadius: 4, color: '#000' }}>{d}</span>
                   ))}
                   {recurringOngoing
-                    ? <span style={{ padding: '2px 6px', color: D.muted }}>… then auto-extends</span>
-                    : (recurringCount > 6 && <span style={{ padding: '2px 6px', color: D.muted }}>+{recurringCount - 6} more</span>)}
+                    ? <span style={{ padding: '2px 6px', color: '#000' }}>… then auto-extends</span>
+                    : (recurringCount > 6 && <span style={{ padding: '2px 6px', color: '#000' }}>+{recurringCount - 6} more</span>)}
                 </div>
               )}
             </div>
@@ -548,23 +551,23 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
 
         <div style={{ marginBottom: 18 }}>
           <label style={labelStyle}>Notes</label>
-          <textarea value={form.notes} onChange={e => update('notes', e.target.value)} rows={3} style={{ ...inputStyle, resize: 'vertical' }} />
+          <textarea value={form.notes} onChange={e => update('notes', e.target.value)} rows={3} className="font-bold" style={{ ...inputStyle, resize: 'vertical' }} />
         </div>
 
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 16, padding: '10px 12px', background: '#F8FAFC', border: `1px solid ${D.border}`, borderRadius: 8 }}>
           <input type="checkbox" checked={createInvoice} onChange={e => setCreateInvoice(e.target.checked)} style={{ width: 16, height: 16, accentColor: D.green }} />
-          <span style={{ fontSize: 13, color: '#000', fontWeight: 600 }}>Create invoice on completion</span>
-          <span style={{ fontSize: 11, color: D.muted }}>— invoice + pay link sent in the service-complete SMS</span>
+          <span style={{ fontSize: 13, color: '#000' }}>Create invoice on completion</span>
+          <span style={{ fontSize: 11, color: '#000' }}>— invoice + pay link sent in the service-complete SMS</span>
         </label>
 
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-          <button onClick={onClose} disabled={saving} style={{
+          <button onClick={onClose} disabled={saving} className="font-bold" style={{
             padding: '10px 18px', borderRadius: 8, background: 'transparent',
-            color: D.muted, border: `1px solid ${D.border}`, fontSize: 13, fontWeight: 600, cursor: 'pointer',
+            color: '#000', border: `1px solid ${D.border}`, fontSize: 13, cursor: 'pointer',
           }}>Cancel</button>
-          <button onClick={handleSave} disabled={saving} style={{
+          <button onClick={handleSave} disabled={saving} className="font-bold" style={{
             padding: '10px 20px', borderRadius: 8, background: '#000', color: '#fff',
-            border: 'none', fontSize: 13, fontWeight: 700, cursor: saving ? 'wait' : 'pointer', opacity: saving ? 0.6 : 1,
+            border: 'none', fontSize: 13, cursor: saving ? 'wait' : 'pointer', opacity: saving ? 0.6 : 1,
           }}>{saving ? 'Saving…' : 'Save Changes'}</button>
         </div>
       </div>
