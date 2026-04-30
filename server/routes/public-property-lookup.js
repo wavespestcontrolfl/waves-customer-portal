@@ -4,6 +4,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { performPropertyLookup } = require('./property-lookup-v2');
+const { resolveLeadSource } = require('../services/lead-source-resolver');
 
 // Aggressive rate limit — each lookup spends real RentCast + Google + Claude +
 // Gemini dollars. 5 per IP per hour is enough for a real lead to iterate on
@@ -35,6 +36,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
 
     const attr = (attribution && typeof attribution === 'object') ? attribution : null;
     const gclid = attr?.gclid ? String(attr.gclid).slice(0, 255) : null;
+    const sourceMeta = await resolveLeadSource(attr);
 
     // Capture the lead BEFORE firing the expensive API chain. Abuse-protection
     // + marketing attribution + recovery if the user bails mid-flow.
@@ -46,6 +48,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       address: String(address).trim(),
       lead_type: 'quote_wizard',
       first_contact_channel: 'website_quote',
+      lead_source_id: sourceMeta.leadSourceId,
       status: 'new',
       gclid,
       extracted_data: JSON.stringify({
