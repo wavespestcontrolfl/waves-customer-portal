@@ -254,15 +254,21 @@ const ReviewService = {
           status: 'sent',
         });
         logger.info(`[review] SMS sent for ${customer.first_name} ${customer.last_name}`);
-      } else {
-        // Mark the request as suppressed instead of leaving it pending
-        // forever — the cron would otherwise keep retrying. Suppression
-        // here covers consent/opt-out/segment/emoji blocks; the request
-        // record still exists for audit history.
+      } else if (result.blocked) {
+        // Wrapper-policy block (opt-out, suppression, emoji, price leak,
+        // segment cap, identity, etc.). Mark suppressed so processScheduled()
+        // — which only picks rows with status='pending' — stops retrying.
+        // The request row stays for audit history; the audit_log row
+        // captures the block reason.
         await db('review_requests').where({ id: requestId }).update({
           status: 'suppressed',
         });
         logger.warn(`[review] SMS BLOCKED for ${customer.first_name} ${customer.last_name}: ${result.code} — ${result.reason}`);
+      } else {
+        // Provider failure (Twilio/network). Leave status='pending' so the
+        // cron retries on the next tick. Permanent suppression for transient
+        // provider errors would silently drop legitimate review requests.
+        logger.error(`[review] SMS PROVIDER FAILURE for ${customer.first_name} ${customer.last_name}: ${result.code} — ${result.reason} (will retry)`);
       }
     } catch (err) {
       logger.error(`[review] SMS failed: ${err.message}`);
