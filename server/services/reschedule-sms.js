@@ -3,16 +3,32 @@ const SmartRebooker = require('./rebooker');
 const TwilioService = require('./twilio');
 const RULES = require('../config/reschedule-rules');
 const logger = require('./logger');
-const { parseETDateTime, etDateString } = require('../utils/datetime-et');
+const { parseETDateTime } = require('../utils/datetime-et');
 
-// "Friday, May 1" — ET-safe. Accepts a YYYY-MM-DD string or a Date.
-// Schedule dates are ET wall-clock; Railway runs UTC, so .toISOString()
-// + naive Date parsing can shift the day across midnight. Route both
-// shapes through the ET helpers and format from the resulting absolute
-// Date with timeZone: 'America/New_York'.
-function formatDayDate(input) {
+// PostgreSQL `date` columns hydrate via node-pg as Date objects pinned
+// to UTC midnight of the stored calendar date — i.e. the wall-clock
+// date IS the UTC parts. Reading via toLocaleDateString in any
+// timezone west of UTC (including ET) shifts back a day. Use UTC
+// getters for Date input; pass strings through after splitting off
+// any time portion. (etDateString from datetime-et.js is ET-zone aware,
+// which is the wrong lens for a `date` column — use it for timestamps,
+// not date-only values.)
+function ymdFromScheduled(input) {
   if (!input) return '';
-  const ymd = typeof input === 'string' ? input.split('T')[0] : etDateString(input);
+  if (typeof input === 'string') return input.split('T')[0];
+  return (
+    `${input.getUTCFullYear()}-` +
+    `${String(input.getUTCMonth() + 1).padStart(2, '0')}-` +
+    `${String(input.getUTCDate()).padStart(2, '0')}`
+  );
+}
+
+// "Friday, May 1" from a YYYY-MM-DD string OR a pg `date` Date.
+// Anchors at noon ET via parseETDateTime so toLocaleDateString in ET
+// always reports the correct calendar day regardless of server zone.
+function formatDayDate(input) {
+  const ymd = ymdFromScheduled(input);
+  if (!ymd) return '';
   const dt = parseETDateTime(ymd + 'T12:00');
   return dt.toLocaleDateString('en-US', {
     weekday: 'long', month: 'long', day: 'numeric',
