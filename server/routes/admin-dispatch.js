@@ -717,23 +717,53 @@ router.get('/:serviceId/reschedule-options', async (req, res, next) => {
 });
 
 // POST /api/admin/dispatch/:serviceId/reschedule
+//
+// New flow (Apr 2026): the admin has already chosen the new slot via
+// drag-drop, so we commit the reschedule unconditionally and — if the
+// admin opted in via the modal's Notification type select — send a
+// notify-only SMS so the customer sees the new date/time. The legacy
+// "send 1️⃣/2️⃣ options and let the customer pick" flow lives at
+// RescheduleSMS.sendRescheduleRequest and is not used here anymore.
 router.post('/:serviceId/reschedule', async (req, res, next) => {
   try {
-    const { newDate, newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
+    const { newDate, newWindow, reasonCode, notifyCustomer, scope } = req.body;
+    const serviceId = req.params.serviceId;
 
-    // Series scope shifts every future occurrence — skip the customer-confirm
-    // SMS path (which only handles a single appt) and commit directly.
+    // Capture original date/window BEFORE the reschedule so the notify
+    // SMS can show "from {old} to {new}". For scope=series we still
+    // rely on the sibling sweep inside rescheduleSeries.
+    const original = scope === 'series'
+      ? null
+      : await db('scheduled_services')
+          .where({ id: serviceId })
+          .select('scheduled_date', 'window_start')
+          .first();
+
+    let result;
     if (scope === 'series') {
-      const result = await SmartRebooker.rescheduleSeries(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin');
-      return res.json(result);
+      result = await SmartRebooker.rescheduleSeries(serviceId, newDate, newWindow, reasonCode || 'admin', 'admin');
+    } else {
+      result = await SmartRebooker.reschedule(serviceId, newDate, newWindow, reasonCode || 'admin', 'admin');
     }
 
-    if (notifyCustomer !== false) {
-      const result = await RescheduleSMS.sendRescheduleRequest(req.params.serviceId, reasonCode || 'admin', reasonText);
-      return res.json(result);
+    // Notify-only SMS, single-instance only. Series reschedules don't
+    // auto-notify — the dropped slot's "from→to" message would be
+    // misleading when many siblings are also moving. Best-effort: an
+    // SMS failure must not roll back the reschedule.
+    if (notifyCustomer === true && scope !== 'series' && original) {
+      try {
+        await RescheduleSMS.sendRescheduleNotification(
+          serviceId,
+          original.scheduled_date,
+          original.window_start,
+          newDate,
+          newWindow,
+        );
+      } catch (smsErr) {
+        logger.warn(`[admin-dispatch] reschedule notify SMS failed for ${serviceId}: ${smsErr.message}`);
+      }
     }
 
-    const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin');
     res.json(result);
   } catch (err) { next(err); }
 });
