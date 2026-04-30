@@ -27,7 +27,7 @@ VOICE — this is what makes Waves content distinct:
 - Like a helpful neighbor who's also a pest control expert
 - Slightly snarky, never corporate
 - Reference sandy soil, afternoon storms, St. Augustine grass
-- Nitrogen blackout June 1–September 30 (Sarasota + Manatee counties)
+- In Sarasota and Manatee counties, fertilizer containing nitrogen or phosphorus is restricted/prohibited from June 1 through September 30. Do NOT call this only a "nitrogen blackout" — phosphorus is part of the rule. When relevant, suggest summer alternatives: iron, micronutrients, compost, Florida-Friendly planting, and mowing-height/irrigation adjustments. Verify the current local rule before stating restriction details for any other county or municipality.
 
 CONTENT STANDARDS:
 - 800-1200 words, H2 every 200-300 words, 1-2 pro tip callouts
@@ -60,7 +60,7 @@ Save the post as a draft in the portal. Distribute to all social channels. Repor
     {
       type: 'custom',
       name: 'get_fawn_weather',
-      description: `Fetch current weather data from Florida Automated Weather Network (FAWN) for Southwest Florida. Returns air temperature, humidity, rainfall, and soil temperature from the nearest SWFL station (Myakka River or Manatee County). Also returns active content signals based on the current season — things like "Chinch bug pressure peak," "Nitrogen blackout in effect," or "Termite swarm season." Use this at the START of every content generation to ground the article in real current conditions.`,
+      description: `Fetch current weather data from Florida Automated Weather Network (FAWN) for Southwest Florida. Returns air temperature, humidity, rainfall, and soil temperature from the nearest SWFL station (Myakka River or Manatee County). Also returns active content signals based on the current season — things like "Chinch bug pressure peak," "Fertilizer N+P restricted season in effect (Sarasota/Manatee)," or "Termite swarm season." Use this at the START of every content generation to ground the article in real current conditions.`,
       input_schema: {
         type: 'object',
         properties: {},
