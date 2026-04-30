@@ -32,6 +32,23 @@ exports.up = async function (knex) {
 };
 
 exports.down = async function (knex) {
+  // After this migration runs in prod, the table will accumulate multiple
+  // 'failed' rows per PI (one per retry attempt). Re-adding the original
+  // (payment_intent_id, outcome) PK on raw production data would fail with
+  // duplicate-key errors and leave the migration partially rolled back.
+  //
+  // Consolidate: keep only the most-recently-notified row per (PI, outcome)
+  // and drop the older duplicates before restoring the old key. The
+  // notification fan-out is informational (one bell entry vs many) — losing
+  // older duplicate rows is acceptable rollback semantics; the actual
+  // payments table is untouched.
+  await knex.raw(`
+    DELETE FROM stripe_payment_notification_log a
+    USING stripe_payment_notification_log b
+    WHERE a.payment_intent_id = b.payment_intent_id
+      AND a.outcome = b.outcome
+      AND (a.notified_at, a.attempt_id) < (b.notified_at, b.attempt_id)
+  `);
   await knex.raw(`ALTER TABLE stripe_payment_notification_log DROP CONSTRAINT stripe_payment_notification_log_pkey`);
   await knex.raw(`ALTER TABLE stripe_payment_notification_log ADD PRIMARY KEY (payment_intent_id, outcome)`);
   await knex.schema.alterTable('stripe_payment_notification_log', (t) => {
