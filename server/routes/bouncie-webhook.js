@@ -20,20 +20,28 @@ router.post('/', async (req, res) => {
     const eventType = payload.eventType || payload.event_type || payload.type || 'unknown';
     const imei = payload.imei || payload.vehicleId || (payload.data && payload.data.imei) || '';
 
-    // Optional key verification. Non-strict on purpose: this endpoint is
-    // already registered with Bouncie without a secret, and flipping it to
-    // strict would 401 every in-flight mileage event the instant the secret
-    // lands in Railway. Log mismatches, accept the event, let us migrate the
-    // Bouncie-side config deliberately.
+    // Key verification. Default non-strict: log mismatches, accept the event.
+    // Set BOUNCIE_WEBHOOK_STRICT=true once Bouncie's side is confirmed sending
+    // x-webhook-key — strict mode returns 401 on mismatch. Non-strict exists
+    // because flipping straight to strict would 401 every in-flight event
+    // the instant the secret lands in Railway, and Bouncie auto-deactivates
+    // a webhook after enough non-2xx responses.
     const expected = process.env.BOUNCIE_WEBHOOK_SECRET;
+    const strict = process.env.BOUNCIE_WEBHOOK_STRICT === 'true';
     if (expected) {
       const headerKey = req.get('x-webhook-key');
       const bodyKey = payload.webhookKey || payload.webhook_key;
-      const queryKey = req.query && req.query.key;
-      const ok = [headerKey, bodyKey, queryKey].some((k) => k && k === expected);
+      const ok = [headerKey, bodyKey].some((k) => k && k === expected);
       if (!ok) {
+        if (strict) {
+          logger.warn(`[bouncie-webhook] secret mismatch for ${eventType} imei=${imei} — rejected (strict)`);
+          return res.status(401).json({ ok: false });
+        }
         logger.warn(`[bouncie-webhook] secret mismatch for ${eventType} imei=${imei} — accepted anyway (non-strict)`);
       }
+    } else if (strict) {
+      logger.error('[bouncie-webhook] BOUNCIE_WEBHOOK_STRICT=true but BOUNCIE_WEBHOOK_SECRET unset — rejecting');
+      return res.status(401).json({ ok: false });
     }
 
     // Log the webhook event
