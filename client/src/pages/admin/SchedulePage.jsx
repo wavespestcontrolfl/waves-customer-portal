@@ -320,7 +320,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
   const labelStyle = { fontSize: 12, fontWeight: 600, color: D.muted, marginBottom: 4, display: 'block' };
   const inputStyle = {
     width: '100%', padding: '10px 12px', borderRadius: 8, background: D.input,
-    color: D.text, border: `1px solid ${D.inputBorder}`, fontSize: 14, outline: 'none', boxSizing: 'border-box',
+    color: '#000', border: `1px solid ${D.inputBorder}`, fontSize: 14, outline: 'none', boxSizing: 'border-box',
   };
 
   return (
@@ -331,9 +331,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
       <div onClick={e => e.stopPropagation()} style={{
         background: D.card, borderRadius: 14, border: `1px solid ${D.border}`,
         width: '100%', maxWidth: 560, maxHeight: '90vh', overflow: 'auto', padding: 24,
+        color: '#000',
       }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 4 }}>
-          <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>Edit Service</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: '#000' }}>Edit Service</div>
           <button
             type="button"
             onClick={onClose}
@@ -375,7 +376,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
           <label style={labelStyle}>Service Type</label>
           {!editingServiceType ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, background: '#F8FAFC', borderRadius: 8, padding: '10px 12px', border: `1px solid ${D.inputBorder}` }}>
-              <div style={{ flex: 1, fontSize: 14, color: D.heading, fontWeight: 600 }}>
+              <div style={{ flex: 1, fontSize: 14, color: '#000', fontWeight: 600 }}>
                 {form.serviceType || <span style={{ color: D.muted, fontWeight: 400 }}>— Select service —</span>}
               </div>
               <button type="button" onClick={() => setEditingServiceType(true)} style={{
@@ -392,7 +393,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                     <button type="button" onClick={() => setExpandedCategory(isOpen ? null : group.category)} style={{
                       width: '100%', textAlign: 'left', padding: '8px 10px', borderRadius: 6,
                       background: isOpen ? `${D.teal}15` : D.card, border: `1px solid ${D.border}`,
-                      color: D.heading, fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                      color: '#000', fontSize: 13, fontWeight: 600, cursor: 'pointer',
                       display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                     }}>
                       <span>{EDIT_CATEGORY_EMOJI[group.category] || '📦'} {EDIT_CATEGORY_LABELS[group.category] || group.category} <span style={{ color: D.muted, fontWeight: 400, marginLeft: 4 }}>({group.items.length})</span></span>
@@ -410,7 +411,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                             setExpandedCategory(null);
                           }} style={{
                             padding: '8px 10px', background: D.card, border: `1px solid ${D.border}`,
-                            borderRadius: 6, color: D.text, fontSize: 13, cursor: 'pointer', textAlign: 'left',
+                            borderRadius: 6, color: '#000', fontSize: 13, cursor: 'pointer', textAlign: 'left',
                           }}>{svc.name}</button>
                         ))}
                       </div>
@@ -446,7 +447,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
         <div style={{ marginBottom: 12, padding: 12, background: '#F8FAFC', border: `1px solid ${D.border}`, borderRadius: 8 }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: isRecurring ? 10 : 0 }}>
             <input type="checkbox" checked={isRecurring} onChange={e => setIsRecurring(e.target.checked)} style={{ width: 16, height: 16, accentColor: D.teal }} />
-            <span style={{ fontSize: 13, color: D.heading, fontWeight: 600 }}>Make Recurring</span>
+            <span style={{ fontSize: 13, color: '#000', fontWeight: 600 }}>Make Recurring</span>
             <span style={{ fontSize: 11, color: D.muted }}>— creates future appointments from this date</span>
           </label>
           {isRecurring && (
@@ -552,7 +553,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
 
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 16, padding: '10px 12px', background: '#F8FAFC', border: `1px solid ${D.border}`, borderRadius: 8 }}>
           <input type="checkbox" checked={createInvoice} onChange={e => setCreateInvoice(e.target.checked)} style={{ width: 16, height: 16, accentColor: D.green }} />
-          <span style={{ fontSize: 13, color: D.heading, fontWeight: 600 }}>Create invoice on completion</span>
+          <span style={{ fontSize: 13, color: '#000', fontWeight: 600 }}>Create invoice on completion</span>
           <span style={{ fontSize: 11, color: D.muted }}>— invoice + pay link sent in the service-complete SMS</span>
         </label>
 
@@ -562,7 +563,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
             color: D.muted, border: `1px solid ${D.border}`, fontSize: 13, fontWeight: 600, cursor: 'pointer',
           }}>Cancel</button>
           <button onClick={handleSave} disabled={saving} style={{
-            padding: '10px 20px', borderRadius: 8, background: D.teal, color: '#fff',
+            padding: '10px 20px', borderRadius: 8, background: '#000', color: '#fff',
             border: 'none', fontSize: 13, fontWeight: 700, cursor: saving ? 'wait' : 'pointer', opacity: saving ? 0.6 : 1,
           }}>{saving ? 'Saving…' : 'Save Changes'}</button>
         </div>
