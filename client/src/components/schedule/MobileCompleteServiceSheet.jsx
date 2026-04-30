@@ -156,8 +156,12 @@ export default function MobileCompleteServiceSheet({
   const [followUpNote, setFollowUpNote] = useState('');
   const [noProductsReason, setNoProductsReason] = useState('');
   const [noProductsActive, setNoProductsActive] = useState(false); // secondary section reveal
-  const [recapEdited, setRecapEdited] = useState(false);
   const [recapDraft, setRecapDraft] = useState('');
+  // Tri-state source so we can tell who wrote the current draft:
+  //   'template' — initial state, instant fallback recap
+  //   'ai'       — Claude-drafted; safe to overwrite on input change
+  //   'manual'   — tech edited; never silently overwritten (force-regen only)
+  const [recapSource, setRecapSource] = useState('template');
   const [recapAiState, setRecapAiState] = useState('idle'); // idle | loading | ok | error
   const [recapStaleAfterEdit, setRecapStaleAfterEdit] = useState(false);
   const recapAbortRef = useRef(null);
@@ -252,7 +256,7 @@ export default function MobileCompleteServiceSheet({
       if (d.soilPh) setSoilPh(d.soilPh);
       if (d.soilMoisture) setSoilMoisture(d.soilMoisture);
       if (d.thatchMeasurement) setThatchMeasurement(d.thatchMeasurement);
-      if (d.recapDraft) { setRecapDraft(d.recapDraft); setRecapEdited(true); }
+      if (d.recapDraft) { setRecapDraft(d.recapDraft); setRecapSource(d.recapSource === 'ai' ? 'ai' : 'manual'); }
       if (typeof d.sendSms === 'boolean') setSendSms(d.sendSms);
     } catch { /* corrupt draft, ignore */ }
   }, [draftKey]);
@@ -264,7 +268,8 @@ export default function MobileCompleteServiceSheet({
         localStorage.setItem(draftKey, JSON.stringify({
           notes, selectedProducts, observations, followUpNote, noProductsReason,
           soilTemp, soilPh, soilMoisture, thatchMeasurement,
-          recapDraft: recapEdited ? recapDraft : '',
+          recapDraft: recapSource !== 'template' ? recapDraft : '',
+          recapSource,
           sendSms,
           ts: Date.now(),
         }));
@@ -272,7 +277,7 @@ export default function MobileCompleteServiceSheet({
     }, 800);
     return () => clearTimeout(t);
   }, [draftKey, notes, selectedProducts, observations, followUpNote, noProductsReason,
-      soilTemp, soilPh, soilMoisture, thatchMeasurement, recapDraft, recapEdited, sendSms]);
+      soilTemp, soilPh, soilMoisture, thatchMeasurement, recapDraft, recapSource, sendSms]);
 
   // ── Recap text ──────────────────────────────────────────────────────────
   const computedRecap = useMemo(() => generateRecap({
@@ -283,17 +288,21 @@ export default function MobileCompleteServiceSheet({
     products: selectedProducts,
   }), [customerFirstName, service?.serviceType, notes, observations, selectedProducts]);
 
-  const recapToSend = recapEdited ? recapDraft : computedRecap;
+  const recapToSend = recapSource !== 'template' ? recapDraft : computedRecap;
 
   // AI recap generation — Claude FAST tier via /admin/dispatch/recap-preview.
   // Fires when notes are substantive AND a product (or no-products reason)
   // is set. 1000ms debounce after the last relevant change; cancels
   // in-flight requests on input change so a slow earlier draft never
   // overwrites a fresher one.
-  function generateAiRecap() {
-    if (!sendSms) return;                              // no recap will be sent
-    if (recapEdited && !recapStaleAfterEdit) return;   // tech edited — don't clobber
-    if (isIncompleteVisit) return;                     // incomplete visits get no recap
+  // `force` (used by the Regenerate button) bypasses the manual-edit
+  // guard. We rely on the argument rather than recapStaleAfterEdit state
+  // because state updates are async and the click handler can't trust
+  // a same-tick setRecapStaleAfterEdit(true) to be visible inside this fn.
+  function generateAiRecap({ force = false } = {}) {
+    if (!sendSms) return;                                            // no recap will be sent
+    if (!force && recapSource === 'manual') return;                  // tech edited — don't clobber
+    if (isIncompleteVisit) return;                                   // incomplete visits get no recap
     if (notes.trim().length < 15) return;
     if (selectedProducts.length === 0 && !noProductsReason) return;
 
@@ -323,7 +332,7 @@ export default function MobileCompleteServiceSheet({
       .then((data) => {
         if (data?.recap && typeof data.recap === 'string') {
           setRecapDraft(data.recap);
-          setRecapEdited(true);
+          setRecapSource('ai');                  // AI-drafted; future inputs may auto-update this
           setRecapStaleAfterEdit(false);
           setRecapAiState('ok');
         } else {
@@ -350,7 +359,7 @@ export default function MobileCompleteServiceSheet({
   // Stale-draft signal: after a manual edit, any change to inputs flags the
   // draft so the UI can offer "Regenerate" rather than silently clobbering.
   useEffect(() => {
-    if (recapEdited && !recapStaleAfterEdit) setRecapStaleAfterEdit(true);
+    if (recapSource === 'manual' && !recapStaleAfterEdit) setRecapStaleAfterEdit(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [notes, selectedProducts.length, observations.join(',')]);
 
@@ -381,6 +390,11 @@ export default function MobileCompleteServiceSheet({
         rateUnit: p.defaultUnit || 'oz',
       }];
     });
+    // Adding a product implicitly cancels the no-products path. Defensive
+    // clear so the submitted body never carries both products and a
+    // no-product reason regardless of interaction order.
+    setNoProductsReason('');
+    setNoProductsActive(false);
   }
 
   function removeProduct(productId) {
@@ -404,7 +418,7 @@ export default function MobileCompleteServiceSheet({
   const ctaLabel = submitting
     ? 'Completing…'
     : isIncompleteVisit
-      ? 'Close Visit & Create Follow-up'
+      ? 'Mark Visit Incomplete'
       : !sendSms
         ? 'Complete Service'
         : willCharge
@@ -650,8 +664,15 @@ export default function MobileCompleteServiceSheet({
                       key={r.label}
                       type="button"
                       onClick={() => {
-                        setNoProductsReason(selected ? '' : r.label);
-                        if (selected) setNoProductsActive(false);
+                        if (selected) {
+                          setNoProductsReason('');
+                          setNoProductsActive(false);
+                        } else {
+                          setNoProductsReason(r.label);
+                          // Mutual exclusion: picking a no-products reason
+                          // clears any selected products defensively.
+                          setSelectedProducts([]);
+                        }
                       }}
                       className="font-medium u-focus-ring"
                       style={{
@@ -746,6 +767,20 @@ export default function MobileCompleteServiceSheet({
           </section>
         )}
 
+        {/* Incomplete-visit explainer: the tech needs to see clearly that
+            no customer-facing message goes out so they don't expect one to
+            land afterwards. This panel replaces the recap section when
+            the chosen reason has the 'incomplete' outcome. */}
+        {isIncompleteVisit && (
+          <section className="mt-8">
+            <div className="text-zinc-900" style={sectionTitleStyle}>What happens next</div>
+            <div className="text-zinc-900" style={{ fontSize: 14, fontWeight: 500, lineHeight: 1.4 }}>
+              This visit will be closed without a customer recap, charge, or review request.
+              The office will see the reason and follow up.
+            </div>
+          </section>
+        )}
+
         {/* Customer recap preview — only when SMS will actually go out, and
             never on incomplete-visit closures (those follow a different path). */}
         {sendSms && !isIncompleteVisit && (
@@ -758,8 +793,8 @@ export default function MobileCompleteServiceSheet({
               value={recapToSend}
               onChange={(e) => {
                 setRecapDraft(e.target.value);
-                setRecapEdited(true);
-                setRecapStaleAfterEdit(false); // tech is editing now; don't flag stale until next input change
+                setRecapSource('manual');       // tech wrote this — protect from auto-overwrite
+                setRecapStaleAfterEdit(false);  // fresh manual edit; only stale on NEXT input change
               }}
               rows={3}
               className="w-full bg-white border-hairline border-zinc-300 rounded-sm px-3 py-2 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
@@ -768,14 +803,14 @@ export default function MobileCompleteServiceSheet({
             />
             <div className="flex items-center justify-between mt-1 gap-3">
               <span className="text-ink-secondary" style={{ fontSize: 12 }}>
-                {recapAiState === 'loading' && 'Drafting with AI…'}
+                {recapAiState === 'loading' && 'Drafting customer recap…'}
                 {recapAiState === 'error' && 'Couldn’t draft. Write one manually or turn off SMS.'}
                 {recapAiState === 'ok' && recapStaleAfterEdit && 'Notes changed since this draft.'}
               </span>
               {(recapStaleAfterEdit || recapAiState === 'error') && (
                 <button
                   type="button"
-                  onClick={() => { setRecapStaleAfterEdit(true); generateAiRecap(); }}
+                  onClick={() => generateAiRecap({ force: true })}
                   className="bg-transparent text-zinc-900 u-focus-ring"
                   style={{ fontSize: 12, padding: 0, border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
                 >
@@ -889,7 +924,8 @@ export default function MobileCompleteServiceSheet({
                 return 'Add notes and either select a product or mark no products applied.';
               }
               if (!notesOk) return 'Add a note to continue.';
-              if (needsNoProductReason) return 'Choose a product or pick a "no products applied" reason.';
+              if (needsNoProductReason && noProductsActive) return 'Choose why no products were applied.';
+              if (needsNoProductReason) return 'Select a product or mark no products applied.';
               return null;
             })()}
           </div>
