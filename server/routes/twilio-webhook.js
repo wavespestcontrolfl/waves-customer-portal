@@ -286,11 +286,38 @@ router.post('/sms', async (req, res) => {
         });
 
         // If AI generated a reply (not escalated), send it automatically
+        // through the customer-message middleware. The wrapper enforces
+        // suppression (so we don't reply to a STOP'd number), consent,
+        // emoji + price-leak rules, and segment cap. Audit row written
+        // either way.
         if (aiResult.reply && !aiResult.escalated) {
           try {
-            await TwilioService.sendSMS(From, aiResult.reply, {
-              customerId: customer?.id, fromNumber: To, messageType: 'ai_assistant',
+            const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+            // Inbound texters always reach at least phone_provided_unverified —
+            // they're literally texting from the number, so the channel-level
+            // identity is established by the inbound webhook itself. Without
+            // this hint, audience='lead' for unknown numbers would fall back
+            // to 'anonymous' in the trust resolver and fail the policy
+            // minimum for purpose='conversational' (a regression that would
+            // silently drop every new-lead AI reply).
+            const sendResult = await sendCustomerMessage({
+              to: From,
+              body: aiResult.reply,
+              channel: 'sms',
+              audience: customer ? 'customer' : 'lead',
+              purpose: 'conversational',
+              customerId: customer?.id || null,
+              identityTrustLevel: customer ? 'phone_matches_customer' : 'phone_provided_unverified',
+              entryPoint: 'twilio_inbound_ai_assistant',
+              metadata: { fromNumber: To },
             });
+            if (!sendResult.sent) {
+              // PII rule: never log full phone in plaintext. Mask to last 4
+              // digits — enough for operator debugging via audit log
+              // cross-reference.
+              const last4 = String(From || '').replace(/\D/g, '').slice(-4);
+              logger.warn(`[twilio-webhook] AI reply BLOCKED for ***${last4}: ${sendResult.code} — ${sendResult.reason}`);
+            }
           } catch (e) { logger.error(`AI reply SMS failed: ${e.message}`); }
         }
 
