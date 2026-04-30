@@ -22,6 +22,11 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const MAX_RETRIES = 1;
 const DEFAULT_RETRY_MS = 2000;
 const MAX_RETRY_MS = 8000;
+// Hard ceiling on a single attempt. Without this, a hung server / dead
+// connection / mobile-network black-hole leaves the page stuck on
+// "Loading…" indefinitely because the dashboard's wave1 Promise.all
+// never resolves.
+const REQUEST_TIMEOUT_MS = 25000;
 
 function authHeader() {
   const token = localStorage.getItem('waves_admin_token');
@@ -46,14 +51,36 @@ export async function adminFetch(path, options = {}) {
   let attempt = 0;
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    const r = await fetch(`${API_BASE}${path}`, {
-      ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...authHeader(),
-        ...(options.headers || {}),
-      },
-    });
+    // Per-attempt AbortController so the timeout resets on retry — a 429
+    // that takes 7s to receive shouldn't eat the next attempt's budget.
+    // Skip if the caller passed their own signal (e.g. a stale-result
+    // abort from search debouncing).
+    const controller = options.signal ? null : new AbortController();
+    const timeoutId = controller
+      ? setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+      : null;
+    let r;
+    try {
+      r = await fetch(`${API_BASE}${path}`, {
+        ...options,
+        signal: options.signal || (controller ? controller.signal : undefined),
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeader(),
+          ...(options.headers || {}),
+        },
+      });
+    } catch (e) {
+      if (timeoutId) clearTimeout(timeoutId);
+      if (e?.name === 'AbortError' && controller) {
+        const err = new Error('Request timed out');
+        err.status = 0;
+        err.code = 'TIMEOUT';
+        throw err;
+      }
+      throw e;
+    }
+    if (timeoutId) clearTimeout(timeoutId);
 
     if (r.status === 401) {
       window.location.href = '/admin/login';
