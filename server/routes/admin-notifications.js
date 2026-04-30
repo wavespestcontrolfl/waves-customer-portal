@@ -143,6 +143,13 @@ router.get('/unread-count', async (req, res, next) => {
 // for every one of them (used by mark-all-read and mark-one-read on
 // live: ids). dismissed_at_count is the alert's CURRENT count so an
 // escalation re-surfaces it.
+//
+// Also marks the persisted `dashboard_alert` notification rows for those
+// alert ids as read. The persisted row was written by the cron when the
+// alert first fired; it lives in `notifications` keyed on metadata, not
+// on a per-admin column. Without this update the live overlay clears
+// (alert is no longer present in `liveKeys`) but the orphan persisted
+// row stays unread, leaving the bell badge stuck at 1+.
 async function dismissLiveAlerts(adminUserId, alertIdFilter = null) {
   if (!adminUserId) return 0;
   let alerts;
@@ -162,11 +169,29 @@ async function dismissLiveAlerts(adminUserId, alertIdFilter = null) {
         dismissed_at_count: a.count,
       })),
     );
-    return targets.length;
   } catch (err) {
     logger.warn(`[admin-notifications] dismiss insert failed: ${err.message}`);
     return 0;
   }
+  // Best-effort: mark the corresponding persisted bell rows read so the
+  // unread-count doesn't double-count after the live alert clears. Read
+  // state on `notifications` is admin-shared today (see markRead in
+  // notification-service), so this matches the existing semantics.
+  // Loop instead of ANY() because targets is typically 1-3 alerts and
+  // the query reads cleaner without driver-specific array casting.
+  for (const a of targets) {
+    try {
+      await db('notifications')
+        .where({ recipient_type: 'admin', category: 'alert' })
+        .whereNull('read_at')
+        .whereRaw("metadata->>'triggerKey' = ?", ['dashboard_alert'])
+        .whereRaw("metadata->'payload'->>'alertId' = ?", [a.id])
+        .update({ read_at: new Date() });
+    } catch (err) {
+      logger.warn(`[admin-notifications] persisted alert read update failed for ${a.id}: ${err.message}`);
+    }
+  }
+  return targets.length;
 }
 
 // PUT /api/admin/notifications/read-all — mark all as read.

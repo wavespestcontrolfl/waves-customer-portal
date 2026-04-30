@@ -70,7 +70,12 @@ export default function NotificationBell() {
 
   const enablePush = async () => {
     setEnabling(true);
-    try { await ensurePushSubscription(); setPushOn(true); }
+    // Forward the same API_BASE the rest of the bell uses. Without this
+    // ensurePushSubscription falls back to '/api', so on hosts where the
+    // frontend is configured to talk to a different API (e.g. staging
+    // pointing at a separate backend) push enable hits the wrong base
+    // and fails silently while every other bell call succeeds.
+    try { await ensurePushSubscription({ apiBase: API_BASE }); setPushOn(true); }
     catch (e) { alert('Push not enabled: ' + e.message); }
     finally { setEnabling(false); }
   };
