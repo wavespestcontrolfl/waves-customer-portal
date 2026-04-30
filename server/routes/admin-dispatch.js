@@ -324,7 +324,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
       } catch (e) { /* table missing or other read fail — fall through */ }
     }
-    const { technicianNotes, products, soilTemp, thatchMeasurement, soilPh, soilMoisture, sendCompletionSms, requestReview, formResponses, formStartedAt, visitOutcome, noProductsReason } = req.body;
+    const { technicianNotes, products, soilTemp, thatchMeasurement, soilPh, soilMoisture, sendCompletionSms, requestReview, formResponses, formStartedAt, visitOutcome, noProductsReason, incompleteReason, reviewSuppressionReason, areasTreated } = req.body;
     // Tech-approved customer recap (the polished SMS body — Claude-drafted
     // or hand-written in MobileCompleteServiceSheet). When present, this
     // text REPLACES the templated body for the standard / prepaid SMS
@@ -390,7 +390,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           ...(formResponses || {}),
           customerRecap: customerRecap || null,
           noProductsReason: noProductsReason || null,
-          visitOutcome: visitOutcome || (noProductsReason ? 'complete' : null),
+          visitOutcome: visitOutcome || 'complete',
+          incompleteReason: incompleteReason || null,
+          reviewSuppressionReason: reviewSuppressionReason || null,
+          areasTreated: Array.isArray(areasTreated) ? areasTreated : null,
         };
         [record] = await trx('service_records').insert({
           scheduled_service_id: svc.id,
@@ -556,11 +559,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (e) { logger.error(`[admin-dispatch] markComplete failed: ${e.message}`); }
     }
 
-    // Office follow-up alert for incomplete visits. Surfaces in the
-    // existing dispatch_alerts queue so the visit doesn't disappear after
-    // the tech taps "Mark Visit Incomplete" — without dragging full
-    // return-visit scheduling into this PR. Severity 'warn' for weather/
-    // access reasons (operational issue), 'info' for declined/other.
+    // Office alerts. Three triggers feed the same dispatch_alerts queue:
+    //   - visit_incomplete    → severity warn (weather/access) | info (other)
+    //   - customer_concern    → severity warn
+    //   - follow_up_needed    → severity info (or warn if also incomplete)
+    //
+    // For *incomplete* visits the alert is the office's primary handoff
+    // signal — a missing alert means the visit silently disappears. We
+    // wait inside a tight try/catch and log loudly on failure. (A future
+    // hardening pass will move this insert into the same trx as the
+    // service_record + status flip; for now non-blocking with prominent
+    // logging matches the existing dispatch_alerts pattern in this file.)
+    const observationsArr = Array.isArray(formResponses?.observations) ? formResponses.observations : [];
+    const customerConcernFlagged = observationsArr.includes('customer_concern');
+    const followUpFlagged = observationsArr.includes('follow_up_needed');
+    const alertBasePayload = {
+      customerName: `${svc.first_name || ''} ${svc.last_name || ''}`.trim(),
+      customerId: svc.customer_id,
+      serviceType: svc.service_type,
+      scheduledDate: svc.scheduled_date,
+      technicianNotes: (technicianNotes || '').slice(0, 500),
+      createdBy: req.technicianId || null,
+    };
     if (isIncompleteOutcome) {
       try {
         const reasonSeverity = (
@@ -572,20 +592,40 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           severity: reasonSeverity,
           tech_id: svc.technician_id || null,
           job_id: svc.id,
+          payload: { ...alertBasePayload, reason: noProductsReason || 'Marked incomplete' },
+        });
+      } catch (e) {
+        logger.error(`[admin-dispatch] visit_incomplete alert insert failed: ${e.message}`);
+      }
+    }
+    if (customerConcernFlagged) {
+      try {
+        await db('dispatch_alerts').insert({
+          type: 'customer_concern',
+          severity: 'warn',
+          tech_id: svc.technician_id || null,
+          job_id: svc.id,
+          payload: { ...alertBasePayload, observation: 'customer_concern' },
+        });
+      } catch (e) {
+        logger.error(`[admin-dispatch] customer_concern alert insert failed: ${e.message}`);
+      }
+    }
+    if (followUpFlagged) {
+      try {
+        await db('dispatch_alerts').insert({
+          type: 'follow_up_needed',
+          severity: isIncompleteOutcome ? 'warn' : 'info',
+          tech_id: svc.technician_id || null,
+          job_id: svc.id,
           payload: {
-            customerName: `${svc.first_name || ''} ${svc.last_name || ''}`.trim(),
-            customerId: svc.customer_id,
-            serviceType: svc.service_type,
-            scheduledDate: svc.scheduled_date,
-            reason: noProductsReason || 'Marked incomplete',
-            technicianNotes: (technicianNotes || '').slice(0, 500),
-            createdBy: req.technicianId || null,
+            ...alertBasePayload,
+            observation: 'follow_up_needed',
+            followUpNote: req.body?.followUpNote || '',
           },
         });
       } catch (e) {
-        // Non-blocking — completion already happened; alert insert is the
-        // followup signal, not the source of truth.
-        logger.error(`[admin-dispatch] visit_incomplete alert insert failed: ${e.message}`);
+        logger.error(`[admin-dispatch] follow_up_needed alert insert failed: ${e.message}`);
       }
     }
 
@@ -667,7 +707,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // SMS instead of firing a second message 90-180 min later. Single message
     // lands higher read-rates than two.
     let bundledReviewUrl = null;
-    if (!isIncompleteOutcome && sendCompletionSms && requestReview && svc.cust_phone) {
+    // Don't bundle a review request alongside an outbound invoice. "Pay
+    // us" and "review us" in one SMS competes for attention and reads
+    // premature when the customer hasn't paid yet. Review goes out later
+    // (delayed cron OR — TODO — Stripe webhook on payment_intent.succeeded).
+    const willBundleReview = !isIncompleteOutcome
+      && sendCompletionSms
+      && requestReview
+      && svc.cust_phone
+      && !shouldInvoice;
+    if (willBundleReview) {
       try {
         const ReviewService = require('../services/review-request');
         bundledReviewUrl = await ReviewService.createInline({
@@ -680,6 +729,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       ? `\n\nEnjoyed the service? A quick review means the world: ${bundledReviewUrl}`
       : '';
 
+    // We capture the exact composed SMS body that gets sent so support
+    // can answer "what did the customer actually receive?" without
+    // reconstructing it. Written back to service_records.structured_notes
+    // after the SMS path resolves. Stays empty when no SMS is sent.
+    let sentSmsBody = '';
     if (!isIncompleteOutcome && sendCompletionSms && svc.cust_phone) {
       try {
         const displayServiceType = normalizeServiceTypeForTemplate(svc.service_type);
@@ -701,7 +755,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 portal_url: portalUrl,
                 pay_url: payUrl,
               }, fallback);
-          await TwilioService.sendSMS(svc.cust_phone, body + reviewSuffix, { customerId: svc.customer_id, messageType: 'service_complete_with_invoice' });
+          sentSmsBody = body + reviewSuffix;
+          await TwilioService.sendSMS(svc.cust_phone, sentSmsBody, { customerId: svc.customer_id, messageType: 'service_complete_with_invoice' });
         } else if (prepaidCovered || alreadyPaid) {
           const fallback = `Hello ${svc.first_name}! Thanks for your payment today. Your ${displayServiceType} service report is ready: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = customerRecap
@@ -711,20 +766,38 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 service_type: displayServiceType,
                 portal_url: portalUrl,
               }, fallback);
-          await TwilioService.sendSMS(svc.cust_phone, body + reviewSuffix, { customerId: svc.customer_id, messageType: 'service_complete_prepaid' });
+          sentSmsBody = body + reviewSuffix;
+          await TwilioService.sendSMS(svc.cust_phone, sentSmsBody, { customerId: svc.customer_id, messageType: 'service_complete_prepaid' });
         } else {
           const fallback = `Hello ${svc.first_name}! Your service report is ready. View it here: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = customerRecap
             ? customerRecap
             : await renderTemplate('service_complete', { first_name: svc.first_name || '' }, fallback);
-          await TwilioService.sendSMS(svc.cust_phone, body + reviewSuffix, { customerId: svc.customer_id, messageType: 'service_complete' });
+          sentSmsBody = body + reviewSuffix;
+          await TwilioService.sendSMS(svc.cust_phone, sentSmsBody, { customerId: svc.customer_id, messageType: 'service_complete' });
         }
       } catch (e) { logger.error(`Completion SMS failed: ${e.message}`); }
+    }
+    // Persist the actual outbound SMS body. Best-effort — write failure
+    // here doesn't roll back the completion (already sent / committed).
+    if (sentSmsBody) {
+      try {
+        const merged = { ...(record.structured_notes || {}), sentSmsBody, sentSmsAt: new Date().toISOString() };
+        await db('service_records').where({ id: record.id }).update({ structured_notes: merged });
+      } catch (e) { logger.warn(`[admin-dispatch] sentSmsBody persist failed: ${e.message}`); }
     }
 
     // Only schedule the delayed follow-up message when the review wasn't
     // already bundled into the completion SMS above.
-    if (!isIncompleteOutcome && requestReview && svc.cust_phone && !bundledReviewUrl) {
+    // Schedule the delayed review request only when:
+    //   - the visit completed successfully (skipped on incomplete)
+    //   - SMS is on
+    //   - no invoice is pending — for invoice cases the Stripe webhook
+    //     will mint the review on payment success (TODO: wire that path
+    //     in stripe-webhook.js; until then invoice customers get no
+    //     auto-scheduled review and the office can request manually)
+    //   - we didn't already bundle one into the completion SMS
+    if (!isIncompleteOutcome && requestReview && svc.cust_phone && !bundledReviewUrl && !shouldInvoice) {
       try {
         const ReviewService = require('../services/review-request');
         await ReviewService.create({
@@ -1659,24 +1732,38 @@ router.post('/recap-preview', requireTechOrAdmin, async (req, res) => {
       return res.status(400).json({ error: 'Notes too short for recap.' });
     }
 
+    // Areas treated — short labels the AI can mention by name without
+    // touching jargon or chemical detail. Capped to keep prompt size sane.
+    const rawAreas = Array.isArray(body.areasTreated) ? body.areasTreated : [];
+    const areasTreated = rawAreas
+      .slice(0, 12)
+      .map((a) => String(a || '').slice(0, 40))
+      .filter(Boolean);
+
     const productList = products.join(', ');
     const observationList = observations.join(', ');
+    const areasList = areasTreated.join(', ');
 
     const system = [
       'You write short customer-facing SMS recaps for Waves Pest Control.',
       'Style: warm, professional, two short sentences max, no exclamation marks, no marketing fluff.',
-      'Translate raw technician shorthand into clear customer language. Never mention internal jargon, product chemistry detail, or pricing.',
+      'Translate raw technician shorthand into clear customer language.',
+      'Never mention product names, chemicals, application rates, or pricing — those stay in the internal record.',
+      'Mention treated areas in plain language ("exterior perimeter, garage, entry points") rather than zones or jargon.',
+      'Never overpromise: avoid "problem solved", "eliminated", "guaranteed". Use "treated", "inspected", "monitored", "we will continue watching".',
+      'For customer-declined visits, stay neutral. Never blame the customer.',
+      'If the technician mentions concerns or follow-up, acknowledge them briefly without alarming the customer.',
       'Use plain ASCII punctuation only (no em dash, no smart quotes). End the message with " - Waves".',
       'Keep it short enough for SMS — aim for under 200 characters before the signoff.',
-      'If the technician mentions concerns or follow-up, acknowledge them briefly without alarming the customer.',
     ].join(' ');
 
     const user = [
       `Customer first name: ${customerFirstName || 'the customer'}`,
       `Service type: ${serviceType}`,
-      productList ? `Products applied: ${productList}` : 'No products applied.',
+      areasList ? `Areas treated: ${areasList}` : '',
+      productList ? `Products applied (INTERNAL — do not mention by name): ${productList}` : 'No products applied.',
       observationList ? `Observations: ${observationList}` : '',
-      `Technician notes (raw): ${technicianNotes}`,
+      `Technician notes (raw, internal shorthand): ${technicianNotes}`,
       '',
       'Write only the SMS body. Do not include "Hi {name}," — start directly with what was done.',
     ].filter(Boolean).join('\n');
