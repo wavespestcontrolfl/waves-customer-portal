@@ -398,14 +398,18 @@ export default function MobileCompleteServiceSheet({
     && !noProductsReason;
 
   // ── Dynamic CTA label ───────────────────────────────────────────────────
+  // Incomplete-visit path (weather / can't access) skips invoice + recap +
+  // review and explicitly closes the visit with a follow-up flag instead.
   const willCharge = !coveredByMembership && !isPrepaid && hasAutoPay && total > 0 && !paymentCollected;
   const ctaLabel = submitting
     ? 'Completing…'
-    : !sendSms
-      ? 'Complete Service'
-      : willCharge
-        ? 'Complete, Charge & Send Recap'
-        : 'Complete & Send Recap';
+    : isIncompleteVisit
+      ? 'Close Visit & Create Follow-up'
+      : !sendSms
+        ? 'Complete Service'
+        : willCharge
+          ? 'Complete, Charge & Send Recap'
+          : 'Complete & Send Recap';
 
   async function handleSubmit() {
     if (!canSubmit) return;
@@ -413,6 +417,12 @@ export default function MobileCompleteServiceSheet({
     setSubmitting(true);
     if (!idempotencyKeyRef.current) idempotencyKeyRef.current = uuid();
     try {
+      // Incomplete visits (weather / can't access) bypass recap + review
+      // entirely — no customer-facing message goes out, and the visit is
+      // recorded so the office can spin up the follow-up. The reason is
+      // forwarded so the backend can branch on it.
+      const sendRecap = sendSms && !isIncompleteVisit;
+      const reviewFinal = requestReview && !isIncompleteVisit;
       const body = {
         technicianNotes: notes.trim(),
         products: selectedProducts.map((p) => ({
@@ -420,15 +430,18 @@ export default function MobileCompleteServiceSheet({
           rate: p.rate ? Number(p.rate) : undefined,
           rateUnit: p.rateUnit || 'oz',
         })),
-        sendCompletionSms: sendSms,
-        requestReview,
+        sendCompletionSms: sendRecap,
+        requestReview: reviewFinal,
         formResponses: {
           observations,
-          customerRecap: sendSms ? recapToSend : '',
+          customerRecap: sendRecap ? recapToSend : '',
         },
       };
       if (followUpNote.trim()) body.followUpNote = followUpNote.trim();
-      if (noProductsReason) body.noProductsReason = noProductsReason;
+      if (noProductsReason) {
+        body.noProductsReason = noProductsReason;
+        body.visitOutcome = reasonOutcome; // complete | no_review | incomplete
+      }
       if (isLawnService) {
         if (soilTemp) body.soilTemp = parseFloat(soilTemp);
         if (soilPh) body.soilPh = parseFloat(soilPh);
@@ -609,32 +622,52 @@ export default function MobileCompleteServiceSheet({
             </div>
           ))}
 
-          {/* No-products reason — only shown for treatment services with 0 products */}
-          {!isNonTreatment && selectedProducts.length === 0 && (
+          {/* "No products applied" path is a quiet secondary action — the
+              full reason picker only appears once the tech taps to expand
+              it, so the screen doesn't equate the no-product path with
+              the normal product path. */}
+          {!isNonTreatment && selectedProducts.length === 0 && !noProductsActive && !noProductsReason && (
+            <button
+              type="button"
+              onClick={() => setNoProductsActive(true)}
+              className="bg-transparent text-ink-secondary u-focus-ring mt-3"
+              style={{ fontSize: 13, padding: 0, border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
+            >
+              No products applied
+            </button>
+          )}
+
+          {!isNonTreatment && selectedProducts.length === 0 && (noProductsActive || noProductsReason) && (
             <div className="mt-3">
               <div className="text-zinc-900 mb-2" style={{ fontSize: 13 }}>
-                No products applied? Pick a reason:
+                Reason:
               </div>
               <div className="flex flex-wrap gap-2">
-                {NO_PRODUCT_REASONS.map((r) => (
-                  <button
-                    key={r}
-                    type="button"
-                    onClick={() => setNoProductsReason(noProductsReason === r ? '' : r)}
-                    className="font-medium u-focus-ring"
-                    style={{
-                      padding: '6px 10px',
-                      borderRadius: 4,
-                      border: `1px solid ${noProductsReason === r ? '#18181B' : '#D4D4D8'}`,
-                      background: noProductsReason === r ? '#18181B' : '#fff',
-                      color: noProductsReason === r ? '#fff' : '#18181B',
-                      fontSize: 12,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    {r}
-                  </button>
-                ))}
+                {NO_PRODUCT_REASONS.map((r) => {
+                  const selected = noProductsReason === r.label;
+                  return (
+                    <button
+                      key={r.label}
+                      type="button"
+                      onClick={() => {
+                        setNoProductsReason(selected ? '' : r.label);
+                        if (selected) setNoProductsActive(false);
+                      }}
+                      className="font-medium u-focus-ring"
+                      style={{
+                        padding: '6px 10px',
+                        borderRadius: 4,
+                        border: `1px solid ${selected ? '#18181B' : '#D4D4D8'}`,
+                        background: selected ? '#18181B' : '#fff',
+                        color: selected ? '#fff' : '#18181B',
+                        fontSize: 12,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {r.label}
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -713,30 +746,43 @@ export default function MobileCompleteServiceSheet({
           </section>
         )}
 
-        {/* Customer recap preview */}
-        {sendSms && (
+        {/* Customer recap preview — only when SMS will actually go out, and
+            never on incomplete-visit closures (those follow a different path). */}
+        {sendSms && !isIncompleteVisit && (
           <section className="mt-8">
             <div className="text-zinc-900" style={sectionTitleStyle}>Customer recap</div>
             <div className="text-zinc-900 mb-2" style={{ fontSize: 13 }}>
-              {customerFirstName} will receive:
+              {customerFirstName} will receive this. Internal notes stay private.
             </div>
             <textarea
               value={recapToSend}
-              onChange={(e) => { setRecapDraft(e.target.value); setRecapEdited(true); }}
+              onChange={(e) => {
+                setRecapDraft(e.target.value);
+                setRecapEdited(true);
+                setRecapStaleAfterEdit(false); // tech is editing now; don't flag stale until next input change
+              }}
               rows={3}
               className="w-full bg-white border-hairline border-zinc-300 rounded-sm px-3 py-2 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
               style={{ fontSize: 14, fontWeight: 500, resize: 'vertical', minHeight: 80, fontFamily: 'inherit' }}
+              placeholder={recapAiState === 'loading' ? 'Drafting…' : 'Write the message the customer will receive.'}
             />
-            {recapEdited && (
-              <button
-                type="button"
-                onClick={() => { setRecapDraft(''); setRecapEdited(false); }}
-                className="bg-transparent text-ink-secondary u-focus-ring mt-1"
-                style={{ fontSize: 12, padding: 0, border: 'none', cursor: 'pointer' }}
-              >
-                Reset to default
-              </button>
-            )}
+            <div className="flex items-center justify-between mt-1 gap-3">
+              <span className="text-ink-secondary" style={{ fontSize: 12 }}>
+                {recapAiState === 'loading' && 'Drafting with AI…'}
+                {recapAiState === 'error' && 'Couldn’t draft. Write one manually or turn off SMS.'}
+                {recapAiState === 'ok' && recapStaleAfterEdit && 'Notes changed since this draft.'}
+              </span>
+              {(recapStaleAfterEdit || recapAiState === 'error') && (
+                <button
+                  type="button"
+                  onClick={() => { setRecapStaleAfterEdit(true); generateAiRecap(); }}
+                  className="bg-transparent text-zinc-900 u-focus-ring"
+                  style={{ fontSize: 12, padding: 0, border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
+                >
+                  Regenerate draft
+                </button>
+              )}
+            </div>
           </section>
         )}
 
@@ -834,14 +880,18 @@ export default function MobileCompleteServiceSheet({
         >
           {ctaLabel}
         </button>
-        {needsNoProductReason && (
+        {(!canSubmit || needsNoProductReason) && (
           <div className="text-ink-secondary text-center mt-2" style={{ fontSize: 12 }}>
-            Pick a "no products applied" reason to continue.
-          </div>
-        )}
-        {!notesOk && (
-          <div className="text-ink-secondary text-center mt-2" style={{ fontSize: 12 }}>
-            Add a note to continue.
+            {(() => {
+              // Tiered messaging: a soft prompt before the tech has done
+              // anything, then specific guidance once they've started.
+              if (!notesOk && selectedProducts.length === 0 && !noProductsReason) {
+                return 'Add notes and either select a product or mark no products applied.';
+              }
+              if (!notesOk) return 'Add a note to continue.';
+              if (needsNoProductReason) return 'Choose a product or pick a "no products applied" reason.';
+              return null;
+            })()}
           </div>
         )}
       </div>
