@@ -286,11 +286,26 @@ router.post('/sms', async (req, res) => {
         });
 
         // If AI generated a reply (not escalated), send it automatically
+        // through the customer-message middleware. The wrapper enforces
+        // suppression (so we don't reply to a STOP'd number), consent,
+        // emoji + price-leak rules, and segment cap. Audit row written
+        // either way.
         if (aiResult.reply && !aiResult.escalated) {
           try {
-            await TwilioService.sendSMS(From, aiResult.reply, {
-              customerId: customer?.id, fromNumber: To, messageType: 'ai_assistant',
+            const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+            const sendResult = await sendCustomerMessage({
+              to: From,
+              body: aiResult.reply,
+              channel: 'sms',
+              audience: customer ? 'customer' : 'lead',
+              purpose: 'conversational',
+              customerId: customer?.id || null,
+              entryPoint: 'twilio_inbound_ai_assistant',
+              metadata: { fromNumber: To },
             });
+            if (!sendResult.sent) {
+              logger.warn(`[twilio-webhook] AI reply BLOCKED for ${From}: ${sendResult.code} — ${sendResult.reason}`);
+            }
           } catch (e) { logger.error(`AI reply SMS failed: ${e.message}`); }
         }
 
