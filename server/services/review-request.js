@@ -270,8 +270,11 @@ const ReviewService = {
         await db('review_requests').where({ id: requestId }).update({
           scheduled_for: retryAt,
         });
-        // PII: ID-only.
-        logger.error(`[review] SMS WRAPPER LOOKUP FAILED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'}): ${result.reason} (queued for retry at ${retryAt.toISOString()})`);
+        // PII: ID + code only. result.reason can include recipient phone
+        // or message body when upstream provider/guard error strings
+        // propagate; full failure context lives on messaging_audit_log
+        // keyed on auditLogId.
+        logger.error(`[review] SMS WRAPPER LOOKUP FAILED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'} code=${result.code}) (queued for retry at ${retryAt.toISOString()})`);
       } else if (result.blocked) {
         // True wrapper-policy block (opt-out, suppression, emoji, price
         // leak, segment cap, identity, NO_CONSENT_RECORD). Mark
@@ -281,8 +284,9 @@ const ReviewService = {
         await db('review_requests').where({ id: requestId }).update({
           status: 'suppressed',
         });
-        // PII: ID-only logging per AGENTS.md.
-        logger.warn(`[review] SMS BLOCKED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'}): ${result.code} — ${result.reason}`);
+        // PII: ID + code only — see WRAPPER LOOKUP FAILED above for why
+        // result.reason is dropped from log lines.
+        logger.warn(`[review] SMS BLOCKED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'} code=${result.code})`);
       } else {
         // Provider failure (Twilio/network). Mark for retry: keep
         // status='pending' AND set scheduled_for=now+5min so
@@ -301,8 +305,9 @@ const ReviewService = {
         await db('review_requests').where({ id: requestId }).update({
           scheduled_for: retryAt,
         });
-        // PII: ID-only logging per AGENTS.md.
-        logger.error(`[review] SMS PROVIDER FAILURE (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'}): ${result.code} — ${result.reason} (queued for retry at ${retryAt.toISOString()})`);
+        // PII: ID + code only — see WRAPPER LOOKUP FAILED above for why
+        // result.reason is dropped from log lines.
+        logger.error(`[review] SMS PROVIDER FAILURE (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'} code=${result.code}) (queued for retry at ${retryAt.toISOString()})`);
       }
     } catch (err) {
       // Same retry contract on a thrown exception (network down etc.):
@@ -312,10 +317,15 @@ const ReviewService = {
         await db('review_requests').where({ id: requestId }).update({
           scheduled_for: retryAt,
         });
-        logger.error(`[review] SMS threw — queued for retry at ${retryAt.toISOString()} (requestId=${requestId}): ${err.message}`);
+        // PII: log error class only. err.message can include Twilio
+        // request bodies / phone numbers since the wrapper internally
+        // calls services that surface the raw destination in their
+        // error strings. Audit row (when reached) holds full context.
+        logger.error(`[review] SMS dispatch threw — queued for retry at ${retryAt.toISOString()} (requestId=${requestId} errType=${err?.name || 'Error'})`);
       } catch (dbErr) {
-        // Last resort — couldn't even update the row. Log both errors.
-        logger.error(`[review] SMS failed AND retry-queue update failed (requestId=${requestId}): sendErr=${err.message} dbErr=${dbErr.message}`);
+        // Last resort — couldn't even update the row. Log error classes
+        // only for both failures (same PII reasoning).
+        logger.error(`[review] SMS failed AND retry-queue update failed (requestId=${requestId} sendErrType=${err?.name || 'Error'} dbErrType=${dbErr?.name || 'Error'})`);
       }
     }
   },
