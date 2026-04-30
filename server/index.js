@@ -237,6 +237,10 @@ app.use('/api/admin/push', adminPushRoutes);
 app.use('/api/admin/intelligence-bar', adminIntelligenceBarRoutes);
 app.use('/api/admin/tool-health', toolHealthRoutes);
 app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
+// Mounted before adminCustomerRoutes so the customer router doesn't
+// shadow the turf-profile sub-routes. Both routers share the
+// /api/admin/customers prefix; Express tries them in mount order.
+app.use('/api/admin/customers', require('./routes/admin-customer-turf-profile'));
 app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/admin/dashboard', adminDashboardRoutes);
 app.use('/api/admin/feature-flags', require('./routes/admin-feature-flags'));

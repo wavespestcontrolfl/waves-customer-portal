@@ -37,14 +37,35 @@ function resizeImage(dataUrl, maxEdge = 1600, quality = 0.85) {
   });
 }
 
+// Allowed values mirror server/routes/admin-customer-turf-profile.js.
+// Keep them in sync — the API rejects anything outside the closed set.
+const TURF_PROFILE_OPTIONS = {
+  grass_type: ['st_augustine', 'bermuda', 'zoysia', 'bahia', 'mixed', 'unknown'],
+  sun_exposure: ['full_sun', 'partial_shade', 'shade'],
+  irrigation_type: ['in_ground', 'manual', 'none', 'mixed'],
+};
+
+const EMPTY_TURF_PROFILE = {
+  grass_type: '', track_key: '', cultivar: '', sun_exposure: '',
+  lawn_sqft: '', irrigation_type: '', municipality: '', county: '',
+  soil_test_date: '', soil_ph: '',
+  known_chinch_history: false, known_disease_history: false, known_drought_stress: false,
+  annual_n_budget_target: '', active: true,
+};
+
 export default function LawnAssessmentPanel() {
-  const [step, setStep] = useState('select'); // select, capture, analyzing, review, history
+  // 'profile' step lets the tech edit a customer's turf profile from
+  // the lawn-care surface — feeds the WaveGuard plan engine later.
+  const [step, setStep] = useState('select'); // select, capture, analyzing, review, history, profile
   const [customers, setCustomers] = useState([]);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [search, setSearch] = useState('');
   const [photos, setPhotos] = useState([]); // { data, preview, file }
   const [analyzing, setAnalyzing] = useState(false);
   const [result, setResult] = useState(null);
+  const [turfProfile, setTurfProfile] = useState(EMPTY_TURF_PROFILE);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileSaving, setProfileSaving] = useState(false);
   // Tech-confirmed scores. Initialized from result.displayScores when
   // /assess returns; the tech can nudge any tile up/down before confirm.
   // recordTechCalibration on the server uses the AI vs tech delta to
@@ -175,6 +196,55 @@ export default function LawnAssessmentPanel() {
     } catch { setHistory([]); }
   };
 
+  const loadTurfProfile = async (customerId) => {
+    setProfileLoading(true);
+    try {
+      const d = await adminFetch(`/admin/customers/${customerId}/turf-profile`);
+      // Server returns { profile: row | null }. Coerce nulls to ''
+      // so the form's controlled inputs don't drop to uncontrolled.
+      const p = d.profile;
+      setTurfProfile(p ? {
+        ...EMPTY_TURF_PROFILE,
+        ...Object.fromEntries(Object.entries(p).map(([k, v]) => [k, v == null ? EMPTY_TURF_PROFILE[k] ?? '' : v])),
+      } : EMPTY_TURF_PROFILE);
+      setStep('profile');
+    } catch (e) {
+      alert('Failed to load turf profile: ' + e.message);
+    } finally {
+      setProfileLoading(false);
+    }
+  };
+
+  const saveTurfProfile = async () => {
+    if (!selectedCustomer) return;
+    // Strip empty strings so the API receives null/undefined instead of
+    // empty strings that fail numeric/date parsing on the server.
+    const payload = Object.fromEntries(
+      Object.entries(turfProfile).filter(([, v]) => v !== '' && v !== null),
+    );
+    setProfileSaving(true);
+    try {
+      const d = await adminFetch(`/admin/customers/${selectedCustomer.id}/turf-profile`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      });
+      alert('Turf profile saved');
+      // Reflect the saved row back into form state so the user sees
+      // any server-applied normalisation immediately.
+      const p = d.profile;
+      setTurfProfile({
+        ...EMPTY_TURF_PROFILE,
+        ...Object.fromEntries(Object.entries(p).map(([k, v]) => [k, v == null ? EMPTY_TURF_PROFILE[k] ?? '' : v])),
+      });
+    } catch (e) {
+      alert('Save failed: ' + e.message);
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+
+  const updateProfileField = (key, value) => setTurfProfile(prev => ({ ...prev, [key]: value }));
+
   // First-use guide
   if (showGuide) {
     return (
@@ -221,6 +291,7 @@ export default function LawnAssessmentPanel() {
                 </div>
                 <div style={{ display: 'flex', gap: 6 }}>
                   {c.lastAssessment && <span style={{ fontSize: 10, color: D.muted }}>Last: {new Date(c.lastAssessment).toLocaleDateString()}</span>}
+                  <button onClick={e => { e.stopPropagation(); setSelectedCustomer(c); loadTurfProfile(c.id); }} style={{ ...btnOutline, padding: '4px 8px', fontSize: 10 }}>Profile</button>
                   <button onClick={e => { e.stopPropagation(); loadHistory(c.id); setSelectedCustomer(c); }} style={{ ...btnOutline, padding: '4px 8px', fontSize: 10 }}>History</button>
                 </div>
               </div>
@@ -409,6 +480,84 @@ export default function LawnAssessmentPanel() {
               {a.observations && <div style={{ fontSize: 11, color: D.muted, marginTop: 8, lineHeight: 1.5 }}>{a.observations}</div>}
             </div>
           ))}
+        </div>
+      )}
+
+      {/* TURF PROFILE VIEW — minimal form for the WaveGuard plan engine inputs */}
+      {step === 'profile' && (
+        <div style={{ maxWidth: 520, margin: '0 auto' }}>
+          <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>
+            {selectedCustomer?.firstName} {selectedCustomer?.lastName} — Turf Profile
+          </div>
+          {profileLoading ? (
+            <div style={{ ...cardStyle, textAlign: 'center', padding: 40, color: D.muted }}>Loading…</div>
+          ) : (
+            <div style={{ ...cardStyle, padding: 16 }}>
+              {/* Selects */}
+              {[
+                ['grass_type', 'Grass type', TURF_PROFILE_OPTIONS.grass_type],
+                ['sun_exposure', 'Sun exposure', TURF_PROFILE_OPTIONS.sun_exposure],
+                ['irrigation_type', 'Irrigation', TURF_PROFILE_OPTIONS.irrigation_type],
+              ].map(([key, label, opts]) => (
+                <div key={key} style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>{label}</div>
+                  <select
+                    value={turfProfile[key] || ''}
+                    onChange={e => updateProfileField(key, e.target.value)}
+                    style={{ ...inputStyle, marginBottom: 0 }}
+                  >
+                    <option value="">—</option>
+                    {opts.map(o => <option key={o} value={o}>{o.replace(/_/g, ' ')}</option>)}
+                  </select>
+                </div>
+              ))}
+              {/* Text/numeric inputs */}
+              {[
+                ['track_key', 'Track key (e.g. st_aug_full_sun)', 'text'],
+                ['cultivar', 'Cultivar (e.g. Floratam, Palmetto)', 'text'],
+                ['lawn_sqft', 'Lawn area (sqft)', 'number'],
+                ['municipality', 'Municipality (e.g. North Port)', 'text'],
+                ['county', 'County (e.g. Sarasota)', 'text'],
+                ['soil_test_date', 'Last soil test date', 'date'],
+                ['soil_ph', 'Soil pH (0–14)', 'number'],
+                ['annual_n_budget_target', 'Annual N budget (lb / 1,000 sqft)', 'number'],
+              ].map(([key, label, type]) => (
+                <div key={key} style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>{label}</div>
+                  <input
+                    type={type}
+                    step={type === 'number' && (key === 'soil_ph' || key === 'annual_n_budget_target') ? '0.1' : undefined}
+                    value={turfProfile[key] ?? ''}
+                    onChange={e => updateProfileField(key, e.target.value)}
+                    style={{ ...inputStyle, marginBottom: 0 }}
+                  />
+                </div>
+              ))}
+              {/* Boolean history flags */}
+              <div style={{ marginTop: 8, marginBottom: 12 }}>
+                <div style={{ fontSize: 11, color: D.muted, marginBottom: 6 }}>Known pressure history</div>
+                {[
+                  ['known_chinch_history', 'Chinch bug history'],
+                  ['known_disease_history', 'Disease history'],
+                  ['known_drought_stress', 'Drought stress history'],
+                ].map(([key, label]) => (
+                  <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: D.heading, padding: '4px 0', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={!!turfProfile[key]}
+                      onChange={e => updateProfileField(key, e.target.checked)}
+                    />
+                    {label}
+                  </label>
+                ))}
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                <button onClick={saveTurfProfile} disabled={profileSaving} style={{ ...btnStyle(D.green), flex: 1, padding: 12, fontSize: 14, opacity: profileSaving ? 0.5 : 1 }}>
+                  {profileSaving ? 'Saving…' : 'Save Turf Profile'}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
