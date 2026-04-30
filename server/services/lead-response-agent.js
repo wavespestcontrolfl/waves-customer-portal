@@ -208,18 +208,49 @@ const LeadResponseAgent = {
                 reason: `Auto-send blocked — critical context tools failed (${criticalFailures.join(', ')}). Generic ack sent; please review and follow up.`,
                 draft_message: toolInput.message || '',
               });
-              // Send the safe generic message directly
-              await executeLeadTool('send_lead_response', {
+              // Send the safe generic message directly. send_lead_response
+              // can now return non-thrown blocked/failed outcomes (consent
+              // block, suppression, provider failure) — capture the actual
+              // result instead of assuming success.
+              const safeResult = await executeLeadTool('send_lead_response', {
                 lead_id: lead.leadId,
                 customer_id: lead.customerId,
                 message: safeMessage,
               });
-              toolResult = {
-                sent: true,
-                fallback: true,
-                note: 'Sent safe generic ack and queued full draft for human review due to missing context.',
-              };
-              actionTaken = 'safe_fallback_sent';
+              if (safeResult && safeResult.sent === true) {
+                toolResult = {
+                  sent: true,
+                  fallback: true,
+                  note: 'Sent safe generic ack and queued full draft for human review due to missing context.',
+                };
+                actionTaken = 'safe_fallback_sent';
+              } else if (safeResult && safeResult.blocked === true) {
+                // Wrapper-policy block (e.g. opt-out). Lead is already
+                // queued for Adam; the missed ack is recorded so ops
+                // triage sees the lead didn't go silent — we just
+                // couldn't text. Not a system failure (no breaker bump).
+                toolResult = {
+                  sent: false,
+                  fallback: true,
+                  blocked: true,
+                  code: safeResult.code,
+                  reason: safeResult.reason,
+                  note: 'Queued for Adam; safe-ack SMS blocked by middleware (consent/suppression/voice).',
+                };
+                actionTaken = 'safe_fallback_blocked_queued';
+              } else {
+                // Provider failure on the fallback send. Lead is still
+                // queued for Adam — that's the real backstop. Surface
+                // failed/error so isToolFailure catches it.
+                toolResult = {
+                  sent: false,
+                  fallback: true,
+                  failed: true,
+                  error: (safeResult && safeResult.error) || 'fallback send failed',
+                  note: 'Queued for Adam; safe-ack SMS provider failure.',
+                };
+                actionTaken = 'safe_fallback_failed_queued';
+              }
             } catch (err) {
               toolResult = { error: `Safe fallback failed: ${err.message}` };
               failed = true;
