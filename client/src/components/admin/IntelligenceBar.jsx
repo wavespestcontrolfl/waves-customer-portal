@@ -106,8 +106,8 @@ function QuickChip({ icon, label, onClick }) {
         padding: '5px 12px', borderRadius: 9999,
         background: hover ? `${D.teal}22` : `${D.card}`,
         border: `1px solid ${hover ? D.teal + '55' : D.border}`,
-        color: hover ? D.teal : D.muted, fontSize: 12, fontWeight: 600,
-        fontFamily: 'DM Sans, sans-serif', cursor: 'pointer',
+        color: hover ? D.teal : '#000', fontSize: 12, fontWeight: 600,
+        fontFamily: "'Roboto', system-ui, sans-serif", cursor: 'pointer',
         transition: 'all 0.15s ease', whiteSpace: 'nowrap',
       }}
     >
@@ -140,7 +140,7 @@ function CustomerRow({ customer, onSelect }) {
         <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
           {c.name || `${c.first_name || ''} ${c.last_name || ''}`.trim() || 'Unnamed'}
         </div>
-        <div style={{ fontSize: 11, color: D.muted }}>
+        <div style={{ fontSize: 11, color: '#000' }}>
           {c.city || '—'}{c.phone ? ` · ${c.phone}` : ''}
         </div>
       </div>
@@ -291,8 +291,8 @@ export default function IntelligenceBar({ onSelectCustomer }) {
             style={{
               width: '100%', padding: '10px 14px', paddingRight: 80,
               background: D.inputBg, border: `1px solid ${D.border}`,
-              borderRadius: 10, color: D.text, fontSize: 14,
-              fontFamily: 'DM Sans, sans-serif', outline: 'none',
+              borderRadius: 10, color: '#000', fontSize: 14,
+              fontFamily: "'Roboto', system-ui, sans-serif", outline: 'none',
               boxSizing: 'border-box',
               transition: 'border-color 0.15s',
             }}
@@ -317,7 +317,7 @@ export default function IntelligenceBar({ onSelectCustomer }) {
                   color: prompt.trim() ? D.white : D.muted,
                   border: `1px solid ${prompt.trim() ? D.teal : D.border}`,
                   fontSize: 12, fontWeight: 700, cursor: prompt.trim() ? 'pointer' : 'default',
-                  fontFamily: 'DM Sans, sans-serif',
+                  fontFamily: "'Roboto', system-ui, sans-serif",
                   opacity: prompt.trim() ? 1 : 0.4,
                   transition: 'all 0.15s',
                 }}
@@ -330,8 +330,8 @@ export default function IntelligenceBar({ onSelectCustomer }) {
           <button onClick={clearConversation} style={{
             padding: '6px 10px', background: 'transparent',
             border: `1px solid ${D.border}`, borderRadius: 8,
-            color: D.muted, fontSize: 11, fontWeight: 600, cursor: 'pointer',
-            fontFamily: 'DM Sans, sans-serif', whiteSpace: 'nowrap',
+            color: '#000', fontSize: 11, fontWeight: 600, cursor: 'pointer',
+            fontFamily: "'Roboto', system-ui, sans-serif", whiteSpace: 'nowrap',
           }}>Clear</button>
         )}
       </div>
@@ -351,13 +351,13 @@ export default function IntelligenceBar({ onSelectCustomer }) {
       {/* ── Recent Prompts ────────────────────────────── */}
       {expanded && !response && !loading && recentPrompts.length > 0 && (
         <div style={{ padding: '0 18px 14px' }}>
-          <div style={{ fontSize: 10, color: D.muted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>Recent</div>
+          <div style={{ fontSize: 10, color: '#000', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>Recent</div>
           {recentPrompts.map((p, i) => (
             <div
               key={i}
               onClick={() => { setPrompt(p); submit(p); }}
               style={{
-                padding: '6px 12px', fontSize: 12, color: D.muted, cursor: 'pointer',
+                padding: '6px 12px', fontSize: 12, color: '#000', cursor: 'pointer',
                 borderRadius: 6, marginBottom: 2,
                 transition: 'all 0.1s',
               }}
@@ -406,8 +406,8 @@ export default function IntelligenceBar({ onSelectCustomer }) {
         }}>
           {/* Claude's text response */}
           <div style={{
-            fontSize: 13, lineHeight: 1.65, color: D.text,
-            fontFamily: 'DM Sans, sans-serif',
+            fontSize: 13, lineHeight: 1.65, color: '#000',
+            fontFamily: "'Roboto', system-ui, sans-serif",
           }}>
             {renderMarkdown(response)}
           </div>
@@ -422,7 +422,7 @@ export default function IntelligenceBar({ onSelectCustomer }) {
               <div style={{
                 padding: '8px 12px', background: `${D.teal}0a`,
                 borderBottom: `1px solid ${D.border}33`,
-                fontSize: 11, fontWeight: 700, color: D.muted,
+                fontSize: 11, fontWeight: 700, color: '#000',
                 textTransform: 'uppercase', letterSpacing: 0.8,
                 display: 'flex', justifyContent: 'space-between',
               }}>
@@ -449,8 +449,8 @@ export default function IntelligenceBar({ onSelectCustomer }) {
               style={{
                 flex: 1, padding: '8px 12px',
                 background: D.inputBg, border: `1px solid ${D.border}`,
-                borderRadius: 8, color: D.text, fontSize: 13,
-                fontFamily: 'DM Sans, sans-serif', outline: 'none',
+                borderRadius: 8, color: '#000', fontSize: 13,
+                fontFamily: "'Roboto', system-ui, sans-serif", outline: 'none',
               }}
             />
             <button
@@ -459,7 +459,7 @@ export default function IntelligenceBar({ onSelectCustomer }) {
               style={{
                 padding: '8px 16px', background: D.teal, color: D.white,
                 border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700,
-                cursor: 'pointer', fontFamily: 'DM Sans, sans-serif',
+                cursor: 'pointer', fontFamily: "'Roboto', system-ui, sans-serif",
                 opacity: prompt.trim() ? 1 : 0.4,
               }}
             >Send</button>
