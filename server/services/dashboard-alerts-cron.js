@@ -44,34 +44,44 @@ async function smsOwner(message) {
   }
 }
 
-// Two-layer overlap guard:
-//   1. `isRunning` — process-local fast-path. Skips the lock acquire
-//      when we already know we're in flight on this instance.
-//   2. `pg_try_advisory_xact_lock` — cross-replica authoritative lock.
-//      If Railway scales the portal service to >1 replica (or two
-//      different services share the cron schedule), the in-process
-//      flag isn't enough; both replicas would tick simultaneously,
-//      read the same `dashboard_alert_state` snapshot, both classify
-//      the alert as "new", and both fan out push + SMS before either
-//      commits state.
+// Concurrency model:
+//   1. `isRunning` — process-local fast-path. Stops node-cron from
+//      firing a second tick on top of one already in flight inside
+//      this process.
+//   2. Per-alert advisory lock — `pg_try_advisory_xact_lock(namespace,
+//      alert_id_hash)`. Each iteration of the for-loop opens a tiny
+//      transaction that takes a lock scoped to that specific alert
+//      id, reads the prior state, writes the new state, and commits.
+//      The trx releases both the lock AND the connection on commit.
 //
-// The lock is held inside `db.transaction()` solely as a connection
-// holder — the callback's awaited body is the lock window. We do NOT
-// run the per-alert state writes through that transaction (Codex P1
-// on PR #532): wrapping them in one trx means a late failure would
-// roll back state rows for alerts we already pushed, so the next tick
-// would re-classify them as new and re-send. Instead, each state
-// upsert and the cleared-alert deletes use `db` directly and commit
-// independently — push/SMS fires only after that alert's state row
-// is durable. The transaction stays open just to hold the lock until
-// the for-loop completes.
+// Why per-alert and not tick-level:
+//   * Tick-wrapping in a single trx (PR #532) caused a late write
+//     failure to roll back state rows for alerts we'd already pushed,
+//     replaying them on the next tick.
+//   * Holding a lock-only trx for the whole tick (PR #535 round 2)
+//     pinned a connection idle for the entire tick — under
+//     DB_POOL_MAX=1 the inner queries timed out (Codex P1).
+//   * Per-alert trx uses one connection at a time and releases it
+//     when each alert is done. Two replicas can process DIFFERENT
+//     alerts in parallel; for the SAME alert, the loser of the lock
+//     skips this iteration and will see committed state on the next
+//     tick (so it heartbeats instead of re-firing).
 //
-// Lock key is hashtext of a stable namespace string so two cron files
-// can't collide accidentally.
+// Push + SMS fire AFTER trx commit. The state row is durable before
+// the network call, so a failed push can't replay on the next tick —
+// operator notices via the bell (which has its own persistence).
+//
+// Cleanup of cleared alerts uses `db` directly with an idempotent
+// DELETE; race-with-resurrection is recoverable (the alert would
+// just reclassify as "new" on the next tick), so no lock is needed.
+//
+// Lock key namespace: hashtext('waves:dashboard-alerts-cron') as the
+// first int4, hashtext(alert.id) as the second. Two cron files can't
+// collide because the namespace differs.
 let isRunning = false;
-const ADVISORY_LOCK_SQL = "pg_try_advisory_xact_lock(hashtext('waves:dashboard-alerts-cron'))";
+const ALERT_LOCK_NAMESPACE_SQL = "hashtext('waves:dashboard-alerts-cron')";
 
-// Single tick: read current alerts + state, fan out notifications, update state.
+// Single tick: read current alerts, fan out notifications per-alert, update state.
 async function runDashboardAlertsCheck() {
   if (isRunning) {
     logger.info('[dashboard-alerts-cron] previous tick still running in this process, skipping');
@@ -79,17 +89,7 @@ async function runDashboardAlertsCheck() {
   }
   isRunning = true;
   try {
-    return await db.transaction(async (trx) => {
-      const lockResult = await trx.raw(`SELECT ${ADVISORY_LOCK_SQL} AS locked`);
-      if (!lockResult.rows[0].locked) {
-        logger.info('[dashboard-alerts-cron] another replica holds advisory lock, skipping');
-        return { fired: 0, cleared: 0, skipped: 'advisory_lock' };
-      }
-      // Inner work runs against `db` (not `trx`) so writes commit as
-      // they happen. The trx object's only job is to hold the
-      // advisory lock until the awaited body returns.
-      return runDashboardAlertsCheckInner();
-    });
+    return await runDashboardAlertsCheckInner();
   } finally {
     isRunning = false;
   }
@@ -105,52 +105,75 @@ async function runDashboardAlertsCheckInner() {
     return { fired: 0, cleared: 0, error: err.message };
   }
 
-  const stateRows = await db('dashboard_alert_state').select('*');
-  const stateById = new Map(stateRows.map((r) => [r.alert_id, r]));
   const currentIds = new Set(current.map((a) => a.id));
 
-  let fired = 0, cleared = 0;
+  let fired = 0, cleared = 0, skippedConcurrent = 0;
   const now = new Date();
 
   for (const alert of current) {
-    const prev = stateById.get(alert.id);
-    const isNew = !prev;
-    const escalated = prev && alert.count > (prev.last_pushed_count || 0);
+    let outcome = null;
+    try {
+      outcome = await db.transaction(async (trx) => {
+        const lockResult = await trx.raw(
+          `SELECT pg_try_advisory_xact_lock(${ALERT_LOCK_NAMESPACE_SQL}, hashtext(?)) AS locked`,
+          [alert.id],
+        );
+        if (!lockResult.rows[0].locked) {
+          // Peer replica owns this alert this tick — let it handle.
+          return { skipped: 'advisory_lock' };
+        }
 
-    if (isNew || escalated) {
-      // Persist state FIRST so a push/SMS that crashes mid-flight
-      // can't replay on the next tick. ON CONFLICT remains as belt-
-      // and-suspenders against any pre-existing row.
-      await db('dashboard_alert_state')
-        .insert({
-          alert_id: alert.id,
-          severity: alert.severity,
-          current_count: alert.count,
-          last_pushed_count: alert.count,
-          first_seen_at: prev ? prev.first_seen_at : now,
-          last_seen_at: now,
-          last_pushed_at: now,
-          last_label: alert.label,
-        })
-        .onConflict('alert_id')
-        .merge({
-          severity: alert.severity,
-          current_count: alert.count,
-          last_pushed_count: alert.count,
-          last_seen_at: now,
-          last_pushed_at: now,
-          last_label: alert.label,
-        });
+        const prev = await trx('dashboard_alert_state').where({ alert_id: alert.id }).first();
+        const isNew = !prev;
+        const escalated = prev && alert.count > (prev.last_pushed_count || 0);
 
-      // Fire push + SMS AFTER the state row is durable. If push fails,
-      // we've still recorded the alert as "pushed at this count," so
-      // it won't re-fire next tick — operator notices via the bell
-      // (which has its own persistence) instead.
+        if (isNew || escalated) {
+          await trx('dashboard_alert_state')
+            .insert({
+              alert_id: alert.id,
+              severity: alert.severity,
+              current_count: alert.count,
+              last_pushed_count: alert.count,
+              first_seen_at: prev ? prev.first_seen_at : now,
+              last_seen_at: now,
+              last_pushed_at: now,
+              last_label: alert.label,
+            })
+            .onConflict('alert_id')
+            .merge({
+              severity: alert.severity,
+              current_count: alert.count,
+              last_pushed_count: alert.count,
+              last_seen_at: now,
+              last_pushed_at: now,
+              last_label: alert.label,
+            });
+          return { fired: true };
+        }
+        // Heartbeat under the same lock so concurrent ticks don't
+        // race a stale current_count over a fresher one.
+        await trx('dashboard_alert_state')
+          .where({ alert_id: alert.id })
+          .update({ current_count: alert.count, last_seen_at: now });
+        return { heartbeat: true };
+      });
+    } catch (err) {
+      logger.error(`[dashboard-alerts-cron] alert ${alert.id} mini-trx failed: ${err.message}`);
+      continue;
+    }
+
+    if (outcome?.skipped === 'advisory_lock') {
+      skippedConcurrent += 1;
+      continue;
+    }
+
+    if (outcome?.fired) {
+      // State row is durable past this point. Push + SMS happen
+      // outside the trx so any network-side failure can't roll back
+      // the state write. alertId + alertCount land in the persisted
+      // row's metadata so the bell endpoint can dedupe this row
+      // against the live overlay (same alert at same count).
       try {
-        // alertId + alertCount land in the persisted row's metadata so
-        // the bell endpoint can dedupe this row against the live overlay
-        // (same alert at same count). Earlier counts stay as escalation
-        // history.
         await triggerNotification('dashboard_alert', {
           alertId: alert.id,
           alertCount: alert.count,
@@ -167,27 +190,24 @@ async function runDashboardAlertsCheckInner() {
       }
 
       fired += 1;
-    } else {
-      // Same alert still active, count hasn't grown — just heartbeat
-      // last_seen_at + current_count so the dashboard's per-admin
-      // dismissal logic can compare against an up-to-date count.
-      await db('dashboard_alert_state')
-        .where({ alert_id: alert.id })
-        .update({ current_count: alert.count, last_seen_at: now });
     }
   }
 
-  // Garbage-collect cleared alerts. Cascade nothing — dismissals for a
-  // resolved alert are harmless to keep around (they'll never match
-  // again unless the same alert id re-fires).
-  for (const stateRow of stateRows) {
-    if (!currentIds.has(stateRow.alert_id)) {
-      await db('dashboard_alert_state').where({ alert_id: stateRow.alert_id }).del();
+  // Garbage-collect cleared alerts. Re-query state since per-alert
+  // mini-trxs above may have inserted rows during this tick. Each
+  // delete is idempotent — two replicas racing on the same delete is
+  // fine, the second is a no-op. If an alert resurges between this
+  // read and the delete, the next tick will reclassify it as "new"
+  // and fire a notification — acceptable flap, not a correctness bug.
+  const liveStateRows = await db('dashboard_alert_state').select('alert_id');
+  for (const row of liveStateRows) {
+    if (!currentIds.has(row.alert_id)) {
+      await db('dashboard_alert_state').where({ alert_id: row.alert_id }).del();
       cleared += 1;
     }
   }
 
-  return { fired, cleared, current: current.length };
+  return { fired, cleared, current: current.length, skippedConcurrent };
 }
 
 module.exports = { runDashboardAlertsCheck };
