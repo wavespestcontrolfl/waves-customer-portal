@@ -43,6 +43,35 @@ const MODE_DISABLED = 'disabled';
 
 const seenSignedEndpoints = new Set();
 
+/**
+ * Heuristic for which Twilio source originated the request. Used in
+ * audit telemetry during log-mode burn-in to prove the Studio Flow's
+ * make-http-request widget arrives signed (per ChatGPT v3 review +
+ * Twilio helper-lib cluster tests). DOES NOT affect routing — purely
+ * an observability label.
+ *
+ * standard_callback   — Twilio's automatic recordingStatusCallback
+ *                       fired by record:true on a Dial; carries
+ *                       AccountSid in the body and the standard
+ *                       Twilio User-Agent.
+ * studio_http_widget  — Studio Flow `make-http-request` widget; the
+ *                       User-Agent typically contains "Studio" or
+ *                       "TwilioStudio". Body shape mirrors the widget
+ *                       config (no AccountSid).
+ * sms_or_voice        — direct Twilio webhook (voice/sms platform);
+ *                       carries AccountSid + standard User-Agent.
+ * unknown             — none of the above heuristics matched.
+ */
+function guessSource(req) {
+  const ua = (req.get('User-Agent') || '').toLowerCase();
+  const hasAccountSid = !!(req.body && req.body.AccountSid);
+  if (ua.includes('studio')) return 'studio_http_widget';
+  if (ua.includes('twilioproxy') && hasAccountSid) return 'standard_callback';
+  if (ua.includes('twilio') && hasAccountSid) return 'sms_or_voice';
+  if (hasAccountSid) return 'sms_or_voice';
+  return 'unknown';
+}
+
 function getMode() {
   const v = (process.env.TWILIO_SIGNATURE_VALIDATION || 'log').toLowerCase();
   if (v === MODE_ENFORCE) return MODE_ENFORCE;
@@ -70,13 +99,62 @@ function reconstructUrl(req) {
   return `${proto}://${host}${req.originalUrl}`;
 }
 
+/**
+ * Build the structured per-request audit object emitted to logger.info
+ * (or logger.warn on auth failure). PII-safe by construction:
+ *
+ *   - never includes req.body fields (phone, transcript, RecordingUrl)
+ *   - never includes raw URL with query string (originalUrl is OK
+ *     because Twilio webhook URLs don't carry secrets in query, but
+ *     we still emit only req.path to be conservative)
+ *   - never includes signature bytes or auth header values
+ *   - presence flags only for sensitive params
+ *
+ * Output shape (line per request):
+ *   {
+ *     evt: 'twilio_sig_audit',
+ *     mode: 'log' | 'enforce' | 'disabled',
+ *     method, path,
+ *     auth_result: 'signature_valid' | 'signature_missing' | 'signature_invalid' | 'auth_token_missing' | 'disabled',
+ *     source_guess: 'standard_callback' | 'studio_http_widget' | 'sms_or_voice' | 'unknown',
+ *     content_type, has_x_twilio_signature,
+ *     account_sid_present, call_sid_present, recording_sid_present,
+ *     recording_status,
+ *     proxy_proto_match  // forwarded === req.protocol — false flags Railway/edge oddness
+ *   }
+ */
+function buildAudit(req, mode, authResult) {
+  const body = (req.body && typeof req.body === 'object') ? req.body : {};
+  return {
+    evt: 'twilio_sig_audit',
+    mode,
+    method: req.method,
+    path: req.path,
+    auth_result: authResult,
+    source_guess: guessSource(req),
+    content_type: req.get('Content-Type') || null,
+    has_x_twilio_signature: !!req.get('X-Twilio-Signature'),
+    account_sid_present: !!body.AccountSid,
+    call_sid_present: !!body.CallSid,
+    recording_sid_present: !!body.RecordingSid,
+    recording_status: body.RecordingStatus || null,
+    proxy_proto_match:
+      (req.get('X-Forwarded-Proto') || '').split(',')[0].trim() === req.protocol ||
+      !req.get('X-Forwarded-Proto'),
+  };
+}
+
 function validateTwilioSignature(req, res, next) {
   const mode = getMode();
-  if (mode === MODE_DISABLED) return next();
+  if (mode === MODE_DISABLED) {
+    logger.info(buildAudit(req, mode, 'disabled'));
+    return next();
+  }
 
   const authToken = process.env.TWILIO_AUTH_TOKEN;
   if (!authToken) {
     logger.error('[twilio-sig] TWILIO_AUTH_TOKEN not configured — cannot validate');
+    logger.warn(buildAudit(req, mode, 'auth_token_missing'));
     if (mode === MODE_ENFORCE) {
       // Misconfig: we can't validate, but we must not silently process
       // an unauthenticated request in enforce mode.
@@ -92,9 +170,7 @@ function validateTwilioSignature(req, res, next) {
   const url = reconstructUrl(req);
 
   if (!signature) {
-    logger.warn(
-      `[twilio-sig] missing X-Twilio-Signature on ${req.method} ${req.originalUrl}`
-    );
+    logger.warn(buildAudit(req, mode, 'signature_missing'));
     if (mode === MODE_ENFORCE) return res.status(403).end();
     return next();
   }
@@ -107,19 +183,24 @@ function validateTwilioSignature(req, res, next) {
   const isValid = twilio.validateRequest(authToken, signature, url, params);
 
   if (!isValid) {
-    // Do NOT log req.body — caller phone, transcript snippets, etc.
-    // Log only the bits needed to debug a proxy/URL mismatch.
+    // Structured audit at warn level + a one-line debug breadcrumb
+    // with the URL/proto info needed to diagnose a Railway proxy
+    // mismatch. NEVER log body, signature, or auth headers.
+    logger.warn(buildAudit(req, mode, 'signature_invalid'));
     logger.warn(
-      `[twilio-sig] INVALID signature on ${req.method} ${req.originalUrl} ` +
-        `(reconstructed_url=${url}, host=${req.get('host')}, ` +
-        `req.protocol=${req.protocol}, forwarded_proto=${req.get('X-Forwarded-Proto') || 'none'})`
+      `[twilio-sig] INVALID signature reconstruction debug: ` +
+        `reconstructed_url=${url}, host=${req.get('host')}, ` +
+        `req.protocol=${req.protocol}, forwarded_proto=${req.get('X-Forwarded-Proto') || 'none'}`
     );
     if (mode === MODE_ENFORCE) return res.status(403).end();
     return next();
   }
 
-  // Valid signature — log INFO once per (method, path) per process
-  // boot so the operator can confirm wiring during log-mode burn-in.
+  // Valid: emit the audit on every request (safe — strictly
+  // structured, no PII), plus a one-shot INFO breadcrumb the first
+  // time we see a valid signature on each (method, path) pair so the
+  // operator can confirm wiring during the log-mode burn-in.
+  logger.info(buildAudit(req, mode, 'signature_valid'));
   const endpointKey = `${req.method} ${req.path}`;
   if (!seenSignedEndpoints.has(endpointKey)) {
     seenSignedEndpoints.add(endpointKey);

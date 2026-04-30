@@ -156,11 +156,11 @@ describe('validateTwilioSignature — valid signature', () => {
 
     expect(next).toHaveBeenCalled();
     expect(res.status).not.toHaveBeenCalled();
-    // First valid → INFO log
+    // First valid → INFO breadcrumb (separate from the per-request audit)
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('first valid signature'));
   });
 
-  test('logs first-valid only ONCE per endpoint per process boot', () => {
+  test('first-valid breadcrumb fires only ONCE per (method, path) per process boot', () => {
     const url = 'https://waves-portal.example.com/api/webhooks/twilio/voice';
     const body = { CallSid: 'CA1' };
     const sig = generateSignature(TEST_TOKEN, url, body);
@@ -172,7 +172,15 @@ describe('validateTwilioSignature — valid signature', () => {
     validateTwilioSignature(req2, mockRes(), next);
 
     expect(next).toHaveBeenCalledTimes(2);
-    expect(logger.info).toHaveBeenCalledTimes(1);
+    // Audit emits per-request (2 calls). Breadcrumb fires once.
+    const breadcrumbCalls = logger.info.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && c[0].includes('first valid signature')
+    );
+    expect(breadcrumbCalls).toHaveLength(1);
+    const auditCalls = logger.info.mock.calls.filter(
+      (c) => c[0] && c[0].evt === 'twilio_sig_audit'
+    );
+    expect(auditCalls).toHaveLength(2);
   });
 
   test('validates after Railway proxy URL reconstruction', () => {
@@ -242,10 +250,16 @@ describe('validateTwilioSignature — invalid / missing signature', () => {
     validateTwilioSignature(req, res, next);
     expect(next).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(403);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('INVALID signature'));
+    // Audit shape with auth_result=signature_invalid, plus debug breadcrumb
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ evt: 'twilio_sig_audit', auth_result: 'signature_invalid' })
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('INVALID signature reconstruction debug')
+    );
   });
 
-  test('forged signature in log mode → next() called, warning logged', () => {
+  test('forged signature in log mode → next() called, audit logged', () => {
     process.env.TWILIO_SIGNATURE_VALIDATION = 'log';
     const req = mockReq({
       body: { CallSid: 'CA1' },
@@ -256,7 +270,9 @@ describe('validateTwilioSignature — invalid / missing signature', () => {
     validateTwilioSignature(req, res, next);
     expect(next).toHaveBeenCalled();
     expect(res.status).not.toHaveBeenCalled();
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('INVALID signature'));
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ evt: 'twilio_sig_audit', auth_result: 'signature_invalid' })
+    );
   });
 
   test('missing signature header in enforce mode → 403', () => {
@@ -266,7 +282,9 @@ describe('validateTwilioSignature — invalid / missing signature', () => {
     validateTwilioSignature(req, res, next);
     expect(next).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(403);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('missing X-Twilio-Signature'));
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ evt: 'twilio_sig_audit', auth_result: 'signature_missing' })
+    );
   });
 
   test('missing signature header in log mode → next()', () => {
@@ -295,6 +313,138 @@ describe('validateTwilioSignature — invalid / missing signature', () => {
     validateTwilioSignature(req, mockRes(), next);
     expect(next).toHaveBeenCalled();
     expect(logger.warn).not.toHaveBeenCalled();
+  });
+});
+
+describe('validateTwilioSignature — structured audit telemetry (per ChatGPT v3 review)', () => {
+  function findAuditCall(spy) {
+    return spy.mock.calls.find((c) => c[0] && c[0].evt === 'twilio_sig_audit');
+  }
+
+  test('valid signature emits audit with auth_result=signature_valid + presence flags', () => {
+    const url = 'https://waves-portal.example.com/api/webhooks/twilio/recording-status';
+    const body = {
+      AccountSid: 'AC123',
+      CallSid: 'CA1',
+      RecordingSid: 'RE1',
+      RecordingStatus: 'completed',
+      // PII fields the audit MUST NOT echo
+      From: '+19415551234',
+      RecordingUrl: 'https://api.twilio.com/.../RE1',
+    };
+    const sig = generateSignature(TEST_TOKEN, url, body);
+    const req = mockReq({
+      originalUrl: '/api/webhooks/twilio/recording-status',
+      body,
+      headers: { 'X-Twilio-Signature': sig, 'Content-Type': 'application/x-www-form-urlencoded' },
+    });
+    validateTwilioSignature(req, mockRes(), jest.fn());
+    const audit = findAuditCall(logger.info);
+    expect(audit).toBeDefined();
+    expect(audit[0]).toMatchObject({
+      evt: 'twilio_sig_audit',
+      auth_result: 'signature_valid',
+      method: 'POST',
+      path: '/api/webhooks/twilio/recording-status',
+      content_type: 'application/x-www-form-urlencoded',
+      has_x_twilio_signature: true,
+      account_sid_present: true,
+      call_sid_present: true,
+      recording_sid_present: true,
+      recording_status: 'completed',
+    });
+    // PII must never appear in any field
+    const audited = JSON.stringify(audit[0]);
+    expect(audited).not.toContain('+19415551234');
+    expect(audited).not.toContain('RecordingUrl');
+    expect(audited).not.toContain('api.twilio.com');
+  });
+
+  test('invalid signature emits audit with auth_result=signature_invalid', () => {
+    const req = mockReq({
+      body: { CallSid: 'CA1' },
+      headers: { 'X-Twilio-Signature': 'forged' },
+    });
+    validateTwilioSignature(req, mockRes(), jest.fn());
+    const audit = findAuditCall(logger.warn);
+    expect(audit).toBeDefined();
+    expect(audit[0].auth_result).toBe('signature_invalid');
+  });
+
+  test('missing signature emits audit with auth_result=signature_missing', () => {
+    const req = mockReq({ body: { CallSid: 'CA1' }, headers: {} });
+    validateTwilioSignature(req, mockRes(), jest.fn());
+    const audit = findAuditCall(logger.warn);
+    expect(audit).toBeDefined();
+    expect(audit[0].auth_result).toBe('signature_missing');
+    expect(audit[0].has_x_twilio_signature).toBe(false);
+  });
+
+  test('disabled mode emits audit with auth_result=disabled', () => {
+    process.env.TWILIO_SIGNATURE_VALIDATION = 'disabled';
+    const req = mockReq({ body: { CallSid: 'CA1' }, headers: {} });
+    validateTwilioSignature(req, mockRes(), jest.fn());
+    const audit = findAuditCall(logger.info);
+    expect(audit).toBeDefined();
+    expect(audit[0].auth_result).toBe('disabled');
+  });
+
+  test('source_guess=studio_http_widget when User-Agent contains "studio"', () => {
+    const url = 'https://waves-portal.example.com/api/webhooks/twilio/recording-status';
+    const body = { CallSid: 'CA1', RecordingSid: 'RE1', RecordingStatus: 'completed' };
+    const sig = generateSignature(TEST_TOKEN, url, body);
+    const req = mockReq({
+      originalUrl: '/api/webhooks/twilio/recording-status',
+      body,
+      headers: {
+        'X-Twilio-Signature': sig,
+        'User-Agent': 'TwilioStudio/1.0 (https://www.twilio.com/studio)',
+      },
+    });
+    validateTwilioSignature(req, mockRes(), jest.fn());
+    const audit = findAuditCall(logger.info);
+    expect(audit[0].source_guess).toBe('studio_http_widget');
+  });
+
+  test('source_guess=standard_callback when AccountSid present and Twilio User-Agent', () => {
+    const url = 'https://waves-portal.example.com/api/webhooks/twilio/recording-status';
+    const body = { AccountSid: 'AC123', CallSid: 'CA1', RecordingSid: 'RE1' };
+    const sig = generateSignature(TEST_TOKEN, url, body);
+    const req = mockReq({
+      originalUrl: '/api/webhooks/twilio/recording-status',
+      body,
+      headers: {
+        'X-Twilio-Signature': sig,
+        'User-Agent': 'TwilioProxy/1.1',
+      },
+    });
+    validateTwilioSignature(req, mockRes(), jest.fn());
+    const audit = findAuditCall(logger.info);
+    expect(audit[0].source_guess).toBe('standard_callback');
+  });
+
+  test('source_guess=unknown when no AccountSid and no Twilio User-Agent', () => {
+    const req = mockReq({
+      body: { foo: 'bar' },
+      headers: { 'X-Twilio-Signature': 'forged', 'User-Agent': 'curl/8.0' },
+    });
+    validateTwilioSignature(req, mockRes(), jest.fn());
+    const audit = findAuditCall(logger.warn);
+    expect(audit[0].source_guess).toBe('unknown');
+  });
+
+  test('proxy_proto_match=false when X-Forwarded-Proto disagrees with req.protocol', () => {
+    const url = 'https://waves-portal.example.com/api/webhooks/twilio/voice';
+    const body = { CallSid: 'CA1' };
+    const sig = generateSignature(TEST_TOKEN, url, body);
+    const req = mockReq({
+      protocol: 'http', // internal hop sees plain http
+      body,
+      headers: { 'X-Twilio-Signature': sig, 'X-Forwarded-Proto': 'https' },
+    });
+    validateTwilioSignature(req, mockRes(), jest.fn());
+    const audit = findAuditCall(logger.info);
+    expect(audit[0].proxy_proto_match).toBe(false);
   });
 });
 
