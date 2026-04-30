@@ -493,25 +493,65 @@ router.post('/outbound-connect', async (req, res) => {
       }
     }
 
-    // FL §934.03 — outbound calls record both legs via record-from-answer-dual.
-    // Disclosure is spoken on the customer leg before dial bridges so the
-    // recipient has notice before any audio is captured. The admin (Adam,
-    // Virginia) is on this call by construction and is on notice via
-    // CLAUDE.md / company policy that all admin↔customer calls are recorded.
+    // FL §934.03 — outbound calls record both legs via
+    // record-from-answer-dual, so the CALLED CUSTOMER must hear the
+    // recording disclosure BEFORE any audio is captured. Previous
+    // versions put the disclosure as a top-level <Say> before <Dial>,
+    // but TwiML at the top of /outbound-connect's response plays on
+    // the CALLING (admin) leg only — the customer was bridged in
+    // silently and still recorded (codex P1 on PR #523, line 503).
+    //
+    // The fix uses Twilio's <Number url=""> "whisper" pattern: the
+    // url= attribute points at TwiML that Twilio fetches and plays on
+    // the CALLED party's leg as soon as they answer; only after the
+    // url's TwiML completes does Twilio bridge the legs. This is the
+    // documented surface for screening / whisper messages to the
+    // called party and runs BEFORE record-from-answer-dual starts
+    // capturing customer audio.
+    //
+    // Admin hears "Connecting now"; admin is already on notice via
+    // CLAUDE.md / company policy that admin↔customer calls are
+    // recorded, so admin-side disclosure is not load-bearing here.
     const twiml = new VoiceResponse();
-    twiml.say({ voice: 'Polly.Joanna' }, 'Connecting now. This call may be recorded, transcribed, and processed with A I to improve service.');
+    twiml.say({ voice: 'Polly.Joanna' }, 'Connecting now.');
     const dial = twiml.dial({
       callerId: callerIdNumber,
       record: 'record-from-answer-dual',
       recordingStatusCallback: '/api/webhooks/twilio/recording-status',
       recordingStatusCallbackEvent: 'completed',
     });
-    dial.number(customerNumber);
+    dial.number(
+      { url: '/api/webhooks/twilio/outbound-callee-disclosure' },
+      customerNumber
+    );
     res.type('text/xml').send(twiml.toString());
   } catch (err) {
     logger.error(`Outbound connect error: ${err.message}`);
     res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Sorry, unable to connect.</Say></Response>');
   }
+});
+
+// =========================================================================
+// POST /api/webhooks/twilio/outbound-callee-disclosure — TwiML played to
+// the customer (called party) leg before the outbound bridge completes.
+//
+// Wired via <Number url> in /outbound-connect. Twilio fetches this URL
+// when the customer's phone answers the outbound dial, plays the
+// returned TwiML on the customer's leg, and only THEN bridges to the
+// admin leg. This is the documented Twilio pattern for a "whisper" /
+// screening message to the called party.
+//
+// FL §934.03 disclosure surface for outbound recorded calls. Runs
+// BEFORE record-from-answer-dual starts capturing customer audio,
+// closing the gap codex P1 flagged on PR #523. Admin disclosure is
+// not duplicated here — admin is on notice via company policy.
+// =========================================================================
+router.post('/outbound-callee-disclosure', (req, res) => {
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">This call from Waves Pest Control may be recorded, transcribed, and processed with A I to improve service. By staying on the line, you consent to this recording and processing.</Say>
+</Response>`;
+  res.type('text/xml').send(twiml);
 });
 
 // =========================================================================
