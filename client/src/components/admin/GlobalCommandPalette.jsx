@@ -347,12 +347,12 @@ function GlobalCommandPalette(_props, ref) {
                   display: 'inline-flex', alignItems: 'center', gap: 5,
                   padding: '5px 12px', borderRadius: 9999,
                   background: '#FFFFFF', border: `1px solid ${D.border}`,
-                  color: D.muted, fontSize: 12, fontWeight: 600,
-                  fontFamily: 'DM Sans, sans-serif', cursor: 'pointer',
+                  color: '#000', fontSize: 12, fontWeight: 600,
+                  fontFamily: "'Roboto', system-ui, sans-serif", cursor: 'pointer',
                   transition: 'all 0.1s',
                 }}
-                onMouseEnter={e => { e.target.style.borderColor = accentColor + '55'; e.target.style.color = accentColor; }}
-                onMouseLeave={e => { e.target.style.borderColor = D.border; e.target.style.color = D.muted; }}
+                onMouseEnter={e => { e.target.style.borderColor = accentColor + '55'; }}
+                onMouseLeave={e => { e.target.style.borderColor = D.border; }}
               >
                 {a.icon && <span style={{ fontSize: 13 }}>{a.icon}</span>}{a.label}
               </button>
