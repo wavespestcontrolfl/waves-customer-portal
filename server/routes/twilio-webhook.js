@@ -293,6 +293,13 @@ router.post('/sms', async (req, res) => {
         if (aiResult.reply && !aiResult.escalated) {
           try {
             const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+            // Inbound texters always reach at least phone_provided_unverified —
+            // they're literally texting from the number, so the channel-level
+            // identity is established by the inbound webhook itself. Without
+            // this hint, audience='lead' for unknown numbers would fall back
+            // to 'anonymous' in the trust resolver and fail the policy
+            // minimum for purpose='conversational' (a regression that would
+            // silently drop every new-lead AI reply).
             const sendResult = await sendCustomerMessage({
               to: From,
               body: aiResult.reply,
@@ -300,11 +307,16 @@ router.post('/sms', async (req, res) => {
               audience: customer ? 'customer' : 'lead',
               purpose: 'conversational',
               customerId: customer?.id || null,
+              identityTrustLevel: customer ? 'phone_matches_customer' : 'phone_provided_unverified',
               entryPoint: 'twilio_inbound_ai_assistant',
               metadata: { fromNumber: To },
             });
             if (!sendResult.sent) {
-              logger.warn(`[twilio-webhook] AI reply BLOCKED for ${From}: ${sendResult.code} — ${sendResult.reason}`);
+              // PII rule: never log full phone in plaintext. Mask to last 4
+              // digits — enough for operator debugging via audit log
+              // cross-reference.
+              const last4 = String(From || '').replace(/\D/g, '').slice(-4);
+              logger.warn(`[twilio-webhook] AI reply BLOCKED for ***${last4}: ${sendResult.code} — ${sendResult.reason}`);
             }
           } catch (e) { logger.error(`AI reply SMS failed: ${e.message}`); }
         }
