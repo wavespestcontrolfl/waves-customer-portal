@@ -246,17 +246,23 @@ export default function LawnAssessmentPanel() {
           <div style={{ ...cardStyle, marginBottom: 16 }}>
             <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>AI Scorecard — {selectedCustomer?.firstName} {selectedCustomer?.lastName}</div>
 
-            {/* Divergence summary — shown when Claude and Gemini disagreed on at least one metric */}
-            {(result.divergenceFlags || []).length > 0 && (
-              <div style={{ marginBottom: 12, padding: 10, background: `${D.amber}15`, border: `1px solid ${D.amber}`, borderRadius: 8 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: D.amber, marginBottom: 4 }}>
-                  ⚠ AI models disagreed on {result.divergenceFlags.length} metric{result.divergenceFlags.length === 1 ? '' : 's'}
+            {/* Divergence summary — shown when Claude and Gemini disagreed on at least one metric.
+                Multi-photo assessments emit one flag per photo, so dedupe by metric to match the
+                number of highlighted tiles below. */}
+            {(() => {
+              const uniqueMetrics = new Set((result.divergenceFlags || []).map(f => f.metric));
+              if (uniqueMetrics.size === 0) return null;
+              return (
+                <div style={{ marginBottom: 12, padding: 10, background: `${D.amber}15`, border: `1px solid ${D.amber}`, borderRadius: 8 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: D.amber, marginBottom: 4 }}>
+                    ⚠ AI models disagreed on {uniqueMetrics.size} metric{uniqueMetrics.size === 1 ? '' : 's'}
+                  </div>
+                  <div style={{ fontSize: 11, color: D.muted, lineHeight: 1.5 }}>
+                    Tiles below marked <span style={{ color: D.amber, fontWeight: 600 }}>DIVERGENCE</span> are where Claude and Gemini gave scores that differed by more than 20 points. Verify by eye before confirming.
+                  </div>
                 </div>
-                <div style={{ fontSize: 11, color: D.muted, lineHeight: 1.5 }}>
-                  Tiles below marked <span style={{ color: D.amber, fontWeight: 600 }}>DIVERGENCE</span> are where Claude and Gemini gave scores that differed by more than 20 points. Verify by eye before confirming.
-                </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* Scores */}
             <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(3, 1fr)', gap: 10 }}>
