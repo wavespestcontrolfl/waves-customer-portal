@@ -149,36 +149,51 @@ router.post('/voice', async (req, res) => {
     // default in route code (codex review on PR #523, AGENTS.md:
     // hardcoded Twilio numbers drift when numbers move). Source of
     // truth is the WAVES_FALLBACK_FORWARD_NUMBERS env var (CSV of
-    // E.164). When unset, we fall back to the existing per-number
-    // forwardTo value from twilio-numbers config — which today is also
-    // unset for every entry, so the dial degrades to "no targets" and
-    // the call falls through to call-complete without ringing anyone
-    // unintentionally. That's the correct fail-closed behavior: if
-    // ops hasn't configured the env var AND the per-number forwardTo
-    // is missing, we'd rather drop into voicemail than silently ring
-    // stale cells from a past configuration.
-    const fallbackForwardCsv = process.env.WAVES_FALLBACK_FORWARD_NUMBERS
+    // E.164). Per-number forwardTo from twilio-numbers config is the
+    // secondary source. If neither is set we route the caller directly
+    // to voicemail rather than emit `<Dial></Dial>` (Twilio warning
+    // 13223, "invalid dial configuration", which would drop the call
+    // before voicemail and is what codex flagged as P1 on PR #523).
+    const forwardNumbers = (
+      process.env.WAVES_FALLBACK_FORWARD_NUMBERS
       || numberConfig?.forwardTo
-      || '';
-    if (!fallbackForwardCsv) {
-      logger.warn(
-        `[voice-fallback] No forward targets configured for ${To}. Set WAVES_FALLBACK_FORWARD_NUMBERS or numberConfig.forwardTo. Falling through to call-complete (voicemail).`
-      );
-    }
-    const numberXml = fallbackForwardCsv
+      || ''
+    )
       .split(',')
       .map(n => n.trim())
-      .filter(Boolean)
-      .map(n => `<Number>${n}</Number>`)
-      .join('');
+      .filter(Boolean);
 
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+    let twiml;
+    if (forwardNumbers.length === 0) {
+      logger.warn(
+        `[voice-fallback] No forward targets configured for ${To}. Set WAVES_FALLBACK_FORWARD_NUMBERS or numberConfig.forwardTo. Routing caller directly to voicemail.`
+      );
+      // Inline voicemail TwiML — mirrors the no-answer fork at
+      // /call-complete (line ~191) but emitted directly so we don't
+      // have to round-trip through Twilio with an invalid empty
+      // <Dial>. Caller hears the (compliance-verified) greeting MP3
+      // first so the FL §934.03 disclosure still plays before the
+      // recording starts.
+      const voicemailAudio = process.env.WAVES_VOICEMAIL_URL
+        || 'https://jet-wolverine-3713.twil.io/assets/waves-voicemail.mp3';
+      twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Play>${greetingUrl}</Play>
+  <Play>${voicemailAudio}</Play>
+  <Say voice="alice">Your message will be recorded and transcribed.</Say>
+  <Record maxLength="120" transcribe="true" transcribeCallback="/api/webhooks/twilio/transcription" playBeep="true" recordingStatusCallback="/api/webhooks/twilio/recording-status" recordingStatusCallbackEvent="completed" />
+  <Say voice="alice">Thank you. We'll get back to you soon. Goodbye.</Say>
+</Response>`;
+    } else {
+      const numberXml = forwardNumbers.map(n => `<Number>${n}</Number>`).join('');
+      twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Play>${greetingUrl}</Play>
   <Dial record="record-from-answer-dual" recordingStatusCallback="/api/webhooks/twilio/recording-status" recordingStatusCallbackEvent="completed" timeout="30" action="/api/webhooks/twilio/call-complete">
     ${numberXml}
   </Dial>
 </Response>`;
+    }
 
     res.type('text/xml').send(twiml);
   } catch (err) {

@@ -287,7 +287,13 @@ const { validateTwilioSignature } = require('./middleware/twilio-signature');
 
 // twilio-webhook.js handles /sms + /status; twilio-voice-webhook.js handles /voice, /call-complete,
 // /recording-status, /transcription, /outbound-admin-prompt — no path conflicts under same mount.
-app.use('/api/webhooks/twilio', validateTwilioSignature, twilioWebhookRoutes);
+//
+// Signature middleware is mounted ONCE at the prefix so a request that
+// falls through twilioWebhookRoutes into twilioVoiceWebhookRoutes is
+// not validated twice (codex P2 on PR #523: double-validation skewed
+// the twilio_sig_audit telemetry that gates the log → enforce flip).
+app.use('/api/webhooks/twilio', validateTwilioSignature);
+app.use('/api/webhooks/twilio', twilioWebhookRoutes);
 app.use('/api/webhooks/lead', require('./routes/lead-webhook'));
 app.use('/api/leads', require('./routes/lead-webhook'));
 app.use('/api/reports', reportsPublicRoutes);
@@ -304,7 +310,7 @@ app.use('/api/dispatch', require('./middleware/admin-auth').adminAuthenticate, r
 app.use('/api/knowledge', require('./middleware/admin-auth').adminAuthenticate, require('./middleware/admin-auth').requireTechOrAdmin, dispatchKnowledgeRoutes);
 app.use('/api/booking', require('./routes/booking'));
 app.use('/api/ai', aiAssistantRoutes);
-app.use('/api/webhooks/twilio', validateTwilioSignature, twilioVoiceWebhookRoutes);
+app.use('/api/webhooks/twilio', twilioVoiceWebhookRoutes);
 app.use('/api/admin/protocols', require('./routes/admin-protocols'));
 app.use('/api/admin/revenue', require('./routes/admin-revenue'));
 app.use('/api/admin/schedule/find-time', require('./routes/admin-schedule-find-time'));
