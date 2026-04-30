@@ -174,7 +174,9 @@ const ReviewService = {
       status: 'pending',
     }).returning('*');
 
-    logger.info(`[review] Created request for ${customer.first_name} ${customer.last_name} — trigger: ${triggeredBy}, scheduled: ${scheduledFor || 'immediate'}`);
+    // PII: ID-only logging per AGENTS.md. Customer name lives in the
+    // customers row; the log line just needs IDs for cross-reference.
+    logger.info(`[review] Created request (customerId=${customer.id} requestId=${request.id} trigger=${triggeredBy} scheduled=${scheduledFor || 'immediate'})`);
 
     // If tech-triggered, send immediately
     if (triggeredBy === 'tech') {
@@ -197,7 +199,8 @@ const ReviewService = {
       await db('review_requests').where({ id: requestId }).update({
         status: 'suppressed',
       });
-      logger.info(`[review] Suppressed request for ${customer.first_name} ${customer.last_name} (already-reviewed flag)`);
+      // PII: ID-only per AGENTS.md.
+      logger.info(`[review] Suppressed request (customerId=${customer.id} requestId=${requestId} reason=already-reviewed-flag)`);
       return;
     }
     // Route to the service beneficiary (see services/customer-contact.js) —
@@ -226,21 +229,94 @@ const ReviewService = {
       body = `Hello ${contact.name || customer.first_name}! How was your service with ${techName}? We'd love your feedback: ${reviewUrl}`;
     }
 
+    // Routed through the customer-message middleware so consent /
+    // suppression / identity / voice / segment checks all apply, and
+    // every attempt lands in messaging_audit_log.
+    //
+    // Per the prompt-hardening pass that landed in #522, review-request
+    // eligibility lives in the upstream candidate-finder (no open
+    // complaint, no unresolved billing, opted in, no recent ask in
+    // cooldown). Here we just make sure the channel is permitted at
+    // send time — sms_enabled, suppression list, segment count, no
+    // emoji / price leak.
     try {
-      const TwilioService = require('./twilio');
-      await TwilioService.sendSMS(contact.phone, body, {
+      const { sendCustomerMessage } = require('./messaging/send-customer-message');
+      const result = await sendCustomerMessage({
+        to: contact.phone,
+        body,
+        channel: 'sms',
+        audience: 'customer',
+        purpose: 'review_request',
         customerId: customer.id,
-        messageType: 'review_request',
+        entryPoint: 'review_request_send',
       });
 
-      await db('review_requests').where({ id: requestId }).update({
-        sms_sent_at: new Date(),
-        status: 'sent',
-      });
-
-      logger.info(`[review] SMS sent for ${customer.first_name} ${customer.last_name}`);
+      if (result.sent) {
+        await db('review_requests').where({ id: requestId }).update({
+          sms_sent_at: new Date(),
+          status: 'sent',
+        });
+        // PII: ID-only per AGENTS.md.
+        logger.info(`[review] SMS sent (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'})`);
+      } else if (result.blocked && result.code === 'CONSENT_LOOKUP_FAILED') {
+        // Transient lookup failure inside the wrapper (DB error during
+        // consent validation). Distinct code from NO_CONSENT_RECORD;
+        // treat like a provider failure — re-queue for the cron rather
+        // than permanently suppress. Codex P1 round-2 on PR #545:
+        // NO_CONSENT_RECORD and CONSENT_LOOKUP_FAILED used to share the
+        // same code, which silently dropped legitimate review requests
+        // during DB blips.
+        const retryAt = new Date(Date.now() + 5 * 60 * 1000);
+        await db('review_requests').where({ id: requestId }).update({
+          scheduled_for: retryAt,
+        });
+        // PII: ID-only.
+        logger.error(`[review] SMS WRAPPER LOOKUP FAILED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'}): ${result.reason} (queued for retry at ${retryAt.toISOString()})`);
+      } else if (result.blocked) {
+        // True wrapper-policy block (opt-out, suppression, emoji, price
+        // leak, segment cap, identity, NO_CONSENT_RECORD). Mark
+        // suppressed so processScheduled() — which only picks rows with
+        // status='pending' — stops retrying. The request row stays for
+        // audit history; the audit_log row captures the block reason.
+        await db('review_requests').where({ id: requestId }).update({
+          status: 'suppressed',
+        });
+        // PII: ID-only logging per AGENTS.md.
+        logger.warn(`[review] SMS BLOCKED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'}): ${result.code} — ${result.reason}`);
+      } else {
+        // Provider failure (Twilio/network). Mark for retry: keep
+        // status='pending' AND set scheduled_for=now+5min so
+        // processScheduled() (which selects status='pending' AND
+        // scheduled_for <= now()) picks it up on its next tick.
+        //
+        // Codex P1 on the redo PR #545: just leaving status='pending'
+        // wasn't enough for tech-triggered requests, which are created
+        // with scheduled_for=null and sent immediately. processScheduled
+        // does whereNotNull('scheduled_for'), so a null-scheduled_for
+        // pending row would never retry — silently dropping legitimate
+        // review requests on a Twilio blip. Setting scheduled_for moves
+        // the row into the cron's retry queue regardless of how it was
+        // originally created.
+        const retryAt = new Date(Date.now() + 5 * 60 * 1000);
+        await db('review_requests').where({ id: requestId }).update({
+          scheduled_for: retryAt,
+        });
+        // PII: ID-only logging per AGENTS.md.
+        logger.error(`[review] SMS PROVIDER FAILURE (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'}): ${result.code} — ${result.reason} (queued for retry at ${retryAt.toISOString()})`);
+      }
     } catch (err) {
-      logger.error(`[review] SMS failed: ${err.message}`);
+      // Same retry contract on a thrown exception (network down etc.):
+      // re-queue for the cron rather than leave the row stranded.
+      try {
+        const retryAt = new Date(Date.now() + 5 * 60 * 1000);
+        await db('review_requests').where({ id: requestId }).update({
+          scheduled_for: retryAt,
+        });
+        logger.error(`[review] SMS threw — queued for retry at ${retryAt.toISOString()} (requestId=${requestId}): ${err.message}`);
+      } catch (dbErr) {
+        // Last resort — couldn't even update the row. Log both errors.
+        logger.error(`[review] SMS failed AND retry-queue update failed (requestId=${requestId}): sendErr=${err.message} dbErr=${dbErr.message}`);
+      }
     }
   },
 
@@ -306,7 +382,8 @@ const ReviewService = {
       status: 'sent',
     }).returning('*');
 
-    logger.info(`[review] Created inline request for ${customer.first_name} ${customer.last_name} (bundled with completion SMS)`);
+    // PII: ID-only per AGENTS.md.
+    logger.info(`[review] Created inline request (customerId=${customer.id} requestId=${request.id} bundled-with=completion_sms)`);
 
     const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
     const longUrl = `${domain}/rate/${request.token}`;
