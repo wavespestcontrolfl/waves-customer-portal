@@ -185,11 +185,23 @@ router.post('/voice', async (req, res) => {
   <Say voice="alice">Thank you. We'll get back to you soon. Goodbye.</Say>
 </Response>`;
     } else {
+      // timeout=15 — must stay BELOW typical carrier voicemail pickup
+      // (~20-25s) so we hand off to /call-complete's portal voicemail
+      // TwiML when the field staff don't answer, instead of letting
+      // the cell's carrier voicemail record. If the cell voicemail
+      // answers, Twilio considers the dial completed (status=completed,
+      // duration>0), the no-answer fork in /call-complete is skipped,
+      // and we lose the recording from the AI extraction pipeline.
+      // Studio Flow uses timeout=30 because its `forward_call` widget
+      // unconditionally falls through to record_voicemail_3 regardless
+      // of dial outcome — the /voice fallback here does NOT have that
+      // unconditional fallthrough, so the timeout has to be tighter.
+      // (codex P1 on PR #523, after the 99e9fab fallback alignment.)
       const numberXml = forwardNumbers.map(n => `<Number>${n}</Number>`).join('');
       twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Play>${greetingUrl}</Play>
-  <Dial record="record-from-answer-dual" recordingStatusCallback="/api/webhooks/twilio/recording-status" recordingStatusCallbackEvent="completed" timeout="30" action="/api/webhooks/twilio/call-complete">
+  <Dial record="record-from-answer-dual" recordingStatusCallback="/api/webhooks/twilio/recording-status" recordingStatusCallbackEvent="completed" timeout="15" action="/api/webhooks/twilio/call-complete">
     ${numberXml}
   </Dial>
 </Response>`;
