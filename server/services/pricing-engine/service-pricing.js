@@ -155,10 +155,13 @@ function pricePestControl(property, options = {}) {
 // still available for severe colonies; this is the auto-fire for the
 // everyday "I saw one or two" case.
 function pricePestInitialRoach(property, options = {}) {
-  const { roachType = 'none' } = options;
+  const { roachType = 'none', standalone = false } = options;
   if (roachType === 'none') return null;
 
-  const scale = PEST.pestInitialRoach?.[roachType];
+  // Standalone Cockroach Treatment (without recurring pest) uses a higher
+  // scale — no future visits to amortize the heavier visit-1 burden across.
+  const scaleKey = standalone && roachType === 'regular' ? 'regular_standalone' : roachType;
+  const scale = PEST.pestInitialRoach?.[scaleKey];
   if (!Array.isArray(scale) || scale.length === 0) return null;
   const footprint = property?.footprint || 0;
   const bracket = scale.find((b) => footprint < b.sqft) || scale[scale.length - 1];
