@@ -306,6 +306,24 @@ router.put('/:serviceId/status', async (req, res, next) => {
 // POST /api/admin/dispatch/:serviceId/complete
 router.post('/:serviceId/complete', async (req, res, next) => {
   try {
+    // Idempotency short-circuit — the mobile sheet generates a UUID per
+    // submit attempt and reuses it on retry. If we've already completed
+    // this attempt, replay the original response instead of re-firing
+    // the trx + SMS + invoice + review side effects. Pure read; no fail
+    // path needed (a missing table just falls through to normal flow).
+    const idempotencyKey = req.headers['x-idempotency-key']
+      ? String(req.headers['x-idempotency-key']).slice(0, 64)
+      : null;
+    if (idempotencyKey) {
+      try {
+        const prior = await db('completion_idempotency_keys')
+          .where({ key: idempotencyKey, service_id: req.params.serviceId })
+          .first();
+        if (prior) {
+          return res.json({ ...prior.response, idempotent: true });
+        }
+      } catch (e) { /* table missing or other read fail — fall through */ }
+    }
     const { technicianNotes, products, soilTemp, thatchMeasurement, soilPh, soilMoisture, sendCompletionSms, requestReview, formResponses, formStartedAt, visitOutcome, noProductsReason } = req.body;
     // Tech-approved customer recap (the polished SMS body — Claude-drafted
     // or hand-written in MobileCompleteServiceSheet). When present, this
@@ -364,13 +382,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // record-from-service unambiguously. Codex P1 on PR #340 — the
         // old (customer_id, technician_id, service_date) soft-join
         // collided on same-day same-customer-same-tech double visits.
+        // Capture the no-product reason, the chosen outcome, and the
+        // recap that was actually approved into structured_notes JSONB so
+        // we can answer "why did this visit close without products?" in
+        // reports + office queues without adding new scalar columns yet.
+        const structuredNotes = {
+          ...(formResponses || {}),
+          customerRecap: customerRecap || null,
+          noProductsReason: noProductsReason || null,
+          visitOutcome: visitOutcome || (noProductsReason ? 'complete' : null),
+        };
         [record] = await trx('service_records').insert({
           scheduled_service_id: svc.id,
           customer_id: svc.customer_id, technician_id: svc.technician_id,
-          service_date: svc.scheduled_date, service_type: svc.service_type, status: 'completed',
+          service_date: svc.scheduled_date, service_type: svc.service_type,
+          // Status reflects what actually happened. An incomplete-outcome
+          // visit hasn't really been completed; mark it 'incomplete' so
+          // reports + status filters can distinguish the two paths.
+          status: isIncompleteOutcome ? 'incomplete' : 'completed',
           technician_notes: technicianNotes || '',
           soil_temp: soilTemp || null, thatch_measurement: thatchMeasurement || null,
           soil_ph: soilPh || null, soil_moisture: soilMoisture || null,
+          structured_notes: structuredNotes,
         }).returning('*');
 
         // 2. service_products — children of the service_record.
@@ -512,12 +545,49 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     // Customer-visible track_state → 'complete' so /track/:token renders the
     // summary card. track_state is owned by services/track-transitions.js.
-    try {
-      await trackTransitions.markComplete(svc.id, {
-        actorType: 'admin',
-        actorId: req.technicianId,
-      });
-    } catch (e) { logger.error(`[admin-dispatch] markComplete failed: ${e.message}`); }
+    // Skip on incomplete visits — there's no completion to surface to the
+    // customer, and the office follow-up alert below carries the handoff.
+    if (!isIncompleteOutcome) {
+      try {
+        await trackTransitions.markComplete(svc.id, {
+          actorType: 'admin',
+          actorId: req.technicianId,
+        });
+      } catch (e) { logger.error(`[admin-dispatch] markComplete failed: ${e.message}`); }
+    }
+
+    // Office follow-up alert for incomplete visits. Surfaces in the
+    // existing dispatch_alerts queue so the visit doesn't disappear after
+    // the tech taps "Mark Visit Incomplete" — without dragging full
+    // return-visit scheduling into this PR. Severity 'warn' for weather/
+    // access reasons (operational issue), 'info' for declined/other.
+    if (isIncompleteOutcome) {
+      try {
+        const reasonSeverity = (
+          noProductsReason === 'Weather prevented treatment'
+          || noProductsReason === 'Unable to access property'
+        ) ? 'warn' : 'info';
+        await db('dispatch_alerts').insert({
+          type: 'visit_incomplete',
+          severity: reasonSeverity,
+          tech_id: svc.technician_id || null,
+          job_id: svc.id,
+          payload: {
+            customerName: `${svc.first_name || ''} ${svc.last_name || ''}`.trim(),
+            customerId: svc.customer_id,
+            serviceType: svc.service_type,
+            scheduledDate: svc.scheduled_date,
+            reason: noProductsReason || 'Marked incomplete',
+            technicianNotes: (technicianNotes || '').slice(0, 500),
+            createdBy: req.technicianId || null,
+          },
+        });
+      } catch (e) {
+        // Non-blocking — completion already happened; alert insert is the
+        // followup signal, not the source of truth.
+        logger.error(`[admin-dispatch] visit_incomplete alert insert failed: ${e.message}`);
+      }
+    }
 
     // Invoice + completion SMS:
     //   - If the appointment was flagged `create_invoice_on_complete` (scheduler's
@@ -696,12 +766,27 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       );
     } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }
 
-    res.json({
+    const responseBody = {
       success: true,
       serviceRecordId: record.id,
       invoiceId: invoice?.id || null,
       invoiceTotal: invoice?.total != null ? Number(invoice.total) : null,
-    });
+      visitOutcome: isIncompleteOutcome ? 'incomplete' : 'completed',
+    };
+    // Store the response under the idempotency key so a retry returns
+    // exactly this payload without re-firing side effects. Best-effort —
+    // a write failure here doesn't roll back the completion (already
+    // happened) and a retry would just hit the normal path.
+    if (idempotencyKey) {
+      try {
+        await db('completion_idempotency_keys').insert({
+          key: idempotencyKey,
+          service_id: req.params.serviceId,
+          response: responseBody,
+        }).onConflict('key').ignore();
+      } catch (e) { logger.warn(`[admin-dispatch] idempotency store failed: ${e.message}`); }
+    }
+    res.json(responseBody);
   } catch (err) { next(err); }
 });
 
