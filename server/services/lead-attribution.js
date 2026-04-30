@@ -1,17 +1,12 @@
 const db = require('../models/db');
 const logger = require('./logger');
 
-// ---------------------------------------------------------------------------
-// Phone normalization
-// ---------------------------------------------------------------------------
-function normalizePhone(phone) {
-  if (!phone) return null;
-  const digits = phone.replace(/\D/g, '');
-  if (digits.length === 10) return `+1${digits}`;
-  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
-  if (digits.startsWith('+')) return phone;
-  return `+${digits}`;
-}
+// Phone normalization moved to server/utils/phone.js (PR1 of call-triage
+// consolidation — see docs/call-triage-discovery.md §9). The unified
+// implementation preserves the toE164 contract (return raw on garbage)
+// rather than the prior `+${digits}` fabrication, which silently
+// produced invalid E.164 strings on bad input.
+const { normalizePhone } = require('../utils/phone');
 
 // ---------------------------------------------------------------------------
 // 1. attributeInboundContact

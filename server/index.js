@@ -271,9 +271,23 @@ app.use('/api/public/track', require('./routes/track-public'));
 app.use('/api/public/estimates', require('./routes/estimate-slots-public'));
 app.use('/api/admin/credentials', require('./routes/admin-credentials'));
 app.use('/api/admin/seo-diagnosis', require('./routes/admin-seo-diagnosis'));
+// Twilio webhook signature validation. Runs before BOTH Twilio routers
+// so /sms /status (twilio-webhook.js) and /voice /call-complete /recording-status
+// /transcription /call-status /outbound-* (twilio-voice-webhook.js) all
+// authenticate inbound requests against X-Twilio-Signature.
+//
+// PR1 ships this in TWILIO_SIGNATURE_VALIDATION=log mode by default (logs
+// failures, allows traffic through) so we can confirm wiring against real
+// signed traffic on every endpoint without a behavior-change risk. Flip
+// to 'enforce' via env var (no code change) once each endpoint has been
+// observed with a valid signature in logs.
+//
+// See server/middleware/twilio-signature.js + docs/call-triage-discovery.md §14.
+const { validateTwilioSignature } = require('./middleware/twilio-signature');
+
 // twilio-webhook.js handles /sms + /status; twilio-voice-webhook.js handles /voice, /call-complete,
 // /recording-status, /transcription, /outbound-admin-prompt — no path conflicts under same mount.
-app.use('/api/webhooks/twilio', twilioWebhookRoutes);
+app.use('/api/webhooks/twilio', validateTwilioSignature, twilioWebhookRoutes);
 app.use('/api/webhooks/lead', require('./routes/lead-webhook'));
 app.use('/api/leads', require('./routes/lead-webhook'));
 app.use('/api/reports', reportsPublicRoutes);
@@ -290,7 +304,7 @@ app.use('/api/dispatch', require('./middleware/admin-auth').adminAuthenticate, r
 app.use('/api/knowledge', require('./middleware/admin-auth').adminAuthenticate, require('./middleware/admin-auth').requireTechOrAdmin, dispatchKnowledgeRoutes);
 app.use('/api/booking', require('./routes/booking'));
 app.use('/api/ai', aiAssistantRoutes);
-app.use('/api/webhooks/twilio', twilioVoiceWebhookRoutes);
+app.use('/api/webhooks/twilio', validateTwilioSignature, twilioVoiceWebhookRoutes);
 app.use('/api/admin/protocols', require('./routes/admin-protocols'));
 app.use('/api/admin/revenue', require('./routes/admin-revenue'));
 app.use('/api/admin/schedule/find-time', require('./routes/admin-schedule-find-time'));

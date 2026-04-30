@@ -14,33 +14,12 @@ function capitalizeName(name) {
     .replace(/\bO'(\w)/g, (_, c) => "O'" + c.toUpperCase());
 }
 
-// Normalize a phone string to canonical E.164 before writing to call_log.
-// Twilio webhooks usually deliver E.164 already, but recording-status /
-// transcription callbacks have intermittently arrived with raw 10/11-digit
-// strings. Mirroring the 20260428000003_backfill_call_log_to_phone_e164
-// normalization here stops new rows from drifting back out of E.164 and
-// breaking the dashboard's exact-string JOIN against lead_sources.
-//
-// Rules:
-//   1. Anything that starts with `+` is treated as already-E.164 — strip
-//      formatting characters (spaces / parens / dashes) but preserve the
-//      country code. Critical for non-NANP callers (e.g. UK +44…) that
-//      Twilio's Lookup-enriched Caller ID sometimes surfaces — assuming
-//      NANP would silently rewrite +442079460958 to +12079460958.
-//   2. No `+` prefix → assume NANP/US, take the last 10 digits.
-//   3. Garbage (<10 digits) → preserve raw for debugging rather than
-//      fabricate a fake number.
-function toE164(raw) {
-  if (!raw) return null;
-  const s = String(raw).trim();
-  if (s.startsWith('+')) {
-    const stripped = '+' + s.slice(1).replace(/\D/g, '');
-    return /^\+\d{8,15}$/.test(stripped) ? stripped : raw;
-  }
-  const digits = s.replace(/\D/g, '');
-  if (digits.length < 10) return raw;
-  return '+1' + digits.slice(-10);
-}
+// Phone normalization consolidated to server/utils/phone.js (PR1 of
+// call-triage work — see docs/call-triage-discovery.md §9). The unified
+// implementation is the verbatim toE164 contract that previously lived
+// here: preserve `+`-prefixed country codes for non-NANP callers and
+// fall back to raw on garbage.
+const { toE164 } = require('../utils/phone');
 
 // =========================================================================
 // POST /api/webhooks/twilio/voice — Inbound voice call webhook
@@ -146,13 +125,46 @@ router.post('/voice', async (req, res) => {
 
     logger.info(`Inbound call: ${From} → ${To} (${CallSid}) customer=${customer?.first_name || 'unknown'}`);
 
-    // Build TwiML response — answer with recording enabled
-    // timeout=15 ensures Twilio hangs up the dial BEFORE the carrier voicemail can answer (~20-25s)
+    // Build TwiML response — fallback path that mirrors the production
+    // Studio Flow ("Waves Inbound — All Numbers", FW5fdc2e44...).
+    //
+    // Production routing for every Waves Twilio number lives in that
+    // Studio Flow — see Twilio Console. This /voice webhook is the
+    // FALLBACK that runs when (a) the Studio Flow is bypassed (rare),
+    // (b) an inbound number is provisioned but not yet wired into the
+    // flow, or (c) the call_log contract-test harness exercises this
+    // path directly. We keep its behavior aligned with the Studio Flow
+    // so a fallback caller hears the same greeting and reaches the
+    // same handlers (Adam + Virginia simul-ring, 30s timeout, Lakewood
+    // Ranch HQ as last resort).
+    //
+    // FL §934.03 (2025) — interception lawful when all parties have
+    // given prior consent. The greeting MP3 is the operative
+    // disclosure: when that audio asset is changed, the new asset MUST
+    // contain recording/transcription/AI-processing language.
+    // WAVES_GREETING_URL exists so the asset can be swapped without a
+    // code deploy; fallback to the production URL is documented and
+    // intentional.
+    const greetingUrl = process.env.WAVES_GREETING_URL
+      || 'https://jet-wolverine-3713.twil.io/assets/ElevenLabs_2025-09-20T05_54_14_Veda%20Sky%20-%20Customer%20Care%20Agent_pvc_sp114_s58_sb72_se89_b_m2.mp3';
+
+    // Mirror the Studio Flow's `forward_call` widget: simul-ring Adam +
+    // Virginia. Comma-separated env override lets ops add/remove
+    // numbers without a code change.
+    const fallbackForwardCsv = process.env.WAVES_FALLBACK_FORWARD_NUMBERS
+      || '+19415993489,+17206334021';
+    const numberXml = fallbackForwardCsv
+      .split(',')
+      .map(n => n.trim())
+      .filter(Boolean)
+      .map(n => `<Number>${n}</Number>`)
+      .join('');
+
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="alice">Thank you for calling Waves Pest Control. Please hold while we connect you.</Say>
-  <Dial record="record-from-answer-dual" recordingStatusCallback="/api/webhooks/twilio/recording-status" recordingStatusCallbackEvent="completed" timeout="15" action="/api/webhooks/twilio/call-complete">
-    <Number>${numberConfig?.forwardTo || '+19413187612'}</Number>
+  <Play>${greetingUrl}</Play>
+  <Dial record="record-from-answer-dual" recordingStatusCallback="/api/webhooks/twilio/recording-status" recordingStatusCallbackEvent="completed" timeout="30" action="/api/webhooks/twilio/call-complete">
+    ${numberXml}
   </Dial>
 </Response>`;
 
@@ -187,12 +199,22 @@ router.post('/call-complete', async (req, res) => {
 
     logger.info(`Call complete: ${CallSid} status=${status} duration=${duration}s`);
 
-    // If no answer, play Waves custom voicemail greeting + record
+    // If no answer, play Waves custom voicemail greeting + record.
+    //
+    // FL §934.03 disclosure: the inbound /voice greeting already
+    // notified the caller that the call may be recorded/transcribed/
+    // AI-processed BEFORE the dial bridged. That same call is still
+    // in progress here, so the consent persists into the voicemail
+    // path. We add a brief reaffirmation before <Record> for clarity
+    // and to cover the edge case where WAVES_VOICEMAIL_URL doesn't
+    // include disclosure language (asset content is opaque to repo —
+    // tracked as a separate audit item).
     if (['no-answer', 'busy', 'failed'].includes(status)) {
       const voicemailAudio = process.env.WAVES_VOICEMAIL_URL || 'https://jet-wolverine-3713.twil.io/assets/waves-voicemail.mp3';
       const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Play>${voicemailAudio}</Play>
+  <Say voice="alice">Your message will be recorded and transcribed.</Say>
   <Record maxLength="120" transcribe="true" transcribeCallback="/api/webhooks/twilio/transcription" playBeep="true" recordingStatusCallback="/api/webhooks/twilio/recording-status" recordingStatusCallbackEvent="completed" />
   <Say voice="alice">Thank you. We'll get back to you soon. Goodbye.</Say>
 </Response>`;
@@ -432,8 +454,13 @@ router.post('/outbound-connect', async (req, res) => {
       }
     }
 
+    // FL §934.03 — outbound calls record both legs via record-from-answer-dual.
+    // Disclosure is spoken on the customer leg before dial bridges so the
+    // recipient has notice before any audio is captured. The admin (Adam,
+    // Virginia) is on this call by construction and is on notice via
+    // CLAUDE.md / company policy that all admin↔customer calls are recorded.
     const twiml = new VoiceResponse();
-    twiml.say({ voice: 'Polly.Joanna' }, 'Connecting now.');
+    twiml.say({ voice: 'Polly.Joanna' }, 'Connecting now. This call may be recorded, transcribed, and processed with A I to improve service.');
     const dial = twiml.dial({
       callerId: callerIdNumber,
       record: 'record-from-answer-dual',

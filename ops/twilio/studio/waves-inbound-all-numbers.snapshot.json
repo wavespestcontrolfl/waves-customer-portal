@@ -1,0 +1,179 @@
+{
+  "_comment": "Sanitized snapshot of the Waves Inbound Studio Flow. Personal cell numbers in connect-call-to.to are replaced with \"<<FORWARD_NUMBERS>>\". Updated via: npm run twilio:flow:export. Verified via: npm run twilio:flow:verify. See docs/twilio-studio-flow-contract.md.",
+  "flow_sid": "FW5fdc2e44700c6e786ed27de94e0cbace",
+  "friendly_name": "Waves Inbound — All Numbers",
+  "status": "published",
+  "revision": 13,
+  "date_updated": "2026-04-27T21:50:36.000Z",
+  "definition": {
+    "description": "(941) 318-7612 - lakewoodranchflpestcontrol.com",
+    "flags": {
+      "allow_concurrent_calls": true
+    },
+    "initial_state": "Trigger",
+    "states": [
+      {
+        "name": "Trigger",
+        "properties": {
+          "offset": {
+            "x": 430,
+            "y": 40
+          }
+        },
+        "transitions": [
+          {
+            "event": "incomingMessage"
+          },
+          {
+            "event": "incomingCall",
+            "next": "say_play_2"
+          },
+          {
+            "event": "incomingConversationMessage"
+          },
+          {
+            "event": "incomingRequest"
+          },
+          {
+            "event": "incomingParent"
+          }
+        ],
+        "type": "trigger"
+      },
+      {
+        "name": "forward_call",
+        "properties": {
+          "caller_id": "{{contact.channel.address}}",
+          "noun": "number-multi",
+          "offset": {
+            "x": 1140,
+            "y": 510
+          },
+          "record": true,
+          "timeout": 30,
+          "to": "<<FORWARD_NUMBERS>>"
+        },
+        "transitions": [
+          {
+            "event": "callCompleted",
+            "next": "post_recording_to_portal"
+          },
+          {
+            "event": "hangup"
+          }
+        ],
+        "type": "connect-call-to"
+      },
+      {
+        "name": "record_voicemail_3",
+        "properties": {
+          "max_length": 3600,
+          "offset": {
+            "x": 310,
+            "y": 960
+          },
+          "play_beep": "true",
+          "recording_status_callback_url": "https://waves-customer-portal-production.up.railway.app/api/webhooks/twilio/recording-status",
+          "timeout": 5,
+          "transcribe": true,
+          "transcription_callback_url": "https://twimlets.com/voicemail?Email=contact@wavespestcontrol.com",
+          "trim": "trim-silence"
+        },
+        "transitions": [
+          {
+            "event": "recordingComplete"
+          },
+          {
+            "event": "noAudio"
+          },
+          {
+            "event": "hangup"
+          }
+        ],
+        "type": "record-voicemail"
+      },
+      {
+        "name": "say_play_1",
+        "properties": {
+          "loop": 1,
+          "offset": {
+            "x": 130,
+            "y": 520
+          },
+          "play": "https://voicemail-9557.twil.io/waves-voicemail.mp3"
+        },
+        "transitions": [
+          {
+            "event": "audioComplete",
+            "next": "record_voicemail_3"
+          }
+        ],
+        "type": "say-play"
+      },
+      {
+        "name": "say_play_2",
+        "properties": {
+          "loop": 1,
+          "offset": {
+            "x": 80,
+            "y": 210
+          },
+          "play": "https://jet-wolverine-3713.twil.io/assets/ElevenLabs_2025-09-20T05_54_14_Veda%20Sky%20-%20Customer%20Care%20Agent_pvc_sp114_s58_sb72_se89_b_m2.mp3"
+        },
+        "transitions": [
+          {
+            "event": "audioComplete",
+            "next": "forward_call"
+          }
+        ],
+        "type": "say-play"
+      },
+      {
+        "name": "post_recording_to_portal",
+        "properties": {
+          "add_twilio_auth": false,
+          "content_type": "application/x-www-form-urlencoded;charset=utf-8",
+          "method": "POST",
+          "offset": {
+            "x": 800,
+            "y": 720
+          },
+          "parameters": [
+            {
+              "key": "CallSid",
+              "value": "{{trigger.call.CallSid}}"
+            },
+            {
+              "key": "RecordingSid",
+              "value": "{{widgets.forward_call.RecordingSid}}"
+            },
+            {
+              "key": "RecordingUrl",
+              "value": "{{widgets.forward_call.RecordingUrl}}"
+            },
+            {
+              "key": "RecordingDuration",
+              "value": "{{widgets.forward_call.DialCallDuration}}"
+            },
+            {
+              "key": "RecordingStatus",
+              "value": "completed"
+            }
+          ],
+          "url": "https://waves-customer-portal-production.up.railway.app/api/webhooks/twilio/recording-status"
+        },
+        "transitions": [
+          {
+            "event": "success",
+            "next": "say_play_1"
+          },
+          {
+            "event": "failed",
+            "next": "say_play_1"
+          }
+        ],
+        "type": "make-http-request"
+      }
+    ]
+  }
+}
