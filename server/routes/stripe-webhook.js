@@ -184,7 +184,12 @@ router.post(
           break;
 
         case 'payment_intent.payment_failed':
-          await handlePaymentIntentFailed(event.data.object);
+          // Pass event.id so the failure-notification dedupe key can use
+          // it as the per-attempt identifier when paymentIntent.latest_charge
+          // is absent (rare authorize-only fail). Each Stripe event has a
+          // distinct id, so this preserves per-attempt dedupe granularity
+          // even in the no-charge case.
+          await handlePaymentIntentFailed(event.data.object, event.id);
           break;
 
         case 'charge.refunded':
@@ -460,12 +465,16 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
 
 async function notifyPaymentSuccess(paymentIntent) {
   const piId = paymentIntent.id;
+  // Successes are one-shot per PI — attempt_id is a constant so the
+  // dedupe semantics here are identical to the original (PI, outcome)
+  // key. The attempt_id column exists for the failure path's per-charge
+  // granularity (codex P1 follow-up to #546).
   const claim = await db.raw(
-    `INSERT INTO stripe_payment_notification_log (payment_intent_id, outcome)
-     VALUES (?, ?)
-     ON CONFLICT (payment_intent_id, outcome) DO NOTHING
+    `INSERT INTO stripe_payment_notification_log (payment_intent_id, outcome, attempt_id)
+     VALUES (?, ?, ?)
+     ON CONFLICT (payment_intent_id, outcome, attempt_id) DO NOTHING
      RETURNING payment_intent_id`,
-    [piId, 'succeeded']
+    [piId, 'succeeded', 'one_shot']
   );
   if (claim.rowCount === 0) {
     logger.info(`[stripe-webhook] payment_succeeded notification already dispatched for PI ${piId}, skipping`);
@@ -484,7 +493,7 @@ async function notifyPaymentSuccess(paymentIntent) {
 /**
  * payment_intent.payment_failed — Update to failed, log failure reason
  */
-async function handlePaymentIntentFailed(paymentIntent) {
+async function handlePaymentIntentFailed(paymentIntent, eventId) {
   const piId = paymentIntent.id;
   const failureMessage = paymentIntent.last_payment_error?.message || 'Unknown failure';
   const failureCode = paymentIntent.last_payment_error?.code || null;
@@ -525,22 +534,41 @@ async function handlePaymentIntentFailed(paymentIntent) {
   // above. Emit even when no invoice is bound — payment_failed is
   // urgent enough that an orphan PI failure still warrants a bell
   // entry; link defaults to /admin/revenue in that case.
-  notifyPaymentFailed(paymentIntent, failureMessage).catch((err) => {
+  notifyPaymentFailed(paymentIntent, failureMessage, eventId).catch((err) => {
     logger.warn(`[stripe-webhook] payment_failed notify failed: ${err.message}`);
   });
 }
 
-async function notifyPaymentFailed(paymentIntent, failureMessage) {
+async function notifyPaymentFailed(paymentIntent, failureMessage, eventId) {
   const piId = paymentIntent.id;
+  // Failures are NOT one-shot per PI: /api/pay/:token/update-amount
+  // mutates an existing PI's amount and the customer can fail again
+  // with the same PI. Stripe emits a separate payment_intent.payment_failed
+  // event per attempt, each with a distinct latest_charge. Keying dedupe
+  // on (PI, 'failed') alone (the original code in #546) suppressed every
+  // failure after the first; operator never saw subsequent legitimate
+  // failures.
+  //
+  // Attempt-id resolution (most stable to least):
+  //   1. paymentIntent.latest_charge — set whenever a charge object was
+  //      created for the attempt (the common case)
+  //   2. event.id — Stripe guarantees uniqueness per Event; covers the
+  //      rare authorize-fail path where the PI fails before creating a
+  //      charge (e.g. risk-based auth refusal)
+  //   3. 'no_charge' sentinel — last-ditch fallback if both are absent
+  //      (should not happen in practice; defensive only)
+  //
+  // Codex P1 follow-up to #546.
+  const attemptId = paymentIntent.latest_charge || eventId || 'no_charge';
   const claim = await db.raw(
-    `INSERT INTO stripe_payment_notification_log (payment_intent_id, outcome)
-     VALUES (?, ?)
-     ON CONFLICT (payment_intent_id, outcome) DO NOTHING
+    `INSERT INTO stripe_payment_notification_log (payment_intent_id, outcome, attempt_id)
+     VALUES (?, ?, ?)
+     ON CONFLICT (payment_intent_id, outcome, attempt_id) DO NOTHING
      RETURNING payment_intent_id`,
-    [piId, 'failed']
+    [piId, 'failed', attemptId]
   );
   if (claim.rowCount === 0) {
-    logger.info(`[stripe-webhook] payment_failed notification already dispatched for PI ${piId}, skipping`);
+    logger.info(`[stripe-webhook] payment_failed notification already dispatched for PI ${piId} attempt ${attemptId}, skipping`);
     return;
   }
   const failedInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first();
