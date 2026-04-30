@@ -125,12 +125,22 @@ function verifyForwardCall(definition) {
     .split(',')
     .map((n) => n.trim())
     .filter(Boolean);
+  // Mask values to last-4 in failure messages (codex P1 — see strict
+  // drift handler below). Personal cells must never appear verbatim
+  // in CI/Railway/operator logs, even on count or format failures.
+  const mask = (n) => `+*******${String(n).slice(-4)}`;
   if (numbers.length !== 2) {
-    fail(`connect-call-to.to expected exactly 2 numbers. Got ${numbers.length}: ${JSON.stringify(numbers)}`);
+    fail(
+      `connect-call-to.to expected exactly 2 numbers. Got ${numbers.length}: ` +
+        `[${numbers.map(mask).join(', ')}] (last-4 only — full digits suppressed).`
+    );
   }
   for (const n of numbers) {
     if (!/^\+1\d{10}$/.test(n)) {
-      fail(`connect-call-to.to has malformed NANP number: "${n}". Expected format ^\\+1\\d{10}$.`);
+      fail(
+        `connect-call-to.to has malformed NANP number "${mask(n)}" (last-4 only). ` +
+          `Expected format ^\\+1\\d{10}$.`
+      );
     }
   }
 
@@ -152,12 +162,12 @@ function verifyForwardCall(definition) {
       .sort();
     const live = [...numbers].sort();
     if (live.length !== expected.length || live.some((n, i) => n !== expected[i])) {
-      // Mask numbers to last4 in the failure message — codex P1 flagged
-      // logging full E.164s as PII. The operator can correlate by last4
-      // (uniquely identifies the personal cell to anyone who already
-      // knows the numbers) without leaking the full digits into shell
-      // logs / Railway logs / CI captures.
-      const mask = (n) => `+*******${n.slice(-4)}`;
+      // Mask values to last-4 — codex P1 flagged logging full E.164s
+      // as PII. Operator correlates against the un-masked env var and
+      // Twilio Console to find the mismatch; shell/Railway/CI logs
+      // never see the full digits. (mask() is defined at the top of
+      // verifyForwardCall so the count/format failures above use the
+      // same redaction.)
       fail(
         `connect-call-to.to drift vs. TWILIO_EXPECTED_FORWARD_NUMBERS.\n` +
           `  expected (last4): ${expected.map(mask).join(', ')}\n` +
