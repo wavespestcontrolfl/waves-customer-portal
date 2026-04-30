@@ -189,13 +189,17 @@ class SmartRebooker {
       intervalDays: parent.recurring_interval_days,
     };
 
-    // Only sweep siblings that are still reschedulable. Live lifecycle
-    // states (en_route, on_site) and intentional drop-offs (skipped)
-    // must NOT be steamrolled back to 'confirmed' by a series shift —
-    // that would corrupt active dispatch state and the audit trail.
-    // pending + confirmed are the only statuses where a future-date
-    // shift is safe.
-    const RESCHEDULABLE = ['pending', 'confirmed'];
+    // Live lifecycle states (en_route, on_site) and intentional drop-offs
+    // (skipped) must NOT be steamrolled back to 'confirmed' by a series
+    // shift — only pending + confirmed are safe to update. BUT we still
+    // need to count them for cadence math: if a quarterly series has a
+    // skipped occurrence between two confirmed ones, the next confirmed
+    // sibling should land at the +2-quarter mark, not +1, otherwise the
+    // recomputed date collides with the skipped one. So we fetch ALL
+    // non-terminal siblings, index by their position in the ordered
+    // list, and only UPDATE/audit the reschedulable ones.
+    const TERMINAL = ['completed', 'cancelled', 'rescheduled'];
+    const RESCHEDULABLE = new Set(['pending', 'confirmed']);
 
     const occurrencesRescheduled = await db.transaction(async (trx) => {
       const siblings = await trx('scheduled_services')
@@ -203,13 +207,25 @@ class SmartRebooker {
           this.where('id', parentId).orWhere('recurring_parent_id', parentId);
         })
         .where('scheduled_date', '>=', service.scheduled_date)
-        .whereIn('status', RESCHEDULABLE)
+        .whereNotIn('status', TERMINAL)
         .orderBy('scheduled_date', 'asc')
         .select('id', 'status', 'scheduled_date', 'window_start', 'window_end');
 
-      for (let i = 0; i < siblings.length; i++) {
+      // Anchor cadence at the dropped service's position so siblings
+      // before it (same-date ties) don't pull index 0 away from it.
+      const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
+      const startIdx = droppedIdx === -1 ? 0 : droppedIdx;
+
+      let touched = 0;
+      for (let i = startIdx; i < siblings.length; i++) {
         const sib = siblings[i];
-        const date = i === 0 ? newDate : nextRecurringDate(newDate, parent.recurring_pattern, i, opts);
+        if (!RESCHEDULABLE.has(sib.status)) continue; // skip live + skipped rows
+
+        const occurrenceIndex = i - startIdx;
+        const date = occurrenceIndex === 0
+          ? newDate
+          : nextRecurringDate(newDate, parent.recurring_pattern, occurrenceIndex, opts);
+
         await trx('scheduled_services').where({ id: sib.id }).update({
           scheduled_date: date,
           window_start: win.start || sib.window_start,
@@ -219,13 +235,20 @@ class SmartRebooker {
         });
 
         if (sib.status !== 'confirmed') {
+          // transitioned_by is a UUID FK to technicians; the route
+          // currently passes the sentinel 'admin' string for
+          // initiatedBy, which would violate the FK. Until we plumb
+          // the real authenticated admin UUID, leave this null —
+          // reschedule_log.initiated_by below preserves the 'admin'
+          // sentinel for the action audit.
           await trx('job_status_history').insert({
             job_id: sib.id,
             from_status: sib.status,
             to_status: 'confirmed',
-            transitioned_by: initiatedBy || null,
+            transitioned_by: null,
           });
         }
+        touched++;
       }
 
       await trx('reschedule_log').insert({
@@ -239,7 +262,7 @@ class SmartRebooker {
         new_window: win.start ? `${win.start}-${win.end}` : null,
       });
 
-      return siblings.length;
+      return touched;
     });
 
     return {
