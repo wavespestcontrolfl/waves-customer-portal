@@ -99,13 +99,19 @@ function uuid() {
 // Treatment services require either a product line or an explicit reason.
 const NON_TREATMENT_TYPES = /inspection|estimate|consult|follow.?up|callback|assessment/i;
 
+// No-product reasons aren't all equivalent. The `outcome` field shapes
+// downstream UI (CTA label, review suppression):
+//   complete   → finish + send recap normally
+//   no_review  → finish, but suppress the review request automatically
+//   incomplete → close visit + create follow-up; no charge, no review,
+//                CTA flips to "Close Visit & Create Follow-up"
 const NO_PRODUCT_REASONS = [
-  'Inspection only',
-  'Customer declined',
-  'Weather prevented treatment',
-  'Unable to access property',
-  'Follow-up only',
-  'Other',
+  { label: 'Inspection only', outcome: 'complete' },
+  { label: 'Customer declined', outcome: 'no_review' },
+  { label: 'Weather prevented treatment', outcome: 'incomplete' },
+  { label: 'Unable to access property', outcome: 'incomplete' },
+  { label: 'Follow-up only', outcome: 'complete' },
+  { label: 'Other', outcome: 'complete' },
 ];
 
 const OBSERVATION_CHIPS = [
@@ -149,8 +155,13 @@ export default function MobileCompleteServiceSheet({
   const [observations, setObservations] = useState([]); // string[]
   const [followUpNote, setFollowUpNote] = useState('');
   const [noProductsReason, setNoProductsReason] = useState('');
+  const [noProductsActive, setNoProductsActive] = useState(false); // secondary section reveal
   const [recapEdited, setRecapEdited] = useState(false);
   const [recapDraft, setRecapDraft] = useState('');
+  const [recapAiState, setRecapAiState] = useState('idle'); // idle | loading | ok | error
+  const [recapStaleAfterEdit, setRecapStaleAfterEdit] = useState(false);
+  const recapAbortRef = useRef(null);
+  const recapDebounceRef = useRef(null);
   const [sendSms, setSendSms] = useState(true);
   const [requestReview, setRequestReview] = useState(true);
   const [reviewManualOverride, setReviewManualOverride] = useState(false);
@@ -197,15 +208,29 @@ export default function MobileCompleteServiceSheet({
     }));
   }, [recentProducts, catalog]);
 
+  // Resolve the chosen no-product reason → outcome. Drives both the CTA
+  // label (incomplete visits become "Close Visit & Create Follow-up") and
+  // automatic review suppression for declined / weather / access cases.
+  const reasonOutcome = useMemo(() => {
+    if (!noProductsReason) return null;
+    return NO_PRODUCT_REASONS.find((r) => r.label === noProductsReason)?.outcome || 'complete';
+  }, [noProductsReason]);
+  const isIncompleteVisit = reasonOutcome === 'incomplete';
+
   // Smart review-request suppression — client-side signals only. Backend
   // can still decline (e.g. opt-out, no mobile, last-90d guard) but the UI
   // shouldn't even ask once we know it'll lead to a bad customer moment.
+  // Reasons with a non-"complete" outcome (declined / weather / access)
+  // suppress automatically; "Inspection only" / "Follow-up only" don't.
   const reviewAutoOff = useMemo(() => {
     if (observations.includes('customer_concern')) return 'customer concern flagged';
     if (observations.includes('follow_up_needed')) return 'follow-up needed';
-    if (noProductsReason) return 'no products applied';
+    if (reasonOutcome && reasonOutcome !== 'complete') {
+      if (reasonOutcome === 'incomplete') return 'visit incomplete';
+      if (reasonOutcome === 'no_review') return 'customer declined';
+    }
     return null;
-  }, [observations, noProductsReason]);
+  }, [observations, reasonOutcome]);
 
   useEffect(() => {
     if (reviewAutoOff && !reviewManualOverride) setRequestReview(false);
@@ -259,6 +284,75 @@ export default function MobileCompleteServiceSheet({
   }), [customerFirstName, service?.serviceType, notes, observations, selectedProducts]);
 
   const recapToSend = recapEdited ? recapDraft : computedRecap;
+
+  // AI recap generation — Claude FAST tier via /admin/dispatch/recap-preview.
+  // Fires when notes are substantive AND a product (or no-products reason)
+  // is set. 1000ms debounce after the last relevant change; cancels
+  // in-flight requests on input change so a slow earlier draft never
+  // overwrites a fresher one.
+  function generateAiRecap() {
+    if (!sendSms) return;                              // no recap will be sent
+    if (recapEdited && !recapStaleAfterEdit) return;   // tech edited — don't clobber
+    if (isIncompleteVisit) return;                     // incomplete visits get no recap
+    if (notes.trim().length < 15) return;
+    if (selectedProducts.length === 0 && !noProductsReason) return;
+
+    if (recapAbortRef.current) recapAbortRef.current.abort();
+    const ctrl = new AbortController();
+    recapAbortRef.current = ctrl;
+    setRecapAiState('loading');
+    fetch(`${API_BASE}/admin/dispatch/recap-preview`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        technicianNotes: notes,
+        products: selectedProducts.map((p) => ({ name: p.name })),
+        observations,
+        customerFirstName,
+        serviceType: service?.serviceType,
+      }),
+      signal: ctrl.signal,
+    })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(await r.text().catch(() => `${r.status}`));
+        return r.json();
+      })
+      .then((data) => {
+        if (data?.recap && typeof data.recap === 'string') {
+          setRecapDraft(data.recap);
+          setRecapEdited(true);
+          setRecapStaleAfterEdit(false);
+          setRecapAiState('ok');
+        } else {
+          setRecapAiState('error');
+        }
+      })
+      .catch((err) => {
+        if (err.name === 'AbortError') return;
+        // Soft failure — template recap stays visible + editable. Tech can
+        // still complete the visit; we just couldn't draft polished copy.
+        setRecapAiState('error');
+      });
+  }
+
+  useEffect(() => {
+    if (recapDebounceRef.current) clearTimeout(recapDebounceRef.current);
+    recapDebounceRef.current = setTimeout(generateAiRecap, 1000);
+    return () => {
+      if (recapDebounceRef.current) clearTimeout(recapDebounceRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notes, selectedProducts.length, noProductsReason, observations.join(','), sendSms, isIncompleteVisit]);
+
+  // Stale-draft signal: after a manual edit, any change to inputs flags the
+  // draft so the UI can offer "Regenerate" rather than silently clobbering.
+  useEffect(() => {
+    if (recapEdited && !recapStaleAfterEdit) setRecapStaleAfterEdit(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notes, selectedProducts.length, observations.join(',')]);
 
   // ── Handlers ────────────────────────────────────────────────────────────
   function toggleObservation(key) {
