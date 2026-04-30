@@ -127,26 +127,27 @@ router.put('/preferences', async (req, res, next) => {
     const adminUserId = req.technicianId;
     const updates = Array.isArray(req.body.preferences) ? req.body.preferences : [];
 
+    // INSERT ... ON CONFLICT replaces the previous select-then-insert
+    // shape — two tabs saving the same trigger key simultaneously can't
+    // race past each other now (the unique constraint on
+    // (admin_user_id, trigger_key) is enforced atomically by Postgres).
     for (const u of updates) {
       if (!u.key) continue;
-      const existing = await db('notification_preferences')
-        .where({ admin_user_id: adminUserId, trigger_key: u.key })
-        .first();
-      const patch = {
-        push_enabled: !!u.push_enabled,
-        bell_enabled: !!u.bell_enabled,
-        sound_enabled: !!u.sound_enabled,
-        updated_at: new Date(),
-      };
-      if (existing) {
-        await db('notification_preferences').where({ id: existing.id }).update(patch);
-      } else {
-        await db('notification_preferences').insert({
+      await db('notification_preferences')
+        .insert({
           admin_user_id: adminUserId,
           trigger_key: u.key,
-          ...patch,
+          push_enabled: !!u.push_enabled,
+          bell_enabled: !!u.bell_enabled,
+          sound_enabled: !!u.sound_enabled,
+        })
+        .onConflict(['admin_user_id', 'trigger_key'])
+        .merge({
+          push_enabled: !!u.push_enabled,
+          bell_enabled: !!u.bell_enabled,
+          sound_enabled: !!u.sound_enabled,
+          updated_at: new Date(),
         });
-      }
     }
     res.json({ ok: true });
   } catch (err) { next(err); }
