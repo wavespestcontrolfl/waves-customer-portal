@@ -395,6 +395,11 @@ const InvoiceService = {
         customerId: customer.id,
         invoiceId,
         entryPoint: 'invoice_send_via_sms',
+        // Preserve the legacy messageType so the admin-sms-templates
+        // 'invoice' template kill switch (invoice → invoice_sent) still
+        // applies. If ops disables the invoice template to halt broken
+        // billing texts, this flow needs to stop too.
+        metadata: { original_message_type: 'invoice' },
       });
 
       if (!sendResult.sent) {
