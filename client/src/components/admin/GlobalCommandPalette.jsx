@@ -312,8 +312,8 @@ function GlobalCommandPalette(_props, ref) {
               style={{
                 width: '100%', padding: '10px 14px', paddingRight: 90,
                 background: '#FFFFFF', border: `1px solid ${D.border}`,
-                borderRadius: 10, color: D.text, fontSize: 15,
-                fontFamily: 'DM Sans, sans-serif', outline: 'none', boxSizing: 'border-box',
+                borderRadius: 10, color: '#000', fontSize: 15,
+                fontFamily: "'Roboto', system-ui, sans-serif", outline: 'none', boxSizing: 'border-box',
               }}
               onFocusCapture={e => e.target.style.borderColor = accentColor + '66'}
               onBlurCapture={e => e.target.style.borderColor = D.border}
@@ -327,7 +327,7 @@ function GlobalCommandPalette(_props, ref) {
                   border: 'none', fontSize: 12, fontWeight: 700, cursor: 'pointer',
                 }}>Go</button>
               ) : (
-                <span style={{ padding: '4px 8px', borderRadius: 4, background: D.bg, border: `1px solid ${D.border}`, fontSize: 10, color: D.muted, fontFamily: 'JetBrains Mono, monospace' }}>ESC</span>
+                <span style={{ padding: '4px 8px', borderRadius: 4, background: D.bg, border: `1px solid ${D.border}`, fontSize: 10, color: '#000', fontFamily: 'JetBrains Mono, monospace' }}>ESC</span>
               )}
             </div>
           </div>
@@ -374,7 +374,7 @@ function GlobalCommandPalette(_props, ref) {
 
         {response && !loading && (
           <div style={{ flex: 1, overflow: 'auto', padding: '14px 18px' }}>
-            <div style={{ fontSize: 13, lineHeight: 1.65, color: D.text, fontFamily: 'DM Sans, sans-serif' }}>
+            <div style={{ fontSize: 13, lineHeight: 1.65, color: '#000', fontFamily: "'Roboto', system-ui, sans-serif" }}>
               {renderMarkdown(response)}
             </div>
           </div>
@@ -387,7 +387,7 @@ function GlobalCommandPalette(_props, ref) {
               placeholder="Follow up..."
               style={{
                 flex: 1, padding: '8px 12px', background: '#FFFFFF', border: `1px solid ${D.border}`,
-                borderRadius: 8, color: D.text, fontSize: 13, fontFamily: 'DM Sans, sans-serif', outline: 'none',
+                borderRadius: 8, color: '#000', fontSize: 13, fontFamily: "'Roboto', system-ui, sans-serif", outline: 'none',
               }}
             />
             <button onClick={() => submit()} disabled={!prompt.trim()} style={{
@@ -397,7 +397,7 @@ function GlobalCommandPalette(_props, ref) {
             }}>Send</button>
             <button onClick={clear} style={{
               padding: '8px 10px', background: 'transparent', border: `1px solid ${D.border}`,
-              borderRadius: 8, color: D.muted, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+              borderRadius: 8, color: '#000', fontSize: 11, fontWeight: 600, cursor: 'pointer',
             }}>Clear</button>
           </div>
         )}
@@ -406,10 +406,10 @@ function GlobalCommandPalette(_props, ref) {
           padding: '6px 18px', borderTop: `1px solid ${D.border}22`,
           display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         }}>
-          <span style={{ fontSize: 10, color: D.border }}>
+          <span style={{ fontSize: 10, color: '#000' }}>
             Intelligence Bar — context: {contextLabel}
           </span>
-          <span style={{ fontSize: 10, color: D.border, fontFamily: 'JetBrains Mono, monospace' }}>
+          <span style={{ fontSize: 10, color: '#000', fontFamily: 'JetBrains Mono, monospace' }}>
             {navigator.platform?.includes('Mac') ? '⌘' : 'Ctrl'}+K to toggle
           </span>
         </div>
