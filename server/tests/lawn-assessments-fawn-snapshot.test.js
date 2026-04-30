@@ -43,32 +43,20 @@ describeOrSkip('lawn_assessments.fawn_snapshot drift fix', () => {
   });
 
   test('attachWeather UPDATE shape round-trips through fawn_snapshot', async () => {
-    // Build a row that satisfies whatever NOT NULL constraints
-    // lawn_assessments has, then issue the exact UPDATE shape from
-    // services/lawn-intelligence.js:117–124.
-    const cols = await knex('lawn_assessments').columnInfo();
-    const required = Object.entries(cols)
-      .filter(([, info]) => !info.nullable && info.defaultValue == null)
-      .map(([name]) => name);
-
-    // Minimum scaffold — any required columns we don't recognise will
-    // surface as a clear insert error pointing at the actual schema.
-    const scaffold = {};
-    if ('id' in cols && cols.id.defaultValue == null) {
-      scaffold.id = knex.raw('gen_random_uuid()');
-    }
-    if ('customer_id' in cols && required.includes('customer_id')) {
-      // Borrow any existing customer; if none exist, skip the test.
-      const c = await knex('customers').select('id').first();
-      if (!c) {
-        // eslint-disable-next-line no-console
-        console.warn('[fawn_snapshot smoke] no customers in dev DB — skipping write round-trip');
-        return;
-      }
-      scaffold.customer_id = c.id;
+    // Borrow any existing customer for the FK; if none, skip cleanly.
+    const c = await knex('customers').select('id').first();
+    if (!c) {
+      // eslint-disable-next-line no-console
+      console.warn('[fawn_snapshot smoke] no customers in DB — skipping write round-trip');
+      return;
     }
 
-    const [row] = await knex('lawn_assessments').insert(scaffold).returning('id');
+    // lawn_assessments NOT NULL columns without defaults: customer_id,
+    // service_date. Everything else is nullable or defaulted, so a
+    // two-field scaffold is sufficient.
+    const [row] = await knex('lawn_assessments')
+      .insert({ customer_id: c.id, service_date: new Date() })
+      .returning('id');
     const id = row?.id ?? row;
 
     try {
