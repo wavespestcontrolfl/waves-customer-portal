@@ -263,12 +263,14 @@ const ReviewService = {
         await db('review_requests').where({ id: requestId }).update({
           status: 'suppressed',
         });
-        logger.warn(`[review] SMS BLOCKED for ${customer.first_name} ${customer.last_name}: ${result.code} — ${result.reason}`);
+        // PII: ID-only logging per AGENTS.md.
+        logger.warn(`[review] SMS BLOCKED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'}): ${result.code} — ${result.reason}`);
       } else {
         // Provider failure (Twilio/network). Leave status='pending' so the
         // cron retries on the next tick. Permanent suppression for transient
         // provider errors would silently drop legitimate review requests.
-        logger.error(`[review] SMS PROVIDER FAILURE for ${customer.first_name} ${customer.last_name}: ${result.code} — ${result.reason} (will retry)`);
+        // PII: ID-only logging per AGENTS.md.
+        logger.error(`[review] SMS PROVIDER FAILURE (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'}): ${result.code} — ${result.reason} (will retry)`);
       }
     } catch (err) {
       logger.error(`[review] SMS failed: ${err.message}`);
