@@ -208,18 +208,59 @@ const LeadResponseAgent = {
                 reason: `Auto-send blocked — critical context tools failed (${criticalFailures.join(', ')}). Generic ack sent; please review and follow up.`,
                 draft_message: toolInput.message || '',
               });
-              // Send the safe generic message directly
-              await executeLeadTool('send_lead_response', {
+              // Send the safe generic message directly. send_lead_response
+              // can now return non-thrown blocked/failed outcomes (consent
+              // block, suppression, provider failure) — capture the actual
+              // result instead of assuming success.
+              const safeResult = await executeLeadTool('send_lead_response', {
                 lead_id: lead.leadId,
                 customer_id: lead.customerId,
                 message: safeMessage,
               });
-              toolResult = {
-                sent: true,
-                fallback: true,
-                note: 'Sent safe generic ack and queued full draft for human review due to missing context.',
-              };
-              actionTaken = 'safe_fallback_sent';
+              if (safeResult && safeResult.sent === true) {
+                toolResult = {
+                  sent: true,
+                  fallback: true,
+                  note: 'Sent safe generic ack and queued full draft for human review due to missing context.',
+                };
+                actionTaken = 'safe_fallback_sent';
+              } else if (safeResult && safeResult.blocked === true) {
+                // Wrapper-policy block (e.g. opt-out). Lead is already
+                // queued for Adam; the missed ack is recorded so ops
+                // triage sees the lead didn't go silent — we just
+                // couldn't text. Not a system failure (no breaker bump).
+                toolResult = {
+                  sent: false,
+                  fallback: true,
+                  blocked: true,
+                  code: safeResult.code,
+                  reason: safeResult.reason,
+                  note: 'Queued for Adam; safe-ack SMS blocked by middleware (consent/suppression/voice).',
+                };
+                actionTaken = 'safe_fallback_blocked_queued';
+              } else {
+                // Provider failure on the fallback send. Lead is still
+                // queued for Adam — that's the real backstop. Surface
+                // failed/error in toolResult AND flip the local `failed`
+                // flag so the API event at the bottom of the loop gets
+                // is_error:true, recordToolEvent logs success:false, and
+                // the breaker bumps on repeated fallback-provider outages
+                // (codex P1 round-5: previous version only set
+                // toolResult.failed, leaving local `failed` unset, so
+                // fallback provider failures were silently reported as
+                // successful tool runs and never tripped the breaker).
+                toolResult = {
+                  sent: false,
+                  fallback: true,
+                  failed: true,
+                  error: (safeResult && safeResult.error) || 'fallback send failed',
+                  note: 'Queued for Adam; safe-ack SMS provider failure.',
+                };
+                actionTaken = 'safe_fallback_failed_queued';
+                failed = true;
+                toolError = toolResult.error;
+                leadToolBreaker.recordFailure();
+              }
             } catch (err) {
               toolResult = { error: `Safe fallback failed: ${err.message}` };
               failed = true;
@@ -241,7 +282,16 @@ const LeadResponseAgent = {
                 if (CRITICAL_CONTEXT_TOOLS.has(toolName)) criticalFailures.push(toolName);
               } else {
                 leadToolBreaker.recordSuccess();
-                if (toolName === 'send_lead_response') actionTaken = 'auto_sent';
+                // Gate auto_sent on actual delivery, not just absence-of-error.
+                // send_lead_response now distinguishes:
+                //   { sent: true, ... }                 — provider accepted (auto_sent)
+                //   { sent: false, blocked: true, ... } — wrapper-policy block,
+                //                                        non-failure, NOT auto_sent
+                //   { sent: false, failed: true, ... }  — provider failure
+                //                                        (caught by isToolFailure above)
+                if (toolName === 'send_lead_response' && toolResult && toolResult.sent === true) {
+                  actionTaken = 'auto_sent';
+                }
                 if (toolName === 'queue_for_adam') actionTaken = 'queued_for_adam';
               }
             } catch (err) {
