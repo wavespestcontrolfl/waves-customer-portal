@@ -270,6 +270,23 @@ const TwilioService = {
         deliveryStatus: 'sent',
       }).catch(() => {});
 
+      // In-band so admin sends from POST /:id/send-sms can rely on the
+      // timeline row being persisted by the time the response returns —
+      // otherwise the lead detail page can re-fetch faster than the
+      // fire-and-forget insert lands and show a stale timeline. logSms
+      // has its own try/catch; the trailing .catch is defense-in-depth
+      // so a logging error never breaks the SMS send itself
+      // (Codex P1 follow-up to #564).
+      await require('./lead-activity-logger').logSms({
+        leadId: options.leadId || null,
+        phone: to,
+        direction: 'outbound',
+        body,
+        messageType: options.messageType,
+        adminUserId: options.adminUserId,
+        twilioSid: message.sid,
+      }).catch((e) => logger.error(`[twilio] lead activity log failed: ${e.message}`));
+
       return { success: true, sid: message.sid, fromNumber };
     } catch (err) {
       logger.error(`SMS send failed to ${to}: ${err.message}`);

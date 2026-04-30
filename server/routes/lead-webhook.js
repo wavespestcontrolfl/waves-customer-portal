@@ -352,6 +352,33 @@ router.post('/', async (req, res) => {
       }
     } catch (e) { logger.error(`Lead alert failed: ${e.message}`); }
 
+    // Create leads table record for pipeline tracking. MUST run before
+    // the auto-reply send below so services/lead-activity-logger.js can
+    // find the lead row when sendSMS fires — otherwise the very first
+    // message to a brand-new web lead never lands on the timeline
+    // (Codex P1 follow-up to #564).
+    let leadRecord = null;
+    try {
+      const serviceInterestField = body.service_interest || body['What Can We Help You With'] || findField(body, /service|help|pest|lawn/i) || '';
+      const [newLead] = await db('leads').insert({
+        first_name: firstName, last_name: lastName,
+        phone: phoneFormatted, email: email || null,
+        address: address || '', city: leadSource.area || '',
+        lead_source_id: leadSourceId,
+        lead_type: 'form_submission',
+        service_interest: serviceInterestField || null,
+        first_contact_at: new Date(),
+        first_contact_channel: 'form',
+        status: 'new',
+        customer_id: customer.id,
+        gclid: gclid || null,
+        is_residential: true,
+      }).returning('*');
+      leadRecord = newLead;
+    } catch (leadErr) {
+      logger.error(`Lead record creation failed: ${leadErr.message}`);
+    }
+
     // Auto-reply to lead — always send (whether call connected or not),
     // 24/7. Same menu prompt regardless of hour: the state machine in
     // server/services/lead-intake.js captures service interest + address
@@ -422,29 +449,6 @@ router.post('/', async (req, res) => {
       });
     } catch (estErr) {
       logger.error(`Lead estimate creation failed: ${estErr.message}`);
-    }
-
-    // Create leads table record for pipeline tracking
-    let leadRecord = null;
-    try {
-      const serviceInterestField = body.service_interest || body['What Can We Help You With'] || findField(body, /service|help|pest|lawn/i) || '';
-      const [newLead] = await db('leads').insert({
-        first_name: firstName, last_name: lastName,
-        phone: phoneFormatted, email: email || null,
-        address: address || '', city: leadSource.area || '',
-        lead_source_id: leadSourceId,
-        lead_type: 'form_submission',
-        service_interest: serviceInterestField || null,
-        first_contact_at: new Date(),
-        first_contact_channel: 'form',
-        status: 'new',
-        customer_id: customer.id,
-        gclid: gclid || null,
-        is_residential: true,
-      }).returning('*');
-      leadRecord = newLead;
-    } catch (leadErr) {
-      logger.error(`Lead record creation failed: ${leadErr.message}`);
     }
 
     // Fire-and-forget AI triage
