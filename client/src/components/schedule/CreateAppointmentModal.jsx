@@ -139,6 +139,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [customerSearch, setCustomerSearch] = useState('');
   const [customerResults, setCustomerResults] = useState([]);
   const [customerLoading, setCustomerLoading] = useState(false);
+  const [customerError, setCustomerError] = useState('');
   const [selectedCustomer, setSelectedCustomer] = useState(defaultCustomer);
   const [showQuickAdd, setShowQuickAdd] = useState(false);
   const [quickAdd, setQuickAdd] = useState({ firstName: '', lastName: '', phone: '', email: '', address: '', city: '', zip: '' });
@@ -355,12 +356,18 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setCustomerSearch(val);
     if (val.length >= 2) {
       setCustomerLoading(true);
+      setCustomerError('');
       try {
         const r = await adminFetch(`/admin/customers?search=${encodeURIComponent(val)}&limit=8`);
         setCustomerResults(r.customers || []);
-      } catch { setCustomerResults([]); }
+      } catch (err) {
+        // Surface real failures (401 expired token, 500, network) so a
+        // misspelled-name lookup is distinguishable from a broken pipeline.
+        setCustomerResults([]);
+        setCustomerError(err?.message || 'Search failed');
+      }
       finally { setCustomerLoading(false); }
-    } else { setCustomerResults([]); setCustomerLoading(false); }
+    } else { setCustomerResults([]); setCustomerLoading(false); setCustomerError(''); }
   };
 
   const selectCustomer = (c) => {
@@ -801,9 +808,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         {c.tier && <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 6, background: `${TIER_COLORS[c.tier] || D.teal}22`, color: TIER_COLORS[c.tier] || D.teal }}>{c.tier}</span>}
                       </div>
                     ))}
-                    {!customerLoading && customerResults.length === 0 && (
+                    {!customerLoading && !customerError && customerResults.length === 0 && (
                       <div style={{ padding: '14px', textAlign: 'center', color: D.muted, fontSize: 13 }}>
                         No customers match &ldquo;{customerSearch}&rdquo;
+                      </div>
+                    )}
+                    {!customerLoading && customerError && (
+                      <div style={{ padding: '14px', textAlign: 'center', color: D.red, fontSize: 13 }}>
+                        Search failed: {customerError}
+                        <div style={{ fontSize: 11, marginTop: 4, color: D.muted }}>
+                          Token may have expired — log out + back in, then retry.
+                        </div>
                       </div>
                     )}
                     {customerLoading && customerResults.length === 0 && (
