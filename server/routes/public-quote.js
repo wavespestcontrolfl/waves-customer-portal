@@ -7,6 +7,7 @@ const { generateEstimate } = require('../services/pricing-engine');
 const TwilioService = require('../services/twilio');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { subscribeOrResubscribe } = require('../services/newsletter-subscribers');
+const { resolveLeadSource } = require('../services/lead-source-resolver');
 const smsTemplatesRouter = require('./admin-sms-templates');
 
 const WAVES_ADMIN_PHONE = '+19413187612';
@@ -104,6 +105,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
 
     const attr = (attribution && typeof attribution === 'object') ? attribution : null;
     const gclid = attr?.gclid ? String(attr.gclid).slice(0, 255) : null;
+    const sourceMeta = await resolveLeadSource(attr);
 
     const extractedData = JSON.stringify({
       stage: 'quote_calculated',
@@ -122,23 +124,29 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // in place so we don't double-count leads for a single conversion.
     let lead;
     if (leadId) {
+      // Don't overwrite a lead_source_id set at property-lookup time — only fill
+      // it in if the row is still missing one (manual leadId reuse, legacy rows).
+      const updateFields = {
+        first_name: firstName,
+        last_name: lastName,
+        email: email.toLowerCase().trim(),
+        phone: normalizedPhone || phone,
+        address: [address, city, zip].filter(Boolean).join(', '),
+        city: city || null,
+        zip: zip || null,
+        service_interest: serviceInterest,
+        monthly_value: monthly,
+        extracted_data: extractedData,
+        updated_at: new Date(),
+      };
       const rows = await db('leads')
         .where({ id: leadId })
-        .update({
-          first_name: firstName,
-          last_name: lastName,
-          email: email.toLowerCase().trim(),
-          phone: normalizedPhone || phone,
-          address: [address, city, zip].filter(Boolean).join(', '),
-          city: city || null,
-          zip: zip || null,
-          service_interest: serviceInterest,
-          monthly_value: monthly,
-          extracted_data: extractedData,
-          updated_at: new Date(),
-        })
-        .returning(['id']);
+        .update(updateFields)
+        .returning(['id', 'lead_source_id']);
       lead = rows[0];
+      if (lead && !lead.lead_source_id && sourceMeta.leadSourceId) {
+        await db('leads').where({ id: lead.id }).update({ lead_source_id: sourceMeta.leadSourceId });
+      }
     }
     if (!lead) {
       const rows = await db('leads').insert({
@@ -152,12 +160,54 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         service_interest: serviceInterest,
         lead_type: 'quote_wizard',
         first_contact_channel: 'website_quote',
+        lead_source_id: sourceMeta.leadSourceId,
         monthly_value: monthly,
         status: 'new',
         gclid,
         extracted_data: extractedData,
       }).returning(['id']);
       lead = rows[0];
+    }
+
+    // Mirror the priced quote into the estimates pipeline so wizard-generated
+    // quotes show up alongside admin/tech estimates in /admin/estimates. Keyed
+    // off lead_id in estimate_data — re-submits update the same draft instead
+    // of stacking duplicates. Source 'quote_wizard' is the discriminator.
+    // estimate_data is jsonb — pass the object directly so the ->>'lead_id'
+    // lookup resolves; pre-stringifying risks pg storing it as a json string
+    // scalar.
+    try {
+      const fullAddress = [address, city, zip].filter(Boolean).join(', ');
+      const estimateDataObj = {
+        lead_id: lead.id,
+        services,
+        monthly,
+        annual,
+        enriched: ep,
+      };
+      const existingEst = await db('estimates')
+        .where({ source: 'quote_wizard', status: 'draft' })
+        .whereRaw("estimate_data->>'lead_id' = ?", [lead.id])
+        .first();
+      const estFields = {
+        customer_name: `${firstName} ${lastName}`,
+        customer_phone: normalizedPhone || phone,
+        customer_email: email.toLowerCase().trim(),
+        address: fullAddress,
+        monthly_total: monthly,
+        annual_total: annual,
+        service_interest: serviceInterest,
+        lead_source: sourceMeta.leadSourceName,
+        lead_source_detail: sourceMeta.leadSourceDetail,
+        estimate_data: estimateDataObj,
+      };
+      if (existingEst) {
+        await db('estimates').where({ id: existingEst.id }).update({ ...estFields, updated_at: new Date() });
+      } else {
+        await db('estimates').insert({ ...estFields, status: 'draft', source: 'quote_wizard' });
+      }
+    } catch (e) {
+      logger.error(`[public-quote] Estimate upsert failed: ${e.message}`);
     }
 
     try {
@@ -330,6 +380,19 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
       extracted_data: JSON.stringify(updatedData),
       updated_at: new Date(),
     });
+
+    // Keep the quote_wizard estimate row in sync — admins viewing the pipeline
+    // should see the merged service_interest after an upsell add, not the
+    // original /calculate snapshot. Scope to status='draft' so a late upsell
+    // submission can't mutate an estimate that's already been sent/viewed/
+    // accepted (admins may have edited service_interest by hand at that
+    // point — the customer-side flow shouldn't overwrite that).
+    try {
+      await db('estimates')
+        .where({ source: 'quote_wizard', status: 'draft' })
+        .whereRaw("estimate_data->>'lead_id' = ?", [leadId])
+        .update({ service_interest: mergedInterest, updated_at: new Date() });
+    } catch (e) { logger.error(`[public-quote] Estimate upsell sync failed: ${e.message}`); }
 
     const firstName = lead.first_name || '';
     const lastName = lead.last_name || '';
