@@ -173,15 +173,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // quotes show up alongside admin/tech estimates in /admin/estimates. Keyed
     // off lead_id in estimate_data — re-submits update the same draft instead
     // of stacking duplicates. Source 'quote_wizard' is the discriminator.
+    // estimate_data is jsonb — pass the object directly so the ->>'lead_id'
+    // lookup resolves; pre-stringifying risks pg storing it as a json string
+    // scalar.
     try {
       const fullAddress = [address, city, zip].filter(Boolean).join(', ');
-      const estimateData = JSON.stringify({
+      const estimateDataObj = {
         lead_id: lead.id,
         services,
         monthly,
         annual,
         enriched: ep,
-      });
+      };
       const existingEst = await db('estimates')
         .where({ source: 'quote_wizard', status: 'draft' })
         .whereRaw("estimate_data->>'lead_id' = ?", [lead.id])
@@ -196,7 +199,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         service_interest: serviceInterest,
         lead_source: sourceMeta.leadSourceName,
         lead_source_detail: sourceMeta.leadSourceDetail,
-        estimate_data: estimateData,
+        estimate_data: estimateDataObj,
       };
       if (existingEst) {
         await db('estimates').where({ id: existingEst.id }).update({ ...estFields, updated_at: new Date() });
