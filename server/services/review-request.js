@@ -226,19 +226,44 @@ const ReviewService = {
       body = `Hello ${contact.name || customer.first_name}! How was your service with ${techName}? We'd love your feedback: ${reviewUrl}`;
     }
 
+    // Routed through the customer-message middleware so consent /
+    // suppression / identity / voice / segment checks all apply, and
+    // every attempt lands in messaging_audit_log.
+    //
+    // Per the prompt-hardening pass that landed in #522, review-request
+    // eligibility lives in the upstream candidate-finder (no open
+    // complaint, no unresolved billing, opted in, no recent ask in
+    // cooldown). Here we just make sure the channel is permitted at
+    // send time — sms_enabled, suppression list, segment count, no
+    // emoji / price leak.
     try {
-      const TwilioService = require('./twilio');
-      await TwilioService.sendSMS(contact.phone, body, {
+      const { sendCustomerMessage } = require('./messaging/send-customer-message');
+      const result = await sendCustomerMessage({
+        to: contact.phone,
+        body,
+        channel: 'sms',
+        audience: 'customer',
+        purpose: 'review_request',
         customerId: customer.id,
-        messageType: 'review_request',
+        entryPoint: 'review_request_send',
       });
 
-      await db('review_requests').where({ id: requestId }).update({
-        sms_sent_at: new Date(),
-        status: 'sent',
-      });
-
-      logger.info(`[review] SMS sent for ${customer.first_name} ${customer.last_name}`);
+      if (result.sent) {
+        await db('review_requests').where({ id: requestId }).update({
+          sms_sent_at: new Date(),
+          status: 'sent',
+        });
+        logger.info(`[review] SMS sent for ${customer.first_name} ${customer.last_name}`);
+      } else {
+        // Mark the request as suppressed instead of leaving it pending
+        // forever — the cron would otherwise keep retrying. Suppression
+        // here covers consent/opt-out/segment/emoji blocks; the request
+        // record still exists for audit history.
+        await db('review_requests').where({ id: requestId }).update({
+          status: 'suppressed',
+        });
+        logger.warn(`[review] SMS BLOCKED for ${customer.first_name} ${customer.last_name}: ${result.code} — ${result.reason}`);
+      }
     } catch (err) {
       logger.error(`[review] SMS failed: ${err.message}`);
     }
