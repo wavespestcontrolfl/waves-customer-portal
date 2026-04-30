@@ -925,12 +925,12 @@ router.get('/quick-actions', async (req, res) => {
     ] });
   } else if (context === 'comms') {
     res.json({ actions: [
-      { id: 'unanswered', group: 'Triage', label: 'Unanswered', prompt: 'Any unanswered messages? Who is waiting for a reply?', icon: '🔴' },
-      { id: 'today', group: 'Triage', label: "Today's Activity", prompt: "What happened today? Messages, calls, anything missed?", icon: '📋' },
-      { id: 'calls', group: 'Triage', label: 'Recent Calls', prompt: "What calls came in today? Any with recordings?", icon: '📞' },
-      { id: 'stats', group: 'Analyze', label: 'SMS Stats', prompt: 'SMS volume breakdown this month by type', icon: '📊' },
-      { id: 'csr', group: 'Analyze', label: 'CSR Coach', prompt: "How's the CSR performance? Any follow-up tasks pending?", icon: '🎓' },
-      { id: 'search', group: 'Search', label: 'Search Messages', prompt: 'Search messages about...', icon: '🔍' },
+      { id: 'unanswered', group: 'Triage', label: 'Unanswered', prompt: 'Any unanswered messages? Who is waiting for a reply?' },
+      { id: 'today', group: 'Triage', label: "Today's Activity", prompt: "What happened today? Messages, calls, anything missed?" },
+      { id: 'calls', group: 'Triage', label: 'Recent Calls', prompt: "What calls came in today? Any with recordings?" },
+      { id: 'stats', group: 'Analyze', label: 'SMS Stats', prompt: 'SMS volume breakdown this month by type' },
+      { id: 'csr', group: 'Analyze', label: 'CSR Coach', prompt: "How's the CSR performance? Any follow-up tasks pending?" },
+      { id: 'search', group: 'Search', label: 'Search Messages', prompt: 'Search messages about...' },
     ] });
   } else if (context === 'tax') {
     res.json({ actions: [
