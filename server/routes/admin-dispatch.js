@@ -719,7 +719,14 @@ router.get('/:serviceId/reschedule-options', async (req, res, next) => {
 // POST /api/admin/dispatch/:serviceId/reschedule
 router.post('/:serviceId/reschedule', async (req, res, next) => {
   try {
-    const { newDate, newWindow, reasonCode, reasonText, notifyCustomer } = req.body;
+    const { newDate, newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
+
+    // Series scope shifts every future occurrence — skip the customer-confirm
+    // SMS path (which only handles a single appt) and commit directly.
+    if (scope === 'series') {
+      const result = await SmartRebooker.rescheduleSeries(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin');
+      return res.json(result);
+    }
 
     if (notifyCustomer !== false) {
       const result = await RescheduleSMS.sendRescheduleRequest(req.params.serviceId, reasonCode || 'admin', reasonText);

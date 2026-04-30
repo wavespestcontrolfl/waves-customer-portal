@@ -413,17 +413,18 @@ export function MonthViewV2({ date, onDateClick }) {
     }));
     setOptimistic({ ...source, weeks: nextWeeks });
 
-    const timeLabel = startMin != null ? minutesToLabelMonth(startMin) : '';
     setPending({
       svc,
       toDate,
       newWindow,
-      fromLabel: `${formatDayLabel(fromDate)}${timeLabel ? ' · ' + timeLabel : ''}`,
-      toLabel: `${formatDayLabel(toDate)}${timeLabel ? ' · ' + timeLabel : ''}`,
+      fromDate,
+      fromMinutes: startMin,
+      toDateLabel: toDate,
+      toMinutes: startMin,
     });
   }, [data, optimistic]);
 
-  const commitReschedule = useCallback(async ({ notificationType }) => {
+  const commitReschedule = useCallback(async ({ notificationType, scope }) => {
     if (!pending) return;
     const { svc, toDate, newWindow } = pending;
     setBusy(true);
@@ -436,6 +437,7 @@ export function MonthViewV2({ date, onDateClick }) {
           reasonCode: 'dispatch_drag',
           reasonText: 'Rescheduled via drag-and-drop on month grid',
           notifyCustomer: notificationType === 'sms',
+          scope: scope || 'this_only',
         }),
       });
       await reload();
@@ -542,8 +544,11 @@ export function MonthViewV2({ date, onDateClick }) {
       <RescheduleConfirmModal
         open={!!pending}
         customerName={pending?.svc?.customerName}
-        fromLabel={pending?.fromLabel || ''}
-        toLabel={pending?.toLabel || ''}
+        fromDate={pending?.fromDate || ''}
+        fromMinutes={pending?.fromMinutes}
+        toDate={pending?.toDateLabel || ''}
+        toMinutes={pending?.toMinutes}
+        isRecurring={!!pending?.svc?.isRecurring}
         onConfirm={commitReschedule}
         onCancel={cancelReschedule}
       />

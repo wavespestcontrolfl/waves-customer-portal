@@ -638,8 +638,10 @@ export default function TimeGridDays({
         svc,
         toDate: fromDate,
         newWindow: null,
-        fromLabel: `${fromDate} · ${minutesToLabel(fromMin)}`,
-        toLabel: `${fromDate} · ${minutesToLabel(fromMin)}`,
+        fromDate,
+        fromMinutes: fromMin,
+        toDateLabel: fromDate,
+        toMinutes: fromMin,
         technicianChange: { fromName: fromTechName, toName: null },
       });
       return;
@@ -682,13 +684,15 @@ export default function TimeGridDays({
       svc,
       toDate,
       newWindow,
-      fromLabel: `${fromDate} · ${minutesToLabel(fromMin)}`,
-      toLabel: `${toDate} · ${minutesToLabel(toMin)}`,
+      fromDate,
+      fromMinutes: fromMin,
+      toDateLabel: toDate,
+      toMinutes: toMin,
       technicianChange: null,
     });
   }, [data]);
 
-  const commitReschedule = useCallback(async ({ notificationType }) => {
+  const commitReschedule = useCallback(async ({ notificationType, scope }) => {
     if (!pending) return;
     const { mode, svc, toDate, newWindow } = pending;
     setBusy(true);
@@ -707,6 +711,7 @@ export default function TimeGridDays({
             reasonCode: 'dispatch_drag',
             reasonText: 'Rescheduled via drag-and-drop on multi-day grid',
             notifyCustomer: notificationType === 'sms',
+            scope: scope || 'this_only',
           }),
         });
       }
@@ -784,8 +789,11 @@ export default function TimeGridDays({
       <RescheduleConfirmModal
         open={!!pending}
         customerName={pending?.svc?.customerName}
-        fromLabel={pending?.fromLabel || ''}
-        toLabel={pending?.toLabel || ''}
+        fromDate={pending?.fromDate || ''}
+        fromMinutes={pending?.fromMinutes}
+        toDate={pending?.toDateLabel || ''}
+        toMinutes={pending?.toMinutes}
+        isRecurring={!!pending?.svc?.isRecurring && pending?.mode !== 'assign'}
         technicianChange={pending?.technicianChange}
         onConfirm={commitReschedule}
         onCancel={cancelReschedule}

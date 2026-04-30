@@ -850,15 +850,13 @@ export default function TimeGridDay({
       fromMin,
       toMin,
       newWindow,
-      fromLabel: minutesToLabel(fromMin),
-      toLabel: minutesToLabel(toMin),
       technicianChange: fromTech !== toTech
         ? { fromName: fromTechName, toName: toTechName }
         : null,
     });
   }, [allServices, technicians]);
 
-  const commitReschedule = useCallback(async ({ notificationType }) => {
+  const commitReschedule = useCallback(async ({ notificationType, scope }) => {
     if (!pending) return;
     const { svc, toTech, fromMin, toMin, newWindow } = pending;
     const fromTech = svc.technicianId || '__unassigned__';
@@ -881,6 +879,7 @@ export default function TimeGridDay({
             reasonCode: 'dispatch_drag',
             reasonText: 'Rescheduled via drag-and-drop on Day grid',
             notifyCustomer: notificationType === 'sms',
+            scope: scope || 'this_only',
           }),
         }));
       }
@@ -1080,8 +1079,11 @@ export default function TimeGridDay({
       <RescheduleConfirmModal
         open={!!pending}
         customerName={pending?.svc?.customerName}
-        fromLabel={pending ? `${date} · ${pending.fromLabel}` : ''}
-        toLabel={pending ? `${date} · ${pending.toLabel}` : ''}
+        fromDate={date}
+        fromMinutes={pending?.fromMin}
+        toDate={date}
+        toMinutes={pending?.toMin}
+        isRecurring={!!pending?.svc?.isRecurring}
         technicianChange={pending?.technicianChange}
         onConfirm={commitReschedule}
         onCancel={cancelReschedule}
