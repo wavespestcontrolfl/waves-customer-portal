@@ -272,7 +272,10 @@ async function executeLeadTool(toolName, input) {
       await PipelineManager.onEvent(input.customer_id, 'first_contact');
 
       if (result.sent) {
-        logger.info(`[lead-agent] Auto-sent response to ${customer.first_name} ${customer.last_name}`);
+        // PII: ID-only logging per AGENTS.md. Customer name + phone live
+        // in the customer record + audit log; the log line just needs an
+        // ID for cross-reference.
+        logger.info(`[lead-agent] Auto-sent response (customerId=${customer.id} leadId=${input.lead_id || 'n/a'} auditLogId=${result.auditLogId || 'n/a'})`);
         return {
           sent: true,
           to: customer.phone,
@@ -282,9 +285,17 @@ async function executeLeadTool(toolName, input) {
           encoding: result.encoding,
         };
       }
-      logger.warn(`[lead-agent] Auto-response BLOCKED for ${customer.first_name} ${customer.last_name}: ${result.code} — ${result.reason}`);
+      logger.warn(`[lead-agent] Auto-response BLOCKED (customerId=${customer.id} leadId=${input.lead_id || 'n/a'}): ${result.code} — ${result.reason}`);
+      // CRITICAL: lead-response-agent.js's isToolFailure() detects failed
+      // tool executions by `result.error || result.failed === true`. Without
+      // these flags, blocked sends would be classified as auto_sent in
+      // telemetry and action tracking even though no SMS was delivered.
+      // Set both an `error` string (string-truthy) AND `failed: true` so
+      // every detection pattern catches it.
       return {
         sent: false,
+        failed: true,
+        error: result.reason || result.code || 'send blocked',
         blocked: !!result.blocked,
         code: result.code,
         reason: result.reason,
