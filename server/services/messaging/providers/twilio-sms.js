@@ -26,6 +26,11 @@ async function sendViaTwilio(input) {
       customerId: input.customerId || null,
       messageType,
       fromNumber: input.metadata && input.metadata.fromNumber,
+      // Preserve admin attribution. services/twilio.js writes
+      // sms_log.admin_user_id from this option; without forwarding,
+      // operator-driven sends (Comms inbox, IB) lose the audit trail
+      // that distinguishes them from system-initiated sends.
+      adminUserId: input.metadata && input.metadata.adminUserId,
     });
 
     if (!result) {
