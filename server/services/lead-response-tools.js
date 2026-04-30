@@ -225,6 +225,10 @@ async function executeLeadTool(toolName, input) {
         customerId: customer.id,
         leadId: input.lead_id || null,
         entryPoint: 'lead_response_auto_reply',
+        // Preserve the legacy messageType so the admin-sms-templates
+        // kill-switch (lead_response → lead_auto_reply_biz toggle) still
+        // applies when ops disables this template during an incident.
+        metadata: { original_message_type: 'lead_response' },
       });
 
       // Record response time + pipeline transition + activity ALWAYS,
@@ -241,12 +245,24 @@ async function executeLeadTool(toolName, input) {
           });
         }
 
+        // Distinguish wrapper-policy blocks from provider failures so
+        // incident triage doesn't see "blocked by middleware" when
+        // Twilio actually had a network error. activity_type:
+        //   sms_sent     → provider accepted the send
+        //   sms_blocked  → wrapper policy refused (opt-out, emoji, etc.)
+        //   sms_failed   → provider failure (Twilio threw, gateway timeout)
+        const activityType = result.sent
+          ? 'sms_sent'
+          : (result.blocked ? 'sms_blocked' : 'sms_failed');
+        const activityDescription = result.sent
+          ? 'Auto-response sent by lead agent'
+          : (result.blocked
+              ? `Auto-response blocked by middleware (${result.code || 'unknown'}): ${result.reason || ''}`
+              : `Auto-response provider failure (${result.code || 'unknown'}): ${result.reason || ''}`);
         await db('lead_activities').insert({
           lead_id: input.lead_id,
-          activity_type: result.sent ? 'sms_sent' : 'sms_blocked',
-          description: result.sent
-            ? 'Auto-response sent by lead agent'
-            : `Auto-response blocked by middleware (${result.code || 'unknown'}): ${result.reason || ''}`,
+          activity_type: activityType,
+          description: activityDescription,
           performed_by: 'lead_agent',
           metadata: JSON.stringify({ message: input.message, audit_log_id: result.auditLogId }),
         }).catch(() => {});
