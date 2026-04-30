@@ -143,7 +143,7 @@ export default function MobileAppointmentDetailSheet({
   const noteDirty = (service?.notes || '') !== note;
 
   const saveNote = async () => {
-    if (!noteDirty) return;
+    if (!noteDirty) return true;
     setSavingNote(true);
     try {
       await adminFetch(`/admin/dispatch/${service.id}/note`, {
@@ -153,8 +153,10 @@ export default function MobileAppointmentDetailSheet({
       setNoteSavedAt(Date.now());
       // Reflect saved state locally so noteDirty flips back to false.
       service.notes = note;
+      return true;
     } catch (err) {
       alert('Failed to save note: ' + err.message);
+      return false;
     } finally {
       setSavingNote(false);
     }
@@ -373,8 +375,12 @@ export default function MobileAppointmentDetailSheet({
             <button
               type="button"
               onClick={async () => {
-                if (noteDirty) await saveNote();
-                onClose?.();
+                if (!noteDirty) {
+                  onClose?.();
+                  return;
+                }
+                const saved = await saveNote();
+                if (saved) onClose?.();
               }}
               disabled={savingNote}
               className="rounded-sm bg-zinc-900 text-white u-focus-ring disabled:opacity-50"
