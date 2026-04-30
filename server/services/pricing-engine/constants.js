@@ -139,6 +139,16 @@ const PEST = {
       { sqft: 2501, price: r(199) },
       { sqft: Infinity, price: r(249) },
     ],
+    // Standalone Cockroach Treatment (svcRoach=true with roachType='REGULAR'):
+    // priced higher than the cost-recovery auto-fire above because the
+    // standalone customer isn't on a recurring program — no future visits to
+    // amortize the heavier visit-1 burden across. Selected via the
+    // `standalone: true` option in pricePestInitialRoach.
+    regular_standalone: [
+      { sqft: 1500, price: 202.50 },
+      { sqft: 2501, price: r(239) },
+      { sqft: Infinity, price: r(289) },
+    ],
   },
   frequencyDiscounts: {
     // Per-visit rate multiplier by cadence. Quarterly is the reference baseline.
