@@ -9,55 +9,63 @@
  * separate. What this layer guarantees:
  *
  *   1. No customer/lead-facing SMS bypasses the policy chain.
- *   2. STOP/HELP behavior is deterministic and template-based.
- *   3. Suppression is checked before every customer/lead send.
- *   4. Customer-facing emoji and exact-price leaks fail closed.
- *   5. Sensitive purposes (payment_link, billing) require identity context.
- *   6. Segment count is computed, logged, and enforced.
- *   7. Internal BI keeps its emoji/3-segment behavior via audience='internal'.
- *   8. Every send attempt — sent OR blocked — is recorded in the audit log.
+ *   2. Suppression is checked before every customer/lead send.
+ *   3. Customer-facing emoji and exact-price leaks fail closed.
+ *   4. Sensitive purposes (payment_link, billing) require identity context.
+ *   5. Segment count is computed, logged, and enforced.
+ *   6. Internal BI keeps its emoji/3-segment behavior via audience='internal'.
+ *   7. Every send attempt — sent OR blocked — is recorded in the audit log.
  *
  * Validator chain order (deterministic):
  *
  *   normalize_recipient
  *   require_input_ids                  — required IDs present per policy
- *   load_contact_state                 — pull notification_prefs, suppression
+ *   load_contact_state                 — pull notification_prefs + customer
+ *   load_suppression_state             — pull active suppression record
  *   check_suppression                  — STOP/wrong-number list
  *   check_consent_for_purpose          — sms_enabled + per-purpose flag/marketing
- *   validate_identity_for_purpose      — identityTrustLevel >= policy.minIdentityTrust
+ *   validate_identity_trust            — identityTrustLevel >= policy.minIdentityTrust
  *   validate_no_customer_emoji         — fail closed when audience in [customer, lead]
  *   validate_no_price_leak             — fail closed when audience in [customer, lead]
  *   validate_segment_count             — GSM-7/UCS-2 aware
- *   persist_audit_log
- *   send_via_provider                  — twilio for sms, gmail for email, etc.
- *   persist_delivery_attempt
+ *   persist_audit_log                  — every attempt, blocked or sent
+ *   send_via_provider                  — twilio for sms; email/portal_chat in follow-up
+ *   persist_delivery_attempt           — fold provider outcome into audit row
  *
- * Validators are pure functions where possible; DB lookups live in
- * load_contact_state and the audit step. Each validator returns
- * { ok: true } | { ok: false, code, reason } and the wrapper stops at
- * the first non-ok result, recording the block in the audit log.
+ * Each validator returns { ok: true } | { ok: false, code, reason }. The
+ * wrapper stops at the first non-ok result, persists an audit row marked
+ * blocked, and returns without invoking the provider.
  *
  * @typedef {import('./policy').SendCustomerMessageInput} SendCustomerMessageInput
  */
 
 const logger = require('../logger');
 const policyModule = require('./policy');
+const { loadContactState, checkConsentForPurpose } = require('./validators/consent');
+const { loadSuppressionState, checkSuppression } = require('./validators/suppression');
+const { validateRequiredIds, validateIdentityTrust, resolveTrustLevel } = require('./validators/identity');
+const { validateNoCustomerEmoji, validateNoPriceLeak } = require('./validators/voice');
+const { validateSegmentCount, countSegments } = require('./segment-counter');
+const { persistAudit } = require('./audit');
+const { sendViaTwilio } = require('./providers/twilio-sms');
 
 /**
- * Validator chain. Each validator is invoked with (input, policy, contactState)
- * and must return { ok: true } or { ok: false, code, reason }.
- *
- * Wired in commit 2 — this commit lands the contract + harness only.
+ * Normalize a phone string to E.164 (best-effort). Mirrors the existing
+ * twilio.js normalizePhone — kept private here so the wrapper doesn't
+ * depend on a non-exported twilio.js helper.
  */
-const VALIDATOR_PIPELINE = [
-  // 'require_input_ids',
-  // 'check_suppression',
-  // 'check_consent_for_purpose',
-  // 'validate_identity_for_purpose',
-  // 'validate_no_customer_emoji',
-  // 'validate_no_price_leak',
-  // 'validate_segment_count',
-];
+function normalizeRecipient(phone) {
+  if (!phone) return null;
+  const trimmed = String(phone).trim();
+  if (!trimmed) return null;
+  const digits = trimmed.replace(/\D/g, '');
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+  if (trimmed.startsWith('+')) return trimmed;
+  // Fall back to the input if we can't confidently normalize — twilio
+  // will reject malformed numbers downstream and we'll log the failure.
+  return trimmed;
+}
 
 /**
  * @param {SendCustomerMessageInput} input
@@ -67,18 +75,20 @@ const VALIDATOR_PIPELINE = [
  *   reason?: string,
  *   code?: string,
  *   providerMessageId?: string,
- *   auditLogId?: string,
+ *   auditLogId?: string | null,
  *   segmentCount?: number,
  *   encoding?: 'GSM_7' | 'UCS_2',
  * }>}
  */
 async function sendCustomerMessage(input) {
-  const validation = validateContract(input);
-  if (!validation.ok) {
-    logger.warn(`[send_customer_message] contract violation: ${validation.reason}`);
-    return { sent: false, blocked: true, code: 'CONTRACT_VIOLATION', reason: validation.reason };
+  // 1. Contract validation
+  const contractCheck = validateContract(input);
+  if (!contractCheck.ok) {
+    logger.warn(`[send_customer_message] contract violation: ${contractCheck.reason}`);
+    return { sent: false, blocked: true, code: 'CONTRACT_VIOLATION', reason: contractCheck.reason };
   }
 
+  // 2. Resolve policy
   let policy;
   try {
     policy = policyModule.resolvePolicy(input.audience, input.purpose);
@@ -87,24 +97,100 @@ async function sendCustomerMessage(input) {
     return { sent: false, blocked: true, code: 'UNKNOWN_POLICY', reason: err.message };
   }
 
-  // Validator pipeline lands in commit 2. Stub: contract-only path so the
-  // wrapper compiles, loads, and is wire-able by call sites without behavior
-  // change. Until validators are wired, customer/lead audiences refuse to
-  // send (fail-closed) so an early call-site migration can't accidentally
-  // bypass the chain. Internal audience is allowed through for the BI
-  // briefing migration test that lands in commit 6.
-  if (input.audience === 'customer' || input.audience === 'lead') {
+  // 3. Normalize recipient + clone input so downstream sees the canonical form
+  const normalizedTo = normalizeRecipient(input.to);
+  const sendInput = { ...input, to: normalizedTo };
+
+  // 4. Load contact state once (consent + suppression share the lookup)
+  let contactState = await loadContactState(sendInput);
+  contactState = await loadSuppressionState(sendInput, contactState);
+
+  // 5. Run validator pipeline. Each entry is { name, fn }; fn is invoked
+  //    with (input, policy, contactState).
+  const segmentMeta = countSegments(sendInput.body);
+  const pipeline = [
+    { name: 'require_input_ids',          fn: () => validateRequiredIds(sendInput, policy) },
+    { name: 'check_suppression',          fn: () => checkSuppression(sendInput, policy, contactState) },
+    { name: 'check_consent_for_purpose',  fn: () => checkConsentForPurpose(sendInput, policy, contactState) },
+    { name: 'validate_identity_trust',    fn: () => validateIdentityTrust(sendInput, policy, contactState) },
+    { name: 'validate_no_customer_emoji', fn: () => validateNoCustomerEmoji(sendInput, policy) },
+    { name: 'validate_no_price_leak',     fn: () => validateNoPriceLeak(sendInput, policy) },
+    { name: 'validate_segment_count',     fn: () => validateSegmentCount(sendInput, policy) },
+  ];
+
+  const validatorsPassed = [];
+  let blockedBy = null;
+
+  for (const step of pipeline) {
+    const result = await step.fn();
+    if (result && result.ok) {
+      validatorsPassed.push(step.name);
+    } else {
+      blockedBy = { code: result.code, reason: result.reason, validator: step.name };
+      break;
+    }
+  }
+
+  const resolvedTrust = resolveTrustLevel(sendInput, contactState);
+
+  // 6. If anything blocked, persist audit + return
+  if (blockedBy) {
+    const audit = await persistAudit({
+      input: sendInput,
+      policy,
+      segmentMeta,
+      validatorsPassed,
+      validatorsFailed: [blockedBy.validator],
+      blockedBy: { code: blockedBy.code, reason: blockedBy.reason },
+      identityTrust: resolvedTrust,
+      providerOutcome: null,
+    });
     return {
       sent: false,
       blocked: true,
-      code: 'PIPELINE_NOT_WIRED',
-      reason: 'Validator pipeline not yet wired — refusing customer/lead send. Land commits 2-4 before migrating call sites.',
+      code: blockedBy.code,
+      reason: blockedBy.reason,
+      auditLogId: audit.id,
+      segmentCount: segmentMeta.segmentCount,
+      encoding: segmentMeta.encoding,
     };
   }
 
-  // Internal/admin/tech audiences pass straight through to provider for now.
-  // (Validators still apply once wired.)
-  return dispatchToProvider(input, policy);
+  // 7. Dispatch to provider
+  const providerOutcome = await dispatchToProvider(sendInput);
+
+  // 8. Persist final audit row with provider outcome
+  const audit = await persistAudit({
+    input: sendInput,
+    policy,
+    segmentMeta,
+    validatorsPassed,
+    validatorsFailed: [],
+    blockedBy: providerOutcome.sent ? null : { code: 'PROVIDER_FAILURE', reason: providerOutcome.error || 'unknown' },
+    identityTrust: resolvedTrust,
+    providerOutcome,
+  });
+
+  if (!providerOutcome.sent) {
+    return {
+      sent: false,
+      blocked: false,
+      code: 'PROVIDER_FAILURE',
+      reason: providerOutcome.error || 'provider returned no message id',
+      auditLogId: audit.id,
+      segmentCount: segmentMeta.segmentCount,
+      encoding: segmentMeta.encoding,
+    };
+  }
+
+  return {
+    sent: true,
+    blocked: false,
+    providerMessageId: providerOutcome.providerMessageId,
+    auditLogId: audit.id,
+    segmentCount: segmentMeta.segmentCount,
+    encoding: segmentMeta.encoding,
+  };
 }
 
 function validateContract(input) {
@@ -136,24 +222,24 @@ function validateContract(input) {
 }
 
 /**
- * Provider dispatch. Lands per-channel routing in commit 5; this stub
- * exists so the contract test in commit 7 has something to call.
+ * Per-channel provider routing. Only sms ships in this commit; email and
+ * portal_chat dispatchers land when the corresponding call sites migrate.
  */
-async function dispatchToProvider(input, policy) {
-  // Channel-specific provider routing wires up in commit 5.
+async function dispatchToProvider(input) {
+  if (input.channel === 'sms') {
+    return sendViaTwilio(input);
+  }
   return {
     sent: false,
-    blocked: true,
-    code: 'PROVIDER_NOT_WIRED',
-    reason: 'Provider dispatch not wired — see commit 5.',
+    error: `Provider for channel "${input.channel}" not yet wired in send_customer_message`,
   };
 }
 
 module.exports = {
   sendCustomerMessage,
-  // Exposed for tests in commit 7
+  // Exposed for tests
   _internals: {
     validateContract,
-    VALIDATOR_PIPELINE,
+    normalizeRecipient,
   },
 };
