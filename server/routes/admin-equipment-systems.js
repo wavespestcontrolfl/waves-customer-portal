@@ -154,10 +154,34 @@ router.put('/calibrations/:id', async (req, res, next) => {
       if (Object.prototype.hasOwnProperty.call(payload, k)) update[k] = payload[k];
     }
 
-    const [saved] = await db('equipment_calibrations')
-      .where({ id: existing.id })
-      .update(update)
-      .returning('*');
+    // Belt-and-suspenders for the partial unique index. The pre-check
+    // above catches the user-error case with a clear 400, but it has
+    // a TOCTOU window: between our SELECT and this UPDATE, a concurrent
+    // writer could activate a different calibration for the same
+    // system. Without this catch, that race surfaces as a 500. We
+    // collapse it into the same 400 shape so callers handle one
+    // failure mode regardless of which writer arrived first.
+    let saved;
+    try {
+      [saved] = await db('equipment_calibrations')
+        .where({ id: existing.id })
+        .update(update)
+        .returning('*');
+    } catch (err) {
+      const isActiveIndexViolation = err
+        && err.code === '23505'
+        && (err.constraint === 'idx_eqcal_one_active_per_system'
+            || /idx_eqcal_one_active_per_system/.test(String(err.message || '')));
+      if (isActiveIndexViolation) {
+        return res.status(400).json({
+          error: 'Cannot activate this calibration while another is active for the same system',
+          details: [
+            'Another active calibration was created for this system between read and write. Refresh the calibration list and try again, or use POST /api/admin/equipment-systems/:id/calibrations to record a new calibration (it deactivates the prior active in the same transaction).',
+          ],
+        });
+      }
+      throw err;
+    }
 
     res.json({ calibration: saved });
   } catch (err) { next(err); }
