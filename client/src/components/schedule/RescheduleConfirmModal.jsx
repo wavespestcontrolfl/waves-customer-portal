@@ -1,7 +1,7 @@
 // Confirmation modal shown when an appointment block is drag-dropped
-// to a new time/date. Layout mirrors Square Appointments' reschedule
-// prompt: prose summary + Client booking notifications + Return to
-// editing / Reschedule appointment / Reschedule series (recurring only).
+// to a new time/date. Layout: prose summary + Client booking
+// notifications + Return to editing / Reschedule appointment /
+// Reschedule series (recurring only).
 //
 // The parent grid is responsible for optimistic UI (moving the block
 // visually) — this modal only confirms and commits via onConfirm
