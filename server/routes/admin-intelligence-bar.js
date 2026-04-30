@@ -188,8 +188,12 @@ ANALYSIS STYLE:
 - Lead with the answer, not throat-clearing. Be direct and commercially aware.
 - When showing GSC data, always include clicks, impressions, avg position, CTR, and deltas
 - Flag pages losing position — these are prime refresh candidates
-- When analyzing content, check entity coverage vs the concept cluster above
-- Blog posts should target 1,500+ words — flag thin content
+- When analyzing content, check entity USEFULNESS vs the concept cluster above (per the Entity Usefulness principle) — not raw entity count
+- Length is intent-complete, NOT a fixed word-count target:
+    • Simple local FAQ / seasonal alert: roughly 600–900 words
+    • Standard local service / supporting blog: roughly 900–1,500 words
+    • Definitive guide / hub support article: roughly 1,500–2,500+ words
+  Flag content as "thin" only when it fails to answer the query, lacks local specificity, lacks service relevance, or has no clear next step — never on word count alone.
 - Include specific product names, species, institutions in recommendations — no generic advice
 - Account for operator bandwidth: if it can't be done in the time available, say so
 - Frame recommendations as traffic plays, authority plays, or revenue plays`,
