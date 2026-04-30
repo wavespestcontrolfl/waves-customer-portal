@@ -174,7 +174,9 @@ const ReviewService = {
       status: 'pending',
     }).returning('*');
 
-    logger.info(`[review] Created request for ${customer.first_name} ${customer.last_name} — trigger: ${triggeredBy}, scheduled: ${scheduledFor || 'immediate'}`);
+    // PII: ID-only logging per AGENTS.md. Customer name lives in the
+    // customers row; the log line just needs IDs for cross-reference.
+    logger.info(`[review] Created request (customerId=${customer.id} requestId=${request.id} trigger=${triggeredBy} scheduled=${scheduledFor || 'immediate'})`);
 
     // If tech-triggered, send immediately
     if (triggeredBy === 'tech') {
@@ -197,7 +199,8 @@ const ReviewService = {
       await db('review_requests').where({ id: requestId }).update({
         status: 'suppressed',
       });
-      logger.info(`[review] Suppressed request for ${customer.first_name} ${customer.last_name} (already-reviewed flag)`);
+      // PII: ID-only per AGENTS.md.
+      logger.info(`[review] Suppressed request (customerId=${customer.id} requestId=${requestId} reason=already-reviewed-flag)`);
       return;
     }
     // Route to the service beneficiary (see services/customer-contact.js) —
@@ -253,7 +256,8 @@ const ReviewService = {
           sms_sent_at: new Date(),
           status: 'sent',
         });
-        logger.info(`[review] SMS sent for ${customer.first_name} ${customer.last_name}`);
+        // PII: ID-only per AGENTS.md.
+        logger.info(`[review] SMS sent (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'})`);
       } else if (result.blocked) {
         // Wrapper-policy block (opt-out, suppression, emoji, price leak,
         // segment cap, identity, etc.). Mark suppressed so processScheduled()
@@ -339,7 +343,8 @@ const ReviewService = {
       status: 'sent',
     }).returning('*');
 
-    logger.info(`[review] Created inline request for ${customer.first_name} ${customer.last_name} (bundled with completion SMS)`);
+    // PII: ID-only per AGENTS.md.
+    logger.info(`[review] Created inline request (customerId=${customer.id} requestId=${request.id} bundled-with=completion_sms)`);
 
     const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
     const longUrl = `${domain}/rate/${request.token}`;
