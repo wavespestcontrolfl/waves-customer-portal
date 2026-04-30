@@ -306,7 +306,23 @@ router.put('/:serviceId/status', async (req, res, next) => {
 // POST /api/admin/dispatch/:serviceId/complete
 router.post('/:serviceId/complete', async (req, res, next) => {
   try {
-    const { technicianNotes, products, soilTemp, thatchMeasurement, soilPh, soilMoisture, sendCompletionSms, requestReview, formResponses, formStartedAt } = req.body;
+    const { technicianNotes, products, soilTemp, thatchMeasurement, soilPh, soilMoisture, sendCompletionSms, requestReview, formResponses, formStartedAt, visitOutcome, noProductsReason } = req.body;
+    // Tech-approved customer recap (the polished SMS body — Claude-drafted
+    // or hand-written in MobileCompleteServiceSheet). When present, this
+    // text REPLACES the templated body for the standard / prepaid SMS
+    // branches so what the tech approved is exactly what the customer
+    // receives. We still append the pay link + review suffix from the
+    // existing pipeline.
+    const customerRecap = (formResponses && typeof formResponses.customerRecap === 'string')
+      ? formResponses.customerRecap.trim().slice(0, 320)
+      : '';
+    // Incomplete visits (weather-blocked, can't access, etc.) record the
+    // record + audit row but skip every customer-facing side effect: no
+    // invoice creation, no completion SMS, no review request. The
+    // operations team picks up the followUpNote separately. The tech
+    // sees a CTA labeled "Mark Visit Incomplete" so the UI doesn't
+    // promise more than this branch delivers.
+    const isIncompleteOutcome = visitOutcome === 'incomplete';
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
@@ -535,7 +551,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         .orderBy('created_at', 'desc')
         .first();
     } catch (e) { /* column may not exist pre-migration — non-blocking */ }
-    const shouldInvoice = !alreadyPaid && !prepaidCovered && !preMintedInvoice
+    const shouldInvoice = !isIncompleteOutcome
+      && !alreadyPaid && !prepaidCovered && !preMintedInvoice
       && (!!svc.create_invoice_on_complete || !!svc.cust_waveguard_tier) && invoiceAmount > 0;
     // Customer-facing SMS URL must be the canonical portal domain, not
     // the raw Railway URL (CLIENT_URL is set to the Railway hostname on
@@ -580,7 +597,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // SMS instead of firing a second message 90-180 min later. Single message
     // lands higher read-rates than two.
     let bundledReviewUrl = null;
-    if (sendCompletionSms && requestReview && svc.cust_phone) {
+    if (!isIncompleteOutcome && sendCompletionSms && requestReview && svc.cust_phone) {
       try {
         const ReviewService = require('../services/review-request');
         bundledReviewUrl = await ReviewService.createInline({
@@ -593,29 +610,43 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       ? `\n\nEnjoyed the service? A quick review means the world: ${bundledReviewUrl}`
       : '';
 
-    if (sendCompletionSms && svc.cust_phone) {
+    if (!isIncompleteOutcome && sendCompletionSms && svc.cust_phone) {
       try {
         const displayServiceType = normalizeServiceTypeForTemplate(svc.service_type);
+        // When the tech approved a customerRecap in the completion sheet,
+        // it REPLACES the templated body so what they saw on screen is
+        // what the customer receives. The pay-link line + review suffix
+        // are still appended by the existing pipeline so we don't lose
+        // the structural pieces the tech wasn't writing themselves.
+        const recapPayLine = (invoiceCreated && payUrl)
+          ? `\n\nInvoice for today's visit: ${payUrl}`
+          : '';
         if (invoiceCreated && payUrl) {
           const fallback = `Hello ${svc.first_name}! Your ${displayServiceType} service report is ready: ${portalUrl}\n\nInvoice for today's visit: ${payUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
-          const body = await renderTemplate('service_complete_with_invoice', {
-            first_name: svc.first_name || '',
-            service_type: displayServiceType,
-            portal_url: portalUrl,
-            pay_url: payUrl,
-          }, fallback);
+          const body = customerRecap
+            ? customerRecap + recapPayLine
+            : await renderTemplate('service_complete_with_invoice', {
+                first_name: svc.first_name || '',
+                service_type: displayServiceType,
+                portal_url: portalUrl,
+                pay_url: payUrl,
+              }, fallback);
           await TwilioService.sendSMS(svc.cust_phone, body + reviewSuffix, { customerId: svc.customer_id, messageType: 'service_complete_with_invoice' });
         } else if (prepaidCovered || alreadyPaid) {
           const fallback = `Hello ${svc.first_name}! Thanks for your payment today. Your ${displayServiceType} service report is ready: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
-          const body = await renderTemplate('service_complete_prepaid', {
-            first_name: svc.first_name || '',
-            service_type: displayServiceType,
-            portal_url: portalUrl,
-          }, fallback);
+          const body = customerRecap
+            ? customerRecap
+            : await renderTemplate('service_complete_prepaid', {
+                first_name: svc.first_name || '',
+                service_type: displayServiceType,
+                portal_url: portalUrl,
+              }, fallback);
           await TwilioService.sendSMS(svc.cust_phone, body + reviewSuffix, { customerId: svc.customer_id, messageType: 'service_complete_prepaid' });
         } else {
           const fallback = `Hello ${svc.first_name}! Your service report is ready. View it here: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
-          const body = await renderTemplate('service_complete', { first_name: svc.first_name || '' }, fallback);
+          const body = customerRecap
+            ? customerRecap
+            : await renderTemplate('service_complete', { first_name: svc.first_name || '' }, fallback);
           await TwilioService.sendSMS(svc.cust_phone, body + reviewSuffix, { customerId: svc.customer_id, messageType: 'service_complete' });
         }
       } catch (e) { logger.error(`Completion SMS failed: ${e.message}`); }
@@ -623,7 +654,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     // Only schedule the delayed follow-up message when the review wasn't
     // already bundled into the completion SMS above.
-    if (requestReview && svc.cust_phone && !bundledReviewUrl) {
+    if (!isIncompleteOutcome && requestReview && svc.cust_phone && !bundledReviewUrl) {
       try {
         const ReviewService = require('../services/review-request');
         await ReviewService.create({
@@ -1478,35 +1509,80 @@ const { FAST: RECAP_MODEL } = require('../config/models');
 let _Anthropic;
 try { _Anthropic = require('@anthropic-ai/sdk'); } catch { _Anthropic = null; }
 
+// Server-side limits on inputs — frontend caps aren't enough since the
+// endpoint is also reachable by any authenticated tech/admin client.
+const RECAP_INPUT_LIMITS = {
+  notes: 2000,
+  products: 25,
+  productName: 120,
+  observations: 12,
+  observationLabel: 60,
+  firstName: 60,
+  serviceType: 120,
+};
+// Output cap — keep recap inside one GSM-7 SMS segment when possible. Use
+// 240 (not 320) because reality shows operator/encoding overhead can push
+// 320-char drafts into a 2-segment send.
+const RECAP_OUTPUT_MAX = 240;
+
+function sanitizeRecap(text) {
+  if (typeof text !== 'string') return '';
+  let s = text.trim();
+  // Drop wrapping smart-quotes/quotes models sometimes emit.
+  s = s.replace(/^["“”']+|["“”']+$/g, '');
+  // Collapse whitespace runs to single spaces.
+  s = s.replace(/\s+/g, ' ');
+  // Strip leading "Hi {anything}," — the prompt forbids it but models
+  // still sneak it in. Anchored so we don't eat legitimate "Hi" inside.
+  s = s.replace(/^hi\b[^,.!]*[,.!]\s*/i, '');
+  // Em/en dash before signoff → ASCII hyphen so we don't trip Twilio's
+  // GSM-7 fallback into UCS-2 encoding (which halves segment capacity).
+  s = s.replace(/\s*[—–]\s*Waves\s*$/i, ' - Waves');
+  // If Claude omitted any signoff, append one.
+  if (!/-+\s*Waves\s*$/i.test(s)) s = `${s} - Waves`;
+  // Hard cap.
+  if (s.length > RECAP_OUTPUT_MAX) {
+    const cap = s.slice(0, RECAP_OUTPUT_MAX - ' - Waves'.length).trimEnd();
+    s = `${cap.replace(/[\s,;]+$/, '')} - Waves`;
+  }
+  return s;
+}
+
 router.post('/recap-preview', requireTechOrAdmin, async (req, res) => {
   try {
     if (!_Anthropic || !process.env.ANTHROPIC_API_KEY) {
       return res.status(503).json({ error: 'AI not configured' });
     }
-    const {
-      technicianNotes = '',
-      products = [],
-      observations = [],
-      customerFirstName = '',
-      serviceType = 'service',
-    } = req.body || {};
+    const body = req.body || {};
+    const technicianNotes = String(body.technicianNotes || '').slice(0, RECAP_INPUT_LIMITS.notes);
+    const customerFirstName = String(body.customerFirstName || '').slice(0, RECAP_INPUT_LIMITS.firstName);
+    const serviceType = String(body.serviceType || 'service').slice(0, RECAP_INPUT_LIMITS.serviceType);
+    const rawProducts = Array.isArray(body.products) ? body.products : [];
+    const rawObservations = Array.isArray(body.observations) ? body.observations : [];
+    const products = rawProducts
+      .slice(0, RECAP_INPUT_LIMITS.products)
+      .map((p) => String(p?.name || p?.product_name || '').slice(0, RECAP_INPUT_LIMITS.productName))
+      .filter(Boolean);
+    const observations = rawObservations
+      .slice(0, RECAP_INPUT_LIMITS.observations)
+      .map((o) => String(o || '').slice(0, RECAP_INPUT_LIMITS.observationLabel))
+      .filter(Boolean);
 
-    if (!technicianNotes || technicianNotes.trim().length < 10) {
+    if (technicianNotes.trim().length < 10) {
       // Below the threshold the client uses to even fire this; reject so
       // a stray request doesn't burn an API call on empty notes.
       return res.status(400).json({ error: 'Notes too short for recap.' });
     }
 
-    const productList = Array.isArray(products)
-      ? products.map((p) => p?.name || p?.product_name).filter(Boolean).join(', ')
-      : '';
-    const observationList = Array.isArray(observations) ? observations.join(', ') : '';
+    const productList = products.join(', ');
+    const observationList = observations.join(', ');
 
     const system = [
       'You write short customer-facing SMS recaps for Waves Pest Control.',
       'Style: warm, professional, two short sentences max, no exclamation marks, no marketing fluff.',
       'Translate raw technician shorthand into clear customer language. Never mention internal jargon, product chemistry detail, or pricing.',
-      'Sign off with " — Waves" at the end. Stay under 320 characters total so it fits one SMS segment.',
+      'Use plain ASCII punctuation only (no em dash, no smart quotes). End the message with " - Waves".',
+      'Keep it short enough for SMS — aim for under 200 characters before the signoff.',
       'If the technician mentions concerns or follow-up, acknowledge them briefly without alarming the customer.',
     ].join(' ');
 
@@ -1528,11 +1604,11 @@ router.post('/recap-preview', requireTechOrAdmin, async (req, res) => {
       messages: [{ role: 'user', content: user }],
     });
 
-    const recap = (r?.content || [])
+    const raw = (r?.content || [])
       .filter((c) => c.type === 'text')
       .map((c) => c.text)
-      .join('')
-      .trim();
+      .join('');
+    const recap = sanitizeRecap(raw);
 
     return res.json({ recap, model: RECAP_MODEL });
   } catch (err) {
