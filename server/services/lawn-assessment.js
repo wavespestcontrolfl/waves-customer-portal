@@ -46,8 +46,9 @@ async function callClaudeVision(base64Image, mimeType) {
   try {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const response = await anthropic.messages.create({
-      model: MODELS.FLAGSHIP,
+      model: MODELS.VISION,
       max_tokens: 500,
+      temperature: 0.2, // match Gemini's 0.2 — keeps Claude's scoring repeatable across re-runs
       messages: [{
         role: 'user',
         content: [

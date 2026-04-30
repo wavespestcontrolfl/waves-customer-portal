@@ -66,8 +66,9 @@ async function assessPhotoQuality(base64Image, mimeType) {
   try {
     const client = new Anthropic();
     const response = await client.messages.create({
-      model: MODELS.FLAGSHIP,
+      model: MODELS.VISION,
       max_tokens: 300,
+      temperature: 0.2, // pin output for repeatable pass/fail decisions on the same photo
       messages: [{
         role: 'user',
         content: [
