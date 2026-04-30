@@ -393,13 +393,41 @@ async function executeExpandedTool(toolName, input, contextCustomerId) {
       const customer = await db('customers').where('id', customerId).first();
       if (!customer?.phone) return { error: 'Customer has no phone number' };
 
-      const TwilioService = require('../../services/twilio');
-      await TwilioService.sendSMS(customer.phone, input.message, {
+      // Routed through the customer-message middleware so consent/
+      // suppression/identity/voice/segment checks all apply, and the
+      // attempt lands in messaging_audit_log (sent or blocked). The
+      // wrapper internally calls services/twilio.js sendSMS, so the
+      // existing owner-silence + feature-gate + sms-guard layers
+      // continue to apply.
+      const { sendCustomerMessage } = require('../messaging/send-customer-message');
+      const result = await sendCustomerMessage({
+        to: customer.phone,
+        body: input.message,
+        channel: 'sms',
+        audience: 'customer',
+        purpose: 'conversational',
         customerId: customer.id,
-        messageType: 'ai_assistant_followup',
+        entryPoint: 'ai_assistant_send_sms_tool',
       });
 
-      return { sent: true, to: customer.phone };
+      if (result.sent) {
+        return {
+          sent: true,
+          to: customer.phone,
+          providerMessageId: result.providerMessageId,
+          segmentCount: result.segmentCount,
+          encoding: result.encoding,
+        };
+      }
+      // Surface the block so the agent's tool-use loop sees the failure
+      // and can adapt (e.g. apologize and offer the office number)
+      // instead of pretending the SMS went out.
+      return {
+        sent: false,
+        blocked: !!result.blocked,
+        code: result.code,
+        reason: result.reason,
+      };
     }
 
     default:
