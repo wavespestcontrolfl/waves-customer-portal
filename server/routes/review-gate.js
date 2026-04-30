@@ -213,6 +213,20 @@ router.post('/:token/submit', async (req, res, next) => {
 });
 
 // POST /api/rate/:token/generate-review — AI-powered review writer
+// Caps for AI prompt inputs — prevent prompt-injection / runaway prompt size.
+const MAX_LIST_ITEMS = 12;
+const MAX_LIST_ITEM_CHARS = 60;
+const MAX_PERSONAL_NOTE_CHARS = 500;
+
+const sanitizeList = (arr) => {
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .filter((v) => typeof v === 'string')
+    .slice(0, MAX_LIST_ITEMS)
+    .map((v) => v.trim().slice(0, MAX_LIST_ITEM_CHARS))
+    .filter(Boolean);
+};
+
 router.post('/:token/generate-review', async (req, res, next) => {
   try {
     const { services, highlights, personalNote } = req.body;
@@ -225,19 +239,39 @@ router.post('/:token/generate-review', async (req, res, next) => {
       return res.status(404).json({ error: 'Review link not found' });
     }
 
+    if (request.expires_at && new Date(request.expires_at) < new Date()) {
+      return res.status(410).json({ error: 'This review link has expired' });
+    }
+
+    // Review writer is the promoter branch only — the client submits the NPS
+    // score first and only then calls this endpoint, so a missing score means
+    // the request is hitting us out of the intended order.
+    if (request.score == null) {
+      return res.status(400).json({ error: 'Submit your rating before generating a review' });
+    }
+    if (request.score < 8) {
+      return res.status(403).json({ error: 'Review writer is available for high-rating responses only' });
+    }
+
     const customer = await db('customers').where({ id: request.customer_id }).first();
     const firstName = customer?.first_name || 'there';
 
+    const safeServices = sanitizeList(services);
+    const safeHighlights = sanitizeList(highlights);
+    const safePersonalNote = (typeof personalNote === 'string' ? personalNote : '')
+      .trim()
+      .slice(0, MAX_PERSONAL_NOTE_CHARS);
+
     // Build the prompt
-    const serviceList = (services && services.length > 0)
-      ? services.join(', ')
+    const serviceList = safeServices.length > 0
+      ? safeServices.join(', ')
       : (request.service_type || 'pest control');
 
-    const highlightList = (highlights && highlights.length > 0)
-      ? highlights.join(', ')
+    const highlightList = safeHighlights.length > 0
+      ? safeHighlights.join(', ')
       : '';
 
-    const personalDetail = personalNote ? personalNote.trim() : '';
+    const personalDetail = safePersonalNote;
 
     // Vary opening style so Google's dup-detection doesn't flag a pattern
     // of "Adam was…" across every generated review. One is sampled per call.
