@@ -535,8 +535,17 @@ async function handlePaymentIntentFailed(paymentIntent) {
   setImmediate(async () => {
     try {
       const piId = paymentIntent.id;
-      // Object-level idempotency — see payment_succeeded handler above.
-      if (!(await claimNotificationDispatch(piId, 'payment_failed'))) return;
+      // Object-level idempotency. Unlike payment_succeeded (one terminal
+      // success per PI), payment_failed can fire legitimately many times
+      // for the same PI: this codebase reuses PIs across attempts (e.g.
+      // /api/pay/:token/update-amount) and Stripe emits a separate event
+      // per failed charge attempt. Keying on PI alone would suppress
+      // every failure after the first. Key on the failed charge id
+      // instead (stable per attempt; falls back to PI id when no charge
+      // is attached, which is the rare authorize-fail case).
+      // Codex P1 #540.
+      const failureDedupeKey = paymentIntent.latest_charge || piId;
+      if (!(await claimNotificationDispatch(failureDedupeKey, 'payment_failed'))) return;
       const failedInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first();
       let customer = null;
       if (failedInvoice?.customer_id) {
