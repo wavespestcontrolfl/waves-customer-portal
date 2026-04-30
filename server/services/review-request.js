@@ -226,52 +226,19 @@ const ReviewService = {
       body = `Hello ${contact.name || customer.first_name}! How was your service with ${techName}? We'd love your feedback: ${reviewUrl}`;
     }
 
-    // Routed through the customer-message middleware so consent /
-    // suppression / identity / voice / segment checks all apply, and
-    // every attempt lands in messaging_audit_log.
-    //
-    // Per the prompt-hardening pass that landed in #522, review-request
-    // eligibility lives in the upstream candidate-finder (no open
-    // complaint, no unresolved billing, opted in, no recent ask in
-    // cooldown). Here we just make sure the channel is permitted at
-    // send time — sms_enabled, suppression list, segment count, no
-    // emoji / price leak.
     try {
-      const { sendCustomerMessage } = require('./messaging/send-customer-message');
-      const result = await sendCustomerMessage({
-        to: contact.phone,
-        body,
-        channel: 'sms',
-        audience: 'customer',
-        purpose: 'review_request',
+      const TwilioService = require('./twilio');
+      await TwilioService.sendSMS(contact.phone, body, {
         customerId: customer.id,
-        entryPoint: 'review_request_send',
+        messageType: 'review_request',
       });
 
-      if (result.sent) {
-        await db('review_requests').where({ id: requestId }).update({
-          sms_sent_at: new Date(),
-          status: 'sent',
-        });
-        logger.info(`[review] SMS sent for ${customer.first_name} ${customer.last_name}`);
-      } else if (result.blocked) {
-        // Wrapper-policy block (opt-out, suppression, emoji, price leak,
-        // segment cap, identity, etc.). Mark suppressed so processScheduled()
-        // — which only picks rows with status='pending' — stops retrying.
-        // The request row stays for audit history; the audit_log row
-        // captures the block reason.
-        await db('review_requests').where({ id: requestId }).update({
-          status: 'suppressed',
-        });
-        // PII: ID-only logging per AGENTS.md.
-        logger.warn(`[review] SMS BLOCKED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'}): ${result.code} — ${result.reason}`);
-      } else {
-        // Provider failure (Twilio/network). Leave status='pending' so the
-        // cron retries on the next tick. Permanent suppression for transient
-        // provider errors would silently drop legitimate review requests.
-        // PII: ID-only logging per AGENTS.md.
-        logger.error(`[review] SMS PROVIDER FAILURE (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'}): ${result.code} — ${result.reason} (will retry)`);
-      }
+      await db('review_requests').where({ id: requestId }).update({
+        sms_sent_at: new Date(),
+        status: 'sent',
+      });
+
+      logger.info(`[review] SMS sent for ${customer.first_name} ${customer.last_name}`);
     } catch (err) {
       logger.error(`[review] SMS failed: ${err.message}`);
     }

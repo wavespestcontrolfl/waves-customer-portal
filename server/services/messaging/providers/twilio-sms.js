@@ -11,14 +11,16 @@
 const TwilioService = require('../../twilio');
 
 async function sendViaTwilio(input) {
-  // Callers can preserve a legacy messageType (e.g. 'lead_response',
-  // 'invoice', 'manual') via metadata.original_message_type so the
-  // existing admin-sms-templates kill-switch keys still work. The
-  // wrapper's purpose enum drives policy + audit; the messageType
-  // string drives the per-template ops kill switch and the
-  // logo-attach behavior in services/twilio.js.
-  const messageType = (input.metadata && input.metadata.original_message_type)
-    || mapPurposeToMessageType(input.purpose);
+  // metadata.original_message_type lets a caller force a specific
+  // template kill-switch mapping when the purpose-based default would
+  // route to the wrong sms_templates row. invoice.js:402 uses this to
+  // keep invoice SMS controlled by the `invoice_sent` template
+  // (purpose=billing/payment_link would otherwise map to a different
+  // template, breaking the per-template kill-switch). Codex P1 on
+  // PR #537 — keep this override pathway when reverting #526.
+  const messageType =
+    (input.metadata && input.metadata.original_message_type) ||
+    mapPurposeToMessageType(input.purpose);
   try {
     const result = await TwilioService.sendSMS(input.to, input.body, {
       customerId: input.customerId || null,

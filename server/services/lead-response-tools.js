@@ -206,34 +206,13 @@ async function executeLeadTool(toolName, input) {
       const customer = await db('customers').where('id', input.customer_id).first();
       if (!customer?.phone) return { error: 'Customer has no phone number' };
 
-      // Routed through the customer-message middleware so consent /
-      // suppression / identity / voice / segment checks all apply, and
-      // every attempt lands in messaging_audit_log. Behavior change to
-      // be aware of: a lead whose notification_prefs.sms_enabled is
-      // false (e.g. they previously sent STOP) WILL NOT receive the
-      // auto-reply — the wrapper blocks the send and the agent's
-      // tool-use loop sees the block. Pipeline updates + activity log
-      // entries still record so the lead doesn't disappear; we just
-      // don't auto-text someone who opted out.
-      const { sendCustomerMessage } = require('./messaging/send-customer-message');
-      const result = await sendCustomerMessage({
-        to: customer.phone,
-        body: input.message,
-        channel: 'sms',
-        audience: 'lead',
-        purpose: 'conversational',
+      const TwilioService = require('./twilio');
+      await TwilioService.sendSMS(customer.phone, input.message, {
         customerId: customer.id,
-        leadId: input.lead_id || null,
-        entryPoint: 'lead_response_auto_reply',
-        // Preserve the legacy messageType so the admin-sms-templates
-        // kill-switch (lead_response → lead_auto_reply_biz toggle) still
-        // applies when ops disables this template during an incident.
-        metadata: { original_message_type: 'lead_response' },
+        messageType: 'lead_response',
       });
 
-      // Record response time + pipeline transition + activity ALWAYS,
-      // regardless of whether the SMS actually went out. The lead came
-      // in, the agent processed it, those facts deserve to be logged.
+      // Record response time
       if (input.lead_id) {
         const lead = await db('leads').where('id', input.lead_id).first();
         if (lead?.first_contact_at) {
@@ -244,81 +223,25 @@ async function executeLeadTool(toolName, input) {
             updated_at: new Date(),
           });
         }
+      }
 
-        // Distinguish wrapper-policy blocks from provider failures so
-        // incident triage doesn't see "blocked by middleware" when
-        // Twilio actually had a network error. activity_type:
-        //   sms_sent     → provider accepted the send
-        //   sms_blocked  → wrapper policy refused (opt-out, emoji, etc.)
-        //   sms_failed   → provider failure (Twilio threw, gateway timeout)
-        const activityType = result.sent
-          ? 'sms_sent'
-          : (result.blocked ? 'sms_blocked' : 'sms_failed');
-        const activityDescription = result.sent
-          ? 'Auto-response sent by lead agent'
-          : (result.blocked
-              ? `Auto-response blocked by middleware (${result.code || 'unknown'}): ${result.reason || ''}`
-              : `Auto-response provider failure (${result.code || 'unknown'}): ${result.reason || ''}`);
+      // Log activity
+      if (input.lead_id) {
         await db('lead_activities').insert({
           lead_id: input.lead_id,
-          activity_type: activityType,
-          description: activityDescription,
+          activity_type: 'sms_sent',
+          description: 'Auto-response sent by lead agent',
           performed_by: 'lead_agent',
-          metadata: JSON.stringify({ message: input.message, audit_log_id: result.auditLogId }),
+          metadata: JSON.stringify({ message: input.message }),
         }).catch(() => {});
       }
 
+      // Update pipeline
       const PipelineManager = require('./pipeline-manager');
       await PipelineManager.onEvent(input.customer_id, 'first_contact');
 
-      if (result.sent) {
-        // PII: ID-only logging per AGENTS.md. Customer name + phone live
-        // in the customer record + audit log; the log line just needs an
-        // ID for cross-reference.
-        logger.info(`[lead-agent] Auto-sent response (customerId=${customer.id} leadId=${input.lead_id || 'n/a'} auditLogId=${result.auditLogId || 'n/a'})`);
-        return {
-          sent: true,
-          to: customer.phone,
-          name: customer.first_name,
-          providerMessageId: result.providerMessageId,
-          segmentCount: result.segmentCount,
-          encoding: result.encoding,
-        };
-      }
-      logger.warn(`[lead-agent] Auto-response BLOCKED (customerId=${customer.id} leadId=${input.lead_id || 'n/a'}): ${result.code} — ${result.reason}`);
-      // Two distinct unsent outcomes — must be signaled differently so the
-      // lead-response-agent's circuit breaker doesn't treat consent/opt-out
-      // blocks as system failures (5 in 60s would trip the breaker and
-      // fast-fail every lead tool for 30s).
-      //
-      //   POLICY BLOCK (consent, suppression, emoji, price-leak, identity,
-      //   segment cap):  expected outcome. Return { sent: false, blocked:
-      //   true } WITHOUT `failed`/`error`. The agent's auto_sent telemetry
-      //   gates on `result.sent === true` (paired change in
-      //   lead-response-agent.js) so a non-sent block isn't tagged as
-      //   auto_sent — but the breaker is NOT bumped.
-      //
-      //   PROVIDER FAILURE (Twilio/network error): real failure. Return
-      //   `failed: true` + `error` so isToolFailure() catches it AND the
-      //   breaker bumps.
-      if (result.blocked) {
-        return {
-          sent: false,
-          blocked: true,
-          code: result.code,
-          reason: result.reason,
-          name: customer.first_name,
-        };
-      }
-      return {
-        sent: false,
-        failed: true,
-        error: result.reason || result.code || 'provider failure',
-        blocked: false,
-        code: result.code,
-        reason: result.reason,
-        name: customer.first_name,
-      };
+      logger.info(`[lead-agent] Auto-sent response to ${customer.first_name} ${customer.last_name}`);
+      return { sent: true, to: customer.phone, name: customer.first_name };
     }
 
     case 'queue_for_adam': {

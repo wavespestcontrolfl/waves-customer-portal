@@ -44,45 +44,31 @@ async function smsOwner(message) {
   }
 }
 
-// Two-layer overlap guard:
-//   1. `isRunning` — process-local fast-path. Skips the trx + lock
-//      acquire when we already know we're in flight on this instance.
-//   2. `pg_try_advisory_xact_lock` — cross-replica authoritative lock.
-//      If Railway scales the portal service to >1 replica (or two
-//      different services share the cron schedule), the in-process
-//      flag isn't enough; both replicas would tick simultaneously,
-//      read the same `dashboard_alert_state` snapshot, both classify
-//      the alert as "new", and both fan out push + SMS before either
-//      commits state. The advisory lock is held for the entire tick
-//      and auto-releases on commit/rollback — no leak risk.
-//
-// Lock key is hashtext of a stable namespace string so two cron files
-// can't collide accidentally.
+// In-process mutex to prevent overlapping ticks. node-cron will fire
+// every 5 minutes regardless of whether the previous run finished, so
+// a slow tick (DB latency, Twilio retry) could otherwise overlap the
+// next one and cause both runs to reclassify the same alert as "new"
+// before either one upserts state — duplicate push + duplicate owner
+// SMS. The flag is process-local; if Railway ever scales this service
+// beyond one replica, swap to a Postgres advisory lock — keeping it
+// simple here matches the actual deployment.
 let isRunning = false;
-const ADVISORY_LOCK_SQL = "pg_try_advisory_xact_lock(hashtext('waves:dashboard-alerts-cron'))";
 
 // Single tick: read current alerts + state, fan out notifications, update state.
 async function runDashboardAlertsCheck() {
   if (isRunning) {
-    logger.info('[dashboard-alerts-cron] previous tick still running in this process, skipping');
-    return { fired: 0, cleared: 0, skipped: 'in_process' };
+    logger.info('[dashboard-alerts-cron] previous tick still running, skipping this fire');
+    return { fired: 0, cleared: 0, skipped: true };
   }
   isRunning = true;
   try {
-    return await db.transaction(async (trx) => {
-      const lockResult = await trx.raw(`SELECT ${ADVISORY_LOCK_SQL} AS locked`);
-      if (!lockResult.rows[0].locked) {
-        logger.info('[dashboard-alerts-cron] another replica holds advisory lock, skipping');
-        return { fired: 0, cleared: 0, skipped: 'advisory_lock' };
-      }
-      return runDashboardAlertsCheckInner(trx);
-    });
+    return await runDashboardAlertsCheckInner();
   } finally {
     isRunning = false;
   }
 }
 
-async function runDashboardAlertsCheckInner(trx) {
+async function runDashboardAlertsCheckInner() {
   let current;
   try {
     const result = await computeDashboardAlerts();
@@ -92,7 +78,7 @@ async function runDashboardAlertsCheckInner(trx) {
     return { fired: 0, cleared: 0, error: err.message };
   }
 
-  const stateRows = await trx('dashboard_alert_state').select('*');
+  const stateRows = await db('dashboard_alert_state').select('*');
   const stateById = new Map(stateRows.map((r) => [r.alert_id, r]));
   const currentIds = new Set(current.map((a) => a.id));
 
@@ -127,11 +113,10 @@ async function runDashboardAlertsCheckInner(trx) {
         await smsOwner(`Waves alert: ${alert.label}${alert.amount ? ` ($${Math.round(alert.amount).toLocaleString()})` : ''}\n${alert.href}`);
       }
 
-      // Upsert state inside the trx so the advisory lock guards the
-      // read-decide-write sequence end-to-end. ON CONFLICT remains as
-      // belt-and-suspenders against any pre-existing row (e.g. from a
-      // prior crash mid-tick).
-      await trx('dashboard_alert_state')
+      // Upsert state. ON CONFLICT ensures a concurrent cron tick
+      // (shouldn't happen with node-cron but cheap insurance) doesn't
+      // duplicate the row.
+      await db('dashboard_alert_state')
         .insert({
           alert_id: alert.id,
           severity: alert.severity,
@@ -156,7 +141,7 @@ async function runDashboardAlertsCheckInner(trx) {
       // Same alert still active, count hasn't grown — just heartbeat
       // last_seen_at + current_count so the dashboard's per-admin
       // dismissal logic can compare against an up-to-date count.
-      await trx('dashboard_alert_state')
+      await db('dashboard_alert_state')
         .where({ alert_id: alert.id })
         .update({ current_count: alert.count, last_seen_at: now });
     }
@@ -167,7 +152,7 @@ async function runDashboardAlertsCheckInner(trx) {
   // again unless the same alert id re-fires).
   for (const stateRow of stateRows) {
     if (!currentIds.has(stateRow.alert_id)) {
-      await trx('dashboard_alert_state').where({ alert_id: stateRow.alert_id }).del();
+      await db('dashboard_alert_state').where({ alert_id: stateRow.alert_id }).del();
       cleared += 1;
     }
   }
