@@ -135,17 +135,28 @@ const OBSERVATION_LAWN = [
   { key: 'irrigation_issue', label: 'Irrigation issue' },
 ];
 
-// Areas treated — short chips so the AI recap can mention concrete spots
-// without the tech having to type them. Multi-select.
-const AREA_CHIPS = [
+// Areas treated — service-type-aware so the tech only sees relevant chips.
+// Multi-select, short labels. The AI recap mentions these by name in
+// plain customer language; jargon stays internal.
+const AREA_CHIPS_PEST = [
   'Exterior perimeter',
   'Garage',
   'Kitchen',
   'Bathrooms',
+  'Entry points',
   'Yard',
   'Fence line',
-  'Shrubs / beds',
-  'Entry points',
+  'Trash area',
+];
+const AREA_CHIPS_LAWN = [
+  'Front yard',
+  'Back yard',
+  'Side yard',
+  'Landscape beds',
+  'Shrubs',
+  'Palms',
+  'Problem area',
+  'Irrigation zone',
 ];
 
 // Kept for backward-compat with code that still references the flat list
@@ -367,6 +378,7 @@ export default function MobileCompleteServiceSheet({
         areasTreated,
         customerFirstName,
         serviceType: service?.serviceType,
+        noProductsReason, // backend short-circuits to a deterministic template for sensitive cases
       }),
       signal: ctrl.signal,
     })
@@ -778,7 +790,7 @@ export default function MobileCompleteServiceSheet({
           <section className="mt-8">
             <div className="text-zinc-900" style={sectionTitleStyle}>Areas treated</div>
             <div className="flex flex-wrap gap-2">
-              {AREA_CHIPS.map((a) => {
+              {(isLawnService ? AREA_CHIPS_LAWN : AREA_CHIPS_PEST).map((a) => {
                 const selected = areasTreated.includes(a);
                 return (
                   <button

@@ -306,11 +306,20 @@ router.put('/:serviceId/status', async (req, res, next) => {
 // POST /api/admin/dispatch/:serviceId/complete
 router.post('/:serviceId/complete', async (req, res, next) => {
   try {
-    // Idempotency short-circuit — the mobile sheet generates a UUID per
-    // submit attempt and reuses it on retry. If we've already completed
-    // this attempt, replay the original response instead of re-firing
-    // the trx + SMS + invoice + review side effects. Pure read; no fail
-    // path needed (a missing table just falls through to normal flow).
+    // Idempotency: race-safe pending → succeeded state machine.
+    //
+    //   1. Same key, succeeded → replay stored response (normal retry).
+    //   2. Same key, pending   → another request is mid-flight; 409.
+    //   3. Different key, but a pending row already exists for this
+    //      service → 409 (the partial unique index on service_id WHERE
+    //      status='pending' enforces this; we surface the conflict
+    //      cleanly instead of letting the insert error bubble).
+    //   4. No prior row → insert a 'pending' row and proceed. We update
+    //      it to 'succeeded' with the response after side effects.
+    //
+    // A missing key (legacy clients) skips the table entirely — but the
+    // mobile sheet always sends one, so the protection is effective in
+    // the path that matters.
     const idempotencyKey = req.headers['x-idempotency-key']
       ? String(req.headers['x-idempotency-key']).slice(0, 64)
       : null;
@@ -319,12 +328,31 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const prior = await db('completion_idempotency_keys')
           .where({ key: idempotencyKey, service_id: req.params.serviceId })
           .first();
-        if (prior) {
+        if (prior?.status === 'succeeded') {
           return res.json({ ...prior.response, idempotent: true });
         }
-      } catch (e) { /* table missing or other read fail — fall through */ }
+        if (prior?.status === 'pending') {
+          return res.status(409).json({ error: 'Completion already in progress for this attempt.' });
+        }
+      } catch (e) { /* table read failed — fall through, the insert below will fail loud if needed */ }
+      try {
+        await db('completion_idempotency_keys').insert({
+          key: idempotencyKey,
+          service_id: req.params.serviceId,
+          status: 'pending',
+          response: null,
+        });
+      } catch (e) {
+        // Hit the partial unique index → another pending request for the
+        // same service is in flight (different key, same service). Reject
+        // so we don't run side effects in parallel.
+        return res.status(409).json({ error: 'Another completion is in progress for this service.' });
+      }
     }
-    const { technicianNotes, products, soilTemp, thatchMeasurement, soilPh, soilMoisture, sendCompletionSms, requestReview, formResponses, formStartedAt, visitOutcome, noProductsReason, incompleteReason, reviewSuppressionReason, areasTreated } = req.body;
+    const { technicianNotes, soilTemp, thatchMeasurement, soilPh, soilMoisture, sendCompletionSms, requestReview, formResponses, formStartedAt, visitOutcome, noProductsReason, incompleteReason, reviewSuppressionReason, areasTreated } = req.body;
+    // `products` is rebindable below (dedupe path) — use let so the trx
+    // path sees the cleaned list.
+    let products = Array.isArray(req.body.products) ? req.body.products : null;
     // Tech-approved customer recap (the polished SMS body — Claude-drafted
     // or hand-written in MobileCompleteServiceSheet). When present, this
     // text REPLACES the templated body for the standard / prepaid SMS
@@ -348,6 +376,60 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       .first();
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    // Server-side product validation — frontend caps aren't enough since
+    // any authenticated tech client can post here. Reject the whole
+    // submit if any product is missing, inactive, or wildly out of
+    // bounds. Better to fail loud than to write bogus rows that downstream
+    // reports + customer history have to clean up later.
+    const PRODUCT_MAX_COUNT = 25;
+    const RATE_MAX = 100;        // rates above 100 in any unit are almost certainly typos
+    const VALID_RATE_UNITS = new Set(['oz', 'fl oz', 'lb', 'g', 'kg', 'ml', 'gal', 'qt', 'each', '%']);
+    if (Array.isArray(products) && products.length > 0) {
+      if (products.length > PRODUCT_MAX_COUNT) {
+        return res.status(400).json({ error: `Too many products (max ${PRODUCT_MAX_COUNT}).` });
+      }
+      const productIds = products.map((p) => p?.productId).filter(Boolean);
+      const catalogRows = productIds.length
+        ? await db('products_catalog').whereIn('id', productIds).select('id', 'active')
+        : [];
+      const catalogById = new Map(catalogRows.map((r) => [r.id, r]));
+      for (let i = 0; i < products.length; i++) {
+        const p = products[i] || {};
+        if (!p.productId) {
+          return res.status(400).json({ error: `Product #${i + 1}: missing productId.` });
+        }
+        const row = catalogById.get(p.productId);
+        if (!row) {
+          return res.status(400).json({ error: `Product #${i + 1}: not found in catalog.` });
+        }
+        if (row.active === false) {
+          return res.status(400).json({ error: `Product #${i + 1}: not active.` });
+        }
+        if (p.rate != null && p.rate !== '') {
+          const r = Number(p.rate);
+          if (!Number.isFinite(r) || r < 0 || r > RATE_MAX) {
+            return res.status(400).json({ error: `Product #${i + 1}: rate ${p.rate} is out of range.` });
+          }
+        }
+        if (p.rateUnit && !VALID_RATE_UNITS.has(String(p.rateUnit))) {
+          return res.status(400).json({ error: `Product #${i + 1}: rate unit "${p.rateUnit}" not allowed.` });
+        }
+      }
+      // Duplicate productId guard — if the UI accidentally submits the
+      // same product twice, fold them into one row instead of writing
+      // two service_products records.
+      const seen = new Set();
+      const dedupedProducts = [];
+      for (const p of products) {
+        if (seen.has(p.productId)) continue;
+        seen.add(p.productId);
+        dedupedProducts.push(p);
+      }
+      if (dedupedProducts.length !== products.length) {
+        products = dedupedProducts;
+      }
+    }
 
     // Status flip + completion artifacts + audit row + lifecycle
     // timestamps, all in one trx. Migrated to
@@ -434,6 +516,34 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         await trx('service_status_log').insert({
           scheduled_service_id: svc.id, status: 'completed', changed_by: req.technicianId,
         });
+
+        // 3b. Incomplete-visit alert is the office's primary handoff
+        // signal. Inside the trx so the alert is atomic with the
+        // service_record + status flip — if the alert insert fails, the
+        // completion rolls back rather than silently disappearing.
+        if (isIncompleteOutcome) {
+          const reasonSeverity = (
+            noProductsReason === 'Weather prevented treatment'
+            || noProductsReason === 'Unable to access property'
+          ) ? 'warn' : 'info';
+          await trx('dispatch_alerts').insert({
+            type: 'visit_incomplete',
+            severity: reasonSeverity,
+            tech_id: svc.technician_id || null,
+            job_id: svc.id,
+            payload: {
+              customerName: `${svc.first_name || ''} ${svc.last_name || ''}`.trim(),
+              customerId: svc.customer_id,
+              serviceType: svc.service_type,
+              scheduledDate: svc.scheduled_date,
+              reason: noProductsReason || 'Marked incomplete',
+              technicianNotes: (technicianNotes || '').slice(0, 500),
+              createdBy: req.technicianId || null,
+              status: 'open',
+              serviceRecordId: record.id,
+            },
+          });
+        }
 
         // 4. Lifecycle timestamps the route owns. transitionJobStatus
         // owns status + updated_at; we own actual_end_time +
@@ -580,24 +690,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       scheduledDate: svc.scheduled_date,
       technicianNotes: (technicianNotes || '').slice(0, 500),
       createdBy: req.technicianId || null,
+      status: 'open',
+      serviceRecordId: record.id,
     };
-    if (isIncompleteOutcome) {
-      try {
-        const reasonSeverity = (
-          noProductsReason === 'Weather prevented treatment'
-          || noProductsReason === 'Unable to access property'
-        ) ? 'warn' : 'info';
-        await db('dispatch_alerts').insert({
-          type: 'visit_incomplete',
-          severity: reasonSeverity,
-          tech_id: svc.technician_id || null,
-          job_id: svc.id,
-          payload: { ...alertBasePayload, reason: noProductsReason || 'Marked incomplete' },
-        });
-      } catch (e) {
-        logger.error(`[admin-dispatch] visit_incomplete alert insert failed: ${e.message}`);
-      }
-    }
+    // Note: the incomplete-visit alert insert moved INTO the completion
+    // trx (see trx block above) so it's atomic with the service_record
+    // write. If the alert insert fails the entire completion rolls back
+    // — the office's primary handoff signal can't be silently lost.
+    // The customer_concern / follow_up_needed alerts below stay
+    // non-blocking; those are advisory rather than the source of truth
+    // and can tolerate the rare retry.
     if (customerConcernFlagged) {
       try {
         await db('dispatch_alerts').insert({
@@ -846,21 +948,47 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       invoiceTotal: invoice?.total != null ? Number(invoice.total) : null,
       visitOutcome: isIncompleteOutcome ? 'incomplete' : 'completed',
     };
-    // Store the response under the idempotency key so a retry returns
-    // exactly this payload without re-firing side effects. Best-effort —
-    // a write failure here doesn't roll back the completion (already
-    // happened) and a retry would just hit the normal path.
+    // Flip the pending row → succeeded with the final response. Best-effort
+    // write — the completion has already happened either way; a failed
+    // update here just means a retry on the same key falls through to
+    // the normal path (idempotent under the unique key constraint).
     if (idempotencyKey) {
       try {
-        await db('completion_idempotency_keys').insert({
-          key: idempotencyKey,
-          service_id: req.params.serviceId,
-          response: responseBody,
-        }).onConflict('key').ignore();
+        const updated = await db('completion_idempotency_keys')
+          .where({ key: idempotencyKey, service_id: req.params.serviceId })
+          .update({ status: 'succeeded', response: responseBody, completed_at: new Date() });
+        if (!updated) {
+          // Pending row missing (race-stripped or never inserted) — store
+          // succeeded directly so retries still replay.
+          await db('completion_idempotency_keys').insert({
+            key: idempotencyKey,
+            service_id: req.params.serviceId,
+            status: 'succeeded',
+            response: responseBody,
+            completed_at: new Date(),
+          }).onConflict('key').ignore();
+        }
       } catch (e) { logger.warn(`[admin-dispatch] idempotency store failed: ${e.message}`); }
     }
     res.json(responseBody);
-  } catch (err) { next(err); }
+  } catch (err) {
+    // On unhandled error inside the route, mark the pending idempotency
+    // row as failed so a retry can re-attempt (vs being told "already in
+    // progress" forever). Best-effort — if this also fails, the route
+    // just hands off to next(err) and the row times out via TTL pruning.
+    if (req.headers['x-idempotency-key']) {
+      try {
+        await db('completion_idempotency_keys')
+          .where({
+            key: String(req.headers['x-idempotency-key']).slice(0, 64),
+            service_id: req.params.serviceId,
+            status: 'pending',
+          })
+          .update({ status: 'failed', completed_at: new Date() });
+      } catch { /* swallow — we're already handing off the error */ }
+    }
+    next(err);
+  }
 });
 
 // PUT /api/admin/dispatch/:serviceId/reorder
@@ -1706,12 +1834,31 @@ function sanitizeRecap(text) {
   return s;
 }
 
+// Deterministic templates for sensitive no-product cases. AI is fine for
+// standard treated visits, but for declined / inspection / follow-up we
+// don't want a model freely composing language around money, customer
+// behavior, or access issues. Predictable copy beats clever copy here.
+const DETERMINISTIC_RECAPS = {
+  'Inspection only':
+    'We completed the inspection today and did not apply treatment. We documented the findings and will follow up with any recommended next steps. - Waves',
+  'Customer declined':
+    'We stopped by today and documented the visit. No treatment was applied today. Please contact us if you would like to reschedule service. - Waves',
+  'Follow-up only':
+    'We completed today\'s follow-up visit and documented the current activity. We will continue monitoring on your next scheduled service. - Waves',
+};
+
 router.post('/recap-preview', requireTechOrAdmin, async (req, res) => {
   try {
+    const body = req.body || {};
+    // Sensitive-case shortcut — return a deterministic template without
+    // calling the model. Lower latency, zero risk of unwanted phrasing.
+    const reasonShortcut = DETERMINISTIC_RECAPS[String(body.noProductsReason || '')];
+    if (reasonShortcut) {
+      return res.json({ recap: reasonShortcut, model: 'template' });
+    }
     if (!_Anthropic || !process.env.ANTHROPIC_API_KEY) {
       return res.status(503).json({ error: 'AI not configured' });
     }
-    const body = req.body || {};
     const technicianNotes = String(body.technicianNotes || '').slice(0, RECAP_INPUT_LIMITS.notes);
     const customerFirstName = String(body.customerFirstName || '').slice(0, RECAP_INPUT_LIMITS.firstName);
     const serviceType = String(body.serviceType || 'service').slice(0, RECAP_INPUT_LIMITS.serviceType);
