@@ -306,6 +306,34 @@ describe('validateTwilioSignature — invalid / missing signature', () => {
     expect(logCalls).not.toContain('PII secret transcript');
   });
 
+  test('does NOT log query-string PII on signature failure (codex review)', () => {
+    // /outbound-connect and /outbound-admin-prompt carry caller/admin
+    // phone numbers in the query string. The invalid-signature debug
+    // breadcrumb must log path only, never the URL with query, or
+    // every failed validation in log mode would leak phone PII.
+    const req = mockReq({
+      method: 'POST',
+      originalUrl:
+        '/api/webhooks/twilio/outbound-connect?customerNumber=%2B19415551234&callerIdNumber=%2B19413187612&callLogId=abc-123',
+      body: { Digits: '1' },
+      headers: { 'X-Twilio-Signature': 'forged-sig' },
+    });
+    validateTwilioSignature(req, mockRes(), jest.fn());
+    const allWarnLogs = logger.warn.mock.calls
+      .map((c) => (typeof c[0] === 'string' ? c[0] : JSON.stringify(c[0])))
+      .join('\n');
+    // No query-string fragment, no encoded numbers, no decoded numbers
+    expect(allWarnLogs).not.toContain('customerNumber');
+    expect(allWarnLogs).not.toContain('callerIdNumber');
+    expect(allWarnLogs).not.toContain('19415551234');
+    expect(allWarnLogs).not.toContain('19413187612');
+    expect(allWarnLogs).not.toContain('%2B');
+    // path-only is fine and expected
+    expect(allWarnLogs).toContain('/api/webhooks/twilio/outbound-connect');
+    // and the breadcrumb should announce that a query was present without showing it
+    expect(allWarnLogs).toContain('query_present=true');
+  });
+
   test('disabled mode bypasses validation entirely', () => {
     process.env.TWILIO_SIGNATURE_VALIDATION = 'disabled';
     const req = mockReq({ body: { CallSid: 'CA1' }, headers: {} });
