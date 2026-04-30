@@ -25,23 +25,7 @@ import {
   fmtMoney,
   fmtMoneyCompact,
 } from '../../components/dashboard/charts';
-
-const API_BASE = import.meta.env.VITE_API_URL || '/api';
-
-function adminFetch(path) {
-  return fetch(`${API_BASE}${path}`, {
-    headers: {
-      Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
-      'Content-Type': 'application/json',
-    },
-  }).then((r) => {
-    if (r.status === 401) {
-      window.location.href = '/admin/login';
-      throw new Error('Session expired');
-    }
-    return r.json();
-  });
-}
+import { adminFetch, isRateLimitError } from '../../utils/admin-fetch';
 
 const PERIODS = [
   { id: 'today', label: 'Today' },
@@ -83,26 +67,48 @@ export default function DashboardPageV2() {
   const [billing, setBilling] = useState(null);
 
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [period, setPeriod] = useState('mtd');
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([
-      adminFetch('/admin/dashboard').catch((e) => { console.error('[dashboard-v2] /dashboard', e); return null; }),
-      adminFetch('/admin/dashboard/compare?period=this_month&against=last_month').catch((e) => { console.error('[dashboard-v2] /compare', e); return null; }),
-      adminFetch('/admin/dashboard/funnel').catch((e) => { console.error('[dashboard-v2] /funnel', e); return null; }),
-      adminFetch('/admin/dashboard/aging').catch((e) => { console.error('[dashboard-v2] /aging', e); return null; }),
-      adminFetch('/admin/dashboard/mrr-trend?months=12').catch((e) => { console.error('[dashboard-v2] /mrr-trend', e); return null; }),
-      adminFetch('/admin/dashboard/calls-by-source?period=mtd').catch((e) => { console.error('[dashboard-v2] /calls-by-source', e); return null; }),
-      adminFetch('/admin/dashboard/leads-by-source?period=mtd').catch((e) => { console.error('[dashboard-v2] /leads-by-source', e); return null; }),
-      adminFetch('/admin/dashboard/channel-mix?period=mtd').catch((e) => { console.error('[dashboard-v2] /channel-mix', e); return null; }),
-      adminFetch('/admin/dashboard/service-mix').catch((e) => { console.error('[dashboard-v2] /service-mix', e); return null; }),
-      adminFetch('/admin/dashboard/today-completion').catch((e) => { console.error('[dashboard-v2] /today-completion', e); return null; }),
-      adminFetch('/admin/billing-health').catch((e) => { console.error('[dashboard-v2] /billing-health', e); return null; }),
-    ]).then(([d, cmp, fnl, ag, mrr, calls, leads, channels, mx, td, bh]) => {
+    // Run the 11 fan-out fetches in two staggered waves so a fresh mount
+    // doesn't burst-trigger the per-user rate limiter (the original code
+    // fired all 11 simultaneously). The hero KPIs land first, then the
+    // attribution panels backfill.
+    function track(label, p) {
+      return p.catch((e) => {
+        console.error(`[dashboard-v2] ${label}`, e);
+        if (isRateLimitError(e) && !cancelled) setLoadError(e);
+        return null;
+      });
+    }
+    async function loadAll() {
+      const wave1 = await Promise.all([
+        track('/dashboard',         adminFetch('/admin/dashboard')),
+        track('/compare',           adminFetch('/admin/dashboard/compare?period=this_month&against=last_month')),
+        track('/today-completion',  adminFetch('/admin/dashboard/today-completion')),
+        track('/billing-health',    adminFetch('/admin/billing-health')),
+      ]);
+      const [d, cmp, td, bh] = wave1;
       if (cancelled) return;
       setData(d);
       setCompare(cmp);
+      setToday(td);
+      setBilling(bh?.summary || null);
+      setLoading(false);
+
+      const wave2 = await Promise.all([
+        track('/funnel',            adminFetch('/admin/dashboard/funnel')),
+        track('/aging',             adminFetch('/admin/dashboard/aging')),
+        track('/mrr-trend',         adminFetch('/admin/dashboard/mrr-trend?months=12')),
+        track('/calls-by-source',   adminFetch('/admin/dashboard/calls-by-source?period=mtd')),
+        track('/leads-by-source',   adminFetch('/admin/dashboard/leads-by-source?period=mtd')),
+        track('/channel-mix',       adminFetch('/admin/dashboard/channel-mix?period=mtd')),
+        track('/service-mix',       adminFetch('/admin/dashboard/service-mix')),
+      ]);
+      if (cancelled) return;
+      const [fnl, ag, mrr, calls, leads, channels, mx] = wave2;
       setFunnel(fnl);
       setAging(ag);
       setMrrTrend(mrr);
@@ -110,10 +116,8 @@ export default function DashboardPageV2() {
       setLeadsBySource(leads);
       setChannelMix(channels);
       setMix(mx);
-      setToday(td);
-      setBilling(bh?.summary || null);
-      setLoading(false);
-    });
+    }
+    loadAll();
     return () => { cancelled = true; };
   }, []);
 
@@ -127,6 +131,16 @@ export default function DashboardPageV2() {
     return <div className="p-16 text-center text-14 sm:text-13 text-ink-secondary">Loading dashboard…</div>;
   }
   if (!data || data.error || !data.kpis) {
+    // 429 from the global limiter used to render as "Try logging in again",
+    // sending operators in circles. Show the real cause + a Retry button.
+    if (isRateLimitError(loadError)) {
+      return (
+        <div className="p-16 text-center text-14 sm:text-13 text-alert-fg">
+          Too many requests. Wait a few seconds and{' '}
+          <button onClick={() => window.location.reload()} className="underline">retry</button>.
+        </div>
+      );
+    }
     return (
       <div className="p-16 text-center text-14 sm:text-13 text-alert-fg">
         Failed to load dashboard. <a href="/admin/login" className="underline">Try logging in again</a>

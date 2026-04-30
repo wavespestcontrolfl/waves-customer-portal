@@ -56,6 +56,10 @@ module.exports = {
 
   rateLimit: {
     windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
-    max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 500,
+    // 500 was tight enough that the dashboard's 11-fetch fan-out plus a few
+    // ⌘K Intelligence Bar queries on a single page session could trip the
+    // limiter mid-shift. The window is per-user (keyed by JWT sub), so the
+    // headroom is just for one operator's bursts, not a global ceiling.
+    max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1500,
   },
 };

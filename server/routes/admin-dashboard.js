@@ -4,12 +4,21 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { etDateString, etMonthStart, etMonthEnd, etYearStart, etWeekStart, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { cacheRoute } = require('../utils/route-cache');
 const {
   executeDashboardTool,
   INTERNAL_TEST_CUSTOMERS,
 } = require('../services/intelligence-bar/dashboard-tools');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+// Per-user response cache (60s) for the read-only KPI panels. The underlying
+// SQL aggregates revenue/AR/MRR/attribution windows that don't shift inside a
+// minute, but the dashboard remounts fan out 11 of them at once — a tab
+// reload on flaky mobile burned through the rate-limit bucket and the DB
+// pool both. Cache is per-user, keyed by full URL (so ?period=mtd and
+// ?period=ytd are separate buckets).
+const dashboardCache = cacheRoute(60);
 
 // Lead-table exclusion mirroring the customers/estimates/payments helpers
 // in dashboard-tools.js, but applied directly to `leads.first_name +
@@ -41,7 +50,7 @@ function mondayThisWeek() { return etWeekStart(); }
 function sundayThisWeek() { return etDateString(addETDays(parseETDateTime(etWeekStart() + 'T12:00'), 6)); }
 
 // GET /api/admin/dashboard — all KPIs in one call
-router.get('/', async (req, res, next) => {
+router.get('/', dashboardCache, async (req, res, next) => {
   try {
     const today = etDateString();
     const som = startOfMonth();
@@ -166,7 +175,7 @@ router.get('/', async (req, res, next) => {
 });
 
 // GET /api/admin/dashboard/forecast — revenue forecasting
-router.get('/forecast', async (req, res, next) => {
+router.get('/forecast', dashboardCache, async (req, res, next) => {
   try {
     const today = new Date();
     const todayStr = etDateString(today);
@@ -296,7 +305,7 @@ router.get('/forecast', async (req, res, next) => {
 
 // GET /api/admin/dashboard/core-kpis?period=today|wtd|mtd|ytd
 // ServiceTitan-style operational KPIs: completion, CSAT, callback, RPJ, efficiency, retention, AR days, lead conv
-router.get('/core-kpis', async (req, res, next) => {
+router.get('/core-kpis', dashboardCache, async (req, res, next) => {
   try {
     const period = String(req.query.period || 'mtd').toLowerCase();
     const now = new Date();
@@ -561,7 +570,7 @@ function ibError(toolName) {
 }
 
 // GET /api/admin/dashboard/funnel — estimate funnel for the current month
-router.get('/funnel', async (req, res, next) => {
+router.get('/funnel', dashboardCache, async (req, res, next) => {
   try {
     const result = await executeDashboardTool('get_estimate_funnel', {}).catch(ibError('get_estimate_funnel'));
     if (result?.error) return res.status(500).json({ error: result.error });
@@ -570,7 +579,7 @@ router.get('/funnel', async (req, res, next) => {
 });
 
 // GET /api/admin/dashboard/aging — outstanding AR aging buckets
-router.get('/aging', async (req, res, next) => {
+router.get('/aging', dashboardCache, async (req, res, next) => {
   try {
     const result = await executeDashboardTool('get_outstanding_balances', {}).catch(ibError('get_outstanding_balances'));
     if (result?.error) return res.status(500).json({ error: result.error });
@@ -579,7 +588,7 @@ router.get('/aging', async (req, res, next) => {
 });
 
 // GET /api/admin/dashboard/mrr-trend?months=12
-router.get('/mrr-trend', async (req, res, next) => {
+router.get('/mrr-trend', dashboardCache, async (req, res, next) => {
   try {
     const months = Math.max(1, Math.min(24, parseInt(req.query.months || 12, 10) || 12));
     const result = await executeDashboardTool('get_mrr_trend', { months }).catch(ibError('get_mrr_trend'));
@@ -589,7 +598,7 @@ router.get('/mrr-trend', async (req, res, next) => {
 });
 
 // GET /api/admin/dashboard/lead-source — customer acquisition by source (YTD)
-router.get('/lead-source', async (req, res, next) => {
+router.get('/lead-source', dashboardCache, async (req, res, next) => {
   try {
     const result = await executeDashboardTool('get_customer_acquisition', {}).catch(ibError('get_customer_acquisition'));
     if (result?.error) return res.status(500).json({ error: result.error });
@@ -598,7 +607,7 @@ router.get('/lead-source', async (req, res, next) => {
 });
 
 // GET /api/admin/dashboard/service-mix — completed service mix by category (MTD)
-router.get('/service-mix', async (req, res, next) => {
+router.get('/service-mix', dashboardCache, async (req, res, next) => {
   try {
     const result = await executeDashboardTool('get_service_mix', {}).catch(ibError('get_service_mix'));
     if (result?.error) return res.status(500).json({ error: result.error });
@@ -609,7 +618,7 @@ router.get('/service-mix', async (req, res, next) => {
 // GET /api/admin/dashboard/compare?period=this_month&against=last_month
 // Powers period-over-period overlay on the revenue area chart and the
 // hero-tile delta arrows. Returns daily series for both windows.
-router.get('/compare', async (req, res, next) => {
+router.get('/compare', dashboardCache, async (req, res, next) => {
   try {
     const period = String(req.query.period || 'this_month').toLowerCase();
     const against = String(req.query.against || 'last_month').toLowerCase();
@@ -688,7 +697,7 @@ router.get('/compare', async (req, res, next) => {
 });
 
 // GET /api/admin/dashboard/today-completion — radial gauge: completed vs scheduled today
-router.get('/today-completion', async (req, res, next) => {
+router.get('/today-completion', dashboardCache, async (req, res, next) => {
   try {
     const today = etDateString();
     const row = await db('scheduled_services')
@@ -745,7 +754,7 @@ function resolveAttributionWindow(period) {
 // Joins call_log (where direction='inbound') against lead_sources on the
 // dialed number. Calls landing on numbers we haven't catalogued show up
 // under "Unmapped" so a missing seed row is visible, not invisible.
-router.get('/calls-by-source', async (req, res, next) => {
+router.get('/calls-by-source', dashboardCache, async (req, res, next) => {
   try {
     const win = resolveAttributionWindow(req.query.period);
     // Direct equality match — the 20260428000003 backfill normalized
@@ -802,7 +811,7 @@ router.get('/calls-by-source', async (req, res, next) => {
 //
 // Groups the `leads` table by lead_source_id (top-of-funnel attribution
 // before customer conversion). Joined to lead_sources for the human label.
-router.get('/leads-by-source', async (req, res, next) => {
+router.get('/leads-by-source', dashboardCache, async (req, res, next) => {
   try {
     const win = resolveAttributionWindow(req.query.period);
     const rows = await excludeInternalLeads(
@@ -856,7 +865,7 @@ router.get('/leads-by-source', async (req, res, next) => {
 //
 // Phone vs form vs SMS vs other — answers "are we still mostly a phone
 // shop or has the web caught up?". Reads leads.first_contact_channel.
-router.get('/channel-mix', async (req, res, next) => {
+router.get('/channel-mix', dashboardCache, async (req, res, next) => {
   try {
     const win = resolveAttributionWindow(req.query.period);
     const rows = await excludeInternalLeads(
@@ -894,7 +903,7 @@ router.get('/channel-mix', async (req, res, next) => {
 // so Intelligence Bar tools / debugging / future surfaces can pull the
 // list without hitting the bell-shaped /admin/notifications response.
 // See server/services/dashboard-alerts.js for the alert definitions.
-router.get('/alerts', async (req, res, next) => {
+router.get('/alerts', dashboardCache, async (req, res, next) => {
   try {
     const { computeDashboardAlerts } = require('../services/dashboard-alerts');
     const result = await computeDashboardAlerts();

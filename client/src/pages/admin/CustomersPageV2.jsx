@@ -61,21 +61,9 @@ import {
   DialogFooter,
   cn,
 } from '../../components/ui';
+import { adminFetch, isRateLimitError } from '../../utils/admin-fetch';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-
-function adminFetch(path, options = {}) {
-  return fetch(`${API_BASE}${path}`, {
-    headers: {
-      Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
-      'Content-Type': 'application/json',
-    },
-    ...options,
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.json();
-  });
-}
 
 // Tier badge tone mapping. V2 drops all colored tier palette — all tiers
 // render neutral. No-plan ("Bronze" default with no services) renders as
@@ -580,7 +568,7 @@ export default function CustomersPageV2() {
         setTotalPages(data.totalPages || 1);
         setLoading(false);
       })
-      .catch((e) => { setError(e.message); setLoading(false); });
+      .catch((e) => { setError(e); setLoading(false); });
   };
 
   const loadPipeline = () => {
@@ -689,10 +677,17 @@ export default function CustomersPageV2() {
   }
 
   if (error && customers.length === 0) {
+    const rateLimited = isRateLimitError(error);
     return (
       <div className="p-16 text-center">
-        <div className="text-14 text-alert-fg mb-3">Failed to load customers</div>
-        <div className="text-13 text-ink-tertiary mb-4">{error}</div>
+        <div className="text-14 text-alert-fg mb-3">
+          {rateLimited ? 'Too many requests' : 'Failed to load customers'}
+        </div>
+        <div className="text-13 text-ink-tertiary mb-4">
+          {rateLimited
+            ? 'Wait a few seconds and try again.'
+            : (error?.message || String(error))}
+        </div>
         <Button variant="primary" onClick={() => loadCustomers()}>Retry</Button>
       </div>
     );
