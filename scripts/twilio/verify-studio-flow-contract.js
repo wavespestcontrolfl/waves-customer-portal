@@ -133,14 +133,45 @@ function verifyForwardCall(definition) {
       fail(`connect-call-to.to has malformed NANP number: "${n}". Expected format ^\\+1\\d{10}$.`);
     }
   }
-  // Soft check: at least one number ends in the documented Adam suffix
-  // and one in the Virginia suffix. Suffixes are not personal-data-leaking.
-  const suffixes = numbers.map((n) => n.slice(-7));
-  if (!suffixes.some((s) => s.endsWith('993489'))) {
-    warn(`connect-call-to.to: no number ending in 993489 (Adam). If the routing pair changed, update the contract.`);
-  }
-  if (!suffixes.some((s) => s.endsWith('334021'))) {
-    warn(`connect-call-to.to: no number ending in 334021 (Virginia). If the routing pair changed, update the contract.`);
+
+  // Strict forward-target verification when the env var is set. Per
+  // ChatGPT v3 pre-merge review: the snapshot redacts personal cells
+  // for repo privacy, but the verifier still needs to confirm the LIVE
+  // Flow rings the expected recipients. TWILIO_EXPECTED_FORWARD_NUMBERS
+  // (CSV of E.164 numbers) holds the authoritative list out-of-band
+  // (Railway env / .env / runbook), so verification runs against real
+  // values without committing them to git.
+  //
+  // Order is not significant — both sides are sorted before comparing.
+  const expectedCsv = process.env.TWILIO_EXPECTED_FORWARD_NUMBERS;
+  if (expectedCsv) {
+    const expected = expectedCsv
+      .split(',')
+      .map((n) => n.trim())
+      .filter(Boolean)
+      .sort();
+    const live = [...numbers].sort();
+    if (live.length !== expected.length || live.some((n, i) => n !== expected[i])) {
+      fail(
+        `connect-call-to.to drift vs. TWILIO_EXPECTED_FORWARD_NUMBERS.\n` +
+          `  expected: ${expected.join(', ')}\n` +
+          `  live:     ${live.join(', ')}\n` +
+          'If the routing pair was intentionally changed, update TWILIO_EXPECTED_FORWARD_NUMBERS in Railway env (and the local .env if used by ops). Numbers stay out of the snapshot/contract on purpose.'
+      );
+    }
+  } else {
+    // Fallback soft check when env not configured — at least confirm
+    // the documented Adam/Virginia suffixes are present so a totally
+    // unrelated pair would warn. Suffixes are not personal-data-leaking
+    // (already present in earlier commits of the verifier).
+    const suffixes = numbers.map((n) => n.slice(-7));
+    if (!suffixes.some((s) => s.endsWith('993489'))) {
+      warn(`connect-call-to.to: no number ending in 993489 (Adam). If the routing pair changed, update TWILIO_EXPECTED_FORWARD_NUMBERS.`);
+    }
+    if (!suffixes.some((s) => s.endsWith('334021'))) {
+      warn(`connect-call-to.to: no number ending in 334021 (Virginia). If the routing pair changed, update TWILIO_EXPECTED_FORWARD_NUMBERS.`);
+    }
+    warn(`TWILIO_EXPECTED_FORWARD_NUMBERS not set; falling back to suffix soft-check. Set the env var (Railway + .env) for strict verification.`);
   }
 }
 

@@ -92,15 +92,34 @@ of the approved asset (as confirmed 2026-04-29 by Adam):
 ### Call routing
 - A `connect-call-to` widget exists, currently named `forward_call`
 - `noun === "number-multi"` (simul-ring, not single-target)
-- `to` is a CSV of two NANP E.164 numbers
-  - one number ends `…993489` (Adam)
-  - one number ends `…334021` (Virginia)
-  - both match `^\+1\d{10}$`
+- `to` is a CSV of two NANP E.164 numbers, each matching `^\+1\d{10}$`
 - `timeout === 30`
 - `record === true`
 - `caller_id === "{{contact.channel.address}}"` (preserves caller's
   original number into the simul-ring leg, so Adam/Virginia see who
   is calling)
+
+**Strict forward-target verification.** The committed Flow snapshot
+redacts the actual numbers to `<<FORWARD_NUMBERS>>` so personal cells
+stay out of git history. To still get drift detection on the live
+numbers, set `TWILIO_EXPECTED_FORWARD_NUMBERS` (CSV of E.164) in
+Railway env and any local `.env` used by ops:
+
+```
+TWILIO_EXPECTED_FORWARD_NUMBERS=+19415993489,+17206334021
+```
+
+When set, `npm run twilio:flow:verify` asserts the live
+`connect-call-to.to` list matches this CSV exactly (order-independent).
+If unset, the verifier falls back to a suffix soft-check (warns when
+known suffixes are missing) and emits a configuration warning.
+**Recommendation:** set the env var so prod Railway always runs strict
+verification.
+
+When the routing pair changes intentionally, update
+`TWILIO_EXPECTED_FORWARD_NUMBERS` in Railway env BEFORE editing the
+Studio Console — that way the verifier catches the misalignment as a
+single check rather than after several real calls.
 
 ### Recording callback
 - `forward_call` automatically fires Twilio's standard signed
