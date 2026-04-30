@@ -258,12 +258,26 @@ const ReviewService = {
         });
         // PII: ID-only per AGENTS.md.
         logger.info(`[review] SMS sent (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'})`);
+      } else if (result.blocked && result.code === 'CONSENT_LOOKUP_FAILED') {
+        // Transient lookup failure inside the wrapper (DB error during
+        // consent validation). Distinct code from NO_CONSENT_RECORD;
+        // treat like a provider failure — re-queue for the cron rather
+        // than permanently suppress. Codex P1 round-2 on PR #545:
+        // NO_CONSENT_RECORD and CONSENT_LOOKUP_FAILED used to share the
+        // same code, which silently dropped legitimate review requests
+        // during DB blips.
+        const retryAt = new Date(Date.now() + 5 * 60 * 1000);
+        await db('review_requests').where({ id: requestId }).update({
+          scheduled_for: retryAt,
+        });
+        // PII: ID-only.
+        logger.error(`[review] SMS WRAPPER LOOKUP FAILED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'}): ${result.reason} (queued for retry at ${retryAt.toISOString()})`);
       } else if (result.blocked) {
-        // Wrapper-policy block (opt-out, suppression, emoji, price leak,
-        // segment cap, identity, etc.). Mark suppressed so processScheduled()
-        // — which only picks rows with status='pending' — stops retrying.
-        // The request row stays for audit history; the audit_log row
-        // captures the block reason.
+        // True wrapper-policy block (opt-out, suppression, emoji, price
+        // leak, segment cap, identity, NO_CONSENT_RECORD). Mark
+        // suppressed so processScheduled() — which only picks rows with
+        // status='pending' — stops retrying. The request row stays for
+        // audit history; the audit_log row captures the block reason.
         await db('review_requests').where({ id: requestId }).update({
           status: 'suppressed',
         });
