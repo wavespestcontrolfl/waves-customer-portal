@@ -99,21 +99,57 @@ function uuid() {
 // Treatment services require either a product line or an explicit reason.
 const NON_TREATMENT_TYPES = /inspection|estimate|consult|follow.?up|callback|assessment/i;
 
-// No-product reasons aren't all equivalent. The `outcome` field shapes
-// downstream UI (CTA label, review suppression):
-//   complete   → finish + send recap normally
-//   no_review  → finish, but suppress the review request automatically
-//   incomplete → close visit + create follow-up; no charge, no review,
-//                CTA flips to "Close Visit & Create Follow-up"
+// No-product reasons map to two orthogonal pieces of state:
+//   visitOutcome: 'complete' | 'incomplete'  — did the visit happen?
+//   reviewSuppression: optional reason code  — should we ask for a review?
+//   incompleteReason: code for incomplete visits (drives office alert tone)
+//
+// Splitting these (was a single 'outcome' enum that conflated visit
+// completion with review eligibility) cleans up reporting + analytics.
+// 'no_review' is no longer a visit outcome — it's a side-effect rule.
 const NO_PRODUCT_REASONS = [
-  { label: 'Inspection only', outcome: 'complete' },
-  { label: 'Customer declined', outcome: 'no_review' },
-  { label: 'Weather prevented treatment', outcome: 'incomplete' },
-  { label: 'Unable to access property', outcome: 'incomplete' },
-  { label: 'Follow-up only', outcome: 'complete' },
-  { label: 'Other', outcome: 'complete' },
+  { label: 'Inspection only', visitOutcome: 'complete' },
+  { label: 'Customer declined', visitOutcome: 'complete', reviewSuppression: 'customer_declined' },
+  { label: 'Weather prevented treatment', visitOutcome: 'incomplete', incompleteReason: 'weather_prevented' },
+  { label: 'Unable to access property', visitOutcome: 'incomplete', incompleteReason: 'access_blocked' },
+  { label: 'Follow-up only', visitOutcome: 'complete' },
+  { label: 'Other', visitOutcome: 'complete', requiresNote: true },
 ];
 
+// Observation chips. Service-type-aware: the pest set and lawn set diverge
+// for the operationally-relevant signals. Both share the universal chips
+// (All clear / Customer concern / Follow-up needed). The component picks
+// one set at render based on serviceType.
+const OBSERVATION_BASE = [
+  { key: 'all_clear', label: 'All clear', exclusive: true },
+  { key: 'customer_concern', label: 'Customer concern', alertOnSelect: { type: 'customer_concern', severity: 'warn' } },
+  { key: 'follow_up_needed', label: 'Follow-up needed', alertOnSelect: { type: 'follow_up_needed', severity: 'warn' } },
+];
+const OBSERVATION_PEST = [
+  { key: 'pest_activity', label: 'Pest activity' },
+  { key: 'entry_points', label: 'Entry points noted' },
+];
+const OBSERVATION_LAWN = [
+  { key: 'weeds_spreading', label: 'Weeds spreading' },
+  { key: 'turf_stress', label: 'Turf stress' },
+  { key: 'irrigation_issue', label: 'Irrigation issue' },
+];
+
+// Areas treated — short chips so the AI recap can mention concrete spots
+// without the tech having to type them. Multi-select.
+const AREA_CHIPS = [
+  'Exterior perimeter',
+  'Garage',
+  'Kitchen',
+  'Bathrooms',
+  'Yard',
+  'Fence line',
+  'Shrubs / beds',
+  'Entry points',
+];
+
+// Kept for backward-compat with code that still references the flat list
+// (driver for the OBSERVATIONS section render below).
 const OBSERVATION_CHIPS = [
   { key: 'all_clear', label: 'All clear', exclusive: true },
   { key: 'pest_activity', label: 'Pest activity' },
@@ -156,6 +192,8 @@ export default function MobileCompleteServiceSheet({
   const [followUpNote, setFollowUpNote] = useState('');
   const [noProductsReason, setNoProductsReason] = useState('');
   const [noProductsActive, setNoProductsActive] = useState(false); // secondary section reveal
+  const [noProductsOtherNote, setNoProductsOtherNote] = useState(''); // required when reason is 'Other'
+  const [areasTreated, setAreasTreated] = useState([]); // string[]
   const [recapDraft, setRecapDraft] = useState('');
   // Tri-state source so we can tell who wrote the current draft:
   //   'template' — initial state, instant fallback recap
@@ -177,6 +215,7 @@ export default function MobileCompleteServiceSheet({
   const [submitError, setSubmitError] = useState('');
   const [paymentCollected, setPaymentCollected] = useState(false);
   const [showCheckout, setShowCheckout] = useState(false);
+  const [draftStatus, setDraftStatus] = useState('idle'); // idle | saved
   const idempotencyKeyRef = useRef(null);
 
   // ── Derived state ───────────────────────────────────────────────────────
@@ -212,29 +251,29 @@ export default function MobileCompleteServiceSheet({
     }));
   }, [recentProducts, catalog]);
 
-  // Resolve the chosen no-product reason → outcome. Drives both the CTA
-  // label (incomplete visits become "Close Visit & Create Follow-up") and
-  // automatic review suppression for declined / weather / access cases.
-  const reasonOutcome = useMemo(() => {
+  // Resolve the chosen no-product reason. Returns the full reason record
+  // so consumers can read visitOutcome / reviewSuppression / incompleteReason
+  // separately — these are NOT the same dimension.
+  const reasonRecord = useMemo(() => {
     if (!noProductsReason) return null;
-    return NO_PRODUCT_REASONS.find((r) => r.label === noProductsReason)?.outcome || 'complete';
+    return NO_PRODUCT_REASONS.find((r) => r.label === noProductsReason) || null;
   }, [noProductsReason]);
-  const isIncompleteVisit = reasonOutcome === 'incomplete';
+  const visitOutcome = reasonRecord?.visitOutcome || 'complete';
+  const isIncompleteVisit = visitOutcome === 'incomplete';
 
-  // Smart review-request suppression — client-side signals only. Backend
-  // can still decline (e.g. opt-out, no mobile, last-90d guard) but the UI
-  // shouldn't even ask once we know it'll lead to a bad customer moment.
-  // Reasons with a non-"complete" outcome (declined / weather / access)
-  // suppress automatically; "Inspection only" / "Follow-up only" don't.
+  // Smart review-request suppression. Backend can still decline (opt-out,
+  // no mobile, last-90d guard) but the UI shouldn't even ask once we know
+  // a request would land badly. Three independent signals drive this:
+  //   1. observations that imply unhappiness or pending issues
+  //   2. no-product reasons that explicitly mark the customer as declining
+  //   3. invoice-due cases (move review to after-payment, see backend)
   const reviewAutoOff = useMemo(() => {
     if (observations.includes('customer_concern')) return 'customer concern flagged';
     if (observations.includes('follow_up_needed')) return 'follow-up needed';
-    if (reasonOutcome && reasonOutcome !== 'complete') {
-      if (reasonOutcome === 'incomplete') return 'visit incomplete';
-      if (reasonOutcome === 'no_review') return 'customer declined';
-    }
+    if (isIncompleteVisit) return 'visit incomplete';
+    if (reasonRecord?.reviewSuppression) return reasonRecord.reviewSuppression.replace(/_/g, ' ');
     return null;
-  }, [observations, reasonOutcome]);
+  }, [observations, reasonRecord, isIncompleteVisit]);
 
   useEffect(() => {
     if (reviewAutoOff && !reviewManualOverride) setRequestReview(false);
@@ -252,6 +291,8 @@ export default function MobileCompleteServiceSheet({
       if (Array.isArray(d.observations)) setObservations(d.observations);
       if (d.followUpNote) setFollowUpNote(d.followUpNote);
       if (d.noProductsReason) setNoProductsReason(d.noProductsReason);
+      if (d.noProductsOtherNote) setNoProductsOtherNote(d.noProductsOtherNote);
+      if (Array.isArray(d.areasTreated)) setAreasTreated(d.areasTreated);
       if (d.soilTemp) setSoilTemp(d.soilTemp);
       if (d.soilPh) setSoilPh(d.soilPh);
       if (d.soilMoisture) setSoilMoisture(d.soilMoisture);
@@ -266,17 +307,20 @@ export default function MobileCompleteServiceSheet({
     const t = setTimeout(() => {
       try {
         localStorage.setItem(draftKey, JSON.stringify({
-          notes, selectedProducts, observations, followUpNote, noProductsReason,
+          notes, selectedProducts, observations, followUpNote,
+          noProductsReason, noProductsOtherNote, areasTreated,
           soilTemp, soilPh, soilMoisture, thatchMeasurement,
           recapDraft: recapSource !== 'template' ? recapDraft : '',
           recapSource,
           sendSms,
           ts: Date.now(),
         }));
+        setDraftStatus('saved');
       } catch { /* quota exceeded */ }
     }, 800);
     return () => clearTimeout(t);
-  }, [draftKey, notes, selectedProducts, observations, followUpNote, noProductsReason,
+  }, [draftKey, notes, selectedProducts, observations, followUpNote,
+      noProductsReason, noProductsOtherNote, areasTreated,
       soilTemp, soilPh, soilMoisture, thatchMeasurement, recapDraft, recapSource, sendSms]);
 
   // ── Recap text ──────────────────────────────────────────────────────────
@@ -320,6 +364,7 @@ export default function MobileCompleteServiceSheet({
         technicianNotes: notes,
         products: selectedProducts.map((p) => ({ name: p.name })),
         observations,
+        areasTreated,
         customerFirstName,
         serviceType: service?.serviceType,
       }),
@@ -354,7 +399,7 @@ export default function MobileCompleteServiceSheet({
       if (recapDebounceRef.current) clearTimeout(recapDebounceRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [notes, selectedProducts.length, noProductsReason, observations.join(','), sendSms, isIncompleteVisit]);
+  }, [notes, selectedProducts.length, noProductsReason, observations.join(','), areasTreated.join(','), sendSms, isIncompleteVisit]);
 
   // Stale-draft signal: after a manual edit, any change to inputs flags the
   // draft so the UI can offer "Regenerate" rather than silently clobbering.
@@ -406,7 +451,10 @@ export default function MobileCompleteServiceSheet({
   const productsOk = selectedProducts.length > 0
     || (isNonTreatment && notesOk)
     || (!!noProductsReason);
-  const canSubmit = notesOk && productsOk && !submitting;
+  // 'Other' as a no-product reason is too vague for the office without a
+  // short justification. Require a 5+ char note before allowing submit.
+  const otherNoteOk = !reasonRecord?.requiresNote || noProductsOtherNote.trim().length >= 5;
+  const canSubmit = notesOk && productsOk && otherNoteOk && !submitting;
   const needsNoProductReason = !isNonTreatment
     && selectedProducts.length === 0
     && !noProductsReason;
@@ -414,7 +462,10 @@ export default function MobileCompleteServiceSheet({
   // ── Dynamic CTA label ───────────────────────────────────────────────────
   // Incomplete-visit path (weather / can't access) skips invoice + recap +
   // review and explicitly closes the visit with a follow-up flag instead.
-  const willCharge = !coveredByMembership && !isPrepaid && hasAutoPay && total > 0 && !paymentCollected;
+  // Invoice-creating path renames the CTA so the tech sees money in the
+  // label — "Send Recap" alone hides the fact that an invoice is outbound.
+  const willCreateInvoice = !coveredByMembership && !isPrepaid && total > 0 && !paymentCollected;
+  const willCharge = willCreateInvoice && hasAutoPay; // auto-pay actually charges Stripe
   const ctaLabel = submitting
     ? 'Completing…'
     : isIncompleteVisit
@@ -423,6 +474,8 @@ export default function MobileCompleteServiceSheet({
         ? 'Complete Service'
         : willCharge
           ? 'Complete, Charge & Send Recap'
+          : willCreateInvoice
+            ? 'Complete & Send Invoice'
           : 'Complete & Send Recap';
 
   async function handleSubmit() {
@@ -452,10 +505,22 @@ export default function MobileCompleteServiceSheet({
         },
       };
       if (followUpNote.trim()) body.followUpNote = followUpNote.trim();
-      if (noProductsReason) {
-        body.noProductsReason = noProductsReason;
-        body.visitOutcome = reasonOutcome; // complete | no_review | incomplete
-      }
+      // Always send a visit outcome — the backend uses it to gate every
+      // customer-facing side effect (invoice / SMS / review).
+      body.visitOutcome = visitOutcome;
+      if (noProductsReason) body.noProductsReason = noProductsReason;
+      if (reasonRecord?.incompleteReason) body.incompleteReason = reasonRecord.incompleteReason;
+      // Suppression sources, kept separate from outcome so reporting can
+      // tell "visit completed but we chose not to ask for a review" apart
+      // from "visit didn't happen". Concern / follow-up read off
+      // observations; declined-customer reads off the no-product reason.
+      const reviewSuppressionReason = observations.includes('customer_concern') ? 'customer_concern'
+        : observations.includes('follow_up_needed') ? 'follow_up_needed'
+        : reasonRecord?.reviewSuppression || null;
+      if (reviewSuppressionReason) body.reviewSuppressionReason = reviewSuppressionReason;
+      // Areas treated — multi-select chips, useful for both internal
+      // record + AI recap composition (sends concrete spots not jargon).
+      if (Array.isArray(areasTreated) && areasTreated.length) body.areasTreated = areasTreated;
       if (isLawnService) {
         if (soilTemp) body.soilTemp = parseFloat(soilTemp);
         if (soilPh) body.soilPh = parseFloat(soilPh);
@@ -690,15 +755,69 @@ export default function MobileCompleteServiceSheet({
                   );
                 })}
               </div>
+              {reasonRecord?.requiresNote && (
+                <div className="mt-3">
+                  <textarea
+                    value={noProductsOtherNote}
+                    onChange={(e) => setNoProductsOtherNote(e.target.value)}
+                    rows={2}
+                    placeholder="Briefly describe what happened (required)."
+                    className="w-full bg-white border-hairline border-zinc-300 rounded-sm px-3 py-2 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
+                    style={{ fontSize: 14, fontWeight: 500, resize: 'vertical', minHeight: 60, fontFamily: 'inherit' }}
+                  />
+                </div>
+              )}
             </div>
           )}
         </section>
 
-        {/* Observations */}
+        {/* Areas treated — multi-select. Helpful for both internal record
+            and the AI recap (so it can mention concrete spots without the
+            tech typing them). Skipped on incomplete visits. */}
+        {!isIncompleteVisit && (
+          <section className="mt-8">
+            <div className="text-zinc-900" style={sectionTitleStyle}>Areas treated</div>
+            <div className="flex flex-wrap gap-2">
+              {AREA_CHIPS.map((a) => {
+                const selected = areasTreated.includes(a);
+                return (
+                  <button
+                    key={a}
+                    type="button"
+                    onClick={() => setAreasTreated((prev) =>
+                      prev.includes(a) ? prev.filter((x) => x !== a) : [...prev, a]
+                    )}
+                    className="font-medium u-focus-ring"
+                    style={{
+                      padding: '6px 10px',
+                      borderRadius: 4,
+                      border: `1px solid ${selected ? '#18181B' : '#D4D4D8'}`,
+                      background: selected ? '#18181B' : '#fff',
+                      color: selected ? '#fff' : '#18181B',
+                      fontSize: 12,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {a}
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {/* Observations — service-type-aware. Pest/lawn each get their own
+            operational signals; the universal trio (All clear / Customer
+            concern / Follow-up needed) is shared. */}
         <section className="mt-8">
           <div className="text-zinc-900" style={sectionTitleStyle}>Observations</div>
           <div className="flex flex-wrap gap-2">
-            {OBSERVATION_CHIPS.map((c) => {
+            {(() => {
+              const universalAllClear = OBSERVATION_BASE.find((c) => c.key === 'all_clear');
+              const universalRest = OBSERVATION_BASE.filter((c) => c.key !== 'all_clear');
+              const specific = isLawnService ? OBSERVATION_LAWN : OBSERVATION_PEST;
+              return [universalAllClear, ...specific, ...universalRest].filter(Boolean);
+            })().map((c) => {
               const selected = observations.includes(c.key);
               return (
                 <button
@@ -818,6 +937,30 @@ export default function MobileCompleteServiceSheet({
                 </button>
               )}
             </div>
+
+            {/* Final SMS preview — shows the tech the EXACT body that
+                will be sent, including the appended invoice line and/or
+                review URL placeholders. No surprises after submit. */}
+            <div className="mt-4 px-3 py-3 rounded-sm" style={{ background: '#F4F4F5', border: '1px solid #E4E4E7', fontSize: 13, fontWeight: 500, color: '#18181B', lineHeight: 1.4, whiteSpace: 'pre-wrap' }}>
+              <div className="text-ink-secondary mb-1" style={{ fontSize: 11 }}>Final SMS preview</div>
+              {recapToSend}
+              {willCreateInvoice && (
+                <div className="mt-2" style={{ color: '#52525B' }}>
+                  + Invoice for today's visit: [pay link inserted]
+                </div>
+              )}
+              {/* Review bundling rule — never alongside a pay request. */}
+              {!isIncompleteVisit && !willCreateInvoice && requestReview && !reviewAutoOff && (
+                <div className="mt-2" style={{ color: '#52525B' }}>
+                  + Enjoyed the service? A quick review means the world: [review link inserted]
+                </div>
+              )}
+            </div>
+            {willCreateInvoice && requestReview && (
+              <div className="text-ink-secondary mt-2" style={{ fontSize: 12 }}>
+                Review request will be sent after payment, not in this SMS.
+              </div>
+            )}
           </section>
         )}
 
@@ -926,8 +1069,16 @@ export default function MobileCompleteServiceSheet({
               if (!notesOk) return 'Add a note to continue.';
               if (needsNoProductReason && noProductsActive) return 'Choose why no products were applied.';
               if (needsNoProductReason) return 'Select a product or mark no products applied.';
+              if (!otherNoteOk) return 'Add a brief description for "Other".';
               return null;
             })()}
+          </div>
+        )}
+        {/* Subtle reassurance the form survives backgrounding / signal
+            loss — the autosave runs every 800ms while inputs change. */}
+        {draftStatus === 'saved' && canSubmit && (
+          <div className="text-ink-tertiary text-center mt-1" style={{ fontSize: 11 }}>
+            Draft saved
           </div>
         )}
       </div>
