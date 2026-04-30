@@ -152,11 +152,18 @@ function verifyForwardCall(definition) {
       .sort();
     const live = [...numbers].sort();
     if (live.length !== expected.length || live.some((n, i) => n !== expected[i])) {
+      // Mask numbers to last4 in the failure message — codex P1 flagged
+      // logging full E.164s as PII. The operator can correlate by last4
+      // (uniquely identifies the personal cell to anyone who already
+      // knows the numbers) without leaking the full digits into shell
+      // logs / Railway logs / CI captures.
+      const mask = (n) => `+*******${n.slice(-4)}`;
       fail(
         `connect-call-to.to drift vs. TWILIO_EXPECTED_FORWARD_NUMBERS.\n` +
-          `  expected: ${expected.join(', ')}\n` +
-          `  live:     ${live.join(', ')}\n` +
-          'If the routing pair was intentionally changed, update TWILIO_EXPECTED_FORWARD_NUMBERS in Railway env (and the local .env if used by ops). Numbers stay out of the snapshot/contract on purpose.'
+          `  expected (last4): ${expected.map(mask).join(', ')}\n` +
+          `  live     (last4): ${live.map(mask).join(', ')}\n` +
+          `  expected count: ${expected.length}, live count: ${live.length}\n` +
+          'Compare against the un-masked TWILIO_EXPECTED_FORWARD_NUMBERS env value and the Twilio Console Flow definition to identify the mismatched number(s). Full digits are deliberately not echoed.'
       );
     }
   } else {
