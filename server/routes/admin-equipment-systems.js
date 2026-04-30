@@ -36,8 +36,10 @@ const CARRIER_MIN = 0.05;
 const CARRIER_MAX = 10.0;
 const DEFAULT_EXPIRY_DAYS = 30;
 
+// technician_id intentionally NOT in this whitelist. POST always uses
+// the auth-derived req.technicianId; PUT never lets the caller change
+// who recorded the calibration. Lets the audit trail stay trustworthy.
 const CALIBRATION_COLUMNS = [
-  'technician_id',
   'carrier_gal_per_1000',
   'test_area_sqft', 'captured_gallons',
   'pressure_psi', 'engine_rpm_setting',
@@ -123,6 +125,30 @@ router.put('/calibrations/:id', async (req, res, next) => {
     const errors = validateCalibrationPayload(payload, { requireCarrier: false });
     if (errors.length) return res.status(400).json({ error: 'Invalid calibration', details: errors });
 
+    // Reject re-activating a stale row when another active calibration
+    // already exists for this system. Without this guard, the partial
+    // unique index `idx_eqcal_one_active_per_system` rejects the write
+    // and bubbles as a 500 — surprising for the caller and useless
+    // diagnostically. The normal "I want a new active calibration"
+    // path is POST /:id/calibrations, which atomically deactivates
+    // the prior active in the same trx; PUT-toggling-active is almost
+    // always a tech mistake worth surfacing loudly.
+    if (payload.active === true && existing.active === false) {
+      const conflict = await db('equipment_calibrations')
+        .where({ equipment_system_id: existing.equipment_system_id, active: true })
+        .whereNot({ id: existing.id })
+        .first();
+      if (conflict) {
+        return res.status(400).json({
+          error: 'Cannot activate this calibration while another is active for the same system',
+          details: [
+            'Use POST /api/admin/equipment-systems/:id/calibrations to record a new calibration (it deactivates the prior active in the same transaction), or PUT active:false on the conflicting row first.',
+          ],
+          conflicting_calibration_id: conflict.id,
+        });
+      }
+    }
+
     const update = { updated_at: new Date() };
     for (const k of ['notes', 'active', 'expires_at', 'carrier_gal_per_1000', 'pressure_psi', 'engine_rpm_setting']) {
       if (Object.prototype.hasOwnProperty.call(payload, k)) update[k] = payload[k];
@@ -183,7 +209,13 @@ router.post('/:id/calibrations', async (req, res, next) => {
 
       const [row] = await trx('equipment_calibrations').insert({
         equipment_system_id: systemId,
-        technician_id: payload.technician_id ?? req.technicianId ?? null,
+        // technician_id is auth-derived only — never trust the payload.
+        // The original `payload.technician_id ?? req.technicianId` let
+        // any logged-in tech attribute a calibration to a different
+        // tech by posting their UUID, which would corrupt the audit
+        // trail. A future "backfill an old calibration as someone
+        // else" path would need an explicit admin-only override route.
+        technician_id: req.technicianId ?? null,
         carrier_gal_per_1000: payload.carrier_gal_per_1000,
         test_area_sqft: payload.test_area_sqft ?? null,
         captured_gallons: payload.captured_gallons ?? null,

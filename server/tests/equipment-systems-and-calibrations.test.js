@@ -138,6 +138,40 @@ describeOrSkip('equipment_systems + equipment_calibrations', () => {
     }
   });
 
+  // ── Activate-stale-row guard (Codex P2 follow-up) ─────────────────────
+  // The PUT path's "set active=true on a stale row" case must NOT bubble
+  // the unique-index violation as a 500. We can't exercise the route
+  // here without a supertest harness, but we CAN assert the underlying
+  // index throws on the same shape — proving the route's pre-check is
+  // load-bearing, not a no-op.
+  test('partial unique index would reject reactivating a stale row', async () => {
+    const tank2 = await knex('equipment_systems')
+      .where({ name: '110-Gallon Spray Tank #2' })
+      .first();
+
+    const created = [];
+    try {
+      const [active] = await knex('equipment_calibrations')
+        .insert({ equipment_system_id: tank2.id, carrier_gal_per_1000: 2.0, active: true })
+        .returning(['id']);
+      created.push(active.id);
+
+      const [stale] = await knex('equipment_calibrations')
+        .insert({ equipment_system_id: tank2.id, carrier_gal_per_1000: 1.8, active: false })
+        .returning(['id']);
+      created.push(stale.id);
+
+      // Trying to flip the stale row to active without deactivating
+      // the current active first must throw — that's the failure mode
+      // the new PUT pre-check catches and surfaces as 400.
+      await expect(
+        knex('equipment_calibrations').where({ id: stale.id }).update({ active: true })
+      ).rejects.toThrow(/duplicate key|unique/i);
+    } finally {
+      await knex('equipment_calibrations').whereIn('id', created).del();
+    }
+  });
+
   // ── Multiple historical calibrations per system ───────────────────────
   test('can store calibration history (multiple rows, one active)', async () => {
     const fz1 = await knex('equipment_systems')
