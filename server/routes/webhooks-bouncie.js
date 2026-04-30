@@ -6,15 +6,17 @@
  * public /track/:token map. Two webhooks on purpose — mileage and
  * tracking have different failure modes and shouldn't cascade.
  *
- * Verification is non-strict, mirroring /api/bouncie/webhook. Bouncie
- * has no formal signing contract and several account-level mismatches
- * in our setup history caused the first deploy of this endpoint to
- * 401 every event — Bouncie auto-deactivates a webhook after enough
- * non-2xx responses. We log mismatches and accept the event; downstream
- * authorization is the IMEI → technician lookup (unknown IMEI = no-op).
- * Receiver still inspects header `x-webhook-key`, body `webhookKey`,
- * and query `?key=` so we know which transport Bouncie chose for the
- * first event with a matching secret.
+ * Verification defaults to non-strict, mirroring /api/bouncie/webhook.
+ * Bouncie has no formal signing contract and several account-level
+ * mismatches in our setup history caused the first deploy of this
+ * endpoint to 401 every event — Bouncie auto-deactivates a webhook
+ * after enough non-2xx responses. We log mismatches and accept the
+ * event; downstream authorization is the IMEI → technician lookup
+ * (unknown IMEI = no-op). Set BOUNCIE_WEBHOOK_STRICT=true once Bouncie's
+ * side is confirmed sending x-webhook-key to flip to reject-on-mismatch.
+ * Receiver inspects header `x-webhook-key` and body `webhookKey` so we
+ * know which transport Bouncie chose for the first event with a
+ * matching secret.
  *
  * Event model:
  *   - trip-start / trip-data / trip-end / trip-metrics / connect / disconnect
@@ -41,8 +43,6 @@ function inspectKey(req) {
   if (headerKey && headerKey === expected) return { matched: true, from: 'header' };
   const bodyKey = req.body && (req.body.webhookKey || req.body.webhook_key);
   if (bodyKey && bodyKey === expected) return { matched: true, from: 'body' };
-  const queryKey = req.query && req.query.key;
-  if (queryKey && queryKey === expected) return { matched: true, from: 'query' };
   return { matched: false, from: null, reason: 'mismatch' };
 }
 
@@ -227,10 +227,12 @@ async function processTrackingEvent({ logId, eventType, payload }) {
 
 // ---------- routes ----------
 
-// GET /api/webhooks/bouncie/ping?key=<secret>
+// GET /api/webhooks/bouncie/ping  (header: x-webhook-key)
+// Header-only on purpose: query strings leak into Railway access logs and
+// any upstream proxy logs, so the secret can't ride in the URL.
 router.get('/ping', (req, res) => {
   const expected = process.env.BOUNCIE_WEBHOOK_SECRET;
-  if (!expected || req.query.key !== expected) {
+  if (!expected || req.get('x-webhook-key') !== expected) {
     return res.status(401).json({ ok: false });
   }
   res.json({ ok: true, timestamp: new Date().toISOString() });
@@ -238,8 +240,13 @@ router.get('/ping', (req, res) => {
 
 // POST /api/webhooks/bouncie
 router.post('/', async (req, res) => {
+  const strict = process.env.BOUNCIE_WEBHOOK_STRICT === 'true';
   const verify = inspectKey(req);
   if (!verify.matched) {
+    if (strict) {
+      logger.warn(`[webhooks-bouncie] secret ${verify.reason} — rejected (strict)`);
+      return res.status(401).json({ ok: false });
+    }
     logger.warn(`[webhooks-bouncie] secret ${verify.reason} — accepted anyway (non-strict)`);
   }
 
