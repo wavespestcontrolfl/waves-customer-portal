@@ -44,6 +44,18 @@ async function logSms({ leadId, phone, direction, body, messageType, adminUserId
     }
     if (!lead) return;
 
+    // Idempotency: Twilio webhooks retry on 5xx, and admin retries can
+    // re-fire the same outbound. Skip if a row with this twilio_sid
+    // already exists for this lead (mirrors the backfill script's
+    // dedup key — server/scripts/backfill-lead-activities-from-sms.js).
+    if (twilioSid) {
+      const existing = await db('lead_activities')
+        .where({ lead_id: lead.id })
+        .whereRaw(`metadata->>'twilio_sid' = ?`, [twilioSid])
+        .first();
+      if (existing) return;
+    }
+
     let activity_type;
     let performed_by;
     let descriptionPrefix;
