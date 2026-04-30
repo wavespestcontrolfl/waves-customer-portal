@@ -84,38 +84,48 @@ export default function DashboardPageV2() {
       });
     }
     async function loadAll() {
-      const wave1 = await Promise.all([
-        track('/dashboard',         adminFetch('/admin/dashboard')),
-        track('/compare',           adminFetch('/admin/dashboard/compare?period=this_month&against=last_month')),
-        track('/today-completion',  adminFetch('/admin/dashboard/today-completion')),
-        track('/billing-health',    adminFetch('/admin/billing-health')),
-      ]);
-      const [d, cmp, td, bh] = wave1;
-      if (cancelled) return;
-      setData(d);
-      setCompare(cmp);
-      setToday(td);
-      setBilling(bh?.summary || null);
-      setLoading(false);
+      // try/finally guarantees we leave the loading state even if a wave
+      // throws unexpectedly. track() should swallow everything, but the
+      // belt-and-suspenders here keeps operators from getting pinned on
+      // "Loading dashboard…" forever if anything below it ever rejects.
+      try {
+        const wave1 = await Promise.all([
+          track('/dashboard',         adminFetch('/admin/dashboard')),
+          track('/compare',           adminFetch('/admin/dashboard/compare?period=this_month&against=last_month')),
+          track('/today-completion',  adminFetch('/admin/dashboard/today-completion')),
+          track('/billing-health',    adminFetch('/admin/billing-health')),
+        ]);
+        if (cancelled) return;
+        const [d, cmp, td, bh] = wave1;
+        setData(d);
+        setCompare(cmp);
+        setToday(td);
+        setBilling(bh?.summary || null);
+        // Drop out of loading as soon as the hero tiles can render —
+        // attribution panels backfill underneath.
+        setLoading(false);
 
-      const wave2 = await Promise.all([
-        track('/funnel',            adminFetch('/admin/dashboard/funnel')),
-        track('/aging',             adminFetch('/admin/dashboard/aging')),
-        track('/mrr-trend',         adminFetch('/admin/dashboard/mrr-trend?months=12')),
-        track('/calls-by-source',   adminFetch('/admin/dashboard/calls-by-source?period=mtd')),
-        track('/leads-by-source',   adminFetch('/admin/dashboard/leads-by-source?period=mtd')),
-        track('/channel-mix',       adminFetch('/admin/dashboard/channel-mix?period=mtd')),
-        track('/service-mix',       adminFetch('/admin/dashboard/service-mix')),
-      ]);
-      if (cancelled) return;
-      const [fnl, ag, mrr, calls, leads, channels, mx] = wave2;
-      setFunnel(fnl);
-      setAging(ag);
-      setMrrTrend(mrr);
-      setCallsBySource(calls);
-      setLeadsBySource(leads);
-      setChannelMix(channels);
-      setMix(mx);
+        const wave2 = await Promise.all([
+          track('/funnel',            adminFetch('/admin/dashboard/funnel')),
+          track('/aging',             adminFetch('/admin/dashboard/aging')),
+          track('/mrr-trend',         adminFetch('/admin/dashboard/mrr-trend?months=12')),
+          track('/calls-by-source',   adminFetch('/admin/dashboard/calls-by-source?period=mtd')),
+          track('/leads-by-source',   adminFetch('/admin/dashboard/leads-by-source?period=mtd')),
+          track('/channel-mix',       adminFetch('/admin/dashboard/channel-mix?period=mtd')),
+          track('/service-mix',       adminFetch('/admin/dashboard/service-mix')),
+        ]);
+        if (cancelled) return;
+        const [fnl, ag, mrr, calls, leads, channels, mx] = wave2;
+        setFunnel(fnl);
+        setAging(ag);
+        setMrrTrend(mrr);
+        setCallsBySource(calls);
+        setLeadsBySource(leads);
+        setChannelMix(channels);
+        setMix(mx);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
     }
     loadAll();
     return () => { cancelled = true; };
