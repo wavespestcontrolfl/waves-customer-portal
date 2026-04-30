@@ -48,6 +48,7 @@ import MobileWeekGrid from '../../components/schedule/MobileWeekGrid';
 import MobileDispatchList from '../../components/schedule/MobileDispatchList';
 import MobileAppointmentDetailSheet from '../../components/schedule/MobileAppointmentDetailSheet';
 import MobileCheckoutSheet from '../../components/schedule/MobileCheckoutSheet';
+import MobileCompleteServiceSheet from '../../components/schedule/MobileCompleteServiceSheet';
 import MobilePaymentSheet from '../../components/schedule/MobilePaymentSheet';
 import MobileServiceEditModal from '../../components/schedule/MobileServiceEditModal';
 import MarkPrepaidModal from '../../components/schedule/MarkPrepaidModal';
@@ -873,6 +874,20 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
 
   const handleComplete = useCallback((service) => { setCompletingService(service); }, []);
 
+  // Status-aware tap routing for the mobile dispatch list. Active visits
+  // (en_route/on_site) jump straight into the completion-first sheet so the
+  // tech logs notes + sends recap in one screen. Other statuses (scheduled,
+  // completed, cancelled, no_show) keep the existing detail sheet which
+  // owns reschedule / cancel / mark no-show.
+  const routeAppointmentTap = useCallback((svc) => {
+    const status = String(svc?.status || 'scheduled');
+    if (status === 'en_route' || status === 'on_site') {
+      setCompletingService(svc);
+    } else {
+      setDetailService(svc);
+    }
+  }, []);
+
   const handleEnRoute = useCallback(async (service) => {
     try {
       await adminFetch(`/admin/schedule/${service.id}/status`, {
@@ -885,8 +900,16 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
     }
   }, [handleStatusChange]);
 
-  const handleCompleteSubmit = useCallback(async (serviceId, body) => {
-    const r = await adminFetch(`/admin/dispatch/${serviceId}/complete`, { method: 'POST', body: JSON.stringify(body) });
+  const handleCompleteSubmit = useCallback(async (serviceId, body, opts = {}) => {
+    // Idempotency key (when the new mobile sheet supplies one) is forwarded
+    // as a header so a backend update can short-circuit duplicate completion
+    // attempts without changing the JSON contract.
+    const headers = opts.idempotencyKey ? { 'X-Idempotency-Key': opts.idempotencyKey } : undefined;
+    const r = await adminFetch(`/admin/dispatch/${serviceId}/complete`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
     handleStatusChange(serviceId, 'completed');
     return r;
   }, [handleStatusChange]);
@@ -1198,7 +1221,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
         <MobileDispatchList
           mode="week"
           date={date}
-          onEdit={(svc) => setDetailService(svc)}
+          onEdit={routeAppointmentTap}
           onEnRoute={handleEnRoute}
         />
       )}
@@ -1401,20 +1424,37 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
               mode="day"
               date={date}
               services={services}
-              onEdit={(svc) => setDetailService(svc)}
+              onEdit={routeAppointmentTap}
               onEnRoute={handleEnRoute}
             />
           </div>
         </>
       )}
 
-      {/* Modals — V1 components, unchanged */}
+      {/* Completion-first mobile sheet — primary entry for active visits.
+          CompletionPanel (V1) is still imported for the constants/exports
+          consumed elsewhere; this surface no longer renders it directly. */}
       {completingService && (
-        <CompletionPanel
+        <MobileCompleteServiceSheet
           service={completingService}
           products={products}
-          onClose={() => setCompletingService(null)}
+          onClose={(result) => {
+            const customerFirst = result?.customerFirstName || (completingService.customerName || '').split(' ')[0] || '';
+            const wantsEdit = !!result?.edit;
+            const completed = !!result?.completed;
+            setCompletingService(null);
+            if (wantsEdit) setEditingService(completingService);
+            if (completed) {
+              fetchSchedule(date);
+              if (customerFirst) {
+                // Lightweight confirmation — rely on browser default since
+                // the page doesn't ship a global toast component yet.
+                try { console.info(`[complete] Recap sent to ${customerFirst}`); } catch {}
+              }
+            }
+          }}
           onSubmit={handleCompleteSubmit}
+          onChargeRequested={(svc) => setCheckoutService(svc)}
         />
       )}
       {rescheduleService && (

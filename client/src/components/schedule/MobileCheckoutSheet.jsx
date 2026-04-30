@@ -203,9 +203,10 @@ export default function MobileCheckoutSheet({
           type="button"
           onClick={onClose}
           aria-label="Close"
-          className="flex items-center justify-center h-11 w-11 u-focus-ring text-zinc-900"
+          className="inline-flex items-center justify-center bg-transparent text-ink-primary u-focus-ring"
+          style={{ width: 44, height: 44, fontSize: 18, lineHeight: 1, border: 'none', cursor: 'pointer' }}
         >
-          <X size={22} strokeWidth={1.75} />
+          ✕
         </button>
         <div className="flex-1 text-center font-medium text-zinc-900" style={{ fontSize: 16 }}>
           Check Out Appointment
@@ -238,16 +239,16 @@ export default function MobileCheckoutSheet({
           >
             <div className="flex-1 min-w-0 pr-2">
               <div className="flex items-center gap-1.5">
-                <span className="font-medium text-blue-600 truncate" style={{ fontSize: 15 }}>
+                <span className="font-medium text-zinc-900 truncate" style={{ fontSize: 15 }}>
                   {service.serviceType || 'General Service'}
                 </span>
                 <Tag size={14} className="text-zinc-400 shrink-0" strokeWidth={1.5} />
               </div>
-              <div className="text-ink-tertiary truncate" style={{ fontSize: 12, marginTop: 2 }}>
+              <div className="font-medium text-zinc-900 truncate" style={{ fontSize: 15, marginTop: 2 }}>
                 {billingSubtitle}
               </div>
               {timeSubtitle && (
-                <div className="text-ink-tertiary u-nums" style={{ fontSize: 12, marginTop: 1 }}>
+                <div className="font-medium text-zinc-900 u-nums" style={{ fontSize: 15, marginTop: 2 }}>
                   {timeSubtitle}
                 </div>
               )}

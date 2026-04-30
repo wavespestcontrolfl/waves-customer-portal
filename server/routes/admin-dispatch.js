@@ -306,7 +306,69 @@ router.put('/:serviceId/status', async (req, res, next) => {
 // POST /api/admin/dispatch/:serviceId/complete
 router.post('/:serviceId/complete', async (req, res, next) => {
   try {
-    const { technicianNotes, products, soilTemp, thatchMeasurement, soilPh, soilMoisture, sendCompletionSms, requestReview, formResponses, formStartedAt } = req.body;
+    // Idempotency: race-safe pending → succeeded state machine.
+    //
+    //   1. Same key, succeeded → replay stored response (normal retry).
+    //   2. Same key, pending   → another request is mid-flight; 409.
+    //   3. Different key, but a pending row already exists for this
+    //      service → 409 (the partial unique index on service_id WHERE
+    //      status='pending' enforces this; we surface the conflict
+    //      cleanly instead of letting the insert error bubble).
+    //   4. No prior row → insert a 'pending' row and proceed. We update
+    //      it to 'succeeded' with the response after side effects.
+    //
+    // A missing key (legacy clients) skips the table entirely — but the
+    // mobile sheet always sends one, so the protection is effective in
+    // the path that matters.
+    const idempotencyKey = req.headers['x-idempotency-key']
+      ? String(req.headers['x-idempotency-key']).slice(0, 64)
+      : null;
+    if (idempotencyKey) {
+      try {
+        const prior = await db('completion_idempotency_keys')
+          .where({ key: idempotencyKey, service_id: req.params.serviceId })
+          .first();
+        if (prior?.status === 'succeeded') {
+          return res.json({ ...prior.response, idempotent: true });
+        }
+        if (prior?.status === 'pending') {
+          return res.status(409).json({ error: 'Completion already in progress for this attempt.' });
+        }
+      } catch (e) { /* table read failed — fall through, the insert below will fail loud if needed */ }
+      try {
+        await db('completion_idempotency_keys').insert({
+          key: idempotencyKey,
+          service_id: req.params.serviceId,
+          status: 'pending',
+          response: null,
+        });
+      } catch (e) {
+        // Hit the partial unique index → another pending request for the
+        // same service is in flight (different key, same service). Reject
+        // so we don't run side effects in parallel.
+        return res.status(409).json({ error: 'Another completion is in progress for this service.' });
+      }
+    }
+    const { technicianNotes, soilTemp, thatchMeasurement, soilPh, soilMoisture, sendCompletionSms, requestReview, formResponses, formStartedAt, visitOutcome, noProductsReason, incompleteReason, reviewSuppressionReason, areasTreated } = req.body;
+    // `products` is rebindable below (dedupe path) — use let so the trx
+    // path sees the cleaned list.
+    let products = Array.isArray(req.body.products) ? req.body.products : null;
+    // Tech-approved customer recap (the polished SMS body — Claude-drafted
+    // or hand-written in MobileCompleteServiceSheet). When present, this
+    // text REPLACES the templated body for the standard / prepaid SMS
+    // branches so what the tech approved is exactly what the customer
+    // receives. We still append the pay link + review suffix from the
+    // existing pipeline.
+    const customerRecap = (formResponses && typeof formResponses.customerRecap === 'string')
+      ? formResponses.customerRecap.trim().slice(0, 320)
+      : '';
+    // Incomplete visits (weather-blocked, can't access, etc.) record the
+    // record + audit row but skip every customer-facing side effect: no
+    // invoice creation, no completion SMS, no review request. The
+    // operations team picks up the followUpNote separately. The tech
+    // sees a CTA labeled "Mark Visit Incomplete" so the UI doesn't
+    // promise more than this branch delivers.
+    const isIncompleteOutcome = visitOutcome === 'incomplete';
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
@@ -314,6 +376,60 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       .first();
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    // Server-side product validation — frontend caps aren't enough since
+    // any authenticated tech client can post here. Reject the whole
+    // submit if any product is missing, inactive, or wildly out of
+    // bounds. Better to fail loud than to write bogus rows that downstream
+    // reports + customer history have to clean up later.
+    const PRODUCT_MAX_COUNT = 25;
+    const RATE_MAX = 100;        // rates above 100 in any unit are almost certainly typos
+    const VALID_RATE_UNITS = new Set(['oz', 'fl oz', 'lb', 'g', 'kg', 'ml', 'gal', 'qt', 'each', '%']);
+    if (Array.isArray(products) && products.length > 0) {
+      if (products.length > PRODUCT_MAX_COUNT) {
+        return res.status(400).json({ error: `Too many products (max ${PRODUCT_MAX_COUNT}).` });
+      }
+      const productIds = products.map((p) => p?.productId).filter(Boolean);
+      const catalogRows = productIds.length
+        ? await db('products_catalog').whereIn('id', productIds).select('id', 'active')
+        : [];
+      const catalogById = new Map(catalogRows.map((r) => [r.id, r]));
+      for (let i = 0; i < products.length; i++) {
+        const p = products[i] || {};
+        if (!p.productId) {
+          return res.status(400).json({ error: `Product #${i + 1}: missing productId.` });
+        }
+        const row = catalogById.get(p.productId);
+        if (!row) {
+          return res.status(400).json({ error: `Product #${i + 1}: not found in catalog.` });
+        }
+        if (row.active === false) {
+          return res.status(400).json({ error: `Product #${i + 1}: not active.` });
+        }
+        if (p.rate != null && p.rate !== '') {
+          const r = Number(p.rate);
+          if (!Number.isFinite(r) || r < 0 || r > RATE_MAX) {
+            return res.status(400).json({ error: `Product #${i + 1}: rate ${p.rate} is out of range.` });
+          }
+        }
+        if (p.rateUnit && !VALID_RATE_UNITS.has(String(p.rateUnit))) {
+          return res.status(400).json({ error: `Product #${i + 1}: rate unit "${p.rateUnit}" not allowed.` });
+        }
+      }
+      // Duplicate productId guard — if the UI accidentally submits the
+      // same product twice, fold them into one row instead of writing
+      // two service_products records.
+      const seen = new Set();
+      const dedupedProducts = [];
+      for (const p of products) {
+        if (seen.has(p.productId)) continue;
+        seen.add(p.productId);
+        dedupedProducts.push(p);
+      }
+      if (dedupedProducts.length !== products.length) {
+        products = dedupedProducts;
+      }
+    }
 
     // Status flip + completion artifacts + audit row + lifecycle
     // timestamps, all in one trx. Migrated to
@@ -348,13 +464,31 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // record-from-service unambiguously. Codex P1 on PR #340 — the
         // old (customer_id, technician_id, service_date) soft-join
         // collided on same-day same-customer-same-tech double visits.
+        // Capture the no-product reason, the chosen outcome, and the
+        // recap that was actually approved into structured_notes JSONB so
+        // we can answer "why did this visit close without products?" in
+        // reports + office queues without adding new scalar columns yet.
+        const structuredNotes = {
+          ...(formResponses || {}),
+          customerRecap: customerRecap || null,
+          noProductsReason: noProductsReason || null,
+          visitOutcome: visitOutcome || 'complete',
+          incompleteReason: incompleteReason || null,
+          reviewSuppressionReason: reviewSuppressionReason || null,
+          areasTreated: Array.isArray(areasTreated) ? areasTreated : null,
+        };
         [record] = await trx('service_records').insert({
           scheduled_service_id: svc.id,
           customer_id: svc.customer_id, technician_id: svc.technician_id,
-          service_date: svc.scheduled_date, service_type: svc.service_type, status: 'completed',
+          service_date: svc.scheduled_date, service_type: svc.service_type,
+          // Status reflects what actually happened. An incomplete-outcome
+          // visit hasn't really been completed; mark it 'incomplete' so
+          // reports + status filters can distinguish the two paths.
+          status: isIncompleteOutcome ? 'incomplete' : 'completed',
           technician_notes: technicianNotes || '',
           soil_temp: soilTemp || null, thatch_measurement: thatchMeasurement || null,
           soil_ph: soilPh || null, soil_moisture: soilMoisture || null,
+          structured_notes: structuredNotes,
         }).returning('*');
 
         // 2. service_products — children of the service_record.
@@ -382,6 +516,34 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         await trx('service_status_log').insert({
           scheduled_service_id: svc.id, status: 'completed', changed_by: req.technicianId,
         });
+
+        // 3b. Incomplete-visit alert is the office's primary handoff
+        // signal. Inside the trx so the alert is atomic with the
+        // service_record + status flip — if the alert insert fails, the
+        // completion rolls back rather than silently disappearing.
+        if (isIncompleteOutcome) {
+          const reasonSeverity = (
+            noProductsReason === 'Weather prevented treatment'
+            || noProductsReason === 'Unable to access property'
+          ) ? 'warn' : 'info';
+          await trx('dispatch_alerts').insert({
+            type: 'visit_incomplete',
+            severity: reasonSeverity,
+            tech_id: svc.technician_id || null,
+            job_id: svc.id,
+            payload: {
+              customerName: `${svc.first_name || ''} ${svc.last_name || ''}`.trim(),
+              customerId: svc.customer_id,
+              serviceType: svc.service_type,
+              scheduledDate: svc.scheduled_date,
+              reason: noProductsReason || 'Marked incomplete',
+              technicianNotes: (technicianNotes || '').slice(0, 500),
+              createdBy: req.technicianId || null,
+              status: 'open',
+              serviceRecordId: record.id,
+            },
+          });
+        }
 
         // 4. Lifecycle timestamps the route owns. transitionJobStatus
         // owns status + updated_at; we own actual_end_time +
@@ -496,12 +658,78 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     // Customer-visible track_state → 'complete' so /track/:token renders the
     // summary card. track_state is owned by services/track-transitions.js.
-    try {
-      await trackTransitions.markComplete(svc.id, {
-        actorType: 'admin',
-        actorId: req.technicianId,
-      });
-    } catch (e) { logger.error(`[admin-dispatch] markComplete failed: ${e.message}`); }
+    // Skip on incomplete visits — there's no completion to surface to the
+    // customer, and the office follow-up alert below carries the handoff.
+    if (!isIncompleteOutcome) {
+      try {
+        await trackTransitions.markComplete(svc.id, {
+          actorType: 'admin',
+          actorId: req.technicianId,
+        });
+      } catch (e) { logger.error(`[admin-dispatch] markComplete failed: ${e.message}`); }
+    }
+
+    // Office alerts. Three triggers feed the same dispatch_alerts queue:
+    //   - visit_incomplete    → severity warn (weather/access) | info (other)
+    //   - customer_concern    → severity warn
+    //   - follow_up_needed    → severity info (or warn if also incomplete)
+    //
+    // For *incomplete* visits the alert is the office's primary handoff
+    // signal — a missing alert means the visit silently disappears. We
+    // wait inside a tight try/catch and log loudly on failure. (A future
+    // hardening pass will move this insert into the same trx as the
+    // service_record + status flip; for now non-blocking with prominent
+    // logging matches the existing dispatch_alerts pattern in this file.)
+    const observationsArr = Array.isArray(formResponses?.observations) ? formResponses.observations : [];
+    const customerConcernFlagged = observationsArr.includes('customer_concern');
+    const followUpFlagged = observationsArr.includes('follow_up_needed');
+    const alertBasePayload = {
+      customerName: `${svc.first_name || ''} ${svc.last_name || ''}`.trim(),
+      customerId: svc.customer_id,
+      serviceType: svc.service_type,
+      scheduledDate: svc.scheduled_date,
+      technicianNotes: (technicianNotes || '').slice(0, 500),
+      createdBy: req.technicianId || null,
+      status: 'open',
+      serviceRecordId: record.id,
+    };
+    // Note: the incomplete-visit alert insert moved INTO the completion
+    // trx (see trx block above) so it's atomic with the service_record
+    // write. If the alert insert fails the entire completion rolls back
+    // — the office's primary handoff signal can't be silently lost.
+    // The customer_concern / follow_up_needed alerts below stay
+    // non-blocking; those are advisory rather than the source of truth
+    // and can tolerate the rare retry.
+    if (customerConcernFlagged) {
+      try {
+        await db('dispatch_alerts').insert({
+          type: 'customer_concern',
+          severity: 'warn',
+          tech_id: svc.technician_id || null,
+          job_id: svc.id,
+          payload: { ...alertBasePayload, observation: 'customer_concern' },
+        });
+      } catch (e) {
+        logger.error(`[admin-dispatch] customer_concern alert insert failed: ${e.message}`);
+      }
+    }
+    if (followUpFlagged) {
+      try {
+        await db('dispatch_alerts').insert({
+          type: 'follow_up_needed',
+          severity: isIncompleteOutcome ? 'warn' : 'info',
+          tech_id: svc.technician_id || null,
+          job_id: svc.id,
+          payload: {
+            ...alertBasePayload,
+            observation: 'follow_up_needed',
+            followUpNote: req.body?.followUpNote || '',
+          },
+        });
+      } catch (e) {
+        logger.error(`[admin-dispatch] follow_up_needed alert insert failed: ${e.message}`);
+      }
+    }
 
     // Invoice + completion SMS:
     //   - If the appointment was flagged `create_invoice_on_complete` (scheduler's
@@ -535,7 +763,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         .orderBy('created_at', 'desc')
         .first();
     } catch (e) { /* column may not exist pre-migration — non-blocking */ }
-    const shouldInvoice = !alreadyPaid && !prepaidCovered && !preMintedInvoice
+    const shouldInvoice = !isIncompleteOutcome
+      && !alreadyPaid && !prepaidCovered && !preMintedInvoice
       && (!!svc.create_invoice_on_complete || !!svc.cust_waveguard_tier) && invoiceAmount > 0;
     // Customer-facing SMS URL must be the canonical portal domain, not
     // the raw Railway URL (CLIENT_URL is set to the Railway hostname on
@@ -580,7 +809,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // SMS instead of firing a second message 90-180 min later. Single message
     // lands higher read-rates than two.
     let bundledReviewUrl = null;
-    if (sendCompletionSms && requestReview && svc.cust_phone) {
+    // Don't bundle a review request alongside an outbound invoice. "Pay
+    // us" and "review us" in one SMS competes for attention and reads
+    // premature when the customer hasn't paid yet. Review goes out later
+    // (delayed cron OR — TODO — Stripe webhook on payment_intent.succeeded).
+    const willBundleReview = !isIncompleteOutcome
+      && sendCompletionSms
+      && requestReview
+      && svc.cust_phone
+      && !shouldInvoice;
+    if (willBundleReview) {
       try {
         const ReviewService = require('../services/review-request');
         bundledReviewUrl = await ReviewService.createInline({
@@ -593,37 +831,75 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       ? `\n\nEnjoyed the service? A quick review means the world: ${bundledReviewUrl}`
       : '';
 
-    if (sendCompletionSms && svc.cust_phone) {
+    // We capture the exact composed SMS body that gets sent so support
+    // can answer "what did the customer actually receive?" without
+    // reconstructing it. Written back to service_records.structured_notes
+    // after the SMS path resolves. Stays empty when no SMS is sent.
+    let sentSmsBody = '';
+    if (!isIncompleteOutcome && sendCompletionSms && svc.cust_phone) {
       try {
         const displayServiceType = normalizeServiceTypeForTemplate(svc.service_type);
+        // When the tech approved a customerRecap in the completion sheet,
+        // it REPLACES the templated body so what they saw on screen is
+        // what the customer receives. The pay-link line + review suffix
+        // are still appended by the existing pipeline so we don't lose
+        // the structural pieces the tech wasn't writing themselves.
+        const recapPayLine = (invoiceCreated && payUrl)
+          ? `\n\nInvoice for today's visit: ${payUrl}`
+          : '';
         if (invoiceCreated && payUrl) {
           const fallback = `Hello ${svc.first_name}! Your ${displayServiceType} service report is ready: ${portalUrl}\n\nInvoice for today's visit: ${payUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
-          const body = await renderTemplate('service_complete_with_invoice', {
-            first_name: svc.first_name || '',
-            service_type: displayServiceType,
-            portal_url: portalUrl,
-            pay_url: payUrl,
-          }, fallback);
-          await TwilioService.sendSMS(svc.cust_phone, body + reviewSuffix, { customerId: svc.customer_id, messageType: 'service_complete_with_invoice' });
+          const body = customerRecap
+            ? customerRecap + recapPayLine
+            : await renderTemplate('service_complete_with_invoice', {
+                first_name: svc.first_name || '',
+                service_type: displayServiceType,
+                portal_url: portalUrl,
+                pay_url: payUrl,
+              }, fallback);
+          sentSmsBody = body + reviewSuffix;
+          await TwilioService.sendSMS(svc.cust_phone, sentSmsBody, { customerId: svc.customer_id, messageType: 'service_complete_with_invoice' });
         } else if (prepaidCovered || alreadyPaid) {
           const fallback = `Hello ${svc.first_name}! Thanks for your payment today. Your ${displayServiceType} service report is ready: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
-          const body = await renderTemplate('service_complete_prepaid', {
-            first_name: svc.first_name || '',
-            service_type: displayServiceType,
-            portal_url: portalUrl,
-          }, fallback);
-          await TwilioService.sendSMS(svc.cust_phone, body + reviewSuffix, { customerId: svc.customer_id, messageType: 'service_complete_prepaid' });
+          const body = customerRecap
+            ? customerRecap
+            : await renderTemplate('service_complete_prepaid', {
+                first_name: svc.first_name || '',
+                service_type: displayServiceType,
+                portal_url: portalUrl,
+              }, fallback);
+          sentSmsBody = body + reviewSuffix;
+          await TwilioService.sendSMS(svc.cust_phone, sentSmsBody, { customerId: svc.customer_id, messageType: 'service_complete_prepaid' });
         } else {
           const fallback = `Hello ${svc.first_name}! Your service report is ready. View it here: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
-          const body = await renderTemplate('service_complete', { first_name: svc.first_name || '' }, fallback);
-          await TwilioService.sendSMS(svc.cust_phone, body + reviewSuffix, { customerId: svc.customer_id, messageType: 'service_complete' });
+          const body = customerRecap
+            ? customerRecap
+            : await renderTemplate('service_complete', { first_name: svc.first_name || '' }, fallback);
+          sentSmsBody = body + reviewSuffix;
+          await TwilioService.sendSMS(svc.cust_phone, sentSmsBody, { customerId: svc.customer_id, messageType: 'service_complete' });
         }
       } catch (e) { logger.error(`Completion SMS failed: ${e.message}`); }
+    }
+    // Persist the actual outbound SMS body. Best-effort — write failure
+    // here doesn't roll back the completion (already sent / committed).
+    if (sentSmsBody) {
+      try {
+        const merged = { ...(record.structured_notes || {}), sentSmsBody, sentSmsAt: new Date().toISOString() };
+        await db('service_records').where({ id: record.id }).update({ structured_notes: merged });
+      } catch (e) { logger.warn(`[admin-dispatch] sentSmsBody persist failed: ${e.message}`); }
     }
 
     // Only schedule the delayed follow-up message when the review wasn't
     // already bundled into the completion SMS above.
-    if (requestReview && svc.cust_phone && !bundledReviewUrl) {
+    // Schedule the delayed review request only when:
+    //   - the visit completed successfully (skipped on incomplete)
+    //   - SMS is on
+    //   - no invoice is pending — for invoice cases the Stripe webhook
+    //     will mint the review on payment success (TODO: wire that path
+    //     in stripe-webhook.js; until then invoice customers get no
+    //     auto-scheduled review and the office can request manually)
+    //   - we didn't already bundle one into the completion SMS
+    if (!isIncompleteOutcome && requestReview && svc.cust_phone && !bundledReviewUrl && !shouldInvoice) {
       try {
         const ReviewService = require('../services/review-request');
         await ReviewService.create({
@@ -665,13 +941,54 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       );
     } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }
 
-    res.json({
+    const responseBody = {
       success: true,
       serviceRecordId: record.id,
       invoiceId: invoice?.id || null,
       invoiceTotal: invoice?.total != null ? Number(invoice.total) : null,
-    });
-  } catch (err) { next(err); }
+      visitOutcome: isIncompleteOutcome ? 'incomplete' : 'completed',
+    };
+    // Flip the pending row → succeeded with the final response. Best-effort
+    // write — the completion has already happened either way; a failed
+    // update here just means a retry on the same key falls through to
+    // the normal path (idempotent under the unique key constraint).
+    if (idempotencyKey) {
+      try {
+        const updated = await db('completion_idempotency_keys')
+          .where({ key: idempotencyKey, service_id: req.params.serviceId })
+          .update({ status: 'succeeded', response: responseBody, completed_at: new Date() });
+        if (!updated) {
+          // Pending row missing (race-stripped or never inserted) — store
+          // succeeded directly so retries still replay.
+          await db('completion_idempotency_keys').insert({
+            key: idempotencyKey,
+            service_id: req.params.serviceId,
+            status: 'succeeded',
+            response: responseBody,
+            completed_at: new Date(),
+          }).onConflict('key').ignore();
+        }
+      } catch (e) { logger.warn(`[admin-dispatch] idempotency store failed: ${e.message}`); }
+    }
+    res.json(responseBody);
+  } catch (err) {
+    // On unhandled error inside the route, mark the pending idempotency
+    // row as failed so a retry can re-attempt (vs being told "already in
+    // progress" forever). Best-effort — if this also fails, the route
+    // just hands off to next(err) and the row times out via TTL pruning.
+    if (req.headers['x-idempotency-key']) {
+      try {
+        await db('completion_idempotency_keys')
+          .where({
+            key: String(req.headers['x-idempotency-key']).slice(0, 64),
+            service_id: req.params.serviceId,
+            status: 'pending',
+          })
+          .update({ status: 'failed', completed_at: new Date() });
+      } catch { /* swallow — we're already handing off the error */ }
+    }
+    next(err);
+  }
 });
 
 // PUT /api/admin/dispatch/:serviceId/reorder
@@ -1460,6 +1777,162 @@ router.patch('/alerts/:id/resolve', requireAdmin, async (req, res, next) => {
   } catch (err) {
     logger.error(`[dispatch/alerts/resolve] failed for ${req.params.id}: ${err.message}`);
     next(err);
+  }
+});
+
+// POST /api/admin/dispatch/recap-preview
+//
+// Translate raw technician notes into a customer-friendly SMS recap. Used
+// by MobileCompleteServiceSheet to draft the message that will be sent on
+// completion — the tech can edit before submit, and the polished preview
+// is what actually goes through (the raw notes stay internal).
+//
+// Light, low-latency call: FAST tier, 200-token cap, single round-trip,
+// no tools. Falls through gracefully if Anthropic isn't configured so a
+// dev environment without ANTHROPIC_API_KEY still lets the form submit
+// (the client falls back to a template-built recap on 503).
+const { FAST: RECAP_MODEL } = require('../config/models');
+let _Anthropic;
+try { _Anthropic = require('@anthropic-ai/sdk'); } catch { _Anthropic = null; }
+
+// Server-side limits on inputs — frontend caps aren't enough since the
+// endpoint is also reachable by any authenticated tech/admin client.
+const RECAP_INPUT_LIMITS = {
+  notes: 2000,
+  products: 25,
+  productName: 120,
+  observations: 12,
+  observationLabel: 60,
+  firstName: 60,
+  serviceType: 120,
+};
+// Output cap — keep recap inside one GSM-7 SMS segment when possible. Use
+// 240 (not 320) because reality shows operator/encoding overhead can push
+// 320-char drafts into a 2-segment send.
+const RECAP_OUTPUT_MAX = 240;
+
+function sanitizeRecap(text) {
+  if (typeof text !== 'string') return '';
+  let s = text.trim();
+  // Drop wrapping smart-quotes/quotes models sometimes emit.
+  s = s.replace(/^["“”']+|["“”']+$/g, '');
+  // Collapse whitespace runs to single spaces.
+  s = s.replace(/\s+/g, ' ');
+  // Strip leading "Hi {anything}," — the prompt forbids it but models
+  // still sneak it in. Anchored so we don't eat legitimate "Hi" inside.
+  s = s.replace(/^hi\b[^,.!]*[,.!]\s*/i, '');
+  // Em/en dash before signoff → ASCII hyphen so we don't trip Twilio's
+  // GSM-7 fallback into UCS-2 encoding (which halves segment capacity).
+  s = s.replace(/\s*[—–]\s*Waves\s*$/i, ' - Waves');
+  // If Claude omitted any signoff, append one.
+  if (!/-+\s*Waves\s*$/i.test(s)) s = `${s} - Waves`;
+  // Hard cap.
+  if (s.length > RECAP_OUTPUT_MAX) {
+    const cap = s.slice(0, RECAP_OUTPUT_MAX - ' - Waves'.length).trimEnd();
+    s = `${cap.replace(/[\s,;]+$/, '')} - Waves`;
+  }
+  return s;
+}
+
+// Deterministic templates for sensitive no-product cases. AI is fine for
+// standard treated visits, but for declined / inspection / follow-up we
+// don't want a model freely composing language around money, customer
+// behavior, or access issues. Predictable copy beats clever copy here.
+const DETERMINISTIC_RECAPS = {
+  'Inspection only':
+    'We completed the inspection today and did not apply treatment. We documented the findings and will follow up with any recommended next steps. - Waves',
+  'Customer declined':
+    'We stopped by today and documented the visit. No treatment was applied today. Please contact us if you would like to reschedule service. - Waves',
+  'Follow-up only':
+    'We completed today\'s follow-up visit and documented the current activity. We will continue monitoring on your next scheduled service. - Waves',
+};
+
+router.post('/recap-preview', requireTechOrAdmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+    // Sensitive-case shortcut — return a deterministic template without
+    // calling the model. Lower latency, zero risk of unwanted phrasing.
+    const reasonShortcut = DETERMINISTIC_RECAPS[String(body.noProductsReason || '')];
+    if (reasonShortcut) {
+      return res.json({ recap: reasonShortcut, model: 'template' });
+    }
+    if (!_Anthropic || !process.env.ANTHROPIC_API_KEY) {
+      return res.status(503).json({ error: 'AI not configured' });
+    }
+    const technicianNotes = String(body.technicianNotes || '').slice(0, RECAP_INPUT_LIMITS.notes);
+    const customerFirstName = String(body.customerFirstName || '').slice(0, RECAP_INPUT_LIMITS.firstName);
+    const serviceType = String(body.serviceType || 'service').slice(0, RECAP_INPUT_LIMITS.serviceType);
+    const rawProducts = Array.isArray(body.products) ? body.products : [];
+    const rawObservations = Array.isArray(body.observations) ? body.observations : [];
+    const products = rawProducts
+      .slice(0, RECAP_INPUT_LIMITS.products)
+      .map((p) => String(p?.name || p?.product_name || '').slice(0, RECAP_INPUT_LIMITS.productName))
+      .filter(Boolean);
+    const observations = rawObservations
+      .slice(0, RECAP_INPUT_LIMITS.observations)
+      .map((o) => String(o || '').slice(0, RECAP_INPUT_LIMITS.observationLabel))
+      .filter(Boolean);
+
+    if (technicianNotes.trim().length < 10) {
+      // Below the threshold the client uses to even fire this; reject so
+      // a stray request doesn't burn an API call on empty notes.
+      return res.status(400).json({ error: 'Notes too short for recap.' });
+    }
+
+    // Areas treated — short labels the AI can mention by name without
+    // touching jargon or chemical detail. Capped to keep prompt size sane.
+    const rawAreas = Array.isArray(body.areasTreated) ? body.areasTreated : [];
+    const areasTreated = rawAreas
+      .slice(0, 12)
+      .map((a) => String(a || '').slice(0, 40))
+      .filter(Boolean);
+
+    const productList = products.join(', ');
+    const observationList = observations.join(', ');
+    const areasList = areasTreated.join(', ');
+
+    const system = [
+      'You write short customer-facing SMS recaps for Waves Pest Control.',
+      'Style: warm, professional, two short sentences max, no exclamation marks, no marketing fluff.',
+      'Translate raw technician shorthand into clear customer language.',
+      'Never mention product names, chemicals, application rates, or pricing — those stay in the internal record.',
+      'Mention treated areas in plain language ("exterior perimeter, garage, entry points") rather than zones or jargon.',
+      'Never overpromise: avoid "problem solved", "eliminated", "guaranteed". Use "treated", "inspected", "monitored", "we will continue watching".',
+      'For customer-declined visits, stay neutral. Never blame the customer.',
+      'If the technician mentions concerns or follow-up, acknowledge them briefly without alarming the customer.',
+      'Use plain ASCII punctuation only (no em dash, no smart quotes). End the message with " - Waves".',
+      'Keep it short enough for SMS — aim for under 200 characters before the signoff.',
+    ].join(' ');
+
+    const user = [
+      `Customer first name: ${customerFirstName || 'the customer'}`,
+      `Service type: ${serviceType}`,
+      areasList ? `Areas treated: ${areasList}` : '',
+      productList ? `Products applied (INTERNAL — do not mention by name): ${productList}` : 'No products applied.',
+      observationList ? `Observations: ${observationList}` : '',
+      `Technician notes (raw, internal shorthand): ${technicianNotes}`,
+      '',
+      'Write only the SMS body. Do not include "Hi {name}," — start directly with what was done.',
+    ].filter(Boolean).join('\n');
+
+    const anthropic = new _Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const r = await anthropic.messages.create({
+      model: RECAP_MODEL,
+      max_tokens: 200,
+      system,
+      messages: [{ role: 'user', content: user }],
+    });
+
+    const raw = (r?.content || [])
+      .filter((c) => c.type === 'text')
+      .map((c) => c.text)
+      .join('');
+    const recap = sanitizeRecap(raw);
+
+    return res.json({ recap, model: RECAP_MODEL });
+  } catch (err) {
+    logger.error(`[dispatch/recap-preview] failed: ${err.message}`);
+    return res.status(500).json({ error: err.message });
   }
 });
 
