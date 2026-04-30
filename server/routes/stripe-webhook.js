@@ -17,6 +17,27 @@ function customerLabel(customer) {
   return name || customer.phone || 'customer';
 }
 
+// Object-level idempotency for notification fan-out. Atomic claim against
+// notification_object_dispatch keyed on (object_id, event_type). Returns
+// true exactly once per (object, event_type) pair; subsequent calls
+// return false and the caller should skip the trigger. If the table is
+// missing (migration not yet applied) we fail open and allow the trigger
+// — better one extra duplicate notification than a permanently-silent
+// admin bell. Codex P1, PR #534.
+async function claimNotificationDispatch(objectId, eventType) {
+  if (!objectId || !eventType) return true;
+  try {
+    const inserted = await db('notification_object_dispatch')
+      .insert({ object_id: objectId, event_type: eventType })
+      .onConflict(['object_id', 'event_type']).ignore()
+      .returning('object_id');
+    return inserted.length > 0;
+  } catch (e) {
+    logger.warn(`[stripe-webhook] notification dispatch claim failed (failing open): ${e.message}`);
+    return true;
+  }
+}
+
 /**
  * Stripe Webhook Handler
  *
@@ -450,6 +471,13 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       const piId = paymentIntent.id;
       const paidInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first();
       if (!paidInvoice?.customer_id) return;
+      // Object-level idempotency. event.id dedupe upstream covers the
+      // common duplicate-delivery case but not the rarer case where
+      // Stripe emits two distinct Event objects for the same
+      // payment_intent (failover, manual replay). Atomic claim on
+      // (object_id, event_type); rowcount=0 means another worker /
+      // event already fired the bell — skip silently. (Codex P1, #534.)
+      if (!(await claimNotificationDispatch(piId, 'payment_succeeded'))) return;
       const customer = await db('customers').where({ id: paidInvoice.customer_id }).first();
       await triggerNotification('payment_succeeded', {
         amount: (paymentIntent.amount_received || paymentIntent.amount || 0) / 100,
@@ -507,6 +535,8 @@ async function handlePaymentIntentFailed(paymentIntent) {
   setImmediate(async () => {
     try {
       const piId = paymentIntent.id;
+      // Object-level idempotency — see payment_succeeded handler above.
+      if (!(await claimNotificationDispatch(piId, 'payment_failed'))) return;
       const failedInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first();
       let customer = null;
       if (failedInvoice?.customer_id) {
