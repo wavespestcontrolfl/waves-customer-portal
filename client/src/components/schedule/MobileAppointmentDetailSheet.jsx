@@ -208,11 +208,10 @@ export default function MobileAppointmentDetailSheet({
           type="button"
           onClick={onClose}
           aria-label="Close"
-          className="inline-flex items-center justify-center gap-1.5 rounded-full bg-white border border-hairline border-zinc-200 text-ink-primary u-focus-ring"
-          style={{ height: 44, padding: '0 18px', fontSize: 15 }}
+          className="inline-flex items-center justify-center bg-transparent text-ink-primary u-focus-ring"
+          style={{ width: 44, height: 44, fontSize: 18, lineHeight: 1, border: 'none', cursor: 'pointer' }}
         >
-          <span style={{ fontSize: 18, lineHeight: 1 }}>✕</span>
-          <span>Close</span>
+          ✕
         </button>
         <button
           type="button"
@@ -259,10 +258,10 @@ export default function MobileAppointmentDetailSheet({
               className="w-full flex items-start justify-between gap-3 py-3 border-b border-hairline border-zinc-200 text-left bg-transparent hover:bg-zinc-50 -mx-1 px-1 rounded-sm"
             >
               <div className="flex-1 min-w-0">
-                <div className="text-zinc-900 truncate" style={{ fontSize: 16 }}>
+                <div className="text-zinc-900 truncate" style={{ fontSize: 15, fontWeight: 500 }}>
                   {service.customerName || 'Unknown'}
                 </div>
-                <div className="text-ink-secondary truncate" style={{ fontSize: 13, marginTop: 2 }}>
+                <div className="text-zinc-900 truncate" style={{ fontSize: 15, fontWeight: 500, marginTop: 2 }}>
                   {service.customerPhone || ''}
                 </div>
               </div>
@@ -278,12 +277,15 @@ export default function MobileAppointmentDetailSheet({
           </div>
           <div className="py-3 border-b border-hairline border-zinc-200 flex items-start justify-between gap-3">
             <div className="flex-1 min-w-0">
-              <div className="text-zinc-900" style={{ fontSize: 15 }}>
+              <div className="text-zinc-900" style={{ fontSize: 15, fontWeight: 500 }}>
                 {service.serviceType || '—'}
               </div>
-              <div className="text-ink-secondary" style={{ fontSize: 13, marginTop: 2 }}>
-                {timeWindow}
-                {service.estimatedDuration ? (timeWindow ? ' · ' : '') + `${service.estimatedDuration} mins` : ''}
+              <div className="text-zinc-900" style={{ fontSize: 15, fontWeight: 500, marginTop: 2 }}>
+                Single visit
+              </div>
+              <div className="text-zinc-900" style={{ fontSize: 15, fontWeight: 500, marginTop: 2 }}>
+                {formatTime(service.windowStart)}
+                {service.estimatedDuration ? (formatTime(service.windowStart) ? ' · ' : '') + `${service.estimatedDuration} mins` : ''}
               </div>
             </div>
             <div className="u-nums text-zinc-900" style={{ fontSize: 15 }}>
@@ -312,16 +314,16 @@ export default function MobileAppointmentDetailSheet({
           </div>
         </section>
 
-        {/* Date and time */}
+        {/* Date/Time */}
         <section className="mt-8">
           <div className="text-zinc-900" style={{ fontSize: 20, marginBottom: 10 }}>
-            Date and time
+            Date/Time
           </div>
-          <div className="text-zinc-900" style={{ fontSize: 15 }}>
+          <div className="text-zinc-900" style={{ fontSize: 15, fontWeight: 500 }}>
             {formatDateLong(service.scheduledDate)}
           </div>
           {timeWindow && (
-            <div className="text-ink-secondary" style={{ fontSize: 14, marginTop: 2 }}>
+            <div className="text-zinc-900" style={{ fontSize: 15, fontWeight: 500, marginTop: 2 }}>
               {timeWindow}{hrs ? ` (${hrs})` : ''}
             </div>
           )}
@@ -335,10 +337,10 @@ export default function MobileAppointmentDetailSheet({
             </div>
             <div className="flex items-start justify-between gap-3">
               <div className="flex-1 min-w-0">
-                <div className="text-zinc-900" style={{ fontSize: 15, lineHeight: 1.3 }}>
+                <div className="text-zinc-900" style={{ fontSize: 15, fontWeight: 500, lineHeight: 1.3 }}>
                   {service.address.split(',')[0] || service.address}
                 </div>
-                <div className="text-ink-secondary" style={{ fontSize: 13, marginTop: 2 }}>
+                <div className="text-zinc-900" style={{ fontSize: 15, fontWeight: 500, marginTop: 2 }}>
                   {service.address.split(',').slice(1).join(',').trim()}
                 </div>
               </div>
