@@ -5,6 +5,7 @@ import {
   CardBody,
   CardHeader,
   CardTitle,
+  Text,
   cn,
 } from '../../components/ui';
 import {
@@ -124,13 +125,17 @@ export default function DashboardPageV2() {
   }, [period]);
 
   if (loading) {
-    return <div className="p-16 text-center text-14 sm:text-13 text-ink-secondary">Loading dashboard…</div>;
+    return (
+      <Text role="body-secondary" className="p-16 text-center sm:text-13">
+        Loading dashboard…
+      </Text>
+    );
   }
   if (!data || data.error || !data.kpis) {
     return (
-      <div className="p-16 text-center text-14 sm:text-13 text-alert-fg">
+      <Text role="body-secondary" tone="alert" className="p-16 text-center sm:text-13">
         Failed to load dashboard. <a href="/admin/login" className="underline">Try logging in again</a>
-      </div>
+      </Text>
     );
   }
 
@@ -174,9 +179,9 @@ export default function DashboardPageV2() {
       <header className="mb-5 max-md:mb-6">
         <div className="flex items-start justify-between flex-wrap gap-3">
           <div>
-            <div className="u-label text-ink-secondary max-md:text-13 max-md:tracking-normal max-md:normal-case max-md:font-medium max-md:text-zinc-500">
+            <Text role="label" className="max-md:text-13 max-md:tracking-normal max-md:normal-case max-md:font-medium max-md:text-zinc-500">
               {todayLabel}
-            </div>
+            </Text>
             <h1 className="text-28 font-normal tracking-h1 mt-1 max-md:mt-2">
               <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>{greeting()}, Adam</span>
               <span className="hidden md:inline">{greeting()}, Adam</span>
@@ -203,9 +208,12 @@ export default function DashboardPageV2() {
                 : 'vs last month'
             }
             action={
-              <span className="text-12 text-ink-secondary">
-                MRR <span className="u-nums font-medium text-zinc-900 ml-1">{fmtMoney(data.mrr)}</span>
-              </span>
+              <Text role="caption" tone="secondary" as="span">
+                MRR{' '}
+                <Text role="caption" tone="primary" as="span" className="font-medium ml-1 u-nums">
+                  {fmtMoney(data.mrr)}
+                </Text>
+              </Text>
             }
           >
             <RevenueTrendArea
@@ -265,7 +273,9 @@ export default function DashboardPageV2() {
         <CardHeader className="flex items-center justify-between gap-3 flex-wrap">
           <div>
             <CardTitle>Core KPIs</CardTitle>
-            <div className="text-12 text-ink-secondary mt-1">{kpis?.periodLabel || 'Month to Date'}</div>
+            <Text role="caption" tone="secondary" className="mt-1">
+              {kpis?.periodLabel || 'Month to Date'}
+            </Text>
           </div>
           <div className="inline-flex items-center border-hairline border-zinc-200 rounded-sm overflow-hidden">
             {PERIODS.map((p) => (
@@ -451,9 +461,9 @@ function pct(n) { return n == null ? '—' : `${n}%`; }
 
 function SectionLabel({ children }) {
   return (
-    <div className="u-label text-ink-secondary pb-2 mb-3 mt-4 first:mt-0">
+    <Text role="label" className="pb-2 mb-3 mt-4 first:mt-0">
       {children}
-    </div>
+    </Text>
   );
 }
 
@@ -464,11 +474,15 @@ function KpiGrid({ children }) {
 function KpiTile({ label, value, sub, alert }) {
   return (
     <div className="bg-surface-sunken border-hairline border-zinc-200 rounded-sm p-3">
-      <div className="u-label text-ink-secondary">{label}</div>
-      <div className={cn('u-nums text-22 font-medium tracking-tight mt-2 leading-none', alert ? 'text-alert-fg' : 'text-zinc-900')}>
+      <Text role="label">{label}</Text>
+      <Text role="metric" tone={alert ? 'alert' : undefined} className="mt-2">
         {value}
-      </div>
-      {sub && <div className="mt-1 text-11 text-ink-secondary">{sub}</div>}
+      </Text>
+      {sub && (
+        <Text role="caption" tone="secondary" className="mt-1 text-11">
+          {sub}
+        </Text>
+      )}
     </div>
   );
 }
@@ -494,10 +508,10 @@ function BillingHealthPanel({ summary: h }) {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           {metrics.map((m) => (
             <div key={m.label} className="bg-surface-sunken border-hairline border-zinc-200 rounded-sm p-3">
-              <div className="u-label text-ink-secondary">{m.label}</div>
-              <div className={cn('u-nums text-22 font-medium tracking-tight mt-2 leading-none', m.alert ? 'text-alert-fg' : 'text-zinc-900')}>
+              <Text role="label">{m.label}</Text>
+              <Text role="metric" tone={m.alert ? 'alert' : undefined} className="mt-2">
                 {m.value}
-              </div>
+              </Text>
             </div>
           ))}
         </div>
