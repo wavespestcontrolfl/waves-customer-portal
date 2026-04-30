@@ -241,7 +241,16 @@ const LeadResponseAgent = {
                 if (CRITICAL_CONTEXT_TOOLS.has(toolName)) criticalFailures.push(toolName);
               } else {
                 leadToolBreaker.recordSuccess();
-                if (toolName === 'send_lead_response') actionTaken = 'auto_sent';
+                // Gate auto_sent on actual delivery, not just absence-of-error.
+                // send_lead_response now distinguishes:
+                //   { sent: true, ... }                 — provider accepted (auto_sent)
+                //   { sent: false, blocked: true, ... } — wrapper-policy block,
+                //                                        non-failure, NOT auto_sent
+                //   { sent: false, failed: true, ... }  — provider failure
+                //                                        (caught by isToolFailure above)
+                if (toolName === 'send_lead_response' && toolResult && toolResult.sent === true) {
+                  actionTaken = 'auto_sent';
+                }
                 if (toolName === 'queue_for_adam') actionTaken = 'queued_for_adam';
               }
             } catch (err) {

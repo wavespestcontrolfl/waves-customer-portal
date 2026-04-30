@@ -286,17 +286,35 @@ async function executeLeadTool(toolName, input) {
         };
       }
       logger.warn(`[lead-agent] Auto-response BLOCKED (customerId=${customer.id} leadId=${input.lead_id || 'n/a'}): ${result.code} — ${result.reason}`);
-      // CRITICAL: lead-response-agent.js's isToolFailure() detects failed
-      // tool executions by `result.error || result.failed === true`. Without
-      // these flags, blocked sends would be classified as auto_sent in
-      // telemetry and action tracking even though no SMS was delivered.
-      // Set both an `error` string (string-truthy) AND `failed: true` so
-      // every detection pattern catches it.
+      // Two distinct unsent outcomes — must be signaled differently so the
+      // lead-response-agent's circuit breaker doesn't treat consent/opt-out
+      // blocks as system failures (5 in 60s would trip the breaker and
+      // fast-fail every lead tool for 30s).
+      //
+      //   POLICY BLOCK (consent, suppression, emoji, price-leak, identity,
+      //   segment cap):  expected outcome. Return { sent: false, blocked:
+      //   true } WITHOUT `failed`/`error`. The agent's auto_sent telemetry
+      //   gates on `result.sent === true` (paired change in
+      //   lead-response-agent.js) so a non-sent block isn't tagged as
+      //   auto_sent — but the breaker is NOT bumped.
+      //
+      //   PROVIDER FAILURE (Twilio/network error): real failure. Return
+      //   `failed: true` + `error` so isToolFailure() catches it AND the
+      //   breaker bumps.
+      if (result.blocked) {
+        return {
+          sent: false,
+          blocked: true,
+          code: result.code,
+          reason: result.reason,
+          name: customer.first_name,
+        };
+      }
       return {
         sent: false,
         failed: true,
-        error: result.reason || result.code || 'send blocked',
-        blocked: !!result.blocked,
+        error: result.reason || result.code || 'provider failure',
+        blocked: false,
         code: result.code,
         reason: result.reason,
         name: customer.first_name,
