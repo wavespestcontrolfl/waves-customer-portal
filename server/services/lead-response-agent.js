@@ -241,7 +241,14 @@ const LeadResponseAgent = {
               } else {
                 // Provider failure on the fallback send. Lead is still
                 // queued for Adam — that's the real backstop. Surface
-                // failed/error so isToolFailure catches it.
+                // failed/error in toolResult AND flip the local `failed`
+                // flag so the API event at the bottom of the loop gets
+                // is_error:true, recordToolEvent logs success:false, and
+                // the breaker bumps on repeated fallback-provider outages
+                // (codex P1 round-5: previous version only set
+                // toolResult.failed, leaving local `failed` unset, so
+                // fallback provider failures were silently reported as
+                // successful tool runs and never tripped the breaker).
                 toolResult = {
                   sent: false,
                   fallback: true,
@@ -250,6 +257,9 @@ const LeadResponseAgent = {
                   note: 'Queued for Adam; safe-ack SMS provider failure.',
                 };
                 actionTaken = 'safe_fallback_failed_queued';
+                failed = true;
+                toolError = toolResult.error;
+                leadToolBreaker.recordFailure();
               }
             } catch (err) {
               toolResult = { error: `Safe fallback failed: ${err.message}` };
