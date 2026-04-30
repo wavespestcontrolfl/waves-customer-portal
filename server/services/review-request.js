@@ -253,7 +253,9 @@ const ReviewService = {
           sms_sent_at: new Date(),
           status: 'sent',
         });
-        logger.info(`[review] SMS sent for ${customer.first_name} ${customer.last_name}`);
+        // PII: ID-only logging per AGENTS.md, matching the BLOCKED /
+        // PROVIDER FAILURE branches below.
+        logger.info(`[review] SMS sent (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'})`);
       } else if (result.blocked) {
         // Wrapper-policy block (opt-out, suppression, emoji, price leak,
         // segment cap, identity, etc.). Mark suppressed so processScheduled()
