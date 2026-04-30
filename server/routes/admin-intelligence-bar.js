@@ -854,14 +854,14 @@ router.get('/quick-actions', async (req, res) => {
   ];
 
   const dashboardActions = [
-    { id: 'briefing', group: 'Summary', label: 'Morning Briefing', prompt: 'Give me a morning briefing — what do I need to know today?', icon: '☀️' },
-    { id: 'this_vs_last', group: 'Summary', label: 'This vs Last Week', prompt: 'How did we do this week compared to last week?', icon: '📊' },
-    { id: 'mrr', group: 'Metrics', label: 'MRR Trend', prompt: "What's our MRR trend over the last 6 months?", icon: '📈' },
-    { id: 'close_rate', group: 'Metrics', label: 'Close Rate', prompt: "What's our estimate close rate this month?", icon: '🎯' },
-    { id: 'revenue_by_service', group: 'Metrics', label: 'Revenue by Service', prompt: 'Break down revenue by service type this month', icon: '💰' },
-    { id: 'churn', group: 'Metrics', label: 'Churn Check', prompt: 'Any churn this month? Who did we lose and what was the revenue impact?', icon: '🔻' },
-    { id: 'lead_sources', group: 'Ops', label: 'Lead Sources', prompt: 'Where are new customers coming from? Which source converts best?', icon: '🧲' },
-    { id: 'balances', group: 'Ops', label: 'Outstanding Balances', prompt: "What's outstanding? Show me the aging breakdown and top debtors", icon: '🧾' },
+    { id: 'briefing', group: 'Summary', label: 'Morning Briefing', prompt: 'Give me a morning briefing — what do I need to know today?' },
+    { id: 'this_vs_last', group: 'Summary', label: 'This vs Last Week', prompt: 'How did we do this week compared to last week?' },
+    { id: 'mrr', group: 'Metrics', label: 'MRR Trend', prompt: "What's our MRR trend over the last 6 months?" },
+    { id: 'close_rate', group: 'Metrics', label: 'Close Rate', prompt: "What's our estimate close rate this month?" },
+    { id: 'revenue_by_service', group: 'Metrics', label: 'Revenue by Service', prompt: 'Break down revenue by service type this month' },
+    { id: 'churn', group: 'Metrics', label: 'Churn Check', prompt: 'Any churn this month? Who did we lose and what was the revenue impact?' },
+    { id: 'lead_sources', group: 'Ops', label: 'Lead Sources', prompt: 'Where are new customers coming from? Which source converts best?' },
+    { id: 'balances', group: 'Ops', label: 'Outstanding Balances', prompt: "What's outstanding? Show me the aging breakdown and top debtors" },
   ];
 
   const seoActions = [
