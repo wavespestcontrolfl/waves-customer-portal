@@ -189,13 +189,21 @@ class SmartRebooker {
       intervalDays: parent.recurring_interval_days,
     };
 
+    // Only sweep siblings that are still reschedulable. Live lifecycle
+    // states (en_route, on_site) and intentional drop-offs (skipped)
+    // must NOT be steamrolled back to 'confirmed' by a series shift —
+    // that would corrupt active dispatch state and the audit trail.
+    // pending + confirmed are the only statuses where a future-date
+    // shift is safe.
+    const RESCHEDULABLE = ['pending', 'confirmed'];
+
     const occurrencesRescheduled = await db.transaction(async (trx) => {
       const siblings = await trx('scheduled_services')
         .where(function () {
           this.where('id', parentId).orWhere('recurring_parent_id', parentId);
         })
         .where('scheduled_date', '>=', service.scheduled_date)
-        .whereNotIn('status', ['completed', 'cancelled', 'rescheduled'])
+        .whereIn('status', RESCHEDULABLE)
         .orderBy('scheduled_date', 'asc')
         .select('id', 'status', 'scheduled_date', 'window_start', 'window_end');
 
