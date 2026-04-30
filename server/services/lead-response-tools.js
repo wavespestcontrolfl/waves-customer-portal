@@ -206,13 +206,30 @@ async function executeLeadTool(toolName, input) {
       const customer = await db('customers').where('id', input.customer_id).first();
       if (!customer?.phone) return { error: 'Customer has no phone number' };
 
-      const TwilioService = require('./twilio');
-      await TwilioService.sendSMS(customer.phone, input.message, {
+      // Routed through the customer-message middleware so consent /
+      // suppression / identity / voice / segment checks all apply, and
+      // every attempt lands in messaging_audit_log. Behavior change to
+      // be aware of: a lead whose notification_prefs.sms_enabled is
+      // false (e.g. they previously sent STOP) WILL NOT receive the
+      // auto-reply — the wrapper blocks the send and the agent's
+      // tool-use loop sees the block. Pipeline updates + activity log
+      // entries still record so the lead doesn't disappear; we just
+      // don't auto-text someone who opted out.
+      const { sendCustomerMessage } = require('./messaging/send-customer-message');
+      const result = await sendCustomerMessage({
+        to: customer.phone,
+        body: input.message,
+        channel: 'sms',
+        audience: 'lead',
+        purpose: 'conversational',
         customerId: customer.id,
-        messageType: 'lead_response',
+        leadId: input.lead_id || null,
+        entryPoint: 'lead_response_auto_reply',
       });
 
-      // Record response time
+      // Record response time + pipeline transition + activity ALWAYS,
+      // regardless of whether the SMS actually went out. The lead came
+      // in, the agent processed it, those facts deserve to be logged.
       if (input.lead_id) {
         const lead = await db('leads').where('id', input.lead_id).first();
         if (lead?.first_contact_at) {
@@ -223,25 +240,40 @@ async function executeLeadTool(toolName, input) {
             updated_at: new Date(),
           });
         }
-      }
 
-      // Log activity
-      if (input.lead_id) {
         await db('lead_activities').insert({
           lead_id: input.lead_id,
-          activity_type: 'sms_sent',
-          description: 'Auto-response sent by lead agent',
+          activity_type: result.sent ? 'sms_sent' : 'sms_blocked',
+          description: result.sent
+            ? 'Auto-response sent by lead agent'
+            : `Auto-response blocked by middleware (${result.code || 'unknown'}): ${result.reason || ''}`,
           performed_by: 'lead_agent',
-          metadata: JSON.stringify({ message: input.message }),
+          metadata: JSON.stringify({ message: input.message, audit_log_id: result.auditLogId }),
         }).catch(() => {});
       }
 
-      // Update pipeline
       const PipelineManager = require('./pipeline-manager');
       await PipelineManager.onEvent(input.customer_id, 'first_contact');
 
-      logger.info(`[lead-agent] Auto-sent response to ${customer.first_name} ${customer.last_name}`);
-      return { sent: true, to: customer.phone, name: customer.first_name };
+      if (result.sent) {
+        logger.info(`[lead-agent] Auto-sent response to ${customer.first_name} ${customer.last_name}`);
+        return {
+          sent: true,
+          to: customer.phone,
+          name: customer.first_name,
+          providerMessageId: result.providerMessageId,
+          segmentCount: result.segmentCount,
+          encoding: result.encoding,
+        };
+      }
+      logger.warn(`[lead-agent] Auto-response BLOCKED for ${customer.first_name} ${customer.last_name}: ${result.code} — ${result.reason}`);
+      return {
+        sent: false,
+        blocked: !!result.blocked,
+        code: result.code,
+        reason: result.reason,
+        name: customer.first_name,
+      };
     }
 
     case 'queue_for_adam': {
