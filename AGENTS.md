@@ -111,10 +111,10 @@ finding and warns on P1. Reviewers must return JSON matching
   Both Railway logs and `errors.log` are plain text. Logging last4 is fine;
   the full PM object (which includes BIN/fingerprint) is not.
 - **Hardcoded Anthropic model IDs.** Per `CLAUDE.md`, model IDs come from
-  `server/config/models.js` (`FLAGSHIP` / `WORKHORSE` / `FAST`). A new string
-  literal `'claude-opus-…'`, `'claude-sonnet-…'`, `'claude-haiku-…'`, or
-  `'claude-3-…'` outside that file is P0 — it pins a tier to a model and
-  defeats the env-var swap.
+  `server/config/models.js` (`FLAGSHIP` / `WORKHORSE` / `FAST` / `VISION`).
+  A new string literal `'claude-opus-…'`, `'claude-sonnet-…'`,
+  `'claude-haiku-…'`, or `'claude-3-…'` outside that file is P0 — it pins a
+  tier to a model and defeats the env-var swap.
 
 ### Treat as P1
 
@@ -253,9 +253,11 @@ finding and warns on P1. Reviewers must return JSON matching
     (Luckiest Guy / Baloo 2 / gold pill / mascot) is **not** applied
     inside `/admin/*`.
 - **Anthropic model IDs.** Imported from `server/config/models.js`
-  (`FLAGSHIP` / `WORKHORSE` / `FAST`). All currently resolve to
-  `claude-opus-4-7`; tiers are env-swappable
-  (`MODEL_FLAGSHIP` / `MODEL_WORKHORSE` / `MODEL_FAST`,
+  (`FLAGSHIP` / `WORKHORSE` / `FAST` / `VISION`). The three reasoning
+  tiers currently resolve to `claude-opus-4-7`; `VISION` resolves to
+  `claude-sonnet-4-6` because Opus 4.7 removed the `temperature`
+  parameter and image scoring needs it. Tiers are env-swappable
+  (`MODEL_FLAGSHIP` / `MODEL_WORKHORSE` / `MODEL_FAST` / `MODEL_VISION`,
   `INTELLIGENCE_BAR_MODEL` / `INTELLIGENCE_BAR_TECH_MODEL`). Never
   hardcode a model ID outside this file.
 - **Feature flags.** `useFeatureFlag('<key>')` from
