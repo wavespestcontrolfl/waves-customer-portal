@@ -4,6 +4,34 @@ const TwilioService = require('./twilio');
 const RULES = require('../config/reschedule-rules');
 const logger = require('./logger');
 
+// "Friday, May 1" — ET-safe. Accepts a YYYY-MM-DD string or a Date.
+function formatDayDate(input) {
+  if (!input) return '';
+  const s = typeof input === 'string' ? input.split('T')[0] : input.toISOString().split('T')[0];
+  return new Date(s + 'T12:00:00').toLocaleDateString('en-US', {
+    weekday: 'long', month: 'long', day: 'numeric',
+    timeZone: 'America/New_York',
+  });
+}
+
+// "08:00:00" or "08:00" → "8:00 AM"
+function formatTime12(hhmm) {
+  if (!hhmm) return '';
+  const [h, m] = String(hhmm).split(':').map((p) => parseInt(p, 10));
+  if (Number.isNaN(h)) return '';
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  const ap = h < 12 ? 'AM' : 'PM';
+  return `${h12}:${String(m || 0).padStart(2, '0')} ${ap}`;
+}
+
+// "08:00-09:00" → "08:00", or pass through if already an object/HH:MM.
+function extractWindowStart(w) {
+  if (!w) return '';
+  if (typeof w === 'object') return w.start || '';
+  const m = String(w).match(/^(\d{1,2}:\d{2})/);
+  return m ? m[1] : '';
+}
+
 class RescheduleSMS {
   async sendRescheduleRequest(serviceId, reasonCode, reasonText) {
     const service = await db('scheduled_services')
@@ -50,6 +78,55 @@ class RescheduleSMS {
 
     logger.info(`Reschedule SMS sent to ${service.first_name} for service ${serviceId}`);
     return { success: true, options: [opt1, opt2], logId: logEntry.id || logEntry };
+  }
+
+  // Notify-only SMS sent AFTER the admin has already committed the
+  // reschedule via the drag-drop flow. No 1️⃣/2️⃣ options, no pending
+  // reschedule_log row — the customer already has their answer (the
+  // new date/time). Replies fall through to the regular comms inbox.
+  //
+  // Mirrors the existing "Appointment Cancelled" template structure
+  // (Hello {first_name}! Your {service_type}…) so reschedule + cancel
+  // SMS read consistently.
+  async sendRescheduleNotification(serviceId, originalDate, originalWindowStart, newDate, newWindow) {
+    const service = await db('scheduled_services')
+      .where('scheduled_services.id', serviceId)
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .select(
+        'scheduled_services.id',
+        'scheduled_services.customer_id',
+        'scheduled_services.service_type',
+        'customers.first_name',
+        'customers.phone',
+        'customers.id as cust_id',
+      )
+      .first();
+
+    if (!service) throw new Error('Service not found');
+    if (!service.phone) {
+      logger.warn(`[reschedule-sms] No phone on customer for service ${serviceId} — skipping notify SMS`);
+      return { sent: false, reason: 'no_phone' };
+    }
+
+    const oldDay = formatDayDate(originalDate);
+    const oldTime = formatTime12(originalWindowStart);
+    const newDay = formatDayDate(newDate);
+    const newTime = formatTime12(extractWindowStart(newWindow));
+
+    const smsBody =
+      `Hello ${service.first_name}! Your ${service.service_type} with Waves originally scheduled for ${oldDay}` +
+      (oldTime ? ` at ${oldTime}` : '') +
+      ` has been rescheduled to ${newDay}` +
+      (newTime ? ` at ${newTime}` : '') +
+      `.\n\nNeed to make a change? Reply here and we'll work it out.`;
+
+    await TwilioService.sendSMS(service.phone, smsBody, {
+      customerId: service.cust_id || service.customer_id,
+      messageType: 'reschedule_notify',
+    });
+
+    logger.info(`Reschedule notify SMS sent to ${service.first_name} for service ${serviceId}`);
+    return { sent: true };
   }
 
   async handleRescheduleReply(customerId, messageBody) {
