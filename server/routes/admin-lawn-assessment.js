@@ -38,7 +38,9 @@ router.get('/customers', async (req, res, next) => {
       .first();
 
     if (hasScheduled) {
-      // Show today's scheduled services (any type, not just lawn)
+      // Show today's scheduled services (any type, not just lawn).
+      // ss.id is exposed as serviceId so the panel can pass it back
+      // through /assess and anchor the assessment to the exact visit.
       query = db('scheduled_services as ss')
         .join('customers as c', 'ss.customer_id', 'c.id')
         .where('ss.scheduled_date', today)
@@ -46,6 +48,7 @@ router.get('/customers', async (req, res, next) => {
         .select(
           'c.id', 'c.first_name as firstName', 'c.last_name as lastName',
           'c.email', 'c.phone', 'c.address_line1 as address',
+          'ss.id as serviceId',
           'ss.service_type as serviceType', 'ss.window_start as windowStart'
         )
         .orderBy('ss.window_start', 'asc');
@@ -77,11 +80,17 @@ router.get('/customers', async (req, res, next) => {
 
 // =========================================================================
 // POST /assess — upload photos + run AI analysis
-// Body: { customerId, photos: [{ data: base64, mimeType }] }
+// Body: { customerId, serviceId?, photos: [{ data: base64, mimeType }] }
+//
+// serviceId is optional for backwards compat: the fallback customer
+// picker (when no scheduled services exist today) has no service to
+// pass. When provided, it must belong to customerId — otherwise we
+// reject so a tech can't accidentally attach one customer's assessment
+// to another customer's appointment.
 // =========================================================================
 router.post('/assess', async (req, res, next) => {
   try {
-    const { customerId, photos } = req.body;
+    const { customerId, serviceId, photos } = req.body;
 
     if (!customerId) return res.status(400).json({ error: 'customerId is required' });
     if (!photos || !photos.length) return res.status(400).json({ error: 'At least one photo is required' });
@@ -89,6 +98,17 @@ router.post('/assess', async (req, res, next) => {
     // Verify customer exists
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    // If serviceId is provided, validate it exists AND belongs to the
+    // supplied customerId. 404 for missing, 400 for ownership mismatch
+    // — different errors so the panel can surface the correct message.
+    if (serviceId) {
+      const svc = await db('scheduled_services').where({ id: serviceId }).first();
+      if (!svc) return res.status(404).json({ error: 'serviceId not found' });
+      if (svc.customer_id !== customerId) {
+        return res.status(400).json({ error: 'serviceId does not belong to customerId' });
+      }
+    }
 
     // Photo quality gating — check each photo before running expensive AI analysis
     const qualityResults = [];
@@ -194,6 +214,7 @@ router.post('/assess', async (req, res, next) => {
     // Save the assessment
     const [assessment] = await db('lawn_assessments').insert({
       customer_id: customerId,
+      service_id: serviceId || null,
       technician_id: req.technicianId,
       service_date: etDateString(now),
       season,

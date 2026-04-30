@@ -106,7 +106,13 @@ export default function LawnAssessmentPanel() {
       }));
       const r = await adminFetch('/admin/lawn-assessment/assess', {
         method: 'POST',
-        body: JSON.stringify({ customerId: selectedCustomer.id, photos: photoData }),
+        body: JSON.stringify({
+          customerId: selectedCustomer.id,
+          // serviceId is present when the picker showed today's scheduled
+          // services; absent on the customer-only fallback path.
+          serviceId: selectedCustomer.serviceId || undefined,
+          photos: photoData,
+        }),
       });
       setResult(r);
       setStep('review');
@@ -173,7 +179,10 @@ export default function LawnAssessmentPanel() {
           <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search today's lawn customers..." style={inputStyle} />
           <div style={{ marginTop: 12, display: 'grid', gap: 8 }}>
             {filteredCustomers.slice(0, 20).map(c => (
-              <div key={c.id} style={{ ...cardStyle, display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', cursor: 'pointer' }}
+              // key uses serviceId when present so a customer with two
+              // scheduled visits on the same day renders as two distinct
+              // rows. Falls back to customer id on the no-services path.
+              <div key={c.serviceId || c.id} style={{ ...cardStyle, display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', cursor: 'pointer' }}
                 onClick={() => { setSelectedCustomer(c); setStep('capture'); }}>
                 <div>
                   <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
