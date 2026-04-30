@@ -270,6 +270,16 @@ const TwilioService = {
         deliveryStatus: 'sent',
       }).catch(() => {});
 
+      require('./lead-activity-logger').logSms({
+        leadId: options.leadId || null,
+        phone: to,
+        direction: 'outbound',
+        body,
+        messageType: options.messageType,
+        adminUserId: options.adminUserId,
+        twilioSid: message.sid,
+      }).catch(() => {});
+
       return { success: true, sid: message.sid, fromNumber };
     } catch (err) {
       logger.error(`SMS send failed to ${to}: ${err.message}`);

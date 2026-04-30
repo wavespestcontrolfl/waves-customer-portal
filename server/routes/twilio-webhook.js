@@ -49,6 +49,14 @@ router.post('/sms', async (req, res) => {
       metadata: { location: numberConfig?.label, numberType: numberConfig?.type },
     }).catch(() => {});
 
+    require('../services/lead-activity-logger').logSms({
+      phone: From,
+      direction: 'inbound',
+      body: Body,
+      messageType: 'inbound',
+      twilioSid: MessageSid,
+    }).catch(() => {});
+
     // ── STOP / UNSUBSCRIBE keyword handling ──
     const bodyTrimmed = (Body || '').trim().toUpperCase();
     const STOP_KEYWORDS = ['STOP', 'UNSUBSCRIBE', 'CANCEL', 'QUIT', 'END'];

@@ -737,15 +737,10 @@ router.post('/:id/send-sms', async (req, res, next) => {
     if (!lead.phone) return res.status(400).json({ error: 'Lead has no phone number' });
 
     const TwilioService = require('../services/twilio');
-    await TwilioService.sendSMS(lead.phone, message, { messageType: 'lead_outreach' });
-
-    // Log activity
-    await db('lead_activities').insert({
-      lead_id: req.params.id,
-      activity_type: 'sms_sent',
-      description: `SMS sent: ${message.slice(0, 100)}${message.length > 100 ? '...' : ''}`,
-      performed_by: req.technician.first_name + ' ' + (req.technician.last_name || ''),
-      metadata: JSON.stringify({ message }),
+    await TwilioService.sendSMS(lead.phone, message, {
+      messageType: 'lead_outreach',
+      adminUserId: req.technicianId,
+      leadId: req.params.id,
     });
 
     // Record first response time if not yet recorded
