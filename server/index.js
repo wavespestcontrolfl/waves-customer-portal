@@ -535,6 +535,33 @@ httpServer.listen(PORT, () => {
   const dbUrl = process.env.DATABASE_URL || process.env.DATABASE_PRIVATE_URL || process.env.POSTGRES_URL;
   logger.info(`Database: ${dbUrl ? dbUrl.replace(/:[^:@]+@/, ':***@').substring(0, 60) + '...' : 'NOT SET'}`);
 
+  // Call-triage PR1 boot-time validation. Production inbound voice runs
+  // through the Twilio Studio Flow, NOT this portal's /voice webhook —
+  // /voice is a fallback for Studio bypass / unwired numbers / contract
+  // tests. When neither WAVES_FALLBACK_FORWARD_NUMBERS nor (per-number)
+  // numberConfig.forwardTo is set, the fallback routes callers directly
+  // to voicemail rather than emit an invalid empty <Dial>. That's safer
+  // than ringing stale cells, but it does mean no human pickup on
+  // fallback — surface that loudly at boot so ops can decide whether
+  // to set the env var, instead of finding out the first time Studio
+  // is bypassed at 6am. See codex review on PR #523 (P1 follow-up).
+  if (!process.env.WAVES_FALLBACK_FORWARD_NUMBERS && config.nodeEnv !== 'test') {
+    logger.warn(
+      '[boot] WAVES_FALLBACK_FORWARD_NUMBERS is NOT SET — /voice webhook ' +
+      'fallback will route callers directly to voicemail (no live forward). ' +
+      'Production traffic is unaffected (Studio Flow handles it), but Studio ' +
+      'bypass / unwired-number scenarios will not ring staff. Set in Railway env ' +
+      'to enable fallback dialing. See server/routes/twilio-voice-webhook.js + .env.example.'
+    );
+  }
+  if (!process.env.TWILIO_EXPECTED_FORWARD_NUMBERS && config.nodeEnv !== 'test') {
+    logger.warn(
+      '[boot] TWILIO_EXPECTED_FORWARD_NUMBERS is NOT SET — Studio Flow drift ' +
+      'verifier (`npm run twilio:flow:verify`) will fall back to suffix soft-check ' +
+      'instead of strict forward-target verification. See docs/twilio-studio-flow-contract.md.'
+    );
+  }
+
   (async () => {
     if (config.nodeEnv !== 'test') {
       initScheduledJobs();
