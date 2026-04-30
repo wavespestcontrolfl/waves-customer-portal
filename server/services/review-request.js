@@ -279,7 +279,12 @@ const ReviewService = {
         logger.error(`[review] SMS PROVIDER FAILURE (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'} code=${result.code}) (will retry)`);
       }
     } catch (err) {
-      logger.error(`[review] SMS failed: ${err.message}`);
+      // Catch path: the wrapper itself threw (not a return-with-error).
+      // err.message can include Twilio request bodies / phone numbers
+      // since the wrapper internally calls services that surface the
+      // raw destination in their error strings. Log IDs + the error
+      // class only; the audit row (if reached) holds the full context.
+      logger.error(`[review] SMS dispatch threw (customerId=${customer.id} requestId=${requestId} errType=${err?.name || 'Error'})`);
     }
   },
 
