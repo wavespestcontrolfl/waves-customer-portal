@@ -3,12 +3,18 @@ const SmartRebooker = require('./rebooker');
 const TwilioService = require('./twilio');
 const RULES = require('../config/reschedule-rules');
 const logger = require('./logger');
+const { parseETDateTime, etDateString } = require('../utils/datetime-et');
 
 // "Friday, May 1" — ET-safe. Accepts a YYYY-MM-DD string or a Date.
+// Schedule dates are ET wall-clock; Railway runs UTC, so .toISOString()
+// + naive Date parsing can shift the day across midnight. Route both
+// shapes through the ET helpers and format from the resulting absolute
+// Date with timeZone: 'America/New_York'.
 function formatDayDate(input) {
   if (!input) return '';
-  const s = typeof input === 'string' ? input.split('T')[0] : input.toISOString().split('T')[0];
-  return new Date(s + 'T12:00:00').toLocaleDateString('en-US', {
+  const ymd = typeof input === 'string' ? input.split('T')[0] : etDateString(input);
+  const dt = parseETDateTime(ymd + 'T12:00');
+  return dt.toLocaleDateString('en-US', {
     weekday: 'long', month: 'long', day: 'numeric',
     timeZone: 'America/New_York',
   });
