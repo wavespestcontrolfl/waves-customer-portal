@@ -15,6 +15,22 @@ function urlBase64ToUint8Array(base64String) {
   return out;
 }
 
+// Mirrors the iOS-aware helpers in client/src/lib/push-subscribe.js so
+// both helper copies stay in sync. Web Push on iPhone/iPad only works
+// for apps installed to the Home Screen (display: standalone) per
+// Apple's iOS 16.4+ rules, and the denied-permission recovery path
+// differs from desktop browsers — needs to be branched on platform.
+function isIOS() {
+  if (typeof navigator === 'undefined') return false;
+  return /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+function isStandalonePWA() {
+  if (typeof window === 'undefined') return false;
+  return window.matchMedia?.('(display-mode: standalone)').matches
+    || window.navigator.standalone === true;
+}
+
 function describeDevice() {
   const ua = navigator.userAgent;
   let device = 'Browser';
@@ -53,6 +69,24 @@ export async function isPushEnabled() {
 export async function ensurePushSubscription({ apiBase = '/api', token } = {}) {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
     throw new Error('Push notifications are not supported in this browser');
+  }
+
+  // iOS gate — Web Push on iPhone/iPad only works for Home Screen apps
+  // (iOS 16.4+). Detect upfront so the user gets clear instructions
+  // instead of a confusing pushManager.subscribe failure later.
+  if (isIOS() && !isStandalonePWA()) {
+    throw new Error('On iPhone, install Waves Admin to your Home Screen first (tap Share → Add to Home Screen), then open the new icon and try Enable again.');
+  }
+
+  // If the user previously blocked notifications, requestPermission
+  // resolves immediately as 'denied' without re-prompting. Recovery
+  // path is platform-dependent: iOS Home Screen PWAs are managed
+  // through Settings → Notifications, not the URL-bar lock icon.
+  if (Notification.permission === 'denied') {
+    if (isIOS()) {
+      throw new Error('Notifications are off for Waves Admin. Open Settings → Notifications → Waves Admin and turn them on. If Waves Admin isn’t listed, remove the Home Screen icon, reinstall from Safari, and grant permission when prompted.');
+    }
+    throw new Error('Notifications are blocked in your browser. Click the lock/site-info icon in the URL bar → Notifications → Allow, then reload.');
   }
 
   const permission = await Notification.requestPermission();
