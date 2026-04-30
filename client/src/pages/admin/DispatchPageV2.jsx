@@ -57,6 +57,7 @@ import HorizontalScroll from '../../components/HorizontalScroll';
 import useIsMobile from '../../hooks/useIsMobile';
 import { Button, Badge, Card, CardBody, cn } from '../../components/ui';
 import { etDateString, etStartOfWeek, isETToday as isETTodayStr } from '../../lib/timezone';
+import { adminFetch, isRateLimitError } from '../../utils/admin-fetch';
 
 const TechMatchPanel = lazy(() => import('../../components/dispatch/TechMatchPanelV2'));
 const CSRPanel = lazy(() => import('../../components/dispatch/CSRPanelV2'));
@@ -72,24 +73,6 @@ const SKIP_REASONS = [
   { value: 'customer_requested', label: 'Customer requested' },
   { value: 'tech_behind', label: 'Tech running behind' },
 ];
-
-function adminFetch(path, options = {}) {
-  return fetch(`${API_BASE}${path}`, {
-    headers: {
-      Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
-      'Content-Type': 'application/json',
-      ...(options.headers || {}),
-    },
-    ...options,
-  }).then(async (r) => {
-    if (r.status === 401) { window.location.href = '/admin/login'; throw new Error('Session expired'); }
-    if (!r.ok) {
-      const text = await r.text().catch(() => '');
-      throw new Error(text || `${r.status} ${r.statusText}`);
-    }
-    return r.json();
-  });
-}
 
 function googleMapsUrl(address) {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address || '')}`;
@@ -821,7 +804,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
       setLoading(false);
       return scheduleData;
     } catch (e) {
-      setError(e.message);
+      setError(e);
       setLoading(false);
       return null;
     }
@@ -920,7 +903,21 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
   }
 
   if (loading) return <div className="py-16 text-center text-13 text-ink-secondary">Loading schedule…</div>;
-  if (error) return <div className="py-16 text-center text-13 text-alert-fg">Failed to load schedule: {error}</div>;
+  if (error) {
+    if (isRateLimitError(error)) {
+      return (
+        <div className="py-16 text-center text-13 text-alert-fg">
+          Too many requests. Wait a few seconds and{' '}
+          <button onClick={() => fetchSchedule(date)} className="underline">retry</button>.
+        </div>
+      );
+    }
+    return (
+      <div className="py-16 text-center text-13 text-alert-fg">
+        Failed to load schedule: {error?.message || String(error)}
+      </div>
+    );
+  }
   if (!data) return null;
 
   const services = data.services || [];
