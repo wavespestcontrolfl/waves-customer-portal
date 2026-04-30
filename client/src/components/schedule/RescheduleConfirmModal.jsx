@@ -70,7 +70,7 @@ export default function RescheduleConfirmModal({
       />
       <div
         className="relative w-full max-w-2xl bg-white rounded-md shadow-xl"
-        style={{ border: '1px solid #E4E4E7' }}
+        style={{ border: '1px solid #E4E4E7', fontFamily: "'Roboto', system-ui, sans-serif" }}
       >
         {/* Header */}
         <div
@@ -120,7 +120,7 @@ export default function RescheduleConfirmModal({
               className="flex items-center gap-3 px-3 py-2 rounded-sm"
               style={{ border: '1px solid #E4E4E7' }}
             >
-              <div className="text-12 text-ink-secondary whitespace-nowrap">
+              <div className="text-12 font-medium text-ink-primary whitespace-nowrap">
                 Notification type
               </div>
               <select
