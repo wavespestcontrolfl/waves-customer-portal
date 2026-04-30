@@ -431,13 +431,19 @@ Tests:
 
 ### 15. Recording / transcription / AI disclosure (FL two-party consent)
 
-**Audit findings (2026-04-29, `twilio-voice-webhook.js`):**
+**Audit findings (2026-04-29):**
 
-| Endpoint | Line | Disclosure status |
+> **Architecture clarification (also 2026-04-29):** Production inbound voice does **NOT** hit our `/voice` webhook. Every Waves Twilio number's `voiceUrl` points at Studio Flow `FW5fdc2e44700c6e786ed27de94e0cbace` ("Waves Inbound — All Numbers"). The flow plays the ElevenLabs greeting (`say_play_2`), simul-rings `+19415993489` (Adam) + `+17206334021` (Virginia) for 30s with recording enabled (`forward_call` widget), then on completion POSTs to our `/recording-status` and falls through to a Twilio voicemail (`say_play_1` plays `voicemail-9557.twil.io/waves-voicemail.mp3` → `record_voicemail_3` records + transcribes; transcription emails `contact@wavespestcontrol.com` via twimlets). The portal's `/voice` handler is a **fallback** (Studio Flow bypass / contract test). PR1's disclosure edits to `/voice` therefore protect the fallback path; the primary disclosure surface is the Studio Flow's greeting MP3.
+
+| Surface | Path | Disclosure status |
 |---|---|---|
-| `/voice` greeting | 153 | ❌ "Thank you for calling Waves Pest Control. Please hold while we connect you." — no recording/transcription/AI disclosure before `<Dial record>` |
-| `/call-complete` voicemail fork | 192–198 | ⚠️ Plays `WAVES_VOICEMAIL_URL` (content not in repo) → `<Record transcribe="true">`. Disclosure status unverifiable from code; must be verified by listening to the audio |
-| `/outbound-connect` | 437–442 | ❌ Records customer leg with no disclosure |
+| Studio Flow greeting (`say_play_2`) — **primary** | plays `ElevenLabs_..._Veda%20Sky%20-%20Customer%20Care%20Agent_..._b_m2.mp3` | ⚠️ MP3 content opaque to repo. Must be audited for recording/transcription/AI language. **Adam to confirm** before signature-validation enforce mode flips. |
+| Studio Flow voicemail (`say_play_1`) | plays `voicemail-9557.twil.io/waves-voicemail.mp3` | ⚠️ Same — content opaque. |
+| `/voice` fallback greeting (post-PR1) | plays `WAVES_GREETING_URL` (defaults to the same ElevenLabs MP3 the Studio Flow uses) + `<Dial>` to `WAVES_FALLBACK_FORWARD_NUMBERS` (`+19415993489,+17206334021`) | Mirrors production. Same MP3 audit applies. |
+| `/call-complete` voicemail fork | Plays `WAVES_VOICEMAIL_URL` → defensive `<Say>` "Your message will be recorded and transcribed" → `<Record transcribe="true">` | Defensive Say belt-and-suspenders the MP3 audit gap. |
+| `/outbound-connect` | Records customer leg via `record-from-answer-dual` | ✅ PR1 prepends spoken disclosure on the customer leg before dial bridges. Production-active (admin-initiated outbound calls). |
+
+**Studio Flow signature concern:** the Flow's `post_recording_to_portal` widget has `add_twilio_auth: false`, so its HTTP POST to `/recording-status` arrives **unsigned**. Twilio's standard recording-status callback (fired automatically by `record: true` on `forward_call`) IS signed. When PR1's signature middleware flips to `enforce`, the unsigned Studio HTTP request will 403; recording metadata will still arrive via the signed standard callback (and via the Studio Flow's fallthrough to voicemail recording, which goes through Twilio's standard signed callback path). Verify this during log-mode burn-in before flipping to enforce.
 
 **PR1 fix:** add disclosure to inbound `/voice` greeting before the `<Dial>`. Suggested language (have legal bless final wording before merge):
 
