@@ -45,6 +45,12 @@ export default function LawnAssessmentPanel() {
   const [photos, setPhotos] = useState([]); // { data, preview, file }
   const [analyzing, setAnalyzing] = useState(false);
   const [result, setResult] = useState(null);
+  // Tech-confirmed scores. Initialized from result.displayScores when
+  // /assess returns; the tech can nudge any tile up/down before confirm.
+  // recordTechCalibration on the server uses the AI vs tech delta to
+  // train its weighting, so this state is the input that makes the
+  // calibration pipeline actually meaningful.
+  const [techScores, setTechScores] = useState(null);
   const [confirming, setConfirming] = useState(false);
   const [history, setHistory] = useState([]);
   const [showGuide, setShowGuide] = useState(() => !localStorage.getItem('lawn_guide_seen'));
@@ -115,6 +121,9 @@ export default function LawnAssessmentPanel() {
         }),
       });
       setResult(r);
+      // Seed the tech-confirmed values from the AI scores so the review
+      // tiles start aligned. Tech adjusts only what they disagree with.
+      setTechScores(r.displayScores ? { ...r.displayScores } : null);
       setStep('review');
     } catch (e) {
       alert('Analysis failed: ' + e.message);
@@ -127,17 +136,35 @@ export default function LawnAssessmentPanel() {
     if (!result?.assessment?.id) return;
     setConfirming(true);
     try {
+      // Send the tech-confirmed scores. Falls back to the AI scores
+      // when the tech didn't change anything (techScores is just a
+      // copy of displayScores in that case, so calibration delta is
+      // zero — which is the correct signal that AI + tech agreed).
+      const adjustedScores = techScores || result.displayScores;
       await adminFetch('/admin/lawn-assessment/confirm', {
         method: 'POST',
-        body: JSON.stringify({ assessmentId: result.assessment.id, adjustedScores: result.displayScores }),
+        body: JSON.stringify({ assessmentId: result.assessment.id, adjustedScores }),
       });
       alert('Assessment confirmed!');
       setStep('select');
       setPhotos([]);
       setResult(null);
+      setTechScores(null);
       setSelectedCustomer(null);
     } catch (e) { alert('Confirm failed: ' + e.message); }
     setConfirming(false);
+  };
+
+  // Clamp + step the tech-edited score. Range matches the AI display
+  // scale (0–100, integers). Step 5 keeps the UX coarse enough that
+  // a tech can't generate noise by tapping +/- repeatedly.
+  const adjustTechScore = (key, delta) => {
+    setTechScores(prev => {
+      if (!prev) return prev;
+      const current = Number.isFinite(prev[key]) ? prev[key] : 0;
+      const next = Math.min(100, Math.max(0, Math.round(current + delta)));
+      return { ...prev, [key]: next };
+    });
   };
 
   const loadHistory = async (customerId) => {
@@ -273,7 +300,11 @@ export default function LawnAssessmentPanel() {
               );
             })()}
 
-            {/* Scores */}
+            {/* Scores — AI value on top, tech-confirmed value below with
+                +/- nudge buttons. Tech edits feed adjustedScores on
+                /confirm, which is what recordTechCalibration measures
+                AI-vs-tech delta against. Step 5 to keep the input
+                coarse and the calibration signal stable. */}
             <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(3, 1fr)', gap: 10 }}>
               {[
                 { key: 'turf_density', label: 'Turf Density' },
@@ -282,11 +313,14 @@ export default function LawnAssessmentPanel() {
                 { key: 'fungus_control', label: 'Fungus Control' },
                 { key: 'thatch_level', label: 'Thatch Level' },
               ].map(m => {
-                const val = result.displayScores?.[m.key] || 0;
+                const aiVal = result.displayScores?.[m.key] || 0;
+                const techVal = techScores?.[m.key] ?? aiVal;
                 const flag = (result.divergenceFlags || []).find(f => f.metric === m.key);
+                const overridden = techVal !== aiVal;
                 return (
                   <div key={m.key} style={{ padding: 14, background: D.input, borderRadius: 10, textAlign: 'center', border: flag ? `2px solid ${D.amber}` : `1px solid ${D.border}` }}>
-                    <div style={{ fontFamily: MONO, fontSize: 28, fontWeight: 800, color: scoreColor(val) }}>{val}%</div>
+                    <div style={{ fontSize: 9, color: D.muted, fontWeight: 600, letterSpacing: 0.5 }}>AI</div>
+                    <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: scoreColor(aiVal) }}>{aiVal}%</div>
                     <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, marginTop: 2 }}>{m.label}</div>
                     {flag && (
                       <>
@@ -294,6 +328,26 @@ export default function LawnAssessmentPanel() {
                         <div style={{ fontSize: 9, color: D.amber, fontWeight: 700, marginTop: 2 }}>⚠ DIVERGENCE — verify</div>
                       </>
                     )}
+                    <div style={{ marginTop: 10, paddingTop: 8, borderTop: `1px solid ${D.border}` }}>
+                      <div style={{ fontSize: 9, color: overridden ? D.teal : D.muted, fontWeight: 600, letterSpacing: 0.5 }}>
+                        TECH {overridden ? '· EDITED' : ''}
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 4 }}>
+                        <button
+                          type="button"
+                          onClick={() => adjustTechScore(m.key, -5)}
+                          aria-label={`Decrease ${m.label}`}
+                          style={{ width: 28, height: 28, borderRadius: 6, border: `1px solid ${D.border}`, background: D.white, fontSize: 16, fontWeight: 700, cursor: 'pointer', color: D.heading }}
+                        >−</button>
+                        <div style={{ fontFamily: MONO, fontSize: 20, fontWeight: 700, minWidth: 56, color: scoreColor(techVal) }}>{techVal}%</div>
+                        <button
+                          type="button"
+                          onClick={() => adjustTechScore(m.key, 5)}
+                          aria-label={`Increase ${m.label}`}
+                          style={{ width: 28, height: 28, borderRadius: 6, border: `1px solid ${D.border}`, background: D.white, fontSize: 16, fontWeight: 700, cursor: 'pointer', color: D.heading }}
+                        >+</button>
+                      </div>
+                    </div>
                   </div>
                 );
               })}

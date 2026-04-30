@@ -13,6 +13,7 @@ const logger = require('../services/logger');
 const lawnAssessment = require('../services/lawn-assessment');
 const KnowledgeBridge = require('../services/knowledge-bridge');
 const LawnIntel = require('../services/lawn-intelligence');
+const { withConcurrency, majorityVote } = require('../services/lawn-photo-merge');
 
 let PhotoService;
 try { PhotoService = require('../services/photos'); } catch { PhotoService = null; }
@@ -110,17 +111,21 @@ router.post('/assess', async (req, res, next) => {
       }
     }
 
-    // Photo quality gating — check each photo before running expensive AI analysis
-    const qualityResults = [];
-    for (const photo of photos) {
-      const quality = await LawnIntel.assessPhotoQuality(photo.data, photo.mimeType || 'image/jpeg');
-      qualityResults.push(quality);
-    }
+    // Photo quality gating — runs in parallel with a small cap so a
+    // 3-photo upload doesn't pay 3× the latency of a 1-photo upload.
+    const qualityResults = await withConcurrency(photos, 3, (photo) =>
+      LawnIntel.assessPhotoQuality(photo.data, photo.mimeType || 'image/jpeg'),
+    );
 
-    // Filter out photos that failed quality check
-    const passedPhotos = photos.filter((_, i) => qualityResults[i].passed);
+    // Track quality outcomes by ORIGINAL photo index. The downstream
+    // photo-storage loop iterates `photos`, but AI runs only over
+    // photos that passed quality — so we need an index map to align
+    // AI results back to the original photo position.
+    const passedIndices = qualityResults
+      .map((q, i) => (q.passed ? i : -1))
+      .filter((i) => i >= 0);
+    const passedPhotos = passedIndices.map((i) => photos[i]);
     const failedPhotos = photos.filter((_, i) => !qualityResults[i].passed);
-    const failedIssues = failedPhotos.map((_, i) => qualityResults.filter(q => !q.passed)[i]?.issues || []);
 
     if (passedPhotos.length === 0 && failedPhotos.length > 0) {
       return res.json({
@@ -131,17 +136,33 @@ router.post('/assess', async (req, res, next) => {
       });
     }
 
-    // Use only photos that passed quality (fall back to all if quality check wasn't available)
+    // Use only photos that passed quality. Fallback path (quality
+    // gate unavailable / no passes but no fails either) analyses
+    // all photos — preserves the original behavior.
     const photosToAnalyze = passedPhotos.length > 0 ? passedPhotos : photos;
+    const analyzedIndices = passedPhotos.length > 0
+      ? passedIndices
+      : photos.map((_, i) => i);
 
-    // Run AI analysis on each photo
-    const photoResults = [];
-    for (const photo of photosToAnalyze) {
-      const result = await lawnAssessment.analyzePhoto(photo.data, photo.mimeType || 'image/jpeg');
-      photoResults.push(result);
+    // Multi-photo AI runs in parallel with the same small cap. Each
+    // analyzePhoto call is itself two vision-API calls (Claude +
+    // Gemini) under the hood — capping at 3 keeps the upper bound
+    // at 6 concurrent vision calls per /assess request, which is
+    // well inside both providers' burst limits.
+    const photoResults = await withConcurrency(photosToAnalyze, 3, (photo) =>
+      lawnAssessment.analyzePhoto(photo.data, photo.mimeType || 'image/jpeg'),
+    );
+
+    // Map AI result back to original photo index. validResults preserves
+    // the in-order list for averaging/divergence aggregation; resultByPhotoIndex
+    // is the lookup the photo-storage loop uses to attach scores to the
+    // correct photo row.
+    const resultByPhotoIndex = {};
+    for (let k = 0; k < photoResults.length; k++) {
+      const result = photoResults[k];
+      if (!result) continue;
+      resultByPhotoIndex[analyzedIndices[k]] = result;
     }
-
-    // Filter out null results (both models failed for that photo)
     const validResults = photoResults.filter(Boolean);
 
     // If all photos failed analysis, return error but allow manual entry
@@ -171,9 +192,19 @@ router.post('/assess', async (req, res, next) => {
         ? Math.round(colorVals.reduce((a, b) => a + b, 0) / colorVals.length * 10) / 10
         : 5;
 
-      // For categorical: take the most common or first
-      mergedComposite.fungal_activity = validResults[0].composite.fungal_activity;
-      mergedComposite.thatch_visibility = validResults[0].composite.thatch_visibility;
+      // Majority vote across photos for categorical fields. Replaces
+      // first-valid-wins, which was risky: fungicide/dethatching gates
+      // would unlock based on photo 0 alone even if photos 1+2 disagreed.
+      // Tie resolves to first-seen — for 1-photo this is identical to
+      // the prior behavior.
+      mergedComposite.fungal_activity = majorityVote(
+        validResults.map(r => r.composite.fungal_activity),
+        validResults[0].composite.fungal_activity,
+      );
+      mergedComposite.thatch_visibility = majorityVote(
+        validResults.map(r => r.composite.thatch_visibility),
+        validResults[0].composite.thatch_visibility,
+      );
       mergedComposite.observations = validResults.map(r => r.composite.observations).filter(Boolean).join(' | ');
     }
 
@@ -241,7 +272,11 @@ router.post('/assess', async (req, res, next) => {
 
     for (let i = 0; i < photos.length; i++) {
       const photo = photos[i];
-      const result = validResults[i] || null;
+      // Use the index-aligned map, not validResults[i]: when a failed-
+      // quality photo sits between two passed photos, validResults[i]
+      // would attach photo[2]'s AI scores to photo[1]'s row.
+      const result = resultByPhotoIndex[i] || null;
+      const qualityCheck = qualityResults[i] || { passed: true, issues: [] };
       const mimeType = photo.mimeType || 'image/jpeg';
       const ext = mimeType.split('/')[1] || 'jpg';
 
@@ -288,7 +323,11 @@ router.post('/assess', async (req, res, next) => {
         }
       }
 
-      // Create photo record (even without S3 — s3_key can be populated later)
+      // Create photo record (even without S3 — s3_key can be populated later).
+      // Failed-quality photos are still stored for audit, but with
+      // quality_gate_passed=false + the issue list. They are excluded
+      // from is_best_photo selection below so they can't become the
+      // canonical before/after image or feed treatment-decision logic.
       try {
         const [photoRecord] = await db('lawn_assessment_photos').insert({
           assessment_id: assessment.id,
@@ -306,6 +345,8 @@ router.post('/assess', async (req, res, next) => {
           thatch_visibility: result?.composite?.thatch_visibility ?? null,
           observations: result?.composite?.observations ?? null,
           quality_score: qualityScore,
+          quality_gate_passed: qualityCheck.passed !== false,
+          quality_issues: JSON.stringify(qualityCheck.issues || []),
           customer_visible: true,
           is_best_photo: false,
           taken_at: new Date(),
@@ -313,7 +354,10 @@ router.post('/assess', async (req, res, next) => {
 
         photoRecords.push(photoRecord);
 
-        if (qualityScore > bestQuality) {
+        // Best-photo selection considers quality-gated photos only.
+        // A failed photo can never become is_best_photo regardless of
+        // its computed quality_score.
+        if (qualityCheck.passed !== false && qualityScore > bestQuality) {
           bestQuality = qualityScore;
           bestPhotoId = photoRecord.id;
         }
