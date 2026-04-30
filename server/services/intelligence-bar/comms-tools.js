@@ -426,6 +426,30 @@ async function getCallLog(input) {
 }
 
 
+// Map the legacy message_type strings used by Comms manual sends to the
+// customer-message-middleware purpose enum. Anything not explicitly
+// mapped defaults to 'conversational'.
+function mapCommsMessageTypeToPurpose(messageType) {
+  switch (messageType) {
+    case 'appointment_reminder':
+    case 'tech_en_route':
+    case 'service_complete':
+    case 'booking_confirmation':
+      return 'appointment';
+    case 'billing_reminder':
+      return 'billing';
+    case 'payment_link':
+      return 'payment_link';
+    case 'review_request':
+      return 'review_request';
+    case 'estimate_followup':
+      return 'estimate_followup';
+    case 'manual':
+    default:
+      return 'conversational';
+  }
+}
+
 async function sendSms(input) {
   const { customer_name, customer_id, phone: directPhone, message, message_type = 'manual' } = input;
 
@@ -443,24 +467,48 @@ async function sendSms(input) {
 
   if (!phone) return { error: 'No phone number' };
 
-  try {
-    const TwilioService = require('../twilio');
-    await TwilioService.sendSMS(phone, message, {
-      customerId: custId, messageType: message_type, adminUserId: 'intelligence_bar',
-    });
+  // Routed through the customer-message middleware. This is Virginia's
+  // daily-driver send path, so the validators apply consistently:
+  // suppression list, sms_enabled, no customer-emoji, no price leak,
+  // segment cap. Operator messages still need to follow the customer
+  // voice rules — Virginia getting a wrapper-block telling her she
+  // can't send "$199" is the wrapper doing its job (link to the portal
+  // estimate instead).
+  const { sendCustomerMessage } = require('../messaging/send-customer-message');
+  const result = await sendCustomerMessage({
+    to: phone,
+    body: message,
+    channel: 'sms',
+    audience: 'customer',
+    purpose: mapCommsMessageTypeToPurpose(message_type),
+    customerId: custId || null,
+    entryPoint: 'intelligence_bar_comms_send_sms',
+    metadata: { adminUserId: 'intelligence_bar', original_message_type: message_type },
+  });
 
-    logger.info(`[intelligence-bar:comms] Sent SMS to ${phone}: ${message.substring(0, 50)}...`);
-
+  if (result.sent) {
+    logger.info(`[intelligence-bar:comms] Sent SMS to ${phone}: ${message.substring(0, 50)}... (segs=${result.segmentCount})`);
     return {
       success: true,
       sent_to: phone,
       customer: customerName,
       message,
       char_count: message.length,
+      segmentCount: result.segmentCount,
+      encoding: result.encoding,
     };
-  } catch (err) {
-    return { error: `Failed to send: ${err.message}` };
   }
+  // Surface the wrapper block to the IB so Virginia sees a clear reason
+  // (e.g. "the customer is opted out", "the body has an emoji") instead
+  // of a silent fail.
+  return {
+    success: false,
+    blocked: !!result.blocked,
+    code: result.code,
+    reason: result.reason,
+    sent_to: phone,
+    customer: customerName,
+  };
 }
 
 
