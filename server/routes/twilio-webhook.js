@@ -314,9 +314,13 @@ router.post('/sms', async (req, res) => {
             if (!sendResult.sent) {
               // PII rule: never log full phone in plaintext. Mask to last 4
               // digits — enough for operator debugging via audit log
-              // cross-reference.
+              // cross-reference. Drop sendResult.reason: upstream
+              // provider/guard error strings may include the full
+              // recipient phone or message body. Operators get the full
+              // failure context via messaging_audit_log keyed by code +
+              // to_last4.
               const last4 = String(From || '').replace(/\D/g, '').slice(-4);
-              logger.warn(`[twilio-webhook] AI reply BLOCKED for ***${last4}: ${sendResult.code} — ${sendResult.reason}`);
+              logger.warn(`[twilio-webhook] AI reply BLOCKED for ***${last4}: code=${sendResult.code}`);
             }
           } catch (e) { logger.error(`AI reply SMS failed: ${e.message}`); }
         }
