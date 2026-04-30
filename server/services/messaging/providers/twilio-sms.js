@@ -11,7 +11,15 @@
 const TwilioService = require('../../twilio');
 
 async function sendViaTwilio(input) {
-  const messageType = mapPurposeToMessageType(input.purpose);
+  // Callers can preserve a legacy messageType (e.g. 'lead_response',
+  // 'invoice', 'manual') via metadata.original_message_type so the
+  // existing admin-sms-templates kill-switch keys still work AND
+  // services/twilio.js's "manual === no auto-attached logo" branch
+  // continues to recognize manual sends. The wrapper's purpose enum
+  // still drives policy + audit; the messageType string drives the
+  // per-template ops kill switch and the logo-attach behavior.
+  const messageType = (input.metadata && input.metadata.original_message_type)
+    || mapPurposeToMessageType(input.purpose);
   try {
     const result = await TwilioService.sendSMS(input.to, input.body, {
       customerId: input.customerId || null,

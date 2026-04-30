@@ -501,8 +501,17 @@ async function sendSms(input) {
   // Surface the wrapper block to the IB so Virginia sees a clear reason
   // (e.g. "the customer is opted out", "the body has an emoji") instead
   // of a silent fail.
+  //
+  // CRITICAL: Intelligence Bar tool-failure detection in
+  // routes/admin-intelligence-bar.js keys on `result.error` (truthy ==
+  // failure) and `/execute` success is `!result.error`. Without an
+  // explicit error field, blocked sends would be reported as successful
+  // tool executions at the API layer. Include `error` so the IB
+  // execute path correctly classifies blocks/provider failures as
+  // tool-execution failures.
   return {
     success: false,
+    error: result.reason || result.code || 'send blocked',
     blocked: !!result.blocked,
     code: result.code,
     reason: result.reason,
