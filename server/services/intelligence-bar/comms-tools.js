@@ -467,17 +467,61 @@ async function sendSms(input) {
   let customerName = null;
   let custId = customer_id;
 
-  // Always try to resolve to a customer record. If only `phone` was passed,
-  // do a phone lookup so we get customerId populated for the wrapper's
-  // consent check (an indexed customer-id lookup, not phone-format-fragile).
-  if (!custId || !phone) {
+  // Resolve identity carefully — never cross-wire a customerId to a different
+  // recipient phone. The wrapper's consent + identity validators trust
+  // customerId, so attaching a customerId that belongs to a different person
+  // than the destination phone bypasses that customer's opt-out.
+  //
+  //   1. Only customer_id given: look up by id, use that record's phone.
+  //   2. Only phone given: look up by phone (last-10 digits) — only attach
+  //      the customerId if the phones genuinely match. Phone-format
+  //      mismatches skip the indexed lookup; wrapper falls back to phone-
+  //      match consent, which is the safe degraded mode.
+  //   3. Only customer_name given: resolve by name, use that record's phone.
+  //   4. BOTH phone AND id (or phone AND name): trust the phone as
+  //      destination AND only keep the customerId when its record's phone
+  //      matches the typed phone. A name-or-id-attached record with a
+  //      DIFFERENT phone gets dropped — wrapper does phone-only consent
+  //      lookup. This is the codex P1 fix.
+  if (!custId && !phone) {
     const customer = await resolveCustomer(input);
+    if (!customer) return { error: 'Customer not found' };
+    customerName = `${customer.first_name} ${customer.last_name}`;
+    custId = customer.id;
+    phone = customer.phone;
+  } else if (custId && !phone) {
+    const customer = await db('customers').where('id', custId).first();
+    if (!customer || !customer.phone) return { error: 'Customer has no phone number' };
+    customerName = `${customer.first_name} ${customer.last_name}`;
+    phone = customer.phone;
+  } else if (!custId && phone) {
+    // Phone given but no customer_id. Try to find a customer record whose
+    // phone matches the typed phone (last 10 digits, format-agnostic).
+    const inputDigits = phone.replace(/\D/g, '').slice(-10);
+    if (inputDigits.length === 10) {
+      const customer = await db('customers')
+        .whereRaw("RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = ?", [inputDigits])
+        .first();
+      if (customer) {
+        customerName = `${customer.first_name} ${customer.last_name}`;
+        custId = customer.id;
+      }
+    }
+  } else {
+    // BOTH custId and phone given. Verify they belong to the same record;
+    // if not, trust the typed phone and drop the id. Prevents cross-wired
+    // consent (codex P1).
+    const customer = await db('customers').where('id', custId).first();
     if (customer) {
-      customerName = `${customer.first_name} ${customer.last_name}`;
-      custId = custId || customer.id;
-      phone = phone || customer.phone;
-    } else if (!phone) {
-      return { error: 'Customer not found' };
+      const inputDigits = phone.replace(/\D/g, '').slice(-10);
+      const customerDigits = (customer.phone || '').replace(/\D/g, '').slice(-10);
+      if (inputDigits === customerDigits && inputDigits.length === 10) {
+        customerName = `${customer.first_name} ${customer.last_name}`;
+      } else {
+        custId = null;
+      }
+    } else {
+      custId = null;
     }
   }
 
