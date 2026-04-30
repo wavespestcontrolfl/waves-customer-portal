@@ -130,7 +130,7 @@ export default function RescheduleConfirmModal({
                 className="flex-1 text-13 text-ink-primary bg-transparent outline-none"
               >
                 <option value="none">Don&rsquo;t send a notification</option>
-                <option value="sms">Ask customer to confirm via SMS</option>
+                <option value="sms">Text message</option>
               </select>
             </div>
           </div>
