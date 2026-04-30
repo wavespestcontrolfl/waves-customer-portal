@@ -47,8 +47,8 @@ function QuickChip({ icon, label, onClick }) {
     <button onClick={onClick} onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)} style={{
       display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 12px', borderRadius: 9999,
       background: hover ? `${D.teal}22` : D.card, border: `1px solid ${hover ? D.teal + '55' : D.border}`,
-      color: hover ? D.teal : D.muted, fontSize: 12, fontWeight: 600,
-      fontFamily: 'DM Sans, sans-serif', cursor: 'pointer', transition: 'all 0.15s', whiteSpace: 'nowrap',
+      color: hover ? D.teal : '#000', fontSize: 12, fontWeight: 600,
+      fontFamily: "'Roboto', system-ui, sans-serif", cursor: 'pointer', transition: 'all 0.15s', whiteSpace: 'nowrap',
     }}>
       <span style={{ fontSize: 13 }}>{icon}</span>{label}
     </button>
@@ -169,7 +169,7 @@ export default function SEOIntelligenceBar({ context = 'seo', activeDomain, onRe
             style={{
               width: '100%', padding: '9px 14px', paddingRight: 80,
               background: D.inputBg, border: `1px solid ${D.border}`, borderRadius: 10,
-              color: D.text, fontSize: 13, fontFamily: 'DM Sans, sans-serif', outline: 'none', boxSizing: 'border-box',
+              color: '#000', fontSize: 13, fontFamily: "'Roboto', system-ui, sans-serif", outline: 'none', boxSizing: 'border-box',
             }}
             onFocusCapture={e => e.target.style.borderColor = D.teal + '66'}
             onBlurCapture={e => e.target.style.borderColor = D.border}
@@ -195,7 +195,7 @@ export default function SEOIntelligenceBar({ context = 'seo', activeDomain, onRe
           </div>
         )}
         {response && (
-          <button onClick={clear} style={{ padding: '5px 8px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: D.muted, fontSize: 10, fontWeight: 600, cursor: 'pointer' }}>Clear</button>
+          <button onClick={clear} style={{ padding: '5px 8px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: '#000', fontSize: 10, fontWeight: 600, cursor: 'pointer' }}>Clear</button>
         )}
       </div>
 
@@ -217,13 +217,13 @@ export default function SEOIntelligenceBar({ context = 'seo', activeDomain, onRe
 
       {response && !loading && (
         <div style={{ padding: '2px 16px 16px', borderTop: `1px solid ${D.border}33`, maxHeight: 500, overflowY: 'auto' }}>
-          <div style={{ fontSize: 13, lineHeight: 1.65, color: D.text, fontFamily: 'DM Sans, sans-serif' }}>
+          <div style={{ fontSize: 13, lineHeight: 1.65, color: '#000', fontFamily: "'Roboto', system-ui, sans-serif" }}>
             {renderMarkdown(response)}
           </div>
           <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
             <input value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={handleKeyDown}
               placeholder="Drill deeper — 'show me that site', 'compare to last month'..."
-              style={{ flex: 1, padding: '7px 12px', background: D.inputBg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 12, fontFamily: 'DM Sans, sans-serif', outline: 'none' }} />
+              style={{ flex: 1, padding: '7px 12px', background: D.inputBg, border: `1px solid ${D.border}`, borderRadius: 8, color: '#000', fontSize: 12, fontFamily: "'Roboto', system-ui, sans-serif", outline: 'none' }} />
             <button onClick={() => submit()} disabled={!prompt.trim() || loading} style={{
               padding: '7px 14px', background: D.teal, color: D.white, border: 'none', borderRadius: 8, fontSize: 11, fontWeight: 700, cursor: 'pointer', opacity: prompt.trim() ? 1 : 0.4,
             }}>Send</button>

@@ -829,28 +829,28 @@ router.get('/quick-actions', async (req, res) => {
   const { context } = req.query;
 
   const baseActions = [
-    { id: 'missing_city', group: 'Find', label: 'Missing Cities', prompt: 'Show me customers with no city on their profile', icon: '📍' },
-    { id: 'pest_overdue', group: 'Find', label: 'Pest Overdue', prompt: 'Which quarterly pest control customers are overdue for service?', icon: '🐛' },
-    { id: 'lawn_overdue', group: 'Find', label: 'Lawn Overdue', prompt: 'Which monthly lawn care customers are overdue?', icon: '🌿' },
-    { id: 'at_risk', group: 'Find', label: 'At Risk', prompt: 'Show me customers with health scores below 40', icon: '⚠️' },
-    { id: 'no_email', group: 'Find', label: 'Missing Emails', prompt: 'Customers with no email address', icon: '📧' },
-    { id: 'high_balance', group: 'Find', label: 'Outstanding Balances', prompt: 'Who has an outstanding balance over $100?', icon: '💰' },
-    { id: 'duplicates', group: 'Find', label: 'Duplicates', prompt: 'Find duplicate customers by phone number', icon: '👥' },
-    { id: 'win_back', group: 'Find', label: 'Win Back', prompt: 'Show churned customers from the last 6 months who were Gold or Platinum tier', icon: '🔄' },
-    { id: 'schedule_gaps', group: 'Analyze', label: 'Schedule Gaps', prompt: `What does this week's schedule look like? Any gaps?`, icon: '📅' },
-    { id: 'tech_performance', group: 'Analyze', label: 'Tech Performance', prompt: 'Compare technician performance this month', icon: '📊' },
+    { id: 'missing_city', group: 'Find', label: 'Missing Cities', prompt: 'Show me customers with no city on their profile' },
+    { id: 'pest_overdue', group: 'Find', label: 'Pest Overdue', prompt: 'Which quarterly pest control customers are overdue for service?' },
+    { id: 'lawn_overdue', group: 'Find', label: 'Lawn Overdue', prompt: 'Which monthly lawn care customers are overdue?' },
+    { id: 'at_risk', group: 'Find', label: 'At Risk', prompt: 'Show me customers with health scores below 40' },
+    { id: 'no_email', group: 'Find', label: 'Missing Emails', prompt: 'Customers with no email address' },
+    { id: 'high_balance', group: 'Find', label: 'Outstanding Balances', prompt: 'Who has an outstanding balance over $100?' },
+    { id: 'duplicates', group: 'Find', label: 'Duplicates', prompt: 'Find duplicate customers by phone number' },
+    { id: 'win_back', group: 'Find', label: 'Win Back', prompt: 'Show churned customers from the last 6 months who were Gold or Platinum tier' },
+    { id: 'schedule_gaps', group: 'Analyze', label: 'Schedule Gaps', prompt: `What does this week's schedule look like? Any gaps?` },
+    { id: 'tech_performance', group: 'Analyze', label: 'Tech Performance', prompt: 'Compare technician performance this month' },
   ];
 
   const scheduleActions = [
-    { id: 'day_briefing', group: 'Plan', label: 'Day Briefing', prompt: 'Give me a full briefing for today', icon: '📋' },
-    { id: 'find_time', group: 'Plan', label: 'Find a Time', prompt: 'Find the best time slot for a new customer — ask me for the address and service type', icon: '✨' },
-    { id: 'gaps_this_week', group: 'Plan', label: 'Gaps This Week', prompt: 'Where do we have open capacity this week?', icon: '📅' },
-    { id: 'optimize', group: 'Optimize', label: 'Optimize Routes', prompt: 'Optimize all routes for today', icon: '🗺️' },
-    { id: 'zone_density', group: 'Optimize', label: 'Zone Density', prompt: 'Analyze zone density for today — any consolidation opportunities?', icon: '📍' },
-    { id: 'far_out', group: 'Optimize', label: 'Far-Out Appointments', prompt: 'Find appointments scheduled more than 30 days out that we could move sooner', icon: '⏩' },
-    { id: 'unassigned', group: 'Fix', label: 'Unassigned Stops', prompt: 'Show me unassigned stops and suggest tech assignments', icon: '❓' },
-    { id: 'overdue_no_appt', group: 'Fix', label: 'Overdue + No Appt', prompt: 'Which overdue customers have no upcoming appointment at all?', icon: '🚨' },
-    { id: 'pest_overdue_sched', group: 'Fix', label: 'Pest Overdue', prompt: 'Quarterly pest customers overdue — schedule them into open slots this week', icon: '🐛' },
+    { id: 'day_briefing', group: 'Plan', label: 'Day Briefing', prompt: 'Give me a full briefing for today' },
+    { id: 'find_time', group: 'Plan', label: 'Find a Time', prompt: 'Find the best time slot for a new customer — ask me for the address and service type' },
+    { id: 'gaps_this_week', group: 'Plan', label: 'Gaps This Week', prompt: 'Where do we have open capacity this week?' },
+    { id: 'optimize', group: 'Optimize', label: 'Optimize Routes', prompt: 'Optimize all routes for today' },
+    { id: 'zone_density', group: 'Optimize', label: 'Zone Density', prompt: 'Analyze zone density for today — any consolidation opportunities?' },
+    { id: 'far_out', group: 'Optimize', label: 'Far-Out Appointments', prompt: 'Find appointments scheduled more than 30 days out that we could move sooner' },
+    { id: 'unassigned', group: 'Fix', label: 'Unassigned Stops', prompt: 'Show me unassigned stops and suggest tech assignments' },
+    { id: 'overdue_no_appt', group: 'Fix', label: 'Overdue + No Appt', prompt: 'Which overdue customers have no upcoming appointment at all?' },
+    { id: 'pest_overdue_sched', group: 'Fix', label: 'Pest Overdue', prompt: 'Quarterly pest customers overdue — schedule them into open slots this week' },
   ];
 
   const dashboardActions = [
@@ -865,14 +865,14 @@ router.get('/quick-actions', async (req, res) => {
   ];
 
   const seoActions = [
-    { id: 'concept_map', group: 'Analyze', label: 'Concept Map', prompt: 'Show me the semantic concept map for pest control — what entities, subtopics, and related concepts should our pages cover?', icon: '🗺️' },
-    { id: 'entity_gaps', group: 'Analyze', label: 'Entity Gaps', prompt: 'Which pages are losing position and likely have entity gaps vs competitors? Check against the concept clusters.', icon: '🧩' },
-    { id: 'drops', group: 'Analyze', label: 'Ranking Drops', prompt: 'Which keywords dropped in rankings this week? Cross-reference with entity coverage gaps.', icon: '📉' },
-    { id: 'top_queries', group: 'Analyze', label: 'Top Queries', prompt: 'What are our top 20 non-branded keywords by clicks? Which concept clusters do they belong to?', icon: '🔍' },
-    { id: 'decay', group: 'Analyze', label: 'Content Decay', prompt: 'Any content decay alerts or keyword cannibalization issues?', icon: '⚠️' },
-    { id: 'refresh_score', group: 'Plan', label: 'Refresh Priority', prompt: 'Score all pages for refresh priority. Which pages have the highest ROI for a semantic update?', icon: '🎯' },
-    { id: 'content_brief', group: 'Plan', label: 'Content Brief', prompt: 'Build a content workflow brief for "pest control bradenton fl" — SERP analysis, entity map, and content blueprint.', icon: '📋' },
-    { id: 'content_pipe', group: 'Plan', label: 'Content Pipeline', prompt: "What's in the content pipeline? How many posts need generation?", icon: '📝' },
+    { id: 'concept_map', group: 'Analyze', label: 'Concept Map', prompt: 'Show me the semantic concept map for pest control — what entities, subtopics, and related concepts should our pages cover?' },
+    { id: 'entity_gaps', group: 'Analyze', label: 'Entity Gaps', prompt: 'Which pages are losing position and likely have entity gaps vs competitors? Check against the concept clusters.' },
+    { id: 'drops', group: 'Analyze', label: 'Ranking Drops', prompt: 'Which keywords dropped in rankings this week? Cross-reference with entity coverage gaps.' },
+    { id: 'top_queries', group: 'Analyze', label: 'Top Queries', prompt: 'What are our top 20 non-branded keywords by clicks? Which concept clusters do they belong to?' },
+    { id: 'decay', group: 'Analyze', label: 'Content Decay', prompt: 'Any content decay alerts or keyword cannibalization issues?' },
+    { id: 'refresh_score', group: 'Plan', label: 'Refresh Priority', prompt: 'Score all pages for refresh priority. Which pages have the highest ROI for a semantic update?' },
+    { id: 'content_brief', group: 'Plan', label: 'Content Brief', prompt: 'Build a content workflow brief for "pest control bradenton fl" — SERP analysis, entity map, and content blueprint.' },
+    { id: 'content_pipe', group: 'Plan', label: 'Content Pipeline', prompt: "What's in the content pipeline? How many posts need generation?" },
   ];
 
   if (context === 'schedule' || context === 'dispatch') {
@@ -883,45 +883,45 @@ router.get('/quick-actions', async (req, res) => {
     res.json({ actions: seoActions });
   } else if (context === 'procurement' || context === 'inventory') {
     res.json({ actions: [
-      { id: 'unpriced', group: 'Find', label: 'Unpriced Products', prompt: 'What products still need pricing? Prioritize by category.', icon: '❓' },
-      { id: 'cheapest', group: 'Find', label: 'Cheapest Sources', prompt: 'Where are we getting the best deals? Any products where a cheaper vendor exists?', icon: '💰' },
-      { id: 'herbicides', group: 'Find', label: 'Herbicide Prices', prompt: 'Compare prices on all our pre-emergent herbicides', icon: '🌿' },
-      { id: 'approvals', group: 'Find', label: 'Approval Queue', prompt: 'Any pending price approvals? Show me what needs review.', icon: '✅' },
-      { id: 'compare', group: 'Analyze', label: 'Compare Vendors', prompt: 'Compare SiteOne vs LESCO pricing on our top 10 most-used products', icon: '⚖️' },
-      { id: 'margins', group: 'Analyze', label: 'Margin Analysis', prompt: 'What are our margins by service type?', icon: '📊' },
-      { id: 'trends', group: 'Analyze', label: 'Price Trends', prompt: 'Have any product prices gone up in the last 90 days?', icon: '📈' },
-      { id: 'price_check', group: 'Act', label: 'Run Price Check', prompt: 'Run a price check on Demand CS across all vendors', icon: '🔍' },
+      { id: 'unpriced', group: 'Find', label: 'Unpriced Products', prompt: 'What products still need pricing? Prioritize by category.' },
+      { id: 'cheapest', group: 'Find', label: 'Cheapest Sources', prompt: 'Where are we getting the best deals? Any products where a cheaper vendor exists?' },
+      { id: 'herbicides', group: 'Find', label: 'Herbicide Prices', prompt: 'Compare prices on all our pre-emergent herbicides' },
+      { id: 'approvals', group: 'Find', label: 'Approval Queue', prompt: 'Any pending price approvals? Show me what needs review.' },
+      { id: 'compare', group: 'Analyze', label: 'Compare Vendors', prompt: 'Compare SiteOne vs LESCO pricing on our top 10 most-used products' },
+      { id: 'margins', group: 'Analyze', label: 'Margin Analysis', prompt: 'What are our margins by service type?' },
+      { id: 'trends', group: 'Analyze', label: 'Price Trends', prompt: 'Have any product prices gone up in the last 90 days?' },
+      { id: 'price_check', group: 'Act', label: 'Run Price Check', prompt: 'Run a price check on Demand CS across all vendors' },
     ] });
   } else if (context === 'revenue') {
     res.json({ actions: [
-      { id: 'overview', group: 'Overview', label: 'Revenue Overview', prompt: "How's revenue this month? Show me the full picture with margins.", icon: '💰' },
-      { id: 'compare', group: 'Overview', label: 'This vs Last Month', prompt: 'Compare this month vs last month — revenue, margin, RPMH, everything', icon: '📊' },
-      { id: 'quarter', group: 'Overview', label: 'Quarter View', prompt: "How's revenue this quarter compared to last quarter?", icon: '📈' },
-      { id: 'service_lines', group: 'Analyze', label: 'Service Line P&L', prompt: 'Break down P&L by service line. Which has the best margin?', icon: '📋' },
-      { id: 'tech_perf', group: 'Analyze', label: 'Tech RPMH', prompt: 'Rank technicians by revenue per man-hour', icon: '👷' },
-      { id: 'top_customers', group: 'Analyze', label: 'Top 10 Customers', prompt: 'Who are our top 10 customers by revenue this month?', icon: '🏆' },
-      { id: 'ad_roi', group: 'Analyze', label: 'Ad ROI', prompt: "What's our ad attribution? ROAS and CAC by channel?", icon: '📣' },
-      { id: 'low_margin', group: 'Watch', label: 'Low Margin Alert', prompt: 'Which service lines are below our 55% margin target?', icon: '⚠️' },
+      { id: 'overview', group: 'Overview', label: 'Revenue Overview', prompt: "How's revenue this month? Show me the full picture with margins." },
+      { id: 'compare', group: 'Overview', label: 'This vs Last Month', prompt: 'Compare this month vs last month — revenue, margin, RPMH, everything' },
+      { id: 'quarter', group: 'Overview', label: 'Quarter View', prompt: "How's revenue this quarter compared to last quarter?" },
+      { id: 'service_lines', group: 'Analyze', label: 'Service Line P&L', prompt: 'Break down P&L by service line. Which has the best margin?' },
+      { id: 'tech_perf', group: 'Analyze', label: 'Tech RPMH', prompt: 'Rank technicians by revenue per man-hour' },
+      { id: 'top_customers', group: 'Analyze', label: 'Top 10 Customers', prompt: 'Who are our top 10 customers by revenue this month?' },
+      { id: 'ad_roi', group: 'Analyze', label: 'Ad ROI', prompt: "What's our ad attribution? ROAS and CAC by channel?" },
+      { id: 'low_margin', group: 'Watch', label: 'Low Margin Alert', prompt: 'Which service lines are below our 55% margin target?' },
     ] });
   } else if (context === 'tech') {
     res.json({ actions: [
-      { id: 'route', group: 'Today', label: "Today's Route", prompt: "What's my route today?", icon: '📅' },
-      { id: 'next', group: 'Today', label: "What's Next?", prompt: "What's my next stop? Any special notes?", icon: '➡️' },
-      { id: 'remaining', group: 'Today', label: 'How Many Left?', prompt: 'How many stops do I have left today?', icon: '📊' },
-      { id: 'weather', group: 'Conditions', label: 'Spray Check', prompt: 'Can I spray right now? Check wind and rain.', icon: '🌤️' },
-      { id: 'protocol', group: 'Reference', label: 'Pest Protocol', prompt: 'What products and rates for quarterly pest control?', icon: '📖' },
-      { id: 'lawn_protocol', group: 'Reference', label: 'Lawn Protocol', prompt: 'Lawn care protocol for St. Augustine', icon: '🌿' },
+      { id: 'route', group: 'Today', label: "Today's Route", prompt: "What's my route today?" },
+      { id: 'next', group: 'Today', label: "What's Next?", prompt: "What's my next stop? Any special notes?" },
+      { id: 'remaining', group: 'Today', label: 'How Many Left?', prompt: 'How many stops do I have left today?' },
+      { id: 'weather', group: 'Conditions', label: 'Spray Check', prompt: 'Can I spray right now? Check wind and rain.' },
+      { id: 'protocol', group: 'Reference', label: 'Pest Protocol', prompt: 'What products and rates for quarterly pest control?' },
+      { id: 'lawn_protocol', group: 'Reference', label: 'Lawn Protocol', prompt: 'Lawn care protocol for St. Augustine' },
     ] });
   } else if (context === 'reviews') {
     res.json({ actions: [
-      { id: 'stats', group: 'Monitor', label: 'Review Stats', prompt: 'How are our Google reviews? Give me the full picture.', icon: '⭐' },
-      { id: 'unresponded', group: 'Monitor', label: 'Needs Reply', prompt: 'Show me reviews that need a reply — prioritize negative ones', icon: '💬' },
-      { id: 'negative', group: 'Monitor', label: 'Negative Reviews', prompt: 'Show me all 1-2 star reviews. Any patterns?', icon: '⚠️' },
-      { id: 'trends', group: 'Monitor', label: 'Review Trends', prompt: 'Are our reviews improving? Show the 6-month trend.', icon: '📈' },
-      { id: 'by_location', group: 'Monitor', label: 'By Location', prompt: 'Compare review counts and ratings across all 4 locations', icon: '📍' },
-      { id: 'draft_all', group: 'Act', label: 'Draft Replies', prompt: 'Draft AI replies for all unresponded reviews', icon: '✍️' },
-      { id: 'outreach', group: 'Act', label: 'Outreach Candidates', prompt: 'Who should we ask for reviews? Show Gold and Platinum customers first.', icon: '📧' },
-      { id: 'velocity', group: 'Analyze', label: 'Velocity Pipeline', prompt: "What's our review request conversion rate?", icon: '🔄' },
+      { id: 'stats', group: 'Monitor', label: 'Review Stats', prompt: 'How are our Google reviews? Give me the full picture.' },
+      { id: 'unresponded', group: 'Monitor', label: 'Needs Reply', prompt: 'Show me reviews that need a reply — prioritize negative ones' },
+      { id: 'negative', group: 'Monitor', label: 'Negative Reviews', prompt: 'Show me all 1-2 star reviews. Any patterns?' },
+      { id: 'trends', group: 'Monitor', label: 'Review Trends', prompt: 'Are our reviews improving? Show the 6-month trend.' },
+      { id: 'by_location', group: 'Monitor', label: 'By Location', prompt: 'Compare review counts and ratings across all 4 locations' },
+      { id: 'draft_all', group: 'Act', label: 'Draft Replies', prompt: 'Draft AI replies for all unresponded reviews' },
+      { id: 'outreach', group: 'Act', label: 'Outreach Candidates', prompt: 'Who should we ask for reviews? Show Gold and Platinum customers first.' },
+      { id: 'velocity', group: 'Analyze', label: 'Velocity Pipeline', prompt: "What's our review request conversion rate?" },
     ] });
   } else if (context === 'comms') {
     res.json({ actions: [
@@ -934,35 +934,35 @@ router.get('/quick-actions', async (req, res) => {
     ] });
   } else if (context === 'tax') {
     res.json({ actions: [
-      { id: 'overview', group: 'Overview', label: 'Tax Overview', prompt: "Give me the full tax picture — expenses, deductions, equipment, upcoming deadlines.", icon: '💰' },
-      { id: 'pnl', group: 'Overview', label: 'P&L', prompt: "Month-to-date P&L with gross and net margins", icon: '📋' },
-      { id: 'quarterly', group: 'Overview', label: 'Quarterly Estimate', prompt: "What's my estimated quarterly tax payment? Break down federal and self-employment.", icon: '📊' },
-      { id: 'deadlines', group: 'Overview', label: 'Deadlines', prompt: 'When are my next tax deadlines? Anything overdue?', icon: '📅' },
-      { id: 'expenses', group: 'Details', label: 'Expenses YTD', prompt: 'Show me expenses by category this year. What percentage is deductible?', icon: '🧾' },
-      { id: 'equipment', group: 'Details', label: 'Depreciation', prompt: 'Which equipment is fully depreciated? Any Section 179 candidates?', icon: '🔧' },
-      { id: 'mileage', group: 'Details', label: 'Mileage', prompt: 'Mileage deduction so far this year?', icon: '🚗' },
-      { id: 'ar', group: 'Details', label: 'A/R Aging', prompt: "Who owes us money? Show me the accounts receivable aging.", icon: '⚠️' },
-      { id: 'advisor', group: 'Advise', label: 'Run Advisor', prompt: 'Run the AI tax advisor — check for savings opportunities and regulation changes.', icon: '🤖' },
+      { id: 'overview', group: 'Overview', label: 'Tax Overview', prompt: "Give me the full tax picture — expenses, deductions, equipment, upcoming deadlines." },
+      { id: 'pnl', group: 'Overview', label: 'P&L', prompt: "Month-to-date P&L with gross and net margins" },
+      { id: 'quarterly', group: 'Overview', label: 'Quarterly Estimate', prompt: "What's my estimated quarterly tax payment? Break down federal and self-employment." },
+      { id: 'deadlines', group: 'Overview', label: 'Deadlines', prompt: 'When are my next tax deadlines? Anything overdue?' },
+      { id: 'expenses', group: 'Details', label: 'Expenses YTD', prompt: 'Show me expenses by category this year. What percentage is deductible?' },
+      { id: 'equipment', group: 'Details', label: 'Depreciation', prompt: 'Which equipment is fully depreciated? Any Section 179 candidates?' },
+      { id: 'mileage', group: 'Details', label: 'Mileage', prompt: 'Mileage deduction so far this year?' },
+      { id: 'ar', group: 'Details', label: 'A/R Aging', prompt: "Who owes us money? Show me the accounts receivable aging." },
+      { id: 'advisor', group: 'Advise', label: 'Run Advisor', prompt: 'Run the AI tax advisor — check for savings opportunities and regulation changes.' },
     ] });
   } else if (context === 'leads') {
     res.json({ actions: [
-      { id: 'overview', group: 'Pipeline', label: 'Pipeline Overview', prompt: 'How does the pipeline look? Active leads, conversion rate, response time.', icon: '📊' },
-      { id: 'new_leads', group: 'Pipeline', label: 'New Leads', prompt: 'Show me all new leads this week', icon: '🆕' },
-      { id: 'stale', group: 'Pipeline', label: 'Stale Leads', prompt: "Which leads haven't been contacted in 48 hours? These are going cold.", icon: '🔴' },
-      { id: 'funnel', group: 'Analyze', label: 'Funnel', prompt: "Show me the funnel. Where's the bottleneck?", icon: '🔄' },
-      { id: 'sources', group: 'Analyze', label: 'Source ROI', prompt: 'Compare lead sources by conversion rate and ROI', icon: '📈' },
-      { id: 'lost', group: 'Analyze', label: 'Lost Analysis', prompt: 'Why are we losing leads? Break down by reason.', icon: '❌' },
-      { id: 'response', group: 'Analyze', label: 'Response Times', prompt: 'How fast are we responding? Does speed correlate with conversion?', icon: '⏱️' },
-      { id: 'cleanup', group: 'Cleanup', label: 'Pipeline Cleanup', prompt: 'How many unresponsive leads older than 30 days should we move to lost?', icon: '🧹' },
+      { id: 'overview', group: 'Pipeline', label: 'Pipeline Overview', prompt: 'How does the pipeline look? Active leads, conversion rate, response time.' },
+      { id: 'new_leads', group: 'Pipeline', label: 'New Leads', prompt: 'Show me all new leads this week' },
+      { id: 'stale', group: 'Pipeline', label: 'Stale Leads', prompt: "Which leads haven't been contacted in 48 hours? These are going cold." },
+      { id: 'funnel', group: 'Analyze', label: 'Funnel', prompt: "Show me the funnel. Where's the bottleneck?" },
+      { id: 'sources', group: 'Analyze', label: 'Source ROI', prompt: 'Compare lead sources by conversion rate and ROI' },
+      { id: 'lost', group: 'Analyze', label: 'Lost Analysis', prompt: 'Why are we losing leads? Break down by reason.' },
+      { id: 'response', group: 'Analyze', label: 'Response Times', prompt: 'How fast are we responding? Does speed correlate with conversion?' },
+      { id: 'cleanup', group: 'Cleanup', label: 'Pipeline Cleanup', prompt: 'How many unresponsive leads older than 30 days should we move to lost?' },
     ] });
   } else if (context === 'email') {
     res.json({ actions: [
-      { id: 'summary', group: 'Today', label: 'Inbox Summary', prompt: 'What came in today? Give me the full picture.', icon: '📬' },
-      { id: 'unread', group: 'Today', label: 'Unread', prompt: 'Show me all unread emails that need attention', icon: '🔴' },
-      { id: 'invoices', group: 'Categorize', label: 'Vendor Invoices', prompt: 'Any vendor invoices to review? Show amounts and status.', icon: '🧾' },
-      { id: 'leads', group: 'Categorize', label: 'Email Leads', prompt: 'How many leads came in via email this month? Show me the recent ones.', icon: '📈' },
-      { id: 'blocked', group: 'Categorize', label: 'Blocked Senders', prompt: 'How many spam senders are blocked? Show the top domains.', icon: '🚫' },
-      { id: 'stats', group: 'Analyze', label: 'Email Stats', prompt: 'Email volume and classification breakdown this month', icon: '📊' },
+      { id: 'summary', group: 'Today', label: 'Inbox Summary', prompt: 'What came in today? Give me the full picture.' },
+      { id: 'unread', group: 'Today', label: 'Unread', prompt: 'Show me all unread emails that need attention' },
+      { id: 'invoices', group: 'Categorize', label: 'Vendor Invoices', prompt: 'Any vendor invoices to review? Show amounts and status.' },
+      { id: 'leads', group: 'Categorize', label: 'Email Leads', prompt: 'How many leads came in via email this month? Show me the recent ones.' },
+      { id: 'blocked', group: 'Categorize', label: 'Blocked Senders', prompt: 'How many spam senders are blocked? Show the top domains.' },
+      { id: 'stats', group: 'Analyze', label: 'Email Stats', prompt: 'Email volume and classification breakdown this month' },
     ] });
   } else if (context === 'estimates') {
     res.json({ actions: [
@@ -974,12 +974,12 @@ router.get('/quick-actions', async (req, res) => {
     ] });
   } else if (context === 'banking') {
     res.json({ actions: [
-      { id: 'balance', group: 'Status', label: 'Stripe Balance', prompt: "What's my Stripe balance right now?", icon: '💳' },
-      { id: 'payouts', group: 'Status', label: 'Recent Payouts', prompt: 'Show me recent payouts to the bank', icon: '🏦' },
-      { id: 'cash_flow', group: 'Status', label: 'Cash Flow', prompt: 'Cash flow this month — am I cash positive?', icon: '📊' },
-      { id: 'fees', group: 'Analyze', label: 'Fee Analysis', prompt: 'How much are we paying in Stripe fees? What is the effective rate?', icon: '💸' },
-      { id: 'reconcile', group: 'Analyze', label: 'Reconciliation', prompt: 'Any unreconciled payouts?', icon: '✅' },
-      { id: 'export', group: 'Export', label: 'Export', prompt: 'Export this month payouts as CSV', icon: '📥' },
+      { id: 'balance', group: 'Status', label: 'Stripe Balance', prompt: "What's my Stripe balance right now?" },
+      { id: 'payouts', group: 'Status', label: 'Recent Payouts', prompt: 'Show me recent payouts to the bank' },
+      { id: 'cash_flow', group: 'Status', label: 'Cash Flow', prompt: 'Cash flow this month — am I cash positive?' },
+      { id: 'fees', group: 'Analyze', label: 'Fee Analysis', prompt: 'How much are we paying in Stripe fees? What is the effective rate?' },
+      { id: 'reconcile', group: 'Analyze', label: 'Reconciliation', prompt: 'Any unreconciled payouts?' },
+      { id: 'export', group: 'Export', label: 'Export', prompt: 'Export this month payouts as CSV' },
     ] });
   } else {
     res.json({ actions: baseActions });
