@@ -377,11 +377,41 @@ const InvoiceService = {
     }
 
     try {
-      const TwilioService = require('./twilio');
-      await TwilioService.sendSMS(customer.phone, body, {
+      // Routed through customer-message middleware. payment_link is a
+      // sensitive purpose: policy.requireIds includes customerId +
+      // invoiceId, and policy.minIdentityTrust is phone_matches_customer.
+      // Both are satisfied here (we resolved the invoice and customer
+      // by id, and the customer's stored phone matches the recipient).
+      // Payment-link SMS bodies legitimately contain a tap-to-pay URL
+      // but never an exact dollar amount in the SMS itself — the URL
+      // points to the pay page where the amount is shown.
+      const { sendCustomerMessage } = require('./messaging/send-customer-message');
+      const sendResult = await sendCustomerMessage({
+        to: customer.phone,
+        body,
+        channel: 'sms',
+        audience: 'customer',
+        purpose: 'payment_link',
         customerId: customer.id,
-        messageType: 'invoice',
+        invoiceId,
+        entryPoint: 'invoice_send_via_sms',
+        // Preserve the legacy messageType so the admin-sms-templates
+        // 'invoice' template kill switch (invoice → invoice_sent) still
+        // applies. If ops disables the invoice template to halt broken
+        // billing texts, this flow needs to stop too.
+        metadata: { original_message_type: 'invoice' },
       });
+
+      if (!sendResult.sent) {
+        logger.warn(`[invoice] payment-link SMS BLOCKED for invoice ${invoiceId}: ${sendResult.code} — ${sendResult.reason}`);
+        // Don't mark the invoice as sent if the wrapper blocked us.
+        // The follow-up cron + admin can retry once the underlying
+        // condition (consent, opt-out, etc.) is resolved.
+        const err = new Error(`payment-link SMS blocked: ${sendResult.code}`);
+        err.code = sendResult.code;
+        err.reason = sendResult.reason;
+        throw err;
+      }
 
       await db('invoices').where({ id: invoiceId }).update({
         status: invoice.status === 'draft' ? 'sent' : invoice.status,
