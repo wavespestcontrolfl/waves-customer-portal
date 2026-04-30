@@ -1,5 +1,5 @@
 import { COLORS, FONTS } from '../theme-brand';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
 import { Button } from '../components/Button';
@@ -42,6 +42,10 @@ export default function RatePage() {
   const [generating, setGenerating] = useState(false);
   const [copied, setCopied] = useState(false);
 
+  // Holds the in-flight /submit promise from the promoter fast-path so
+  // /generate-review can await it and avoid racing the score persist.
+  const submitPromiseRef = useRef(null);
+
   useEffect(() => {
     fetch(`${API_BASE}/rate/${token}`)
       .then(r => { if (!r.ok) throw new Error('Invalid link'); return r.json(); })
@@ -62,7 +66,11 @@ export default function RatePage() {
         const match = SERVICE_OPTIONS.find((x) => data.serviceType.toLowerCase().includes(x.toLowerCase()));
         if (match) setSelectedServices([match]);
       }
-      fetch(`${API_BASE}/rate/${token}/submit`, {
+      // Fire immediately so the score is recorded even if the customer
+      // bounces, but stash the promise — handleGenerateReview awaits it
+      // before calling /generate-review (the server requires score to be
+      // persisted, otherwise it 400s).
+      submitPromiseRef.current = fetch(`${API_BASE}/rate/${token}/submit`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ score: s, feedback: '', highlights: [] }),
       }).catch(() => {});
@@ -128,6 +136,11 @@ export default function RatePage() {
   const handleGenerateReview = async () => {
     setGenerating(true);
     setGeneratedReview('');
+    // Make sure the up-front /submit from handleScore has landed before we
+    // ask the server to draft a review — the server gates on persisted score.
+    if (submitPromiseRef.current) {
+      try { await submitPromiseRef.current; } catch { /* tolerated */ }
+    }
     try {
       const r = await fetch(`${API_BASE}/rate/${token}/generate-review`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
