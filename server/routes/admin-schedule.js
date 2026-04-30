@@ -389,6 +389,7 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.estimated_price',
           'scheduled_services.technician_id',
           'scheduled_services.zone', 'scheduled_services.route_order',
+          'scheduled_services.is_recurring',
           'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
           'technicians.name as tech_name')
         .orderByRaw('COALESCE(route_order, 999)');
@@ -416,6 +417,7 @@ router.get('/week', async (req, res, next) => {
             estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
             technicianId: s.technician_id,
             technicianName: s.tech_name,
+            isRecurring: s.is_recurring,
           };
         }),
         count: services.length,
@@ -461,6 +463,7 @@ router.get('/month', async (req, res, next) => {
         'scheduled_services.service_type', 'scheduled_services.status',
         'scheduled_services.window_start', 'scheduled_services.zone',
         'scheduled_services.technician_id', 'scheduled_services.estimated_duration_minutes',
+        'scheduled_services.is_recurring',
         'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
         'customers.city', 'customers.zip',
         'technicians.name as tech_name'
@@ -489,6 +492,7 @@ router.get('/month', async (req, res, next) => {
         zone: s.zone || getZone(s.city, s.zip),
         windowStart: s.window_start,
         duration: s.estimated_duration_minutes || 30,
+        isRecurring: s.is_recurring,
       });
     });
 
