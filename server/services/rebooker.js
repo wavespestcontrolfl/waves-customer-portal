@@ -122,11 +122,16 @@ class SmartRebooker {
     if (!service) throw new Error('Service not found');
 
     const originalDate = service.scheduled_date;
+    // Drag-drop callers send newWindow as a "HH:MM-HH:MM" string;
+    // findRescheduleOptions / weather paths pass an object. Normalize
+    // both so window_start/window_end actually persist (was a no-op
+    // string-vs-object mismatch before — date moved but time didn't).
+    const win = parseWindow(newWindow);
 
     await db('scheduled_services').where({ id: serviceId }).update({
       scheduled_date: newDate,
-      window_start: newWindow?.start || service.window_start,
-      window_end: newWindow?.end || service.window_end,
+      window_start: win.start || service.window_start,
+      window_end: win.end || service.window_end,
       status: 'confirmed',
     });
 
@@ -138,7 +143,7 @@ class SmartRebooker {
       reason_code: reason,
       initiated_by: initiatedBy,
       original_window: service.window_start ? `${service.window_start}-${service.window_end}` : null,
-      new_window: newWindow ? `${newWindow.start}-${newWindow.end}` : null,
+      new_window: win.start ? `${win.start}-${win.end}` : null,
     });
 
     // Check escalation
