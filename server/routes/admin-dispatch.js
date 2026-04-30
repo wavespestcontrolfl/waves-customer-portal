@@ -1463,4 +1463,82 @@ router.patch('/alerts/:id/resolve', requireAdmin, async (req, res, next) => {
   }
 });
 
+// POST /api/admin/dispatch/recap-preview
+//
+// Translate raw technician notes into a customer-friendly SMS recap. Used
+// by MobileCompleteServiceSheet to draft the message that will be sent on
+// completion — the tech can edit before submit, and the polished preview
+// is what actually goes through (the raw notes stay internal).
+//
+// Light, low-latency call: FAST tier, 200-token cap, single round-trip,
+// no tools. Falls through gracefully if Anthropic isn't configured so a
+// dev environment without ANTHROPIC_API_KEY still lets the form submit
+// (the client falls back to a template-built recap on 503).
+const { FAST: RECAP_MODEL } = require('../config/models');
+let _Anthropic;
+try { _Anthropic = require('@anthropic-ai/sdk'); } catch { _Anthropic = null; }
+
+router.post('/recap-preview', requireTechOrAdmin, async (req, res) => {
+  try {
+    if (!_Anthropic || !process.env.ANTHROPIC_API_KEY) {
+      return res.status(503).json({ error: 'AI not configured' });
+    }
+    const {
+      technicianNotes = '',
+      products = [],
+      observations = [],
+      customerFirstName = '',
+      serviceType = 'service',
+    } = req.body || {};
+
+    if (!technicianNotes || technicianNotes.trim().length < 10) {
+      // Below the threshold the client uses to even fire this; reject so
+      // a stray request doesn't burn an API call on empty notes.
+      return res.status(400).json({ error: 'Notes too short for recap.' });
+    }
+
+    const productList = Array.isArray(products)
+      ? products.map((p) => p?.name || p?.product_name).filter(Boolean).join(', ')
+      : '';
+    const observationList = Array.isArray(observations) ? observations.join(', ') : '';
+
+    const system = [
+      'You write short customer-facing SMS recaps for Waves Pest Control.',
+      'Style: warm, professional, two short sentences max, no exclamation marks, no marketing fluff.',
+      'Translate raw technician shorthand into clear customer language. Never mention internal jargon, product chemistry detail, or pricing.',
+      'Sign off with " — Waves" at the end. Stay under 320 characters total so it fits one SMS segment.',
+      'If the technician mentions concerns or follow-up, acknowledge them briefly without alarming the customer.',
+    ].join(' ');
+
+    const user = [
+      `Customer first name: ${customerFirstName || 'the customer'}`,
+      `Service type: ${serviceType}`,
+      productList ? `Products applied: ${productList}` : 'No products applied.',
+      observationList ? `Observations: ${observationList}` : '',
+      `Technician notes (raw): ${technicianNotes}`,
+      '',
+      'Write only the SMS body. Do not include "Hi {name}," — start directly with what was done.',
+    ].filter(Boolean).join('\n');
+
+    const anthropic = new _Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const r = await anthropic.messages.create({
+      model: RECAP_MODEL,
+      max_tokens: 200,
+      system,
+      messages: [{ role: 'user', content: user }],
+    });
+
+    const recap = (r?.content || [])
+      .filter((c) => c.type === 'text')
+      .map((c) => c.text)
+      .join('')
+      .trim();
+
+    return res.json({ recap, model: RECAP_MODEL });
+  } catch (err) {
+    logger.error(`[dispatch/recap-preview] failed: ${err.message}`);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
