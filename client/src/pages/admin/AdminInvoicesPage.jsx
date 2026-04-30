@@ -1022,6 +1022,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [sendAfterCreate, setSendAfterCreate] = useState(true);
+  const [requestReview, setRequestReview] = useState(false);
   const [serviceSearchIdx, setServiceSearchIdx] = useState(null);
   const [serviceResults, setServiceResults] = useState([]);
   const [availableDiscounts, setAvailableDiscounts] = useState([]);
@@ -1145,7 +1146,10 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
       const invoice = await adminFetch('/admin/invoices', { method: 'POST', body: JSON.stringify(body) });
 
       if (sendAfterCreate && invoice.id) {
-        await adminFetch(`/admin/invoices/${invoice.id}/send`, { method: 'POST' });
+        await adminFetch(`/admin/invoices/${invoice.id}/send`, {
+          method: 'POST',
+          body: JSON.stringify({ requestReview }),
+        });
         showToast(`Invoice created & sent: ${invoice.invoice_number}`);
       } else {
         showToast(`Invoice created: ${invoice.invoice_number} (draft)`);
@@ -1331,9 +1335,15 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
           </div>
 
           {/* Send toggle */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
             <input type="checkbox" checked={sendAfterCreate} onChange={e => setSendAfterCreate(e.target.checked)} id="send-toggle" />
             <label htmlFor="send-toggle" style={{ fontSize: 13, color: D.text }}>Send via SMS + email immediately after creating</label>
+          </div>
+
+          {/* Review request toggle */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, opacity: sendAfterCreate ? 1 : 0.5 }}>
+            <input type="checkbox" checked={requestReview} onChange={e => setRequestReview(e.target.checked)} disabled={!sendAfterCreate} id="review-toggle" />
+            <label htmlFor="review-toggle" style={{ fontSize: 13, color: D.text }}>Send review request (2hr delay)</label>
           </div>
 
           <button onClick={handleCreate} disabled={saving} style={{ ...sBtn('#111', D.white, isMobile), width: '100%', padding: 14, minHeight: isMobile ? 48 : undefined, opacity: saving ? 0.5 : 1 }}>
