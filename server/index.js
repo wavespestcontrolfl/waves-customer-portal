@@ -340,6 +340,7 @@ app.use('/api/admin/lawn-assessment', require('./routes/admin-lawn-assessment'))
 app.use('/api/admin/knowledge-bridge', require('./routes/admin-knowledge-bridge'));
 app.use('/api/admin/assessment-analytics', require('./routes/admin-assessment-analytics'));
 app.use('/api/admin/equipment', require('./routes/admin-equipment'));
+app.use('/api/admin/equipment-systems', require('./routes/admin-equipment-systems'));
 app.use('/api/admin/analytics', require('./routes/admin-analytics'));
 app.use('/api/admin/token-health', require('./routes/admin-token-health'));
 app.use('/api/admin/kb', require('./routes/admin-kb'));
