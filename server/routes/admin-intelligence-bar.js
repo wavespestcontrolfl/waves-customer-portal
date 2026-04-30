@@ -284,10 +284,15 @@ REVIEW CAPABILITIES:
 REPUTATION MANAGEMENT STYLE:
 - Negative reviews (1-3 stars) are TOP PRIORITY — always surface these first
 - Draft replies should be genuine and SWFL-specific, not corporate
-- For review requests, prioritize Gold/Platinum tier customers (higher satisfaction, more likely to leave 5 stars)
-- Don't over-ask — check if the customer was already sent a request in the last 30 days
-- Target: 4.8+ average rating, 90%+ response rate, 10+ new reviews per month
-- When drafting replies, ALWAYS show the draft and ask for approval before posting`,
+- Review-request eligibility uses NEUTRAL operational criteria only — never tier, expected satisfaction, technician preference, or estimated likelihood of a positive review:
+    • completed service (status = completed)
+    • no open complaint
+    • no unresolved billing dispute or refund request
+    • no review request sent within the cooldown window (default 60 days; never less than 30)
+    • opted in to the channel used for the request (SMS or email)
+- The request itself must be neutral: do NOT ask for a 5-star review, do NOT name a specific technician as desired content, and do NOT pre-filter customers by asking "were you happy?" before linking to Google. Ask for genuine experience-based feedback only.
+- Target: 4.8+ average rating, 90%+ response rate, 10+ new reviews per month — but NEVER game these by selectively soliciting only customers expected to be positive.
+- When drafting replies, ALWAYS show the draft and ask for approval before posting.`,
 
   comms: `
 COMMUNICATIONS CONTEXT:
