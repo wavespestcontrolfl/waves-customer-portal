@@ -122,9 +122,49 @@ const InvoiceService = {
     });
     const manualDiscountAmount = manualDiscounts.reduce((s, m) => s + m.dollars, 0);
 
-    // Cap combined discount at subtotal so total never goes negative.
-    let discountAmount = Math.round((tierDiscountAmount + manualDiscountAmount) * 100) / 100;
-    if (discountAmount > subtotal) discountAmount = subtotal;
+    // Cap combined discount at subtotal so total never goes negative. When the
+    // sum exceeds subtotal, scale each component proportionally so per-discount
+    // audit rows in invoice_discounts sum to invoices.discount_amount exactly —
+    // otherwise discounts.total_discount_given (rolled up from invoice_discounts)
+    // overstates what was actually applied.
+    const uncappedDiscount = Math.round((tierDiscountAmount + manualDiscountAmount) * 100) / 100;
+    let scaledTierDiscountAmount = tierDiscountAmount;
+    let scaledManualDiscounts = manualDiscounts;
+    let discountAmount = uncappedDiscount;
+    if (uncappedDiscount > subtotal && uncappedDiscount > 0) {
+      const factor = subtotal / uncappedDiscount;
+      scaledTierDiscountAmount = Math.round(tierDiscountAmount * factor * 100) / 100;
+      scaledManualDiscounts = manualDiscounts.map(m => ({
+        ...m,
+        dollars: Math.round(m.dollars * factor * 100) / 100,
+      }));
+      // Absorb cents-rounding remainder so the audit rows sum to exactly subtotal.
+      // Apply the remainder to the row with the most headroom — never the smallest —
+      // so a -0.01 adjustment can't drive a near-zero row negative and then
+      // decrement discounts.total_discount_given via .increment() in
+      // DiscountEngine.recordInvoiceDiscounts.
+      const scaledSum = Math.round(
+        (scaledTierDiscountAmount + scaledManualDiscounts.reduce((s, m) => s + m.dollars, 0)) * 100
+      ) / 100;
+      const remainder = Math.round((subtotal - scaledSum) * 100) / 100;
+      if (remainder !== 0) {
+        let targetIdx = -1; // -1 = tier slot, >=0 = manual index
+        let targetDollars = scaledTierDiscountAmount;
+        scaledManualDiscounts.forEach((m, i) => {
+          if (m.dollars > targetDollars) { targetIdx = i; targetDollars = m.dollars; }
+        });
+        if (targetIdx === -1) {
+          scaledTierDiscountAmount = Math.round((scaledTierDiscountAmount + remainder) * 100) / 100;
+        } else {
+          const m = scaledManualDiscounts[targetIdx];
+          scaledManualDiscounts[targetIdx] = {
+            ...m,
+            dollars: Math.round((m.dollars + remainder) * 100) / 100,
+          };
+        }
+      }
+      discountAmount = subtotal;
+    }
 
     const labelParts = [
       tierDiscountLabel,
@@ -185,7 +225,7 @@ const InvoiceService = {
     // Record applied discounts in invoice_discounts table
     try {
       const auditRows = [];
-      if (tierDiscountAmount > 0) {
+      if (scaledTierDiscountAmount > 0) {
         const tierDiscountRow = await db('discounts')
           .where({ is_waveguard_tier_discount: true, requires_waveguard_tier: customer.waveguard_tier, is_active: true })
           .first();
@@ -194,10 +234,10 @@ const InvoiceService = {
           name: tierDiscountLabel,
           discount_type: 'percentage',
           amount: tierDiscount * 100,
-          discount_dollars: tierDiscountAmount,
+          discount_dollars: scaledTierDiscountAmount,
         });
       }
-      for (const m of manualDiscounts) {
+      for (const m of scaledManualDiscounts) {
         auditRows.push({
           id: m.row.id,
           name: m.row.name,
