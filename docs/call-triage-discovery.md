@@ -437,9 +437,9 @@ Tests:
 
 | Surface | Path | Disclosure status |
 |---|---|---|
-| Studio Flow greeting (`say_play_2`) — **primary** | plays `ElevenLabs_..._Veda%20Sky%20-%20Customer%20Care%20Agent_..._b_m2.mp3` | ⚠️ MP3 content opaque to repo. Must be audited for recording/transcription/AI language. **Adam to confirm** before signature-validation enforce mode flips. |
-| Studio Flow voicemail (`say_play_1`) | plays `voicemail-9557.twil.io/waves-voicemail.mp3` | ⚠️ Same — content opaque. |
-| `/voice` fallback greeting (post-PR1) | plays `WAVES_GREETING_URL` (defaults to the same ElevenLabs MP3 the Studio Flow uses) + `<Dial>` to `WAVES_FALLBACK_FORWARD_NUMBERS` (`+19415993489,+17206334021`) | Mirrors production. Same MP3 audit applies. |
+| Studio Flow greeting (`say_play_2`) — **primary** | plays `ElevenLabs_..._Veda%20Sky%20-%20Customer%20Care%20Agent_..._b_m2.mp3` | ✅ Confirmed by Adam (2026-04-29) to contain recording/transcription/AI disclosure language. This MP3 is the operative FL §934.03 consent surface for inbound calls. |
+| Studio Flow voicemail (`say_play_1`) | plays `voicemail-9557.twil.io/waves-voicemail.mp3` | ⚠️ Content not yet audited. By the time a caller reaches voicemail they've already heard `say_play_2`'s disclosure on the same call, so consent persists; voicemail-specific disclosure is belt-and-suspenders, not load-bearing. |
+| `/voice` fallback greeting (post-PR1) | plays `WAVES_GREETING_URL` (defaults to the same ElevenLabs MP3 the Studio Flow uses) + `<Dial>` to `WAVES_FALLBACK_FORWARD_NUMBERS` (`+19415993489,+17206334021`) | ✅ Same compliance-verified MP3. |
 | `/call-complete` voicemail fork | Plays `WAVES_VOICEMAIL_URL` → defensive `<Say>` "Your message will be recorded and transcribed" → `<Record transcribe="true">` | Defensive Say belt-and-suspenders the MP3 audit gap. |
 | `/outbound-connect` | Records customer leg via `record-from-answer-dual` | ✅ PR1 prepends spoken disclosure on the customer leg before dial bridges. Production-active (admin-initiated outbound calls). |
 
