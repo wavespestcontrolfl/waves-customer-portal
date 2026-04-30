@@ -787,7 +787,7 @@ export default function MobileCompleteServiceSheet({
           <section className="mt-8">
             <div className="text-zinc-900" style={sectionTitleStyle}>Customer recap</div>
             <div className="text-zinc-900 mb-2" style={{ fontSize: 13 }}>
-              {customerFirstName} will receive this. Internal notes stay private.
+              {customerFirstName} will receive this recap. Pay link or review request may be appended below when applicable. Internal notes stay private.
             </div>
             <textarea
               value={recapToSend}
