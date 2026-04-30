@@ -426,6 +426,40 @@ async function getCallLog(input) {
 }
 
 
+// Map the legacy message_type strings used by Comms manual sends to the
+// customer-message-middleware purpose enum. Mappings carry through to
+// policy enforcement (consent, voice, segment). The legacy messageType
+// is preserved separately via metadata.original_message_type so the
+// admin-sms-templates kill switch + twilio.js manual-vs-MMS branch
+// keep working.
+function mapCommsMessageTypeToPurpose(messageType) {
+  switch (messageType) {
+    // Appointment-family — hits the service_reminder_24h preference gate
+    // so opted-out reminder customers don't receive ANY of these.
+    case 'reminder':                // send_sms tool's enum value
+    case 'appointment_reminder':
+    case 'tech_en_route':
+    case 'service_complete':
+    case 'booking_confirmation':
+      return 'appointment';
+    case 'billing_reminder':
+      return 'billing';
+    case 'payment_link':
+      return 'payment_link';
+    case 'review_request':
+      return 'review_request';
+    case 'estimate_followup':
+      return 'estimate_followup';
+    // 'follow_up' is general post-service outreach (not a hard reminder).
+    // Keep it conversational so it doesn't hit service_reminder_24h, but
+    // still goes through the customer-voice validators.
+    case 'follow_up':
+    case 'manual':
+    default:
+      return 'conversational';
+  }
+}
+
 async function sendSms(input) {
   const { customer_name, customer_id, phone: directPhone, message, message_type = 'manual' } = input;
 
@@ -433,34 +467,72 @@ async function sendSms(input) {
   let customerName = null;
   let custId = customer_id;
 
-  if (!phone) {
+  // Always try to resolve to a customer record. If only `phone` was passed,
+  // do a phone lookup so we get customerId populated for the wrapper's
+  // consent check (an indexed customer-id lookup, not phone-format-fragile).
+  if (!custId || !phone) {
     const customer = await resolveCustomer(input);
-    if (!customer) return { error: 'Customer not found' };
-    phone = customer.phone;
-    customerName = `${customer.first_name} ${customer.last_name}`;
-    custId = customer.id;
+    if (customer) {
+      customerName = `${customer.first_name} ${customer.last_name}`;
+      custId = custId || customer.id;
+      phone = phone || customer.phone;
+    } else if (!phone) {
+      return { error: 'Customer not found' };
+    }
   }
 
   if (!phone) return { error: 'No phone number' };
 
-  try {
-    const TwilioService = require('../twilio');
-    await TwilioService.sendSMS(phone, message, {
-      customerId: custId, messageType: message_type, adminUserId: 'intelligence_bar',
-    });
+  // Routed through the customer-message middleware. This is Virginia's
+  // daily-driver send path, so the validators apply consistently:
+  // suppression list, sms_enabled, no customer-emoji, no price leak,
+  // segment cap. Operator messages still need to follow the customer
+  // voice rules.
+  const { sendCustomerMessage } = require('../messaging/send-customer-message');
+  const result = await sendCustomerMessage({
+    to: phone,
+    body: message,
+    channel: 'sms',
+    audience: 'customer',
+    purpose: mapCommsMessageTypeToPurpose(message_type),
+    customerId: custId || null,
+    entryPoint: 'intelligence_bar_comms_send_sms',
+    // metadata.original_message_type preserves the legacy messageType for
+    // the admin-sms-templates kill switch + twilio.js manual-vs-MMS
+    // logic. metadata.adminUserId populates sms_log.admin_user_id so
+    // operator-typed sends are distinguishable from system-generated.
+    metadata: {
+      original_message_type: message_type,
+      adminUserId: 'intelligence_bar',
+    },
+  });
 
-    logger.info(`[intelligence-bar:comms] Sent SMS to ${phone}: ${message.substring(0, 50)}...`);
-
+  if (result.sent) {
+    logger.info(`[intelligence-bar:comms] Sent SMS (custId=${custId || 'n/a'} segs=${result.segmentCount})`);
     return {
       success: true,
       sent_to: phone,
       customer: customerName,
       message,
       char_count: message.length,
+      segmentCount: result.segmentCount,
+      encoding: result.encoding,
     };
-  } catch (err) {
-    return { error: `Failed to send: ${err.message}` };
   }
+  // CRITICAL: Intelligence Bar tool-failure detection in
+  // routes/admin-intelligence-bar.js keys on `result.error` (truthy =
+  // failure) and /execute success is `!result.error`. Without an explicit
+  // error field, blocked sends would be reported as successful tool
+  // executions at the API layer.
+  return {
+    success: false,
+    error: result.reason || result.code || 'send blocked',
+    blocked: !!result.blocked,
+    code: result.code,
+    reason: result.reason,
+    sent_to: phone,
+    customer: customerName,
+  };
 }
 
 
