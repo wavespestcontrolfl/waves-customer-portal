@@ -169,6 +169,99 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       lead = rows[0];
     }
 
+    // Upsert a customers row so wizard-priced leads surface in /admin/customers
+    // alongside the leads pipeline. Mirrors the lead-webhook precedent where
+    // any qualified inbound creates a customer record at pipeline_stage=
+    // 'new_lead'. Dedup: phone-digits regex first (matches /quick-add and the
+    // customers search fallback), email second. NEVER downgrade an existing
+    // active_customer/won row — only fill missing attribution and bump
+    // last_contact_*. Lead and estimate are linked via customer_id once we
+    // have it.
+    let customerId = null;
+    try {
+      const phoneDigits = String(normalizedPhone || phone).replace(/\D/g, '').slice(-10);
+      const emailLc = email.toLowerCase().trim();
+      let existingCust = null;
+      if (phoneDigits.length === 10) {
+        existingCust = await db('customers')
+          .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}`])
+          .whereNull('deleted_at')
+          .first();
+      }
+      if (!existingCust && emailLc) {
+        existingCust = await db('customers')
+          .whereRaw('LOWER(email) = ?', [emailLc])
+          .whereNull('deleted_at')
+          .first();
+      }
+
+      // customers.lead_service_interest is varchar(32); a merged upsell string
+      // ("Pest Control + Lawn Care + Mosquito...") will overflow. Truncate.
+      const serviceInterestForCustomer = serviceInterest ? serviceInterest.slice(0, 32) : null;
+      // landing_page_url is varchar(500); UTM-heavy URLs can creep past it.
+      const landingForCustomer = attr?.landing_url ? String(attr.landing_url).slice(0, 500) : null;
+
+      if (existingCust) {
+        const updates = {
+          last_contact_date: new Date(),
+          last_contact_type: 'website_quote',
+          lead_service_interest: serviceInterestForCustomer,
+        };
+        if (!existingCust.lead_source) updates.lead_source = 'website_quote';
+        if (!existingCust.lead_source_detail) updates.lead_source_detail = sourceMeta.leadSourceDetail;
+        if (!existingCust.lead_source_channel) updates.lead_source_channel = 'quote_wizard';
+        if (!existingCust.lead_source_area && city) updates.lead_source_area = String(city).slice(0, 50);
+        if (!existingCust.email && emailLc) updates.email = emailLc;
+        if (!existingCust.address_line1 && address) updates.address_line1 = address;
+        if (!existingCust.city && city) updates.city = city;
+        if (!existingCust.zip && zip) updates.zip = zip;
+        if (existingCust.latitude == null && ep.lat) updates.latitude = ep.lat;
+        if (existingCust.longitude == null && ep.lng) updates.longitude = ep.lng;
+        if (existingCust.property_sqft == null && sqft) updates.property_sqft = sqft;
+        if (existingCust.lot_sqft == null && lot) updates.lot_sqft = lot;
+        if (!existingCust.landing_page_url && landingForCustomer) updates.landing_page_url = landingForCustomer;
+        if (!existingCust.utm_data && attr?.utm) updates.utm_data = attr.utm;
+        await db('customers').where({ id: existingCust.id }).update(updates);
+        customerId = existingCust.id;
+      } else {
+        const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
+        const [newCust] = await db('customers').insert({
+          first_name: firstName,
+          last_name: lastName,
+          email: emailLc,
+          phone: normalizedPhone || phone,
+          address_line1: address,
+          city: city || '',
+          state: 'FL',
+          zip: zip || '',
+          latitude: ep.lat || null,
+          longitude: ep.lng || null,
+          property_sqft: sqft,
+          lot_sqft: lot,
+          pipeline_stage: 'new_lead',
+          pipeline_stage_changed_at: new Date(),
+          lead_source: 'website_quote',
+          lead_source_detail: sourceMeta.leadSourceDetail,
+          lead_source_channel: 'quote_wizard',
+          lead_source_area: city ? String(city).slice(0, 50) : null,
+          lead_service_interest: serviceInterestForCustomer,
+          landing_page_url: landingForCustomer,
+          utm_data: attr?.utm || null,
+          referral_code: code,
+          last_contact_date: new Date(),
+          last_contact_type: 'website_quote',
+          active: true,
+        }).returning(['id']);
+        customerId = newCust.id;
+      }
+
+      if (customerId) {
+        await db('leads').where({ id: lead.id }).update({ customer_id: customerId });
+      }
+    } catch (e) {
+      logger.error(`[public-quote] Customer upsert failed: ${e.message}`);
+    }
+
     // Mirror the priced quote into the estimates pipeline so wizard-generated
     // quotes show up alongside admin/tech estimates in /admin/estimates. Keyed
     // off lead_id in estimate_data — re-submits update the same draft instead
@@ -190,6 +283,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         .whereRaw("estimate_data->>'lead_id' = ?", [lead.id])
         .first();
       const estFields = {
+        customer_id: customerId,
         customer_name: `${firstName} ${lastName}`,
         customer_phone: normalizedPhone || phone,
         customer_email: email.toLowerCase().trim(),
@@ -393,6 +487,22 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
         .whereRaw("estimate_data->>'lead_id' = ?", [leadId])
         .update({ service_interest: mergedInterest, updated_at: new Date() });
     } catch (e) { logger.error(`[public-quote] Estimate upsell sync failed: ${e.message}`); }
+
+    // Cascade to the customer row's lead_service_interest (varchar(32) — must
+    // truncate, since merged "Pest Control + Lawn Care + Mosquito..." overflows).
+    // Same scope guard as the estimate sync — only if pipeline_stage is still
+    // 'new_lead', so we don't mutate active/won customer profiles.
+    if (lead.customer_id) {
+      try {
+        await db('customers')
+          .where({ id: lead.customer_id, pipeline_stage: 'new_lead' })
+          .update({
+            lead_service_interest: mergedInterest.slice(0, 32),
+            last_contact_date: new Date(),
+            last_contact_type: 'website_quote',
+          });
+      } catch (e) { logger.error(`[public-quote] Customer upsell sync failed: ${e.message}`); }
+    }
 
     const firstName = lead.first_name || '';
     const lastName = lead.last_name || '';

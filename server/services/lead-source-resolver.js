@@ -33,10 +33,11 @@ function extractHost(url) {
 // Falls back to the Main Site row, which is the catch-all for organic traffic
 // to the portal. is_active is intentionally NOT filtered: even paused-for-cost
 // rows still represent the true acquisition channel.
-// estimates.lead_source_detail is varchar(255); UTM-heavy referrer URLs blow
-// past that fast. Cap at 240 so a prefix label ("Spoke referrer: ") + URL
-// never overflows the column.
-const DETAIL_MAX_LEN = 240;
+// Tightest destination column wins: estimates.lead_source_detail is
+// varchar(255), customers.lead_source_detail is varchar(200). Cap at 200 so
+// the same value writes safely to both. UTM-heavy referrer URLs blow past
+// that fast — a prefix label ("Spoke referrer: ") + URL must still fit.
+const DETAIL_MAX_LEN = 200;
 function clampDetail(s) {
   if (!s) return s;
   return s.length > DETAIL_MAX_LEN ? s.slice(0, DETAIL_MAX_LEN) : s;
