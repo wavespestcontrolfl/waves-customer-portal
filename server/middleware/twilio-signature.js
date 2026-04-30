@@ -184,13 +184,19 @@ function validateTwilioSignature(req, res, next) {
 
   if (!isValid) {
     // Structured audit at warn level + a one-line debug breadcrumb
-    // with the URL/proto info needed to diagnose a Railway proxy
-    // mismatch. NEVER log body, signature, or auth headers.
+    // with proxy/URL diagnostic info. NEVER log body, signature, auth
+    // headers, OR the URL with query string — TwiML response endpoints
+    // like /outbound-connect carry caller/admin phone numbers in the
+    // query string, so logging `reconstructed_url` would leak PII into
+    // plaintext logs every time signature validation failed in log
+    // mode. We log req.path only (no query) plus the host/proto bits
+    // needed to debug a Railway proxy mismatch.
     logger.warn(buildAudit(req, mode, 'signature_invalid'));
     logger.warn(
       `[twilio-sig] INVALID signature reconstruction debug: ` +
-        `reconstructed_url=${url}, host=${req.get('host')}, ` +
-        `req.protocol=${req.protocol}, forwarded_proto=${req.get('X-Forwarded-Proto') || 'none'}`
+        `path=${req.path}, host=${req.get('host')}, ` +
+        `req.protocol=${req.protocol}, forwarded_proto=${req.get('X-Forwarded-Proto') || 'none'}, ` +
+        `query_present=${req.originalUrl.includes('?')}`
     );
     if (mode === MODE_ENFORCE) return res.status(403).end();
     return next();
