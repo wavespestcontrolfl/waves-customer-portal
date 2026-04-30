@@ -556,13 +556,15 @@ export default function MobileWeekGrid({ date, onEdit, onChange, onNavigate }) {
       svc,
       toDate,
       newWindow,
-      fromLabel: `${fromDate} · ${fromMin != null ? minutesToLabel(fromMin) : ''}`,
-      toLabel: `${toDate} · ${minutesToLabel(toMin)}`,
+      fromDate,
+      fromMinutes: fromMin,
+      toDateLabel: toDate,
+      toMinutes: toMin,
       technicianChange: null,
     });
   }, [data]);
 
-  const commitReschedule = useCallback(async ({ notificationType }) => {
+  const commitReschedule = useCallback(async ({ notificationType, scope }) => {
     if (!pending) return;
     const { svc, toDate, newWindow } = pending;
     setBusy(true);
@@ -575,6 +577,7 @@ export default function MobileWeekGrid({ date, onEdit, onChange, onNavigate }) {
           reasonCode: 'dispatch_drag',
           reasonText: 'Rescheduled via drag-and-drop on mobile week grid',
           notifyCustomer: notificationType === 'sms',
+          scope: scope || 'this_only',
         }),
       });
       const j = await adminFetch(`/admin/schedule/week?start=${weekStart}`);
@@ -684,8 +687,11 @@ export default function MobileWeekGrid({ date, onEdit, onChange, onNavigate }) {
       <RescheduleConfirmModal
         open={!!pending}
         customerName={pending?.svc?.customerName}
-        fromLabel={pending?.fromLabel || ''}
-        toLabel={pending?.toLabel || ''}
+        fromDate={pending?.fromDate || ''}
+        fromMinutes={pending?.fromMinutes}
+        toDate={pending?.toDateLabel || ''}
+        toMinutes={pending?.toMinutes}
+        isRecurring={!!pending?.svc?.isRecurring}
         technicianChange={pending?.technicianChange}
         onConfirm={commitReschedule}
         onCancel={cancelReschedule}

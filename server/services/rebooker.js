@@ -2,6 +2,48 @@ const db = require('../models/db');
 const RULES = require('../config/reschedule-rules');
 const logger = require('./logger');
 
+// Inline duplicate of nextRecurringDate from server/routes/admin-schedule.js so
+// the series-reschedule path doesn't have to round-trip through the route module.
+// Keep the two in sync if you change recurrence math.
+function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
+  const { nth, weekday, intervalDays } = opts;
+  const safe = baseDateStr ? String(baseDateStr).split('T')[0] : null;
+  if (!safe) return null;
+  const base = new Date(safe + 'T12:00:00');
+  if (isNaN(base.getTime())) return safe;
+  const nthNum = (nth != null && nth !== '' && !isNaN(parseInt(nth))) ? parseInt(nth) : null;
+  const wdayNum = (weekday != null && weekday !== '' && !isNaN(parseInt(weekday))) ? parseInt(weekday) : null;
+  const intNum = (intervalDays != null && intervalDays !== '' && !isNaN(parseInt(intervalDays))) ? parseInt(intervalDays) : null;
+  if (pattern === 'monthly_nth_weekday' && nthNum != null && wdayNum != null) {
+    const d = new Date(base.getFullYear(), base.getMonth() + i, 1, 12, 0, 0);
+    const firstW = d.getDay();
+    const offset = (wdayNum - firstW + 7) % 7;
+    d.setDate(1 + offset + (nthNum - 1) * 7);
+    if (isNaN(d.getTime())) return safe;
+    return d.toISOString().split('T')[0];
+  }
+  const intervals = {
+    daily: 1, weekly: 7, biweekly: 14, monthly: 30, bimonthly: 60,
+    quarterly: 91, triannual: 122,
+  };
+  let gap;
+  if (pattern === 'custom' && intNum) gap = Math.max(1, intNum);
+  else gap = intervals[pattern] || 91;
+  const d = new Date(base);
+  d.setDate(d.getDate() + gap * i);
+  if (isNaN(d.getTime())) return safe;
+  return d.toISOString().split('T')[0];
+}
+
+// Convert "08:00-09:00" → { start: '08:00', end: '09:00' }. Tolerates objects.
+function parseWindow(w) {
+  if (!w) return { start: null, end: null };
+  if (typeof w === 'object') return { start: w.start || null, end: w.end || null };
+  const m = String(w).match(/^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/);
+  if (!m) return { start: null, end: null };
+  return { start: m[1], end: m[2] };
+}
+
 class SmartRebooker {
   async findRescheduleOptions(serviceId, reason) {
     const service = await db('scheduled_services')
@@ -107,6 +149,70 @@ class SmartRebooker {
     }
 
     return { success: true, originalDate, newDate };
+  }
+
+  // Reschedule the dropped occurrence AND every future sibling in the
+  // recurring series. The dropped slot becomes the new anchor and every
+  // later occurrence is recomputed from it via nextRecurringDate(),
+  // so a quarterly series anchored on May 1 dragged to Apr 29 will
+  // re-anchor at Apr 29 and shift the next occurrences accordingly.
+  // Past + completed/cancelled/rescheduled rows are left untouched.
+  async rescheduleSeries(serviceId, newDate, newWindow, reason, initiatedBy) {
+    const service = await db('scheduled_services').where({ id: serviceId }).first();
+    if (!service) throw new Error('Service not found');
+
+    const parentId = service.recurring_parent_id || service.id;
+    const parent = await db('scheduled_services').where({ id: parentId }).first();
+    if (!parent || (!parent.is_recurring && !parent.recurring_pattern)) {
+      throw new Error('Service is not part of a recurring series');
+    }
+
+    const win = parseWindow(newWindow);
+    const opts = {
+      nth: parent.recurring_nth,
+      weekday: parent.recurring_weekday,
+      intervalDays: parent.recurring_interval_days,
+    };
+
+    // Future-or-equal siblings in the series, ordered by current date so
+    // the dropped occurrence is index 0 and subsequent rows step at i=1,2,…
+    const siblings = await db('scheduled_services')
+      .where(function () {
+        this.where('id', parentId).orWhere('recurring_parent_id', parentId);
+      })
+      .where('scheduled_date', '>=', service.scheduled_date)
+      .whereNotIn('status', ['completed', 'cancelled', 'rescheduled'])
+      .orderBy('scheduled_date', 'asc')
+      .select('id', 'scheduled_date', 'window_start', 'window_end');
+
+    const updates = siblings.map((sib, i) => {
+      const date = i === 0 ? newDate : nextRecurringDate(newDate, parent.recurring_pattern, i, opts);
+      return db('scheduled_services').where({ id: sib.id }).update({
+        scheduled_date: date,
+        window_start: win.start || sib.window_start,
+        window_end: win.end || sib.window_end,
+        status: 'confirmed',
+      });
+    });
+    await Promise.all(updates);
+
+    await db('reschedule_log').insert({
+      scheduled_service_id: serviceId,
+      customer_id: service.customer_id,
+      original_date: service.scheduled_date,
+      new_date: newDate,
+      reason_code: `${reason}_series`,
+      initiated_by: initiatedBy,
+      original_window: service.window_start ? `${service.window_start}-${service.window_end}` : null,
+      new_window: win.start ? `${win.start}-${win.end}` : null,
+    });
+
+    return {
+      success: true,
+      originalDate: service.scheduled_date,
+      newDate,
+      occurrencesRescheduled: siblings.length,
+    };
   }
 }
 
