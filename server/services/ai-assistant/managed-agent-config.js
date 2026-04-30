@@ -35,15 +35,28 @@ PAYMENTS: Find their unpaid invoice → text the Stripe pay link → confirm "ca
 
 PROPERTY/LAWN: Pull their actual scores and property data. Be honest — if a score is low, explain what it means.
 
-MUST ESCALATE (use escalate tool):
-- Cancel/pause/downgrade requests
-- Reschedule EXISTING confirmed appointments
-- Complaints about quality or technicians
-- Billing disputes or refund requests
-- Manager/owner requests
-- Anything uncertain
+MUST ESCALATE (use escalate tool — always pass a structured category):
+Each escalation MUST set the most-specific category from this enum. Do NOT use unsupported_or_uncertain if a more specific category fits.
 
-You CAN book new appointments without escalating.
+- cancellation_pause_downgrade — customer wants to cancel, pause, or downgrade service
+- existing_appointment_reschedule — customer wants to move an EXISTING confirmed appointment
+- complaint_quality — complaint about service quality / results
+- complaint_technician — complaint about a specific tech's behavior or work
+- billing_dispute_refund — billing dispute, refund request, chargeback threat
+- manager_owner_request — explicit ask to speak to a manager or owner
+- chemical_safety — pesticide / chemical exposure concern, label question, SDS request, off-label question
+- medical_or_pet_exposure — customer / pet / child reports symptoms attributed to treatment
+- legal_threat_or_regulatory_complaint — mentions lawyer, BBB, FDACS, EPA, media, lawsuit
+- opt_out_or_wrong_number — STOP / unsubscribe / "stop contacting me" / wrong-number indicator
+- identity_mismatch — customer name/phone/address does not match account; suspected wrong-number recipient
+- commercial_or_multi_unit_scope — commercial property, HOA, multi-unit, property manager request
+- same_day_request — customer wants same-day service (engine never books today by design)
+- route_exception — route-feasibility issue the agent can't resolve (cross-zone hop, no slots in 14d, etc.)
+- technician_safety — aggressive dog, unsafe property, threat to tech
+- suspected_fraud — payment-identity mismatch, recycled-number red flag
+- unsupported_or_uncertain — fallback only when none of the above fits
+
+You CAN book NEW appointments without escalating (so long as availability + customer confirmation are in place).
 
 RULES:
 - Never make up dates, prices, or tech names — always look them up
@@ -245,14 +258,39 @@ RULES:
     {
       type: 'custom',
       name: 'escalate',
-      description: `Escalate to a human. MUST use for: cancellations, existing appointment reschedules, complaints, billing disputes, refund requests, manager requests, anything uncertain. You CAN book NEW appointments without escalating.`,
+      description: `Escalate to a human. MUST use for: cancellations, existing appointment reschedules, complaints, billing disputes, refund requests, manager requests, chemical/medical exposure concerns, legal threats, opt-outs, identity mismatches, commercial scope, same-day requests, route exceptions, technician-safety issues, suspected fraud, or anything uncertain. You CAN book NEW appointments without escalating. ALWAYS pass the most-specific 'category' from the enum — do not use unsupported_or_uncertain if a more specific category fits.`,
       input_schema: {
         type: 'object',
         properties: {
+          category: {
+            type: 'string',
+            enum: [
+              'cancellation_pause_downgrade',
+              'existing_appointment_reschedule',
+              'complaint_quality',
+              'complaint_technician',
+              'billing_dispute_refund',
+              'manager_owner_request',
+              'chemical_safety',
+              'medical_or_pet_exposure',
+              'legal_threat_or_regulatory_complaint',
+              'opt_out_or_wrong_number',
+              'identity_mismatch',
+              'commercial_or_multi_unit_scope',
+              'same_day_request',
+              'route_exception',
+              'technician_safety',
+              'suspected_fraud',
+              'unsupported_or_uncertain',
+            ],
+            description: 'Most-specific escalation category. Required so middleware/dashboards can route by reason.',
+          },
           reason: { type: 'string', description: 'Clear summary of why this needs human attention' },
           priority: { type: 'string', enum: ['urgent', 'normal', 'low'] },
+          customer_visible_response: { type: 'string', description: 'Optional message to send the customer while they wait for follow-up' },
+          recommended_next_action: { type: 'string', description: 'Optional internal note: what the human should do next' },
         },
-        required: ['reason'],
+        required: ['category', 'reason'],
       },
     },
   ],
