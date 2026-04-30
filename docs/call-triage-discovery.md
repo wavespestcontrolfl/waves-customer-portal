@@ -562,7 +562,7 @@ Accept criteria: backfill labeling shows zero critical false-positive auto-creat
 2. `administrative_area_level_2` reliably populated in FL AV responses (true in spot checks; test fixture covers the unincorporated-area edge case).
 3. Service area = {Manatee, Sarasota, Charlotte, DeSoto}. Confirmed 2026-04-29.
 4. `expires_at = validated_at + 30d` aligns with Google T&C downstream-use scope (validated against Google Maps Platform Service-Specific Terms; last checked 2026-04-29). Re-verify if T&C change.
-5. Anthropic native structured outputs available on `MODELS.FLAGSHIP` (currently `claude-opus-4-7`). Confirmed in API docs.
+5. Anthropic native structured outputs available on whichever Anthropic model `MODELS.FLAGSHIP` currently resolves to (see `server/config/models.js` — never reference the concrete model ID outside that file per AGENTS.md). Confirmed in API docs at the time of writing.
 6. Twilio `X-Forwarded-Proto` header survives Railway's edge (it does for all current endpoints — verified during PR1 fixture work).
 7. `WAVES_VOICEMAIL_URL` audio content unknown from repo; audit happens during PR1.
 8. Labeling effort: ~40 stratified transcripts, ~1.5–2h. Adam or Virginia executes pre-PR4.
