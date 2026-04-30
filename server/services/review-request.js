@@ -270,14 +270,39 @@ const ReviewService = {
         // PII: ID-only logging per AGENTS.md.
         logger.warn(`[review] SMS BLOCKED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'}): ${result.code} — ${result.reason}`);
       } else {
-        // Provider failure (Twilio/network). Leave status='pending' so the
-        // cron retries on the next tick. Permanent suppression for transient
-        // provider errors would silently drop legitimate review requests.
+        // Provider failure (Twilio/network). Mark for retry: keep
+        // status='pending' AND set scheduled_for=now+5min so
+        // processScheduled() (which selects status='pending' AND
+        // scheduled_for <= now()) picks it up on its next tick.
+        //
+        // Codex P1 on the redo PR #545: just leaving status='pending'
+        // wasn't enough for tech-triggered requests, which are created
+        // with scheduled_for=null and sent immediately. processScheduled
+        // does whereNotNull('scheduled_for'), so a null-scheduled_for
+        // pending row would never retry — silently dropping legitimate
+        // review requests on a Twilio blip. Setting scheduled_for moves
+        // the row into the cron's retry queue regardless of how it was
+        // originally created.
+        const retryAt = new Date(Date.now() + 5 * 60 * 1000);
+        await db('review_requests').where({ id: requestId }).update({
+          scheduled_for: retryAt,
+        });
         // PII: ID-only logging per AGENTS.md.
-        logger.error(`[review] SMS PROVIDER FAILURE (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'}): ${result.code} — ${result.reason} (will retry)`);
+        logger.error(`[review] SMS PROVIDER FAILURE (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || 'n/a'}): ${result.code} — ${result.reason} (queued for retry at ${retryAt.toISOString()})`);
       }
     } catch (err) {
-      logger.error(`[review] SMS failed: ${err.message}`);
+      // Same retry contract on a thrown exception (network down etc.):
+      // re-queue for the cron rather than leave the row stranded.
+      try {
+        const retryAt = new Date(Date.now() + 5 * 60 * 1000);
+        await db('review_requests').where({ id: requestId }).update({
+          scheduled_for: retryAt,
+        });
+        logger.error(`[review] SMS threw — queued for retry at ${retryAt.toISOString()} (requestId=${requestId}): ${err.message}`);
+      } catch (dbErr) {
+        // Last resort — couldn't even update the row. Log both errors.
+        logger.error(`[review] SMS failed AND retry-queue update failed (requestId=${requestId}): sendErr=${err.message} dbErr=${dbErr.message}`);
+      }
     }
   },
 
