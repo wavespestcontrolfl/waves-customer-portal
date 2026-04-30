@@ -1026,6 +1026,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const [serviceResults, setServiceResults] = useState([]);
   const [availableDiscounts, setAvailableDiscounts] = useState([]);
   const [selectedDiscountIds, setSelectedDiscountIds] = useState([]);
+  const [discountQuery, setDiscountQuery] = useState('');
 
   // Load active, invoice-visible, non-tier discounts once. Tier discount is auto-applied
   // server-side from the customer's WaveGuard tier, so we exclude it from the picker.
@@ -1265,42 +1266,63 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
           </div>
 
           {/* Discounts */}
-          {availableDiscounts.length > 0 && (
-            <div style={{ marginBottom: 16 }}>
-              <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8, display: 'block', marginBottom: 8 }}>Discounts (optional)</label>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {availableDiscounts.map(d => {
-                  const active = selectedDiscountIds.includes(d.id);
-                  const label = d.discount_type === 'percentage' || d.discount_type === 'variable_percentage'
-                    ? `${Number(d.amount)}%`
-                    : d.discount_type === 'fixed_amount' || d.discount_type === 'variable_amount'
-                    ? `$${Number(d.amount).toFixed(2)}`
-                    : d.discount_type === 'free_service'
-                    ? 'free'
-                    : '';
-                  return (
-                    <button
-                      key={d.id}
-                      type="button"
-                      onClick={() => toggleDiscount(d.id)}
-                      style={{
-                        background: active ? D.green : 'transparent',
-                        color: active ? D.white : D.text,
-                        border: `1px solid ${active ? D.green : D.border}`,
-                        borderRadius: 16,
-                        padding: isMobile ? '8px 12px' : '6px 10px',
-                        fontSize: 12,
-                        cursor: 'pointer',
-                        minHeight: isMobile ? 36 : undefined,
-                      }}
-                    >
-                      {active ? '- ' : '+ '}{d.name}{label ? ` (${label})` : ''}
-                    </button>
-                  );
-                })}
+          {availableDiscounts.length > 0 && (() => {
+            const formatLabel = (d) => d.discount_type === 'percentage' || d.discount_type === 'variable_percentage'
+              ? `${Number(d.amount)}%`
+              : d.discount_type === 'fixed_amount' || d.discount_type === 'variable_amount'
+              ? `$${Number(d.amount).toFixed(2)}`
+              : d.discount_type === 'free_service'
+              ? 'free'
+              : '';
+            // Always show selected chips so a query never hides an active selection.
+            const q = discountQuery.trim().toLowerCase();
+            const matches = (d) => {
+              if (!q) return true;
+              const hay = `${d.name || ''} ${d.description || ''} ${formatLabel(d)}`.toLowerCase();
+              return hay.includes(q);
+            };
+            const visibleDiscounts = availableDiscounts.filter(
+              d => selectedDiscountIds.includes(d.id) || matches(d)
+            );
+            return (
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8, display: 'block', marginBottom: 8 }}>Discounts (optional)</label>
+                <input
+                  value={discountQuery}
+                  onChange={e => setDiscountQuery(e.target.value)}
+                  placeholder="Search discounts..."
+                  style={{ ...sInput(isMobile), marginBottom: 8 }}
+                />
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {visibleDiscounts.length === 0 ? (
+                    <span style={{ fontSize: 12, color: D.muted, padding: '6px 0' }}>No discounts match.</span>
+                  ) : visibleDiscounts.map(d => {
+                    const active = selectedDiscountIds.includes(d.id);
+                    const label = formatLabel(d);
+                    return (
+                      <button
+                        key={d.id}
+                        type="button"
+                        onClick={() => toggleDiscount(d.id)}
+                        style={{
+                          background: active ? D.green : 'transparent',
+                          color: active ? D.white : D.text,
+                          border: `1px solid ${active ? D.green : D.border}`,
+                          borderRadius: 16,
+                          padding: isMobile ? '8px 12px' : '6px 10px',
+                          fontSize: 12,
+                          cursor: 'pointer',
+                          minHeight: isMobile ? 36 : undefined,
+                        }}
+                      >
+                        {active ? '- ' : '+ '}{d.name}{label ? ` (${label})` : ''}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* Notes */}
           <div style={{ marginBottom: 16 }}>
