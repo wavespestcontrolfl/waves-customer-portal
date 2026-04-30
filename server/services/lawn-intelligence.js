@@ -631,10 +631,13 @@ If no contradictions, return: { "contradictions": [] }`
       const techs = await db('technicians').where('active', true).select('id', 'name', 'email');
 
       for (const tech of techs) {
-        // Lawn services assigned/completed that day
+        // Lawn services assigned/completed that day. scheduled_services
+        // standardised on technician_id; assigned_tech_id is a column
+        // on dispatch_jobs, not here. The prior `or assigned_tech_id`
+        // branch silently 500s the whole query.
         const lawnServices = await db('scheduled_services')
           .where('scheduled_date', trackingDate)
-          .where(function () { this.where('assigned_tech_id', tech.id).orWhere('technician_id', tech.id); })
+          .where('technician_id', tech.id)
           .where('service_type', 'ilike', '%lawn%')
           .count('id as count').first();
 
