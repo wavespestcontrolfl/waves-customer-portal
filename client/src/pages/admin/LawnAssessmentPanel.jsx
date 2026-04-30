@@ -15,6 +15,28 @@ function adminFetch(path, options = {}) {
 const scoreColor = (v) => v >= 75 ? D.green : v >= 50 ? D.amber : D.red;
 const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
 
+// Resize phone photos before base64 upload — caps the long edge so a 4-8MB camera shot
+// becomes ~200-400KB. Opus 4.7 vision works on the smaller image without loss for turf
+// assessment, and the upload doesn't choke on slow LTE.
+function resizeImage(dataUrl, maxEdge = 1600, quality = 0.85) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const longEdge = Math.max(img.width, img.height);
+      if (longEdge <= maxEdge) { resolve(dataUrl); return; }
+      const scale = maxEdge / longEdge;
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = () => resolve(dataUrl); // fall through with original on decode error
+    img.src = dataUrl;
+  });
+}
+
 export default function LawnAssessmentPanel() {
   const [step, setStep] = useState('select'); // select, capture, analyzing, review, history
   const [customers, setCustomers] = useState([]);
@@ -59,11 +81,12 @@ export default function LawnAssessmentPanel() {
 
   const handlePhotoCapture = (e) => {
     const files = Array.from(e.target.files);
-    files.forEach(file => {
+    files.forEach(async (file) => {
       if (photos.length >= 3) return;
       const reader = new FileReader();
-      reader.onload = (ev) => {
-        setPhotos(prev => [...prev.slice(0, 2), { data: ev.target.result, preview: ev.target.result, file }]);
+      reader.onload = async (ev) => {
+        const resized = await resizeImage(ev.target.result, 1600, 0.85);
+        setPhotos(prev => [...prev.slice(0, 2), { data: resized, preview: resized, file }]);
       };
       reader.readAsDataURL(file);
     });
@@ -223,6 +246,18 @@ export default function LawnAssessmentPanel() {
           <div style={{ ...cardStyle, marginBottom: 16 }}>
             <div style={{ fontSize: 15, fontWeight: 600, color: D.heading, marginBottom: 12 }}>AI Scorecard — {selectedCustomer?.firstName} {selectedCustomer?.lastName}</div>
 
+            {/* Divergence summary — shown when Claude and Gemini disagreed on at least one metric */}
+            {(result.divergenceFlags || []).length > 0 && (
+              <div style={{ marginBottom: 12, padding: 10, background: `${D.amber}15`, border: `1px solid ${D.amber}`, borderRadius: 8 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: D.amber, marginBottom: 4 }}>
+                  ⚠ AI models disagreed on {result.divergenceFlags.length} metric{result.divergenceFlags.length === 1 ? '' : 's'}
+                </div>
+                <div style={{ fontSize: 11, color: D.muted, lineHeight: 1.5 }}>
+                  Tiles below marked <span style={{ color: D.amber, fontWeight: 600 }}>DIVERGENCE</span> are where Claude and Gemini gave scores that differed by more than 20 points. Verify by eye before confirming.
+                </div>
+              </div>
+            )}
+
             {/* Scores */}
             <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(3, 1fr)', gap: 10 }}>
               {[
@@ -233,17 +268,17 @@ export default function LawnAssessmentPanel() {
                 { key: 'thatch_level', label: 'Thatch Level' },
               ].map(m => {
                 const val = result.displayScores?.[m.key] || 0;
-                const claude = result.claudeDisplay?.[m.key];
-                const gemini = result.geminiDisplay?.[m.key];
-                const flagged = (result.divergenceFlags || []).some(f => f.metric === m.key);
+                const flag = (result.divergenceFlags || []).find(f => f.metric === m.key);
                 return (
-                  <div key={m.key} style={{ padding: 14, background: D.input, borderRadius: 10, textAlign: 'center', border: flagged ? `2px solid ${D.amber}` : `1px solid ${D.border}` }}>
+                  <div key={m.key} style={{ padding: 14, background: D.input, borderRadius: 10, textAlign: 'center', border: flag ? `2px solid ${D.amber}` : `1px solid ${D.border}` }}>
                     <div style={{ fontFamily: MONO, fontSize: 28, fontWeight: 800, color: scoreColor(val) }}>{val}%</div>
                     <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, marginTop: 2 }}>{m.label}</div>
-                    {claude != null && gemini != null && (
-                      <div style={{ fontSize: 10, color: D.muted, marginTop: 4 }}>Claude: {claude}% · Gemini: {gemini}%</div>
+                    {flag && (
+                      <>
+                        <div style={{ fontSize: 10, color: D.muted, marginTop: 4 }}>Claude: {flag.claude}% · Gemini: {flag.gemini}%</div>
+                        <div style={{ fontSize: 9, color: D.amber, fontWeight: 700, marginTop: 2 }}>⚠ DIVERGENCE — verify</div>
+                      </>
                     )}
-                    {flagged && <div style={{ fontSize: 9, color: D.amber, fontWeight: 700, marginTop: 2 }}>⚠ DIVERGENCE — verify</div>}
                   </div>
                 );
               })}

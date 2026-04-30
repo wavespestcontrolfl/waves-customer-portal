@@ -137,30 +137,82 @@ function averageScores(claudeResult, geminiResult) {
   if (!geminiResult) return { composite: claudeResult, divergenceFlags };
 
   const composite = {};
+  const DIVERGENCE_THRESHOLD = 20; // points on the 0-100 display scale
 
-  // Numeric: simple average, flag if >20 difference
-  for (const field of ['turf_density', 'weed_coverage']) {
-    const c = Number(claudeResult[field]) || 0;
-    const g = Number(geminiResult[field]) || 0;
-    composite[field] = Math.round((c + g) / 2);
-    if (Math.abs(c - g) > 20) divergenceFlags.push({ metric: field, claude: c, gemini: g, gap: Math.abs(c - g) });
+  // Turf density: direct 0-100 average
+  {
+    const c = Number(claudeResult.turf_density) || 0;
+    const g = Number(geminiResult.turf_density) || 0;
+    composite.turf_density = Math.round((c + g) / 2);
+    if (Math.abs(c - g) > DIVERGENCE_THRESHOLD) {
+      divergenceFlags.push({ metric: 'turf_density', claude: c, gemini: g, gap: Math.abs(c - g) });
+    }
   }
 
-  // Color health (1-10 scale, so >2 point gap = >20 on 0-100 scale)
-  const cColor = Number(claudeResult.color_health) || 5;
-  const gColor = Number(geminiResult.color_health) || 5;
-  composite.color_health = Math.round((cColor + gColor) / 2 * 10) / 10;
-  if (Math.abs(cColor - gColor) > 2) divergenceFlags.push({ metric: 'color_health', claude: cColor, gemini: gColor, gap: Math.abs(cColor - gColor) });
+  // Weed coverage: average raw, but flag divergence on the display-side metric (weed_suppression = 100 - coverage)
+  // so the UI's per-tile flag check matches the display-key naming.
+  {
+    const c = Number(claudeResult.weed_coverage) || 0;
+    const g = Number(geminiResult.weed_coverage) || 0;
+    composite.weed_coverage = Math.round((c + g) / 2);
+    if (Math.abs(c - g) > DIVERGENCE_THRESHOLD) {
+      divergenceFlags.push({
+        metric: 'weed_suppression',
+        claude: 100 - c,
+        gemini: 100 - g,
+        gap: Math.abs(c - g),
+      });
+    }
+  }
 
-  // Categorical: fungal_activity
-  const cFungal = FUNGAL_MAP[claudeResult.fungal_activity] ?? 0;
-  const gFungal = FUNGAL_MAP[geminiResult.fungal_activity] ?? 0;
-  composite.fungal_activity = FUNGAL_REVERSE[Math.round((cFungal + gFungal) / 2)];
+  // Color health (1-10 scale; 2-point gap = 20-point gap on display scale)
+  {
+    const c = Number(claudeResult.color_health) || 5;
+    const g = Number(geminiResult.color_health) || 5;
+    composite.color_health = Math.round((c + g) / 2 * 10) / 10;
+    if (Math.abs(c - g) * 10 > DIVERGENCE_THRESHOLD) {
+      divergenceFlags.push({
+        metric: 'color_health',
+        claude: Math.round(c * 10),
+        gemini: Math.round(g * 10),
+        gap: Math.round(Math.abs(c - g) * 10),
+      });
+    }
+  }
 
-  // Categorical: thatch_visibility
-  const cThatch = THATCH_MAP[claudeResult.thatch_visibility] ?? 0;
-  const gThatch = THATCH_MAP[geminiResult.thatch_visibility] ?? 0;
-  composite.thatch_visibility = THATCH_REVERSE[Math.round((cThatch + gThatch) / 2)];
+  // Fungal activity: categorical → 0-3 → averaged → categorical. Flag when display-mapped values diverge.
+  {
+    const cFungal = FUNGAL_MAP[claudeResult.fungal_activity] ?? 0;
+    const gFungal = FUNGAL_MAP[geminiResult.fungal_activity] ?? 0;
+    composite.fungal_activity = FUNGAL_REVERSE[Math.round((cFungal + gFungal) / 2)];
+    const cDisplay = FUNGUS_DISPLAY[claudeResult.fungal_activity] ?? null;
+    const gDisplay = FUNGUS_DISPLAY[geminiResult.fungal_activity] ?? null;
+    if (cDisplay != null && gDisplay != null && Math.abs(cDisplay - gDisplay) > DIVERGENCE_THRESHOLD) {
+      divergenceFlags.push({
+        metric: 'fungus_control',
+        claude: cDisplay,
+        gemini: gDisplay,
+        gap: Math.abs(cDisplay - gDisplay),
+      });
+    }
+  }
+
+  // Thatch visibility: categorical with same divergence treatment as fungus
+  {
+    const cThatch = THATCH_MAP[claudeResult.thatch_visibility] ?? 0;
+    const gThatch = THATCH_MAP[geminiResult.thatch_visibility] ?? 0;
+    composite.thatch_visibility = THATCH_REVERSE[Math.round((cThatch + gThatch) / 2)];
+    const cDisplay = THATCH_DISPLAY[claudeResult.thatch_visibility] ?? null;
+    const gDisplay = THATCH_DISPLAY[geminiResult.thatch_visibility] ?? null;
+    if (cDisplay != null && gDisplay != null && Math.abs(cDisplay - gDisplay) > DIVERGENCE_THRESHOLD) {
+      divergenceFlags.push({
+        metric: 'thatch_level',
+        claude: cDisplay,
+        gemini: gDisplay,
+        gap: Math.abs(cDisplay - gDisplay),
+      });
+    }
+  }
 
   // Observations: concatenate both
   const observations = [claudeResult.observations, geminiResult.observations].filter(Boolean);
