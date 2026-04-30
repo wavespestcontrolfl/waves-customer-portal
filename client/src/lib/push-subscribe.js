@@ -15,6 +15,23 @@ function urlBase64ToUint8Array(base64String) {
   return out;
 }
 
+// iOS detection covers iPad-on-MacIntel where userAgent reports Mac but
+// touch points reveal a tablet. Web Push on iOS is gated to Home Screen
+// installs (display: standalone) per Apple's iOS 16.4+ rules — both the
+// pre-subscribe gate and the denied-permission recovery copy below have
+// to branch on this because Safari behavior differs from Chrome/Firefox
+// on every other platform.
+function isIOS() {
+  if (typeof navigator === 'undefined') return false;
+  return /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+function isStandalonePWA() {
+  if (typeof window === 'undefined') return false;
+  return window.matchMedia?.('(display-mode: standalone)').matches
+    || window.navigator.standalone === true;
+}
+
 function describeDevice() {
   const ua = navigator.userAgent;
   let device = 'Browser';
@@ -60,9 +77,24 @@ export async function ensurePushSubscription({ apiBase = '/api', token } = {}) {
     throw new Error('Push requires HTTPS. This page is loaded over HTTP — use the production URL.');
   }
 
-  // If the user previously blocked notifications, requestPermission resolves
-  // immediately as 'denied' without re-prompting. Tell them how to recover.
+  // iOS gate — Web Push on iPhone/iPad only works for Home Screen apps
+  // (iOS 16.4+). Detect upfront so the user gets clear instructions
+  // instead of a confusing pushManager.subscribe failure later. Without
+  // this pre-check the only iOS hint sits in a generic "Browser refused
+  // subscription" error message after the subscribe call has already
+  // failed.
+  if (isIOS() && !isStandalonePWA()) {
+    throw new Error('On iPhone, install Waves Admin to your Home Screen first (tap Share → Add to Home Screen), then open the new icon and try Enable again.');
+  }
+
+  // If the user previously blocked notifications, requestPermission
+  // resolves immediately as 'denied' without re-prompting. Recovery
+  // path is platform-dependent: iOS Home Screen PWAs are managed
+  // through Settings → Notifications, not the URL-bar lock icon.
   if (Notification.permission === 'denied') {
+    if (isIOS()) {
+      throw new Error('Notifications are off for Waves Admin. Open Settings → Notifications → Waves Admin and turn them on. If Waves Admin isn’t listed, remove the Home Screen icon, reinstall from Safari, and grant permission when prompted.');
+    }
     throw new Error('Notifications are blocked in your browser. Click the lock/site-info icon in the URL bar → Notifications → Allow, then reload.');
   }
 
