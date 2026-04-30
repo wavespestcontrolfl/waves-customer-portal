@@ -5,6 +5,17 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const stripeConfig = require('../config/stripe-config');
 const { classifyExistingWebhookEvent, STALE_CLAIM_WINDOW_MS } = require('./stripe-webhook-helpers');
+const { triggerNotification } = require('../services/notification-triggers');
+
+// Build a "First Last" string from a customer row, falling back to phone
+// then a generic 'customer'. Used to fill the body of the bell + push
+// notifications fired from the Stripe webhook handlers below — without
+// this they'd just say "$X.XX from customer" with no identifier.
+function customerLabel(customer) {
+  if (!customer) return 'customer';
+  const name = [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim();
+  return name || customer.phone || 'customer';
+}
 
 /**
  * Stripe Webhook Handler
@@ -423,6 +434,32 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       }
     } catch { /* non-critical */ }
   }
+
+  // ── Bell + push for the admin team ──
+  //
+  // Fire-and-forget via setImmediate so the webhook 2xx is not gated on
+  // notification fan-out. triggerNotification does a DB read for active
+  // admins + per-user prefs + sequential webpush.sendNotification calls
+  // per push subscription — under slow push or many subscribers, awaiting
+  // it inline can push the webhook past Stripe's timeout and trigger
+  // retries (Codex P1, PR #534). Same fire-and-forget pattern as the
+  // auto-receipt SMS dispatch above. Emit only when the PI is bound to
+  // one of our invoices — otherwise there's nothing to deep-link into.
+  setImmediate(async () => {
+    try {
+      const piId = paymentIntent.id;
+      const paidInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first();
+      if (!paidInvoice?.customer_id) return;
+      const customer = await db('customers').where({ id: paidInvoice.customer_id }).first();
+      await triggerNotification('payment_succeeded', {
+        amount: (paymentIntent.amount_received || paymentIntent.amount || 0) / 100,
+        customerName: customerLabel(customer),
+        invoiceId: paidInvoice.id,
+      });
+    } catch (err) {
+      logger.warn(`[stripe-webhook] payment_succeeded trigger failed: ${err.message}`);
+    }
+  });
 }
 
 /**
@@ -460,6 +497,36 @@ async function handlePaymentIntentFailed(paymentIntent) {
   if (pmType === 'us_bank_account') {
     await handleAchFailure(paymentIntent, failureMessage);
   }
+
+  // ── Bell + push for the admin team ──
+  // Fire-and-forget via setImmediate so the webhook 2xx is not gated on
+  // notification fan-out (Codex P1, PR #534 — same reasoning as the
+  // succeeded handler above). Emit even when no invoice is bound —
+  // payment_failed is urgent enough that an orphan PI failure still
+  // warrants a bell entry; link defaults to /admin/revenue in that case.
+  setImmediate(async () => {
+    try {
+      const piId = paymentIntent.id;
+      const failedInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first();
+      let customer = null;
+      if (failedInvoice?.customer_id) {
+        customer = await db('customers').where({ id: failedInvoice.customer_id }).first();
+      } else {
+        const payment = await db('payments').where({ stripe_payment_intent_id: piId }).first();
+        if (payment?.customer_id) {
+          customer = await db('customers').where({ id: payment.customer_id }).first();
+        }
+      }
+      await triggerNotification('payment_failed', {
+        amount: (paymentIntent.amount || 0) / 100,
+        customerName: customerLabel(customer),
+        reason: failureMessage,
+        invoiceId: failedInvoice?.id || null,
+      });
+    } catch (err) {
+      logger.warn(`[stripe-webhook] payment_failed trigger failed: ${err.message}`);
+    }
+  });
 }
 
 /**
