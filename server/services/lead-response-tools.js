@@ -231,20 +231,14 @@ async function executeLeadTool(toolName, input) {
         metadata: { original_message_type: 'lead_response' },
       });
 
-      // Record response time + pipeline transition + activity ALWAYS,
-      // regardless of whether the SMS actually went out. The lead came
-      // in, the agent processed it, those facts deserve to be logged.
+      // Activity log captures EVERY attempt (sent / blocked / failed) for
+      // operator triage. But the lead-status / pipeline transition only
+      // advances on an actual successful send — a wrapper-policy block
+      // (opt-out) or provider failure should NOT mark the lead "contacted"
+      // or fire the first_contact pipeline event, otherwise the response-
+      // time SLA metric and the funnel both record a phantom contact.
+      // Codex P1 follow-up to #538.
       if (input.lead_id) {
-        const lead = await db('leads').where('id', input.lead_id).first();
-        if (lead?.first_contact_at) {
-          const responseMinutes = Math.round((Date.now() - new Date(lead.first_contact_at).getTime()) / 60000);
-          await db('leads').where('id', input.lead_id).update({
-            response_time_minutes: responseMinutes,
-            status: 'contacted',
-            updated_at: new Date(),
-          });
-        }
-
         // Distinguish wrapper-policy blocks from provider failures so
         // incident triage doesn't see "blocked by middleware" when
         // Twilio actually had a network error. activity_type:
@@ -254,22 +248,41 @@ async function executeLeadTool(toolName, input) {
         const activityType = result.sent
           ? 'sms_sent'
           : (result.blocked ? 'sms_blocked' : 'sms_failed');
+        // Description is operator-facing — keep it stable code-only, no
+        // result.reason (upstream provider error strings can include
+        // recipient phone or message body). audit_log_id in metadata is
+        // the cross-reference for full failure context.
         const activityDescription = result.sent
           ? 'Auto-response sent by lead agent'
           : (result.blocked
-              ? `Auto-response blocked by middleware (${result.code || 'unknown'}): ${result.reason || ''}`
-              : `Auto-response provider failure (${result.code || 'unknown'}): ${result.reason || ''}`);
+              ? `Auto-response blocked by middleware (${result.code || 'unknown'})`
+              : `Auto-response provider failure (${result.code || 'unknown'})`);
         await db('lead_activities').insert({
           lead_id: input.lead_id,
           activity_type: activityType,
           description: activityDescription,
           performed_by: 'lead_agent',
-          metadata: JSON.stringify({ message: input.message, audit_log_id: result.auditLogId }),
+          metadata: JSON.stringify({ audit_log_id: result.auditLogId }),
         }).catch(() => {});
+
+        // Pipeline + response-time only advance on real send.
+        if (result.sent) {
+          const lead = await db('leads').where('id', input.lead_id).first();
+          if (lead?.first_contact_at) {
+            const responseMinutes = Math.round((Date.now() - new Date(lead.first_contact_at).getTime()) / 60000);
+            await db('leads').where('id', input.lead_id).update({
+              response_time_minutes: responseMinutes,
+              status: 'contacted',
+              updated_at: new Date(),
+            });
+          }
+        }
       }
 
-      const PipelineManager = require('./pipeline-manager');
-      await PipelineManager.onEvent(input.customer_id, 'first_contact');
+      if (result.sent) {
+        const PipelineManager = require('./pipeline-manager');
+        await PipelineManager.onEvent(input.customer_id, 'first_contact');
+      }
 
       if (result.sent) {
         // PII: ID-only logging per AGENTS.md. Customer name + phone live
@@ -285,7 +298,10 @@ async function executeLeadTool(toolName, input) {
           encoding: result.encoding,
         };
       }
-      logger.warn(`[lead-agent] Auto-response BLOCKED (customerId=${customer.id} leadId=${input.lead_id || 'n/a'}): ${result.code} — ${result.reason}`);
+      // PII: ID + code only; result.reason can include recipient phone
+      // or body if upstream provider/guard error strings propagate.
+      // Full context lives on messaging_audit_log keyed on auditLogId.
+      logger.warn(`[lead-agent] Auto-response BLOCKED (customerId=${customer.id} leadId=${input.lead_id || 'n/a'} auditLogId=${result.auditLogId || 'n/a'} code=${result.code})`);
       // Two distinct unsent outcomes — must be signaled differently so the
       // lead-response-agent's circuit breaker doesn't treat consent/opt-out
       // blocks as system failures (5 in 60s would trip the breaker and
