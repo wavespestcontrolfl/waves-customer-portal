@@ -26,6 +26,8 @@
     "test:contracts:list": "node server/contract-tests/index.js --list",
     "models:check": "node scripts/check-models.js",
     "seed:pricing": "node scripts/seed-local-pricing.js",
+    "twilio:flow:export": "node scripts/twilio/export-studio-flow.js",
+    "twilio:flow:verify": "node scripts/twilio/verify-studio-flow-contract.js",
     "verify:blog-schema": "node packages/blog-schema/scripts/verify-vendor.js",
     "sync:blog-schema": "node packages/blog-schema/scripts/sync-from-astro.js",
     "prepare": "git config core.hooksPath scripts/hooks 2>/dev/null || true",
