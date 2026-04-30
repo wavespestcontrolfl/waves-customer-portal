@@ -383,10 +383,13 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
 
     // Keep the quote_wizard estimate row in sync — admins viewing the pipeline
     // should see the merged service_interest after an upsell add, not the
-    // original /calculate snapshot.
+    // original /calculate snapshot. Scope to status='draft' so a late upsell
+    // submission can't mutate an estimate that's already been sent/viewed/
+    // accepted (admins may have edited service_interest by hand at that
+    // point — the customer-side flow shouldn't overwrite that).
     try {
       await db('estimates')
-        .where({ source: 'quote_wizard' })
+        .where({ source: 'quote_wizard', status: 'draft' })
         .whereRaw("estimate_data->>'lead_id' = ?", [leadId])
         .update({ service_interest: mergedInterest, updated_at: new Date() });
     } catch (e) { logger.error(`[public-quote] Estimate upsell sync failed: ${e.message}`); }

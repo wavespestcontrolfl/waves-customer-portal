@@ -33,6 +33,15 @@ function extractHost(url) {
 // Falls back to the Main Site row, which is the catch-all for organic traffic
 // to the portal. is_active is intentionally NOT filtered: even paused-for-cost
 // rows still represent the true acquisition channel.
+// estimates.lead_source_detail is varchar(255); UTM-heavy referrer URLs blow
+// past that fast. Cap at 240 so a prefix label ("Spoke referrer: ") + URL
+// never overflows the column.
+const DETAIL_MAX_LEN = 240;
+function clampDetail(s) {
+  if (!s) return s;
+  return s.length > DETAIL_MAX_LEN ? s.slice(0, DETAIL_MAX_LEN) : s;
+}
+
 async function resolveLeadSource(attribution) {
   const referrer = attribution?.referrer || null;
   const landing = attribution?.landing_url || null;
@@ -62,7 +71,7 @@ async function resolveLeadSource(attribution) {
   return {
     leadSourceId: row?.id || null,
     leadSourceName: targetName,
-    leadSourceDetail: detail,
+    leadSourceDetail: clampDetail(detail),
   };
 }
 
