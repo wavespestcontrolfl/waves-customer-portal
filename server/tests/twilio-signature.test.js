@@ -433,6 +433,68 @@ describe('validateTwilioSignature — structured audit telemetry (per ChatGPT v3
     expect(audit[0].source_guess).toBe('unknown');
   });
 
+  test('preserves URL-encoded query string verbatim (no decode/re-encode)', () => {
+    // Per ChatGPT v3 pre-merge review: Twilio webhook security requires
+    // the EXACT URL be used in the signing input, including query
+    // string encoding. If our middleware decoded "%20" to a space or
+    // "%2B" to "+" before reconstructing the URL, the signature would
+    // mismatch and prod calls would 403 in enforce mode. Express's
+    // req.originalUrl preserves the raw, encoded path+query exactly
+    // as the client sent it — this test pins that contract so a future
+    // refactor can't silently break it.
+    //
+    // We sign over the raw-encoded URL (matching what Twilio would
+    // sign) and then mock req.originalUrl with the same raw-encoded
+    // path. If reconstructUrl() decoded anywhere, the signature would
+    // not match.
+    const path = '/api/webhooks/twilio/status?message=hello%20world&type=test%2Bvalue&note=foo%26bar';
+    const signedUrl = 'https://waves-portal.example.com' + path;
+    const body = { CallSid: 'CA1', SmsStatus: 'delivered' };
+    const sig = generateSignature(TEST_TOKEN, signedUrl, body);
+
+    const req = mockReq({
+      method: 'POST',
+      originalUrl: path,
+      host: 'waves-portal.example.com',
+      body,
+      headers: { 'X-Twilio-Signature': sig },
+    });
+    const next = jest.fn();
+    validateTwilioSignature(req, mockRes(), next);
+
+    expect(next).toHaveBeenCalled();
+    expect(reconstructUrl(req)).toBe(signedUrl);
+    expect(reconstructUrl(req)).toContain('%20');
+    expect(reconstructUrl(req)).toContain('%2B');
+    expect(reconstructUrl(req)).toContain('%26');
+  });
+
+  test('rejects when query string is decoded by middleware (defense against future regression)', () => {
+    // Belt-and-suspenders: if a future refactor accidentally decodes
+    // %20 to a space before reconstructing, the signature for the
+    // raw-encoded URL would no longer match. We verify that signing
+    // against a DECODED URL while presenting the encoded request fails
+    // — proving the middleware is keying on the raw form.
+    const rawPath = '/api/webhooks/twilio/status?message=hello%20world';
+    const decodedUrl = 'https://waves-portal.example.com/api/webhooks/twilio/status?message=hello world';
+    const body = { CallSid: 'CA1' };
+    const sigOverDecoded = generateSignature(TEST_TOKEN, decodedUrl, body);
+
+    const req = mockReq({
+      method: 'POST',
+      originalUrl: rawPath, // raw-encoded — what Twilio actually sends
+      host: 'waves-portal.example.com',
+      body,
+      headers: { 'X-Twilio-Signature': sigOverDecoded },
+    });
+    const res = mockRes();
+    const next = jest.fn();
+    validateTwilioSignature(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(403);
+  });
+
   test('proxy_proto_match=false when X-Forwarded-Proto disagrees with req.protocol', () => {
     const url = 'https://waves-portal.example.com/api/webhooks/twilio/voice';
     const body = { CallSid: 'CA1' };
