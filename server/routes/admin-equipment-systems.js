@@ -56,17 +56,55 @@ function pickCalibrationFields(body) {
   return out;
 }
 
+// Columns that the schema declares NOT NULL. Sending an explicit null
+// for any of these would pass the value into the update object, then
+// get rejected at the DB → 500 instead of a clean 400. Reject up front
+// so a malformed admin request becomes a client error, not a server one.
+const NOT_NULL_COLUMNS = ['carrier_gal_per_1000', 'active'];
+
+// Date fields the route accepts from clients. We must validate the
+// parsed Date is finite before letting it reach Postgres — `new Date()`
+// will happily return Invalid Date for garbage input, then bubble as
+// a "invalid input syntax for type timestamp" 500.
+const DATE_COLUMNS = ['calibrated_at', 'expires_at'];
+
 function validateCalibrationPayload(payload, { requireCarrier = true } = {}) {
   const errors = [];
-  const carrier = payload.carrier_gal_per_1000;
-  if (carrier == null) {
+
+  // ── carrier_gal_per_1000 ───────────────────────────────────────────
+  // Distinguish "key omitted" from "key sent as null". On POST,
+  // requireCarrier=true demands the key be present; on PUT, the key
+  // may be omitted (partial update) but if it IS sent, it must not
+  // be null on this NOT NULL column.
+  const carrierSent = Object.prototype.hasOwnProperty.call(payload, 'carrier_gal_per_1000');
+  const carrierIsNull = carrierSent && payload.carrier_gal_per_1000 === null;
+  if (!carrierSent) {
     if (requireCarrier) errors.push('carrier_gal_per_1000 is required');
+  } else if (carrierIsNull) {
+    errors.push('carrier_gal_per_1000 cannot be null');
   } else {
-    const n = Number(carrier);
+    const n = Number(payload.carrier_gal_per_1000);
     if (!Number.isFinite(n) || n < CARRIER_MIN || n > CARRIER_MAX) {
       errors.push(`carrier_gal_per_1000 must be between ${CARRIER_MIN} and ${CARRIER_MAX}`);
     }
   }
+
+  // ── other NOT NULL columns ─────────────────────────────────────────
+  // For NOT NULL columns OTHER than carrier (which is handled above
+  // because it has a range check), reject explicit null with a clear
+  // 400. `active` is the only one in the PUT whitelist, but the loop
+  // future-proofs adding more NOT NULL columns to the whitelist.
+  for (const k of NOT_NULL_COLUMNS) {
+    if (k === 'carrier_gal_per_1000') continue; // already handled
+    if (
+      Object.prototype.hasOwnProperty.call(payload, k)
+      && payload[k] === null
+    ) {
+      errors.push(`${k} cannot be null`);
+    }
+  }
+
+  // ── nullable numeric columns ───────────────────────────────────────
   for (const k of [
     'test_area_sqft', 'captured_gallons',
     'pressure_psi', 'swath_width_ft', 'pass_time_seconds',
@@ -76,6 +114,25 @@ function validateCalibrationPayload(payload, { requireCarrier = true } = {}) {
       if (!Number.isFinite(n) || n < 0) errors.push(`${k} must be a non-negative number`);
     }
   }
+
+  // ── date fields ────────────────────────────────────────────────────
+  // expires_at IS nullable in the schema (an open-ended calibration
+  // is allowed), but if a non-null value is sent it must parse. Same
+  // for calibrated_at on POST (defaults to now() server-side, so null
+  // / omitted is fine).
+  for (const k of DATE_COLUMNS) {
+    if (
+      Object.prototype.hasOwnProperty.call(payload, k)
+      && payload[k] !== null
+      && payload[k] !== undefined
+    ) {
+      const d = new Date(payload[k]);
+      if (Number.isNaN(d.getTime())) {
+        errors.push(`${k} must be a valid ISO date string`);
+      }
+    }
+  }
+
   return errors;
 }
 
@@ -149,6 +206,11 @@ router.put('/calibrations/:id', async (req, res, next) => {
       }
     }
 
+    // active=false is a no-op against the partial unique index;
+    // active=true (re-activation) is gated by the pre-check above
+    // and the unique-violation catch below — so blindly copying
+    // payload.active into the update is safe at this point. Other
+    // NOT NULL columns are null-rejected upfront in the validator.
     const update = { updated_at: new Date() };
     for (const k of ['notes', 'active', 'expires_at', 'carrier_gal_per_1000', 'pressure_psi', 'engine_rpm_setting']) {
       if (Object.prototype.hasOwnProperty.call(payload, k)) update[k] = payload[k];
