@@ -381,10 +381,18 @@ function initScheduledJobs() {
             });
             continue;
           }
-          await TwilioService.sendSMS(row.cust_phone, row.completion_sms_body, {
+          // TwilioService.sendSMS can return a non-throwing { success: false }
+          // for soft failures (guard block, missing config). Treat that as
+          // "not delivered" — leave completion_sms_sent_at NULL so the next
+          // tick re-claims and retries; only stamp on a true success.
+          const result = await TwilioService.sendSMS(row.cust_phone, row.completion_sms_body, {
             customerId: row.customer_id,
             messageType: row.completion_sms_message_type || 'service_complete',
           });
+          if (result && result.success === false) {
+            logger.error(`Deferred completion SMS for service ${row.id} soft-failed: ${result.error || 'unknown'}`);
+            continue;
+          }
           await db('scheduled_services').where({ id: row.id }).update({
             completion_sms_sent_at: new Date(),
           });
