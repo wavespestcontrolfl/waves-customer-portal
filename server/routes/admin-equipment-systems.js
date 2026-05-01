@@ -68,6 +68,18 @@ const NOT_NULL_COLUMNS = ['carrier_gal_per_1000', 'active'];
 // a "invalid input syntax for type timestamp" 500.
 const DATE_COLUMNS = ['calibrated_at', 'expires_at'];
 
+// Stricter Number() that rejects empty / whitespace-only strings.
+// Without this, `Number('')` and `Number(' ')` both return 0 — meaning
+// a request like {"test_area_sqft": ""} would silently pass our finite
+// + non-negative checks, then Postgres would reject the empty string
+// at the integer/numeric column with 22P02 → 500 instead of a clean
+// 400. Returns NaN for anything else that doesn't parse.
+function parseFiniteNumber(v) {
+  if (typeof v === 'string' && v.trim() === '') return NaN;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : NaN;
+}
+
 function validateCalibrationPayload(payload, { requireCarrier = true } = {}) {
   const errors = [];
 
@@ -83,8 +95,8 @@ function validateCalibrationPayload(payload, { requireCarrier = true } = {}) {
   } else if (carrierIsNull) {
     errors.push('carrier_gal_per_1000 cannot be null');
   } else {
-    const n = Number(payload.carrier_gal_per_1000);
-    if (!Number.isFinite(n) || n < CARRIER_MIN || n > CARRIER_MAX) {
+    const n = parseFiniteNumber(payload.carrier_gal_per_1000);
+    if (Number.isNaN(n) || n < CARRIER_MIN || n > CARRIER_MAX) {
       errors.push(`carrier_gal_per_1000 must be between ${CARRIER_MIN} and ${CARRIER_MAX}`);
     }
   }
@@ -110,8 +122,8 @@ function validateCalibrationPayload(payload, { requireCarrier = true } = {}) {
     'pressure_psi', 'swath_width_ft', 'pass_time_seconds',
   ]) {
     if (payload[k] != null) {
-      const n = Number(payload[k]);
-      if (!Number.isFinite(n) || n < 0) errors.push(`${k} must be a non-negative number`);
+      const n = parseFiniteNumber(payload[k]);
+      if (Number.isNaN(n) || n < 0) errors.push(`${k} must be a non-negative number`);
     }
   }
 
