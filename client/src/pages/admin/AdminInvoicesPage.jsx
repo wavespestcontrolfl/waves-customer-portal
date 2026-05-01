@@ -1023,6 +1023,8 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const [saving, setSaving] = useState(false);
   const [sendAfterCreate, setSendAfterCreate] = useState(true);
   const [requestReview, setRequestReview] = useState(false);
+  const [scheduleSend, setScheduleSend] = useState(false);
+  const [scheduledAt, setScheduledAt] = useState('');
   const [serviceSearchIdx, setServiceSearchIdx] = useState(null);
   const [serviceResults, setServiceResults] = useState([]);
   const [availableDiscounts, setAvailableDiscounts] = useState([]);
@@ -1146,11 +1148,23 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
       const invoice = await adminFetch('/admin/invoices', { method: 'POST', body: JSON.stringify(body) });
 
       if (sendAfterCreate && invoice.id) {
+        let scheduledIso = null;
+        if (scheduleSend) {
+          const when = scheduledAt ? new Date(scheduledAt) : null;
+          if (!when || isNaN(when.getTime()) || when <= new Date()) {
+            showToast('Pick a future scheduled time');
+            setSaving(false);
+            return;
+          }
+          scheduledIso = when.toISOString();
+        }
         await adminFetch(`/admin/invoices/${invoice.id}/send`, {
           method: 'POST',
-          body: JSON.stringify({ requestReview }),
+          body: JSON.stringify({ requestReview, scheduledAt: scheduledIso }),
         });
-        showToast(`Invoice created & sent: ${invoice.invoice_number}`);
+        showToast(scheduledIso
+          ? `Invoice scheduled: ${invoice.invoice_number}`
+          : `Invoice created & sent: ${invoice.invoice_number}`);
       } else {
         showToast(`Invoice created: ${invoice.invoice_number} (draft)`);
       }
@@ -1341,13 +1355,52 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
           </div>
 
           {/* Review request toggle */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, opacity: sendAfterCreate ? 1 : 0.5 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, opacity: sendAfterCreate ? 1 : 0.5 }}>
             <input type="checkbox" checked={requestReview} onChange={e => setRequestReview(e.target.checked)} disabled={!sendAfterCreate} id="review-toggle" />
             <label htmlFor="review-toggle" style={{ fontSize: 13, color: D.text }}>Send review request (2hr delay)</label>
           </div>
 
+          {/* Schedule for later toggle */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, opacity: sendAfterCreate ? 1 : 0.5, flexWrap: 'wrap' }}>
+            <input
+              type="checkbox"
+              checked={scheduleSend}
+              onChange={e => {
+                const on = e.target.checked;
+                setScheduleSend(on);
+                if (on && !scheduledAt) {
+                  // Default suggested time: 2 hours from now (datetime-local format YYYY-MM-DDTHH:MM)
+                  const t = new Date(Date.now() + 2 * 60 * 60 * 1000);
+                  t.setMinutes(t.getMinutes() - t.getTimezoneOffset());
+                  setScheduledAt(t.toISOString().slice(0, 16));
+                }
+              }}
+              disabled={!sendAfterCreate}
+              id="schedule-toggle"
+            />
+            <label htmlFor="schedule-toggle" style={{ fontSize: 13, color: D.text }}>Schedule for later</label>
+            {scheduleSend && (
+              <input
+                type="datetime-local"
+                value={scheduledAt}
+                onChange={e => setScheduledAt(e.target.value)}
+                disabled={!sendAfterCreate}
+                style={{ ...sInput(isMobile), width: 'auto', padding: '6px 10px', fontSize: 13, marginLeft: 4 }}
+              />
+            )}
+          </div>
+          {scheduleSend && sendAfterCreate && (
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 16, marginLeft: 22 }}>
+              Defaults to 2 hours from now. Review request (if enabled) goes 2 hours after the scheduled send.
+            </div>
+          )}
+          {!scheduleSend && <div style={{ marginBottom: 8 }} />}
+
           <button onClick={handleCreate} disabled={saving} style={{ ...sBtn('#111', D.white, isMobile), width: '100%', padding: 14, minHeight: isMobile ? 48 : undefined, opacity: saving ? 0.5 : 1 }}>
-            {saving ? 'Creating...' : sendAfterCreate ? 'Send Invoice' : 'Create Draft'}
+            {saving ? 'Creating...'
+              : !sendAfterCreate ? 'Create Draft'
+              : scheduleSend ? 'Schedule Invoice'
+              : 'Send Invoice'}
           </button>
         </div>
       </div>

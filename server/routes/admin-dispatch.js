@@ -306,7 +306,18 @@ router.put('/:serviceId/status', async (req, res, next) => {
 // POST /api/admin/dispatch/:serviceId/complete
 router.post('/:serviceId/complete', async (req, res, next) => {
   try {
-    const { technicianNotes, products, soilTemp, thatchMeasurement, soilPh, soilMoisture, sendCompletionSms, requestReview, formResponses, formStartedAt } = req.body;
+    const { technicianNotes, products, soilTemp, thatchMeasurement, soilPh, soilMoisture, sendCompletionSms, requestReview, scheduledAt, formResponses, formStartedAt } = req.body;
+
+    // Validate optional scheduled-send timestamp. When provided, the customer
+    // SMS + review request are deferred to that moment; the actual completion
+    // (status flip, service_record, products, audit log) still happens now.
+    let scheduledSendAt = null;
+    if (scheduledAt) {
+      const when = new Date(scheduledAt);
+      if (isNaN(when.getTime())) return res.status(400).json({ error: 'Invalid scheduledAt' });
+      if (when <= new Date()) return res.status(400).json({ error: 'scheduledAt must be in the future' });
+      scheduledSendAt = when;
+    }
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
@@ -596,41 +607,60 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (sendCompletionSms && svc.cust_phone) {
       try {
         const displayServiceType = normalizeServiceTypeForTemplate(svc.service_type);
+        let body, messageType;
         if (invoiceCreated && payUrl) {
           const fallback = `Hello ${svc.first_name}! Your ${displayServiceType} service report is ready: ${portalUrl}\n\nInvoice for today's visit: ${payUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
-          const body = await renderTemplate('service_complete_with_invoice', {
+          body = await renderTemplate('service_complete_with_invoice', {
             first_name: svc.first_name || '',
             service_type: displayServiceType,
             portal_url: portalUrl,
             pay_url: payUrl,
           }, fallback);
-          await TwilioService.sendSMS(svc.cust_phone, body + reviewSuffix, { customerId: svc.customer_id, messageType: 'service_complete_with_invoice' });
+          messageType = 'service_complete_with_invoice';
         } else if (prepaidCovered || alreadyPaid) {
           const fallback = `Hello ${svc.first_name}! Thanks for your payment today. Your ${displayServiceType} service report is ready: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
-          const body = await renderTemplate('service_complete_prepaid', {
+          body = await renderTemplate('service_complete_prepaid', {
             first_name: svc.first_name || '',
             service_type: displayServiceType,
             portal_url: portalUrl,
           }, fallback);
-          await TwilioService.sendSMS(svc.cust_phone, body + reviewSuffix, { customerId: svc.customer_id, messageType: 'service_complete_prepaid' });
+          messageType = 'service_complete_prepaid';
         } else {
           const fallback = `Hello ${svc.first_name}! Your service report is ready. View it here: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
-          const body = await renderTemplate('service_complete', { first_name: svc.first_name || '' }, fallback);
-          await TwilioService.sendSMS(svc.cust_phone, body + reviewSuffix, { customerId: svc.customer_id, messageType: 'service_complete' });
+          body = await renderTemplate('service_complete', { first_name: svc.first_name || '' }, fallback);
+          messageType = 'service_complete';
         }
-      } catch (e) { logger.error(`Completion SMS failed: ${e.message}`); }
+        const finalBody = body + reviewSuffix;
+
+        if (scheduledSendAt) {
+          // Defer to the 5-min cron tick. Body is rendered now (template choice
+          // depends on completion-time state) and stored verbatim.
+          await db('scheduled_services').where({ id: svc.id }).update({
+            completion_sms_scheduled_at: scheduledSendAt,
+            completion_sms_body: finalBody,
+            completion_sms_message_type: messageType,
+          });
+        } else {
+          await TwilioService.sendSMS(svc.cust_phone, finalBody, { customerId: svc.customer_id, messageType });
+        }
+      } catch (e) { logger.error(`Completion SMS ${scheduledSendAt ? 'queue' : 'send'} failed: ${e.message}`); }
     }
 
     // Only schedule the delayed follow-up message when the review wasn't
-    // already bundled into the completion SMS above.
+    // already bundled into the completion SMS above. When the tech scheduled
+    // the completion SMS for later, slide the review-request delay so it
+    // lands ~2h after the SMS itself, not 2h after the underlying completion.
     if (requestReview && svc.cust_phone && !bundledReviewUrl) {
       try {
         const ReviewService = require('../services/review-request');
+        const delayMinutes = scheduledSendAt
+          ? Math.max(1, Math.ceil((scheduledSendAt.getTime() + 120 * 60000 - Date.now()) / 60000))
+          : 120;
         await ReviewService.create({
           customerId: svc.customer_id,
           serviceRecordId: record.id,
           triggeredBy: 'auto',
-          delayMinutes: 120,
+          delayMinutes,
         });
       } catch (e) { logger.error(`[dispatch] Review request schedule failed: ${e.message}`); }
     }

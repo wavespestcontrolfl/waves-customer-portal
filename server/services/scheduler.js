@@ -296,6 +296,91 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 5 MINUTES — Send scheduled invoices whose time has arrived
+  // sendInvoiceNow flips status='scheduled' → 'sent' on success, so the row
+  // drops out of this query on the next tick. Channel failures are logged
+  // per-invoice but don't abort the batch.
+  // =========================================================================
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const scheduled = await db('invoices')
+        .where({ status: 'scheduled' })
+        .where('scheduled_at', '<=', new Date())
+        .whereNotNull('scheduled_at')
+        .select('id', 'invoice_number', 'send_method');
+
+      if (scheduled.length === 0) return;
+
+      const { sendInvoiceNow } = require('../routes/admin-invoices');
+      let sent = 0;
+      for (const inv of scheduled) {
+        try {
+          const channels = await sendInvoiceNow(inv.id, { sendMethod: inv.send_method || 'both' });
+          if (channels.sms.ok || channels.email.ok) sent += 1;
+          else logger.error(`Scheduled invoice ${inv.invoice_number} both channels failed: sms=${channels.sms.error} email=${channels.email.error}`);
+        } catch (e) {
+          logger.error(`Scheduled invoice ${inv.invoice_number} failed: ${e.message}`);
+        }
+      }
+      logger.info(`Scheduled invoices: ${sent}/${scheduled.length} sent`);
+    } catch (err) {
+      logger.error(`Scheduled invoice cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 5 MINUTES — Send deferred completion-SMS rows whose time has arrived
+  // Body was fully rendered at completion time (template choice depends on
+  // invoice / prepaid state) and stashed on scheduled_services. We just send
+  // it via Twilio and stamp completion_sms_sent_at so it falls out of the
+  // query on the next tick.
+  // =========================================================================
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const due = await db('scheduled_services')
+        .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+        .whereNotNull('scheduled_services.completion_sms_scheduled_at')
+        .whereNull('scheduled_services.completion_sms_sent_at')
+        .where('scheduled_services.completion_sms_scheduled_at', '<=', new Date())
+        .select(
+          'scheduled_services.id',
+          'scheduled_services.customer_id',
+          'scheduled_services.completion_sms_body',
+          'scheduled_services.completion_sms_message_type',
+          'customers.phone as cust_phone',
+        );
+
+      if (due.length === 0) return;
+
+      const TwilioService = require('./twilio');
+      let sent = 0;
+      for (const row of due) {
+        try {
+          if (!row.cust_phone || !row.completion_sms_body) {
+            await db('scheduled_services').where({ id: row.id }).update({
+              completion_sms_sent_at: new Date(),
+            });
+            continue;
+          }
+          await TwilioService.sendSMS(row.cust_phone, row.completion_sms_body, {
+            customerId: row.customer_id,
+            messageType: row.completion_sms_message_type || 'service_complete',
+          });
+          await db('scheduled_services').where({ id: row.id }).update({
+            completion_sms_sent_at: new Date(),
+          });
+          sent += 1;
+        } catch (e) {
+          logger.error(`Deferred completion SMS for service ${row.id} failed: ${e.message}`);
+        }
+      }
+      logger.info(`Deferred completion SMS: ${sent}/${due.length} sent`);
+    } catch (err) {
+      logger.error(`Deferred completion SMS cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 2 MINUTES — Email sync (Gmail → PostgreSQL)
   // =========================================================================
   cron.schedule('*/2 * * * *', async () => {

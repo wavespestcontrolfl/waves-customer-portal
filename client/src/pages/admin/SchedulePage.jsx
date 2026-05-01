@@ -1015,6 +1015,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   const [soilMoisture, setSoilMoisture] = useState('');
   const [sendSms, setSendSms] = useState(true);
   const [requestReview, setRequestReview] = useState(true);
+  const [scheduleSend, setScheduleSend] = useState(false);
+  const [scheduledAt, setScheduledAt] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -1090,6 +1092,15 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   }
 
   async function handleSubmit() {
+    let scheduledIso = null;
+    if (scheduleSend) {
+      const when = scheduledAt ? new Date(scheduledAt) : null;
+      if (!when || isNaN(when.getTime()) || when <= new Date()) {
+        alert('Pick a future scheduled time');
+        return;
+      }
+      scheduledIso = when.toISOString();
+    }
     setSubmitting(true);
     try {
       const body = {
@@ -1097,6 +1108,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         products: selectedProducts.map(p => ({ productId: p.productId, rate: p.rate, rateUnit: p.rateUnit })),
         sendCompletionSms: sendSms,
         requestReview,
+        scheduledAt: scheduledIso,
         timeOnSite: elapsed,
         areasServiced,
         customerInteraction,
@@ -1582,7 +1594,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
               <label style={{
                 display: 'flex', alignItems: 'center', gap: 12, padding: '14px 16px',
                 background: M.card, border: `0.5px solid ${M.hairline}`, borderRadius: 12,
-                cursor: 'pointer',
+                marginBottom: 8, cursor: 'pointer',
               }}>
                 <input type="checkbox" checked={requestReview}
                        onChange={e => setRequestReview(e.target.checked)}
@@ -1591,6 +1603,37 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
                   Send review request (2hr delay)
                 </span>
               </label>
+              <label style={{
+                display: 'flex', alignItems: 'center', gap: 12, padding: '14px 16px',
+                background: M.card, border: `0.5px solid ${M.hairline}`, borderRadius: 12,
+                cursor: 'pointer', flexWrap: 'wrap',
+              }}>
+                <input type="checkbox" checked={scheduleSend}
+                       onChange={e => {
+                         const on = e.target.checked;
+                         setScheduleSend(on);
+                         if (on && !scheduledAt) {
+                           const t = new Date(Date.now() + 2 * 60 * 60 * 1000);
+                           t.setMinutes(t.getMinutes() - t.getTimezoneOffset());
+                           setScheduledAt(t.toISOString().slice(0, 16));
+                         }
+                       }}
+                       style={{ width: 18, height: 18, accentColor: M.ink }} />
+                <span style={{ fontFamily: font, fontSize: 15, color: M.ink }}>
+                  Schedule customer messages for later
+                </span>
+                {scheduleSend && (
+                  <input type="datetime-local" value={scheduledAt}
+                         onClick={e => e.stopPropagation()}
+                         onChange={e => setScheduledAt(e.target.value)}
+                         style={{ ...mInput, width: 'auto', padding: '8px 10px', fontSize: 13, marginLeft: 'auto' }} />
+                )}
+              </label>
+              {scheduleSend && (
+                <div style={{ fontFamily: font, fontSize: 12, color: M.ink3, padding: '6px 16px 0' }}>
+                  Defaults to 2 hours from now. Review request (if enabled) goes 2 hours after the SMS.
+                </div>
+              )}
             </Field>
 
             {/* Next visit */}
@@ -1643,7 +1686,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
               disabled={submitting}
               style={{ ...primaryPill, opacity: submitting ? 0.5 : 1 }}
             >
-              {submitting ? 'Completing…' : 'Complete service'}
+              {submitting ? 'Completing…' : scheduleSend ? 'Complete & schedule send' : 'Complete service'}
             </button>
           </div>
         </div>
@@ -1994,6 +2037,30 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
             <input type="checkbox" checked={requestReview} onChange={e => setRequestReview(e.target.checked)} />
             <span>Send review request (2hr delay)</span>
           </label>
+          <label style={checkboxRow}>
+            <input type="checkbox" checked={scheduleSend}
+                   onChange={e => {
+                     const on = e.target.checked;
+                     setScheduleSend(on);
+                     if (on && !scheduledAt) {
+                       const t = new Date(Date.now() + 2 * 60 * 60 * 1000);
+                       t.setMinutes(t.getMinutes() - t.getTimezoneOffset());
+                       setScheduledAt(t.toISOString().slice(0, 16));
+                     }
+                   }} />
+            <span>Schedule customer messages for later</span>
+            {scheduleSend && (
+              <input type="datetime-local" value={scheduledAt}
+                     onClick={e => e.stopPropagation()}
+                     onChange={e => setScheduledAt(e.target.value)}
+                     style={{ ...inputStyle, width: 'auto', padding: '6px 10px', fontSize: 12, marginLeft: 8 }} />
+            )}
+          </label>
+          {scheduleSend && (
+            <div style={{ fontSize: 11, color: D.muted, marginTop: 4, marginLeft: 24 }}>
+              Defaults to 2 hours from now. Review request (if enabled) goes 2 hours after the SMS.
+            </div>
+          )}
 
           {/* Next Visit Prompt */}
           {nextVisit && (

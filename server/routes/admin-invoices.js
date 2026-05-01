@@ -302,35 +302,110 @@ router.put('/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /:id/send — send invoice via SMS + email
-// SMS fires via InvoiceService.sendViaSMS (the invoice_sent template);
-// email via the branded sendInvoiceEmail helper with the PDF attached.
-// Either channel failing alone doesn't abort the other — returns per-
-// channel status so the UI can toast accordingly. Missing phone / email
-// on the customer record is treated as "channel skipped", not an error.
-router.post('/:id/send', async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const { requestReview } = req.body || {};
-    const { sendInvoiceEmail } = require('../services/invoice-email');
+// Shared dispatch — used by the route's immediate path AND the scheduled-send
+// cron tick. Either channel failing alone doesn't abort the other; missing
+// phone / email is treated as channel-skipped, not an error. Idempotent
+// cleanup at the bottom transitions a status='scheduled' row back to 'sent'
+// once one channel lands so the cron can stop picking it up.
+async function sendInvoiceNow(invoiceId, { sendMethod = 'both' } = {}) {
+  const { sendInvoiceEmail } = require('../services/invoice-email');
 
-    const sms = { ok: false };
-    const email = { ok: false };
+  const sms = { ok: false };
+  const email = { ok: false };
 
+  if (sendMethod === 'sms' || sendMethod === 'both') {
     try {
-      await InvoiceService.sendViaSMS(id);
+      await InvoiceService.sendViaSMS(invoiceId);
       sms.ok = true;
     } catch (err) {
       sms.error = err.message;
     }
+  }
 
+  if (sendMethod === 'email' || sendMethod === 'both') {
     try {
-      const r = await sendInvoiceEmail(id);
+      const r = await sendInvoiceEmail(invoiceId);
       if (r?.ok) email.ok = true;
       else if (r?.error) email.error = r.error;
     } catch (err) {
       email.error = err.message;
     }
+  }
+
+  // InvoiceService.sendViaSMS only flips draft → sent. A scheduled-send row
+  // therefore stays status='scheduled' after dispatch; clear it explicitly
+  // so the cron tick stops re-picking it up.
+  if (sms.ok || email.ok) {
+    try {
+      const inv = await db('invoices').where({ id: invoiceId }).select('status').first();
+      if (inv && inv.status === 'scheduled') {
+        await db('invoices').where({ id: invoiceId }).update({
+          status: 'sent',
+          scheduled_at: null,
+          send_method: null,
+          updated_at: new Date(),
+        });
+      }
+    } catch (err) {
+      logger.error(`[admin-invoices] post-send schedule cleanup failed: ${err.message}`);
+    }
+  }
+
+  return { sms, email };
+}
+
+// POST /:id/send — send invoice via SMS + email, immediately or scheduled.
+// Body: { requestReview?: boolean, scheduledAt?: ISO string, sendMethod?: 'sms'|'email'|'both' }
+// When `scheduledAt` is set to a future instant, the row is flipped to
+// status='scheduled' and the scheduler.js 5-minute cron picks it up; the
+// review request (if requested) is queued at scheduledAt + 2h via the
+// existing ReviewService.scheduled_for path. Either channel failing alone
+// doesn't abort the other on the immediate path.
+router.post('/:id/send', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { requestReview, scheduledAt, sendMethod } = req.body || {};
+
+    // ── SCHEDULED PATH ──
+    if (scheduledAt) {
+      const when = new Date(scheduledAt);
+      if (isNaN(when.getTime())) return res.status(400).json({ error: 'Invalid scheduledAt' });
+      if (when <= new Date()) return res.status(400).json({ error: 'scheduledAt must be in the future' });
+
+      const updated = await db('invoices').where({ id }).update({
+        status: 'scheduled',
+        scheduled_at: when,
+        send_method: sendMethod || 'both',
+        updated_at: new Date(),
+      });
+      if (!updated) return res.status(404).json({ error: 'Invoice not found' });
+
+      // Queue the review request for scheduledAt + 2h. ReviewService.create
+      // converts delayMinutes → scheduled_for relative to "now"; compute the
+      // delay from now so the math lands on the right absolute moment.
+      if (requestReview) {
+        try {
+          const ReviewService = require('../services/review-request');
+          const inv = await db('invoices').where({ id }).select('customer_id', 'service_record_id').first();
+          if (inv) {
+            const delayMinutes = Math.max(1, Math.ceil((when.getTime() + 120 * 60000 - Date.now()) / 60000));
+            await ReviewService.create({
+              customerId: inv.customer_id,
+              serviceRecordId: inv.service_record_id || null,
+              triggeredBy: 'auto',
+              delayMinutes,
+            });
+          }
+        } catch (err) {
+          logger.error(`[admin-invoices] Review request schedule failed: ${err.message}`);
+        }
+      }
+
+      return res.json({ ok: true, scheduled: true, scheduledAt: when.toISOString() });
+    }
+
+    // ── IMMEDIATE PATH ──
+    const { sms, email } = await sendInvoiceNow(id, { sendMethod: sendMethod || 'both' });
 
     // Schedule a delayed review request when at least one channel landed.
     // ReviewService dedupes on service_record_id, so a follow-up triggered
@@ -358,6 +433,9 @@ router.post('/:id/send', async (req, res, next) => {
     res.json({ ok: true, sms, email });
   } catch (err) { next(err); }
 });
+
+// Export for cron usage
+router.sendInvoiceNow = sendInvoiceNow;
 
 // POST /:id/charge-card — charge a saved card on file against this invoice.
 // Body: { paymentMethodId } (our internal payment_methods.id).
