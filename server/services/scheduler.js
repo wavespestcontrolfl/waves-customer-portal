@@ -297,23 +297,32 @@ function initScheduledJobs() {
 
   // =========================================================================
   // EVERY 5 MINUTES — Send scheduled invoices whose time has arrived
-  // sendInvoiceNow flips status='scheduled' → 'sent' on success, so the row
-  // drops out of this query on the next tick. Channel failures are logged
-  // per-invoice but don't abort the batch.
+  // Atomic UPDATE…RETURNING stamps send_claim_at on each due row only when
+  // it's NULL or older than the 10-minute TTL — two concurrent workers
+  // can't both win the row, and a process crash mid-send leaves the row
+  // reclaimable on the next tick. sendInvoiceNow flips status='scheduled'
+  // → 'sent' on success so the row drops out of this query thereafter.
+  // Channel failures are logged per-invoice but don't abort the batch.
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
     try {
-      const scheduled = await db('invoices')
+      const claimTtlMs = 10 * 60 * 1000;
+      const claimed = await db('invoices')
         .where({ status: 'scheduled' })
-        .where('scheduled_at', '<=', new Date())
         .whereNotNull('scheduled_at')
-        .select('id', 'invoice_number', 'send_method');
+        .where('scheduled_at', '<=', new Date())
+        .where(function () {
+          this.whereNull('send_claim_at')
+            .orWhere('send_claim_at', '<', new Date(Date.now() - claimTtlMs));
+        })
+        .update({ send_claim_at: new Date() })
+        .returning(['id', 'invoice_number', 'send_method']);
 
-      if (scheduled.length === 0) return;
+      if (claimed.length === 0) return;
 
       const { sendInvoiceNow } = require('../routes/admin-invoices');
       let sent = 0;
-      for (const inv of scheduled) {
+      for (const inv of claimed) {
         try {
           const channels = await sendInvoiceNow(inv.id, { sendMethod: inv.send_method || 'both' });
           if (channels.sms.ok || channels.email.ok) sent += 1;
@@ -322,7 +331,7 @@ function initScheduledJobs() {
           logger.error(`Scheduled invoice ${inv.invoice_number} failed: ${e.message}`);
         }
       }
-      logger.info(`Scheduled invoices: ${sent}/${scheduled.length} sent`);
+      logger.info(`Scheduled invoices: ${sent}/${claimed.length} sent`);
     } catch (err) {
       logger.error(`Scheduled invoice cron failed: ${err.message}`);
     }
@@ -331,26 +340,36 @@ function initScheduledJobs() {
   // =========================================================================
   // EVERY 5 MINUTES — Send deferred completion-SMS rows whose time has arrived
   // Body was fully rendered at completion time (template choice depends on
-  // invoice / prepaid state) and stashed on scheduled_services. We just send
-  // it via Twilio and stamp completion_sms_sent_at so it falls out of the
-  // query on the next tick.
+  // invoice / prepaid state) and stashed on scheduled_services. We claim
+  // each row atomically by stamping completion_sms_claim_at — only NULL or
+  // expired (>10min) rows match, so concurrent workers can't both win the
+  // same row. After Twilio confirms, completion_sms_sent_at is set and the
+  // row drops out of the query on the next tick. A crash mid-send leaves
+  // the claim to expire and the row gets retried.
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
     try {
-      const due = await db('scheduled_services')
-        .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-        .whereNotNull('scheduled_services.completion_sms_scheduled_at')
-        .whereNull('scheduled_services.completion_sms_sent_at')
-        .where('scheduled_services.completion_sms_scheduled_at', '<=', new Date())
-        .select(
-          'scheduled_services.id',
-          'scheduled_services.customer_id',
-          'scheduled_services.completion_sms_body',
-          'scheduled_services.completion_sms_message_type',
-          'customers.phone as cust_phone',
-        );
+      const claimTtlMs = 10 * 60 * 1000;
+      const claimed = await db('scheduled_services')
+        .whereNotNull('completion_sms_scheduled_at')
+        .whereNull('completion_sms_sent_at')
+        .where('completion_sms_scheduled_at', '<=', new Date())
+        .where(function () {
+          this.whereNull('completion_sms_claim_at')
+            .orWhere('completion_sms_claim_at', '<', new Date(Date.now() - claimTtlMs));
+        })
+        .update({ completion_sms_claim_at: new Date() })
+        .returning(['id', 'customer_id', 'completion_sms_body', 'completion_sms_message_type']);
 
-      if (due.length === 0) return;
+      if (claimed.length === 0) return;
+
+      // Resolve customer phones for the claimed rows in one query.
+      const customerIds = [...new Set(claimed.map(r => r.customer_id).filter(Boolean))];
+      const customers = customerIds.length
+        ? await db('customers').whereIn('id', customerIds).select('id', 'phone')
+        : [];
+      const phoneByCustomerId = new Map(customers.map(c => [c.id, c.phone]));
+      const due = claimed.map(r => ({ ...r, cust_phone: phoneByCustomerId.get(r.customer_id) || null }));
 
       const TwilioService = require('./twilio');
       let sent = 0;

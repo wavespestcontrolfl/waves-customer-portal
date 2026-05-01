@@ -590,8 +590,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // mint the review row now and bundle its short URL into the one completion
     // SMS instead of firing a second message 90-180 min later. Single message
     // lands higher read-rates than two.
+    //
+    // SKIP this bundling when the completion SMS is deferred (`scheduledSendAt`):
+    // ReviewService.createInline marks `review_requests.sms_sent_at` immediately,
+    // so for a long deferral the review-request follow-up cadence (which keys
+    // off sms_sent_at) would tick before the customer ever sees the underlying
+    // SMS. For deferred sends we fall through to the regular delayed
+    // `ReviewService.create({ delayMinutes })` path below — that scheduler-side
+    // ask fires at scheduledSendAt + 2h, after the actual completion SMS lands.
     let bundledReviewUrl = null;
-    if (sendCompletionSms && requestReview && svc.cust_phone) {
+    if (sendCompletionSms && requestReview && svc.cust_phone && !scheduledSendAt) {
       try {
         const ReviewService = require('../services/review-request');
         bundledReviewUrl = await ReviewService.createInline({

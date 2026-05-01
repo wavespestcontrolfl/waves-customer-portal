@@ -355,6 +355,7 @@ async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = 
             updates.status = 'sent';
             updates.scheduled_at = null;
             updates.send_method = null;
+            updates.send_claim_at = null;
           }
           if (queuedReview) updates.request_review_after_send = false;
           await db('invoices').where({ id: invoiceId }).update(updates);
