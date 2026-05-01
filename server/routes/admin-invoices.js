@@ -342,12 +342,16 @@ async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = 
   if (sms.ok || email.ok) {
     try {
       const inv = await db('invoices').where({ id: invoiceId })
-        .select('status', 'sent_at', 'request_review_after_send', 'customer_id', 'service_record_id')
+        .select('status', 'sent_at', 'scheduled_at', 'request_review_after_send', 'customer_id', 'service_record_id')
         .first();
 
       if (inv) {
         const queuedReview = !!inv.request_review_after_send;
-        const wasScheduled = inv.status === 'scheduled';
+        // Was this dispatch driven by a scheduled-send row? `scheduled_at`
+        // (rather than status) is the queue marker — preserves prior
+        // lifecycle state (viewed / overdue / sent) on resend. Cleared
+        // here so the cron stops re-picking up the row.
+        const wasScheduled = !!inv.scheduled_at;
         // sendViaSMS already flips draft → sent itself, but sendInvoiceEmail
         // doesn't touch status. So an email-only successful send leaves the
         // row at 'draft'. Catch that here so timeline / follow-ups / list
@@ -359,21 +363,21 @@ async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = 
         // clear it AFTER ReviewService.create lands, so a transient throw
         // there doesn't permanently drop the follow-up. If it does throw,
         // the flag remains true and is at least queryable / replayable.
-        if (wasScheduled) {
-          await db('invoices').where({ id: invoiceId }).update({
-            status: 'sent',
-            sent_at: inv.sent_at || new Date(),
-            scheduled_at: null,
-            send_method: null,
-            send_claim_at: null,
-            updated_at: new Date(),
-          });
-        } else if (wasDraft) {
-          await db('invoices').where({ id: invoiceId }).update({
-            status: 'sent',
-            sent_at: new Date(),
-            updated_at: new Date(),
-          });
+        if (wasScheduled || wasDraft) {
+          const updates = { updated_at: new Date() };
+          if (wasScheduled) {
+            updates.scheduled_at = null;
+            updates.send_method = null;
+            updates.send_claim_at = null;
+            // sent_at is bumped only when this is the FIRST send (i.e.
+            // status was draft going in). For a scheduled resend of a
+            // viewed / overdue invoice, the original sent_at stays.
+          }
+          if (wasDraft) {
+            updates.status = 'sent';
+            updates.sent_at = new Date();
+          }
+          await db('invoices').where({ id: invoiceId }).update(updates);
         }
 
         if (requestReview || queuedReview) {
@@ -406,10 +410,12 @@ async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = 
 
 // POST /:id/send — send invoice via SMS + email, immediately or scheduled.
 // Body: { requestReview?: boolean, scheduledAt?: ISO string, sendMethod?: 'sms'|'email'|'both' }
-// When `scheduledAt` is set to a future instant, the row is flipped to
-// status='scheduled' and the scheduler.js 5-minute cron picks it up; the
-// review request (if requested) is queued at scheduledAt + 2h via the
-// existing ReviewService.scheduled_for path. Either channel failing alone
+// When `scheduledAt` is set to a future instant the row's `scheduled_at`
+// column is stamped (status is left alone so a resend of an existing
+// 'overdue' / 'viewed' invoice keeps its lifecycle state); the
+// scheduler.js 5-minute cron picks it up. The review request (if
+// requested) is queued at scheduledAt + 2h via the existing
+// ReviewService.scheduled_for path. Either channel failing alone
 // doesn't abort the other on the immediate path.
 router.post('/:id/send', async (req, res, next) => {
   try {
@@ -442,11 +448,14 @@ router.post('/:id/send', async (req, res, next) => {
       // SMS so customers never get late-night invoice prods.
       const sendAt = bumpPastQuietHours(when);
 
-      // Refuse to downgrade terminal/settled states. Without this guard,
-      // /:id/send with scheduledAt would reset paid/void/refunded rows to
-      // status='scheduled' and the cron would later flip them to 'sent',
-      // breaking the invariants the void / refund / receipt-resend flows
-      // explicitly protect.
+      // Refuse to schedule terminal/settled states — paid/void/refunded
+      // invoices have no valid resend semantics, and downgrading them
+      // breaks invariants the void / refund / receipt-resend flows
+      // protect. Non-terminal lifecycle states (draft / sent / viewed /
+      // overdue) are kept AS-IS — we use `scheduled_at` as the queue
+      // marker, not the status column, so an overdue invoice that gets a
+      // scheduled resend stays in 'overdue' filters until the customer
+      // actually pays.
       const current = await db('invoices').where({ id }).select('status').first();
       if (!current) return res.status(404).json({ error: 'Invoice not found' });
       if (['paid', 'void', 'refunded'].includes(current.status)) {
@@ -454,7 +463,6 @@ router.post('/:id/send', async (req, res, next) => {
       }
 
       const updated = await db('invoices').where({ id }).update({
-        status: 'scheduled',
         scheduled_at: sendAt,
         send_method: finalSendMethod,
         request_review_after_send: !!requestReview,

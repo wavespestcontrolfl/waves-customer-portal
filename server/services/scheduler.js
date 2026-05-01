@@ -297,20 +297,22 @@ function initScheduledJobs() {
 
   // =========================================================================
   // EVERY 5 MINUTES — Send scheduled invoices whose time has arrived
-  // Atomic UPDATE…RETURNING stamps send_claim_at on each due row only when
-  // it's NULL or older than the 10-minute TTL — two concurrent workers
-  // can't both win the row, and a process crash mid-send leaves the row
-  // reclaimable on the next tick. sendInvoiceNow flips status='scheduled'
-  // → 'sent' on success so the row drops out of this query thereafter.
-  // Channel failures are logged per-invoice but don't abort the batch.
+  // Queue marker is `scheduled_at` (not the status column) so a scheduled
+  // resend on an existing 'overdue' / 'viewed' invoice keeps its lifecycle
+  // state. Atomic UPDATE…RETURNING stamps send_claim_at on each due row
+  // only when it's NULL or older than the 10-minute TTL — two concurrent
+  // workers can't both win the same row, and a crash mid-send leaves the
+  // row reclaimable on the next tick. Terminal states (paid / void /
+  // refunded) are explicitly skipped here as defense-in-depth in case
+  // the row settled between scheduling and dispatch.
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
     try {
       const claimTtlMs = 10 * 60 * 1000;
       const claimed = await db('invoices')
-        .where({ status: 'scheduled' })
         .whereNotNull('scheduled_at')
         .where('scheduled_at', '<=', new Date())
+        .whereNotIn('status', ['paid', 'void', 'refunded'])
         .where(function () {
           this.whereNull('send_claim_at')
             .orWhere('send_claim_at', '<', new Date(Date.now() - claimTtlMs));
