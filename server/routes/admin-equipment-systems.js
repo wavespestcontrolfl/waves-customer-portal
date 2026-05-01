@@ -62,6 +62,19 @@ function pickCalibrationFields(body) {
 // so a malformed admin request becomes a client error, not a server one.
 const NOT_NULL_COLUMNS = ['carrier_gal_per_1000', 'active'];
 
+// Boolean columns. Postgres won't coerce strings like "maybe" or "true"
+// to booleans without complaint — it'll throw "invalid input syntax
+// for type boolean" which surfaces as a 500. Type-check at the boundary.
+const BOOLEAN_COLUMNS = ['active'];
+
+// String column max-lengths from the schema (migration 20260430000008).
+// Submitting more than the column allows produces "value too long for
+// type character varying(N)" → 500. Reject upstream with a 400 that
+// names the field and limit so the caller can fix the input.
+const STRING_MAX_LENGTHS = {
+  engine_rpm_setting: 30,
+};
+
 // Date fields the route accepts from clients. We must validate the
 // parsed Date is finite before letting it reach Postgres — `new Date()`
 // will happily return Invalid Date for garbage input, then bubble as
@@ -113,6 +126,37 @@ function validateCalibrationPayload(payload, { requireCarrier = true } = {}) {
       && payload[k] === null
     ) {
       errors.push(`${k} cannot be null`);
+    }
+  }
+
+  // ── boolean type check ─────────────────────────────────────────────
+  // `{"active": "maybe"}` would pass the null check above, then
+  // Postgres would reject the string→boolean cast as a 500. Reject
+  // at the boundary; only true / false land in the update object.
+  for (const k of BOOLEAN_COLUMNS) {
+    if (
+      Object.prototype.hasOwnProperty.call(payload, k)
+      && payload[k] !== null
+      && payload[k] !== undefined
+      && typeof payload[k] !== 'boolean'
+    ) {
+      errors.push(`${k} must be a boolean (true or false)`);
+    }
+  }
+
+  // ── string length caps ─────────────────────────────────────────────
+  // Schema declares string column sizes; over-length input throws
+  // "value too long for type character varying(N)" → 500. Cap them
+  // here so the validator owns the constraint, not Postgres.
+  for (const [k, max] of Object.entries(STRING_MAX_LENGTHS)) {
+    if (
+      Object.prototype.hasOwnProperty.call(payload, k)
+      && payload[k] !== null
+      && payload[k] !== undefined
+      && typeof payload[k] === 'string'
+      && payload[k].length > max
+    ) {
+      errors.push(`${k} must be ${max} characters or fewer`);
     }
   }
 
