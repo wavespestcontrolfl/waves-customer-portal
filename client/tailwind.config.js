@@ -1,7 +1,6 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
-  darkMode: false,
   corePlugins: {
     preflight: false, // Don't reset browser defaults — the portal uses inline styles
   },

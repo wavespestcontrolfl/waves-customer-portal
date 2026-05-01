@@ -3,16 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
-const { etDateString } = require('../utils/datetime-et');
 const VoiceResponse = require('twilio').twiml.VoiceResponse;
-
-function capitalizeName(name) {
-  if (!name) return '';
-  return name.trim().toLowerCase()
-    .replace(/\b\w/g, c => c.toUpperCase())
-    .replace(/\bMc(\w)/g, (_, c) => 'Mc' + c.toUpperCase())
-    .replace(/\bO'(\w)/g, (_, c) => "O'" + c.toUpperCase());
-}
 
 // Phone normalization consolidated to server/utils/phone.js (PR1 of
 // call-triage work — see docs/call-triage-discovery.md §9). The unified
@@ -57,32 +48,7 @@ router.post('/voice', async (req, res) => {
           const lookupData = await lookupRes.json();
           const callerName = lookupData.caller_name?.caller_name;
           if (callerName && callerName !== 'UNKNOWN' && callerName.trim().length > 0) {
-            // Create a lightweight customer record with the caller name
-            const nameParts = callerName.trim().split(/\s+/);
-            const firstName = capitalizeName(nameParts[0] || 'Unknown');
-            const lastName = capitalizeName(nameParts.slice(1).join(' ') || '');
-            try {
-              const [newCust] = await db('customers').insert({
-                first_name: firstName,
-                last_name: lastName,
-                phone: From,
-                address_line1: '', city: '', state: 'FL', zip: '',
-                lead_source: 'twilio_lookup',
-                pipeline_stage: 'new_lead',
-                pipeline_stage_changed_at: new Date(),
-                last_contact_date: new Date(),
-                last_contact_type: 'call_inbound',
-                member_since: etDateString(),
-                waveguard_tier: null,
-                crm_notes: `Auto-created from Twilio Lookup: ${callerName}`,
-              }).returning('*');
-              customer = newCust;
-              logger.info(`[CallerID] Created customer from lookup: ${callerName} (${From})`);
-            } catch (createErr) {
-              if (!createErr.message?.includes('duplicate') && !createErr.message?.includes('unique')) {
-                logger.error(`[CallerID] Failed to create customer: ${createErr.message}`);
-              }
-            }
+            logger.info(`[CallerID] Lookup matched for inbound call ${CallSid}; deferring customer creation until transcript confirms first name`);
           }
         }
       } catch (lookupErr) {
@@ -252,6 +218,8 @@ router.post('/recording-status', async (req, res) => {
       // first means the by-CallSid match below only catches the rare
       // single-leg / non-dial cases (e.g. voicemail recording on the parent).
       const ParentCallSid = req.body.ParentCallSid || null;
+      const requestFrom = req.body.From || null;
+      const requestTo = req.body.To || null;
 
       let updated = 0;
       let matchedSid = null;
@@ -270,6 +238,24 @@ router.post('/recording-status', async (req, res) => {
 
       if (updated > 0) {
         logger.info(`Recording saved: ${matchedSid} → ${RecordingSid} (${RecordingDuration}s)`);
+      } else if (!ParentCallSid && requestFrom && requestTo) {
+        const primaryCallSid = CallSid;
+        try {
+          await db('call_log').insert({
+            direction: 'inbound',
+            from_phone: toE164(requestFrom),
+            to_phone: toE164(requestTo),
+            twilio_call_sid: primaryCallSid,
+            call_sid: CallSid,
+            status: 'completed',
+            metadata: JSON.stringify({ source: 'twilio_studio_recording_status' }),
+            ...recordingData,
+          });
+          matchedSid = primaryCallSid;
+          logger.info(`[recording-status] Created Studio-originated call_log row ${primaryCallSid} from recording callback ${CallSid}`);
+        } catch (insertErr) {
+          logger.warn(`[recording-status] Failed to create Studio-originated call_log row for CallSid=${CallSid}: ${insertErr.message}`);
+        }
       } else {
         // No parent row found by either SID. The previous fallback inserted
         // a synthetic row using req.body.To/From, but on the dial-leg

@@ -635,7 +635,7 @@ function ConfigCard({ config, onUpdate }) {
               />
               <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
                 <button onClick={handleRawSave} disabled={saving} style={{ fontSize: 11, padding: '4px 12px', borderRadius: 4, border: 'none', cursor: 'pointer', background: D.green, color: D.white }}>{saving ? '...' : 'Save'}</button>
-                <button onClick={() => setRawEdit(false)} style={{ fontSize: 11, padding: '4px 12px', borderRadius: 4, border: 'none', cursor: 'pointer', background: 'transparent', color: D.muted, border: `1px solid ${D.border}` }}>Cancel</button>
+                <button onClick={() => setRawEdit(false)} style={{ fontSize: 11, padding: '4px 12px', borderRadius: 4, cursor: 'pointer', background: 'transparent', color: D.muted, border: `1px solid ${D.border}` }}>Cancel</button>
               </div>
             </div>
           ) : isSimple ? (
@@ -695,7 +695,7 @@ function LawnBracketsTab() {
             key={tk}
             onClick={() => setActiveTrack(tk)}
             style={{
-              padding: '6px 14px', borderRadius: 6, fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer',
+              padding: '6px 14px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
               background: activeTrack === tk ? D.green : D.card,
               color: activeTrack === tk ? D.white : D.muted,
               border: `1px solid ${activeTrack === tk ? D.green : D.border}`,
