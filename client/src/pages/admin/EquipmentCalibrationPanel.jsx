@@ -50,13 +50,24 @@ export default function EquipmentCalibrationPanel() {
 
   // When the tech picks a system, fetch its current active calibration
   // so they can see what they're about to supersede.
+  //
+  // Stale-response guard: if the tech rapidly switches systems, an older
+  // fetch could resolve after a newer one and overwrite the displayed
+  // active calibration with data for the wrong rig. The cleanup function
+  // sets `cancelled = true` before the next effect runs, and every state
+  // setter checks it before applying. This is especially important here
+  // because the displayed "Current active calibration" is what the tech
+  // sees right before saving a superseding row — wrong display could
+  // cause them to overwrite the wrong rig.
   useEffect(() => {
-    if (!selectedSystemId) { setActiveCalibration(null); return; }
+    if (!selectedSystemId) { setActiveCalibration(null); return undefined; }
+    let cancelled = false;
     setLoading(true);
     adminFetch(`/admin/equipment-systems/${selectedSystemId}`)
-      .then(d => setActiveCalibration(d.calibration || null))
-      .catch(() => setActiveCalibration(null))
-      .finally(() => setLoading(false));
+      .then((d) => { if (!cancelled) setActiveCalibration(d.calibration || null); })
+      .catch(() => { if (!cancelled) setActiveCalibration(null); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, [selectedSystemId]);
 
   const computedRate = useMemo(

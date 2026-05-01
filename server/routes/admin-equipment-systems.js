@@ -223,8 +223,16 @@ router.put('/calibrations/:id', async (req, res, next) => {
     // and the unique-violation catch below — so blindly copying
     // payload.active into the update is safe at this point. Other
     // NOT NULL columns are null-rejected upfront in the validator.
+    //
+    // Iterate over CALIBRATION_COLUMNS rather than a hand-curated
+    // subset. The previous version dropped fields the validator
+    // accepted (test_area_sqft, captured_gallons, swath_width_ft,
+    // pass_time_seconds, calibrated_at) — callers got a 200 but
+    // the values were silently discarded. Anything in
+    // CALIBRATION_COLUMNS has been validated; anything not in it
+    // (e.g. technician_id) is intentionally excluded.
     const update = { updated_at: new Date() };
-    for (const k of ['notes', 'active', 'expires_at', 'carrier_gal_per_1000', 'pressure_psi', 'engine_rpm_setting']) {
+    for (const k of CALIBRATION_COLUMNS) {
       if (Object.prototype.hasOwnProperty.call(payload, k)) update[k] = payload[k];
     }
 
@@ -295,39 +303,61 @@ router.post('/:id/calibrations', async (req, res, next) => {
       ? new Date(payload.expires_at)
       : new Date(calibratedAt.getTime() + DEFAULT_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
 
-    const saved = await db.transaction(async (trx) => {
-      // Deactivate the prior active row for this system in the same
-      // trx the new insert runs in. The unique partial index on
-      // (equipment_system_id) WHERE active=true will reject a parallel
-      // attempt — this trx makes that the "good" race outcome instead
-      // of the "panic" one.
-      await trx('equipment_calibrations')
-        .where({ equipment_system_id: systemId, active: true })
-        .update({ active: false, updated_at: new Date() });
+    let saved;
+    try {
+      saved = await db.transaction(async (trx) => {
+        // Deactivate the prior active row for this system in the same
+        // trx the new insert runs in. The unique partial index on
+        // (equipment_system_id) WHERE active=true will reject a parallel
+        // attempt — this trx makes that the "good" race outcome instead
+        // of the "panic" one.
+        await trx('equipment_calibrations')
+          .where({ equipment_system_id: systemId, active: true })
+          .update({ active: false, updated_at: new Date() });
 
-      const [row] = await trx('equipment_calibrations').insert({
-        equipment_system_id: systemId,
-        // technician_id is auth-derived only — never trust the payload.
-        // The original `payload.technician_id ?? req.technicianId` let
-        // any logged-in tech attribute a calibration to a different
-        // tech by posting their UUID, which would corrupt the audit
-        // trail. A future "backfill an old calibration as someone
-        // else" path would need an explicit admin-only override route.
-        technician_id: req.technicianId ?? null,
-        carrier_gal_per_1000: payload.carrier_gal_per_1000,
-        test_area_sqft: payload.test_area_sqft ?? null,
-        captured_gallons: payload.captured_gallons ?? null,
-        pressure_psi: payload.pressure_psi ?? null,
-        engine_rpm_setting: payload.engine_rpm_setting ?? null,
-        swath_width_ft: payload.swath_width_ft ?? null,
-        pass_time_seconds: payload.pass_time_seconds ?? null,
-        calibrated_at: calibratedAt,
-        expires_at: expiresAt,
-        active: true,
-        notes: payload.notes ?? null,
-      }).returning('*');
-      return row;
-    });
+        const [row] = await trx('equipment_calibrations').insert({
+          equipment_system_id: systemId,
+          // technician_id is auth-derived only — never trust the payload.
+          // The original `payload.technician_id ?? req.technicianId` let
+          // any logged-in tech attribute a calibration to a different
+          // tech by posting their UUID, which would corrupt the audit
+          // trail. A future "backfill an old calibration as someone
+          // else" path would need an explicit admin-only override route.
+          technician_id: req.technicianId ?? null,
+          carrier_gal_per_1000: payload.carrier_gal_per_1000,
+          test_area_sqft: payload.test_area_sqft ?? null,
+          captured_gallons: payload.captured_gallons ?? null,
+          pressure_psi: payload.pressure_psi ?? null,
+          engine_rpm_setting: payload.engine_rpm_setting ?? null,
+          swath_width_ft: payload.swath_width_ft ?? null,
+          pass_time_seconds: payload.pass_time_seconds ?? null,
+          calibrated_at: calibratedAt,
+          expires_at: expiresAt,
+          active: true,
+          notes: payload.notes ?? null,
+        }).returning('*');
+        return row;
+      });
+    } catch (err) {
+      // Race-window catch — same pattern as the PUT path. Two concurrent
+      // POSTs for the same system can both pass the deactivate-prior
+      // step (each finds no active row at its read), then collide at
+      // the partial unique index. Without this, the loser surfaces as
+      // a 500 instead of a clean client conflict.
+      const isActiveIndexViolation = err
+        && err.code === '23505'
+        && (err.constraint === 'idx_eqcal_one_active_per_system'
+            || /idx_eqcal_one_active_per_system/.test(String(err.message || '')));
+      if (isActiveIndexViolation) {
+        return res.status(409).json({
+          error: 'Calibration write conflicted with a concurrent calibration for the same system',
+          details: [
+            'Another calibration was saved for this system at the same time. Refresh the calibration list and try again.',
+          ],
+        });
+      }
+      throw err;
+    }
 
     logger.info?.(`[equipment] calibration saved system=${systemId} carrier=${saved.carrier_gal_per_1000} by tech=${req.technicianId}`);
     res.json({ calibration: saved });
