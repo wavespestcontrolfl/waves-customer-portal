@@ -87,13 +87,21 @@ const STRING_MAX_LENGTHS = {
 // a "invalid input syntax for type timestamp" 500.
 const DATE_COLUMNS = ['calibrated_at', 'expires_at'];
 
-// Stricter Number() that rejects empty / whitespace-only strings.
-// Without this, `Number('')` and `Number(' ')` both return 0 — meaning
-// a request like {"test_area_sqft": ""} would silently pass our finite
-// + non-negative checks, then Postgres would reject the empty string
-// at the integer/numeric column with 22P02 → 500 instead of a clean
-// 400. Returns NaN for anything else that doesn't parse.
+// Stricter Number() that only accepts actual numbers and numeric
+// strings. Without these guards, JS's coercion table lets booleans,
+// arrays, and various objects slip past:
+//   Number(true)    === 1
+//   Number(false)   === 0
+//   Number([])      === 0
+//   Number([1])     === 1
+//   Number('')      === 0
+//   Number(' ')     === 0
+// Postgres then rejects whichever non-numeric primitive bubbles
+// through with 22P02 → 500 instead of a clean 400. Limit the
+// accepted input shape to number-or-string and reject empty /
+// whitespace-only strings explicitly.
 function parseFiniteNumber(v) {
+  if (typeof v !== 'number' && typeof v !== 'string') return NaN;
   if (typeof v === 'string' && v.trim() === '') return NaN;
   const n = Number(v);
   return Number.isFinite(n) ? n : NaN;
