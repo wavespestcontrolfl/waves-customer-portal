@@ -175,13 +175,22 @@ function validateCalibrationPayload(payload, { requireCarrier = true } = {}) {
   }
 
   // ── nullable numeric columns ───────────────────────────────────────
+  // test_area_sqft is the only INTEGER column in the calibration
+  // numeric set (others are decimal). The schema would silently round
+  // a fractional input or 500 on the integer cast, so enforce
+  // Number.isInteger upfront.
+  const INTEGER_NUMERIC_COLUMNS = new Set(['test_area_sqft']);
   for (const k of [
     'test_area_sqft', 'captured_gallons',
     'pressure_psi', 'swath_width_ft', 'pass_time_seconds',
   ]) {
     if (payload[k] != null) {
       const n = parseFiniteNumber(payload[k]);
-      if (Number.isNaN(n) || n < 0) errors.push(`${k} must be a non-negative number`);
+      if (Number.isNaN(n) || n < 0) {
+        errors.push(`${k} must be a non-negative number`);
+      } else if (INTEGER_NUMERIC_COLUMNS.has(k) && !Number.isInteger(n)) {
+        errors.push(`${k} must be a non-negative integer`);
+      }
     }
   }
 

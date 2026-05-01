@@ -65,8 +65,13 @@ function validateProfile(payload) {
     errors.push(`irrigation_type must be one of: ${IRRIGATION_TYPES.join(', ')}`);
   }
   if (payload.lawn_sqft != null) {
+    // The schema column is integer; the validator must enforce that
+    // upfront. Without Number.isInteger, fractional inputs like
+    // 1500.7 would coerce on Postgres write — silently rounding the
+    // stored value or 500-ing depending on driver. The error message
+    // already promised "integer", so the check now matches.
     const n = Number(payload.lawn_sqft);
-    if (!Number.isFinite(n) || n < 0 || n > 1_000_000) {
+    if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0 || n > 1_000_000) {
       errors.push('lawn_sqft must be a non-negative integer ≤ 1,000,000');
     }
   }
@@ -117,23 +122,22 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
     const errors = validateProfile(fields);
     if (errors.length) return res.status(400).json({ error: 'Invalid payload', details: errors });
 
-    const existing = await db('customer_turf_profiles')
-      .where({ customer_id: customerId })
-      .first();
+    // Atomic upsert. The previous SELECT-then-conditional-INSERT/UPDATE
+    // had a TOCTOU window: two concurrent PUTs could both observe
+    // "no profile exists," both attempt INSERT, and the second hit
+    // the unique customer_id constraint → 500 for a perfectly valid
+    // request. ON CONFLICT DO UPDATE collapses both branches into one
+    // statement that the DB enforces atomically. fields ∪ updated_at
+    // is the merge set; customer_id stays the conflict key and is
+    // never mutated.
+    const insertRow = { customer_id: customerId, ...fields };
+    const [saved] = await db('customer_turf_profiles')
+      .insert(insertRow)
+      .onConflict('customer_id')
+      .merge({ ...fields, updated_at: new Date() })
+      .returning('*');
 
-    let saved;
-    if (existing) {
-      [saved] = await db('customer_turf_profiles')
-        .where({ id: existing.id })
-        .update({ ...fields, updated_at: new Date() })
-        .returning('*');
-    } else {
-      [saved] = await db('customer_turf_profiles')
-        .insert({ customer_id: customerId, ...fields })
-        .returning('*');
-    }
-
-    logger.info?.(`[turf-profile] ${existing ? 'updated' : 'created'} customer=${customerId} by tech=${req.technicianId}`);
+    logger.info?.(`[turf-profile] saved customer=${customerId} by tech=${req.technicianId}`);
     res.json({ profile: saved });
   } catch (err) {
     next(err);

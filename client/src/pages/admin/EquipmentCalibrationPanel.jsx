@@ -83,6 +83,12 @@ export default function EquipmentCalibrationPanel() {
     if (!canSave) return;
     setSaving(true);
     setSavedAt(null);
+    // Capture the system-at-save so we can detect a switch during the
+    // POST roundtrip. Without this, clicking Save for system A and
+    // then switching to system B before the response resolves would
+    // call setActiveCalibration with A's calibration while the UI is
+    // showing B — the tech would see B's name + A's carrier rate.
+    const systemAtSave = selectedSystemId;
     try {
       const payload = {
         carrier_gal_per_1000: computedRate,
@@ -93,10 +99,15 @@ export default function EquipmentCalibrationPanel() {
       if (enginRpm !== '') payload.engine_rpm_setting = String(enginRpm);
       if (notes !== '') payload.notes = notes;
 
-      const d = await adminFetch(`/admin/equipment-systems/${selectedSystemId}/calibrations`, {
+      const d = await adminFetch(`/admin/equipment-systems/${systemAtSave}/calibrations`, {
         method: 'POST',
         body: JSON.stringify(payload),
       });
+      // Only commit the response into UI state if the user is still
+      // looking at the system we saved against. Otherwise, the
+      // useEffect on selectedSystemId will refetch the new system's
+      // calibration and we leave the response on the floor.
+      if (systemAtSave !== selectedSystemId) return;
       setActiveCalibration(d.calibration);
       setSavedAt(new Date());
       // Clear the form except the picked system — tech can immediately
