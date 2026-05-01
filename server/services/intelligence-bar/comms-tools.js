@@ -179,7 +179,7 @@ async function resolveCustomer(input) {
     return db('customers').where(function () {
       const s = `%${input.customer_name}%`;
       this.whereILike('first_name', s).orWhereILike('last_name', s)
-        .orWhereRaw("first_name || ' ' || last_name ILIKE ?", [s]);
+        .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s]);
     }).first();
   }
   if (input.phone) {
