@@ -60,7 +60,13 @@ function pickCalibrationFields(body) {
 // for any of these would pass the value into the update object, then
 // get rejected at the DB → 500 instead of a clean 400. Reject up front
 // so a malformed admin request becomes a client error, not a server one.
-const NOT_NULL_COLUMNS = ['carrier_gal_per_1000', 'active'];
+//
+// calibrated_at is included because the PUT update loop now iterates
+// CALIBRATION_COLUMNS (so callers can edit calibrated_at). Without this,
+// `{"calibrated_at": null}` slips past the validator and crashes the
+// NOT NULL constraint. Was a regression from the drop-validated-fields
+// fix in 184deae — caught by Codex on 41cd8b6.
+const NOT_NULL_COLUMNS = ['carrier_gal_per_1000', 'active', 'calibrated_at'];
 
 // Boolean columns. Postgres won't coerce strings like "maybe" or "true"
 // to booleans without complaint — it'll throw "invalid input syntax
