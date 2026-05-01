@@ -1132,6 +1132,21 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const handleCreate = async () => {
     if (!selectedCustomer) { showToast('Select a customer'); return; }
     if (!lineItems.some(i => i.description && i.unit_price > 0)) { showToast('Add at least one line item'); return; }
+
+    // Validate the scheduled-send time BEFORE creating the invoice. If the
+    // pre-fill has gone stale (user left the form open past the suggested
+    // moment), we want to bail before the POST so a retry doesn't leave
+    // an orphan draft on the customer.
+    let scheduledIso = null;
+    if (sendAfterCreate && scheduleSend) {
+      const when = scheduledAt ? new Date(scheduledAt) : null;
+      if (!when || isNaN(when.getTime()) || when <= new Date()) {
+        showToast('Pick a future scheduled time');
+        return;
+      }
+      scheduledIso = when.toISOString();
+    }
+
     setSaving(true);
 
     try {
@@ -1148,16 +1163,6 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
       const invoice = await adminFetch('/admin/invoices', { method: 'POST', body: JSON.stringify(body) });
 
       if (sendAfterCreate && invoice.id) {
-        let scheduledIso = null;
-        if (scheduleSend) {
-          const when = scheduledAt ? new Date(scheduledAt) : null;
-          if (!when || isNaN(when.getTime()) || when <= new Date()) {
-            showToast('Pick a future scheduled time');
-            setSaving(false);
-            return;
-          }
-          scheduledIso = when.toISOString();
-        }
         await adminFetch(`/admin/invoices/${invoice.id}/send`, {
           method: 'POST',
           body: JSON.stringify({ requestReview, scheduledAt: scheduledIso }),

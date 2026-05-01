@@ -307,7 +307,7 @@ router.put('/:id', async (req, res, next) => {
 // phone / email is treated as channel-skipped, not an error. Idempotent
 // cleanup at the bottom transitions a status='scheduled' row back to 'sent'
 // once one channel lands so the cron can stop picking it up.
-async function sendInvoiceNow(invoiceId, { sendMethod = 'both' } = {}) {
+async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = false } = {}) {
   const { sendInvoiceEmail } = require('../services/invoice-email');
 
   const sms = { ok: false };
@@ -334,17 +334,45 @@ async function sendInvoiceNow(invoiceId, { sendMethod = 'both' } = {}) {
 
   // InvoiceService.sendViaSMS only flips draft → sent. A scheduled-send row
   // therefore stays status='scheduled' after dispatch; clear it explicitly
-  // so the cron tick stops re-picking it up.
+  // so the cron tick stops re-picking it up. We also fire any deferred
+  // review-request the user opted into at scheduling time — only now that
+  // we know at least one channel landed, mirroring the immediate-path
+  // gating so a delivery failure doesn't ask the customer to review an
+  // invoice they never got.
   if (sms.ok || email.ok) {
     try {
-      const inv = await db('invoices').where({ id: invoiceId }).select('status').first();
-      if (inv && inv.status === 'scheduled') {
-        await db('invoices').where({ id: invoiceId }).update({
-          status: 'sent',
-          scheduled_at: null,
-          send_method: null,
-          updated_at: new Date(),
-        });
+      const inv = await db('invoices').where({ id: invoiceId })
+        .select('status', 'request_review_after_send', 'customer_id', 'service_record_id')
+        .first();
+
+      if (inv) {
+        const queuedReview = !!inv.request_review_after_send;
+        const wasScheduled = inv.status === 'scheduled';
+
+        if (wasScheduled || queuedReview) {
+          const updates = { updated_at: new Date() };
+          if (wasScheduled) {
+            updates.status = 'sent';
+            updates.scheduled_at = null;
+            updates.send_method = null;
+          }
+          if (queuedReview) updates.request_review_after_send = false;
+          await db('invoices').where({ id: invoiceId }).update(updates);
+        }
+
+        if (requestReview || queuedReview) {
+          try {
+            const ReviewService = require('../services/review-request');
+            await ReviewService.create({
+              customerId: inv.customer_id,
+              serviceRecordId: inv.service_record_id || null,
+              triggeredBy: 'auto',
+              delayMinutes: 120,
+            });
+          } catch (err) {
+            logger.error(`[admin-invoices] Review request schedule failed: ${err.message}`);
+          }
+        }
       }
     } catch (err) {
       logger.error(`[admin-invoices] post-send schedule cleanup failed: ${err.message}`);
@@ -367,6 +395,11 @@ router.post('/:id/send', async (req, res, next) => {
     const { requestReview, scheduledAt, sendMethod } = req.body || {};
 
     // ── SCHEDULED PATH ──
+    // Persist the user's review-request intent on the row instead of
+    // queuing it now: sendInvoiceNow fires it post-delivery, gating on
+    // sms.ok || email.ok the same way the immediate path does. That way
+    // a cron-time delivery failure doesn't leave the customer with a
+    // review prompt for an invoice they never received.
     if (scheduledAt) {
       const when = new Date(scheduledAt);
       if (isNaN(when.getTime())) return res.status(400).json({ error: 'Invalid scheduledAt' });
@@ -376,56 +409,21 @@ router.post('/:id/send', async (req, res, next) => {
         status: 'scheduled',
         scheduled_at: when,
         send_method: sendMethod || 'both',
+        request_review_after_send: !!requestReview,
         updated_at: new Date(),
       });
       if (!updated) return res.status(404).json({ error: 'Invoice not found' });
-
-      // Queue the review request for scheduledAt + 2h. ReviewService.create
-      // converts delayMinutes → scheduled_for relative to "now"; compute the
-      // delay from now so the math lands on the right absolute moment.
-      if (requestReview) {
-        try {
-          const ReviewService = require('../services/review-request');
-          const inv = await db('invoices').where({ id }).select('customer_id', 'service_record_id').first();
-          if (inv) {
-            const delayMinutes = Math.max(1, Math.ceil((when.getTime() + 120 * 60000 - Date.now()) / 60000));
-            await ReviewService.create({
-              customerId: inv.customer_id,
-              serviceRecordId: inv.service_record_id || null,
-              triggeredBy: 'auto',
-              delayMinutes,
-            });
-          }
-        } catch (err) {
-          logger.error(`[admin-invoices] Review request schedule failed: ${err.message}`);
-        }
-      }
 
       return res.json({ ok: true, scheduled: true, scheduledAt: when.toISOString() });
     }
 
     // ── IMMEDIATE PATH ──
-    const { sms, email } = await sendInvoiceNow(id, { sendMethod: sendMethod || 'both' });
-
-    // Schedule a delayed review request when at least one channel landed.
-    // ReviewService dedupes on service_record_id, so a follow-up triggered
-    // here won't double up with one already scheduled at service completion.
-    if (requestReview && (sms.ok || email.ok)) {
-      try {
-        const ReviewService = require('../services/review-request');
-        const inv = await db('invoices').where({ id }).select('customer_id', 'service_record_id').first();
-        if (inv) {
-          await ReviewService.create({
-            customerId: inv.customer_id,
-            serviceRecordId: inv.service_record_id || null,
-            triggeredBy: 'auto',
-            delayMinutes: 120,
-          });
-        }
-      } catch (err) {
-        logger.error(`[admin-invoices] Review request schedule failed: ${err.message}`);
-      }
-    }
+    // sendInvoiceNow handles the review-request gating internally so the
+    // immediate and cron-driven paths share one source of truth.
+    const { sms, email } = await sendInvoiceNow(id, {
+      sendMethod: sendMethod || 'both',
+      requestReview: !!requestReview,
+    });
 
     if (!sms.ok && !email.ok) {
       return res.status(500).json({ ok: false, sms, email });
