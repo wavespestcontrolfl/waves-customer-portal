@@ -4,7 +4,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const InvoiceService = require('../services/invoice');
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, bumpPastQuietHours } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -302,34 +302,192 @@ router.put('/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /:id/send — send invoice via SMS + email
-// SMS fires via InvoiceService.sendViaSMS (the invoice_sent template);
-// email via the branded sendInvoiceEmail helper with the PDF attached.
-// Either channel failing alone doesn't abort the other — returns per-
-// channel status so the UI can toast accordingly. Missing phone / email
-// on the customer record is treated as "channel skipped", not an error.
-router.post('/:id/send', async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const { sendInvoiceEmail } = require('../services/invoice-email');
+// Shared dispatch — used by the route's immediate path AND the scheduled-send
+// cron tick. Either channel failing alone doesn't abort the other; missing
+// phone / email is treated as channel-skipped, not an error. Idempotent
+// cleanup at the bottom transitions a status='scheduled' row back to 'sent'
+// once one channel lands so the cron can stop picking it up.
+async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = false } = {}) {
+  const { sendInvoiceEmail } = require('../services/invoice-email');
 
-    const sms = { ok: false };
-    const email = { ok: false };
+  const sms = { ok: false };
+  const email = { ok: false };
 
+  if (sendMethod === 'sms' || sendMethod === 'both') {
     try {
-      await InvoiceService.sendViaSMS(id);
+      await InvoiceService.sendViaSMS(invoiceId);
       sms.ok = true;
     } catch (err) {
       sms.error = err.message;
     }
+  }
 
+  if (sendMethod === 'email' || sendMethod === 'both') {
     try {
-      const r = await sendInvoiceEmail(id);
+      const r = await sendInvoiceEmail(invoiceId);
       if (r?.ok) email.ok = true;
       else if (r?.error) email.error = r.error;
     } catch (err) {
       email.error = err.message;
     }
+  }
+
+  // InvoiceService.sendViaSMS only flips draft → sent. A scheduled-send row
+  // therefore stays status='scheduled' after dispatch; clear it explicitly
+  // so the cron tick stops re-picking it up. We also fire any deferred
+  // review-request the user opted into at scheduling time — only now that
+  // we know at least one channel landed, mirroring the immediate-path
+  // gating so a delivery failure doesn't ask the customer to review an
+  // invoice they never got.
+  if (sms.ok || email.ok) {
+    try {
+      const inv = await db('invoices').where({ id: invoiceId })
+        .select('status', 'sent_at', 'scheduled_at', 'request_review_after_send', 'customer_id', 'service_record_id')
+        .first();
+
+      if (inv) {
+        const queuedReview = !!inv.request_review_after_send;
+        // Was this dispatch driven by a scheduled-send row? `scheduled_at`
+        // (rather than status) is the queue marker — preserves prior
+        // lifecycle state (viewed / overdue / sent) on resend. Cleared
+        // here so the cron stops re-picking up the row.
+        const wasScheduled = !!inv.scheduled_at;
+        // sendViaSMS already flips draft → sent itself, but sendInvoiceEmail
+        // doesn't touch status. So an email-only successful send leaves the
+        // row at 'draft'. Catch that here so timeline / follow-ups / list
+        // filters reflect the actual delivery state.
+        const wasDraft = inv.status === 'draft';
+
+        // Status / scheduling cleanup happens unconditionally on success.
+        // The deferred-review flag stays set across this update — we only
+        // clear it AFTER ReviewService.create lands, so a transient throw
+        // there doesn't permanently drop the follow-up. If it does throw,
+        // the flag remains true and is at least queryable / replayable.
+        if (wasScheduled || wasDraft) {
+          const updates = { updated_at: new Date() };
+          if (wasScheduled) {
+            updates.scheduled_at = null;
+            updates.send_method = null;
+            updates.send_claim_at = null;
+            // sent_at is bumped only when this is the FIRST send (i.e.
+            // status was draft going in). For a scheduled resend of a
+            // viewed / overdue invoice, the original sent_at stays.
+          }
+          if (wasDraft) {
+            updates.status = 'sent';
+            updates.sent_at = new Date();
+          }
+          await db('invoices').where({ id: invoiceId }).update(updates);
+        }
+
+        if (requestReview || queuedReview) {
+          try {
+            const ReviewService = require('../services/review-request');
+            await ReviewService.create({
+              customerId: inv.customer_id,
+              serviceRecordId: inv.service_record_id || null,
+              triggeredBy: 'auto',
+              delayMinutes: 120,
+            });
+            if (queuedReview) {
+              await db('invoices').where({ id: invoiceId }).update({
+                request_review_after_send: false,
+                updated_at: new Date(),
+              });
+            }
+          } catch (err) {
+            logger.error(`[admin-invoices] Review request schedule failed: ${err.message}`);
+          }
+        }
+      }
+    } catch (err) {
+      logger.error(`[admin-invoices] post-send schedule cleanup failed: ${err.message}`);
+    }
+  }
+
+  return { sms, email };
+}
+
+// POST /:id/send — send invoice via SMS + email, immediately or scheduled.
+// Body: { requestReview?: boolean, scheduledAt?: ISO string, sendMethod?: 'sms'|'email'|'both' }
+// When `scheduledAt` is set to a future instant the row's `scheduled_at`
+// column is stamped (status is left alone so a resend of an existing
+// 'overdue' / 'viewed' invoice keeps its lifecycle state); the
+// scheduler.js 5-minute cron picks it up. The review request (if
+// requested) is queued at scheduledAt + 2h via the existing
+// ReviewService.scheduled_for path. Either channel failing alone
+// doesn't abort the other on the immediate path.
+router.post('/:id/send', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { requestReview, scheduledAt, sendMethod } = req.body || {};
+
+    // Reject unknown send_method values up front. sendInvoiceNow only
+    // dispatches channels for sms|email|both — anything else would cause
+    // both branches to skip, leaving a scheduled row to thrash through
+    // cron retries forever without ever delivering.
+    const finalSendMethod = sendMethod || 'both';
+    if (!['sms', 'email', 'both'].includes(finalSendMethod)) {
+      return res.status(400).json({ error: "sendMethod must be 'sms', 'email', or 'both'" });
+    }
+
+    // ── SCHEDULED PATH ──
+    // Persist the user's review-request intent on the row instead of
+    // queuing it now: sendInvoiceNow fires it post-delivery, gating on
+    // sms.ok || email.ok the same way the immediate path does. That way
+    // a cron-time delivery failure doesn't leave the customer with a
+    // review prompt for an invoice they never received.
+    if (scheduledAt) {
+      const when = new Date(scheduledAt);
+      if (isNaN(when.getTime())) return res.status(400).json({ error: 'Invalid scheduledAt' });
+      if (when <= new Date()) return res.status(400).json({ error: 'scheduledAt must be in the future' });
+
+      // Quiet-hours bump: any picked time at or after 8 PM ET slides to
+      // 10 AM ET the next day. Matches the evening cutoff that
+      // calculateReviewSendTime() already enforces for review-request
+      // SMS so customers never get late-night invoice prods.
+      const sendAt = bumpPastQuietHours(when);
+
+      // Refuse to schedule terminal/settled states — paid/void/refunded
+      // invoices have no valid resend semantics, and downgrading them
+      // breaks invariants the void / refund / receipt-resend flows
+      // protect. Non-terminal lifecycle states (draft / sent / viewed /
+      // overdue) are kept AS-IS — we use `scheduled_at` as the queue
+      // marker, not the status column, so an overdue invoice that gets a
+      // scheduled resend stays in 'overdue' filters until the customer
+      // actually pays.
+      const current = await db('invoices').where({ id }).select('status').first();
+      if (!current) return res.status(404).json({ error: 'Invoice not found' });
+      if (['paid', 'void', 'refunded'].includes(current.status)) {
+        return res.status(409).json({ error: `Cannot schedule a ${current.status} invoice` });
+      }
+
+      const updated = await db('invoices').where({ id }).update({
+        scheduled_at: sendAt,
+        send_method: finalSendMethod,
+        request_review_after_send: !!requestReview,
+        updated_at: new Date(),
+      });
+      if (!updated) return res.status(404).json({ error: 'Invoice not found' });
+
+      // Surface both the picked time and the actual landing time so the UI
+      // can confirm "scheduled for tomorrow at 10 AM" if the bump fired.
+      return res.json({
+        ok: true,
+        scheduled: true,
+        scheduledAt: sendAt.toISOString(),
+        requestedAt: when.toISOString(),
+        bumped: sendAt.getTime() !== when.getTime(),
+      });
+    }
+
+    // ── IMMEDIATE PATH ──
+    // sendInvoiceNow handles the review-request gating internally so the
+    // immediate and cron-driven paths share one source of truth.
+    const { sms, email } = await sendInvoiceNow(id, {
+      sendMethod: finalSendMethod,
+      requestReview: !!requestReview,
+    });
 
     if (!sms.ok && !email.ok) {
       return res.status(500).json({ ok: false, sms, email });
@@ -337,6 +495,9 @@ router.post('/:id/send', async (req, res, next) => {
     res.json({ ok: true, sms, email });
   } catch (err) { next(err); }
 });
+
+// Export for cron usage
+router.sendInvoiceNow = sendInvoiceNow;
 
 // POST /:id/charge-card — charge a saved card on file against this invoice.
 // Body: { paymentMethodId } (our internal payment_methods.id).

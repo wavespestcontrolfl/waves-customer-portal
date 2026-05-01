@@ -296,6 +296,120 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 5 MINUTES — Send scheduled invoices whose time has arrived
+  // Queue marker is `scheduled_at` (not the status column) so a scheduled
+  // resend on an existing 'overdue' / 'viewed' invoice keeps its lifecycle
+  // state. Atomic UPDATE…RETURNING stamps send_claim_at on each due row
+  // only when it's NULL or older than the 10-minute TTL — two concurrent
+  // workers can't both win the same row, and a crash mid-send leaves the
+  // row reclaimable on the next tick. Terminal states (paid / void /
+  // refunded) are explicitly skipped here as defense-in-depth in case
+  // the row settled between scheduling and dispatch.
+  // =========================================================================
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const claimTtlMs = 10 * 60 * 1000;
+      const claimed = await db('invoices')
+        .whereNotNull('scheduled_at')
+        .where('scheduled_at', '<=', new Date())
+        .whereNotIn('status', ['paid', 'void', 'refunded'])
+        .where(function () {
+          this.whereNull('send_claim_at')
+            .orWhere('send_claim_at', '<', new Date(Date.now() - claimTtlMs));
+        })
+        .update({ send_claim_at: new Date() })
+        .returning(['id', 'invoice_number', 'send_method']);
+
+      if (claimed.length === 0) return;
+
+      const { sendInvoiceNow } = require('../routes/admin-invoices');
+      let sent = 0;
+      for (const inv of claimed) {
+        try {
+          const channels = await sendInvoiceNow(inv.id, { sendMethod: inv.send_method || 'both' });
+          if (channels.sms.ok || channels.email.ok) sent += 1;
+          else logger.error(`Scheduled invoice ${inv.invoice_number} both channels failed: sms=${channels.sms.error} email=${channels.email.error}`);
+        } catch (e) {
+          logger.error(`Scheduled invoice ${inv.invoice_number} failed: ${e.message}`);
+        }
+      }
+      logger.info(`Scheduled invoices: ${sent}/${claimed.length} sent`);
+    } catch (err) {
+      logger.error(`Scheduled invoice cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 5 MINUTES — Send deferred completion-SMS rows whose time has arrived
+  // Body was fully rendered at completion time (template choice depends on
+  // invoice / prepaid state) and stashed on scheduled_services. We claim
+  // each row atomically by stamping completion_sms_claim_at — only NULL or
+  // expired (>10min) rows match, so concurrent workers can't both win the
+  // same row. After Twilio confirms, completion_sms_sent_at is set and the
+  // row drops out of the query on the next tick. A crash mid-send leaves
+  // the claim to expire and the row gets retried.
+  // =========================================================================
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const claimTtlMs = 10 * 60 * 1000;
+      const claimed = await db('scheduled_services')
+        .whereNotNull('completion_sms_scheduled_at')
+        .whereNull('completion_sms_sent_at')
+        .where('completion_sms_scheduled_at', '<=', new Date())
+        .where(function () {
+          this.whereNull('completion_sms_claim_at')
+            .orWhere('completion_sms_claim_at', '<', new Date(Date.now() - claimTtlMs));
+        })
+        .update({ completion_sms_claim_at: new Date() })
+        .returning(['id', 'customer_id', 'completion_sms_body', 'completion_sms_message_type']);
+
+      if (claimed.length === 0) return;
+
+      // Resolve customer phones for the claimed rows in one query.
+      const customerIds = [...new Set(claimed.map(r => r.customer_id).filter(Boolean))];
+      const customers = customerIds.length
+        ? await db('customers').whereIn('id', customerIds).select('id', 'phone')
+        : [];
+      const phoneByCustomerId = new Map(customers.map(c => [c.id, c.phone]));
+      const due = claimed.map(r => ({ ...r, cust_phone: phoneByCustomerId.get(r.customer_id) || null }));
+
+      const TwilioService = require('./twilio');
+      let sent = 0;
+      for (const row of due) {
+        try {
+          if (!row.cust_phone || !row.completion_sms_body) {
+            await db('scheduled_services').where({ id: row.id }).update({
+              completion_sms_sent_at: new Date(),
+            });
+            continue;
+          }
+          // TwilioService.sendSMS can return a non-throwing { success: false }
+          // for soft failures (guard block, missing config). Treat that as
+          // "not delivered" — leave completion_sms_sent_at NULL so the next
+          // tick re-claims and retries; only stamp on a true success.
+          const result = await TwilioService.sendSMS(row.cust_phone, row.completion_sms_body, {
+            customerId: row.customer_id,
+            messageType: row.completion_sms_message_type || 'service_complete',
+          });
+          if (result && result.success === false) {
+            logger.error(`Deferred completion SMS for service ${row.id} soft-failed: ${result.error || 'unknown'}`);
+            continue;
+          }
+          await db('scheduled_services').where({ id: row.id }).update({
+            completion_sms_sent_at: new Date(),
+          });
+          sent += 1;
+        } catch (e) {
+          logger.error(`Deferred completion SMS for service ${row.id} failed: ${e.message}`);
+        }
+      }
+      logger.info(`Deferred completion SMS: ${sent}/${due.length} sent`);
+    } catch (err) {
+      logger.error(`Deferred completion SMS cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 2 MINUTES — Email sync (Gmail → PostgreSQL)
   // =========================================================================
   cron.schedule('*/2 * * * *', async () => {
