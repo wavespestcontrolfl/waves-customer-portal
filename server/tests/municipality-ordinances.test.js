@@ -148,6 +148,57 @@ describeOrSkip('municipality_ordinances (PR 1.4)', () => {
     ).rejects.toThrow(/duplicate key|unique/i);
   });
 
+  // ── Provenance honesty (Codex P1 follow-up) ──────────────────────────
+  test('source_checked_at is the actual verification date, not deploy time', async () => {
+    // The seed hardcodes source_checked_at to 2026-04-30 (when the
+    // sources were actually reviewed for this commit). Using
+    // new Date() at migration runtime would falsely record the
+    // deploy date and undermine the audit trail.
+    const rows = await knex('municipality_ordinances').where({ active: true });
+    for (const r of rows) {
+      const checked = new Date(r.source_checked_at).toISOString().slice(0, 10);
+      expect(checked).toBe('2026-04-30');
+    }
+  });
+
+  // ── Per-jurisdiction idempotency (Codex P2 follow-up) ────────────────
+  test('seed backfills missing jurisdictions even when others already exist', async () => {
+    // Simulate a partially-seeded DB: drop one jurisdiction, re-run
+    // the seed migration's logic, verify it gets restored.
+    // (Down-then-up the migration to exercise the seed's idempotency
+    // branch end-to-end.)
+    const path = require('path');
+    const migrationPath = path.join(__dirname, '..', 'models', 'migrations', '20260430000011_municipality_ordinances.js');
+    const migration = require(migrationPath);
+
+    // Soft-delete Charlotte's active row so it appears "missing" in
+    // the partial unique index's space.
+    await knex('municipality_ordinances')
+      .where({ jurisdiction_name: 'Charlotte County', active: true })
+      .update({ active: false });
+
+    let charlotteAfterDelete = await knex('municipality_ordinances')
+      .where({ jurisdiction_name: 'Charlotte County', active: true })
+      .first();
+    expect(charlotteAfterDelete).toBeUndefined();
+
+    // Re-run the seed step (the up() function — the createTable
+    // step is guarded by hasTable so it'll be a no-op).
+    await migration.up(knex);
+
+    // Charlotte should be restored.
+    const charlotteAfterReseed = await knex('municipality_ordinances')
+      .where({ jurisdiction_name: 'Charlotte County', active: true })
+      .first();
+    expect(charlotteAfterReseed).toBeTruthy();
+    expect(charlotteAfterReseed.notes).toMatch(/office review/i);
+
+    // The other 3 must NOT have been duplicated by the re-run.
+    const sarasotaActive = await knex('municipality_ordinances')
+      .where({ jurisdiction_name: 'Sarasota County', active: true });
+    expect(sarasotaActive.length).toBe(1);
+  });
+
   test('inactive history rows ARE allowed (rule supersession)', async () => {
     // Inserting an inactive row for the same jurisdiction must NOT
     // collide with the active one — supports rule history without

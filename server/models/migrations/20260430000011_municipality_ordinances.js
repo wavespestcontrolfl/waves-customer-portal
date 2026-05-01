@@ -123,20 +123,17 @@ exports.up = async function (knex) {
   }
 
   // ── Seed: 4 SWFL jurisdictions ─────────────────────────────────
-  // Source URLs + effective dates current as of the migration date.
-  // They WILL drift; that's why source_checked_at is mandatory and
-  // the columns are designed for re-verification.
-  //
-  // Idempotent: skip seed if any active row already exists.
-  const existingActive = await knex('municipality_ordinances')
-    .where({ active: true })
-    .count('id as cnt')
-    .first();
-  if (parseInt(existingActive.cnt, 10) > 0) return;
+  // source_checked_at is hardcoded to the actual verification date
+  // (the day the source URLs were reviewed for this commit), NOT
+  // `new Date()`. Using the runtime clock would record the deploy
+  // date instead — months later an audit would treat stale data as
+  // freshly verified. The whole point of this column is honest
+  // provenance; it should reflect when a human read the source.
+  // When a future PR re-verifies, it bumps source_checked_at on the
+  // affected rows.
+  const SOURCES_VERIFIED_AT = '2026-04-30';
 
-  const today = new Date().toISOString().slice(0, 10);
-
-  await knex('municipality_ordinances').insert([
+  const SEED_ROWS = [
     {
       jurisdiction_name: 'Sarasota County',
       jurisdiction_type: 'county',
@@ -156,7 +153,7 @@ exports.up = async function (knex) {
       annual_n_limit_per_1000: 4.000,
       source_url: 'https://www.scgov.net/government/utilities/water-quality/fertilizer-ordinance',
       source_name: 'Sarasota County Fertilizer Ordinance',
-      source_checked_at: today,
+      source_checked_at: SOURCES_VERIFIED_AT,
       effective_date: '2007-04-01',
       notes: 'Restricted season prohibits any fertilizer containing nitrogen or phosphorus. Outside the season, slow-release N ≥ 50% required, no application within 10 ft of any water body.',
       active: true,
@@ -180,7 +177,7 @@ exports.up = async function (knex) {
       annual_n_limit_per_1000: 4.000,
       source_url: 'https://www.cityofnorthport.com/government/departments/public-works/stormwater/fertilizer-ordinance',
       source_name: 'City of North Port Fertilizer Ordinance',
-      source_checked_at: today,
+      source_checked_at: SOURCES_VERIFIED_AT,
       effective_date: '2014-06-09',
       notes: 'Apr 1 – Sept 30 restricted period prohibits N/P fertilizer on turf. Landscape plants may receive limited treatment under separate rules. North Port window is BROADER than the surrounding Sarasota County season — city rule wins where they overlap.',
       active: true,
@@ -204,7 +201,7 @@ exports.up = async function (knex) {
       annual_n_limit_per_1000: 4.000,
       source_url: 'https://www.mymanatee.org/departments/natural_resources/water_quality/fertilizer_ordinance',
       source_name: 'Manatee County Fertilizer Ordinance',
-      source_checked_at: today,
+      source_checked_at: SOURCES_VERIFIED_AT,
       effective_date: '2011-10-25',
       notes: 'Jun 1 – Sept 30 restricted: N/P prohibited. Year-round: phosphorus prohibited unless a soil test indicates deficiency. Slow-release N ≥ 50% outside the restricted season.',
       active: true,
@@ -235,12 +232,31 @@ exports.up = async function (knex) {
       annual_n_limit_per_1000: 4.000,   // FFL guidance
       source_url: 'https://www.charlottecountyfl.gov/services/naturalresources/Pages/default.aspx',
       source_name: 'Charlotte County Natural Resources (FFL guidance)',
-      source_checked_at: today,
+      source_checked_at: SOURCES_VERIFIED_AT,
       effective_date: null,
       notes: 'No verified county-level blackout window as of source_checked_at. Plan engine should require office review for N/P applications until an explicit county ordinance is confirmed and seeded as an amended row.',
       active: true,
     },
-  ]);
+  ];
+
+  // Per-jurisdiction idempotency. The previous all-or-nothing check
+  // (count(active)>0 → return) skipped the entire seed if even one
+  // jurisdiction already existed — leaving partially-seeded or
+  // hand-repaired DBs with incomplete policy coverage. Now each
+  // (jurisdiction_type, jurisdiction_name) is checked individually
+  // against the partial unique index's space; we insert only the
+  // ones missing an active row.
+  for (const row of SEED_ROWS) {
+    const existing = await knex('municipality_ordinances')
+      .where({
+        jurisdiction_type: row.jurisdiction_type,
+        jurisdiction_name: row.jurisdiction_name,
+        active: true,
+      })
+      .first();
+    if (existing) continue;
+    await knex('municipality_ordinances').insert(row);
+  }
 };
 
 exports.down = async function (knex) {
