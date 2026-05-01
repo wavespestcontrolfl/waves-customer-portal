@@ -311,6 +311,7 @@ router.put('/:id', async (req, res, next) => {
 router.post('/:id/send', async (req, res, next) => {
   try {
     const { id } = req.params;
+    const { requestReview } = req.body || {};
     const { sendInvoiceEmail } = require('../services/invoice-email');
 
     const sms = { ok: false };
@@ -329,6 +330,26 @@ router.post('/:id/send', async (req, res, next) => {
       else if (r?.error) email.error = r.error;
     } catch (err) {
       email.error = err.message;
+    }
+
+    // Schedule a delayed review request when at least one channel landed.
+    // ReviewService dedupes on service_record_id, so a follow-up triggered
+    // here won't double up with one already scheduled at service completion.
+    if (requestReview && (sms.ok || email.ok)) {
+      try {
+        const ReviewService = require('../services/review-request');
+        const inv = await db('invoices').where({ id }).select('customer_id', 'service_record_id').first();
+        if (inv) {
+          await ReviewService.create({
+            customerId: inv.customer_id,
+            serviceRecordId: inv.service_record_id || null,
+            triggeredBy: 'auto',
+            delayMinutes: 120,
+          });
+        }
+      } catch (err) {
+        logger.error(`[admin-invoices] Review request schedule failed: ${err.message}`);
+      }
     }
 
     if (!sms.ok && !email.ok) {
