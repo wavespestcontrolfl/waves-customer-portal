@@ -242,6 +242,7 @@ function timeAgo(d) {
 const SOURCE_ICON = {
   lead_webhook: { Icon: Globe, title: 'Website lead' },
   voice_agent: { Icon: Mic, title: 'Voice agent lead' },
+  call_recording: { Icon: Phone, title: 'Phone call recording draft' },
   referral: { Icon: Users, title: 'Referral' },
   ai_agent: { Icon: Bot, title: 'AI agent draft — review before sending' },
 };

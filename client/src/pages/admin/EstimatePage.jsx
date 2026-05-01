@@ -2010,7 +2010,7 @@ function EstimatePipelineView() {
           const isActive = filter === f.key;
           return (
             <button key={f.key} onClick={() => setFilter(f.key)} style={{
-              padding: '7px 14px', borderRadius: 8, border: 'none', cursor: 'pointer',
+              padding: '7px 14px', borderRadius: 8, cursor: 'pointer',
               background: isActive ? f.color : C.card,
               color: isActive ? '#fff' : f.color,
               fontSize: 12, fontWeight: 600, transition: 'all 0.15s',

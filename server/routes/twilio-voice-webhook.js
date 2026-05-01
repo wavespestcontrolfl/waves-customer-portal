@@ -3,14 +3,19 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
-const { etDateString } = require('../utils/datetime-et');
 
-function capitalizeName(name) {
-  if (!name) return '';
-  return name.trim().toLowerCase()
-    .replace(/\b\w/g, c => c.toUpperCase())
-    .replace(/\bMc(\w)/g, (_, c) => 'Mc' + c.toUpperCase())
-    .replace(/\bO'(\w)/g, (_, c) => "O'" + c.toUpperCase());
+const FALLBACK_FORWARD_NUMBERS = ['+19415993489', '+17206334021'];
+
+function uniqueSids(...sids) {
+  return sids.filter(Boolean).filter((sid, idx, arr) => arr.indexOf(sid) === idx);
+}
+
+async function updateCallLogBySidCandidates(sids, updates) {
+  for (const sid of sids) {
+    const updated = await db('call_log').where('twilio_call_sid', sid).update(updates);
+    if (updated > 0) return sid;
+  }
+  return null;
 }
 
 // =========================================================================
@@ -40,6 +45,8 @@ router.post('/voice', async (req, res) => {
     let customer = await db('customers').where({ phone: From }).first();
 
     // #4: Caller ID Enrichment via Twilio Lookup API
+    // Do not create a customer from lookup alone; customer creation requires
+    // first name and phone after call extraction. Email/address are preferred.
     if (!customer && From) {
       try {
         const lookupUrl = `https://lookups.twilio.com/v2/PhoneNumbers/${encodeURIComponent(From)}?Fields=caller_name`;
@@ -49,32 +56,7 @@ router.post('/voice', async (req, res) => {
           const lookupData = await lookupRes.json();
           const callerName = lookupData.caller_name?.caller_name;
           if (callerName && callerName !== 'UNKNOWN' && callerName.trim().length > 0) {
-            // Create a lightweight customer record with the caller name
-            const nameParts = callerName.trim().split(/\s+/);
-            const firstName = capitalizeName(nameParts[0] || 'Unknown');
-            const lastName = capitalizeName(nameParts.slice(1).join(' ') || '');
-            try {
-              const [newCust] = await db('customers').insert({
-                first_name: firstName,
-                last_name: lastName,
-                phone: From,
-                address_line1: '', city: '', state: 'FL', zip: '',
-                lead_source: 'twilio_lookup',
-                pipeline_stage: 'new_lead',
-                pipeline_stage_changed_at: new Date(),
-                last_contact_date: new Date(),
-                last_contact_type: 'call_inbound',
-                member_since: etDateString(),
-                waveguard_tier: null,
-                crm_notes: `Auto-created from Twilio Lookup: ${callerName}`,
-              }).returning('*');
-              customer = newCust;
-              logger.info(`[CallerID] Created customer from lookup: ${callerName} (${From})`);
-            } catch (createErr) {
-              if (!createErr.message?.includes('duplicate') && !createErr.message?.includes('unique')) {
-                logger.error(`[CallerID] Failed to create customer: ${createErr.message}`);
-              }
-            }
+            logger.info(`[CallerID] Lookup matched ${callerName} (${From}); customer creation deferred until extraction has required fields`);
           }
         }
       } catch (lookupErr) {
@@ -119,11 +101,14 @@ router.post('/voice', async (req, res) => {
 
     // Build TwiML response — answer with recording enabled
     // timeout=15 ensures Twilio hangs up the dial BEFORE the carrier voicemail can answer (~20-25s)
+    const forwardNumbers = FALLBACK_FORWARD_NUMBERS
+      .map(number => `    <Number>${number}</Number>`)
+      .join('\n');
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="alice">Thank you for calling Waves Pest Control. Please hold while we connect you.</Say>
+  <Say voice="alice">This call is being recorded for quality assurance.</Say>
   <Dial record="record-from-answer-dual" recordingStatusCallback="/api/webhooks/twilio/recording-status" recordingStatusCallbackEvent="completed" timeout="15" action="/api/webhooks/twilio/call-complete">
-    <Number>${numberConfig?.forwardTo || '+19413187612'}</Number>
+${forwardNumbers}
   </Dial>
 </Response>`;
 
@@ -182,9 +167,11 @@ router.post('/call-complete', async (req, res) => {
 // =========================================================================
 router.post('/recording-status', async (req, res) => {
   try {
-    const { CallSid, RecordingSid, RecordingUrl, RecordingDuration, RecordingStatus } = req.body;
+    const { CallSid, ParentCallSid, RecordingSid, RecordingUrl, RecordingDuration, RecordingStatus } = req.body;
+    const sidCandidates = uniqueSids(ParentCallSid, CallSid);
+    const primaryCallSid = ParentCallSid || CallSid;
 
-    if (RecordingStatus === 'completed' && CallSid) {
+    if (RecordingStatus === 'completed' && primaryCallSid) {
       const recordingData = {
         recording_url: RecordingUrl ? RecordingUrl + '.mp3' : null,
         recording_sid: RecordingSid,
@@ -194,11 +181,12 @@ router.post('/recording-status', async (req, res) => {
       };
 
       // Update existing call_log entry, or create one if missing
-      const updated = await db('call_log').where('twilio_call_sid', CallSid).update(recordingData);
-      if (updated === 0) {
+      const matchedCallSid = await updateCallLogBySidCandidates(sidCandidates, recordingData);
+      const processingCallSid = matchedCallSid || primaryCallSid;
+      if (!matchedCallSid) {
         // No call_log entry exists — create one so the recording isn't orphaned
         await db('call_log').insert({
-          twilio_call_sid: CallSid,
+          twilio_call_sid: primaryCallSid,
           call_sid: CallSid,
           from_phone: req.body.From || null,
           to_phone: req.body.To || null,
@@ -206,9 +194,9 @@ router.post('/recording-status', async (req, res) => {
           status: 'completed',
           ...recordingData,
         }).catch(e => logger.error(`[recording-status] Fallback insert failed: ${e.message}`));
-        logger.info(`Recording saved (new call_log entry): ${CallSid} → ${RecordingSid} (${RecordingDuration}s)`);
+        logger.info(`Recording saved (new call_log entry): ${primaryCallSid} → ${RecordingSid} (${RecordingDuration}s)`);
       } else {
-        logger.info(`Recording saved: ${CallSid} → ${RecordingSid} (${RecordingDuration}s)`);
+        logger.info(`Recording saved: ${matchedCallSid} → ${RecordingSid} (${RecordingDuration}s)`);
       }
 
       // Auto-process recording when ready
@@ -217,7 +205,7 @@ router.post('/recording-status', async (req, res) => {
         // Queue for processing (don't block the webhook response)
         setTimeout(async () => {
           try {
-            await processor.processRecording(CallSid);
+            await processor.processRecording(processingCallSid);
           } catch (e) { logger.error(`Auto-process recording failed: ${e.message}`); }
         }, 5000); // 5 second delay to ensure recording is fully available
       } catch (e) { logger.error(`Recording auto-process setup failed: ${e.message}`); }
@@ -235,16 +223,16 @@ router.post('/recording-status', async (req, res) => {
 // =========================================================================
 router.post('/transcription', async (req, res) => {
   try {
-    const { CallSid, RecordingSid, TranscriptionText, TranscriptionStatus } = req.body;
+    const { CallSid, ParentCallSid, RecordingSid, TranscriptionText, TranscriptionStatus } = req.body;
 
-    if (TranscriptionText && CallSid) {
-      await db('call_log').where('twilio_call_sid', CallSid).update({
+    if (TranscriptionText && (ParentCallSid || CallSid)) {
+      const matchedCallSid = await updateCallLogBySidCandidates(uniqueSids(ParentCallSid, CallSid), {
         transcription: TranscriptionText,
         transcription_status: TranscriptionStatus === 'completed' ? 'completed' : 'failed',
         updated_at: new Date(),
       });
 
-      logger.info(`Transcription received: ${CallSid} (${TranscriptionText.length} chars)`);
+      logger.info(`Transcription received: ${matchedCallSid || ParentCallSid || CallSid} (${TranscriptionText.length} chars)`);
     }
 
     res.sendStatus(200);

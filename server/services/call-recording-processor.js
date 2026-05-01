@@ -13,6 +13,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const crypto = require('crypto');
 
 function capitalizeName(name) {
   if (!name) return '';
@@ -28,6 +29,107 @@ const { parseETDateTime, formatETDate, formatETTime } = require('../utils/dateti
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
+
+const PROCESSING_STALE_MINUTES = 30;
+
+function makeProcessingToken() {
+  return crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+}
+
+async function claimCallForProcessing(call) {
+  const token = makeProcessingToken();
+  const now = new Date();
+  const updated = await db('call_log')
+    .where({ id: call.id })
+    .where(function () {
+      this.whereNull('processing_status')
+        .orWhereIn('processing_status', ['pending', 'no_transcription', 'extraction_failed'])
+        .orWhere(function () {
+          this.where('processing_status', 'processing')
+            .andWhere(function () {
+              this.whereNull('processing_started_at')
+                .orWhere('processing_started_at', '<', db.raw(`NOW() - INTERVAL '${PROCESSING_STALE_MINUTES} minutes'`));
+            });
+        });
+    })
+    .update({
+      processing_status: 'processing',
+      processing_token: token,
+      processing_started_at: now,
+      updated_at: now,
+    });
+
+  if (updated > 0) return { claimed: true, token };
+
+  const fresh = await db('call_log')
+    .where({ id: call.id })
+    .select('processing_status', 'processing_started_at')
+    .first();
+  if (fresh?.processing_status === 'processed') {
+    return { claimed: false, skipped: true, reason: 'already_processed' };
+  }
+  if (['processing', 'spam', 'voicemail'].includes(fresh?.processing_status)) {
+    return { claimed: false, skipped: true, reason: fresh.processing_status };
+  }
+  return { claimed: false, skipped: true, reason: 'not_claimable' };
+}
+
+function makeEstimateToken(customerName) {
+  const shortId = crypto.randomBytes(4).toString('hex');
+  const nameSlug = (customerName || 'customer')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 48) || 'customer';
+  return `${nameSlug}-${shortId}`;
+}
+
+function hasEstimateIntent(extracted, transcription = '') {
+  if (extracted?.wants_estimate === true) return true;
+  const haystack = [
+    extracted?.requested_service,
+    extracted?.call_summary,
+    extracted?.pain_points,
+    transcription,
+  ].filter(Boolean).join(' ').toLowerCase();
+  return /\b(quote|estimate|pricing|price|prices|cost|costs|how much|what would it cost|what'?s it cost|can you give me a number|bid)\b/i.test(haystack);
+}
+
+function normalizePhone(raw, fallback = null) {
+  const value = raw || fallback;
+  if (!value) return null;
+  const digits = String(value).replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+  if (digits.length === 10) return `+1${digits}`;
+  return String(value);
+}
+
+function buildCustomerUpdates(existing, extracted) {
+  const updates = {};
+  if (!existing.email && extracted.email) updates.email = extracted.email;
+  if ((!existing.first_name || existing.first_name === 'Unknown') && extracted.first_name) {
+    updates.first_name = capitalizeName(extracted.first_name);
+  }
+  if (!existing.last_name && extracted.last_name) updates.last_name = capitalizeName(extracted.last_name);
+  if ((!existing.address_line1 || existing.address_line1 === '') && extracted.address_line1) {
+    updates.address_line1 = extracted.address_line1;
+    if (extracted.city) updates.city = extracted.city;
+    if (extracted.zip) updates.zip = extracted.zip;
+  } else {
+    if ((!existing.city || existing.city === '') && extracted.city) updates.city = extracted.city;
+    if ((!existing.zip || existing.zip === '') && extracted.zip) updates.zip = extracted.zip;
+  }
+  updates.last_contact_date = new Date();
+  updates.last_contact_type = 'call_inbound';
+  return updates;
+}
+
+function hasMinimumNewCustomerFields(extracted, phone) {
+  return Boolean(
+    extracted?.first_name &&
+    phone
+  );
+}
 
 // ── Download Twilio recording (authenticated) ──
 async function downloadRecording(mp3Url) {
@@ -125,6 +227,7 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "requested_service": "what service they're calling about",
   "appointment_confirmed": true/false,
   "preferred_date_time": "ISO 8601 local (no timezone) in Eastern Time: YYYY-MM-DDTHH:MM — e.g. 2026-04-20T14:00 for April 20, 2026 at 2:00 PM ET. null if not confirmed.",
+  "wants_estimate": true/false,
   "is_voicemail": true/false,
   "is_spam": true/false,
   "sentiment": "positive/neutral/negative/frustrated",
@@ -140,6 +243,16 @@ IMPORTANT — appointment_confirmed rules:
 - If the agent says "I'll text you" or "let me check" without the caller confirming a specific time slot, appointment_confirmed must be false.
 - preferred_date_time must include the confirmed time, not just a date.
 
+IMPORTANT — customer name rules:
+- Capture both first_name and last_name whenever the caller states both.
+- If only one name is clearly stated, put it in first_name and leave last_name null.
+- Do not invent a last name from caller ID, address, email, or context.
+
+IMPORTANT — wants_estimate rules:
+- Set wants_estimate to true when the caller asks for a quote, estimate, price, pricing, cost, "how much", "what would it cost", "can you give me a number", or similar pricing intent.
+- Keep wants_estimate true even if they also booked an appointment.
+- Set wants_estimate to false for voicemail, spam, existing-customer service questions, complaints, billing, or rescheduling when no price/quote intent is present.
+
 Return ONLY valid JSON, no markdown.`,
     }],
   });
@@ -151,7 +264,7 @@ Return ONLY valid JSON, no markdown.`,
     return JSON.parse(cleaned);
   } catch (e) {
     logger.error(`[call-proc] Invalid JSON from Claude: ${e.message} — raw: ${cleaned.slice(0, 200)}`);
-    return { first_name: null, is_spam: false, is_voicemail: false, call_summary: 'AI extraction returned invalid JSON', lead_quality: 'cold' };
+    return { first_name: null, wants_estimate: false, is_spam: false, is_voicemail: false, call_summary: 'AI extraction returned invalid JSON', lead_quality: 'cold' };
   }
 }
 
@@ -225,13 +338,14 @@ const CallRecordingProcessor = {
     const call = await db('call_log').where('twilio_call_sid', callSid).first();
     if (!call) throw new Error(`Call not found: ${callSid}`);
 
-    // Dedup guard — skip if already fully processed (prevents duplicate SMS on webhook retries)
-    if (call.processing_status === 'processed') {
-      logger.info(`[call-proc] Already processed ${callSid} — skipping`);
-      return { success: true, skipped: true, reason: 'already_processed' };
+    const claim = await claimCallForProcessing(call);
+    if (!claim.claimed) {
+      logger.info(`[call-proc] Skipping ${callSid}: ${claim.reason}`);
+      return { success: true, skipped: true, reason: claim.reason };
     }
 
-    logger.info(`[call-proc] Processing recording for ${callSid}`);
+    const processingToken = claim.token;
+    logger.info(`[call-proc] Processing recording for ${callSid} token=${processingToken}`);
 
     // Step 1: Transcribe — Gemini is the source of truth. Twilio's built-in is fallback only.
     let transcription = null;
@@ -262,8 +376,10 @@ const CallRecordingProcessor = {
 
     if (!transcription) {
       logger.warn(`[call-proc] No transcription available for ${callSid}`);
-      await db('call_log').where({ id: call.id }).update({
+      await db('call_log').where({ id: call.id, processing_token: processingToken }).update({
         processing_status: 'no_transcription',
+        processing_token: null,
+        processing_started_at: null,
         updated_at: new Date(),
       });
       return { success: false, error: 'No transcription available' };
@@ -275,8 +391,10 @@ const CallRecordingProcessor = {
       extracted = await extractCallData(transcription, call.from_phone);
     } catch (err) {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
-      await db('call_log').where({ id: call.id }).update({
+      await db('call_log').where({ id: call.id, processing_token: processingToken }).update({
         processing_status: 'extraction_failed',
+        processing_token: null,
+        processing_started_at: null,
         updated_at: new Date(),
       });
       return { success: false, error: `AI extraction failed: ${err.message}` };
@@ -284,36 +402,40 @@ const CallRecordingProcessor = {
 
     // Skip voicemail/spam
     if (extracted.is_voicemail || extracted.is_spam) {
-      await db('call_log').where({ id: call.id }).update({
+      await db('call_log').where({ id: call.id, processing_token: processingToken }).update({
         ai_extraction: JSON.stringify(extracted),
         processing_status: extracted.is_spam ? 'spam' : 'voicemail',
+        processing_token: null,
+        processing_started_at: null,
         updated_at: new Date(),
       });
       logger.info(`[call-proc] Skipping ${callSid}: ${extracted.is_spam ? 'spam' : 'voicemail'}`);
       return { success: true, skipped: true, reason: extracted.is_spam ? 'spam' : 'voicemail' };
     }
 
+    const wantsEstimate = hasEstimateIntent(extracted, transcription);
+
     // Step 3: Create or update customer
     let customerId = call.customer_id;
-    const phone = extracted.phone || call.from_phone;
+    const phone = normalizePhone(extracted.phone, call.from_phone);
+    let existingCustomer = customerId ? await db('customers').where({ id: customerId }).first() : null;
 
-    if (!customerId && phone) {
+    if (existingCustomer) {
+      const updates = buildCustomerUpdates(existingCustomer, extracted);
+      if (Object.keys(updates).length > 0) {
+        await db('customers').where({ id: customerId }).update(updates);
+      }
+    } else if (phone) {
       // Try to find existing customer by phone
       const existing = await db('customers').where({ phone }).first();
       if (existing) {
         customerId = existing.id;
         // Update with any new info
-        const updates = {};
-        if (!existing.email && extracted.email) updates.email = extracted.email;
-        if ((!existing.address_line1 || existing.address_line1 === '') && extracted.address_line1) {
-          updates.address_line1 = extracted.address_line1;
-          if (extracted.city) updates.city = extracted.city;
-          if (extracted.zip) updates.zip = extracted.zip;
-        }
+        const updates = buildCustomerUpdates(existing, extracted);
         if (Object.keys(updates).length > 0) {
           await db('customers').where({ id: customerId }).update(updates);
         }
-      } else if (extracted.first_name) {
+      } else if (hasMinimumNewCustomerFields(extracted, phone)) {
         // Create new customer
         const loc = resolveLocation(extracted.city || '');
         const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
@@ -341,13 +463,13 @@ const CallRecordingProcessor = {
 
           const [newCust] = await db('customers').insert({
             first_name: capitalizeName(extracted.first_name),
-            last_name: capitalizeName(extracted.last_name || ''),
+            last_name: extracted.last_name ? capitalizeName(extracted.last_name) : null,
             phone,
             email: extracted.email || null,
-            address_line1: addrLine,
-            city: addrCity,
+            address_line1: addrLine || null,
+            city: addrCity || null,
             state: addrState,
-            zip: addrZip,
+            zip: addrZip || null,
             referral_code: code,
             lead_source: leadSource.source || 'phone_call',
             lead_source_detail: numberConfig?.domain || 'inbound call',
@@ -356,7 +478,7 @@ const CallRecordingProcessor = {
             nearest_location_id: loc.id,
           }).returning('*');
           customerId = newCust.id;
-          logger.info(`[call-proc] Created customer: ${extracted.first_name} ${extracted.last_name} (${customerId})`);
+          logger.info(`[call-proc] Created customer: ${extracted.first_name} ${extracted.last_name || ''} (${customerId})`);
 
           // Auto-create Stripe customer
           try {
@@ -366,17 +488,19 @@ const CallRecordingProcessor = {
         } catch (err) {
           logger.error(`[call-proc] Customer creation failed: ${err.message}`);
         }
+      } else {
+        logger.info(`[call-proc] Skipping customer creation for ${callSid}: missing first name or phone`);
       }
     }
 
-    // Step 4: Update call log with extraction results
-    await db('call_log').where({ id: call.id }).update({
+    // Step 4: Update call log with extraction results; keep the processing claim
+    // active until critical side effects below finish.
+    await db('call_log').where({ id: call.id, processing_token: processingToken }).update({
       customer_id: customerId || call.customer_id,
       ai_extraction: JSON.stringify(extracted),
       call_summary: extracted.call_summary || null,
       sentiment: extracted.sentiment || null,
       lead_quality: extracted.lead_quality || null,
-      processing_status: 'processed',
       updated_at: new Date(),
     });
 
@@ -385,7 +509,7 @@ const CallRecordingProcessor = {
     // because Step 3 already created the customer — attribution would find the customer
     // and skip lead creation (race condition).
     let leadId = null;
-    if (customerId && extracted.first_name && !extracted.is_spam) {
+    if (customerId && !extracted.is_spam) {
       try {
         // Check if lead already exists for this phone
         const existingLead = phone ? await db('leads').where('phone', phone).orderBy('created_at', 'desc').first() : null;
@@ -410,7 +534,7 @@ const CallRecordingProcessor = {
             lead_source_id: leadSourceId,
             customer_id: customerId,
             phone,
-            first_name: capitalizeName(extracted.first_name),
+            first_name: capitalizeName(extracted.first_name || 'Unknown'),
             last_name: capitalizeName(extracted.last_name || ''),
             email: extracted.email || null,
             lead_type: 'inbound_call',
@@ -422,7 +546,7 @@ const CallRecordingProcessor = {
             status: 'new',
           }).returning('*');
           leadId = newLead.id;
-          logger.info(`[call-proc] Created new lead ${leadId} for ${extracted.first_name} ${extracted.last_name}`);
+          logger.info(`[call-proc] Created new lead ${leadId} for ${extracted.first_name || 'Unknown'} ${extracted.last_name || ''}`);
         }
 
         // Enrich lead with AI-extracted data
@@ -458,6 +582,79 @@ const CallRecordingProcessor = {
         }
       } catch (leadErr) {
         logger.error(`[call-proc] Lead creation failed (non-blocking): ${leadErr.message}`);
+      }
+    }
+
+    // Step 4c: Queue a draft estimate when the caller asks about pricing.
+    let estimateQueueResult = null;
+    if (wantsEstimate && !extracted.is_spam && !extracted.is_voicemail) {
+      try {
+        let existingEstimate = null;
+        if (customerId) {
+          existingEstimate = await db('estimates')
+            .where({ customer_id: customerId, status: 'draft' })
+            .where('created_at', '>', db.raw("NOW() - INTERVAL '24 hours'"))
+            .orderBy('created_at', 'desc')
+            .first();
+        } else if (phone) {
+          existingEstimate = await db('estimates')
+            .where({ customer_phone: phone, status: 'draft', source: 'call_recording' })
+            .where('created_at', '>', db.raw("NOW() - INTERVAL '24 hours'"))
+            .orderBy('created_at', 'desc')
+            .first();
+        }
+
+        if (existingEstimate) {
+          estimateQueueResult = { skipped: true, existingEstimateId: existingEstimate.id };
+          logger.info(`[call-proc] Estimate already queued for ${customerId || phone || callSid}: ${existingEstimate.id}`);
+        } else {
+          const customer = customerId ? await db('customers').where({ id: customerId }).first() : null;
+          const customerName = [customer?.first_name || extracted.first_name, customer?.last_name || extracted.last_name]
+            .filter(Boolean)
+            .join(' ')
+            .trim() || 'Unknown Caller';
+          const expiresAt = new Date();
+          expiresAt.setDate(expiresAt.getDate() + 7);
+          const serviceInterest = extracted.matched_service || extracted.requested_service || 'General Pest Control';
+          const leadQuality = extracted.lead_quality || 'cold';
+          const urgency = leadQuality === 'hot' ? 3 : leadQuality === 'warm' ? 2 : 1;
+
+          const [estimate] = await db('estimates').insert({
+            customer_id: customerId || null,
+            status: 'draft',
+            source: 'call_recording',
+            service_interest: serviceInterest,
+            lead_source: 'phone_call',
+            lead_source_detail: call.to_phone || null,
+            urgency,
+            is_priority: leadQuality === 'hot' || extracted.sentiment === 'frustrated',
+            estimate_data: JSON.stringify({
+              callSid,
+              leadId,
+              requested_service: extracted.requested_service || null,
+              matched_service: extracted.matched_service || null,
+              pain_points: extracted.pain_points || null,
+              sentiment: extracted.sentiment || null,
+              lead_quality: leadQuality,
+              city: extracted.city || null,
+              zip: extracted.zip || null,
+              wants_estimate: true,
+            }),
+            address: extracted.address_line1 || customer?.address_line1 || null,
+            customer_name: customerName,
+            customer_phone: customer?.phone || phone || null,
+            customer_email: customer?.email || extracted.email || null,
+            token: makeEstimateToken(customerName),
+            expires_at: expiresAt,
+            notes: extracted.call_summary || `Queued from inbound call ${callSid}`,
+          }).returning('*');
+
+          estimateQueueResult = { created: true, estimateId: estimate.id, token: estimate.token };
+          logger.info(`[call-proc] Queued draft estimate ${estimate.id} for ${customerId || phone || callSid}`);
+        }
+      } catch (estimateErr) {
+        logger.error(`[call-proc] Estimate queue failed (non-blocking): ${estimateErr.message}`);
+        estimateQueueResult = { error: estimateErr.message };
       }
     }
 
@@ -543,6 +740,12 @@ const CallRecordingProcessor = {
             }
 
             if (scheduledDate) {
+              const needsServiceAddress = !(customer.address_line1 || extracted.address_line1);
+              const scheduleNotes = [
+                'Booked via phone call.',
+                needsServiceAddress ? 'ADDRESS NEEDED - confirm service street address before dispatch.' : '',
+                extracted.call_summary || '',
+              ].filter(Boolean).join(' ').trim();
               // Compute window_end (1 hour after start) and 12-hour display
               let windowEnd = null, windowDisplay = '9:00 AM';
               if (windowStart) {
@@ -563,7 +766,7 @@ const CallRecordingProcessor = {
                 status: 'confirmed',
                 customer_confirmed: true,
                 confirmed_at: new Date(),
-                notes: `Booked via phone call. ${extracted.call_summary || ''}`.trim(),
+                notes: scheduleNotes,
                 booking_source: 'phone_call',
               }).returning('*');
               logger.info(`[call-proc] Scheduled service created: ${svc.id} on ${scheduledDate} at ${windowStart}`);
@@ -660,6 +863,19 @@ const CallRecordingProcessor = {
       }
     }
 
+    const finalUpdated = await db('call_log')
+      .where({ id: call.id, processing_token: processingToken })
+      .update({
+        processing_status: 'processed',
+        processing_token: null,
+        processing_started_at: null,
+        updated_at: new Date(),
+      });
+
+    if (finalUpdated === 0) {
+      logger.warn(`[call-proc] Finished ${callSid}, but processing claim was no longer owned by token=${processingToken}`);
+    }
+
     logger.info(`[call-proc] Completed processing for ${callSid}: customer=${customerId}, appointment=${!!extracted.appointment_confirmed}`);
 
     return {
@@ -669,6 +885,7 @@ const CallRecordingProcessor = {
       leadId,
       extracted,
       appointmentResult,
+      estimateQueueResult,
       beehiivResult,
     };
   },
@@ -684,7 +901,15 @@ const CallRecordingProcessor = {
       .where(function () {
         this.whereNull('processing_status')
           .orWhere('processing_status', 'pending')
-          .orWhere('processing_status', 'no_transcription');
+          .orWhere('processing_status', 'no_transcription')
+          .orWhere('processing_status', 'extraction_failed')
+          .orWhere(function () {
+            this.where('processing_status', 'processing')
+              .andWhere(function () {
+                this.whereNull('processing_started_at')
+                  .orWhere('processing_started_at', '<', db.raw(`NOW() - INTERVAL '${PROCESSING_STALE_MINUTES} minutes'`));
+              });
+          });
       })
       .where('duration_seconds', '>', 10)
       .orderBy('created_at', 'desc')
@@ -725,6 +950,7 @@ const CallRecordingProcessor = {
       db.raw("COUNT(*) FILTER (WHERE recording_url IS NOT NULL) as total_recordings"),
       db.raw("COUNT(*) FILTER (WHERE processing_status = 'processed') as processed"),
       db.raw("COUNT(*) FILTER (WHERE processing_status IS NULL OR processing_status = 'pending') as pending"),
+      db.raw("COUNT(*) FILTER (WHERE processing_status = 'processing') as processing"),
       db.raw("COUNT(*) FILTER (WHERE processing_status = 'voicemail') as voicemail"),
       db.raw("COUNT(*) FILTER (WHERE processing_status = 'spam') as spam"),
       db.raw("COUNT(*) FILTER (WHERE ai_extraction IS NOT NULL AND ai_extraction::text LIKE '%appointment_confirmed\": true%') as appointments"),
@@ -744,6 +970,7 @@ const CallRecordingProcessor = {
       totalRecordings: parseInt(totals.total_recordings || 0),
       processed: parseInt(totals.processed || 0),
       pending: parseInt(totals.pending || 0),
+      processing: parseInt(totals.processing || 0),
       voicemail: parseInt(totals.voicemail || 0),
       spam: parseInt(totals.spam || 0),
       appointments: parseInt(totals.appointments || 0),
