@@ -4,7 +4,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const InvoiceService = require('../services/invoice');
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, bumpPastQuietHours } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -436,6 +436,12 @@ router.post('/:id/send', async (req, res, next) => {
       if (isNaN(when.getTime())) return res.status(400).json({ error: 'Invalid scheduledAt' });
       if (when <= new Date()) return res.status(400).json({ error: 'scheduledAt must be in the future' });
 
+      // Quiet-hours bump: any picked time at or after 8 PM ET slides to
+      // 10 AM ET the next day. Matches the evening cutoff that
+      // calculateReviewSendTime() already enforces for review-request
+      // SMS so customers never get late-night invoice prods.
+      const sendAt = bumpPastQuietHours(when);
+
       // Refuse to downgrade terminal/settled states. Without this guard,
       // /:id/send with scheduledAt would reset paid/void/refunded rows to
       // status='scheduled' and the cron would later flip them to 'sent',
@@ -449,14 +455,22 @@ router.post('/:id/send', async (req, res, next) => {
 
       const updated = await db('invoices').where({ id }).update({
         status: 'scheduled',
-        scheduled_at: when,
+        scheduled_at: sendAt,
         send_method: finalSendMethod,
         request_review_after_send: !!requestReview,
         updated_at: new Date(),
       });
       if (!updated) return res.status(404).json({ error: 'Invoice not found' });
 
-      return res.json({ ok: true, scheduled: true, scheduledAt: when.toISOString() });
+      // Surface both the picked time and the actual landing time so the UI
+      // can confirm "scheduled for tomorrow at 10 AM" if the bump fired.
+      return res.json({
+        ok: true,
+        scheduled: true,
+        scheduledAt: sendAt.toISOString(),
+        requestedAt: when.toISOString(),
+        bumped: sendAt.getTime() !== when.getTime(),
+      });
     }
 
     // ── IMMEDIATE PATH ──

@@ -6,7 +6,7 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const { resolveLocation } = require('../config/locations');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, bumpPastQuietHours } = require('../utils/datetime-et');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 
@@ -311,12 +311,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Validate optional scheduled-send timestamp. When provided, the customer
     // SMS + review request are deferred to that moment; the actual completion
     // (status flip, service_record, products, audit log) still happens now.
+    // Quiet-hours bump: if the picked time falls at or after 8 PM ET, slide
+    // to 10 AM ET the next day. Mirrors the review-request evening cutoff
+    // (services/review-request.js#calculateReviewSendTime) so deferred
+    // completion texts don't hit phones late at night.
     let scheduledSendAt = null;
     if (scheduledAt) {
       const when = new Date(scheduledAt);
       if (isNaN(when.getTime())) return res.status(400).json({ error: 'Invalid scheduledAt' });
       if (when <= new Date()) return res.status(400).json({ error: 'scheduledAt must be in the future' });
-      scheduledSendAt = when;
+      scheduledSendAt = bumpPastQuietHours(when);
     }
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -658,11 +662,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // already bundled into the completion SMS above. When the tech scheduled
     // the completion SMS for later, slide the review-request delay so it
     // lands ~2h after the SMS itself, not 2h after the underlying completion.
+    // The 2h slide can push the review past 8 PM ET (e.g. 7:30 PM SMS →
+    // 9:30 PM review ask), so run that absolute moment through the same
+    // quiet-hours bump before deriving delayMinutes.
     if (requestReview && svc.cust_phone && !bundledReviewUrl) {
       try {
         const ReviewService = require('../services/review-request');
-        const delayMinutes = scheduledSendAt
-          ? Math.max(1, Math.ceil((scheduledSendAt.getTime() + 120 * 60000 - Date.now()) / 60000))
+        const reviewAt = scheduledSendAt
+          ? bumpPastQuietHours(new Date(scheduledSendAt.getTime() + 120 * 60000))
+          : null;
+        const delayMinutes = reviewAt
+          ? Math.max(1, Math.ceil((reviewAt.getTime() - Date.now()) / 60000))
           : 120;
         await ReviewService.create({
           customerId: svc.customer_id,
