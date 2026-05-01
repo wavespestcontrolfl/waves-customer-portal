@@ -591,7 +591,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // SMS instead of firing a second message 90-180 min later. Single message
     // lands higher read-rates than two.
     let bundledReviewUrl = null;
-    if (sendCompletionSms && requestReview && svc.cust_phone) {
+    if (sendCompletionSms && requestReview && svc.cust_phone && !scheduledSendAt) {
       try {
         const ReviewService = require('../services/review-request');
         bundledReviewUrl = await ReviewService.createInline({

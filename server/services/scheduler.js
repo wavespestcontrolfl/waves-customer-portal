@@ -314,12 +314,22 @@ function initScheduledJobs() {
       const { sendInvoiceNow } = require('../routes/admin-invoices');
       let sent = 0;
       for (const inv of scheduled) {
+        const lockKey = `invoice-send:${inv.id}`;
+        let claimed = false;
         try {
+          const lock = await db.raw('SELECT pg_try_advisory_lock(hashtext(?)) AS acquired', [lockKey]);
+          claimed = !!(lock.rows && lock.rows[0] && lock.rows[0].acquired);
+          if (!claimed) continue;
+
           const channels = await sendInvoiceNow(inv.id, { sendMethod: inv.send_method || 'both' });
           if (channels.sms.ok || channels.email.ok) sent += 1;
           else logger.error(`Scheduled invoice ${inv.invoice_number} both channels failed: sms=${channels.sms.error} email=${channels.email.error}`);
         } catch (e) {
           logger.error(`Scheduled invoice ${inv.invoice_number} failed: ${e.message}`);
+        } finally {
+          if (claimed) {
+            await db.raw('SELECT pg_advisory_unlock(hashtext(?))', [lockKey]).catch(() => {});
+          }
         }
       }
       logger.info(`Scheduled invoices: ${sent}/${scheduled.length} sent`);
@@ -355,7 +365,13 @@ function initScheduledJobs() {
       const TwilioService = require('./twilio');
       let sent = 0;
       for (const row of due) {
+        const lockKey = `completion-sms:${row.id}`;
+        let claimed = false;
         try {
+          const lock = await db.raw('SELECT pg_try_advisory_lock(hashtext(?)) AS acquired', [lockKey]);
+          claimed = !!(lock.rows && lock.rows[0] && lock.rows[0].acquired);
+          if (!claimed) continue;
+
           if (!row.cust_phone || !row.completion_sms_body) {
             await db('scheduled_services').where({ id: row.id }).update({
               completion_sms_sent_at: new Date(),
@@ -372,6 +388,10 @@ function initScheduledJobs() {
           sent += 1;
         } catch (e) {
           logger.error(`Deferred completion SMS for service ${row.id} failed: ${e.message}`);
+        } finally {
+          if (claimed) {
+            await db.raw('SELECT pg_advisory_unlock(hashtext(?))', [lockKey]).catch(() => {});
+          }
         }
       }
       logger.info(`Deferred completion SMS: ${sent}/${due.length} sent`);
