@@ -42,7 +42,7 @@ router.get('/customers/search', async (req, res, next) => {
     if (!q) return res.json({ customers: [] });
     const customers = await db('customers')
       .where(function () {
-        this.whereRaw("LOWER(first_name || ' ' || last_name) LIKE ?", [`%${q.toLowerCase()}%`])
+        this.whereRaw("LOWER(TRIM(first_name || ' ' || COALESCE(last_name, ''))) LIKE ?", [`%${q.toLowerCase()}%`])
           .orWhere('phone', 'like', `%${q}%`)
           .orWhere('email', 'like', `%${q.toLowerCase()}%`);
       })

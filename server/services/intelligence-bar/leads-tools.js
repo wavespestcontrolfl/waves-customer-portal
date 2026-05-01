@@ -460,7 +460,7 @@ async function updateLeadStatus(input) {
     lead = await db('leads').where(function () {
       const s = `%${lead_name}%`;
       this.whereILike('first_name', s).orWhereILike('last_name', s)
-        .orWhereRaw("first_name || ' ' || last_name ILIKE ?", [s]);
+        .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s]);
     }).whereIn('status', ACTIVE_STATUSES).first();
   }
   if (!lead) return { error: 'Lead not found' };

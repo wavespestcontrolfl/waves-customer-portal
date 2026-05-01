@@ -202,7 +202,7 @@ async function getStopDetails(input) {
     customer = await db('customers').where(function () {
       const s = `%${input.customer_name}%`;
       this.whereILike('first_name', s).orWhereILike('last_name', s)
-        .orWhereRaw("first_name || ' ' || last_name ILIKE ?", [s]);
+        .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s]);
     }).first();
   } else if (input.service_id) {
     const svc = await db('scheduled_services').where('id', input.service_id).first();
@@ -272,7 +272,7 @@ async function getServiceHistory(input) {
     customer = await db('customers').where(function () {
       const s = `%${customer_name}%`;
       this.whereILike('first_name', s).orWhereILike('last_name', s)
-        .orWhereRaw("first_name || ' ' || last_name ILIKE ?", [s]);
+        .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s]);
     }).first();
   }
   if (!customer) return { error: 'Customer not found' };
@@ -356,7 +356,7 @@ async function checkCustomerStatus(input) {
     customer = await db('customers').where(function () {
       const s = `%${customer_name}%`;
       this.whereILike('first_name', s).orWhereILike('last_name', s)
-        .orWhereRaw("first_name || ' ' || last_name ILIKE ?", [s]);
+        .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s]);
     }).first();
   }
   if (!customer) return { error: 'Customer not found' };
