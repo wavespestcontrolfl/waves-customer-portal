@@ -1019,7 +1019,7 @@ function SmsTemplatesTab() {
               {editing === t.id ? (
                 <>
                   <button onClick={() => handleSave(t.id)} disabled={saving} style={{ fontSize: 11, padding: '3px 10px', borderRadius: 4, border: 'none', cursor: 'pointer', background: D.green, color: '#fff' }}>{saving ? '...' : 'Save'}</button>
-                  <button onClick={() => setEditing(null)} style={{ fontSize: 11, padding: '3px 10px', borderRadius: 4, border: 'none', cursor: 'pointer', background: 'transparent', color: D.muted, border: `1px solid ${D.border}` }}>Cancel</button>
+                  <button onClick={() => setEditing(null)} style={{ fontSize: 11, padding: '3px 10px', borderRadius: 4, cursor: 'pointer', background: 'transparent', color: D.muted, border: `1px solid ${D.border}` }}>Cancel</button>
                 </>
               ) : (
                 <button onClick={() => { setEditing(t.id); setEditBody(t.body); }} style={{ fontSize: 11, padding: '3px 10px', borderRadius: 4, border: 'none', cursor: 'pointer', background: D.teal + '22', color: D.teal }}>Edit</button>
@@ -1303,4 +1303,3 @@ function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
 
 // Named exports for V2 reuse
 export { ALL_NUMBERS, TEMPLATES, CALL_DISPOSITIONS, NUMBER_LABEL_MAP, CallLogTab, CSRCoachTab, SmsTemplatesTab };
-
