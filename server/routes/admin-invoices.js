@@ -349,16 +349,19 @@ async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = 
         const queuedReview = !!inv.request_review_after_send;
         const wasScheduled = inv.status === 'scheduled';
 
-        if (wasScheduled || queuedReview) {
-          const updates = { updated_at: new Date() };
-          if (wasScheduled) {
-            updates.status = 'sent';
-            updates.scheduled_at = null;
-            updates.send_method = null;
-            updates.send_claim_at = null;
-          }
-          if (queuedReview) updates.request_review_after_send = false;
-          await db('invoices').where({ id: invoiceId }).update(updates);
+        // Status / scheduling cleanup happens unconditionally on success.
+        // The deferred-review flag stays set across this update — we only
+        // clear it AFTER ReviewService.create lands, so a transient throw
+        // there doesn't permanently drop the follow-up. If it does throw,
+        // the flag remains true and is at least queryable / replayable.
+        if (wasScheduled) {
+          await db('invoices').where({ id: invoiceId }).update({
+            status: 'sent',
+            scheduled_at: null,
+            send_method: null,
+            send_claim_at: null,
+            updated_at: new Date(),
+          });
         }
 
         if (requestReview || queuedReview) {
@@ -370,6 +373,12 @@ async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = 
               triggeredBy: 'auto',
               delayMinutes: 120,
             });
+            if (queuedReview) {
+              await db('invoices').where({ id: invoiceId }).update({
+                request_review_after_send: false,
+                updated_at: new Date(),
+              });
+            }
           } catch (err) {
             logger.error(`[admin-invoices] Review request schedule failed: ${err.message}`);
           }
@@ -395,6 +404,15 @@ router.post('/:id/send', async (req, res, next) => {
     const { id } = req.params;
     const { requestReview, scheduledAt, sendMethod } = req.body || {};
 
+    // Reject unknown send_method values up front. sendInvoiceNow only
+    // dispatches channels for sms|email|both — anything else would cause
+    // both branches to skip, leaving a scheduled row to thrash through
+    // cron retries forever without ever delivering.
+    const finalSendMethod = sendMethod || 'both';
+    if (!['sms', 'email', 'both'].includes(finalSendMethod)) {
+      return res.status(400).json({ error: "sendMethod must be 'sms', 'email', or 'both'" });
+    }
+
     // ── SCHEDULED PATH ──
     // Persist the user's review-request intent on the row instead of
     // queuing it now: sendInvoiceNow fires it post-delivery, gating on
@@ -409,7 +427,7 @@ router.post('/:id/send', async (req, res, next) => {
       const updated = await db('invoices').where({ id }).update({
         status: 'scheduled',
         scheduled_at: when,
-        send_method: sendMethod || 'both',
+        send_method: finalSendMethod,
         request_review_after_send: !!requestReview,
         updated_at: new Date(),
       });
@@ -422,7 +440,7 @@ router.post('/:id/send', async (req, res, next) => {
     // sendInvoiceNow handles the review-request gating internally so the
     // immediate and cron-driven paths share one source of truth.
     const { sms, email } = await sendInvoiceNow(id, {
-      sendMethod: sendMethod || 'both',
+      sendMethod: finalSendMethod,
       requestReview: !!requestReview,
     });
 
