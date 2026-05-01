@@ -342,12 +342,17 @@ async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = 
   if (sms.ok || email.ok) {
     try {
       const inv = await db('invoices').where({ id: invoiceId })
-        .select('status', 'request_review_after_send', 'customer_id', 'service_record_id')
+        .select('status', 'sent_at', 'request_review_after_send', 'customer_id', 'service_record_id')
         .first();
 
       if (inv) {
         const queuedReview = !!inv.request_review_after_send;
         const wasScheduled = inv.status === 'scheduled';
+        // sendViaSMS already flips draft → sent itself, but sendInvoiceEmail
+        // doesn't touch status. So an email-only successful send leaves the
+        // row at 'draft'. Catch that here so timeline / follow-ups / list
+        // filters reflect the actual delivery state.
+        const wasDraft = inv.status === 'draft';
 
         // Status / scheduling cleanup happens unconditionally on success.
         // The deferred-review flag stays set across this update — we only
@@ -357,9 +362,16 @@ async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = 
         if (wasScheduled) {
           await db('invoices').where({ id: invoiceId }).update({
             status: 'sent',
+            sent_at: inv.sent_at || new Date(),
             scheduled_at: null,
             send_method: null,
             send_claim_at: null,
+            updated_at: new Date(),
+          });
+        } else if (wasDraft) {
+          await db('invoices').where({ id: invoiceId }).update({
+            status: 'sent',
+            sent_at: new Date(),
             updated_at: new Date(),
           });
         }
@@ -423,6 +435,17 @@ router.post('/:id/send', async (req, res, next) => {
       const when = new Date(scheduledAt);
       if (isNaN(when.getTime())) return res.status(400).json({ error: 'Invalid scheduledAt' });
       if (when <= new Date()) return res.status(400).json({ error: 'scheduledAt must be in the future' });
+
+      // Refuse to downgrade terminal/settled states. Without this guard,
+      // /:id/send with scheduledAt would reset paid/void/refunded rows to
+      // status='scheduled' and the cron would later flip them to 'sent',
+      // breaking the invariants the void / refund / receipt-resend flows
+      // explicitly protect.
+      const current = await db('invoices').where({ id }).select('status').first();
+      if (!current) return res.status(404).json({ error: 'Invoice not found' });
+      if (['paid', 'void', 'refunded'].includes(current.status)) {
+        return res.status(409).json({ error: `Cannot schedule a ${current.status} invoice` });
+      }
 
       const updated = await db('invoices').where({ id }).update({
         status: 'scheduled',
