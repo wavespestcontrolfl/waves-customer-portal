@@ -796,9 +796,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       : '';
 
     const recordStructuredNotes = parseJsonObject(record.structured_notes);
+    const completionSmsAttemptedAt = recordStructuredNotes.completionSmsAttemptedAt
+      ? new Date(recordStructuredNotes.completionSmsAttemptedAt).getTime()
+      : 0;
+    const completionSmsSendingFresh = recordStructuredNotes.completionSmsStatus === 'sending'
+      && completionSmsAttemptedAt
+      && Date.now() - completionSmsAttemptedAt < 10 * 60 * 1000;
     const completionSmsAlreadyHandled = !!recordStructuredNotes.sentSmsBody
       || recordStructuredNotes.completionSmsStatus === 'sent'
-      || recordStructuredNotes.completionSmsStatus === 'sending';
+      || completionSmsSendingFresh;
 
     if (sendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled) {
       try {
