@@ -1,15 +1,15 @@
 const express = require('express');
 const router = express.Router();
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const PaymentRouter = require('../services/payment-router');
-const TwilioService = require('../services/twilio');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { logAutopay } = require('../services/autopay-log');
 const { etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate);
-router.use(requireTechOrAdmin);
+router.use(requireAdmin);
 
 /**
  * GET /api/admin/customers/:id/autopay-state — admin read of autopay + recent events.
@@ -104,10 +104,17 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
     if (customer.phone) {
       try {
         const receiptLine = receiptUrl ? ` View receipt: ${receiptUrl}` : '';
-        await TwilioService.sendSMS(
-          customer.phone,
-          `Hi ${customer.first_name}, your payment of $${chargeAmount.toFixed(2)} to Waves was successfully processed. Thank you!${receiptLine}`
-        );
+        const result = await sendCustomerMessage({
+          audience: 'customer',
+          channel: 'sms',
+          to: customer.phone,
+          customerId,
+          purpose: 'billing',
+          identityTrustLevel: 'admin_operator',
+          body: `Hi ${customer.first_name}, your payment to Waves was successfully processed. Thank you!${receiptLine}`,
+          metadata: { source: 'admin_manual_charge', paymentId: payment?.id || null },
+        });
+        if (!result?.sent) logger.warn(`[admin-billing] receipt SMS blocked: ${result?.code || 'unknown'}`);
       } catch (smsErr) {
         logger.error(`[admin-billing] receipt SMS failed: ${smsErr.message}`);
       }

@@ -35,7 +35,8 @@ router.put('/read-all', async (req, res, next) => {
 // PUT /api/customer-notifications/:id/read — mark one read
 router.put('/:id/read', async (req, res, next) => {
   try {
-    await NotificationService.markRead(req.params.id);
+    const updated = await NotificationService.markRead(req.params.id, req.customerId);
+    if (!updated) return res.status(404).json({ error: 'Notification not found' });
     res.json({ success: true });
   } catch (err) { next(err); }
 });

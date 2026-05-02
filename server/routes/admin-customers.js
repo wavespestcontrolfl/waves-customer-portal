@@ -3,16 +3,96 @@ const router = express.Router();
 const db = require('../models/db');
 const LeadScorer = require('../services/lead-scorer');
 const PipelineManager = require('../services/pipeline-manager');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
+const { recordAuditEvent } = require('../services/audit-log');
+const PhotoService = require('../services/photos');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+function applyCustomerListFilters(query, filters) {
+  const { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited } = filters;
+  if (search) {
+    const s = `%${search}%`;
+    const isPhoneLike = /^[\d\s().+\-]+$/.test(search);
+    const phoneDigits = isPhoneLike ? String(search).replace(/\D/g, '') : '';
+    query = query.where(function () {
+      this.whereILike('first_name', s).orWhereILike('last_name', s)
+        .orWhereILike('phone', s).orWhereILike('email', s)
+        .orWhereILike('address_line1', s).orWhereILike('city', s)
+        .orWhereILike('company_name', s)
+        .orWhereRaw("(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) ILIKE ?", [s]);
+      if (phoneDigits.length >= 3) {
+        this.orWhereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}%`]);
+      }
+    });
+  }
+  if (stage) query = query.where('pipeline_stage', stage);
+  if (tier === 'none') query = query.whereNull('waveguard_tier');
+  else if (tier) query = query.where('waveguard_tier', tier);
+  if (city) query = query.whereILike('city', `%${city}%`);
+  if (source) query = query.where('lead_source', source);
+  if (area) query = query.whereILike('city', `%${area}%`);
+  if (tag) query = query.whereExists(function () {
+    this.select('*').from('customer_tags').whereRaw('customer_tags.customer_id = customers.id').where('tag', tag);
+  });
+  if (cards === 'has') {
+    query = query.whereExists(function () {
+      this.select(db.raw('1')).from('payment_methods').whereRaw('payment_methods.customer_id = customers.id');
+    });
+  } else if (cards === 'none') {
+    query = query.whereNotExists(function () {
+      this.select(db.raw('1')).from('payment_methods').whereRaw('payment_methods.customer_id = customers.id');
+    });
+  }
+  if (hasBalance === 'true' || hasBalance === true) {
+    query = query.whereExists(function () {
+      this.select('customer_id').from('invoices')
+        .whereRaw('invoices.customer_id = customers.id')
+        .whereIn('status', ['sent', 'viewed', 'overdue'])
+        .groupBy('customer_id')
+        .havingRaw('COALESCE(SUM(total), 0) > 0');
+    });
+  }
+  if (lastVisited && lastVisited !== 'all') {
+    if (lastVisited === 'never') {
+      query = query.whereNotExists(function () {
+        this.select(db.raw('1')).from('service_records').whereRaw('service_records.customer_id = customers.id');
+      });
+    } else {
+      const days = parseInt(lastVisited, 10);
+      if (Number.isFinite(days) && days >= 0) {
+        query = query.whereExists(function () {
+          this.select('customer_id').from('service_records')
+            .whereRaw('service_records.customer_id = customers.id')
+            .groupBy('customer_id')
+            .havingRaw('MAX(service_date) >= ?::date - (? * INTERVAL \'1 day\')', [etDateString(), days]);
+        });
+      }
+    }
+  }
+  return query;
+}
+
+async function auditCustomerMutation(req, action, customerId, metadata = {}, critical = false) {
+  await recordAuditEvent({
+    actor_type: 'technician',
+    actor_id: req.technicianId || null,
+    action,
+    resource_type: 'customer',
+    resource_id: customerId,
+    metadata,
+    ip_address: req.ip,
+    user_agent: req.get('user-agent') || null,
+    critical,
+  });
+}
 
 // --- Static POST routes (must be registered before /:id handlers to avoid route shadowing) ---
 
 // POST /api/admin/customers/fix-tiers — Recalculate tiers from service count
-router.post('/fix-tiers', async (req, res, next) => {
+router.post('/fix-tiers', requireAdmin, async (req, res, next) => {
   try {
     const customers = await db('customers')
       .select('customers.id', 'customers.waveguard_tier')
@@ -50,7 +130,7 @@ router.post('/fix-tiers', async (req, res, next) => {
 // for any customer who already has a matched (non-_stats) row in google_reviews.
 // One-shot helper for the ~170 historical reviewers; safe to re-run (idempotent —
 // preserves the original review_marked_at on rows that are already true).
-router.post('/backfill-review-status', async (req, res, next) => {
+router.post('/backfill-review-status', requireAdmin, async (req, res, next) => {
   try {
     const dryRun = req.body?.dryRun === true;
     const matchedIds = await db('google_reviews')
@@ -144,11 +224,16 @@ router.get('/', async (req, res, next) => {
     // the top-100-by-lead-score slice. Anything beyond that fell off
     // the end of the list — looked like "not alphabetical" to operators
     // working large customer bases.
-    const { search, stage, tier, tag, source, area, city, sort = 'name', order = 'asc' } = req.query;
+    const {
+      search, stage, tier, tag, source, area, city,
+      cards, hasBalance, lastVisited,
+      sort = 'name', order = 'asc',
+    } = req.query;
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit) || 100));
 
-    let query = db('customers').whereNull('customers.deleted_at').select(
+    const filters = { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited };
+    let query = applyCustomerListFilters(db('customers').whereNull('customers.deleted_at'), filters).select(
       'customers.*',
       db.raw('(SELECT COUNT(*) FROM service_records WHERE service_records.customer_id = customers.id) as services_count'),
       db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id) as last_service_date"),
@@ -163,41 +248,6 @@ router.get('/', async (req, res, next) => {
       db.raw("(SELECT COUNT(*) FROM payment_methods WHERE payment_methods.customer_id = customers.id) as cards_on_file"),
     );
 
-    if (search) {
-      const s = `%${search}%`;
-      // Phone-digit fallback: stored phones carry formatting (e.g. "(941)
-      // 555-1234" or "+19415551234"), so a literal ILIKE on `phone` misses
-      // when the operator types a bare 10-digit number. Mirrors the dedupe
-      // check used by /quick-add. Only fires when the *whole* search term
-      // is phone-shaped (digits + standard separators) — otherwise mixed
-      // queries like "Acme 941" or "123 Main St" would pull in every
-      // customer whose phone happens to contain those digits, and in 941
-      // that's all of them.
-      const isPhoneLike = /^[\d\s().+\-]+$/.test(search);
-      const phoneDigits = isPhoneLike ? String(search).replace(/\D/g, '') : '';
-      query = query.where(function () {
-        this.whereILike('first_name', s).orWhereILike('last_name', s)
-          .orWhereILike('phone', s).orWhereILike('email', s)
-          .orWhereILike('address_line1', s).orWhereILike('city', s)
-          .orWhereILike('company_name', s)
-          // Multi-word name match — "Joe Smith" needs to hit first+last
-          // concatenated, not each column in isolation.
-          .orWhereRaw("(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) ILIKE ?", [s]);
-        if (phoneDigits.length >= 3) {
-          this.orWhereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}%`]);
-        }
-      });
-    }
-    if (stage) query = query.where('pipeline_stage', stage);
-    if (tier === 'none') query = query.whereNull('waveguard_tier');
-    else if (tier) query = query.where('waveguard_tier', tier);
-    if (city) query = query.whereILike('city', `%${city}%`);
-    if (source) query = query.where('lead_source', source);
-    if (area) query = query.whereILike('city', `%${area}%`);
-    if (tag) query = query.whereExists(function () {
-      this.select('*').from('customer_tags').whereRaw('customer_tags.customer_id = customers.id').where('tag', tag);
-    });
-
     // Alphabetical by first name only — operator preference. No tie-break
     // on last name or other columns. NULLS LAST keeps blank-first-name
     // rows pinned to the end of the list instead of the top.
@@ -209,7 +259,10 @@ router.get('/', async (req, res, next) => {
       query = query.orderBy(sortCol, dir);
     }
 
-    const total = await db('customers').whereNull('deleted_at').count('* as count').first();
+    const total = await applyCustomerListFilters(
+      db('customers').whereNull('customers.deleted_at'),
+      filters
+    ).count('* as count').first();
     const totalCount = parseInt(total?.count || 0);
     const offset = (page - 1) * limit;
     const customers = await query.limit(limit).offset(offset);
@@ -586,7 +639,20 @@ router.get('/:id', async (req, res, next) => {
       db('customer_health_scores').where({ customer_id: c.id }).orderBy('scored_at', 'desc').first().catch(e => { logger.warn(`[customers:${c.id}] health_scores: ${e.message}`); return null; }),
       db('invoices').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(10).catch(e => { logger.warn(`[customers:${c.id}] invoices: ${e.message}`); return []; }),
       db('payment_methods').where({ customer_id: c.id }).catch(e => { logger.warn(`[customers:${c.id}] payment_methods: ${e.message}`); return []; }),
-      db('service_photos').where({ customer_id: c.id }).select('id', 's3_url', 'caption', 'service_record_id', 'created_at').orderBy('created_at', 'desc').limit(12).catch(e => { logger.warn(`[customers:${c.id}] service_photos: ${e.message}`); return []; }),
+      db('service_photos')
+        .join('service_records', 'service_photos.service_record_id', 'service_records.id')
+        .where('service_records.customer_id', c.id)
+        .select(
+          'service_photos.id',
+          'service_photos.s3_key',
+          'service_photos.s3_url',
+          'service_photos.caption',
+          'service_photos.service_record_id',
+          'service_photos.created_at'
+        )
+        .orderBy('service_photos.created_at', 'desc')
+        .limit(12)
+        .catch(e => { logger.warn(`[customers:${c.id}] service_photos: ${e.message}`); return []; }),
       db('notification_prefs').where({ customer_id: c.id }).first().catch(e => { logger.warn(`[customers:${c.id}] notification_prefs: ${e.message}`); return null; }),
       db('referral_promoters').where({ customer_id: c.id }).first().catch(e => { logger.warn(`[customers:${c.id}] referral_promoters: ${e.message}`); return null; }),
       db('property_application_history').where({ customer_id: c.id }).orderBy('applied_at', 'desc').limit(10).catch(e => { logger.warn(`[customers:${c.id}] property_application_history: ${e.message}`); return []; }),
@@ -613,6 +679,16 @@ router.get('/:id', async (req, res, next) => {
     // paid-invoice totals from the limit(10) query above would underreport for
     // long-tenured customers and miss off-gateway payments without invoices.
     const lifetimeRevenue = parseFloat(paymentsTotal?.net || 0);
+
+    const signedPhotos = await Promise.all((photos || []).map(async (p) => {
+      if (!p.s3_key) return { ...p, url: null, s3_url: null };
+      try {
+        return { ...p, url: await PhotoService.getViewUrl(p.s3_key, 300), s3_url: null };
+      } catch (err) {
+        logger.warn(`[customers:${c.id}] service photo presign failed: ${err.message}`);
+        return { ...p, url: null, s3_url: null };
+      }
+    }));
 
     res.json({
       customer: {
@@ -644,7 +720,7 @@ router.get('/:id', async (req, res, next) => {
       healthScore: healthScore || null,
       invoices: mappedInvoices,
       cards: cards || [],
-      photos: photos || [],
+      photos: signedPhotos,
       notificationPrefs: notificationPrefs || null,
       referralInfo: referralInfo || null,
       complianceRecords: complianceRecords || [],
@@ -654,7 +730,7 @@ router.get('/:id', async (req, res, next) => {
 });
 
 // POST /api/admin/customers — create
-router.post('/', async (req, res, next) => {
+router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const { firstName, lastName, phone, email, addressLine1, city, state, zip, tier, monthlyRate, leadSource, pipelineStage, tags, notes, companyName, propertyType } = req.body;
     if (!firstName || !lastName || !phone) return res.status(400).json({ error: 'Name and phone required' });
@@ -676,29 +752,37 @@ router.post('/', async (req, res, next) => {
 
     const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
 
-    const [customer] = await db('customers').insert({
-      first_name: firstName, last_name: lastName, phone, email,
-      address_line1: addressLine1 || '', city: city || '', state: state || 'FL', zip: zip || '',
-      waveguard_tier: tier || null, monthly_rate: monthlyRate || 0,
-      member_since: etDateString(),
-      referral_code: code, lead_source: leadSource,
-      pipeline_stage: pipelineStage || 'new_lead',
-      pipeline_stage_changed_at: new Date(),
-      assigned_to: req.technicianId,
-      company_name: companyName, property_type: propertyType, crm_notes: notes,
-    }).returning('*');
+    const customer = await db.transaction(async (trx) => {
+      const [created] = await trx('customers').insert({
+        first_name: firstName, last_name: lastName, phone, email,
+        address_line1: addressLine1 || '', city: city || '', state: state || 'FL', zip: zip || '',
+        waveguard_tier: tier || null, monthly_rate: monthlyRate || 0,
+        member_since: etDateString(),
+        referral_code: code, lead_source: leadSource,
+        pipeline_stage: pipelineStage || 'new_lead',
+        pipeline_stage_changed_at: new Date(),
+        assigned_to: req.technicianId,
+        company_name: companyName, property_type: propertyType, crm_notes: notes,
+      }).returning('*');
 
-    await db('property_preferences').insert({ customer_id: customer.id });
-    await db('notification_prefs').insert({ customer_id: customer.id });
+      await trx('property_preferences').insert({ customer_id: created.id });
+      await trx('notification_prefs').insert({ customer_id: created.id });
 
-    if (tags?.length) {
-      for (const tag of tags) {
-        await db('customer_tags').insert({ customer_id: customer.id, tag }).onConflict(['customer_id', 'tag']).ignore();
+      if (tags?.length) {
+        for (const tag of tags) {
+          await trx('customer_tags').insert({ customer_id: created.id, tag }).onConflict(['customer_id', 'tag']).ignore();
+        }
       }
-    }
+      return created;
+    });
 
-    await PipelineManager.onEvent(customer.id, 'lead_created');
-    await LeadScorer.calculateScore(customer.id);
+    PipelineManager.onEvent(customer.id, 'lead_created')
+      .catch(err => logger.warn(`[customers:${customer.id}] pipeline lead_created failed: ${err.message}`));
+    LeadScorer.calculateScore(customer.id)
+      .catch(err => logger.warn(`[customers:${customer.id}] lead score failed: ${err.message}`));
+    await auditCustomerMutation(req, 'customer.create', customer.id, {
+      fields: ['first_name', 'last_name', 'phone', 'email', 'address', 'tier', 'monthly_rate', 'lead_source', 'pipeline_stage', 'tags'],
+    });
 
     // Fire-and-forget geocoding (don't block the create response)
     if (addressLine1) {
@@ -710,7 +794,7 @@ router.post('/', async (req, res, next) => {
 });
 
 // PUT /api/admin/customers/:id
-router.put('/:id', async (req, res, next) => {
+router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
     const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', addressLine1: 'address_line1', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', hasLeftGoogleReview: 'has_left_google_review' };
     const updates = {};
@@ -727,7 +811,20 @@ router.put('/:id', async (req, res, next) => {
     if (updates.has_left_google_review !== undefined) {
       updates.review_marked_at = updates.has_left_google_review ? new Date() : null;
     }
-    if (Object.keys(updates).length) await db('customers').where({ id: req.params.id }).update(updates);
+    let before = null;
+    if (Object.keys(updates).length) {
+      before = await db('customers').where({ id: req.params.id }).first();
+      await db('customers').where({ id: req.params.id }).update(updates);
+      const sensitiveFields = ['email', 'phone', 'secondary_phone', 'address_line1', 'city', 'state', 'zip', 'monthly_rate', 'active', 'pipeline_stage', 'service_contact_name', 'service_contact_phone', 'service_contact_email'];
+      const changed = Object.keys(updates).filter(field => before && before[field] !== updates[field]);
+      if (changed.some(field => sensitiveFields.includes(field))) {
+        await auditCustomerMutation(req, 'customer.update_sensitive', req.params.id, {
+          fields: changed,
+          before: Object.fromEntries(changed.map(field => [field, before?.[field] ?? null])),
+          after: Object.fromEntries(changed.map(field => [field, updates[field] ?? null])),
+        }, true);
+      }
+    }
 
     // If address changed, re-geocode (clear lat/lng first so ensureCustomerGeocoded refreshes)
     const addressChanged = ['address_line1', 'city', 'state', 'zip'].some(f => updates[f] !== undefined);
@@ -769,7 +866,7 @@ router.put('/:id', async (req, res, next) => {
 // needs to override on a customer's behalf.
 //
 // Creates the prefs row if it doesn't exist (defaults to all TRUE).
-router.put('/:id/notification-prefs', async (req, res, next) => {
+router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
   try {
     const dbUpdates = {};
     if (req.body.autoFlipEnRoute !== undefined) {
@@ -896,25 +993,27 @@ router.post('/:id/follow-up', async (req, res, next) => {
 });
 
 // DELETE /api/admin/customers/:id — soft-delete a customer
-router.delete('/:id', async (req, res, next) => {
+router.delete('/:id', requireAdmin, async (req, res, next) => {
   try {
     const customer = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
     await db('customers').where({ id: req.params.id }).update({ deleted_at: new Date() });
-    logger.info(`[customers] Soft-deleted customer ${customer.first_name} ${customer.last_name} (${req.params.id})`);
+    await auditCustomerMutation(req, 'customer.archive', req.params.id, { previousDeletedAt: customer.deleted_at || null }, true);
+    logger.info(`[customers] Soft-deleted customer id=${req.params.id}`);
     res.json({ success: true });
   } catch (err) { next(err); }
 });
 
 // PATCH /api/admin/customers/:id/restore — restore a soft-deleted customer (admin only)
-router.patch('/:id/restore', async (req, res, next) => {
+router.patch('/:id/restore', requireAdmin, async (req, res, next) => {
   try {
     const customer = await db('customers').where({ id: req.params.id }).whereNotNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found or not deleted' });
 
     await db('customers').where({ id: req.params.id }).update({ deleted_at: null });
-    logger.info(`[customers] Restored customer ${customer.first_name} ${customer.last_name} (${req.params.id})`);
+    await auditCustomerMutation(req, 'customer.restore', req.params.id, { previousDeletedAt: customer.deleted_at || null }, true);
+    logger.info(`[customers] Restored customer id=${req.params.id}`);
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -922,11 +1021,16 @@ router.patch('/:id/restore', async (req, res, next) => {
 // =========================================================================
 // POST /api/admin/customers/:id/refund — Refund a Stripe payment
 // =========================================================================
-router.post('/:id/refund', async (req, res, next) => {
+router.post('/:id/refund', requireAdmin, async (req, res, next) => {
   try {
     const { paymentId, amount, reason } = req.body;
     if (!paymentId) return res.status(400).json({ error: 'paymentId required' });
 
+    await auditCustomerMutation(req, 'customer.payment.refund', req.params.id, {
+      paymentId,
+      amount: amount || null,
+      reason: reason || 'requested_by_customer',
+    }, true);
     const StripeService = require('../services/stripe');
     const result = await StripeService.refund(paymentId, { amount, reason: reason || 'requested_by_customer' });
     res.json(result);

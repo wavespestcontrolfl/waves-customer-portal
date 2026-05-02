@@ -31,6 +31,21 @@ function infoRow(doc, label, value, x, y, labelW, valW) {
   return y + 14;
 }
 
+async function getServiceReportCredentialText() {
+  try {
+    const row = await db('business_credentials')
+      .where({ slug: 'fdacs_pest_control', is_public: true, status: 'active' })
+      .whereNull('archived_at')
+      .first('display_format_short');
+    return row?.display_format_short
+      ? `Licensed & Insured | FL ${row.display_format_short}`
+      : 'Licensed & Insured';
+  } catch (err) {
+    logger.warn(`[documents] credential lookup failed: ${err.message}`);
+    return 'Licensed & Insured';
+  }
+}
+
 // Map product categories to customer-friendly descriptions
 function friendlyProductDescription(category) {
   const map = {
@@ -76,6 +91,7 @@ function getVisitDuration(service) {
 
 function generateServiceReportPDF(customer, service, products, res, extra = {}) {
   const { compliance = [], invoice = null } = extra;
+  const credentialText = extra.credentialText || 'Licensed & Insured';
   const doc = new PDFDocument({ size: 'LETTER', margin: 40 });
 
   // Build filename: firstName-lastName-YYYY-MM-DD.pdf (sanitized to prevent
@@ -142,11 +158,11 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   const logoBuf = getLogoBuffer();
   if (logoBuf) {
     doc.image(logoBuf, L + 2, 8, { width: 64, height: 64 });
-    doc.fontSize(8).font('Helvetica').fillColor('#ccc').text('Licensed & Insured | FL License #JB351547', L + 72, 60);
+    doc.fontSize(8).font('Helvetica').fillColor('#ccc').text(credentialText, L + 72, 60);
   } else {
     doc.fontSize(22).font('Helvetica-Bold').fillColor('#fff').text('WAVES', L + 10, 18);
     doc.fontSize(9).font('Helvetica').fillColor(TEAL).text('LAWN & PEST CONTROL', L + 10, 42);
-    doc.fontSize(8).fillColor('#ccc').text('Licensed & Insured | FL License #JB351547', L + 10, 56);
+    doc.fontSize(8).fillColor('#ccc').text(credentialText, L + 10, 56);
   }
 
   doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text('(941) 318-7612', R - 150, 22, { width: 150, align: 'right' });
@@ -493,7 +509,7 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   doc.save();
   doc.rect(0, 730, 612, 62).fill(NAVY);
   doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text(
-    'Waves Pest Control, LLC · FL License #JB351547',
+    `Waves Pest Control, LLC · ${credentialText}`,
     0, 738, { width: 612, align: 'center' }
   );
   doc.fontSize(7).font('Helvetica').fillColor('#ccc').text(
@@ -683,7 +699,8 @@ router.get('/service-report/:serviceRecordId', authenticate, async (req, res, ne
       .catch(() => null);
 
     const customer = req.customer;
-    generateServiceReportPDF(customer, service, products, res, { compliance, invoice });
+    const credentialText = await getServiceReportCredentialText();
+    generateServiceReportPDF(customer, service, products, res, { compliance, invoice, credentialText });
   } catch (err) {
     next(err);
   }
@@ -826,7 +843,8 @@ router.get('/shared/:token', async (req, res, next) => {
         .where({ service_record_id: service.id })
         .catch(() => []);
 
-      return generateServiceReportPDF(customer, service, products, res, { compliance });
+      const credentialText = await getServiceReportCredentialText();
+      return generateServiceReportPDF(customer, service, products, res, { compliance, credentialText });
     }
 
     // Stored document — file contents aren't hosted yet (S3 integration

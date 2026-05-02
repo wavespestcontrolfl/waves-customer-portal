@@ -109,6 +109,9 @@ const TOOLTIP_STYLE = {
   padding: '6px 10px',
 };
 
+const RESPONSIVE_INITIAL_DIMENSION = { width: 1, height: 1 };
+const SPARKLINE_INITIAL_DIMENSION = { width: 88, height: 28 };
+
 // ─── KPI tile w/ sparkline + delta ────────────────────────────────
 
 // Big number, tiny inline area sparkline, period-over-period delta.
@@ -117,15 +120,15 @@ const TOOLTIP_STYLE = {
 export function KpiSparklineTile({ label, value, sub, delta, deltaSuffix, alert, series }) {
   const data = (series || []).map((v, i) => ({ i, v: Number(v) || 0 }));
   return (
-    <Card className="max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
-      <CardBody className="p-4 max-md:p-5">
-        <div className="u-label text-ink-secondary max-md:text-13 max-md:font-medium max-md:normal-case max-md:tracking-normal max-md:text-zinc-500">
+    <Card className="max-md:border-0 max-md:shadow-sm max-md:rounded-xl max-md:min-h-[128px]">
+      <CardBody className="p-4 max-md:p-4">
+        <div className="u-label text-ink-secondary max-md:text-11 max-md:font-semibold max-md:tracking-label max-md:uppercase max-md:text-zinc-600">
           {label}
         </div>
-        <div className="flex items-end justify-between gap-3 mt-2">
+        <div className="flex items-end justify-between gap-3 mt-2 max-md:block">
           <div
             className={cn(
-              'u-nums text-28 font-medium tracking-tight leading-none max-md:text-[32px] max-md:font-bold',
+              'u-nums text-28 font-medium tracking-tight leading-none max-md:text-[28px] max-md:font-bold',
               alert ? 'text-alert-fg' : 'text-zinc-900'
             )}
           >
@@ -133,7 +136,12 @@ export function KpiSparklineTile({ label, value, sub, delta, deltaSuffix, alert,
           </div>
           {data.length > 1 && (
             <div className="w-[88px] h-[28px] flex-shrink-0 opacity-90">
-              <ResponsiveContainer>
+              <ResponsiveContainer
+                width="100%"
+                height="100%"
+                minWidth={0}
+                initialDimension={SPARKLINE_INITIAL_DIMENSION}
+              >
                 <AreaChart data={data} margin={{ top: 2, right: 0, bottom: 0, left: 0 }}>
                   <defs>
                     <linearGradient id="sparkfill" x1="0" y1="0" x2="0" y2="1">
@@ -157,7 +165,7 @@ export function KpiSparklineTile({ label, value, sub, delta, deltaSuffix, alert,
         {delta != null && (
           <div
             className={cn(
-              'mt-2 text-12 font-medium',
+              'mt-2 text-12 font-medium max-md:text-11',
               delta < 0 ? 'text-alert-fg' : 'text-ink-secondary'
             )}
           >
@@ -165,7 +173,7 @@ export function KpiSparklineTile({ label, value, sub, delta, deltaSuffix, alert,
           </div>
         )}
         {sub && delta == null && (
-          <div className="mt-2 text-12 text-ink-secondary">{sub}</div>
+          <div className="mt-2 text-12 max-md:text-11 text-ink-secondary">{sub}</div>
         )}
       </CardBody>
     </Card>
@@ -186,7 +194,12 @@ export function RevenueTrendArea({ current = [], prior = [], height = 240 }) {
   }));
   return (
     <div style={{ height }}>
-      <ResponsiveContainer>
+      <ResponsiveContainer
+        width="100%"
+        height="100%"
+        minWidth={0}
+        initialDimension={RESPONSIVE_INITIAL_DIMENSION}
+      >
         <AreaChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: -12 }}>
           <defs>
             <linearGradient id="rev-current" x1="0" y1="0" x2="0" y2="1">
@@ -253,7 +266,12 @@ export function ServiceMixDonut({ mix = [], height = 220 }) {
   return (
     <div className="grid grid-cols-2 gap-4 items-center" style={{ minHeight: height }}>
       <div style={{ height }}>
-        <ResponsiveContainer>
+        <ResponsiveContainer
+          width="100%"
+          height="100%"
+          minWidth={0}
+          initialDimension={RESPONSIVE_INITIAL_DIMENSION}
+        >
           <PieChart>
             <Pie
               data={data}
@@ -391,7 +409,12 @@ export function CompletionGauge({ completed = 0, total = 0, remaining = 0, cance
   return (
     <div className="grid grid-cols-2 gap-4 items-center">
       <div style={{ height: 180 }}>
-        <ResponsiveContainer>
+        <ResponsiveContainer
+          width="100%"
+          height="100%"
+          minWidth={0}
+          initialDimension={RESPONSIVE_INITIAL_DIMENSION}
+        >
           <RadialBarChart
             innerRadius="68%"
             outerRadius="100%"
@@ -447,7 +470,12 @@ export function MrrTrendChart({ trend = [], height = 220 }) {
   if (!trend.length) return <EmptyState>No MRR history yet</EmptyState>;
   return (
     <div style={{ height }}>
-      <ResponsiveContainer>
+      <ResponsiveContainer
+        width="100%"
+        height="100%"
+        minWidth={0}
+        initialDimension={RESPONSIVE_INITIAL_DIMENSION}
+      >
         <LineChart data={trend} margin={{ top: 8, right: 8, bottom: 0, left: -12 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID} vertical={false} />
           <XAxis dataKey="month" tick={{ fill: CHART_TICK, fontSize: 10 }} tickLine={false} axisLine={{ stroke: CHART_GRID }} />
@@ -683,7 +711,12 @@ export function ChannelMixDonut({ channels = [], height = 200 }) {
   return (
     <div className="grid grid-cols-2 gap-4 items-center" style={{ minHeight: height }}>
       <div style={{ height }}>
-        <ResponsiveContainer>
+        <ResponsiveContainer
+          width="100%"
+          height="100%"
+          minWidth={0}
+          initialDimension={RESPONSIVE_INITIAL_DIMENSION}
+        >
           <PieChart>
             <Pie
               data={data}

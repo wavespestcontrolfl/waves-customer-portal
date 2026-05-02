@@ -67,8 +67,11 @@ const NotificationService = {
   },
 
   // Mark as read
-  async markRead(notificationId) {
-    await db('notifications').where({ id: notificationId }).update({ read_at: new Date() });
+  async markRead(notificationId, customerId = null) {
+    let q = db('notifications').where({ id: notificationId });
+    if (customerId) q = q.where({ recipient_type: 'customer', recipient_id: customerId });
+    const updated = await q.update({ read_at: new Date() });
+    return updated > 0;
   },
 
   // Mark all read for admin

@@ -307,8 +307,12 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
   const [timelineFilter, setTimelineFilter] = useState('all');
   const [timeline, setTimeline] = useState([]);
   const [comms, setComms] = useState([]);
+  const [commsLoaded, setCommsLoaded] = useState(false);
+  const [commsLoading, setCommsLoading] = useState(false);
+  const [commsErr, setCommsErr] = useState('');
   const [smsReply, setSmsReply] = useState('');
   const [sendingSms, setSendingSms] = useState(false);
+  const [smsErr, setSmsErr] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [editForm, setEditForm] = useState({});
@@ -317,23 +321,58 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
   const [deletingCustomer, setDeletingCustomer] = useState(false);
   const panelRef = useRef(null);
   const menuRef = useRef(null);
+  const commsSeqRef = useRef(0);
+  const commsAbortRef = useRef(null);
 
   const reloadCustomer = () =>
     adminFetch(`/admin/customers/${customerId}`).then(setData).catch(() => {});
 
   useEffect(() => {
+    commsSeqRef.current += 1;
+    if (commsAbortRef.current) commsAbortRef.current.abort();
     setLoading(true);
+    setCommsLoading(false);
     Promise.all([
       adminFetch(`/admin/customers/${customerId}`),
       adminFetch(`/admin/customers/${customerId}/timeline`).catch(() => ({ timeline: [] })),
-      adminFetch(`/admin/customers/${customerId}/comms`).catch(() => ({ comms: [] })),
-    ]).then(([detail, tl, cm]) => {
+    ]).then(([detail, tl]) => {
       setData(detail);
       setTimeline(tl.timeline || []);
-      setComms(cm.comms || []);
+      setComms([]);
+      setCommsLoaded(false);
+      setCommsErr('');
       setLoading(false);
     }).catch(() => setLoading(false));
   }, [customerId]);
+
+  useEffect(() => {
+    if (activeTab !== 'comms' || commsLoaded || commsLoading) return;
+    const seq = commsSeqRef.current + 1;
+    commsSeqRef.current = seq;
+    if (commsAbortRef.current) commsAbortRef.current.abort();
+    const ctrl = new AbortController();
+    commsAbortRef.current = ctrl;
+    setCommsLoading(true);
+    setCommsErr('');
+    adminFetch(`/admin/customers/${customerId}/comms`, { signal: ctrl.signal })
+      .then((data) => {
+        if (seq !== commsSeqRef.current) return;
+        setComms(data.comms || []);
+        setCommsLoaded(true);
+      })
+      .catch((err) => {
+        if (err.name === 'AbortError' || seq !== commsSeqRef.current) return;
+        setCommsErr(err.message || 'Failed to load messages');
+        setCommsLoaded(true);
+      })
+      .finally(() => {
+        if (seq === commsSeqRef.current) setCommsLoading(false);
+      });
+  }, [activeTab, customerId, commsLoaded, commsLoading]);
+
+  useEffect(() => () => {
+    if (commsAbortRef.current) commsAbortRef.current.abort();
+  }, []);
 
   useEffect(() => {
     const handler = (e) => { if (e.key === 'Escape') onClose(); };
@@ -423,8 +462,9 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
   ];
 
   const sendSms = async () => {
-    if (!smsReply.trim() || !c.phone) return;
+    if (sendingSms || !smsReply.trim() || !c.phone) return;
     setSendingSms(true);
+    setSmsErr('');
     try {
       await adminFetch('/admin/communications/send-sms', { method: 'POST', body: JSON.stringify({ to: c.phone, message: smsReply }) });
       setSmsReply('');
@@ -434,7 +474,10 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
       ]);
       setData(fresh);
       setComms(freshComms.comms || []);
-    } catch { /* ignore */ }
+      setCommsLoaded(true);
+    } catch (err) {
+      setSmsErr(err.message || 'SMS failed to send');
+    }
     setSendingSms(false);
   };
 
@@ -858,7 +901,7 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
                   <div className="grid grid-cols-[repeat(auto-fill,minmax(100px,1fr))] gap-2">
                     {photos.map((p, i) => (
                       <div key={i} className="rounded-sm overflow-hidden bg-zinc-50 border-hairline border-zinc-200 aspect-square">
-                        <img src={p.s3_url} alt={p.caption || ''} className="w-full h-full object-cover"
+                        <img src={p.url || ''} alt={p.caption || ''} className="w-full h-full object-cover"
                           onError={e => { e.target.style.display = 'none'; }} />
                       </div>
                     ))}
@@ -956,6 +999,12 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
             <div className="flex flex-col h-full">
               <SectionTitle>Thread ({comms.length})</SectionTitle>
               <div className="flex-1 overflow-y-auto flex flex-col gap-1.5 mb-3 max-h-[400px]">
+                {commsLoading && (
+                  <div className="text-ink-secondary text-13 text-center py-5">Loading messages…</div>
+                )}
+                {commsErr && (
+                  <div className="text-alert-fg text-13 text-center py-5">{commsErr}</div>
+                )}
                 {[...comms].reverse().map((m, i) => {
                   const inbound = m.direction === 'inbound';
                   if (m.channel === 'sms') {
@@ -1002,22 +1051,25 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
                     </div>
                   );
                 })}
-                {comms.length === 0 && (
+                {!commsLoading && !commsErr && commsLoaded && comms.length === 0 && (
                   <div className="text-ink-secondary text-13 text-center py-5">No messages</div>
                 )}
               </div>
               {c.phone && (
-                <div className="flex gap-2 py-3 border-t border-hairline border-zinc-200">
-                  <input
-                    value={smsReply}
-                    onChange={e => setSmsReply(e.target.value)}
-                    placeholder="Type a message…"
-                    onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendSms(); } }}
-                    className="flex-1 h-10 px-3.5 bg-white border-hairline border-zinc-300 rounded-sm text-13 text-zinc-900 u-focus-ring"
-                  />
-                  <Button onClick={sendSms} disabled={sendingSms || !smsReply.trim()}>
-                    {sendingSms ? '…' : 'Send'}
-                  </Button>
+                <div className="py-3 border-t border-hairline border-zinc-200">
+                  <div className="flex gap-2">
+                    <input
+                      value={smsReply}
+                      onChange={e => { setSmsReply(e.target.value); if (smsErr) setSmsErr(''); }}
+                      placeholder="Type a message…"
+                      onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendSms(); } }}
+                      className="flex-1 h-10 px-3.5 bg-white border-hairline border-zinc-300 rounded-sm text-13 text-zinc-900 u-focus-ring"
+                    />
+                    <Button onClick={sendSms} disabled={sendingSms || !smsReply.trim()}>
+                      {sendingSms ? '…' : 'Send'}
+                    </Button>
+                  </div>
+                  {smsErr && <div className="mt-1.5 text-12 text-alert-fg">{smsErr}</div>}
                 </div>
               )}
 

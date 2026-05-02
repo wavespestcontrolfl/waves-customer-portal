@@ -49,6 +49,77 @@ function endOfLastMonth() { return etMonthEnd(new Date(), -1); }
 function mondayThisWeek() { return etWeekStart(); }
 function sundayThisWeek() { return etDateString(addETDays(parseETDateTime(etWeekStart() + 'T12:00'), 6)); }
 
+function applyETTimestampWindow(qb, column, from, to) {
+  return qb
+    .whereRaw(`${column} >= ?::timestamp AT TIME ZONE 'America/New_York'`, [`${from}T00:00:00`])
+    .whereRaw(`${column} <  (?::timestamp + INTERVAL '1 day') AT TIME ZONE 'America/New_York'`, [`${to}T00:00:00`]);
+}
+
+async function paidRevenueTotal(from, to) {
+  const [ledger, paidInvoiceGaps] = await Promise.all([
+    db('payments')
+      .where({ status: 'paid' })
+      .where('payment_date', '>=', from)
+      .where('payment_date', '<=', to)
+      .sum('amount as total')
+      .first(),
+    applyETTimestampWindow(
+      db('invoices as i')
+        .where({ 'i.status': 'paid', 'i.processor': 'stripe' })
+        .whereNotNull('i.stripe_payment_intent_id')
+        .whereNotExists(function () {
+          this.select(db.raw('1'))
+            .from('payments as p')
+            .whereRaw('p.stripe_payment_intent_id = i.stripe_payment_intent_id');
+        }),
+      'i.paid_at',
+      from,
+      to,
+    )
+      .sum('i.total as total')
+      .first(),
+  ]);
+  return parseFloat(ledger?.total || 0) + parseFloat(paidInvoiceGaps?.total || 0);
+}
+
+async function paidRevenueDaily(from, to) {
+  const paidInvoiceGapDateExpr = "((i.paid_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/New_York')::date";
+  const [ledgerRows, paidInvoiceGapRows] = await Promise.all([
+    db('payments')
+      .where({ status: 'paid' })
+      .where('payment_date', '>=', from)
+      .where('payment_date', '<=', to)
+      .select(db.raw("payment_date::date as date"), db.raw("SUM(amount) as total"))
+      .groupByRaw("payment_date::date")
+      .orderBy('date'),
+    applyETTimestampWindow(
+      db('invoices as i')
+        .where({ 'i.status': 'paid', 'i.processor': 'stripe' })
+        .whereNotNull('i.stripe_payment_intent_id')
+        .whereNotExists(function () {
+          this.select(db.raw('1'))
+            .from('payments as p')
+            .whereRaw('p.stripe_payment_intent_id = i.stripe_payment_intent_id');
+        }),
+      'i.paid_at',
+      from,
+      to,
+    )
+      .select(db.raw(`${paidInvoiceGapDateExpr} as date`), db.raw('SUM(i.total) as total'))
+      .groupByRaw(paidInvoiceGapDateExpr)
+      .orderBy('date'),
+  ]);
+
+  const byDate = new Map();
+  for (const row of [...ledgerRows, ...paidInvoiceGapRows]) {
+    const key = row.date instanceof Date ? row.date.toISOString().slice(0, 10) : String(row.date).slice(0, 10);
+    byDate.set(key, (byDate.get(key) || 0) + parseFloat(row.total || 0));
+  }
+  return [...byDate.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, total]) => ({ date, total }));
+}
+
 // GET /api/admin/dashboard — all KPIs in one call
 router.get('/', dashboardCache, async (req, res, next) => {
   try {
@@ -64,8 +135,8 @@ router.get('/', dashboardCache, async (req, res, next) => {
       estimatesPending, servicesWeek, avgResponse, mrr, oneTimeMonth,
       todaysSchedule, recentActivity, tierRevenue, reviewStats
     ] = await Promise.all([
-      db('payments').where({ status: 'paid' }).where('payment_date', '>=', som).where('payment_date', '<=', today).sum('amount as total').first(),
-      db('payments').where({ status: 'paid' }).where('payment_date', '>=', solm).where('payment_date', '<=', eolm).sum('amount as total').first(),
+      paidRevenueTotal(som, today),
+      paidRevenueTotal(solm, eolm),
       db('customers').where({ active: true }).whereNull('deleted_at').count('* as count').first(),
       db('customers').where({ active: true }).whereNull('deleted_at').where('created_at', '>=', som).count('* as count').first(),
       db('estimates').whereIn('status', ['sent', 'viewed']).where('expires_at', '>', db.raw('NOW()')).count('* as count').first(),
@@ -124,8 +195,8 @@ router.get('/', dashboardCache, async (req, res, next) => {
       })(),
     ]);
 
-    const revMTDVal = parseFloat(revMTD?.total || 0);
-    const revLMVal = parseFloat(revLastMonth?.total || 0);
+    const revMTDVal = parseFloat(revMTD || 0);
+    const revLMVal = parseFloat(revLastMonth || 0);
     const revChange = revLMVal > 0 ? Math.round((revMTDVal - revLMVal) / revLMVal * 100) : null;
 
     function safeParseJSON(v) {
@@ -134,10 +205,7 @@ router.get('/', dashboardCache, async (req, res, next) => {
     }
 
     // Revenue chart — daily for current month
-    const dailyRevenue = await db('payments')
-      .where({ status: 'paid' }).where('payment_date', '>=', som).where('payment_date', '<=', today)
-      .select(db.raw("payment_date::date as date"), db.raw("SUM(amount) as total"))
-      .groupByRaw("payment_date::date").orderBy('date');
+    const dailyRevenue = await paidRevenueDaily(som, today);
 
     res.json({
       kpis: {
@@ -420,9 +488,12 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
     let leadMetrics = { avgResponseMin: null, conversion: null, leads: 0, booked: 0, error: null };
     try {
       const leadAgg = await excludeInternalLeads(
-        db('leads')
-          .where('created_at', '>=', start)
-          .whereNotIn('status', NON_ENGAGED_LEAD_STATUSES)
+        applyETTimestampWindow(
+          db('leads').whereNotIn('status', NON_ENGAGED_LEAD_STATUSES),
+          'first_contact_at',
+          start,
+          todayStr,
+        )
       ).select(
           db.raw("COUNT(*) as total"),
           db.raw("COUNT(*) FILTER (WHERE status = 'won') as booked"),
@@ -642,23 +713,18 @@ router.get('/compare', dashboardCache, async (req, res, next) => {
     }
 
     async function dailySeries(from, to) {
-      const rows = await db('payments')
-        .where({ status: 'paid' })
-        .where('payment_date', '>=', from).where('payment_date', '<=', to)
-        .select(db.raw("payment_date::date as date"), db.raw("SUM(amount) as total"))
-        .groupByRaw("payment_date::date").orderBy('date');
-      return rows.map(r => ({ date: r.date, total: parseFloat(r.total || 0) }));
+      return paidRevenueDaily(from, to);
     }
 
     async function totals(from, to) {
       const [rev, services, customers] = await Promise.all([
-        db('payments').where({ status: 'paid' }).whereBetween('payment_date', [from, to]).sum('amount as total').first(),
+        paidRevenueTotal(from, to),
         db('scheduled_services').whereBetween('scheduled_date', [from, to])
           .select(db.raw("COUNT(*) as total"), db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed")).first(),
         db('customers').where({ active: true }).whereBetween('created_at', [from, to + 'T23:59:59']).count('* as c').first(),
       ]);
       return {
-        revenue: parseFloat(rev?.total || 0),
+        revenue: parseFloat(rev || 0),
         services: parseInt(services?.total || 0),
         servicesCompleted: parseInt(services?.completed || 0),
         newCustomers: parseInt(customers?.c || 0),
@@ -770,8 +836,7 @@ router.get('/calls-by-source', dashboardCache, async (req, res, next) => {
       // attribution panel. Keep the seed row for registry purposes and
       // drop it from the dashboard instead.
       .where((qb) => qb.where('s.is_active', true).orWhereNull('s.is_active'))
-      .whereRaw("c.created_at >= ?::timestamp AT TIME ZONE 'America/New_York'", [`${win.from}T00:00:00`])
-      .whereRaw("c.created_at <  (?::timestamp + INTERVAL '1 day') AT TIME ZONE 'America/New_York'", [`${win.to}T00:00:00`])
+      .modify((qb) => applyETTimestampWindow(qb, 'c.created_at', win.from, win.to))
       .select(
         db.raw("COALESCE(s.name, 'Unmapped — ' || c.to_phone) as name"),
         db.raw("s.source_type as source_type"),
@@ -815,9 +880,13 @@ router.get('/leads-by-source', dashboardCache, async (req, res, next) => {
   try {
     const win = resolveAttributionWindow(req.query.period);
     const rows = await excludeInternalLeads(
-      db('leads as l')
-        .leftJoin('lead_sources as s', 'l.lead_source_id', 's.id')
-        .whereBetween('l.first_contact_at', [`${win.from}T00:00:00`, `${win.to}T23:59:59`]),
+      applyETTimestampWindow(
+        db('leads as l')
+          .leftJoin('lead_sources as s', 'l.lead_source_id', 's.id'),
+        'l.first_contact_at',
+        win.from,
+        win.to,
+      ),
       'l',
     ).select(
         db.raw("COALESCE(s.name, 'Unattributed') as name"),
@@ -869,8 +938,7 @@ router.get('/channel-mix', dashboardCache, async (req, res, next) => {
   try {
     const win = resolveAttributionWindow(req.query.period);
     const rows = await excludeInternalLeads(
-      db('leads')
-        .whereBetween('first_contact_at', [`${win.from}T00:00:00`, `${win.to}T23:59:59`])
+      applyETTimestampWindow(db('leads'), 'first_contact_at', win.from, win.to)
     ).select(
         db.raw("COALESCE(first_contact_channel, 'unknown') as channel"),
         db.raw('COUNT(*) as leads'),

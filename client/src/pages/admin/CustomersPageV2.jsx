@@ -34,7 +34,7 @@
 // - V1/V2 panel reuse: CustomerHealthSection (V1 export) renders
 //   inside V2. Watch for V1 styling leaking through — should be
 //   reskinned eventually but for now stylistic drift is the risk.
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Filter, Phone, MessageSquare, Plus, Trash2 } from 'lucide-react';
 import Customer360Profile from '../../components/admin/Customer360ProfileV2';
@@ -522,6 +522,8 @@ export default function CustomersPageV2() {
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [savingEdit, setSavingEdit] = useState(false);
+  const loadSeqRef = useRef(0);
+  const loadAbortRef = useRef(null);
 
   const startEdit = (c) => {
     setEditingId(c.id);
@@ -549,26 +551,39 @@ export default function CustomersPageV2() {
 
   const loadCustomers = (p) => {
     const pg = p || page;
+    const seq = loadSeqRef.current + 1;
+    loadSeqRef.current = seq;
+    if (loadAbortRef.current) loadAbortRef.current.abort();
+    const ctrl = new AbortController();
+    loadAbortRef.current = ctrl;
     setLoading(true);
     setError(null);
     const params = new URLSearchParams();
     if (search.trim()) params.set('search', search.trim());
     if (filterStage !== 'all') params.set('stage', filterStage);
     if (filterTier !== 'all') params.set('tier', filterTier);
+    if (filterCards !== 'all') params.set('cards', filterCards);
+    if (filterHasBalance) params.set('hasBalance', 'true');
+    if (filterLastVisited !== 'all') params.set('lastVisited', filterLastVisited);
     params.set('page', String(pg));
     // Load up to the server's max so the full customer list lands in a
     // single alphabetical scroll rather than A-H on page 1, I-Q on
     // page 2, etc. Server caps at 500; any customer base above that
     // will still paginate (Prev/Next controls stay wired below).
     params.set('limit', '500');
-    adminFetch(`/admin/customers?${params.toString()}`)
+    adminFetch(`/admin/customers?${params.toString()}`, { signal: ctrl.signal })
       .then((data) => {
+        if (seq !== loadSeqRef.current) return;
         setCustomers(Array.isArray(data) ? data : data.customers || []);
         setTotalCustomers(data.total || 0);
         setTotalPages(data.totalPages || 1);
         setLoading(false);
       })
-      .catch((e) => { setError(e); setLoading(false); });
+      .catch((e) => {
+        if (e.name === 'AbortError' || seq !== loadSeqRef.current) return;
+        setError(e);
+        setLoading(false);
+      });
   };
 
   const loadPipeline = () => {
@@ -576,6 +591,10 @@ export default function CustomersPageV2() {
       .then((data) => setPipelineData(data))
       .catch(() => {});
   };
+
+  useEffect(() => () => {
+    if (loadAbortRef.current) loadAbortRef.current.abort();
+  }, []);
 
   // Single debounced effect — one fetch per filter/search/view change.
   // StrictMode's mount→cleanup→mount double-fire is absorbed by the
@@ -589,7 +608,7 @@ export default function CustomersPageV2() {
     const t = setTimeout(() => { setPage(1); loadCustomers(1); }, 300);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, filterStage, filterTier, view]);
+  }, [search, filterStage, filterTier, filterCards, filterHasBalance, filterLastVisited, view]);
 
   const handleSort = (key) => {
     if (sortBy === key) setSortDir((d) => d === 'asc' ? 'desc' : 'asc');
@@ -992,7 +1011,7 @@ export default function CustomersPageV2() {
                               try {
                                 const r = await adminFetch('/admin/communications/call', {
                                   method: 'POST',
-                                  body: JSON.stringify({ to: c.phone, fromNumber: '+19412975749' }),
+                                  body: JSON.stringify({ to: c.phone }),
                                 });
                                 if (!r?.success) alert('Call failed: ' + (r?.error || 'unknown error'));
                               } catch (err) { alert('Call failed: ' + err.message); }
@@ -1060,7 +1079,7 @@ export default function CustomersPageV2() {
                               try {
                                 const r = await adminFetch('/admin/communications/call', {
                                   method: 'POST',
-                                  body: JSON.stringify({ to: c.phone, fromNumber: '+19412975749' }),
+                                  body: JSON.stringify({ to: c.phone }),
                                 });
                                 if (!r?.success) alert('Call failed: ' + (r?.error || 'unknown error'));
                               } catch (err) { alert('Call failed: ' + err.message); }

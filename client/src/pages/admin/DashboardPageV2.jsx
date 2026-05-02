@@ -25,6 +25,7 @@ import {
   fmtMoney,
   fmtMoneyCompact,
 } from '../../components/dashboard/charts';
+import useIsMobile from '../../hooks/useIsMobile';
 import { adminFetch, isRateLimitError } from '../../utils/admin-fetch';
 
 const PERIODS = [
@@ -51,6 +52,7 @@ function sparkSeries(daily) {
 }
 
 export default function DashboardPageV2() {
+  const isMobile = useIsMobile();
   const [data, setData] = useState(null);     // /admin/dashboard
   const [kpis, setKpis] = useState(null);     // /admin/dashboard/core-kpis
   const [compare, setCompare] = useState(null); // /admin/dashboard/compare
@@ -69,6 +71,10 @@ export default function DashboardPageV2() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [period, setPeriod] = useState('mtd');
+  const [kpisLoading, setKpisLoading] = useState(false);
+  const [kpisError, setKpisError] = useState(null);
+  const [attributionLoading, setAttributionLoading] = useState(false);
+  const [attributionError, setAttributionError] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -102,19 +108,13 @@ export default function DashboardPageV2() {
         track('/funnel',            adminFetch('/admin/dashboard/funnel')),
         track('/aging',             adminFetch('/admin/dashboard/aging')),
         track('/mrr-trend',         adminFetch('/admin/dashboard/mrr-trend?months=12')),
-        track('/calls-by-source',   adminFetch('/admin/dashboard/calls-by-source?period=mtd')),
-        track('/leads-by-source',   adminFetch('/admin/dashboard/leads-by-source?period=mtd')),
-        track('/channel-mix',       adminFetch('/admin/dashboard/channel-mix?period=mtd')),
         track('/service-mix',       adminFetch('/admin/dashboard/service-mix')),
       ]);
       if (cancelled) return;
-      const [fnl, ag, mrr, calls, leads, channels, mx] = wave2;
+      const [fnl, ag, mrr, mx] = wave2;
       setFunnel(fnl);
       setAging(ag);
       setMrrTrend(mrr);
-      setCallsBySource(calls);
-      setLeadsBySource(leads);
-      setChannelMix(channels);
       setMix(mx);
     }
     loadAll();
@@ -122,9 +122,54 @@ export default function DashboardPageV2() {
   }, []);
 
   useEffect(() => {
-    adminFetch(`/admin/dashboard/core-kpis?period=${period}`)
-      .then((d) => setKpis(d))
-      .catch((e) => console.error('[dashboard-v2] /core-kpis', e));
+    const ctrl = new AbortController();
+    setKpis(null);
+    setKpisError(null);
+    setKpisLoading(true);
+    adminFetch(`/admin/dashboard/core-kpis?period=${period}`, { signal: ctrl.signal })
+      .then((d) => {
+        setKpis(d);
+        setKpisError(null);
+      })
+      .catch((e) => {
+        if (e?.name === 'AbortError') return;
+        console.error('[dashboard-v2] /core-kpis', e);
+        setKpisError(e);
+      })
+      .finally(() => {
+        if (!ctrl.signal.aborted) setKpisLoading(false);
+      });
+    return () => ctrl.abort();
+  }, [period]);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    setCallsBySource(null);
+    setLeadsBySource(null);
+    setChannelMix(null);
+    setAttributionError(null);
+    setAttributionLoading(true);
+
+    Promise.all([
+      adminFetch(`/admin/dashboard/calls-by-source?period=${period}`, { signal: ctrl.signal }),
+      adminFetch(`/admin/dashboard/leads-by-source?period=${period}`, { signal: ctrl.signal }),
+      adminFetch(`/admin/dashboard/channel-mix?period=${period}`, { signal: ctrl.signal }),
+    ])
+      .then(([calls, leads, channels]) => {
+        setCallsBySource(calls);
+        setLeadsBySource(leads);
+        setChannelMix(channels);
+        setAttributionError(null);
+      })
+      .catch((e) => {
+        if (e?.name === 'AbortError') return;
+        console.error('[dashboard-v2] attribution', e);
+        setAttributionError(e);
+      })
+      .finally(() => {
+        if (!ctrl.signal.aborted) setAttributionLoading(false);
+      });
+    return () => ctrl.abort();
   }, [period]);
 
   if (loading) {
@@ -151,6 +196,9 @@ export default function DashboardPageV2() {
   const k = data.kpis;
   const dailySpark = sparkSeries(data.revenueChart?.daily);
   const todayLabel = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+  const mrrTrendSub = mrrTrend?.avg_growth_pct != null
+    ? `${mrrTrend.avg_growth_pct >= 0 ? '↑' : '↓'} ${Math.abs(mrrTrend.avg_growth_pct)}% avg monthly growth`
+    : 'last 12 months';
 
   // Hero KPI tiles. Google Rating tile intentionally removed — NPS from the
   // /rate/:token submissions (review_requests.score where status='submitted')
@@ -184,7 +232,7 @@ export default function DashboardPageV2() {
   ];
 
   return (
-    <div className="dashboard-blackout font-sans bg-surface-page min-h-full p-3 sm:p-6 text-zinc-900">
+    <div className="dashboard-blackout font-sans bg-surface-page min-h-full p-3 sm:p-6 pb-[calc(6rem+env(safe-area-inset-bottom))] md:pb-6 text-zinc-900">
       <header className="mb-5 max-md:mb-6">
         <div className="flex items-start justify-between flex-wrap gap-3">
           <div>
@@ -200,7 +248,7 @@ export default function DashboardPageV2() {
       </header>
 
       {/* Hero KPI row — sparkline + delta */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4 mb-5 max-md:grid-cols-1">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4 mb-4 md:mb-5">
         {HERO.map((h) => (
           <KpiSparklineTile key={h.label} {...h} />
         ))}
@@ -297,8 +345,12 @@ export default function DashboardPageV2() {
           </div>
         </CardHeader>
         <CardBody>
-          {!kpis ? (
+          {kpisLoading ? (
             <EmptyState>Loading KPIs…</EmptyState>
+          ) : kpisError ? (
+            <EmptyState>Failed to load KPIs for this period</EmptyState>
+          ) : !kpis ? (
+            <EmptyState>No KPI data for this period</EmptyState>
           ) : (
             <>
               <SectionLabel>Operations</SectionLabel>
@@ -402,14 +454,22 @@ export default function DashboardPageV2() {
       </Card>
 
       {/* MRR trend — full width above the attribution row */}
+      {isMobile ? (
+        <MobileFold title="MRR Trend" sub={mrrTrendSub}>
+          <ChartCard title="MRR Trend" sub={mrrTrendSub}>
+            <MrrTrendChart trend={mrrTrend?.trend || []} />
+          </ChartCard>
+        </MobileFold>
+      ) : (
       <div className="mb-5">
         <ChartCard
           title="MRR Trend"
-          sub={mrrTrend?.avg_growth_pct != null ? `${mrrTrend.avg_growth_pct >= 0 ? '↑' : '↓'} ${Math.abs(mrrTrend.avg_growth_pct)}% avg monthly growth` : 'last 12 months'}
+          sub={mrrTrendSub}
         >
           <MrrTrendChart trend={mrrTrend?.trend || []} />
         </ChartCard>
       </div>
+      )}
 
       {/* Upstream lead-attribution row.
           Replaces the prior single Lead Source panel (which aggregated the
@@ -418,45 +478,115 @@ export default function DashboardPageV2() {
             - Calls by Source: call_log JOIN lead_sources by dialed number
             - Leads by Source: leads GROUP BY lead_source_id
             - Channel Mix:     leads.first_contact_channel breakdown
-          All MTD; can grow a period selector later. */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-5">
-        <ChartCard
-          title="Calls by Source"
-          sub={
-            callsBySource?.total_inbound_calls != null
-              ? `${callsBySource.total_inbound_calls} inbound calls · ${callsBySource.period?.label || 'MTD'}`
-              : ''
-          }
-        >
-          <CallsBySourceList sources={callsBySource?.sources || []} />
-        </ChartCard>
-        <ChartCard
-          title="Leads by Source"
-          sub={
-            leadsBySource?.total_leads != null
-              ? `${leadsBySource.total_leads} leads · ${leadsBySource.overall_conversion_pct ?? 0}% booked · ${leadsBySource.period?.label || 'MTD'}`
-              : ''
-          }
-        >
-          <LeadsBySourceList sources={leadsBySource?.sources || []} />
-        </ChartCard>
-        <ChartCard
-          title="Channel Mix"
-          sub={channelMix?.total_leads != null ? `${channelMix.total_leads} leads by first-contact channel` : ''}
-        >
-          <ChannelMixDonut channels={channelMix?.channels || []} />
-        </ChartCard>
-      </div>
+          Uses the same period selector as Core KPIs. */}
+      {isMobile ? (
+        <MobileFold title="Lead Attribution" sub={callsBySource?.period?.label || kpis?.periodLabel || 'Month to Date'}>
+          <AttributionPanels
+            callsBySource={callsBySource}
+            leadsBySource={leadsBySource}
+            channelMix={channelMix}
+            loading={attributionLoading}
+            error={attributionError}
+          />
+        </MobileFold>
+      ) : (
+        <AttributionPanels
+          callsBySource={callsBySource}
+          leadsBySource={leadsBySource}
+          channelMix={channelMix}
+          loading={attributionLoading}
+          error={attributionError}
+        />
+      )}
 
       {/* Tech leaderboard — bar variant */}
       {kpis?.leaderboard?.length > 0 && (
-        <ChartCard title="Tech Leaderboard" sub={kpis.periodLabel} className="mb-5">
-          <TechLeaderboardBars leaderboard={kpis.leaderboard} />
-        </ChartCard>
+        isMobile ? (
+          <MobileFold title="Tech Leaderboard" sub={kpis.periodLabel}>
+            <ChartCard title="Tech Leaderboard" sub={kpis.periodLabel}>
+              <TechLeaderboardBars leaderboard={kpis.leaderboard} />
+            </ChartCard>
+          </MobileFold>
+        ) : (
+          <ChartCard title="Tech Leaderboard" sub={kpis.periodLabel} className="mb-5">
+            <TechLeaderboardBars leaderboard={kpis.leaderboard} />
+          </ChartCard>
+        )
       )}
 
       {/* Billing Health — kept as a peer panel per user instruction */}
-      {billing && <BillingHealthPanel summary={billing} />}
+      {billing && (
+        isMobile ? (
+          <MobileFold title="Billing Health" sub={`${billing.total_billable} billable`}>
+            <BillingHealthPanel summary={billing} />
+          </MobileFold>
+        ) : (
+          <BillingHealthPanel summary={billing} />
+        )
+      )}
+    </div>
+  );
+}
+
+function MobileFold({ title, sub, children }) {
+  return (
+    <details className="md:hidden mb-3 rounded-xl border-hairline border-zinc-200 bg-white shadow-sm overflow-hidden">
+      <summary className="list-none cursor-pointer select-none px-4 py-4 flex items-center justify-between gap-3">
+        <span className="u-label text-zinc-900">{title}</span>
+        {sub && <span className="text-12 text-ink-secondary text-right truncate">{sub}</span>}
+      </summary>
+      <div className="px-3 pb-3">{children}</div>
+    </details>
+  );
+}
+
+function AttributionPanels({ callsBySource, leadsBySource, channelMix, loading, error }) {
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-5">
+      <ChartCard
+        title="Calls by Source"
+        sub={
+          callsBySource?.total_inbound_calls != null
+            ? `${callsBySource.total_inbound_calls} inbound calls · ${callsBySource.period?.label || 'MTD'}`
+            : ''
+        }
+      >
+        {loading ? (
+          <EmptyState>Loading…</EmptyState>
+        ) : error ? (
+          <EmptyState>Failed to load attribution</EmptyState>
+        ) : (
+          <CallsBySourceList sources={callsBySource?.sources || []} />
+        )}
+      </ChartCard>
+      <ChartCard
+        title="Leads by Source"
+        sub={
+          leadsBySource?.total_leads != null
+            ? `${leadsBySource.total_leads} leads · ${leadsBySource.overall_conversion_pct ?? 0}% booked · ${leadsBySource.period?.label || 'MTD'}`
+            : ''
+        }
+      >
+        {loading ? (
+          <EmptyState>Loading…</EmptyState>
+        ) : error ? (
+          <EmptyState>Failed to load attribution</EmptyState>
+        ) : (
+          <LeadsBySourceList sources={leadsBySource?.sources || []} />
+        )}
+      </ChartCard>
+      <ChartCard
+        title="Channel Mix"
+        sub={channelMix?.total_leads != null ? `${channelMix.total_leads} leads by first-contact channel` : ''}
+      >
+        {loading ? (
+          <EmptyState>Loading…</EmptyState>
+        ) : error ? (
+          <EmptyState>Failed to load attribution</EmptyState>
+        ) : (
+          <ChannelMixDonut channels={channelMix?.channels || []} />
+        )}
+      </ChartCard>
     </div>
   );
 }
