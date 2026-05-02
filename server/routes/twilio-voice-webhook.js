@@ -19,9 +19,16 @@ async function fetchTwilioCall(callSid) {
     const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
     return await client.calls(callSid).fetch();
   } catch (err) {
-    logger.warn(`[recording-status] Twilio call metadata lookup failed for ${callSid}: ${err.message}`);
+    logger.warn(`[recording-status] Twilio call metadata lookup failed for ${maskSid(callSid)}: ${err.message}`);
     return null;
   }
+}
+
+function maskSid(sid) {
+  if (!sid) return 'none';
+  const value = String(sid);
+  if (value.length <= 8) return `${value.slice(0, 2)}…`;
+  return `${value.slice(0, 2)}…${value.slice(-6)}`;
 }
 
 // =========================================================================
@@ -266,19 +273,19 @@ router.post('/recording-status', async (req, res) => {
             if (existing) {
               await trx('call_log').where({ id: existing.id }).update(recordingData);
               matchedSid = primaryCallSid;
-              logger.info(`[recording-status] Attached recording ${RecordingSid} to existing Studio-originated call ${primaryCallSid}`);
+              logger.info(`[recording-status] Attached recording ${maskSid(RecordingSid)} to existing Studio-originated call ${maskSid(primaryCallSid)}`);
               return;
             }
 
             if (!recoveredFrom || !recoveredTo) {
               logger.warn(
-                `[recording-status] No parent call_log row and no recoverable From/To for CallSid=${primaryCallSid}; skipping orphan insert (recording=${RecordingSid})`
+                `[recording-status] No parent call_log row and no recoverable From/To for CallSid=${maskSid(primaryCallSid)}; skipping orphan insert (recording=${maskSid(RecordingSid)})`
               );
               return;
             }
             if (twilioCall?.direction && !String(twilioCall.direction).startsWith('inbound')) {
               logger.warn(
-                `[recording-status] No parent call_log row for non-inbound CallSid=${primaryCallSid}; skipping orphan insert (recording=${RecordingSid})`
+                `[recording-status] No parent call_log row for non-inbound CallSid=${maskSid(primaryCallSid)}; skipping orphan insert (recording=${maskSid(RecordingSid)})`
               );
               return;
             }
@@ -306,10 +313,10 @@ router.post('/recording-status', async (req, res) => {
               ...recordingData,
             });
             matchedSid = primaryCallSid;
-            logger.info(`[recording-status] Created Studio-originated call_log row ${primaryCallSid} from recording callback ${CallSid}`);
+            logger.info(`[recording-status] Created Studio-originated call_log row from recording callback ${maskSid(CallSid)}`);
           });
         } catch (insertErr) {
-          logger.warn(`[recording-status] Failed to recover Studio-originated call_log row for CallSid=${CallSid}: ${insertErr.message}`);
+          logger.warn(`[recording-status] Failed to recover Studio-originated call_log row for CallSid=${maskSid(CallSid)}: ${insertErr.message}`);
         }
       } else {
         // No parent row found by either SID. The previous fallback inserted
