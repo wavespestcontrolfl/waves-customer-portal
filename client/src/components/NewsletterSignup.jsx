@@ -136,7 +136,7 @@ export default function NewsletterSignup({
         }}
       >
         {/* honeypot — hidden from humans, attractive to bots */}
-        <label style={{ position: 'absolute', left: '-10000px', width: 1, height: 1, overflow: 'hidden' }} aria-hidden="true">
+        <label style={{ display: 'none' }} aria-hidden="true">
           Company
           <input
             type="text"
