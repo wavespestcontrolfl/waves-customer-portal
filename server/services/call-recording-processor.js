@@ -25,7 +25,7 @@ function capitalizeName(name) {
 const TwilioService = require('./twilio');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { resolveLocation } = require('../config/locations');
-const { parseETDateTime, formatETDate, formatETTime } = require('../utils/datetime-et');
+const { parseETDateTime, formatETDate, formatETTime, etDateString } = require('../utils/datetime-et');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -56,8 +56,9 @@ async function transcribeWithGemini(mp3Url) {
     const audioBase64 = await downloadRecording(mp3Url);
     logger.info(`[call-proc] Downloaded ${Math.round(audioBase64.length / 1024)}KB audio`);
 
+    const model = process.env.GEMINI_TRANSCRIPTION_MODEL || 'gemini-2.5-flash';
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -100,14 +101,16 @@ Rules:
 // endpoint changed. Gemini's response_mime_type='application/json'
 // forces structured output so we rarely have to strip markdown fences,
 // but we still guard-parse for the "text-only refusal" edge case.
-async function extractCallData(transcription, callerPhone) {
+async function extractCallData(transcription, callerPhone, opts = {}) {
   if (!process.env.GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY not configured');
   }
+  const callDateET = etDateString(opts.callStartedAt || new Date());
 
   const prompt = `Analyze this phone call transcript for Waves Pest Control (pest control + lawn care, SW Florida).
 
 Caller phone: ${callerPhone || 'unknown'}
+Call date in Eastern Time: ${callDateET}
 
 Transcript:
 ${transcription}
@@ -140,6 +143,7 @@ IMPORTANT — appointment_confirmed rules:
 - Vague references like "tomorrow", "next week", "noonish", "sometime Tuesday" do NOT count — the caller must confirm an actual time (e.g. "10 AM", "2:30 PM", "noon").
 - If the agent says "I'll text you" or "let me check" without the caller confirming a specific time slot, appointment_confirmed must be false.
 - preferred_date_time must include the confirmed time, not just a date.
+- Resolve relative dates against the call date above in Eastern Time. "Today" means ${callDateET}; do not invent a prior year or use the model's training/current date.
 
 IMPORTANT — wants_estimate rules:
 - Set wants_estimate to true if the caller asks for a quote, estimate, price, pricing, "how much", "what would it cost", "can you give me a number", or otherwise signals they want a written/verbal price before committing.
@@ -384,7 +388,7 @@ const CallRecordingProcessor = {
     // Step 2: AI extraction
     let extracted;
     try {
-      extracted = await extractCallData(transcription, call.from_phone);
+      extracted = await extractCallData(transcription, call.from_phone, { callStartedAt: call.created_at });
     } catch (err) {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
       await db('call_log').where({ id: call.id }).update({
@@ -806,6 +810,21 @@ const CallRecordingProcessor = {
                 if (t.includes('am') && h === 12) h = 0;
                 windowStart = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
               }
+            }
+
+            const callDateET = etDateString(call.created_at || new Date());
+            if (scheduledDate && scheduledDate < callDateET) {
+              logger.warn(
+                `[call-proc] Extracted appointment date ${scheduledDate} is before call date ${callDateET}; skipping schedule + SMS`
+              );
+              appointmentResult = {
+                service: serviceType,
+                dateTime: extracted.preferred_date_time,
+                scheduleCreated: false,
+                smsSent: false,
+                skippedReason: 'past_extracted_date',
+              };
+              scheduledDate = null;
             }
 
             if (scheduledDate) {
