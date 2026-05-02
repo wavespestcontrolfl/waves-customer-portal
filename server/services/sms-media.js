@@ -1,10 +1,16 @@
 const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const crypto = require('crypto');
 const config = require('../config');
 const logger = require('./logger');
 
 const PREFIX = 'sms-media/';
+const OUTBOUND_PREFIX = 'sms-attachments/';
 const URL_TTL_SECONDS = 60 * 60;
+
+function attachmentTokenSecret() {
+  return config.jwt?.secret || config.twilio?.authToken || null;
+}
 
 const s3 = new S3Client({
   region: config.s3?.region,
@@ -41,6 +47,39 @@ function parseStoredMedia(value) {
     }
   }
   return [];
+}
+
+function createAttachmentToken({ key, size, mimeType }) {
+  const secret = attachmentTokenSecret();
+  if (!secret) throw new Error('SMS attachment token secret is not configured');
+  const payload = [key || '', size || '', mimeType || ''].join('|');
+  return crypto
+    .createHmac('sha256', secret)
+    .update(payload)
+    .digest('hex');
+}
+
+function isValidAttachmentToken(attachment = {}) {
+  if (!attachment?.key || !attachment?.attachmentToken) return false;
+  if (!attachment.key.startsWith(OUTBOUND_PREFIX)) return false;
+  const expected = createAttachmentToken({
+    key: attachment.key,
+    size: attachment.size,
+    mimeType: attachment.mimeType || attachment.contentType,
+  });
+  try {
+    return crypto.timingSafeEqual(
+      Buffer.from(String(attachment.attachmentToken), 'hex'),
+      Buffer.from(expected, 'hex'),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isSignableStoredMediaKey(key) {
+  return typeof key === 'string' &&
+    (key.startsWith(`${PREFIX}inbound/`) || key.startsWith(OUTBOUND_PREFIX));
 }
 
 function extractTwilioMedia(body = {}) {
@@ -124,7 +163,7 @@ async function signMediaForClient(value) {
   const media = parseStoredMedia(value);
   if (!media.length) return [];
   return Promise.all(media.map(async (item) => {
-    if (item.key && config.s3?.bucket) {
+    if (item.key && config.s3?.bucket && isSignableStoredMediaKey(item.key)) {
       try {
         const url = await getSignedUrl(
           s3,
@@ -144,7 +183,7 @@ function mediaFromOutboundAttachments(attachments = [], urls = []) {
   if (Array.isArray(attachments) && attachments.length) {
     return attachments.slice(0, 10).map((a, index) => ({
       direction: 'outbound',
-      key: a.key || null,
+      key: isValidAttachmentToken(a) ? a.key : null,
       url: a.url || null,
       fileName: a.fileName || null,
       contentType: a.mimeType || a.contentType || null,
@@ -164,6 +203,7 @@ module.exports = {
   uploadTwilioMedia,
   signMediaForClient,
   mediaFromOutboundAttachments,
+  createAttachmentToken,
   // Exposed for tests/review and to document the SSRF guard.
   isAllowedTwilioMediaUrl,
 };

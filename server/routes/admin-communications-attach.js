@@ -29,6 +29,7 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const config = require('../config');
+const { createAttachmentToken } = require('../services/sms-media');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -90,6 +91,7 @@ router.post('/attach', upload.array('attachments', MAX_PER_MESSAGE), async (req,
         fileName: file.originalname,
         size: file.size,
         mimeType: file.mimetype,
+        attachmentToken: createAttachmentToken({ key, size: file.size, mimeType: file.mimetype }),
       });
     }
 
