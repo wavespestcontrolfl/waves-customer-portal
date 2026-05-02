@@ -1229,15 +1229,77 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
     setSaving(false);
   };
 
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 320px', gap: 16 }}>
-      {/* Left — Form */}
-      <div>
-        <div style={sCard}>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 16 }}>New Invoice</div>
+  const stepBadge = (step) => (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      width: 24,
+      height: 24,
+      borderRadius: 999,
+      background: D.heading,
+      color: D.white,
+      fontSize: 12,
+      fontWeight: 700,
+      flex: '0 0 auto',
+    }}>
+      {step}
+    </span>
+  );
 
-          {/* Customer Search */}
-          <div style={{ marginBottom: 16 }}>
+  const sectionHeader = (step, title, subtitle, action = null) => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', minWidth: 0 }}>
+        {stepBadge(step)}
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>{title}</div>
+          {subtitle && <div style={{ fontSize: 12, color: D.muted, marginTop: 3, lineHeight: 1.4 }}>{subtitle}</div>}
+        </div>
+      </div>
+      {action}
+    </div>
+  );
+
+  const lineRowGrid = item => ({
+    display: 'grid',
+    gridTemplateColumns: isMobile ? 'minmax(0, 1fr) 76px' : 'minmax(260px, 1fr) 84px 132px 36px',
+    gap: 8,
+    alignItems: 'start',
+    padding: item._kind === 'discount' ? '8px 0 8px 18px' : '12px 0',
+    borderTop: `1px solid ${D.border}`,
+    background: item._kind === 'discount' ? '#F0FDF4' : 'transparent',
+    borderRadius: item._kind === 'discount' ? 8 : 0,
+  });
+
+  const fieldLabel = (label, align = 'left') => (
+    <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 5, textAlign: align }}>
+      {label}
+    </div>
+  );
+
+  const Panel = ({ children, style }) => (
+    <div style={{ ...sCard, padding: isMobile ? 14 : 18, marginBottom: 0, borderRadius: 10, ...style }}>
+      {children}
+    </div>
+  );
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'minmax(0, 1fr) 340px', gap: 16, alignItems: 'start' }}>
+      <div style={{ display: 'grid', gap: 12, minWidth: 0 }}>
+        <Panel style={{ padding: isMobile ? 14 : 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <div>
+              <div style={{ fontSize: 18, fontWeight: 800, color: D.heading }}>New Invoice</div>
+              <div style={{ fontSize: 12, color: D.muted, marginTop: 3 }}>Build the invoice from customer, services, discounts, then delivery.</div>
+            </div>
+            <div style={{ fontSize: 12, color: D.muted, fontFamily: "'JetBrains Mono', monospace" }}>
+              ${total.toFixed(2)}
+            </div>
+          </div>
+        </Panel>
+
+        <Panel>
+          {sectionHeader(1, 'Customer', 'Search by name, phone, or email.')}
             {selectedCustomer ? (
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: D.input, borderRadius: 8, padding: '10px 12px', border: `1px solid ${D.teal}`, flexWrap: 'wrap', gap: 8 }}>
                 <div>
@@ -1264,12 +1326,11 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                 )}
               </div>
             )}
-          </div>
+        </Panel>
 
-          {/* Link to Service Record */}
-          {serviceRecords.length > 0 && (
-            <div style={{ marginBottom: 16 }}>
-              <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8, display: 'block', marginBottom: 4 }}>Link to Service (optional -- pulls products, photos, tech notes)</label>
+        {serviceRecords.length > 0 && (
+          <Panel>
+            {sectionHeader(2, 'Service History', 'Optionally link a completed service record for context.')}
               <select value={selectedService?.id || ''} onChange={e => {
                 const sr = serviceRecords.find(r => r.id === e.target.value);
                 setSelectedService(sr || null);
@@ -1284,30 +1345,22 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                   </option>
                 ))}
               </select>
-            </div>
-          )}
+          </Panel>
+        )}
 
-          {/* Services */}
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 12, marginBottom: 8, flexWrap: 'wrap' }}>
-              <div>
-                <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Services</div>
-                <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
-                  Search the Services catalog, then add a per-line discount from Services &gt; Discounts.
-                </div>
-              </div>
-              <a href="/admin/service-library?tab=discounts" style={{ fontSize: 12, color: D.teal, textDecoration: 'none', fontWeight: 700 }}>
+        <Panel>
+          {sectionHeader(
+            serviceRecords.length > 0 ? 3 : 2,
+            'Services',
+            'Search the Services catalog, then add a per-line discount from Services > Discounts.',
+            <a href="/admin/service-library?tab=discounts" style={{ fontSize: 12, color: D.teal, textDecoration: 'none', fontWeight: 700, paddingTop: 3 }}>
                 Services &gt; Discounts
               </a>
-            </div>
+          )}
             {lineItems.map((item, i) => (
-              <div key={item.client_id || i} style={{ display: 'flex', gap: 8, marginBottom: item._kind === 'discount' ? 4 : 8, alignItems: 'flex-start', flexWrap: isMobile ? 'wrap' : 'nowrap', paddingLeft: item._kind === 'discount' ? (isMobile ? 14 : 24) : 0 }}>
-                <div style={{ position: 'relative', flex: isMobile ? '1 1 100%' : 3 }}>
-                  {item._kind !== 'discount' && (
-                    <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 4 }}>
-                      Service
-                    </div>
-                  )}
+              <div key={item.client_id || i} style={lineRowGrid(item)}>
+                <div style={{ position: 'relative', minWidth: 0 }}>
+                  {fieldLabel(item._kind === 'discount' ? 'Discount' : 'Service')}
                   <input
                     value={item.description}
                     onChange={e => updateLineItem(i, 'description', e.target.value)}
@@ -1345,33 +1398,23 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                     </div>
                   )}
                 </div>
-                <div style={{ flex: isMobile ? '0 0 72px' : 0.5 }}>
-                  {item._kind !== 'discount' && (
-                    <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 4, textAlign: 'center' }}>
-                      Qty
-                    </div>
-                  )}
+                <div>
+                  {fieldLabel('Qty', 'center')}
                   <input type="number" value={item.quantity} onChange={e => updateLineItem(i, 'quantity', e.target.value)}
                     min="1" readOnly={item._kind === 'discount'} style={{ ...sInput(isMobile), textAlign: 'center' }} />
                 </div>
-                <div style={{ position: 'relative', flex: 1 }}>
-                  {item._kind !== 'discount' && (
-                    <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 4 }}>
-                      Price
-                    </div>
-                  )}
-                  <span style={{ position: 'absolute', left: 10, top: item._kind === 'discount' ? '50%' : (isMobile ? 43 : 37), transform: 'translateY(-50%)', color: D.muted, fontSize: isMobile ? 16 : 13 }}>$</span>
+                <div style={{ position: 'relative' }}>
+                  {fieldLabel(item._kind === 'discount' ? 'Credit' : 'Price')}
+                  <span style={{ position: 'absolute', left: 10, top: isMobile ? 43 : 37, transform: 'translateY(-50%)', color: D.muted, fontSize: isMobile ? 16 : 13 }}>$</span>
                   <input type="number" value={item.unit_price || ''} onChange={e => updateLineItem(i, 'unit_price', e.target.value)}
                     placeholder="0.00" step="0.01" readOnly={item._kind === 'discount'} style={{ ...sInput(isMobile), paddingLeft: 22, color: item._kind === 'discount' ? D.green : D.text }} />
                 </div>
                 {lineItems.length > 1 && (
-                  <button onClick={() => removeLineItem(i)} style={{ background: 'none', border: 'none', color: D.red, cursor: 'pointer', fontSize: 18, padding: isMobile ? '12px 12px' : '10px 4px', minHeight: isMobile ? 44 : undefined, minWidth: isMobile ? 44 : undefined }}>x</button>
+                  <button onClick={() => removeLineItem(i)} aria-label="Remove line item" style={{ background: 'none', border: 'none', color: D.red, cursor: 'pointer', fontSize: 18, padding: isMobile ? '30px 12px 10px' : '26px 4px 8px', minHeight: isMobile ? 44 : undefined, minWidth: isMobile ? 44 : undefined }}>x</button>
                 )}
                 {item._kind !== 'discount' && (
-                  <div style={{ flexBasis: '100%', paddingLeft: isMobile ? 0 : 0, position: 'relative' }}>
-                    <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 4 }}>
-                      Services &gt; Discounts for this line item
-                    </div>
+                  <div style={{ gridColumn: '1 / -1', position: 'relative', padding: '0 0 2px' }}>
+                    {fieldLabel('Services > Discounts for this line item')}
                     <input
                       value={discountQueries[item.client_id || i] || ''}
                       onChange={e => { setDiscountQueries(prev => ({ ...prev, [item.client_id || i]: e.target.value })); if (availableDiscounts.length > 0) setDiscountSearchIdx(i); }}
@@ -1416,22 +1459,21 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                 )}
               </div>
             ))}
-            <button onClick={addLineItem} style={{ ...sBtn('transparent', D.teal, isMobile), padding: isMobile ? '12px 14px' : '6px 12px', fontSize: isMobile ? 14 : 12 }}>+ Add line item</button>
-          </div>
+            <button onClick={addLineItem} style={{ ...sBtn('transparent', D.teal, isMobile), padding: isMobile ? '12px 14px' : '8px 12px', fontSize: isMobile ? 14 : 12, marginTop: 10 }}>+ Add service</button>
+        </Panel>
 
-          {/* Notes */}
-          <div style={{ marginBottom: 16 }}>
+        <Panel>
+          {sectionHeader(serviceRecords.length > 0 ? 4 : 3, 'Delivery', 'Choose how the invoice and review request should go out.')}
+          <div style={{ marginBottom: 14 }}>
             <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8, display: 'block', marginBottom: 4 }}>Notes (optional)</label>
             <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} placeholder="" style={{ ...sInput(isMobile), resize: 'vertical' }} />
           </div>
 
-          {/* Send toggle */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
             <input type="checkbox" checked={sendAfterCreate} onChange={e => setSendAfterCreate(e.target.checked)} id="send-toggle" />
             <label htmlFor="send-toggle" style={{ fontSize: 13, color: D.text }}>Send via SMS + email immediately after creating</label>
           </div>
 
-          {/* Review request timing */}
           <div style={{ marginBottom: 16, opacity: sendAfterCreate ? 1 : 0.5 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: requestReview ? 8 : 0 }}>
               <input type="checkbox" checked={requestReview} onChange={e => setRequestReview(e.target.checked)} disabled={!sendAfterCreate} id="review-toggle" />
@@ -1466,13 +1508,12 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
           <button onClick={handleCreate} disabled={saving} style={{ ...sBtn('#111', D.white, isMobile), width: '100%', padding: 14, minHeight: isMobile ? 48 : undefined, opacity: saving ? 0.5 : 1 }}>
             {saving ? 'Creating...' : sendAfterCreate ? 'Send Invoice' : 'Create Draft'}
           </button>
-        </div>
+        </Panel>
       </div>
 
-      {/* Right — Preview */}
       <div style={{ position: isMobile ? 'relative' : 'sticky', top: 20, alignSelf: 'start' }}>
         <div style={sCard}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Preview</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 12 }}>Invoice Preview</div>
 
           {lineItems.filter(i => i.description).map((item, i) => {
             const amount = lineAmount(item);
