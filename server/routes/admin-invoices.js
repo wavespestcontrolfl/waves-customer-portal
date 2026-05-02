@@ -360,7 +360,7 @@ router.post('/:id/schedule-send', async (req, res, next) => {
 
     const [invoice] = await db('invoices')
       .where({ id: req.params.id })
-      .whereNotIn('status', ['paid', 'void'])
+      .whereIn('status', ['draft', 'scheduled'])
       .update({
         status: 'scheduled',
         scheduled_send_at: when,

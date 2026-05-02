@@ -713,14 +713,18 @@ const InvoiceService = {
     let sent = 0;
     let failed = 0;
     for (const inv of due) {
-      const claimed = await db('invoices')
+      const [claimed] = await db('invoices')
         .where({ id: inv.id, status: 'scheduled' })
-        .update({ status: 'sending', updated_at: new Date() });
+        .whereNotNull('scheduled_send_at')
+        .where('scheduled_send_at', '<=', new Date())
+        .where(q => q.whereNull('scheduled_send_attempts').orWhere('scheduled_send_attempts', '<', 5))
+        .update({ status: 'sending', updated_at: new Date() })
+        .returning(['id', 'scheduled_request_review', 'scheduled_review_delay_minutes']);
       if (!claimed) continue;
 
-      const result = await this.sendViaSMSAndEmail(inv.id, {
-        requestReview: Boolean(inv.scheduled_request_review),
-        reviewDelayMinutes: inv.scheduled_review_delay_minutes,
+      const result = await this.sendViaSMSAndEmail(claimed.id, {
+        requestReview: Boolean(claimed.scheduled_request_review),
+        reviewDelayMinutes: claimed.scheduled_review_delay_minutes,
       });
       if (result.ok) {
         sent += 1;
