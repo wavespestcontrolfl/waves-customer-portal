@@ -62,6 +62,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { launchTapToPay } from '../../lib/tapToPay';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
+import { computeCardTotal } from '../../lib/cardSurcharge';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -1185,6 +1186,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const taxRate = isCommercial ? 0.07 : 0;
   const tax = afterDiscount * taxRate;
   const total = afterDiscount + tax;
+  const cardCharge = computeCardTotal(total);
 
   const dateOnly = (date) => {
     const parts = new Intl.DateTimeFormat('en-US', {
@@ -1314,6 +1316,18 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const panelStyle = (style) => ({ ...sCard, padding: isMobile ? 14 : 18, marginBottom: 0, borderRadius: 10, ...style });
   const primaryActionLabel = saving ? 'Creating...' : sendTiming === 'now' ? 'Send Invoice' : sendTiming === 'draft' ? 'Create Draft' : 'Schedule Invoice';
   const lineTableColumns = 'minmax(260px, 1fr) 84px 132px 36px';
+  const summaryRowStyle = (size = 12, weight = 400) => ({
+    display: 'grid',
+    gridTemplateColumns: 'minmax(0, 1fr) max-content',
+    gap: 12,
+    alignItems: 'baseline',
+    fontSize: size,
+    fontWeight: weight,
+    color: D.text,
+    marginBottom: 4,
+  });
+  const summaryLabelStyle = { minWidth: 0, overflowWrap: 'anywhere' };
+  const summaryAmountStyle = { fontFamily: "'Roboto', Arial, sans-serif", textAlign: 'right', whiteSpace: 'nowrap' };
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'minmax(0, 1fr) 340px', gap: 16, alignItems: 'start', fontFamily: "'Roboto', Arial, sans-serif", color: D.text }}>
@@ -1322,9 +1336,6 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
             <div>
               <div style={{ fontSize: 18, fontWeight: 800, color: D.heading }}>Invoice Builder</div>
-            </div>
-            <div style={{ fontSize: 12, color: D.muted, fontFamily: "'Roboto', Arial, sans-serif" }}>
-              ${total.toFixed(2)}
             </div>
           </div>
         </div>
@@ -1602,34 +1613,42 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
           {lineItems.filter(i => i.description).map((item, i) => {
             const amount = lineAmount(item);
             return (
-            <div key={item.client_id || i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: D.text, marginBottom: 6, paddingLeft: item._kind === 'discount' ? 12 : 0 }}>
-              <span>{item.description}{item.quantity > 1 ? ` x${item.quantity}` : ''}</span>
-              <span style={{ fontFamily: "'Roboto', Arial, sans-serif" }}>{amount < 0 ? '-' : ''}${Math.abs(amount).toFixed(2)}</span>
+            <div key={item.client_id || i} style={{ ...summaryRowStyle(13), paddingLeft: item._kind === 'discount' ? 12 : 0 }}>
+              <span style={summaryLabelStyle}>{item.description}{item.quantity > 1 ? ` x${item.quantity}` : ''}</span>
+              <span style={summaryAmountStyle}>{amount < 0 ? '-' : ''}${Math.abs(amount).toFixed(2)}</span>
             </div>
             );
           })}
 
           <div style={{ borderTop: `1px solid ${D.border}`, marginTop: 12, paddingTop: 12 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: D.muted, marginBottom: 4 }}>
-              <span>Subtotal</span><span>${subtotal.toFixed(2)}</span>
+            <div style={summaryRowStyle()}>
+              <span style={summaryLabelStyle}>Subtotal</span><span style={summaryAmountStyle}>${subtotal.toFixed(2)}</span>
             </div>
             {discountAmt > 0 && (
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: D.text, marginBottom: 4 }}>
-                <span>{selectedCustomer?.waveguard_tier} -{Math.round(tierDiscount * 100)}%</span><span>-${discountAmt.toFixed(2)}</span>
+              <div style={summaryRowStyle()}>
+                <span style={summaryLabelStyle}>{selectedCustomer?.waveguard_tier} -{Math.round(tierDiscount * 100)}%</span><span style={summaryAmountStyle}>-${discountAmt.toFixed(2)}</span>
               </div>
             )}
             {lineDiscountAmt > 0 && (
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: D.text, marginBottom: 4 }}>
-                <span>Line-item discounts</span><span>-${lineDiscountAmt.toFixed(2)}</span>
+              <div style={summaryRowStyle()}>
+                <span style={summaryLabelStyle}>Line-item discounts</span><span style={summaryAmountStyle}>-${lineDiscountAmt.toFixed(2)}</span>
               </div>
             )}
             {tax > 0 && (
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: D.muted, marginBottom: 4 }}>
-                <span>Tax ({Math.round(taxRate * 100)}%)</span><span>${tax.toFixed(2)}</span>
+              <div style={summaryRowStyle()}>
+                <span style={summaryLabelStyle}>Tax ({Math.round(taxRate * 100)}%)</span><span style={summaryAmountStyle}>${tax.toFixed(2)}</span>
               </div>
             )}
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 18, fontFamily: "'Roboto', Arial, sans-serif", fontWeight: 700, color: D.heading, marginTop: 8, paddingTop: 8, borderTop: `2px solid ${D.teal}` }}>
-              <span>Total</span><span>${total.toFixed(2)}</span>
+            {cardCharge.surcharge > 0 && (
+              <div style={summaryRowStyle()}>
+                <span style={summaryLabelStyle}>Credit card fee (not ACH)</span><span style={summaryAmountStyle}>${cardCharge.surcharge.toFixed(2)}</span>
+              </div>
+            )}
+            <div style={{ ...summaryRowStyle(18, 700), marginTop: 8, paddingTop: 8, borderTop: `2px solid ${D.teal}` }}>
+              <span style={summaryLabelStyle}>Invoice total</span><span style={summaryAmountStyle}>${total.toFixed(2)}</span>
+            </div>
+            <div style={summaryRowStyle(12, 700)}>
+              <span style={summaryLabelStyle}>Card total</span><span style={summaryAmountStyle}>${cardCharge.total.toFixed(2)}</span>
             </div>
           </div>
         </div>
