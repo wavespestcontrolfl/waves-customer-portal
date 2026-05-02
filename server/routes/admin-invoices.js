@@ -34,18 +34,26 @@ function parseReviewDelayMinutes(body = {}) {
   return Math.min(rounded, maxDelayMinutes);
 }
 
-function parseReviewDelayMinutesFrom(body = {}, baseDate = new Date()) {
+function parseScheduledReviewDelayMinutes(body = {}, scheduledSendAt = new Date()) {
   if (!body.requestReview) return null;
+  // Delays stored on scheduled invoices are relative to the eventual send,
+  // not relative to the time the admin creates the schedule.
   if (body.reviewTiming === 'now') return 0;
   if (body.reviewTiming === 'tomorrow_8') {
-    const targetDay = etDateString(addETDays(baseDate, 1));
+    const targetDay = etDateString(addETDays(scheduledSendAt, 1));
     const target = parseETDateTime(`${targetDay}T08:00`);
-    return Math.max(0, Math.ceil((target.getTime() - baseDate.getTime()) / 60000));
+    return Math.max(0, Math.ceil((target.getTime() - scheduledSendAt.getTime()) / 60000));
   }
   if (body.reviewTiming === 'custom' && body.reviewScheduledFor) {
     const target = parseETDateTime(body.reviewScheduledFor);
     if (!Number.isNaN(target.getTime())) {
-      return Math.max(0, Math.ceil((target.getTime() - baseDate.getTime()) / 60000));
+      if (target.getTime() <= scheduledSendAt.getTime()) {
+        const err = new Error('reviewScheduledFor must be after scheduledFor');
+        err.statusCode = 400;
+        err.isOperational = true;
+        throw err;
+      }
+      return Math.ceil((target.getTime() - scheduledSendAt.getTime()) / 60000);
     }
   }
   return parseReviewDelayMinutes(body);
@@ -373,7 +381,7 @@ router.post('/:id/schedule-send', async (req, res, next) => {
     const when = parseETDateTime(scheduledFor);
     if (Number.isNaN(when.getTime())) return res.status(400).json({ error: 'invalid scheduledFor' });
     if (when.getTime() <= Date.now()) return res.status(400).json({ error: 'scheduledFor must be in the future' });
-    const reviewDelayMinutes = parseReviewDelayMinutesFrom(req.body || {}, when);
+    const reviewDelayMinutes = parseScheduledReviewDelayMinutes(req.body || {}, when);
 
     const [invoice] = await db('invoices')
       .where({ id: req.params.id })

@@ -66,7 +66,7 @@ import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
 // STATUS_COLORS folds cleanly — sent/viewed were both #0A7EC2 in V1, stay identical post-fold.
-const D = { bg: '#F4F4F5', card: '#FFFFFF', border: '#E4E4E7', teal: '#18181B', green: '#15803D', amber: '#A16207', red: '#991B1B', purple: '#18181B', blue: '#18181B', text: '#27272A', muted: '#71717A', white: '#FFFFFF', input: '#FFFFFF', heading: '#09090B', inputBorder: '#D4D4D8' };
+const D = { bg: '#F4F4F5', card: '#FFFFFF', border: '#E4E4E7', teal: '#18181B', green: '#15803D', amber: '#A16207', red: '#991B1B', purple: '#18181B', blue: '#18181B', text: '#000000', muted: '#000000', white: '#FFFFFF', input: '#FFFFFF', heading: '#000000', inputBorder: '#D4D4D8' };
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -78,7 +78,7 @@ function adminFetch(path, options = {}) {
 const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' };
 const sBtn = (bg, color, isMobile) => ({ padding: isMobile ? '12px 18px' : '8px 16px', background: bg, color, border: 'none', borderRadius: 8, fontSize: isMobile ? 14 : 13, fontWeight: 600, cursor: 'pointer', minHeight: isMobile ? 44 : undefined, textTransform: 'uppercase', letterSpacing: '0.04em' });
 const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color, fontWeight: 600, display: 'inline-block' });
-const sInput = (isMobile) => ({ width: '100%', padding: isMobile ? '12px 14px' : '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: isMobile ? 16 : 13, outline: 'none', boxSizing: 'border-box', minHeight: isMobile ? 44 : undefined });
+const sInput = (isMobile) => ({ width: '100%', padding: isMobile ? '12px 14px' : '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: isMobile ? 16 : 13, fontFamily: "'Roboto', Arial, sans-serif", outline: 'none', boxSizing: 'border-box', minHeight: isMobile ? 44 : undefined });
 
 const STATUS_COLORS = { draft: D.muted, scheduled: D.amber, sending: D.amber, sent: D.blue, viewed: D.teal, paid: D.green, overdue: D.red, void: D.muted };
 export default function AdminInvoicesPage() {
@@ -101,7 +101,7 @@ export default function AdminInvoicesPage() {
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3500); };
 
   return (
-    <div style={{ maxWidth: 960, margin: '0 auto', padding: isMobile ? '8px 4px 24px' : '0' }}>
+    <div style={{ maxWidth: 960, margin: '0 auto', padding: isMobile ? '8px 4px 24px' : '0', fontFamily: "'Roboto', Arial, sans-serif", color: D.text }}>
       {/* Header — title + round add button (mirrors attached UI) */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: isMobile ? '16px 16px 12px' : '4px 0 16px' }}>
         <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>
@@ -483,7 +483,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                         </div>
                       </div>
                       <div style={{ textAlign: 'right' }}>
-                        <div style={{ fontSize: 17, fontWeight: 700, color: D.heading, fontFamily: "'JetBrains Mono', monospace" }}>
+                        <div style={{ fontSize: 17, fontWeight: 700, color: D.heading, fontFamily: "'Roboto', Arial, sans-serif" }}>
                           ${parseFloat(inv.total).toFixed(2)}
                         </div>
                         <div style={{ fontSize: 14, fontWeight: 600, color: display.color, marginTop: 4 }}>
@@ -1283,31 +1283,11 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
     setSaving(false);
   };
 
-  const stepBadge = (step) => (
-    <span style={{
-      display: 'inline-flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      width: 24,
-      height: 24,
-      borderRadius: 999,
-      background: D.heading,
-      color: D.white,
-      fontSize: 12,
-      fontWeight: 700,
-      flex: '0 0 auto',
-    }}>
-      {step}
-    </span>
-  );
-
-  const sectionHeader = (step, title, subtitle, action = null) => (
+  const sectionHeader = (title, action = null) => (
     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
       <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', minWidth: 0 }}>
-        {stepBadge(step)}
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>{title}</div>
-          {subtitle && <div style={{ fontSize: 12, color: D.muted, marginTop: 3, lineHeight: 1.4 }}>{subtitle}</div>}
         </div>
       </div>
       {action}
@@ -1331,34 +1311,26 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
     </div>
   );
 
-  const Panel = ({ children, style }) => (
-    <div style={{ ...sCard, padding: isMobile ? 14 : 18, marginBottom: 0, borderRadius: 10, ...style }}>
-      {children}
-    </div>
-  );
-
-  const serviceStep = serviceRecords.length > 0 ? 3 : 2;
-  const deliveryStep = serviceRecords.length > 0 ? 4 : 3;
+  const panelStyle = (style) => ({ ...sCard, padding: isMobile ? 14 : 18, marginBottom: 0, borderRadius: 10, ...style });
   const primaryActionLabel = saving ? 'Creating...' : sendTiming === 'now' ? 'Send Invoice' : sendTiming === 'draft' ? 'Create Draft' : 'Schedule Invoice';
   const lineTableColumns = 'minmax(260px, 1fr) 84px 132px 36px';
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'minmax(0, 1fr) 340px', gap: 16, alignItems: 'start' }}>
+    <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'minmax(0, 1fr) 340px', gap: 16, alignItems: 'start', fontFamily: "'Roboto', Arial, sans-serif", color: D.text }}>
       <div style={{ display: 'grid', gap: 12, minWidth: 0 }}>
-        <Panel style={{ padding: isMobile ? 14 : 16 }}>
+        <div style={panelStyle({ padding: isMobile ? 14 : 16 })}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
             <div>
               <div style={{ fontSize: 18, fontWeight: 800, color: D.heading }}>Invoice Builder</div>
-              <div style={{ fontSize: 12, color: D.muted, marginTop: 3 }}>Add a customer, build services, apply line discounts, then send.</div>
             </div>
-            <div style={{ fontSize: 12, color: D.muted, fontFamily: "'JetBrains Mono', monospace" }}>
+            <div style={{ fontSize: 12, color: D.muted, fontFamily: "'Roboto', Arial, sans-serif" }}>
               ${total.toFixed(2)}
             </div>
           </div>
-        </Panel>
+        </div>
 
-        <Panel>
-          {sectionHeader(1, 'Customer', 'Search by name, phone, or email.')}
+        <div style={panelStyle()}>
+          {sectionHeader('Customer')}
             {selectedCustomer ? (
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: D.input, borderRadius: 8, padding: '10px 12px', border: `1px solid ${D.teal}`, flexWrap: 'wrap', gap: 8 }}>
                 <div>
@@ -1385,11 +1357,11 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                 )}
               </div>
             )}
-        </Panel>
+        </div>
 
         {serviceRecords.length > 0 && (
-          <Panel>
-            {sectionHeader(2, 'Service History', 'Optionally link a completed service record for context.')}
+          <div style={panelStyle()}>
+            {sectionHeader('Service History')}
               <select value={selectedService?.id || ''} onChange={e => {
                 const sr = serviceRecords.find(r => r.id === e.target.value);
                 setSelectedService(sr || null);
@@ -1404,18 +1376,11 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                   </option>
                 ))}
               </select>
-          </Panel>
+          </div>
         )}
 
-        <Panel>
-          {sectionHeader(
-            serviceStep,
-            'Services',
-            'Search the Services catalog, then add a per-line discount from Services > Discounts.',
-            <a href="/admin/service-library?tab=discounts" style={{ fontSize: 12, color: D.teal, textDecoration: 'none', fontWeight: 700, paddingTop: 3 }}>
-                Services &gt; Discounts
-              </a>
-          )}
+        <div style={panelStyle()}>
+          {sectionHeader('Services')}
             {!isMobile && (
               <div style={{ display: 'grid', gridTemplateColumns: lineTableColumns, gap: 8, padding: '0 0 8px', borderBottom: `1px solid ${D.border}`, color: D.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.6 }}>
                 <div>Item</div>
@@ -1434,7 +1399,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                     onFocus={() => { if (item._kind !== 'discount') setServiceSearchIdx(i); }}
                     onBlur={() => setTimeout(() => { setServiceSearchIdx(prev => (prev === i ? null : prev)); }, 150)}
                     placeholder={item._kind === 'discount' ? 'Discount' : 'Search service library or type custom...'}
-                    style={{ ...sInput(isMobile), color: item._kind === 'discount' ? D.green : D.text }}
+                    style={{ ...sInput(isMobile), color: D.text }}
                     readOnly={item._kind === 'discount'}
                   />
                   {serviceSearchIdx === i && (lineItems[i]?.description || '').length >= 2 && (
@@ -1456,7 +1421,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                             )}
                           </div>
                           {svc.base_price != null && Number(svc.base_price) > 0 && (
-                            <span style={{ color: D.text, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, whiteSpace: 'nowrap' }}>
+                            <span style={{ color: D.text, fontFamily: "'Roboto', Arial, sans-serif", fontSize: 12, whiteSpace: 'nowrap' }}>
                               ${Number(svc.base_price).toFixed(2)}
                             </span>
                           )}
@@ -1474,14 +1439,14 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                   {isMobile && fieldLabel(item._kind === 'discount' ? 'Credit' : 'Price')}
                   <span style={{ position: 'absolute', left: 10, top: isMobile ? 43 : 20, transform: 'translateY(-50%)', color: D.muted, fontSize: isMobile ? 16 : 13 }}>$</span>
                   <input type="number" value={item.unit_price || ''} onChange={e => updateLineItem(i, 'unit_price', e.target.value)}
-                    placeholder="0.00" step="0.01" readOnly={item._kind === 'discount'} style={{ ...sInput(isMobile), paddingLeft: 22, color: item._kind === 'discount' ? D.green : D.text }} />
+                    placeholder="0.00" step="0.01" readOnly={item._kind === 'discount'} style={{ ...sInput(isMobile), paddingLeft: 22, color: D.text }} />
                 </div>
                 {lineItems.length > 1 && (
                   <button onClick={() => removeLineItem(i)} aria-label="Remove line item" style={{ background: 'none', border: 'none', color: D.red, cursor: 'pointer', fontSize: 18, padding: isMobile ? '30px 12px 10px' : '6px 4px', minHeight: isMobile ? 44 : undefined, minWidth: isMobile ? 44 : undefined }}>x</button>
                 )}
                 {item._kind !== 'discount' && (
                   <div style={{ gridColumn: '1 / -1', position: 'relative', padding: '0 0 2px' }}>
-                    {fieldLabel('Services > Discounts for this line item')}
+                    {fieldLabel('Discount')}
                     <input
                       value={discountQueries[item.client_id || i] || ''}
                       onChange={e => { setDiscountQueries(prev => ({ ...prev, [item.client_id || i]: e.target.value })); if (availableDiscounts.length > 0) setDiscountSearchIdx(i); }}
@@ -1490,7 +1455,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                       placeholder={
                         availableDiscounts.length === 0
                           ? 'No invoice discounts are available'
-                          : `Search Services > Discounts${item.description ? ` for ${item.description}` : ''}...`
+                          : `Search discounts${item.description ? ` for ${item.description}` : ''}...`
                       }
                       disabled={availableDiscounts.length === 0}
                       style={{
@@ -1501,11 +1466,6 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                         opacity: availableDiscounts.length === 0 ? 0.65 : 1,
                       }}
                     />
-                    {availableDiscounts.length === 0 && (
-                      <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
-                        Enable invoice discounts in Services &gt; Discounts.
-                      </div>
-                    )}
                     {discountSearchIdx === i && (
                       <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, zIndex: 18, maxHeight: 220, overflow: 'auto', marginTop: 4, boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }}>
                         {matchingDiscounts(i).length === 0 ? (
@@ -1517,7 +1477,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                             style={{ padding: '10px 12px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 13, display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}
                           >
                             <span style={{ color: D.heading, fontWeight: 600, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</span>
-                            <span style={{ color: D.green, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, whiteSpace: 'nowrap' }}>{formatDiscountLabel(d)}</span>
+                            <span style={{ color: D.text, fontFamily: "'Roboto', Arial, sans-serif", fontSize: 12, whiteSpace: 'nowrap' }}>{formatDiscountLabel(d)}</span>
                           </div>
                         ))}
                       </div>
@@ -1527,10 +1487,10 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
               </div>
             ))}
             <button onClick={addLineItem} style={{ ...sBtn('transparent', D.teal, isMobile), padding: isMobile ? '12px 14px' : '8px 12px', fontSize: isMobile ? 14 : 12, marginTop: 10 }}>+ Add service</button>
-        </Panel>
+        </div>
 
-        <Panel>
-          {sectionHeader(deliveryStep, 'Delivery', 'Choose how the invoice and review request should go out.')}
+        <div style={panelStyle()}>
+          {sectionHeader('Delivery')}
           <div style={{ marginBottom: 14 }}>
             <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8, display: 'block', marginBottom: 4 }}>Notes (optional)</label>
             <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} placeholder="" style={{ ...sInput(isMobile), resize: 'vertical' }} />
@@ -1611,7 +1571,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
               </div>
             )}
           </div>
-        </Panel>
+        </div>
       </div>
 
       <div style={{ position: isMobile ? 'relative' : 'sticky', top: 20, alignSelf: 'start' }}>
@@ -1642,9 +1602,9 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
           {lineItems.filter(i => i.description).map((item, i) => {
             const amount = lineAmount(item);
             return (
-            <div key={item.client_id || i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: item._kind === 'discount' ? D.green : D.text, marginBottom: 6, paddingLeft: item._kind === 'discount' ? 12 : 0 }}>
+            <div key={item.client_id || i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: D.text, marginBottom: 6, paddingLeft: item._kind === 'discount' ? 12 : 0 }}>
               <span>{item.description}{item.quantity > 1 ? ` x${item.quantity}` : ''}</span>
-              <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{amount < 0 ? '-' : ''}${Math.abs(amount).toFixed(2)}</span>
+              <span style={{ fontFamily: "'Roboto', Arial, sans-serif" }}>{amount < 0 ? '-' : ''}${Math.abs(amount).toFixed(2)}</span>
             </div>
             );
           })}
@@ -1654,12 +1614,12 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
               <span>Subtotal</span><span>${subtotal.toFixed(2)}</span>
             </div>
             {discountAmt > 0 && (
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: D.green, marginBottom: 4 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: D.text, marginBottom: 4 }}>
                 <span>{selectedCustomer?.waveguard_tier} -{Math.round(tierDiscount * 100)}%</span><span>-${discountAmt.toFixed(2)}</span>
               </div>
             )}
             {lineDiscountAmt > 0 && (
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: D.green, marginBottom: 4 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: D.text, marginBottom: 4 }}>
                 <span>Line-item discounts</span><span>-${lineDiscountAmt.toFixed(2)}</span>
               </div>
             )}
@@ -1668,7 +1628,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                 <span>Tax ({Math.round(taxRate * 100)}%)</span><span>${tax.toFixed(2)}</span>
               </div>
             )}
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 18, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, color: D.heading, marginTop: 8, paddingTop: 8, borderTop: `2px solid ${D.teal}` }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 18, fontFamily: "'Roboto', Arial, sans-serif", fontWeight: 700, color: D.heading, marginTop: 8, paddingTop: 8, borderTop: `2px solid ${D.teal}` }}>
               <span>Total</span><span>${total.toFixed(2)}</span>
             </div>
           </div>
