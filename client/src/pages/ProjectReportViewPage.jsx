@@ -29,6 +29,25 @@ const FIELD_LABELS = {
   evidence_location: 'Evidence location',
   moisture_issues: 'Moisture / conducive conditions',
   treatment_recommendation: 'Treatment recommendation',
+  property_address: 'Property inspected',
+  structures_inspected: 'Structure(s) inspected',
+  requested_by: 'Inspection requested by',
+  report_sent_to: 'Report sent to',
+  inspection_scope: 'Visible / accessible areas inspected',
+  wdo_finding: 'FDACS Section 2 finding',
+  live_wdo: 'Live WDO(s)',
+  wdo_evidence: 'Evidence of WDO(s)',
+  wdo_damage: 'Damage caused by WDO(s)',
+  inaccessible_areas: 'Obstructions / inaccessible areas',
+  previous_treatment_evidence: 'Evidence of previous treatment',
+  previous_treatment_notes: 'Previous treatment observations',
+  notice_location: 'Notice of Inspection location',
+  treated_at_inspection: 'Treated at time of inspection',
+  organism_treated: 'Organism treated',
+  pesticide_used: 'Pesticide used',
+  treatment_terms: 'Treatment terms and conditions',
+  treatment_notice_location: 'Treatment notice location',
+  comments: 'Comments / financial disclosure notes',
   termite_type: 'Termite species',
   activity_status: 'Activity status',
   infestation_extent: 'Infestation extent',
@@ -154,6 +173,30 @@ export default function ProjectReportViewPage() {
                fall back to the single "Recommendations" block. */}
           {data.recommendations && <RecommendationsBlock text={data.recommendations} />}
         </div>
+
+        {data.projectType === 'wdo_inspection' && (
+          <div style={{ marginTop: 16, background: '#fff', borderRadius: 16, padding: 18, border: `1px solid ${B.bluePale}` }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+              Official WDO Form
+            </div>
+            <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55 }}>
+              This inspection follows Florida FDACS-13645, Wood-Destroying Organisms Inspection Report.
+            </div>
+            <a
+              href="/forms/fdacs-13645-wdo-inspection-report.pdf"
+              target="_blank"
+              rel="noreferrer"
+              style={{
+                ...BUTTON_BASE, marginTop: 12, padding: '0 18px', height: 40, fontSize: 14,
+                borderRadius: 999, background: B.navy, color: '#fff',
+                textDecoration: 'none', display: 'inline-flex', alignItems: 'center',
+                fontWeight: 800,
+              }}
+            >
+              <Icon name="document" size={15} strokeWidth={2} style={{ marginRight: 6 }} /> View FDACS-13645
+            </a>
+          </div>
+        )}
 
         {/* Primary visit photos */}
         {primaryPhotos.length > 0 && (

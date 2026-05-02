@@ -33,6 +33,19 @@ const TYPE_LABELS = {
   rodent_exclusion: 'Rodent',
   bed_bug: 'Bed Bug',
 };
+const WDO_TYPE = 'wdo_inspection';
+const GENERAL_TYPE_LABELS = Object.fromEntries(
+  Object.entries(TYPE_LABELS).filter(([key]) => key !== WDO_TYPE)
+);
+const GENERAL_PROJECT_TYPES = Object.keys(GENERAL_TYPE_LABELS);
+
+function mergeProjectsUnique(...lists) {
+  const byId = new Map();
+  lists.flat().forEach(p => {
+    if (p?.id && !byId.has(p.id)) byId.set(p.id, p);
+  });
+  return Array.from(byId.values());
+}
 
 function fmtDate(d) {
   if (!d) return '—';
@@ -46,17 +59,32 @@ export default function ProjectsPage() {
   const [filterType, setFilterType] = useState('');
   const [selectedId, setSelectedId] = useState(null);
   const [typesRegistry, setTypesRegistry] = useState(null);
-  const [showCreate, setShowCreate] = useState(false);
+  const [createMode, setCreateMode] = useState(null);
 
   const loadProjects = useCallback(async () => {
     setLoading(true);
     const qs = new URLSearchParams();
     if (filterStatus) qs.set('status', filterStatus);
-    if (filterType) qs.set('project_type', filterType);
+    const wdoQs = new URLSearchParams(qs);
+    wdoQs.set('project_type', WDO_TYPE);
     try {
-      const r = await adminFetch(`/admin/projects?${qs.toString()}`);
-      const d = await r.json();
-      setProjects(d.projects || []);
+      if (filterType) {
+        const generalQs = new URLSearchParams(qs);
+        generalQs.set('project_type', filterType);
+        const [generalRes, wdoRes] = await Promise.all([
+          adminFetch(`/admin/projects?${generalQs.toString()}`),
+          adminFetch(`/admin/projects?${wdoQs.toString()}`),
+        ]);
+        const [generalData, wdoData] = await Promise.all([generalRes.json(), wdoRes.json()]);
+        setProjects([...(generalData.projects || []), ...(wdoData.projects || [])]);
+      } else {
+        const [allRes, wdoRes] = await Promise.all([
+          adminFetch(`/admin/projects?${qs.toString()}`),
+          adminFetch(`/admin/projects?${wdoQs.toString()}`),
+        ]);
+        const [allData, wdoData] = await Promise.all([allRes.json(), wdoRes.json()]);
+        setProjects(mergeProjectsUnique(allData.projects || [], wdoData.projects || []));
+      }
     } catch { /* ignore */ }
     finally { setLoading(false); }
   }, [filterStatus, filterType]);
@@ -67,6 +95,8 @@ export default function ProjectsPage() {
     adminFetch('/admin/projects/types').then(r => r.json()).then(d => setTypesRegistry(d.types)).catch(() => {});
   }, []);
 
+  const regularProjects = projects.filter(p => p.project_type !== WDO_TYPE && (!filterType || p.project_type === filterType));
+  const wdoProjects = projects.filter(p => p.project_type === WDO_TYPE);
   const selected = projects.find(p => p.id === selectedId);
 
   return (
@@ -83,7 +113,7 @@ export default function ProjectsPage() {
         </div>
         <button
           type="button"
-          onClick={() => setShowCreate(true)}
+          onClick={() => setCreateMode('general')}
           style={{
             padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
             background: D.accent, color: '#fff', border: 'none', cursor: 'pointer',
@@ -109,7 +139,7 @@ export default function ProjectsPage() {
         ))}
         <div style={{ width: 12 }} />
         <FilterPill label="All types" active={!filterType} onClick={() => setFilterType('')} />
-        {Object.entries(TYPE_LABELS).map(([key, label]) => (
+        {Object.entries(GENERAL_TYPE_LABELS).map(([key, label]) => (
           <FilterPill
             key={key}
             label={label}
@@ -124,7 +154,7 @@ export default function ProjectsPage() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {loading ? (
             <div style={{ padding: 24, color: D.muted }}>Loading…</div>
-          ) : projects.length === 0 ? (
+          ) : regularProjects.length === 0 ? (
             <div style={{
               padding: 24, background: D.card, borderRadius: 10,
               border: `1px dashed ${D.border}`, color: D.muted, textAlign: 'center',
@@ -132,7 +162,7 @@ export default function ProjectsPage() {
               No projects match these filters.
             </div>
           ) : (
-            projects.map(p => (
+            regularProjects.map(p => (
               <ProjectRow
                 key={p.id}
                 project={p}
@@ -141,6 +171,13 @@ export default function ProjectsPage() {
               />
             ))
           )}
+
+          <WdoReportsSection
+            projects={wdoProjects}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+            onCreate={() => setCreateMode('wdo')}
+          />
         </div>
 
         {/* Detail */}
@@ -154,18 +191,95 @@ export default function ProjectsPage() {
         )}
       </div>
 
-      {showCreate && (
+      {createMode && (
         <CreateProjectModal
           theme="light"
-          onClose={() => setShowCreate(false)}
+          allowAiDraft
+          defaultProjectType={createMode === 'wdo' ? WDO_TYPE : ''}
+          allowedProjectTypes={createMode === 'wdo' ? [WDO_TYPE] : GENERAL_PROJECT_TYPES}
+          onClose={() => setCreateMode(null)}
           onCreated={(p) => {
-            setShowCreate(false);
+            setCreateMode(null);
             loadProjects();
             if (p?.id) setSelectedId(p.id);
           }}
         />
       )}
     </div>
+  );
+}
+
+function WdoReportsSection({ projects, selectedId, onSelect, onCreate }) {
+  const urgentCount = projects.filter(p => {
+    if (p.status === 'sent' || p.status === 'closed') return false;
+    const created = p.created_at ? new Date(p.created_at).getTime() : 0;
+    return created && Date.now() - created > 24 * 60 * 60 * 1000;
+  }).length;
+
+  return (
+    <section style={{
+      marginTop: 18,
+      paddingTop: 16,
+      borderTop: `1px solid ${D.border}`,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 800, color: D.muted, textTransform: 'uppercase', letterSpacing: 1 }}>
+            WDO Inspection Reports
+          </div>
+          <div style={{ fontSize: 13, color: D.text, marginTop: 3 }}>
+            Real-estate reports, realtor sharing, and closing-sensitive documentation.
+          </div>
+          {urgentCount > 0 && (
+            <div style={{ fontSize: 11, color: D.amber, marginTop: 4, fontWeight: 700 }}>
+              {urgentCount} draft{urgentCount === 1 ? '' : 's'} older than 24h
+            </div>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={onCreate}
+          style={{
+            ...btnSecondary,
+            padding: '7px 10px',
+            fontSize: 11,
+            fontWeight: 800,
+            whiteSpace: 'nowrap',
+            textTransform: 'uppercase',
+            letterSpacing: '0.04em',
+          }}
+        >
+          + New WDO
+        </button>
+      </div>
+
+      {projects.length === 0 ? (
+        <div style={{
+          padding: 18,
+          background: D.card,
+          borderRadius: 10,
+          border: `1px dashed ${D.border}`,
+          color: D.muted,
+          fontSize: 12,
+          textAlign: 'center',
+        }}>
+          No WDO reports match these filters.
+        </div>
+      ) : (
+        projects.map(p => (
+          <ProjectRow
+            key={p.id}
+            project={p}
+            active={selectedId === p.id}
+            onSelect={() => onSelect(p.id)}
+            compactType="WDO"
+          />
+        ))
+      )}
+    </section>
   );
 }
 
@@ -185,7 +299,7 @@ function FilterPill({ label, active, onClick }) {
   );
 }
 
-function ProjectRow({ project, active, onSelect }) {
+function ProjectRow({ project, active, onSelect, compactType }) {
   const status = STATUS_STYLES[project.status] || STATUS_STYLES.draft;
   return (
     <button
@@ -203,7 +317,7 @@ function ProjectRow({ project, active, onSelect }) {
         background: D.pill, display: 'flex', alignItems: 'center', justifyContent: 'center',
         fontFamily: MONO, fontSize: 11, fontWeight: 700, color: D.heading,
       }}>
-        {TYPE_LABELS[project.project_type] || 'Proj'}
+        {compactType || TYPE_LABELS[project.project_type] || 'Proj'}
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
@@ -432,6 +546,42 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
             <div style={{ fontFamily: MONO, fontSize: 11, wordBreak: 'break-all' }}>
               <a href={sentLink} target="_blank" rel="noreferrer" style={{ color: '#065F46' }}>{sentLink}</a>
             </div>
+          </div>
+        )}
+
+        {project.project_type === WDO_TYPE && (
+          <div style={{
+            padding: '10px 12px',
+            background: D.pill,
+            border: `1px solid ${D.border}`,
+            borderRadius: 8,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: 12,
+          }}>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 800, color: D.heading }}>FDACS-13645 WDO form</div>
+              <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>Use this as the official inspection template and review copy.</div>
+            </div>
+            <a
+              href="/forms/fdacs-13645-wdo-inspection-report.pdf"
+              target="_blank"
+              rel="noreferrer"
+              style={{
+                flexShrink: 0,
+                padding: '7px 10px',
+                borderRadius: 6,
+                fontSize: 11,
+                fontWeight: 800,
+                color: D.heading,
+                textDecoration: 'none',
+                background: D.card,
+                border: `1px solid ${D.inputBorder}`,
+              }}
+            >
+              Open PDF
+            </a>
           </div>
         )}
 
