@@ -776,9 +776,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
       return created;
     });
 
-    PipelineManager.onEvent(customer.id, 'lead_created')
+    // Intentional fire-and-forget: derived pipeline/score state can lag the
+    // create response, and failures should not roll back the durable customer.
+    void PipelineManager.onEvent(customer.id, 'lead_created')
       .catch(err => logger.warn(`[customers:${customer.id}] pipeline lead_created failed: ${err.message}`));
-    LeadScorer.calculateScore(customer.id)
+    void LeadScorer.calculateScore(customer.id)
       .catch(err => logger.warn(`[customers:${customer.id}] lead score failed: ${err.message}`));
     await auditCustomerMutation(req, 'customer.create', customer.id, {
       fields: ['first_name', 'last_name', 'phone', 'email', 'address', 'tier', 'monthly_rate', 'lead_source', 'pipeline_stage', 'tags'],
@@ -820,8 +822,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       if (changed.some(field => sensitiveFields.includes(field))) {
         await auditCustomerMutation(req, 'customer.update_sensitive', req.params.id, {
           fields: changed,
-          before: Object.fromEntries(changed.map(field => [field, before?.[field] ?? null])),
-          after: Object.fromEntries(changed.map(field => [field, updates[field] ?? null])),
+          sensitiveFieldsChanged: changed.filter(field => sensitiveFields.includes(field)),
         }, true);
       }
     }
