@@ -681,9 +681,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
-    // Customer-visible track_state → 'complete' so /track/:token renders the
-    // summary card. track_state is owned by services/track-transitions.js.
-    if (!isIncompleteVisit && !resumingCommittedCompletion) {
+    // Customer-visible track_state → 'complete' so /track/:token stops
+    // showing an active en-route/on-property visit after the office closes it.
+    // Incomplete visits skip invoice/SMS/review below, but still need a
+    // terminal public tracker state.
+    if (!resumingCommittedCompletion) {
       try {
         await trackTransitions.markComplete(svc.id, {
           actorType: 'admin',
