@@ -18,8 +18,17 @@ function isUniqueViolation(err) {
 function hashCompletionRequest(body) {
   const { idempotencyKey, timeOnSite, ...stableBody } = body || {};
   return crypto.createHash('sha256')
-    .update(JSON.stringify(stableBody))
+    .update(JSON.stringify(sortObjectKeys(stableBody)))
     .digest('hex');
+}
+
+function sortObjectKeys(value) {
+  if (Array.isArray(value)) return value.map(sortObjectKeys);
+  if (!value || typeof value !== 'object' || value instanceof Date) return value;
+  return Object.keys(value).sort().reduce((acc, key) => {
+    acc[key] = sortObjectKeys(value[key]);
+    return acc;
+  }, {});
 }
 
 function sideEffectsRunningPayload() {

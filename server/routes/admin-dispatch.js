@@ -880,7 +880,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (!resumingCommittedCompletion) {
       try {
         const JobCosting = require('../services/job-costing');
-        JobCosting.calculateJobCost(svc.id).catch(e =>
+        void JobCosting.calculateJobCost(svc.id).catch(e =>
           logger.error(`[dispatch] Job cost calc failed: ${e.message}`)
         );
       } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }

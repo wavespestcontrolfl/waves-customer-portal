@@ -514,6 +514,8 @@ describe('completion attempts', () => {
 
   test('request hash is stable for equivalent bodies', () => {
     expect(hashCompletionRequest({ a: 1, b: 'x' })).toBe(hashCompletionRequest({ a: 1, b: 'x' }));
+    expect(hashCompletionRequest({ a: 1, b: { c: 2, d: 3 } }))
+      .toBe(hashCompletionRequest({ b: { d: 3, c: 2 }, a: 1 }));
     expect(hashCompletionRequest({ notes: 'done', timeOnSite: 10 }))
       .toBe(hashCompletionRequest({ notes: 'done', timeOnSite: 25 }));
     expect(hashCompletionRequest({ a: 1 })).not.toBe(hashCompletionRequest({ a: 2 }));
