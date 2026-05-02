@@ -272,6 +272,7 @@ router.get('/', async (req, res, next) => {
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
         prepaidMethod: s.prepaid_method || null,
         prepaidAt: s.prepaid_at || null,
+        createInvoiceOnComplete: !!s.create_invoice_on_complete,
         customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
         customerId: s.customer_id, customerPhone: s.customer_phone,
         address: `${s.address_line1}, ${s.city}, ${s.state} ${s.zip}`,

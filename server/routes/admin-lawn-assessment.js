@@ -394,13 +394,57 @@ router.post('/assess', async (req, res, next) => {
 
 // =========================================================================
 // POST /confirm — tech confirms scores (with optional adjustments)
-// Body: { assessmentId, adjustedScores: { turf_density, weed_suppression, ... } }
+// Body: { assessmentId, adjustedScores: { turf_density, ... }, stress_flags: { drought_stress, ... } }
+//
+// stress_flags is per-visit transient state the future plan engine
+// reads to gate hot herbicides / PGR / etc. — distinct from the
+// stable known_*_history flags on customer_turf_profiles. All keys
+// are booleans; any non-boolean value is rejected with 400.
 // =========================================================================
+const STRESS_FLAG_KEYS = [
+  'drought_stress',
+  'shade_stress',
+  'disease_suspicion',
+  'recent_scalp',
+  'new_sod',
+];
+
+function normalizeStressFlags(input) {
+  // Accepts: object whose keys are a subset of STRESS_FLAG_KEYS and
+  // whose values are booleans. Returns { errors, normalized } where
+  // normalized is a stripped object with only the allowed keys.
+  if (input == null) return { errors: [], normalized: null };
+  if (typeof input !== 'object' || Array.isArray(input)) {
+    return { errors: ['stress_flags must be an object'], normalized: null };
+  }
+  const errors = [];
+  const normalized = {};
+  for (const [k, v] of Object.entries(input)) {
+    if (!STRESS_FLAG_KEYS.includes(k)) {
+      errors.push(`stress_flags.${k} is not a recognized flag (allowed: ${STRESS_FLAG_KEYS.join(', ')})`);
+      continue;
+    }
+    if (typeof v !== 'boolean') {
+      errors.push(`stress_flags.${k} must be a boolean`);
+      continue;
+    }
+    normalized[k] = v;
+  }
+  return { errors, normalized };
+}
+
 router.post('/confirm', async (req, res, next) => {
   try {
-    const { assessmentId, adjustedScores } = req.body;
+    const { assessmentId, adjustedScores, stress_flags: stressFlagsInput } = req.body;
 
     if (!assessmentId) return res.status(400).json({ error: 'assessmentId is required' });
+
+    // Validate stress_flags up front so a bad payload doesn't reach
+    // the DB write path.
+    const { errors: stressErrors, normalized: normalizedStressFlags } = normalizeStressFlags(stressFlagsInput);
+    if (stressErrors.length) {
+      return res.status(400).json({ error: 'Invalid stress_flags', details: stressErrors });
+    }
 
     const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
     if (!assessment) return res.status(404).json({ error: 'Assessment not found' });
@@ -420,6 +464,13 @@ router.post('/confirm', async (req, res, next) => {
       if (adjustedScores.thatch_level != null) updateData.thatch_level = adjustedScores.thatch_level;
       if (adjustedScores.observations != null) updateData.observations = adjustedScores.observations;
       updateData.adjusted_scores = JSON.stringify(adjustedScores);
+    }
+
+    // Persist stress_flags only if any allowed key was sent. An empty
+    // object {} is treated as "tech confirmed no flags set" and
+    // stored — distinguishable from null (no signal).
+    if (normalizedStressFlags !== null) {
+      updateData.stress_flags = JSON.stringify(normalizedStressFlags);
     }
 
     const [updated] = await db('lawn_assessments')

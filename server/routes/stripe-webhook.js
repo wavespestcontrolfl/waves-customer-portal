@@ -299,6 +299,7 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
     } catch (e) {
       logger.error(`[invoice-followups] stopOnPayment failed: ${e.message}`);
     }
+    scheduleReviewAfterPaidInvoice(piId);
   }
 
   // ── Auto-send payment receipt SMS ─────────────────────────
@@ -460,6 +461,29 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
   // via INSERT ... ON CONFLICT DO NOTHING — only the first claimer fires.
   notifyPaymentSuccess(paymentIntent).catch((err) => {
     logger.warn(`[stripe-webhook] payment_succeeded notify failed: ${err.message}`);
+  });
+}
+
+function scheduleReviewAfterPaidInvoice(piId) {
+  setImmediate(async () => {
+    try {
+      const paidInvoice = await db('invoices')
+        .where({ stripe_payment_intent_id: piId })
+        .select('id', 'customer_id', 'service_record_id', 'invoice_number')
+        .first();
+      if (!paidInvoice?.customer_id || !paidInvoice?.service_record_id) return;
+
+      const ReviewService = require('../services/review-request');
+      const request = await ReviewService.create({
+        customerId: paidInvoice.customer_id,
+        serviceRecordId: paidInvoice.service_record_id,
+        triggeredBy: 'auto',
+        delayMinutes: 120,
+      });
+      logger.info(`[stripe-webhook] Queued review request ${request.id} after invoice ${paidInvoice.invoice_number || paidInvoice.id} payment`);
+    } catch (err) {
+      logger.error(`[stripe-webhook] Paid-invoice review request schedule failed for PI ${piId}: ${err.message}`);
+    }
   });
 }
 

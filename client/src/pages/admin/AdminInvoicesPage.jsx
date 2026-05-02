@@ -81,6 +81,23 @@ const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius:
 const sInput = (isMobile) => ({ width: '100%', padding: isMobile ? '12px 14px' : '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: isMobile ? 16 : 13, outline: 'none', boxSizing: 'border-box', minHeight: isMobile ? 44 : undefined });
 
 const STATUS_COLORS = { draft: D.muted, sent: D.blue, viewed: D.teal, paid: D.green, overdue: D.red, void: D.muted };
+const HIDDEN_INVOICE_DISCOUNT_NAMES = new Set([
+  'waveguard member discount',
+  'waveguard member discount (termite inspection)',
+  'military discount',
+  'family & friends',
+  'multi-home discount',
+  'prepayment discount',
+  'referral credit',
+  'senior discount',
+  'free termite inspection',
+  'custom percentage discount',
+  'custom dollar discount',
+]);
+
+function isHiddenInvoiceDiscount(discount) {
+  return HIDDEN_INVOICE_DISCOUNT_NAMES.has(String(discount?.name || '').trim().toLowerCase());
+}
 
 export default function AdminInvoicesPage() {
   const [tab, setTab] = useState('list');
@@ -1035,7 +1052,12 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
     adminFetch('/admin/discounts')
       .then(d => {
         const list = (Array.isArray(d) ? d : d.discounts || [])
-          .filter(x => x.is_active && x.show_in_invoices && !x.is_waveguard_tier_discount);
+          .filter(x => (
+            x.is_active
+            && x.show_in_invoices
+            && !x.is_waveguard_tier_discount
+            && !isHiddenInvoiceDiscount(x)
+          ));
         setAvailableDiscounts(list);
       })
       .catch(() => {});
