@@ -615,9 +615,13 @@ const InvoiceService = {
       }
 
       await db('invoices').where({ id: invoiceId }).update({
-        status: invoice.status === 'draft' ? 'sent' : invoice.status,
+        status: ['draft', 'scheduled', 'sending'].includes(invoice.status) ? 'sent' : invoice.status,
         sent_at: new Date(),
         sms_sent_at: new Date(),
+        scheduled_send_at: null,
+        scheduled_send_error: null,
+        scheduled_request_review: false,
+        scheduled_review_delay_minutes: null,
         updated_at: new Date(),
       });
 
@@ -642,6 +646,100 @@ const InvoiceService = {
       logger.error(`[invoice] SMS failed for ${invoice.invoice_number}: ${err.message}`);
       throw err;
     }
+  },
+
+  async sendViaSMSAndEmail(invoiceId, { requestReview = false, reviewDelayMinutes = null } = {}) {
+    const { sendInvoiceEmail } = require('./invoice-email');
+    const sms = { ok: false };
+    const email = { ok: false };
+
+    try {
+      await this.sendViaSMS(invoiceId);
+      sms.ok = true;
+    } catch (err) {
+      sms.error = err.message;
+    }
+
+    try {
+      const r = await sendInvoiceEmail(invoiceId);
+      if (r?.ok) email.ok = true;
+      else if (r?.error) email.error = r.error;
+    } catch (err) {
+      email.error = err.message;
+    }
+
+    if (requestReview && (sms.ok || email.ok)) {
+      try {
+        const ReviewService = require('./review-request');
+        const inv = await db('invoices').where({ id: invoiceId }).select('customer_id', 'service_record_id').first();
+        if (inv) {
+          await ReviewService.create({
+            customerId: inv.customer_id,
+            serviceRecordId: inv.service_record_id || null,
+            triggeredBy: 'auto',
+            delayMinutes: reviewDelayMinutes,
+          });
+        }
+      } catch (err) {
+        logger.error(`[invoice] Review request schedule failed: ${err.message}`);
+      }
+    }
+
+    const ok = sms.ok || email.ok;
+    if (ok) {
+      await db('invoices').where({ id: invoiceId }).update({
+        status: 'sent',
+        sent_at: new Date(),
+        scheduled_send_at: null,
+        scheduled_send_error: null,
+        scheduled_request_review: false,
+        scheduled_review_delay_minutes: null,
+        updated_at: new Date(),
+      }).catch(() => {});
+    }
+    return { ok, sms, email };
+  },
+
+  async processScheduledSends({ limit = 25 } = {}) {
+    const due = await db('invoices')
+      .where({ status: 'scheduled' })
+      .whereNotNull('scheduled_send_at')
+      .where('scheduled_send_at', '<=', new Date())
+      .where(q => q.whereNull('scheduled_send_attempts').orWhere('scheduled_send_attempts', '<', 5))
+      .orderBy('scheduled_send_at', 'asc')
+      .limit(limit)
+      .select('id', 'invoice_number', 'scheduled_send_attempts', 'scheduled_request_review', 'scheduled_review_delay_minutes');
+
+    let sent = 0;
+    let failed = 0;
+    for (const inv of due) {
+      const claimed = await db('invoices')
+        .where({ id: inv.id, status: 'scheduled' })
+        .update({ status: 'sending', updated_at: new Date() });
+      if (!claimed) continue;
+
+      const result = await this.sendViaSMSAndEmail(inv.id, {
+        requestReview: Boolean(inv.scheduled_request_review),
+        reviewDelayMinutes: inv.scheduled_review_delay_minutes,
+      });
+      if (result.ok) {
+        sent += 1;
+        continue;
+      }
+
+      failed += 1;
+      const error = [result.sms?.error && `sms: ${result.sms.error}`, result.email?.error && `email: ${result.email.error}`]
+        .filter(Boolean)
+        .join(' | ') || 'send failed';
+      await db('invoices').where({ id: inv.id }).update({
+        status: 'scheduled',
+        scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
+        scheduled_send_error: error,
+        updated_at: new Date(),
+      });
+      logger.error(`[invoice] Scheduled send failed for ${inv.invoice_number}: ${error}`);
+    }
+    return { sent, failed };
   },
 
   /**

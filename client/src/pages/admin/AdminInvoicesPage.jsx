@@ -80,7 +80,7 @@ const sBtn = (bg, color, isMobile) => ({ padding: isMobile ? '12px 18px' : '8px 
 const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: bg, color, fontWeight: 600, display: 'inline-block' });
 const sInput = (isMobile) => ({ width: '100%', padding: isMobile ? '12px 14px' : '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: isMobile ? 16 : 13, outline: 'none', boxSizing: 'border-box', minHeight: isMobile ? 44 : undefined });
 
-const STATUS_COLORS = { draft: D.muted, sent: D.blue, viewed: D.teal, paid: D.green, overdue: D.red, void: D.muted };
+const STATUS_COLORS = { draft: D.muted, scheduled: D.amber, sending: D.amber, sent: D.blue, viewed: D.teal, paid: D.green, overdue: D.red, void: D.muted };
 export default function AdminInvoicesPage() {
   const [tab, setTab] = useState('list');
   const [stats, setStats] = useState(null);
@@ -1021,7 +1021,10 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const [lineItems, setLineItems] = useState(() => [newLineItem()]);
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
-  const [sendAfterCreate, setSendAfterCreate] = useState(true);
+  const [sendTiming, setSendTiming] = useState('now');
+  const [sendCustomAt, setSendCustomAt] = useState('');
+  const [dueTiming, setDueTiming] = useState('today');
+  const [dueCustomDate, setDueCustomDate] = useState('');
   const [requestReview, setRequestReview] = useState(false);
   const [reviewTiming, setReviewTiming] = useState('120');
   const [reviewCustomAt, setReviewCustomAt] = useState('');
@@ -1181,6 +1184,34 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const tax = afterDiscount * taxRate;
   const total = afterDiscount + tax;
 
+  const dateOnly = (date) => {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+  const addDays = (days) => {
+    const d = new Date();
+    d.setDate(d.getDate() + days);
+    return d;
+  };
+  const invoiceDueDate = () => {
+    if (dueTiming === 'today') return dateOnly(new Date());
+    if (dueTiming === 'tomorrow') return dateOnly(addDays(1));
+    if (dueTiming === '7') return dateOnly(addDays(7));
+    if (dueTiming === '30') return dateOnly(addDays(30));
+    return dueCustomDate || null;
+  };
+  const invoiceScheduledFor = () => {
+    if (sendTiming === 'now' || sendTiming === 'draft') return null;
+    if (sendTiming === 'tomorrow_8') {
+      const d = addDays(1);
+      d.setHours(8, 0, 0, 0);
+      return `${dateOnly(d)}T08:00`;
+    }
+    return sendCustomAt || null;
+  };
+
   const reviewDelayMinutes = () => {
     if (!requestReview) return null;
     if (reviewTiming === 'now') return 0;
@@ -1194,8 +1225,12 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const handleCreate = async () => {
     if (!selectedCustomer) { showToast('Select a customer'); return; }
     if (!lineItems.some(i => i._kind !== 'discount' && i.description && i.unit_price > 0)) { showToast('Add at least one line item'); return; }
+    const dueDate = invoiceDueDate();
+    if (!dueDate) { showToast('Choose a due date'); return; }
+    const scheduledFor = invoiceScheduledFor();
+    if (sendTiming === 'custom' && !scheduledFor) { showToast('Choose an invoice send time'); return; }
     const reviewDelay = reviewDelayMinutes();
-    if (sendAfterCreate && requestReview && reviewDelay === null) { showToast('Choose a review request time'); return; }
+    if (sendTiming !== 'draft' && requestReview && reviewDelay === null) { showToast('Choose a review request time'); return; }
     setSaving(true);
 
     try {
@@ -1206,11 +1241,12 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
           ...i, amount: lineAmount(i),
         })),
         notes: notes || null,
+        dueDate,
       };
 
       const invoice = await adminFetch('/admin/invoices', { method: 'POST', body: JSON.stringify(body) });
 
-      if (sendAfterCreate && invoice.id) {
+      if (sendTiming === 'now' && invoice.id) {
         await adminFetch(`/admin/invoices/${invoice.id}/send`, {
           method: 'POST',
           body: JSON.stringify({
@@ -1221,6 +1257,18 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
           }),
         });
         showToast(`Invoice created & sent: ${invoice.invoice_number}`);
+      } else if (sendTiming !== 'draft' && invoice.id) {
+        await adminFetch(`/admin/invoices/${invoice.id}/schedule-send`, {
+          method: 'POST',
+          body: JSON.stringify({
+            scheduledFor,
+            requestReview,
+            reviewDelayMinutes: reviewDelay,
+            reviewTiming,
+            reviewScheduledFor: reviewTiming === 'custom' ? reviewCustomAt : null,
+          }),
+        });
+        showToast(`Invoice scheduled: ${invoice.invoice_number}`);
       } else {
         showToast(`Invoice created: ${invoice.invoice_number} (draft)`);
       }
@@ -1285,7 +1333,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
 
   const serviceStep = serviceRecords.length > 0 ? 3 : 2;
   const deliveryStep = serviceRecords.length > 0 ? 4 : 3;
-  const primaryActionLabel = saving ? 'Creating...' : sendAfterCreate ? 'Send Invoice' : 'Create Draft';
+  const primaryActionLabel = saving ? 'Creating...' : sendTiming === 'now' ? 'Send Invoice' : sendTiming === 'draft' ? 'Create Draft' : 'Schedule Invoice';
   const lineTableColumns = 'minmax(260px, 1fr) 84px 132px 36px';
 
   return (
@@ -1482,14 +1530,54 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} placeholder="" style={{ ...sInput(isMobile), resize: 'vertical' }} />
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-            <input type="checkbox" checked={sendAfterCreate} onChange={e => setSendAfterCreate(e.target.checked)} id="send-toggle" />
-            <label htmlFor="send-toggle" style={{ fontSize: 13, color: D.text }}>Send via SMS + email immediately after creating</label>
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>Schedule</div>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 8 }}>
+              <div>
+                <label style={{ fontSize: 12, color: D.text, display: 'block', marginBottom: 4 }}>Send</label>
+                <select value={sendTiming} onChange={e => setSendTiming(e.target.value)} style={sInput(isMobile)}>
+                  <option value="now">Immediately</option>
+                  <option value="tomorrow_8">Tomorrow at 8 AM</option>
+                  <option value="custom">Custom time</option>
+                  <option value="draft">Save draft</option>
+                </select>
+              </div>
+              <div>
+                <label style={{ fontSize: 12, color: D.text, display: 'block', marginBottom: 4 }}>Due</label>
+                <select value={dueTiming} onChange={e => setDueTiming(e.target.value)} style={sInput(isMobile)}>
+                  <option value="today">Today</option>
+                  <option value="tomorrow">Tomorrow</option>
+                  <option value="7">In 7 days</option>
+                  <option value="30">In 30 days</option>
+                  <option value="custom">Custom date</option>
+                </select>
+              </div>
+            </div>
+            {(sendTiming === 'custom' || dueTiming === 'custom') && (
+              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 8, marginTop: 8 }}>
+                {sendTiming === 'custom' ? (
+                  <input
+                    type="datetime-local"
+                    value={sendCustomAt}
+                    onChange={e => setSendCustomAt(e.target.value)}
+                    style={sInput(isMobile)}
+                  />
+                ) : <div />}
+                {dueTiming === 'custom' ? (
+                  <input
+                    type="date"
+                    value={dueCustomDate}
+                    onChange={e => setDueCustomDate(e.target.value)}
+                    style={sInput(isMobile)}
+                  />
+                ) : <div />}
+              </div>
+            )}
           </div>
 
-          <div style={{ marginBottom: 16, opacity: sendAfterCreate ? 1 : 0.5 }}>
+          <div style={{ marginBottom: 16, opacity: sendTiming !== 'draft' ? 1 : 0.5 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: requestReview ? 8 : 0 }}>
-              <input type="checkbox" checked={requestReview} onChange={e => setRequestReview(e.target.checked)} disabled={!sendAfterCreate} id="review-toggle" />
+              <input type="checkbox" checked={requestReview} onChange={e => setRequestReview(e.target.checked)} disabled={sendTiming === 'draft'} id="review-toggle" />
               <label htmlFor="review-toggle" style={{ fontSize: 13, color: D.text }}>Send review request</label>
             </div>
             {requestReview && (
@@ -1497,7 +1585,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                 <select
                   value={reviewTiming}
                   onChange={e => setReviewTiming(e.target.value)}
-                  disabled={!sendAfterCreate}
+                  disabled={sendTiming === 'draft'}
                   style={sInput(isMobile)}
                 >
                   <option value="now">Now</option>
@@ -1510,7 +1598,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                     type="datetime-local"
                     value={reviewCustomAt}
                     onChange={e => setReviewCustomAt(e.target.value)}
-                    disabled={!sendAfterCreate}
+                    disabled={sendTiming === 'draft'}
                     style={sInput(isMobile)}
                   />
                 )}
@@ -1525,6 +1613,20 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
           <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 4 }}>Invoice Summary</div>
           <div style={{ fontSize: 12, color: D.muted, marginBottom: 12 }}>
             {selectedCustomer ? `${selectedCustomer.first_name} ${selectedCustomer.last_name}` : 'No customer selected'}
+          </div>
+          <div style={{ display: 'grid', gap: 6, fontSize: 12, color: D.text, marginBottom: 14 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+              <span style={{ color: D.muted }}>Send</span>
+              <span>{sendTiming === 'now' ? 'Immediately' : sendTiming === 'draft' ? 'Draft' : sendTiming === 'tomorrow_8' ? 'Tomorrow 8 AM' : 'Custom'}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+              <span style={{ color: D.muted }}>Due</span>
+              <span>{dueTiming === 'today' ? 'Today' : dueTiming === 'tomorrow' ? 'Tomorrow' : dueTiming === '7' ? '7 days' : dueTiming === '30' ? '30 days' : dueCustomDate || 'Custom'}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+              <span style={{ color: D.muted }}>Sales tax</span>
+              <span>{isCommercial ? 'Commercial only' : 'None'}</span>
+            </div>
           </div>
 
           <button onClick={handleCreate} disabled={saving} style={{ ...sBtn('#111', D.white, isMobile), width: '100%', padding: 14, minHeight: isMobile ? 48 : undefined, opacity: saving ? 0.5 : 1, marginBottom: 14 }}>

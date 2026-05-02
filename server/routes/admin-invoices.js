@@ -73,7 +73,7 @@ router.get('/customers/search', async (req, res, next) => {
           .orWhere('email', 'like', `%${q.toLowerCase()}%`);
       })
       .where({ active: true })
-      .select('id', 'first_name', 'last_name', 'phone', 'email', 'waveguard_tier', 'address_line1', 'city')
+      .select('id', 'first_name', 'last_name', 'phone', 'email', 'waveguard_tier', 'address_line1', 'city', 'property_type')
       .limit(10);
     res.json({ customers });
   } catch (err) { next(err); }
@@ -339,50 +339,40 @@ router.post('/:id/send', async (req, res, next) => {
     const { id } = req.params;
     const { requestReview } = req.body || {};
     const reviewDelayMinutes = parseReviewDelayMinutes(req.body || {});
-    const { sendInvoiceEmail } = require('../services/invoice-email');
 
-    const sms = { ok: false };
-    const email = { ok: false };
-
-    try {
-      await InvoiceService.sendViaSMS(id);
-      sms.ok = true;
-    } catch (err) {
-      sms.error = err.message;
+    const result = await InvoiceService.sendViaSMSAndEmail(id, { requestReview, reviewDelayMinutes });
+    if (!result.ok) {
+      return res.status(500).json(result);
     }
+    res.json(result);
+  } catch (err) { next(err); }
+});
 
-    try {
-      const r = await sendInvoiceEmail(id);
-      if (r?.ok) email.ok = true;
-      else if (r?.error) email.error = r.error;
-    } catch (err) {
-      email.error = err.message;
-    }
+// POST /:id/schedule-send — send invoice later via the scheduler.
+router.post('/:id/schedule-send', async (req, res, next) => {
+  try {
+    const { scheduledFor, requestReview } = req.body || {};
+    const reviewDelayMinutes = parseReviewDelayMinutes(req.body || {});
+    if (!scheduledFor) return res.status(400).json({ error: 'scheduledFor required' });
+    const when = parseETDateTime(scheduledFor);
+    if (Number.isNaN(when.getTime())) return res.status(400).json({ error: 'invalid scheduledFor' });
+    if (when.getTime() <= Date.now()) return res.status(400).json({ error: 'scheduledFor must be in the future' });
 
-    // Schedule a delayed review request when at least one channel landed.
-    // ReviewService dedupes on service_record_id, so a follow-up triggered
-    // here won't double up with one already scheduled at service completion.
-    if (requestReview && (sms.ok || email.ok)) {
-      try {
-        const ReviewService = require('../services/review-request');
-        const inv = await db('invoices').where({ id }).select('customer_id', 'service_record_id').first();
-        if (inv) {
-          await ReviewService.create({
-            customerId: inv.customer_id,
-            serviceRecordId: inv.service_record_id || null,
-            triggeredBy: 'auto',
-            delayMinutes: reviewDelayMinutes,
-          });
-        }
-      } catch (err) {
-        logger.error(`[admin-invoices] Review request schedule failed: ${err.message}`);
-      }
-    }
-
-    if (!sms.ok && !email.ok) {
-      return res.status(500).json({ ok: false, sms, email });
-    }
-    res.json({ ok: true, sms, email });
+    const [invoice] = await db('invoices')
+      .where({ id: req.params.id })
+      .whereNotIn('status', ['paid', 'void'])
+      .update({
+        status: 'scheduled',
+        scheduled_send_at: when,
+        scheduled_send_attempts: 0,
+        scheduled_send_error: null,
+        scheduled_request_review: Boolean(requestReview),
+        scheduled_review_delay_minutes: requestReview ? reviewDelayMinutes : null,
+        updated_at: new Date(),
+      })
+      .returning('*');
+    if (!invoice) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true, invoice });
   } catch (err) { next(err); }
 });
 

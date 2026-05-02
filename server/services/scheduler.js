@@ -330,6 +330,21 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 5 MINUTES — Send scheduled invoices whose time has arrived
+  // =========================================================================
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const InvoiceService = require('./invoice');
+      const result = await InvoiceService.processScheduledSends();
+      if (result.sent || result.failed) {
+        logger.info(`Scheduled invoices: ${result.sent} sent, ${result.failed} failed`);
+      }
+    } catch (err) {
+      logger.error(`Scheduled invoice cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 2 MINUTES — Email sync (Gmail → PostgreSQL)
   // =========================================================================
   cron.schedule('*/2 * * * *', async () => {
