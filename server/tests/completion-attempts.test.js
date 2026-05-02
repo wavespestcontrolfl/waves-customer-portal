@@ -91,7 +91,7 @@ describe('completion attempts', () => {
       noResumableCompletion(),
       noCompletedRecord(),
       { insertError: uniqueViolation() },
-      { first: { id: 'attempt-1', status: 'pending' } },
+      { first: { id: 'attempt-1', status: 'pending', updated_at: new Date() } },
     ]);
 
     const result = await claimCompletionAttempt({
@@ -103,6 +103,38 @@ describe('completion attempts', () => {
     expect(result.action).toBe('conflict');
     expect(result.status).toBe(409);
     expect(result.payload.code).toBe('completion_pending');
+  });
+
+  test('same key reclaims a stale pending attempt and proceeds', async () => {
+    const stale = {
+      id: 'attempt-1',
+      idempotency_key: 'key-1',
+      status: 'pending',
+      request_hash: 'hash-1',
+      updated_at: new Date(Date.now() - 12 * 60 * 1000),
+    };
+    const reclaimed = { ...stale, updated_at: new Date() };
+    const knex = makeKnex([
+      noPriorSuccess(),
+      noResumableCompletion(),
+      noCompletedRecord(),
+      { insertError: uniqueViolation() },
+      { first: stale },
+      { first: undefined },
+      { returning: [reclaimed] },
+    ]);
+
+    const result = await claimCompletionAttempt({
+      serviceId: 'svc-1',
+      idempotencyKey: 'key-1',
+      requestHash: 'hash-1',
+    }, knex);
+
+    expect(result).toEqual({ action: 'proceed', attempt: reclaimed });
+    expect(knex.calls[5].table).toBe('service_records');
+    expect(knex.calls[6].op.whereCriteria).toEqual({ id: 'attempt-1', status: 'pending' });
+    expect(knex.calls[6].op.andWhereArgs[0]).toBe('updated_at');
+    expect(knex.calls[6].op.updatePayload.request_hash).toBe('hash-1');
   });
 
   test('same key after success replays stored response (upfront fast path)', async () => {
