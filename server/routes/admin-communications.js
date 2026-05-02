@@ -3,10 +3,12 @@ const router = express.Router();
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
+const { normalizePhone } = require('../utils/phone');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -21,12 +23,39 @@ router.post('/sms', async (req, res, next) => {
   try {
     const { to, body, customerId, messageType, fromNumber, mediaUrls } = req.body;
     if (!to || !body) return res.status(400).json({ error: 'to and body required' });
+    if (fromNumber && !TWILIO_NUMBERS.findByNumber(fromNumber)) {
+      return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
+    }
+    let trustedCustomerId;
+    if (customerId) {
+      const customer = await db('customers').where({ id: customerId }).first('id', 'phone');
+      if (!customer) return res.status(404).json({ error: 'customerId not found' });
+      const normalizedTo = normalizePhone(to);
+      const normalizedCustomerPhone = normalizePhone(customer.phone);
+      if (!normalizedTo || !normalizedCustomerPhone || normalizedTo !== normalizedCustomerPhone) {
+        return res.status(400).json({ error: 'to must match the selected customer phone' });
+      }
+      trustedCustomerId = customer.id;
+    }
 
-    const result = await TwilioService.sendSMS(to, body, {
-      customerId, messageType: messageType || 'manual', adminUserId: req.technicianId,
-      fromNumber: fromNumber || undefined,
-      mediaUrls: Array.isArray(mediaUrls) ? mediaUrls : undefined,
+    const result = await sendCustomerMessage({
+      to,
+      body,
+      channel: 'sms',
+      audience: trustedCustomerId ? 'customer' : 'lead',
+      purpose: 'conversational',
+      customerId: trustedCustomerId || undefined,
+      identityTrustLevel: trustedCustomerId ? 'phone_matches_customer' : 'phone_provided_unverified',
+      metadata: {
+        original_message_type: messageType || 'manual',
+        adminUserId: req.technicianId,
+        fromNumber: fromNumber || undefined,
+        mediaUrls: Array.isArray(mediaUrls) ? mediaUrls : undefined,
+      },
     });
+    if (result.blocked || result.sent === false) {
+      return res.status(422).json(result);
+    }
 
     res.json(result);
   } catch (err) { next(err); }

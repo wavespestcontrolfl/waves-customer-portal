@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { etDateString } = require('../utils/datetime-et');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -79,17 +80,29 @@ router.post('/inbox/:id/reply', async (req, res, next) => {
       || (await db('customers').where({ id: original.customer_id }).first())?.phone;
     if (!replyTo) return res.status(400).json({ error: 'No reply destination on this thread' });
 
-    const TwilioService = require('../services/twilio');
-    const result = await TwilioService.sendSMS(replyTo, body.trim(), {
-      customerId: original.customer_id,
-      messageType: 'manual',
-      adminUserId: req.technicianId,
-      fromNumber: original.our_endpoint_id || undefined,
+    const result = await sendCustomerMessage({
+      to: replyTo,
+      body: body.trim(),
+      channel: 'sms',
+      audience: original.customer_id ? 'customer' : 'lead',
+      purpose: 'conversational',
+      customerId: original.customer_id || undefined,
+      identityTrustLevel: original.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
+      entryPoint: 'admin_dashboard_ops_inbox_reply',
+      metadata: {
+        original_message_type: 'manual',
+        adminUserId: req.technicianId,
+        fromNumber: original.our_endpoint_id || undefined,
+        conversationId: original.conversation_id,
+      },
     });
+    if (!result.sent) {
+      return res.status(422).json({ error: result.reason || result.code || 'SMS send blocked/failed' });
+    }
 
     await db('messages').where({ id: req.params.id }).update({ is_read: true });
 
-    res.json({ success: true, sid: result?.sid });
+    res.json({ success: true, sid: result?.providerMessageId });
   } catch (err) { next(err); }
 });
 

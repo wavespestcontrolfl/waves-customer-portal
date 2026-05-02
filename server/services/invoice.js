@@ -469,7 +469,6 @@ const InvoiceService = {
     const customer = await db('customers').where({ id: invoice.customer_id }).first();
     if (!customer?.phone) return { sent: false, reason: 'no-phone' };
 
-    const amount = Number(invoice.total).toFixed(2);
     const domain = process.env.PORTAL_DOMAIN || 'https://portal.wavespestcontrol.com';
     const longReceiptUrl = invoice.token ? `${domain}/pay/${invoice.token}` : '';
     const receiptUrl = longReceiptUrl
@@ -477,19 +476,19 @@ const InvoiceService = {
       : '';
 
     // Template body has a {card_line} placeholder that renders as e.g.
-    // " (Visa •4242)" when card metadata is present, or empty otherwise.
+    // " (Visa ending 4242)" when card metadata is present, or empty otherwise.
     const cardBrand = invoice.card_brand;
     const cardLast4 = invoice.card_last_four;
-    const cardLine = cardBrand && cardLast4 ? ` (${cardBrand.charAt(0).toUpperCase() + cardBrand.slice(1)} •${cardLast4})` : '';
+    const cardLine = cardBrand && cardLast4 ? ` (${cardBrand.charAt(0).toUpperCase() + cardBrand.slice(1)} ending ${cardLast4})` : '';
 
-    const fallback = `Hello ${customer.first_name}! Thank you for your payment — we truly appreciate your business. You can view your receipt here: ${receiptUrl}.\n\nIf you have any questions or need assistance, simply reply to this message. Thanks again for choosing Waves!`;
+    const fallback = `Hello ${customer.first_name}! Thank you for your payment. We truly appreciate your business. You can view your receipt here: ${receiptUrl}.\n\nIf you have any questions or need assistance, simply reply to this message. Thanks again for choosing Waves!`;
     let body = fallback;
     try {
       const templates = require('../routes/admin-sms-templates');
       const rendered = await templates.getTemplate('invoice_receipt', {
         first_name: customer.first_name || '',
         invoice_number: invoice.invoice_number,
-        amount,
+        amount: 'your payment',
         card_line: cardLine,
         receipt_url: receiptUrl,
       });
@@ -498,11 +497,24 @@ const InvoiceService = {
       logger.warn(`[invoice] Receipt template lookup failed: ${err.message}`);
     }
 
-    const TwilioService = require('./twilio');
-    await TwilioService.sendSMS(customer.phone, body, {
+    const { sendCustomerMessage } = require('./messaging/send-customer-message');
+    const sendResult = await sendCustomerMessage({
+      to: customer.phone,
+      body,
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'payment_receipt',
       customerId: customer.id,
-      messageType: 'receipt',
+      invoiceId,
+      entryPoint: 'invoice_receipt_sms',
+      metadata: { original_message_type: 'receipt' },
     });
+    if (sendResult.blocked || sendResult.sent === false) {
+      const err = new Error(`receipt SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+      err.code = sendResult.code;
+      err.reason = sendResult.reason;
+      throw err;
+    }
     logger.info(`[invoice] Receipt SMS sent for ${invoice.invoice_number}`);
 
     if (!invoice.receipt_sent_at) {

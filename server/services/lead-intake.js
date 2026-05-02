@@ -26,6 +26,7 @@ const logger = require('./logger');
 const TwilioService = require('./twilio');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { classifyServiceIntent } = require('./sms-service-intent');
+const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 const ADAM_NOTIFY_PHONE = '+19415993489';
 
@@ -75,10 +76,23 @@ async function sendBranchReply(customer, interest) {
     : `Great, ${firstName} — putting together a ${SERVICE_LABEL[interest].toLowerCase()} quote now.`;
   const body = await renderTemplate(templateKey, { first_name: firstName }, fallback);
   try {
-    await TwilioService.sendSMS(customer.phone, body, {
+    const result = await sendCustomerMessage({
+      to: customer.phone,
+      body,
+      channel: 'sms',
+      audience: 'lead',
+      purpose: 'conversational',
       customerId: customer.id,
-      messageType: 'auto_reply',
+      identityTrustLevel: 'phone_matches_customer',
+      entryPoint: 'lead_intake_branch_reply',
+      metadata: {
+        original_message_type: 'auto_reply',
+        lead_service_interest: interest,
+      },
     });
+    if (!result.sent) {
+      logger.warn(`[lead-intake] Branch reply blocked/failed for customer ${customer.id}: ${result.code || result.reason || 'unknown'}`);
+    }
   } catch (e) {
     logger.error(`[lead-intake] Branch reply send failed: ${e.message}`);
   }
@@ -89,10 +103,22 @@ async function sendAddressNudge(customer) {
   const fallback = `Just need the service address to finish your quote, ${firstName}.`;
   const body = await renderTemplate('lead_address_needed', { first_name: firstName }, fallback);
   try {
-    await TwilioService.sendSMS(customer.phone, body, {
+    const result = await sendCustomerMessage({
+      to: customer.phone,
+      body,
+      channel: 'sms',
+      audience: 'lead',
+      purpose: 'conversational',
       customerId: customer.id,
-      messageType: 'auto_reply',
+      identityTrustLevel: 'phone_matches_customer',
+      entryPoint: 'lead_intake_address_nudge',
+      metadata: {
+        original_message_type: 'auto_reply',
+      },
     });
+    if (!result.sent) {
+      logger.warn(`[lead-intake] Address nudge blocked/failed for customer ${customer.id}: ${result.code || result.reason || 'unknown'}`);
+    }
   } catch (e) {
     logger.error(`[lead-intake] Address nudge send failed: ${e.message}`);
   }

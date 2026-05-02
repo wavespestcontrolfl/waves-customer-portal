@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etParts } = require('../utils/datetime-et');
+const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 // Map notification types to their toggle column and channel column in notification_prefs
 const TYPE_MAP = {
@@ -15,6 +16,16 @@ const TYPE_MAP = {
   payment_receipt:   { toggle: 'payment_receipt',      channel: 'payment_receipt_channel' },
   weather_alert:     { toggle: 'weather_alerts',       channel: 'weather_alert_channel' },
 };
+
+function purposeForNotificationType(type) {
+  if (['service_reminder', 'en_route', 'service_complete', 'weather_alert'].includes(type)) return 'appointment';
+  if (type === 'billing') return 'billing';
+  if (type === 'payment_receipt') return 'payment_receipt';
+  if (type === 'review_request') return 'review_request';
+  if (type === 'referral') return 'referral';
+  if (type === 'seasonal' || type === 'marketing') return 'marketing';
+  return 'conversational';
+}
 
 const NotificationDispatcher = {
 
@@ -78,13 +89,32 @@ const NotificationDispatcher = {
     // Send SMS
     if ((channel === 'sms' || channel === 'both') && smsMessage && customer.phone) {
       try {
-        const TwilioService = require('./twilio');
-        await TwilioService.sendSMS(customer.phone, smsMessage, {
+        const purpose = purposeForNotificationType(notificationType);
+        const smsResult = await sendCustomerMessage({
+          to: customer.phone,
+          body: smsMessage,
+          channel: 'sms',
+          audience: 'customer',
+          purpose,
           customerId: customer.id,
-          messageType: notificationType,
+          identityTrustLevel: 'phone_matches_customer',
+          entryPoint: 'notification_dispatcher',
+          consentBasis: purpose === 'marketing' ? {
+            status: 'opted_in',
+            source: 'notification_prefs',
+            capturedAt: prefs?.updated_at || prefs?.created_at || new Date().toISOString(),
+          } : undefined,
+          metadata: {
+            original_message_type: notificationType,
+          },
         });
-        results.sms = 'sent';
-        sent = true;
+        if (smsResult.sent) {
+          results.sms = 'sent';
+          sent = true;
+        } else {
+          results.sms = `blocked: ${smsResult.code || smsResult.reason || 'unknown'}`;
+          logger.warn(`[notify] SMS blocked/failed for ${customerId}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+        }
       } catch (err) {
         logger.error(`[notify] SMS failed for ${customerId}: ${err.message}`);
         results.sms = `error: ${err.message}`;

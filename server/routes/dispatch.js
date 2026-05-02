@@ -17,6 +17,7 @@ const { simulate } = require('../services/dispatch/tech-matcher');
 const { getRecommendedSlots } = require('../services/dispatch/csr-booker');
 const { getDashboardMetrics } = require('../services/dispatch/insight-engine');
 const { etDateString } = require('../utils/datetime-et');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 let db;
 function getDb() {
@@ -64,12 +65,21 @@ router.post('/jobs/:id/cancel', async (req, res) => {
           .first();
 
         if (svc?.phone) {
-          const TwilioService = require('../services/twilio');
           const svcLabel = (cancelledJob.service_type || 'service').replace(/_/g, ' ');
-          await TwilioService.sendSMS(svc.phone,
-            `Hi ${svc.first_name || 'there'}, your ${svcLabel} appointment has been rescheduled. We'll confirm your new time shortly. — Waves Pest Control`,
-            { customerId: svc.customer_id, messageType: 'reschedule' }
-          );
+          const smsResult = await sendCustomerMessage({
+            to: svc.phone,
+            body: `Hi ${svc.first_name || 'there'}, your ${svcLabel} appointment has been rescheduled. We'll confirm your new time shortly. - Waves Pest Control`,
+            channel: 'sms',
+            audience: 'customer',
+            purpose: 'appointment',
+            customerId: svc.customer_id,
+            appointmentId: cancelledJob.sheet_row_id,
+            identityTrustLevel: 'phone_matches_customer',
+            metadata: { original_message_type: 'reschedule' },
+          });
+          if (!smsResult.sent) {
+            console.warn(`[dispatch] SMS on cancellation blocked/failed for customer ${svc.customer_id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+          }
         }
       } catch (smsErr) {
         console.warn('[dispatch] SMS on cancellation failed:', smsErr.message);

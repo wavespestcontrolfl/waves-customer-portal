@@ -1,6 +1,6 @@
 const db = require('../../models/db');
-const TwilioService = require('../twilio');
 const logger = require('../logger');
+const { sendCustomerMessage } = require('../messaging/send-customer-message');
 
 const TIER_PRICING = {
   silver: { monthly: 49, label: 'Silver' },
@@ -58,16 +58,32 @@ class UpsellTrigger {
     const annualCost = tier.monthly * 12;
     const savings = Math.round(totalSpent - annualCost);
 
-    const body = `Hi ${customer.first_name}! You've spent $${totalSpent.toFixed(0)} on ${serviceCount} services this year. ` +
-      `With our ${tier.label} WaveGuard plan at $${tier.monthly}/mo, you'd get unlimited coverage ` +
-      `${savings > 0 ? `and save ~$${savings}/yr` : 'with predictable monthly billing'}. ` +
-      `Reply INFO to learn more! - Waves Pest Control`;
+    const body = `Hi ${customer.first_name}! Based on your recent services, our ${tier.label} WaveGuard plan may be a better fit with unlimited coverage and predictable billing. Reply INFO to learn more. - Waves Pest Control`;
 
-    await TwilioService.sendSMS(customer.phone, body, {
+    const smsResult = await sendCustomerMessage({
+      to: customer.phone,
+      body,
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'marketing',
       customerId,
-      messageType: 'upsell',
-      customerLocationId: customer.location_id,
+      identityTrustLevel: 'phone_matches_customer',
+      entryPoint: 'upsell_trigger',
+      consentBasis: {
+        status: 'opted_in',
+        source: 'customer_marketing_preferences',
+        capturedAt: customer.updated_at || customer.created_at || new Date().toISOString(),
+      },
+      metadata: {
+        original_message_type: 'upsell',
+        customerLocationId: customer.location_id,
+        recommended_tier: recommendedTier,
+      },
     });
+    if (!smsResult.sent) {
+      logger.warn(`Upsell blocked/failed for customer ${customerId}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+      return { sent: false, blocked: true, reason: smsResult.code || smsResult.reason, recommendedTier };
+    }
 
     await db('customer_interactions').insert({
       customer_id: customerId,

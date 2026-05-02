@@ -9,6 +9,7 @@ const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const engine = require('../services/referral-engine');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 router.use(authenticate);
 
@@ -200,11 +201,31 @@ router.post('/invite', inviteLimiter, async (req, res, next) => {
       return res.json({ success: true, deduped: true });
     }
 
-    const TwilioService = require('../services/twilio');
     const friendly = friendName ? ` ${friendName.replace(/[<>]/g, '')}` : '';
     const body = `Hi${friendly}! ${promoter.first_name} thinks you'd love Waves Pest Control. Get a free quote: ${promoter.referral_link || settings.base_url + promoter.referral_code} or call (941) 318-7612`;
 
-    await TwilioService.sendSMS(cleanPhone, body, { messageType: 'referral_invite' });
+    const smsResult = await sendCustomerMessage({
+      to: cleanPhone,
+      body,
+      channel: 'sms',
+      audience: 'lead',
+      purpose: 'referral',
+      identityTrustLevel: 'phone_provided_unverified',
+      consentBasis: {
+        status: 'transactional_allowed',
+        source: 'referral_invite_form',
+        capturedAt: new Date().toISOString(),
+      },
+      entryPoint: 'referrals_v2_invite',
+      metadata: {
+        original_message_type: 'referral_invite',
+        promoter_id: promoter.id,
+      },
+    });
+    if (!smsResult.sent) {
+      logger.warn(`[referrals-v2] Invite SMS blocked/failed for promoter ${promoter.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+      return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
+    }
 
     // Best-effort log of the invite for cooldown tracking
     await db('referral_invites').insert({

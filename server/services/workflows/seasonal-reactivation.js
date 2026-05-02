@@ -1,7 +1,7 @@
 const db = require('../../models/db');
-const TwilioService = require('../twilio');
 const TWILIO_NUMBERS = require('../../config/twilio-numbers');
 const logger = require('../logger');
+const { sendCustomerMessage } = require('../messaging/send-customer-message');
 
 const SEASONAL_HOOKS = {
   // month index (0-based) → hooks
@@ -64,11 +64,30 @@ class SeasonalReactivation {
           `${customer.address ? ` at ${customer.address}` : ''}. ` +
           `Reply YES or call ${callNumber} to book. - Waves Pest Control`;
 
-        await TwilioService.sendSMS(customer.phone, body, {
+        const smsResult = await sendCustomerMessage({
+          to: customer.phone,
+          body,
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'marketing',
           customerId: customer.id,
-          messageType: 'reactivation',
-          customerLocationId: customer.location_id,
+          identityTrustLevel: 'phone_matches_customer',
+          entryPoint: 'seasonal_reactivation',
+          consentBasis: {
+            status: 'opted_in',
+            source: 'customer_marketing_preferences',
+            capturedAt: customer.updated_at || customer.created_at || new Date().toISOString(),
+          },
+          metadata: {
+            original_message_type: 'reactivation',
+            customerLocationId: customer.location_id,
+            hook_type: seasonal.type,
+          },
         });
+        if (!smsResult.sent) {
+          logger.warn(`Reactivation blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+          continue;
+        }
 
         await db('customer_interactions').insert({
           customer_id: customer.id,

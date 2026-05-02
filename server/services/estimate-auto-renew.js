@@ -13,11 +13,11 @@
  */
 
 const db = require('../models/db');
-const TwilioService = require('./twilio');
 const EmailService = require('./email');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
+const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 const RENEWAL_DAYS = 7;
 
@@ -55,12 +55,32 @@ const EstimateAutoRenew = {
           const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
           const smsBody = await renderTemplate('estimate_auto_renewed',
             { first_name: firstName, estimate_url: url },
-            `Hey ${firstName}! Your Waves estimate was about to expire so we extended it a few more days. Still good — take another look whenever you're ready:\n\n${url}\n\nQuestions? (941) 318-7612 🌊`
+            `Hey ${firstName}! Your Waves estimate was about to expire, so we extended it a few more days. Take another look whenever you're ready: ${url} Questions? (941) 318-7612`
           );
 
           if (est.customer_phone) {
-            try { await TwilioService.sendSMS(est.customer_phone, smsBody); }
-            catch (e) { logger.error(`[est-auto-renew] SMS failed: ${e.message}`); }
+            try {
+              const smsResult = await sendCustomerMessage({
+                to: est.customer_phone,
+                body: smsBody,
+                channel: 'sms',
+                audience: est.customer_id ? 'customer' : 'lead',
+                purpose: 'estimate_followup',
+                customerId: est.customer_id || undefined,
+                estimateId: est.id,
+                identityTrustLevel: est.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
+                consentBasis: est.customer_id ? undefined : {
+                  status: 'transactional_allowed',
+                  source: 'estimate_auto_renew',
+                  capturedAt: est.created_at || new Date().toISOString(),
+                },
+                entryPoint: 'estimate_auto_renew',
+                metadata: { original_message_type: 'estimate_auto_renewed' },
+              });
+              if (!smsResult.sent) {
+                logger.warn(`[est-auto-renew] SMS blocked/failed for estimate ${est.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+              }
+            } catch (e) { logger.error(`[est-auto-renew] SMS failed: ${e.message}`); }
           }
           if (est.customer_email) {
             try {

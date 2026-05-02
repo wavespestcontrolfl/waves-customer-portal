@@ -2,7 +2,6 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
-const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { resolveLocation } = require('../config/locations');
 const smsTemplatesRouter = require('./admin-sms-templates');
@@ -12,6 +11,7 @@ const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const CompletionRecap = require('../services/completion-recap');
 const CompletionAttempts = require('../services/completion-attempts');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 // Haversine ETA for the dispatch board tech cards. Returns a whole
 // number of minutes, or null when any input is missing or the tech is
@@ -866,30 +866,40 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           await db('service_records').where({ id: record.id }).update({
             structured_notes: sendingNotes,
           });
-          try {
-            await TwilioService.sendSMS(svc.cust_phone, sentSmsBody, { customerId: svc.customer_id, messageType: sentSmsType });
-          } catch (smsErr) {
+          const smsResult = await sendCustomerMessage({
+            to: svc.cust_phone,
+            body: sentSmsBody,
+            channel: 'sms',
+            audience: 'customer',
+            purpose: 'appointment',
+            customerId: svc.customer_id,
+            appointmentId: svc.id,
+            identityTrustLevel: 'phone_matches_customer',
+            metadata: { original_message_type: sentSmsType, service_record_id: record.id },
+          });
+          if (!smsResult.sent) {
             await db('service_records').where({ id: record.id }).update({
               structured_notes: {
                 ...sendingNotes,
-                completionSmsStatus: 'failed',
-                completionSmsError: smsErr.message,
+                completionSmsStatus: smsResult.blocked ? 'blocked' : 'failed',
+                completionSmsError: smsResult.reason || smsResult.code || 'SMS send failed',
                 completionSmsFailedAt: new Date().toISOString(),
               },
             });
-            throw smsErr;
+            logger.warn(`[dispatch] Completion SMS blocked/failed for customer ${svc.customer_id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+          } else {
+            const sentNotes = {
+              ...sendingNotes,
+              completionSmsStatus: 'sent',
+              sentSmsBody,
+              sentSmsAt: new Date().toISOString(),
+              sentSmsType,
+            };
+            await db('service_records').where({ id: record.id }).update({
+              structured_notes: sentNotes,
+            });
+            record.structured_notes = sentNotes;
           }
-          const sentNotes = {
-            ...sendingNotes,
-            completionSmsStatus: 'sent',
-            sentSmsBody,
-            sentSmsAt: new Date().toISOString(),
-            sentSmsType,
-          };
-          await db('service_records').where({ id: record.id }).update({
-            structured_notes: sentNotes,
-          });
-          record.structured_notes = sentNotes;
         }
       } catch (e) { logger.error(`Completion SMS failed: ${e.message}`); }
     } else if (sendCompletionSms && svc.cust_phone && completionSmsAlreadyHandled) {

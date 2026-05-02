@@ -1,8 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -46,18 +46,28 @@ router.put('/:id/approve', async (req, res, next) => {
     const draft = await db('message_drafts').where({ id: req.params.id }).first();
     if (!draft) return res.status(404).json({ error: 'Draft not found' });
 
-    const customer = draft.customer_id ? await db('customers').where({ id: draft.customer_id }).first() : null;
-    const phone = customer?.phone || draft.inbound_message; // fallback
-
     // Get the inbound SMS to find the FROM number
     const smsLog = draft.sms_log_id ? await db('sms_log').where({ id: draft.sms_log_id }).first() : null;
     const toPhone = smsLog?.from_phone;
 
     if (!toPhone) return res.status(400).json({ error: 'Cannot determine recipient phone' });
 
-    await TwilioService.sendSMS(toPhone, draft.draft_response, {
-      customerId: draft.customer_id, messageType: 'ai_approved',
+    const smsResult = await sendCustomerMessage({
+      to: toPhone,
+      body: draft.draft_response,
+      channel: 'sms',
+      audience: 'lead',
+      purpose: 'conversational',
+      customerId: draft.customer_id || undefined,
+      identityTrustLevel: draft.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
+      entryPoint: 'admin_draft_approve',
+      metadata: {
+        original_message_type: 'ai_approved',
+        draft_id: draft.id,
+        adminUserId: req.technicianId,
+      },
     });
+    if (!smsResult.sent) return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
 
     const responseTime = Math.round((Date.now() - new Date(draft.created_at)) / 1000);
 
@@ -85,9 +95,22 @@ router.put('/:id/revise', async (req, res, next) => {
 
     if (!toPhone) return res.status(400).json({ error: 'Cannot determine recipient' });
 
-    await TwilioService.sendSMS(toPhone, revisedResponse, {
-      customerId: draft.customer_id, messageType: 'ai_revised',
+    const smsResult = await sendCustomerMessage({
+      to: toPhone,
+      body: revisedResponse,
+      channel: 'sms',
+      audience: 'lead',
+      purpose: 'conversational',
+      customerId: draft.customer_id || undefined,
+      identityTrustLevel: draft.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
+      entryPoint: 'admin_draft_revise',
+      metadata: {
+        original_message_type: 'ai_revised',
+        draft_id: draft.id,
+        adminUserId: req.technicianId,
+      },
     });
+    if (!smsResult.sent) return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
 
     const responseTime = Math.round((Date.now() - new Date(draft.created_at)) / 1000);
 

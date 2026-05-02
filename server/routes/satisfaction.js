@@ -4,6 +4,7 @@ const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const TwilioService = require('../services/twilio');
 const logger = require('../services/logger');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 router.use(authenticate);
 
@@ -180,13 +181,23 @@ router.post('/', async (req, res, next) => {
       // 8-10: Send Google review SMS to customer
       const reviewLink = REVIEW_LINKS[office];
       try {
-        await TwilioService.sendSMS(
-          customer.phone,
-          `🌊 Thanks for the ${rating}/10, ${customer.first_name}! ` +
-          `We'd love if you shared your experience on Google — it means the world to our team.\n\n` +
-          `${reviewLink}\n\n` +
-          `Thank you for choosing Waves! 🙏`
-        );
+        const smsResult = await sendCustomerMessage({
+          to: customer.phone,
+          body: `Thanks for the feedback, ${customer.first_name}! We'd love if you shared your experience on Google. It means the world to our team: ${reviewLink}. Thank you for choosing Waves!`,
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'review_request',
+          customerId: customer.id,
+          identityTrustLevel: 'phone_matches_customer',
+          entryPoint: 'satisfaction_promoter_review',
+          metadata: {
+            original_message_type: 'review_request',
+            service_record_id: serviceRecordId,
+          },
+        });
+        if (!smsResult.sent) {
+          logger.warn(`Review SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+        }
       } catch (smsErr) {
         logger.error(`Failed to send review SMS: ${smsErr.message}`);
       }

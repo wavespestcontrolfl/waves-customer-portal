@@ -124,9 +124,9 @@ describe('reconstructUrl', () => {
 });
 
 describe('getMode', () => {
-  test('defaults to log when env unset', () => {
+  test('defaults to enforce when env unset', () => {
     delete process.env.TWILIO_SIGNATURE_VALIDATION;
-    expect(getMode()).toBe('log');
+    expect(getMode()).toBe('enforce');
   });
   test('honors enforce', () => {
     process.env.TWILIO_SIGNATURE_VALIDATION = 'enforce';
@@ -136,9 +136,9 @@ describe('getMode', () => {
     process.env.TWILIO_SIGNATURE_VALIDATION = 'disabled';
     expect(getMode()).toBe('disabled');
   });
-  test('unknown value falls back to log', () => {
+  test('unknown value falls back to enforce', () => {
     process.env.TWILIO_SIGNATURE_VALIDATION = 'pretend';
-    expect(getMode()).toBe('log');
+    expect(getMode()).toBe('enforce');
   });
 });
 

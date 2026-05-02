@@ -1,13 +1,14 @@
 const db = require('../../models/db');
 const TwilioService = require('../twilio');
 const logger = require('../logger');
+const { sendCustomerMessage } = require('../messaging/send-customer-message');
 
 const WAVES_ADMIN_PHONE = '+19413187612';
 
 const REASON_OFFERS = {
   price: {
     empathy: 'We totally understand — budgets matter.',
-    offer: 'We can downgrade you to our Silver plan at $49/mo with core coverage. Reply 1 to switch, 2 to discuss options.',
+    offer: 'We can review lower-cost plan options with core coverage. Reply 1 to switch, 2 to discuss options.',
   },
   moving: {
     empathy: 'Moving is stressful — we get it!',
@@ -22,6 +23,28 @@ const REASON_OFFERS = {
     offer: 'We\'d love to find a way to keep you. Reply 1 for a special retention offer, 2 to talk to someone.',
   },
 };
+
+async function sendCancellationSms(customer, body, metadata = {}) {
+  const result = await sendCustomerMessage({
+    to: customer.phone,
+    body,
+    channel: 'sms',
+    audience: 'customer',
+    purpose: 'support_resolution',
+    customerId: customer.id,
+    identityTrustLevel: 'phone_matches_customer',
+    entryPoint: 'cancellation_save',
+    metadata: {
+      original_message_type: 'cancellation_save',
+      customerLocationId: customer.location_id,
+      ...metadata,
+    },
+  });
+  if (!result.sent) {
+    logger.warn(`[cancellation-save] SMS blocked/failed for customer ${customer.id}: ${result.code || result.reason || 'unknown'}`);
+  }
+  return result;
+}
 
 class CancellationSave {
   /**
@@ -51,11 +74,7 @@ class CancellationSave {
       `We've been proud to keep your home protected and we don't want to lose you. ` +
       `We'll follow up with some options shortly. - Waves Pest Control`;
 
-    await TwilioService.sendSMS(customer.phone, step1Body, {
-      customerId,
-      messageType: 'cancellation_save',
-      customerLocationId: customer.location_id,
-    });
+    await sendCancellationSms(customer, step1Body, { sequence_id: sequence.id, step: 1 });
 
     // Notify Adam immediately
     await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
@@ -75,11 +94,8 @@ class CancellationSave {
         const step2Body = `Hi ${customer.first_name}, ${reason.offer}\n` +
           `Reply CANCEL if you still want to proceed. - Waves Pest Control`;
 
-        await TwilioService.sendSMS(customer.phone, step2Body, {
-          customerId,
-          messageType: 'cancellation_save',
-          customerLocationId: customer.location_id,
-        });
+        const result = await sendCancellationSms(customer, step2Body, { sequence_id: sequence.id, step: 2 });
+        if (!result.sent) return;
 
         await db('sms_sequences').where({ id: sequence.id }).update({ current_step: 2 });
       } catch (err) {
@@ -98,11 +114,8 @@ class CancellationSave {
           `If you ever want to come back, we'll waive the setup fee and get you protected right away. ` +
           `We're here when you need us. - Waves Pest Control`;
 
-        await TwilioService.sendSMS(customer.phone, step3Body, {
-          customerId,
-          messageType: 'cancellation_save',
-          customerLocationId: customer.location_id,
-        });
+        const result = await sendCancellationSms(customer, step3Body, { sequence_id: sequence.id, step: 3 });
+        if (!result.sent) return;
 
         await db('sms_sequences').where({ id: sequence.id })
           .update({ current_step: 3, status: 'completed' });
@@ -133,10 +146,10 @@ class CancellationSave {
     if (normalizedReply === '1') {
       await db('sms_sequences').where({ id: sequence.id }).update({ status: 'converted' });
 
-      await TwilioService.sendSMS(customer.phone,
+      await sendCancellationSms(customer,
         `Awesome, ${customer.first_name}! We're so glad you're staying. ` +
         `Someone from our team will reach out within 24 hours to get you set up. - Waves Pest Control`,
-        { customerId, messageType: 'cancellation_save', customerLocationId: customer.location_id }
+        { sequence_id: sequence.id, reply_action: 'accepted_offer' }
       );
 
       await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
@@ -155,9 +168,9 @@ class CancellationSave {
         { messageType: 'admin_alert' }
       );
 
-      await TwilioService.sendSMS(customer.phone,
+      await sendCancellationSms(customer,
         `Thanks ${customer.first_name}! We'll have someone call you within a few hours. - Waves Pest Control`,
-        { customerId, messageType: 'cancellation_save', customerLocationId: customer.location_id }
+        { sequence_id: sequence.id, reply_action: 'callback_requested' }
       );
 
       return { action: 'callback_requested' };
@@ -166,10 +179,10 @@ class CancellationSave {
     if (normalizedReply === 'cancel') {
       await db('sms_sequences').where({ id: sequence.id }).update({ status: 'cancelled' });
 
-      await TwilioService.sendSMS(customer.phone,
+      await sendCancellationSms(customer,
         `We're sorry to see you go, ${customer.first_name}. Your service has been cancelled. ` +
         `Remember, the door's always open if you need us. - Waves Pest Control`,
-        { customerId, messageType: 'cancellation_save', customerLocationId: customer.location_id }
+        { sequence_id: sequence.id, reply_action: 'cancelled' }
       );
 
       return { action: 'cancelled' };

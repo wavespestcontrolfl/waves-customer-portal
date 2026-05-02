@@ -22,7 +22,7 @@ function capitalizeName(name) {
     .replace(/\bMc(\w)/g, (_, c) => 'Mc' + c.toUpperCase())
     .replace(/\bO'(\w)/g, (_, c) => "O'" + c.toUpperCase());
 }
-const TwilioService = require('./twilio');
+const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString } = require('../utils/datetime-et');
@@ -476,7 +476,13 @@ const CallRecordingProcessor = {
             nearest_location_id: loc.id,
           }).returning('*');
           customerId = newCust.id;
-          logger.info(`[call-proc] Created customer: ${extracted.first_name} ${extracted.last_name} (${customerId})`);
+          logger.info(`[call-proc] Created customer ${customerId} from call recording`);
+
+          await db('notification_prefs')
+            .insert({ customer_id: customerId })
+            .onConflict('customer_id')
+            .ignore()
+            .catch((e) => logger.warn(`[call-proc] notification_prefs create failed for ${customerId}: ${e.message}`));
 
           // Auto-create Stripe customer (non-blocking, but log failures so a
           // misconfigured Stripe key surfaces in the logs instead of silently
@@ -755,7 +761,7 @@ const CallRecordingProcessor = {
             smsBody = `Hello ${firstName}! Your ${serviceType} appointment has been scheduled.\n\n` +
               `Date/Time: ${extracted.preferred_date_time}\n\n` +
               `We'll send you a reminder before your appointment. Reply to this text or call (941) 318-7612 with any questions.\n\n` +
-              `— Waves Pest Control 🌊`;
+              `- Waves Pest Control`;
           }
 
           // Content-level dedup: even if the concurrent-run guard above
@@ -895,11 +901,37 @@ const CallRecordingProcessor = {
           // Only send the confirmation SMS if the schedule row landed.
           if (scheduledServiceId) {
             if (!alreadySent) {
-              await TwilioService.sendSMS(customer.phone, smsBody, { messageType: 'confirmation' });
-              logger.info(`[call-proc] Appointment SMS sent to ${customer.phone}`);
-              appointmentResult = { smsSent: true, scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog };
+              const sendResult = await sendCustomerMessage({
+                to: customer.phone,
+                body: smsBody,
+                channel: 'sms',
+                audience: 'customer',
+                purpose: 'appointment',
+                customerId,
+                appointmentId: scheduledServiceId,
+                identityTrustLevel: 'phone_matches_customer',
+                metadata: {
+                  original_message_type: 'confirmation',
+                },
+              });
+              if (sendResult.blocked || sendResult.sent === false) {
+                logger.warn(`[call-proc] Appointment SMS blocked for customer ${customerId}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
+                appointmentResult = {
+                  smsSent: false,
+                  smsBlocked: true,
+                  smsBlockedCode: sendResult.code || null,
+                  scheduledServiceId,
+                  service: serviceType,
+                  dateTime: extracted.preferred_date_time,
+                  scheduledDate: scheduledDateForLog,
+                  windowStart: windowStartForLog,
+                };
+              } else {
+                logger.info(`[call-proc] Appointment SMS sent to customer ${customerId}`);
+                appointmentResult = { smsSent: true, scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog };
+              }
             } else {
-              logger.info(`[call-proc] Skipping duplicate appointment SMS to ${customer.phone} (sent within last 10 min)`);
+              logger.info(`[call-proc] Skipping duplicate appointment SMS to customer ${customerId} (sent within last 10 min)`);
               appointmentResult = { smsSent: false, smsSkippedReason: 'duplicate', scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time };
             }
           }

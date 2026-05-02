@@ -6,6 +6,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 class AvailabilityEngine {
 
@@ -182,7 +183,7 @@ class AvailabilityEngine {
 
     // Create scheduled_service so it shows on the dispatch board
     const serviceType = estimate?.services?.[0] || estimate?.service_type || 'General Pest Control';
-    await db('scheduled_services').insert({
+    const [scheduled] = await db('scheduled_services').insert({
       customer_id: customerId,
       scheduled_date: date,
       window_start: startTime,
@@ -195,7 +196,7 @@ class AvailabilityEngine {
       source: 'self_booked',
       self_booking_id: booking.id,
       zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
-    });
+    }).returning('*');
 
     // Sync to dispatch_jobs
     try {
@@ -209,10 +210,21 @@ class AvailabilityEngine {
       const dateLabel = new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
 
       // Customer confirmation
-      await TwilioService.sendSMS(customer.phone,
-        `Your Waves Pest Control appointment is confirmed.\n\nDate: ${dateLabel}\nTime: ${this.minToTime12(this.timeToMin(startTime))} – ${this.minToTime12(this.timeToMin(endTime))}\nAddress: ${customer.address_line1}, ${customer.city}\n\nConfirmation: ${confCode}\n\nReply RESCHEDULE if you need to change.`,
-        { customerId: customer.id, messageType: 'booking_confirmation' }
-      );
+      const smsResult = await sendCustomerMessage({
+        to: customer.phone,
+        body: `Your Waves Pest Control appointment is confirmed. Date: ${dateLabel}. Time: ${this.minToTime12(this.timeToMin(startTime))} - ${this.minToTime12(this.timeToMin(endTime))}. Address: ${customer.address_line1}, ${customer.city}. Confirmation: ${confCode}. Reply RESCHEDULE if you need to change.`,
+        channel: 'sms',
+        audience: 'customer',
+        purpose: 'appointment',
+        customerId: customer.id,
+        appointmentId: scheduled.id,
+        identityTrustLevel: 'phone_matches_customer',
+        entryPoint: 'availability_self_book',
+        metadata: { original_message_type: 'booking_confirmation' },
+      });
+      if (!smsResult.sent) {
+        logger.warn(`Booking confirmation SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+      }
 
       // Adam notification
       if (process.env.ADAM_PHONE) {

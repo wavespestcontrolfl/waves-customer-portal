@@ -33,6 +33,8 @@ async function sendViaTwilio(input) {
       customerId: input.customerId || null,
       messageType,
       fromNumber: input.metadata && input.metadata.fromNumber,
+      mediaUrls: input.metadata && input.metadata.mediaUrls,
+      customerLocationId: input.metadata && input.metadata.customerLocationId,
       // Preserve admin attribution. services/twilio.js writes
       // sms_log.admin_user_id from this option; without forwarding,
       // operator-driven sends (Comms inbox, IB) lose the audit trail
@@ -82,10 +84,15 @@ function mapPurposeToMessageType(purpose) {
   switch (purpose) {
     case 'conversational':      return 'ai_assistant';
     case 'appointment':         return 'appointment_reminder';
+    case 'appointment_confirmation': return 'appointment_confirmation';
     case 'billing':             return 'billing_reminder';
+    case 'payment_receipt':     return 'receipt';
+    case 'payment_failure':     return 'payment_failure';
+    case 'autopay':             return 'autopay';
     case 'payment_link':        return 'payment_link';
     case 'estimate_followup':   return 'manual';
     case 'review_request':      return 'review_request';
+    case 'referral':            return 'referral';
     case 'retention':           return 'manual';
     case 'marketing':           return 'manual';
     case 'internal_briefing':   return 'internal_alert';

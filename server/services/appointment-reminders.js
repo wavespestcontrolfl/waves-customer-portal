@@ -13,7 +13,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const TwilioService = require('./twilio');
+const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { getServiceContact } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
@@ -155,10 +155,20 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     return false;
   }
 
-  await TwilioService.sendSMS(phone, body, {
+  const result = await sendCustomerMessage({
+    to: phone,
+    body,
+    channel: 'sms',
+    audience: 'customer',
+    purpose: 'appointment',
     customerId,
-    messageType,
+    identityTrustLevel: 'phone_matches_customer',
+    metadata: { original_message_type: messageType },
   });
+  if (result.blocked || result.sent === false) {
+    logger.warn(`[appt-remind] SMS blocked for customer ${customerId}: ${result.code || 'unknown'} ${result.reason || ''}`);
+    return false;
+  }
   return true;
 }
 
@@ -255,7 +265,7 @@ const AppointmentReminders = {
               await db('appointment_reminders')
                 .where({ id: record.id })
                 .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
-              logger.info(`[appt-remind] Confirmation sent to ${customer.first_name} for ${serviceLabel}`);
+              logger.info(`[appt-remind] Confirmation sent for customer ${customerId} for ${serviceLabel}`);
             } else {
               // Mark as sent even if landline — don't retry
               await db('appointment_reminders')
@@ -344,7 +354,7 @@ const AppointmentReminders = {
               .update({ reminder_72h_sent: true, reminder_72h_sent_at: new Date() });
 
             results.sent72h++;
-            logger.info(`[appt-remind] 72h reminder sent: ${firstName} — ${r.service_type}`);
+            logger.info(`[appt-remind] 72h reminder sent for customer ${r.customer_id} - ${r.service_type}`);
           } catch (err) {
             results.errors++;
             logger.error(`[appt-remind] 72h reminder failed for ${r.scheduled_service_id}: ${err.message}`);
@@ -385,7 +395,7 @@ const AppointmentReminders = {
               .update({ reminder_24h_sent: true, reminder_24h_sent_at: new Date() });
 
             results.sent24h++;
-            logger.info(`[appt-remind] 24h reminder sent: ${firstName} — ${r.service_type}`);
+            logger.info(`[appt-remind] 24h reminder sent for customer ${r.customer_id} - ${r.service_type}`);
           } catch (err) {
             results.errors++;
             logger.error(`[appt-remind] 24h reminder failed for ${r.scheduled_service_id}: ${err.message}`);
@@ -455,7 +465,7 @@ const AppointmentReminders = {
         );
 
         await safeSend(record.customer_id, contact.phone, body);
-        logger.info(`[appt-remind] Reschedule notice sent: ${firstName} — ${record.service_type} -> ${day} ${date}`);
+        logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id} - ${record.service_type} -> ${day} ${date}`);
       }
 
       return record;
@@ -501,7 +511,7 @@ const AppointmentReminders = {
         );
 
         await safeSend(record.customer_id, contact.phone, body);
-        logger.info(`[appt-remind] Cancellation notice sent: ${firstName} — ${record.service_type}`);
+        logger.info(`[appt-remind] Cancellation notice sent for customer ${record.customer_id} - ${record.service_type}`);
       }
 
       return record;

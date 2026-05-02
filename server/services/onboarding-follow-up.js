@@ -15,11 +15,11 @@
  */
 
 const db = require('../models/db');
-const TwilioService = require('./twilio');
 const EmailService = require('./email');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { shortenOrPassthrough } = require('./short-url');
 const logger = require('./logger');
+const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 async function renderTemplate(templateKey, vars, fallback) {
   try {
@@ -71,8 +71,25 @@ async function sendDualChannel(ob, { sms, email }) {
   let attempted = false;
   if (ob.phone) {
     try {
-      await TwilioService.sendSMS(ob.phone, sms);
-      attempted = true;
+      const smsResult = await sendCustomerMessage({
+        to: ob.phone,
+        body: sms,
+        channel: 'sms',
+        audience: 'customer',
+        purpose: 'appointment',
+        customerId: ob.customer_id,
+        identityTrustLevel: 'phone_matches_customer',
+        entryPoint: 'onboarding_followup',
+        metadata: {
+          original_message_type: 'onboarding_followup',
+          onboarding_session_id: ob.id,
+        },
+      });
+      if (smsResult.sent) {
+        attempted = true;
+      } else {
+        logger.warn(`[onboard-followup] SMS blocked/failed for session ${ob.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+      }
     } catch (e) {
       logger.error(`[onboard-followup] SMS failed for session ${ob.id}: ${e.message}`);
     }
@@ -112,7 +129,7 @@ const OnboardingFollowUp = {
           const url = await onboardUrl(ob);
           const smsBody = await renderTemplate('onboarding_followup_24h',
             { first_name: firstName, onboarding_url: url, waveguard_tier: ob.waveguard_tier || 'Bronze' },
-            `Hey ${firstName}! Thanks again for choosing Waves 🌊 Just need a few quick details to get you on the schedule — takes ~2 minutes:\n\n${url}\n\nQuestions? Reply here or call (941) 318-7612.`
+            `Hey ${firstName}! Thanks again for choosing Waves. Just need a few quick details to get you on the schedule: ${url}. Questions? Reply here or call (941) 318-7612.`
           );
           const ok = await sendDualChannel(ob, {
             sms: smsBody,
@@ -144,7 +161,7 @@ const OnboardingFollowUp = {
           const url = await onboardUrl(ob);
           const smsBody = await renderTemplate('onboarding_followup_72h',
             { first_name: firstName, onboarding_url: url, waveguard_tier: ob.waveguard_tier || 'Bronze' },
-            `Hi ${firstName}! Still here whenever you're ready — wrap up your Waves setup here and we'll confirm your first service:\n\n${url}\n\n— Adam, Waves Pest Control 🌊`
+            `Hi ${firstName}! Still here whenever you're ready. Wrap up your Waves setup here and we'll confirm your first service: ${url}. - Waves Pest Control`
           );
           const ok = await sendDualChannel(ob, {
             sms: smsBody,
@@ -181,7 +198,7 @@ const OnboardingFollowUp = {
           const tier = ob.waveguard_tier || 'Bronze';
           const smsBody = await renderTemplate('onboarding_followup_expiring',
             { first_name: firstName, onboarding_url: url, expires_at: expDate, waveguard_tier: tier },
-            `Hey ${firstName} — heads up, your Waves onboarding link expires on ${expDate}. Lock in your WaveGuard ${tier} plan and first service here:\n\n${url}\n\nQuestions? (941) 318-7612 🌊`
+            `Hey ${firstName}, heads up: your Waves onboarding link expires on ${expDate}. Lock in your WaveGuard ${tier} plan and first service here: ${url}. Questions? (941) 318-7612`
           );
           const ok = await sendDualChannel(ob, {
             sms: smsBody,

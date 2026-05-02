@@ -4,6 +4,7 @@ const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 router.use(authenticate);
 
@@ -349,13 +350,24 @@ router.post('/:id/interest', async (req, res, next) => {
 
     // SMS to customer
     try {
-      await TwilioService.sendSMS(
-        customer.phone,
-        `🌊 Thanks for your interest in ${serviceName || serviceType}, ${customer.first_name}!\n\n` +
-        `Waves will follow up within 24 hours to get you set up. ` +
-        `Your ${newTier} WaveGuard discount will apply automatically.\n\n` +
-        `Questions? Call us: (941) 318-7612`
-      );
+      const smsResult = await sendCustomerMessage({
+        to: customer.phone,
+        body: `Thanks for your interest in ${serviceName || serviceType}, ${customer.first_name}! Waves will follow up within 24 hours to get you set up. Your ${newTier} WaveGuard discount will apply automatically. Questions? Call us: (941) 318-7612`,
+        channel: 'sms',
+        audience: 'customer',
+        purpose: 'support_resolution',
+        customerId: customer.id,
+        identityTrustLevel: 'authenticated_portal',
+        entryPoint: 'promotions_upsell_interest',
+        metadata: {
+          original_message_type: 'upsell_interest_confirmation',
+          service_type: serviceType,
+          new_tier: newTier,
+        },
+      });
+      if (!smsResult.sent) {
+        logger.warn(`Customer promotion confirmation blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+      }
     } catch (smsErr) {
       logger.error(`Failed to send customer confirmation: ${smsErr.message}`);
     }

@@ -5,6 +5,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const crypto = require('crypto');
+const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -42,13 +43,31 @@ function templateReplace(template, vars) {
   return template.replace(/\{(\w+)\}/g, (_, k) => vars[k] || '');
 }
 
-async function sendSMS(to, body) {
+async function sendSMS(to, body, options = {}) {
   try {
-    const TwilioService = require('./twilio');
-    await TwilioService.sendSMS(to, body, { messageType: 'referral' });
+    const result = await sendCustomerMessage({
+      to,
+      body,
+      channel: 'sms',
+      audience: options.customerId ? 'customer' : 'lead',
+      purpose: 'referral',
+      customerId: options.customerId || undefined,
+      identityTrustLevel: options.customerId ? 'phone_matches_customer' : 'phone_provided_unverified',
+      consentBasis: options.consentBasis,
+      entryPoint: options.entryPoint || 'referral_engine',
+      metadata: {
+        original_message_type: options.messageType || 'referral',
+        referral_id: options.referralId,
+        promoter_id: options.promoterId,
+      },
+    });
+    if (!result.sent) {
+      logger.warn(`[ReferralEngine] SMS blocked/failed (code=${result.code || 'UNKNOWN'} auditLogId=${result.auditLogId || 'n/a'})`);
+      return false;
+    }
     return true;
   } catch (err) {
-    logger.error(`[ReferralEngine] SMS failed to ${to}: ${err.message}`);
+    logger.error(`[ReferralEngine] SMS failed: ${err.message}`);
     return false;
   }
 }
@@ -233,7 +252,17 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
       referral_link: promoter.referral_link || `${settings.base_url}${promoter.referral_code}`,
     }
   );
-  const smsSent = await sendSMS(normalizedPhone || phone.trim(), smsBody);
+  const smsSent = await sendSMS(normalizedPhone || phone.trim(), smsBody, {
+    messageType: 'referral_invite',
+    referralId: referral.id,
+    promoterId,
+    consentBasis: {
+      status: 'transactional_allowed',
+      source: 'referral_submission',
+      capturedAt: new Date().toISOString(),
+    },
+    entryPoint: 'referral_engine_invite',
+  });
 
   if (smsSent) {
     await db('referrals').where({ id: referral.id }).update({ status: 'contacted' });
@@ -302,10 +331,16 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
         {
           referrer_name: promoter.first_name,
           referee_name: referral.referee_name || referral.referral_first_name || 'your friend',
-          reward_amount: `$${rewardDollars.toFixed(2)}`,
+          reward_amount: 'a referral reward',
         }
       );
-      await sendSMS(promoter.customer_phone, rewardSms);
+      await sendSMS(promoter.customer_phone, rewardSms, {
+        customerId: promoter.customer_id,
+        messageType: 'referral_reward',
+        referralId: referral.id,
+        promoterId: promoter.id,
+        entryPoint: 'referral_engine_reward',
+      });
 
       // Check milestones
       await checkMilestones(referral.promoter_id);
@@ -432,10 +467,15 @@ async function checkMilestones(promoterId) {
       referrer_name: promoter.first_name,
       milestone_level: newLevel,
       count: String(converted),
-      bonus_amount: `$${(bonusCents / 100).toFixed(2)}`,
+      bonus_amount: 'a bonus reward',
     }
   );
-  await sendSMS(promoter.customer_phone, milestoneSms);
+  await sendSMS(promoter.customer_phone, milestoneSms, {
+    customerId: promoter.customer_id,
+    messageType: 'referral_milestone',
+    promoterId: promoter.id,
+    entryPoint: 'referral_engine_milestone',
+  });
 
   logger.info(`[ReferralEngine] Promoter ${promoterId} reached ${newLevel} milestone. Bonus: $${(bonusCents / 100).toFixed(2)}`);
   return { promoterId, newLevel, bonusCents };

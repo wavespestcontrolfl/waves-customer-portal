@@ -15,8 +15,8 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const PricingIntelligence = require('../services/pricing-intelligence');
-const TwilioService = require('../services/twilio');
 const logger = require('../services/logger');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 router.use(adminAuthenticate);
 
@@ -233,9 +233,9 @@ router.post('/trigger-upsell/:customerId', async (req, res, next) => {
     // Build personalized message
     let message;
     if (upsell.type === 'tier_upgrade') {
-      message = `Hey ${firstName}! Adam here from Waves. Quick question — did you know upgrading to WaveGuard ${upsell.nextTier} saves you ${upsell.discountPct}% on every service? Most of our ${upsell.currentTier} members who upgrade save $20-40/mo. Want me to run the numbers for you? Reply YES and I'll send a breakdown. — Waves`;
+      message = `Hey ${firstName}! Adam here from Waves. Quick question: did you know upgrading to WaveGuard ${upsell.nextTier} can add more coverage and service savings? Want me to run the numbers for you? Reply YES and I'll send a breakdown. - Waves`;
     } else {
-      message = `Hey ${firstName}! Adam here from Waves. Since you're already a WaveGuard member, I wanted to let you know we can add ${upsell.service} to your plan at ${upsell.discountPct}% off — that's just $${upsell.estimatedMonthlyAdd}/mo bundled. Most of our customers in your area add this. Want details? Reply YES. — Waves`;
+      message = `Hey ${firstName}! Adam here from Waves. Since you're already a WaveGuard member, I wanted to let you know we can add ${upsell.service} to your plan with bundled service savings. Want details? Reply YES. - Waves`;
     }
 
     // Allow custom message override
@@ -243,8 +243,30 @@ router.post('/trigger-upsell/:customerId', async (req, res, next) => {
       message = req.body.message;
     }
 
-    await TwilioService.sendSMS(customer.phone, message);
-    logger.info(`[pricing-strategy] Upsell SMS sent to ${firstName} (${customer.phone}): ${upsell.type} — ${upsell.service}`);
+    const smsResult = await sendCustomerMessage({
+      to: customer.phone,
+      body: message,
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'marketing',
+      customerId: customer.id,
+      identityTrustLevel: 'phone_matches_customer',
+      entryPoint: 'admin_pricing_strategy_upsell',
+      consentBasis: {
+        status: 'opted_in',
+        source: 'admin_pricing_strategy',
+        capturedAt: new Date().toISOString(),
+      },
+      metadata: {
+        original_message_type: 'upsell',
+        upsell_type: upsell.type,
+        service: upsell.service,
+      },
+    });
+    if (!smsResult.sent) {
+      return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
+    }
+    logger.info(`[pricing-strategy] Upsell SMS sent to customer ${customer.id}: ${upsell.type} - ${upsell.service}`);
 
     // Log the attempt — increment times_triggered on matching rule
     if (upsell.rule?.id) {

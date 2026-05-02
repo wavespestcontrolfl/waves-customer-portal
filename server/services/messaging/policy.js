@@ -14,10 +14,15 @@
  * @typedef {(
  *   'conversational'      |   // inbound-reply / chat continuation
  *   'appointment'         |   // confirm, reminder, en-route, reschedule
+ *   'appointment_confirmation' | // booked/scheduled confirmation
  *   'billing'             |   // overdue, statement, dunning
+ *   'payment_receipt'     |   // paid receipt / payment confirmation
+ *   'payment_failure'     |   // failed charge / retry / bank-verification action required
+ *   'autopay'             |   // autopay pre-charge / card state notices
  *   'payment_link'        |   // tap-to-pay link
  *   'estimate_followup'   |   // estimate sent / viewed / nudge
  *   'review_request'      |   // post-service review ask
+ *   'referral'            |   // referral enrollment/reward/invite
  *   'retention'           |   // win-back, churn-save, check-in
  *   'marketing'           |   // promo, deal, seasonal pitch
  *   'internal_briefing'   |   // BI SMS to operator/owner
@@ -61,10 +66,15 @@ const MESSAGE_CHANNELS = ['sms', 'email', 'portal_chat', 'website_chat'];
 const MESSAGE_PURPOSES = [
   'conversational',
   'appointment',
+  'appointment_confirmation',
   'billing',
+  'payment_receipt',
+  'payment_failure',
+  'autopay',
   'payment_link',
   'estimate_followup',
   'review_request',
+  'referral',
   'retention',
   'marketing',
   'internal_briefing',
@@ -132,12 +142,48 @@ const PURPOSE_POLICY = {
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId'],
   },
+  appointment_confirmation: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 2,
+    requireConsent: 'transactional',
+    prefsColumn: null,
+    minIdentityTrust: 'phone_matches_customer',
+    requireIds: ['customerId'],
+  },
   billing: {
     allowEmoji: false,
     allowExactPrice: false,
     maxSegments: 2,
     requireConsent: 'transactional',
     prefsColumn: 'billing_reminder',
+    minIdentityTrust: 'phone_matches_customer',
+    requireIds: ['customerId'],
+  },
+  payment_receipt: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 2,
+    requireConsent: 'transactional',
+    prefsColumn: 'payment_receipt',
+    minIdentityTrust: 'phone_matches_customer',
+    requireIds: ['customerId'],
+  },
+  payment_failure: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 2,
+    requireConsent: 'transactional',
+    prefsColumn: null,
+    minIdentityTrust: 'phone_matches_customer',
+    requireIds: ['customerId'],
+  },
+  autopay: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 2,
+    requireConsent: 'transactional',
+    prefsColumn: 'payment_receipt',
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId'],
   },
@@ -167,6 +213,15 @@ const PURPOSE_POLICY = {
     prefsColumn: null,
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId'],
+  },
+  referral: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 2,
+    requireConsent: 'transactional',
+    prefsColumn: null,
+    minIdentityTrust: 'phone_provided_unverified',
+    requireIds: [],
   },
   retention: {
     allowEmoji: false,

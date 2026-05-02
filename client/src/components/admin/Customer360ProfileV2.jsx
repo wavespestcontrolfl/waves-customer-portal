@@ -5,7 +5,7 @@
  * Monochrome rewrite of Customer360Profile (PR #4c).
  * Strict 1:1 with V1 on:
  *   - endpoints (GET /admin/customers/:id, /timeline, /autopay-state;
- *     POST /admin/communications/send-sms, /admin/customers/:id/refund,
+ *     POST /admin/communications/sms, /admin/customers/:id/refund,
  *     /admin/customers/:id/charge-now)
  *   - state (data, loading, activeTab, timelineFilter, smsReply, sendingSms)
  *   - tabs (overview / services / billing / comms / property / compliance)
@@ -28,7 +28,7 @@
  * - Slide-out lifecycle: ESC handler should detach on unmount, clicks
  *   on the overlay should close cleanly, focus should return to the
  *   row that opened the panel.
- * - SMS reply submit (POST /communications/send-sms): must be
+ * - SMS reply submit (POST /communications/sms): must be
  *   debounced or single-flight so a double-click doesn't double-send.
  *   Also: empty / whitespace-only message should not submit.
  * - Refund / charge-now (POST /:id/refund, /:id/charge-now): these
@@ -466,7 +466,15 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
     setSendingSms(true);
     setSmsErr('');
     try {
-      await adminFetch('/admin/communications/send-sms', { method: 'POST', body: JSON.stringify({ to: c.phone, message: smsReply }) });
+      await adminFetch('/admin/communications/sms', {
+        method: 'POST',
+        body: JSON.stringify({
+          to: c.phone,
+          body: smsReply,
+          customerId: c.id,
+          messageType: 'manual',
+        }),
+      });
       setSmsReply('');
       const [fresh, freshComms] = await Promise.all([
         adminFetch(`/admin/customers/${customerId}`),

@@ -6,6 +6,7 @@ const logger = require('../services/logger');
 const stripeConfig = require('../config/stripe-config');
 const { classifyExistingWebhookEvent, STALE_CLAIM_WINDOW_MS } = require('./stripe-webhook-helpers');
 const { triggerNotification } = require('../services/notification-triggers');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 // Build a "First Last" string from a customer row, falling back to phone
 // then a generic 'customer'. Used to fill the body of the bell + push
@@ -15,6 +16,23 @@ function customerLabel(customer) {
   if (!customer) return 'customer';
   const name = [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim();
   return name || customer.phone || 'customer';
+}
+
+async function sendBillingSms(customer, body, metadata = {}) {
+  if (!customer?.phone || !customer?.id) {
+    return { sent: false, blocked: true, code: 'MISSING_CUSTOMER_CONTACT' };
+  }
+  return sendCustomerMessage({
+    to: customer.phone,
+    body,
+    channel: 'sms',
+    audience: 'customer',
+    purpose: 'payment_failure',
+    customerId: customer.id,
+    identityTrustLevel: 'phone_matches_customer',
+    entryPoint: 'stripe_webhook',
+    metadata,
+  });
 }
 
 /**
@@ -822,27 +840,29 @@ async function handleAchFailure(paymentIntent, failureReason) {
       }
     });
 
-    // Send SMS — outside the transaction so a slow Twilio call doesn't
+    // Send SMS outside the transaction so a slow provider call doesn't
     // hold the per-customer advisory lock against concurrent failures.
     try {
-      const twilio = require('../services/twilio');
-      const phone = customer.phone;
-      if (phone) {
+      if (customer.phone) {
+        let body;
+        let messageType;
         if (recentFailures >= 3) {
-          // 3rd failure — ACH suspended
-          await twilio.sendSMS(phone,
-            `Hi ${customer.first_name}, your bank payment failed again. We've updated your default payment to your card. Card payments include a 3.99% processing fee — update your bank account at ${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/billing to pay with no added fee. — Waves Pest Control`
-          );
+          messageType = 'ach_suspended';
+          body = `Hi ${customer.first_name}, your bank payment failed again. We updated your default payment to your card. Card payments include a processing fee. Update your bank account at ${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/billing to pay with no added fee. - Waves Pest Control`;
         } else if (recentFailures >= 2) {
-          // 2nd failure — card fallback
-          await twilio.sendSMS(phone,
-            `Hi ${customer.first_name}, your bank payment failed again. We've switched this payment to your card on file. Card payments include a 3.99% processing fee — you can switch back to bank payment once your account is verified. — Waves Pest Control`
-          );
+          messageType = 'ach_card_fallback';
+          body = `Hi ${customer.first_name}, your bank payment failed again. We switched this payment to your card on file. Card payments include a processing fee. You can switch back to bank payment once your account is verified. - Waves Pest Control`;
         } else {
-          // 1st failure — notify + auto-retry
-          await twilio.sendSMS(phone,
-            `Hi ${customer.first_name}, your bank payment didn't go through. We'll retry automatically in 3 business days. No action needed. — Waves Pest Control`
-          );
+          messageType = 'ach_retry_notice';
+          body = `Hi ${customer.first_name}, your bank payment did not go through. We will retry automatically in 3 business days. No action needed. - Waves Pest Control`;
+        }
+        const smsResult = await sendBillingSms(customer, body, {
+          original_message_type: messageType,
+          stripe_payment_intent_id: paymentIntent.id,
+          recent_failures: recentFailures,
+        });
+        if (!smsResult.sent) {
+          logger.warn(`[stripe-webhook] ACH failure SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
         }
       }
     } catch (smsErr) {
@@ -896,10 +916,14 @@ async function handlePaymentIntentRequiresAction(paymentIntent) {
     if (payment?.customer_id) {
       const customer = await db('customers').where({ id: payment.customer_id }).first();
       if (customer?.phone) {
-        const twilio = require('../services/twilio');
-        await twilio.sendSMS(customer.phone,
-          `Hi ${customer.first_name}, your bank account verification is incomplete. Please finish setup at ${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/billing to complete your payment. — Waves`
+        const smsResult = await sendBillingSms(
+          customer,
+          `Hi ${customer.first_name}, your bank account verification is incomplete. Please finish setup at ${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/billing to complete your payment. - Waves`,
+          { original_message_type: 'bank_verification_incomplete', stripe_payment_intent_id: piId }
         );
+        if (!smsResult.sent) {
+          logger.warn(`[stripe-webhook] Requires-action SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+        }
       }
     }
   } catch (err) {
@@ -1045,10 +1069,14 @@ async function handleSetupIntentFailed(setupIntent) {
     if (customerId) {
       const customer = await db('customers').where({ id: customerId }).first();
       if (customer?.phone) {
-        const twilio = require('../services/twilio');
-        await twilio.sendSMS(customer.phone,
-          `Hi ${customer.first_name}, we couldn't verify your bank account. Please try again at ${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/billing or use a card. — Waves`
+        const smsResult = await sendBillingSms(
+          customer,
+          `Hi ${customer.first_name}, we could not verify your bank account. Please try again at ${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/billing or use a card. - Waves`,
+          { original_message_type: 'bank_verification_failed', stripe_setup_intent_id: setupIntent.id }
         );
+        if (!smsResult.sent) {
+          logger.warn(`[stripe-webhook] Setup-failed SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+        }
       }
     }
   } catch { /* non-critical */ }

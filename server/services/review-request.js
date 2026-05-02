@@ -3,6 +3,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etParts, parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 const { shortenOrPassthrough } = require('./short-url');
+const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 // GBP review links per location
 const REVIEW_LINKS = {
@@ -655,7 +656,7 @@ const ReviewService = {
       const location = resolveLocation(customer || {});
       const googleReviewUrl = REVIEW_LINKS[location] || REVIEW_LINKS['lakewood-ranch'];
 
-      const fallback = `No pressure at all, ${contact.name || customer.first_name} — but if you get a sec, your review helps other SWFL families find a pest company they can trust → ${googleReviewUrl} 🌊`;
+      const fallback = `No pressure at all, ${contact.name || customer.first_name}, but if you get a sec, your review helps other SWFL families find a pest company they can trust: ${googleReviewUrl}`;
       let body = fallback;
       try {
         const templates = require('../routes/admin-sms-templates');
@@ -669,11 +670,24 @@ const ReviewService = {
       } catch { /* use fallback */ }
 
       try {
-        const TwilioService = require('./twilio');
-        await TwilioService.sendSMS(contact.phone, body, {
+        const result = await sendCustomerMessage({
+          to: contact.phone,
+          body,
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'review_request',
           customerId: customer.id,
-          messageType: 'review_followup',
+          identityTrustLevel: 'phone_matches_customer',
+          entryPoint: 'review_request_followup',
+          metadata: {
+            original_message_type: 'review_followup',
+            review_request_id: request.id,
+          },
         });
+        if (!result.sent) {
+          logger.warn(`[review] Follow-up SMS blocked/failed (customerId=${customer.id} requestId=${request.id} auditLogId=${result.auditLogId || 'n/a'} code=${result.code || 'UNKNOWN'})`);
+          continue;
+        }
 
         await db('review_requests').where({ id: request.id }).update({
           followup_sent: true,

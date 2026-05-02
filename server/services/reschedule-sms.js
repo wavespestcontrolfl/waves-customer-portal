@@ -1,8 +1,24 @@
 const db = require('../models/db');
 const SmartRebooker = require('./rebooker');
-const TwilioService = require('./twilio');
-const RULES = require('../config/reschedule-rules');
 const logger = require('./logger');
+const { sendCustomerMessage } = require('./messaging/send-customer-message');
+
+async function sendAppointmentSms({ to, body, customerId, messageType }) {
+  const result = await sendCustomerMessage({
+    to,
+    body,
+    channel: 'sms',
+    audience: 'customer',
+    purpose: 'appointment',
+    customerId,
+    identityTrustLevel: 'phone_matches_customer',
+    metadata: { original_message_type: messageType },
+  });
+  if (result.blocked || result.sent === false) {
+    throw new Error(`appointment SMS blocked: ${result.code || result.reason || 'unknown'}`);
+  }
+  return result;
+}
 
 class RescheduleSMS {
   async sendRescheduleRequest(serviceId, reasonCode, reasonText) {
@@ -23,14 +39,16 @@ class RescheduleSMS {
 
     let smsBody;
     if (reasonCode.startsWith('weather')) {
-      smsBody = `Hi ${service.first_name}, due to weather your ${service.service_type.toLowerCase()} on ${originalDate} needs to move.\n\nWe have:\n1️⃣ ${opt1.displayDate}, ${opt1.suggestedWindow.display}\n2️⃣ ${opt2.displayDate}, ${opt2.suggestedWindow.display}\n\nReply 1 or 2, or suggest a day. — Waves 🌊`;
+      smsBody = `Hi ${service.first_name}, due to weather your ${service.service_type.toLowerCase()} on ${originalDate} needs to move.\n\nWe have:\n1. ${opt1.displayDate}, ${opt1.suggestedWindow.display}\n2. ${opt2.displayDate}, ${opt2.suggestedWindow.display}\n\nReply 1 or 2, or suggest a day. - Waves`;
     } else if (reasonCode === 'customer_noshow' || reasonCode === 'gate_locked') {
-      smsBody = `Hi ${service.first_name}, we stopped by for your ${service.service_type.toLowerCase()} but ${reasonCode === 'gate_locked' ? 'the gate was locked' : "couldn't access the property"}. We can come back:\n\n1️⃣ ${opt1.displayDate}, ${opt1.suggestedWindow.display}\n2️⃣ ${opt2.displayDate}, ${opt2.suggestedWindow.display}\n\nReply 1 or 2. — Adam, Waves`;
+      smsBody = `Hi ${service.first_name}, we stopped by for your ${service.service_type.toLowerCase()} but ${reasonCode === 'gate_locked' ? 'the gate was locked' : "couldn't access the property"}. We can come back:\n\n1. ${opt1.displayDate}, ${opt1.suggestedWindow.display}\n2. ${opt2.displayDate}, ${opt2.suggestedWindow.display}\n\nReply 1 or 2. - Adam, Waves`;
     } else {
-      smsBody = `Hi ${service.first_name}, your ${service.service_type.toLowerCase()} on ${originalDate} needs to be rescheduled.${reasonText ? ' ' + reasonText : ''}\n\n1️⃣ ${opt1.displayDate}, ${opt1.suggestedWindow.display}\n2️⃣ ${opt2.displayDate}, ${opt2.suggestedWindow.display}\n\nReply 1 or 2. — Waves`;
+      smsBody = `Hi ${service.first_name}, your ${service.service_type.toLowerCase()} on ${originalDate} needs to be rescheduled.${reasonText ? ' ' + reasonText : ''}\n\n1. ${opt1.displayDate}, ${opt1.suggestedWindow.display}\n2. ${opt2.displayDate}, ${opt2.suggestedWindow.display}\n\nReply 1 or 2. - Waves`;
     }
 
-    await TwilioService.sendSMS(service.phone, smsBody, {
+    await sendAppointmentSms({
+      to: service.phone,
+      body: smsBody,
       customerId: service.cust_id || service.customer_id,
       messageType: 'reschedule',
     });
@@ -48,7 +66,7 @@ class RescheduleSMS {
       }),
     }).returning('id');
 
-    logger.info(`Reschedule SMS sent to ${service.first_name} for service ${serviceId}`);
+    logger.info(`Reschedule SMS sent for customer ${service.cust_id || service.customer_id} for service ${serviceId}`);
     return { success: true, options: [opt1, opt2], logId: logEntry.id || logEntry };
   }
 
@@ -99,10 +117,12 @@ class RescheduleSMS {
       const customer = await db('customers').where({ id: customerId }).first();
       const displayDate = new Date(selectedOption.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
 
-      await TwilioService.sendSMS(customer.phone,
-        `Confirmed! Your service is rescheduled for ${displayDate}, ${selectedOption.window.display}. We'll remind you the day before. — Waves 🌊`,
-        { customerId, messageType: 'confirmation' }
-      );
+      await sendAppointmentSms({
+        to: customer.phone,
+        body: `Confirmed! Your service is rescheduled for ${displayDate}, ${selectedOption.window.display}. We'll remind you the day before. - Waves`,
+        customerId,
+        messageType: 'confirmation',
+      });
 
       await db('reschedule_log').where({ id: pending.id }).update({
         new_date: selectedOption.date,
@@ -114,10 +134,12 @@ class RescheduleSMS {
 
     if (responseType === 'call_requested') {
       const customer = await db('customers').where({ id: customerId }).first();
-      await TwilioService.sendSMS(customer.phone,
-        `No problem! We'll give you a call shortly. — Waves`,
-        { customerId, messageType: 'manual' }
-      );
+      await sendAppointmentSms({
+        to: customer.phone,
+        body: `No problem! We'll give you a call shortly. - Waves`,
+        customerId,
+        messageType: 'manual',
+      });
       return { handled: true, action: 'call_requested' };
     }
 

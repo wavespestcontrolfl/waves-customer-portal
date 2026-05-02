@@ -2,6 +2,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const PaymentRouter = require('./payment-router');
 const TwilioService = require('./twilio');
+const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { logAutopay } = require('./autopay-log');
 const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
@@ -21,6 +22,23 @@ const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const RETRY_DELAYS_DAYS = [2, 2]; // cumulative: +2, +2 more
 
 const { isBillingDayMatch } = require('./billing-helpers');
+
+async function sendCustomerBillingSms({ customer, body, purpose = 'billing', messageType, entryPoint }) {
+  const sendResult = await sendCustomerMessage({
+    to: customer.phone,
+    body,
+    channel: 'sms',
+    audience: 'customer',
+    purpose,
+    customerId: customer.id,
+    entryPoint,
+    metadata: { original_message_type: messageType },
+  });
+  if (sendResult.blocked || sendResult.sent === false) {
+    throw new Error(`billing SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+  }
+  return sendResult;
+}
 
 const WAVES_OFFICE_PHONE = '+19413187612';
 const BILLING_PORTAL_URL = 'https://portal.wavespestcontrol.com/?tab=billing';
@@ -153,12 +171,17 @@ const BillingCron = {
 
         try {
           const receiptLine = receiptUrl ? ` View your receipt: ${receiptUrl}` : '';
-          const amount = parseFloat(customer.monthly_rate).toFixed(2);
           const body = await renderTemplate('autopay_charge_success',
-            { first_name: customer.first_name, amount, receipt_line: receiptLine },
-            `Hi ${customer.first_name}, your WaveGuard monthly payment of $${amount} was successfully processed. Thank you!${receiptLine}`
+            { first_name: customer.first_name, amount: 'your payment', receipt_line: receiptLine },
+            `Hi ${customer.first_name}, your WaveGuard monthly payment was successfully processed. Thank you!${receiptLine}`
           );
-          await TwilioService.sendSMS(customer.phone, body);
+          await sendCustomerBillingSms({
+            customer,
+            body,
+            purpose: 'payment_receipt',
+            messageType: 'autopay_charge_success',
+            entryPoint: 'monthly_billing_success',
+          });
         } catch (smsErr) {
           logger.error(`[billing-cron] Payment confirmation SMS failed: ${smsErr.message}`);
         }
@@ -259,12 +282,17 @@ const BillingCron = {
 
         // Send failure SMS with actionable card-update link
         try {
-          const amount = parseFloat(customer.monthly_rate).toFixed(2);
           const body = await renderTemplate('autopay_charge_failed',
-            { first_name: customer.first_name, amount, update_card_url: BILLING_PORTAL_URL },
-            `Hi ${customer.first_name}, your WaveGuard monthly payment of $${amount} couldn't be processed. We'll retry automatically in a few days — update your card here if you'd like to fix it now: ${BILLING_PORTAL_URL}\n\nQuestions? (941) 318-7612`
+            { first_name: customer.first_name, amount: 'your payment', update_card_url: BILLING_PORTAL_URL },
+            `Hi ${customer.first_name}, your WaveGuard monthly payment couldn't be processed. We'll retry automatically in a few days. Update your card here if you'd like to fix it now: ${BILLING_PORTAL_URL}\n\nQuestions? (941) 318-7612`
           );
-          await TwilioService.sendSMS(customer.phone, body);
+          await sendCustomerBillingSms({
+            customer,
+            body,
+            purpose: 'payment_failure',
+            messageType: 'autopay_charge_failed',
+            entryPoint: 'monthly_billing_failure',
+          });
         } catch (smsErr) {
           logger.error(`[billing-cron] SMS notification failed: ${smsErr.message}`);
         }
@@ -357,10 +385,16 @@ const BillingCron = {
         try {
           const receiptLine = retryReceiptUrl ? ` View your receipt: ${retryReceiptUrl}` : '';
           const body = await renderTemplate('autopay_retry_success',
-            { first_name: customer.first_name, amount: amount.toFixed(2), receipt_line: receiptLine },
-            `Hi ${customer.first_name}, great news — your payment of $${amount.toFixed(2)} just went through. Thank you for being a Waves customer!${receiptLine}`
+            { first_name: customer.first_name, amount: 'your payment', receipt_line: receiptLine },
+            `Hi ${customer.first_name}, great news - your payment just went through. Thank you for being a Waves customer!${receiptLine}`
           );
-          await TwilioService.sendSMS(customer.phone, body);
+          await sendCustomerBillingSms({
+            customer,
+            body,
+            purpose: 'payment_receipt',
+            messageType: 'autopay_retry_success',
+            entryPoint: 'autopay_retry_success',
+          });
         } catch (smsErr) {
           logger.error(`[billing-cron] Success SMS failed: ${smsErr.message}`);
         }
@@ -389,10 +423,16 @@ const BillingCron = {
           // wrong area code — 239 instead of 941.)
           try {
             const body = await renderTemplate('autopay_retry_final_failed',
-              { first_name: customer.first_name, amount, update_card_url: BILLING_PORTAL_URL },
-              `Hi ${customer.first_name}, after several attempts we still couldn't process your payment of $${amount}. Please update your card to keep your service active: ${BILLING_PORTAL_URL}\n\nQuestions? Call (941) 318-7612 or reply to this message.`
+              { first_name: customer.first_name, amount: 'your payment', update_card_url: BILLING_PORTAL_URL },
+              `Hi ${customer.first_name}, after several attempts we still couldn't process your payment. Please update your card to keep your service active: ${BILLING_PORTAL_URL}\n\nQuestions? Call (941) 318-7612 or reply to this message.`
             );
-            await TwilioService.sendSMS(customer.phone, body);
+            await sendCustomerBillingSms({
+              customer,
+              body,
+              purpose: 'payment_failure',
+              messageType: 'autopay_retry_final_failed',
+              entryPoint: 'autopay_retry_final_failed',
+            });
           } catch (smsErr) {
             logger.error(`[billing-cron] Final SMS failed: ${smsErr.message}`);
           }
@@ -469,10 +509,16 @@ const BillingCron = {
           try {
             const amount = parseFloat(payment.amount).toFixed(2);
             const body = await renderTemplate('autopay_retry_failed',
-              { first_name: customer.first_name, amount, update_card_url: BILLING_PORTAL_URL },
-              `Hi ${customer.first_name}, your payment of $${amount} still didn't go through. We'll try again in a few days — or update your card here to fix it now: ${BILLING_PORTAL_URL}\n\nQuestions? (941) 318-7612`
+              { first_name: customer.first_name, amount: 'your payment', update_card_url: BILLING_PORTAL_URL },
+              `Hi ${customer.first_name}, your payment still didn't go through. We'll try again in a few days, or you can update your card here to fix it now: ${BILLING_PORTAL_URL}\n\nQuestions? (941) 318-7612`
             );
-            await TwilioService.sendSMS(customer.phone, body);
+            await sendCustomerBillingSms({
+              customer,
+              body,
+              purpose: 'payment_failure',
+              messageType: 'autopay_retry_failed',
+              entryPoint: 'autopay_retry_failed',
+            });
           } catch (smsErr) {
             logger.error(`[billing-cron] Retry SMS failed: ${smsErr.message}`);
           }
