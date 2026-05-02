@@ -199,7 +199,8 @@ IMPORTANT — appointment_confirmed rules:
 - Resolve relative dates against the call date above in Eastern Time. "Today" means ${callDateET}; do not invent a prior year or use the model's training/current date.
 
 IMPORTANT — wants_estimate rules:
-- Set wants_estimate to true if the caller asks for a quote, estimate, price, pricing, "how much", "what would it cost", "can you give me a number", or otherwise signals they want a written/verbal price before committing.
+- Set wants_estimate to true only if the caller explicitly asks for a quote, estimate, bid, proposal, or asks Waves to send/give/prepare a price.
+- Do not set wants_estimate to true for casual cost discussion during scheduling or when the call's outcome is simply a booked appointment.
 - true even if they also booked an appointment — quote intent and service intent are not mutually exclusive.
 - false for existing-customer service questions, complaints, billing calls, rescheduling, voicemail, or spam.
 
@@ -243,10 +244,21 @@ Return ONLY valid JSON.`;
   }
 }
 
+const ESTIMATE_INTENT_PATTERNS = [
+  /\b(quote|quotation|estimate|bid|proposal)\b/i,
+  /\bcan you (?:give|send|write|prepare|put together) (?:me )?(?:a |an )?(?:quote|estimate|price|proposal|bid)\b/i,
+  /\bneed (?:a |an )?(?:quote|estimate|price|proposal|bid)\b/i,
+  /\blooking for (?:a |an )?(?:quote|estimate|price|proposal|bid)\b/i,
+  /\b(?:send|give|write|prepare|put together) (?:me )?(?:a |an )?(?:written )?(?:price|pricing|number|ballpark)\b/i,
+];
+
 function hasEstimateIntent(transcription, extracted = {}) {
-  if (extracted.wants_estimate) return true;
   const text = String(transcription || '').toLowerCase();
-  return /\b(quote|estimate|pricing|price|cost|how much|what would it cost|give me a number)\b/.test(text);
+  const hasTranscriptEvidence = ESTIMATE_INTENT_PATTERNS.some(pattern => pattern.test(text));
+  if (extracted.wants_estimate && !hasTranscriptEvidence) {
+    logger.info('[call-proc] Ignoring AI wants_estimate=true because transcript has no quote/price request language');
+  }
+  return hasTranscriptEvidence;
 }
 
 // ── Lead Synopsis via Claude (Sales Strategist prompt) ──
