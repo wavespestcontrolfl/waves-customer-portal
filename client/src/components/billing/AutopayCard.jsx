@@ -65,7 +65,7 @@ function loadStripeJs(publishableKey) {
  * 3 visual states: active (green), paused (amber), disabled (neutral).
  * Controls: toggle on/off, pause until date, change card, change billing day.
  */
-export default function AutopayCard() {
+export default function AutopayCard({ onStateChange }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -84,8 +84,16 @@ export default function AutopayCard() {
 
   const load = () =>
     api.getAutopay()
-      .then((d) => { setData(d); setSelectedCard(d.autopay_payment_method_id || ''); setSelectedDay(d.billing_day || 1); })
-      .catch((e) => setErr(e.message || 'Failed to load autopay'))
+      .then((d) => {
+        setData(d);
+        setSelectedCard(d.autopay_payment_method_id || '');
+        setSelectedDay(d.billing_day || 1);
+        onStateChange?.(d);
+      })
+      .catch((e) => {
+        setErr(e.message || 'Failed to load autopay');
+        onStateChange?.({ state: 'unknown', loadError: true });
+      })
       .finally(() => setLoading(false));
 
   useEffect(() => { load(); }, []);

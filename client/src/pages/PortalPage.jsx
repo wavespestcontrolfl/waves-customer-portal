@@ -2971,6 +2971,7 @@ function BillingTab({ customer }) {
   const [payments, setPayments] = useState([]);
   const [balance, setBalance] = useState(null);
   const [cards, setCards] = useState([]);
+  const [autopay, setAutopay] = useState(null);
   const [loading, setLoading] = useState(true);
   const [yearFilter, setYearFilter] = useState('All');
   const [typeFilter, setTypeFilter] = useState('All');
@@ -2991,9 +2992,16 @@ function BillingTab({ customer }) {
   const refreshCards = () => api.getCards().then(d => setCards(d.cards)).catch(console.error);
 
   useEffect(() => {
-    Promise.all([api.getPayments(), api.getBalance(), api.getCards(), api.getNotificationPrefs()])
-      .then(([payData, balData, cardData, prefsData]) => {
+    Promise.all([
+      api.getPayments(),
+      api.getBalance(),
+      api.getCards(),
+      api.getNotificationPrefs(),
+      api.getAutopay().catch(() => ({ state: 'unknown', loadError: true })),
+    ])
+      .then(([payData, balData, cardData, prefsData, autopayData]) => {
         setPayments(payData.payments); setBalance(balData); setCards(cardData.cards);
+        setAutopay(autopayData);
         if (prefsData) {
           setBillingEmail(prefsData.billingEmail || '');
           setPaymentSmsEnabled(prefsData.paymentConfirmationSms !== false);
@@ -3108,7 +3116,18 @@ function BillingTab({ customer }) {
   })();
 
   // Banner state: red (failed) > amber (expiring) > green (all good)
-  const bannerState = lastPaymentFailed ? 'failed' : cardExpiringSoon ? 'expiring' : 'active';
+  const autopayState = autopay?.state || (autopay?.autopay_enabled ? 'active' : 'unknown');
+  const bannerState = lastPaymentFailed
+    ? 'failed'
+    : cardExpiringSoon
+      ? 'expiring'
+      : autopayState === 'active'
+        ? 'active'
+        : autopayState === 'paused'
+          ? 'paused'
+          : autopayState === 'disabled'
+            ? 'disabled'
+            : 'unknown';
   const bannerConfig = {
     failed: {
       bg: `${B.red}20`, border: `${B.red}33`, iconBg: B.red,
@@ -3121,6 +3140,18 @@ function BillingTab({ customer }) {
     active: {
       bg: `${B.green}20`, border: `${B.green}33`, iconBg: B.green,
       icon: '\u2713', titleColor: B.green, subtitleColor: B.grayDark,
+    },
+    paused: {
+      bg: `${B.orange}20`, border: `${B.orange}33`, iconBg: B.orange,
+      icon: '!', titleColor: B.orange, subtitleColor: B.grayDark,
+    },
+    disabled: {
+      bg: B.offWhite, border: B.grayLight, iconBg: B.grayMid,
+      icon: 'i', titleColor: B.navy, subtitleColor: B.grayDark,
+    },
+    unknown: {
+      bg: B.offWhite, border: B.grayLight, iconBg: B.grayMid,
+      icon: 'i', titleColor: B.navy, subtitleColor: B.grayDark,
     },
   }[bannerState];
 
@@ -3245,11 +3276,45 @@ function BillingTab({ customer }) {
               </div>
             </>
           )}
+          {bannerState === 'paused' && (
+            <>
+              <div style={{ fontSize: 14, fontWeight: 700, color: bannerConfig.titleColor }}>
+                Auto Pay is paused
+              </div>
+              <div style={{ fontSize: 14, color: bannerConfig.subtitleColor, marginTop: 2 }}>
+                {autopay?.paused_until
+                  ? `Automatic charges resume after ${parseDate(autopay.paused_until).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}.`
+                  : 'Automatic charges are paused until you resume Auto Pay.'}
+              </div>
+            </>
+          )}
+          {bannerState === 'disabled' && (
+            <>
+              <div style={{ fontSize: 14, fontWeight: 700, color: bannerConfig.titleColor }}>
+                Auto Pay is off
+              </div>
+              <div style={{ fontSize: 14, color: bannerConfig.subtitleColor, marginTop: 2 }}>
+                {balance?.currentBalance > 0
+                  ? `Balance due: $${balance.currentBalance.toFixed(2)}. Add or enable Auto Pay below to run future charges automatically.`
+                  : 'Charges will not run automatically unless you enable Auto Pay below.'}
+              </div>
+            </>
+          )}
+          {bannerState === 'unknown' && (
+            <>
+              <div style={{ fontSize: 14, fontWeight: 700, color: bannerConfig.titleColor }}>
+                Auto Pay status unavailable
+              </div>
+              <div style={{ fontSize: 14, color: bannerConfig.subtitleColor, marginTop: 2 }}>
+                We could not load your Auto Pay status. Your saved settings have not been changed.
+              </div>
+            </>
+          )}
         </div>
       </div>
 
       {/* ── 1b. Autopay Control Card ── */}
-      <AutopayCard />
+      <AutopayCard onStateChange={setAutopay} />
 
       {/* ── 2. Balance Card with context ── */}
       {balance && (
