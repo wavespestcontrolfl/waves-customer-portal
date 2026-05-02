@@ -93,6 +93,29 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
         .first();
 
       if (stalePending) {
+        // Defense in depth: even with the in-trx markSucceeded in
+        // admin-dispatch, an out-of-band path (admin tooling, a future
+        // route) could leave a pending attempt while the dispatch
+        // service_record is already committed. Reclaiming + re-running
+        // /complete in that case would duplicate everything. Check
+        // service_records first; if the service is already completed,
+        // 409 instead of reclaiming.
+        const completedRecord = await knex('service_records')
+          .where({ scheduled_service_id: serviceId })
+          .orderBy('created_at', 'desc')
+          .first();
+        if (completedRecord) {
+          return {
+            action: 'conflict',
+            status: 409,
+            payload: {
+              error: 'Service has already been completed.',
+              code: 'service_already_completed',
+              serviceRecordId: completedRecord.id,
+            },
+          };
+        }
+
         const [reclaimed] = await knex('service_completion_attempts')
           .where({ id: stalePending.id, status: 'pending' })
           .update({

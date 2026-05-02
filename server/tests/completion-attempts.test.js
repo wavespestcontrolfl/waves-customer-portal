@@ -260,7 +260,7 @@ describe('completion attempts', () => {
       noPriorSuccess(),
       { insertError: uniqueViolation() },
       { first: undefined },     // no same-key match
-      { first: undefined },     // no stale pending → no reclaim
+      { first: undefined },     // no stale pending → no reclaim path
     ]);
 
     const result = await claimCompletionAttempt({
@@ -292,6 +292,7 @@ describe('completion attempts', () => {
       { insertError: uniqueViolation() },   // first insert hits partial index
       { first: undefined },                 // no same-key match
       { first: stale },                     // stale pending found
+      { first: undefined },                 // service_records: no completed record (safe to reclaim)
       { returning: [reclaimed] },           // conditional UPDATE wins reclaim
       { returning: [newRow] },              // re-insert succeeds
     ]);
@@ -304,8 +305,8 @@ describe('completion attempts', () => {
 
     expect(result).toEqual({ action: 'proceed', attempt: newRow });
     // Reclaim UPDATE was scoped to the stale row + status='pending' guard.
-    expect(knex.calls[4].op.whereCriteria).toEqual({ id: 'orphan-1', status: 'pending' });
-    expect(knex.calls[4].op.updatePayload.status).toBe('failed');
+    expect(knex.calls[5].op.whereCriteria).toEqual({ id: 'orphan-1', status: 'pending' });
+    expect(knex.calls[5].op.updatePayload.status).toBe('failed');
   });
 
   test('different key falls through to 409 when reclaim race is lost', async () => {
@@ -321,6 +322,7 @@ describe('completion attempts', () => {
       { insertError: uniqueViolation() },
       { first: undefined },             // no same-key match
       { first: stale },                 // stale pending found
+      { first: undefined },             // service_records: no completed record
       { returning: [] },                // another retry already reclaimed it
     ]);
 
@@ -333,6 +335,44 @@ describe('completion attempts', () => {
     expect(result.action).toBe('conflict');
     expect(result.status).toBe(409);
     expect(result.payload.code).toBe('service_completion_pending');
+  });
+
+  test('stale-pending reclaim refuses when service_record already exists (P0 defense in depth)', async () => {
+    // The trx for /complete commits service_record + status flip + the
+    // attempt's status='succeeded' in one shot now (PR #588), so the
+    // window is tiny. But an out-of-band path could still leave a
+    // pending attempt orphaned with a committed service_record. The
+    // 10-min reclaim must NOT re-run /complete in that case — duplicate
+    // service_records / invoices / SMS would result.
+    const stale = {
+      id: 'orphan-1',
+      idempotency_key: 'old-key',
+      status: 'pending',
+      updated_at: new Date(Date.now() - 12 * 60 * 1000),
+    };
+    const completedRecord = { id: 'record-1', scheduled_service_id: 'svc-1' };
+
+    const knex = makeKnex([
+      noPriorSuccess(),
+      { insertError: uniqueViolation() },
+      { first: undefined },             // no same-key match
+      { first: stale },                 // stale pending found
+      { first: completedRecord },       // service_records HAS a record → bail out
+    ]);
+
+    const result = await claimCompletionAttempt({
+      serviceId: 'svc-1',
+      idempotencyKey: 'fresh-key',
+      requestHash: 'hash-1',
+    }, knex);
+
+    expect(result.action).toBe('conflict');
+    expect(result.status).toBe(409);
+    expect(result.payload.code).toBe('service_already_completed');
+    expect(result.payload.serviceRecordId).toBe('record-1');
+    // Five table calls total: priorSuccess + insert + same-key + stale + service_records.
+    // No reclaim UPDATE, no new INSERT.
+    expect(knex.calls).toHaveLength(5);
   });
 
   test('marks attempts succeeded and failed', async () => {

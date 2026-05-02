@@ -517,6 +517,29 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             payload: { ...alertBase.payload, incompleteReason: incompleteReason || null },
           });
         }
+
+        // Mark the attempt succeeded INSIDE the trx so it's atomic with
+        // the durable completion artifacts. A crash between trx commit
+        // and a post-commit markSucceeded would otherwise leave the
+        // attempt 'pending' while service_record / status_flip already
+        // exist; the 10-minute stale-pending reclaim could then re-run
+        // /complete and duplicate everything (Codex P0 on PR #588).
+        // The response is partial here — invoice/SMS info is refreshed
+        // at the end of the handler.
+        await CompletionAttempts.markCompletionAttemptSucceeded(
+          completionAttempt,
+          {
+            record,
+            invoice: null,
+            response: {
+              success: true,
+              serviceRecordId: record.id,
+              invoiceId: null,
+              invoiceTotal: null,
+            },
+          },
+          trx
+        );
       });
     } catch (err) {
       if (err && err.message && err.message.includes('not in state')) {
@@ -528,29 +551,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       throw err;
     }
 
-    // The durable completion artifacts (service_record, service_products,
-    // status_log, lifecycle UPDATE, status flip, dispatch alerts) have all
-    // committed. Mark the attempt succeeded NOW with a partial response so
-    // that any subsequent side-effect failure can't flip this attempt back
-    // to 'failed' and let a retry re-create those artifacts. The response
-    // payload is refreshed at the end of the handler with invoice IDs.
-    //
-    // All side effects below are wrapped in their own try/catch and are
-    // independently idempotent (review-request by service_record_id, SMS
-    // skip by structured_notes.sentSmsBody, invoice by service_record_id,
-    // etc.), so a process crash mid-side-effect does not duplicate on the
-    // next webhook/UI retry — the per-service success guard in
+    // The trx committed atomically: service_record, service_products,
+    // status_log, lifecycle UPDATE, status flip, dispatch alerts AND
+    // the completion_attempt row's status='succeeded'. From this point
+    // on, all side effects are independently idempotent (review-request
+    // by service_record_id, SMS skip by structured_notes.sentSmsBody,
+    // invoice by service_record_id), so a crash mid-side-effect can't
+    // duplicate on the next retry — the per-service success guard in
     // claimCompletionAttempt rejects the duplicate completion attempt.
-    await CompletionAttempts.markCompletionAttemptSucceeded(completionAttempt, {
-      record,
-      invoice: null,
-      response: {
-        success: true,
-        serviceRecordId: record.id,
-        invoiceId: null,
-        invoiceTotal: null,
-      },
-    });
     markedSucceeded = true;
 
     // MOA-rotation violation detector (third dispatch alert generator).
