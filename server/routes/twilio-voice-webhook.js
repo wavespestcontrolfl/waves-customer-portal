@@ -3,7 +3,8 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
-const VoiceResponse = require('twilio').twiml.VoiceResponse;
+const twilio = require('twilio');
+const VoiceResponse = twilio.twiml.VoiceResponse;
 
 // Phone normalization consolidated to server/utils/phone.js (PR1 of
 // call-triage work — see docs/call-triage-discovery.md §9). The unified
@@ -11,6 +12,17 @@ const VoiceResponse = require('twilio').twiml.VoiceResponse;
 // here: preserve `+`-prefixed country codes for non-NANP callers and
 // fall back to raw on garbage.
 const { toE164 } = require('../utils/phone');
+
+async function fetchTwilioCall(callSid) {
+  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return null;
+  try {
+    const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+    return await client.calls(callSid).fetch();
+  } catch (err) {
+    logger.warn(`[recording-status] Twilio call metadata lookup failed for ${callSid}: ${err.message}`);
+    return null;
+  }
+}
 
 // =========================================================================
 // POST /api/webhooks/twilio/voice — Inbound voice call webhook
@@ -238,23 +250,66 @@ router.post('/recording-status', async (req, res) => {
 
       if (updated > 0) {
         logger.info(`Recording saved: ${matchedSid} → ${RecordingSid} (${RecordingDuration}s)`);
-      } else if (!ParentCallSid && requestFrom && requestTo) {
+      } else if (!ParentCallSid) {
         const primaryCallSid = CallSid;
         try {
-          await db('call_log').insert({
-            direction: 'inbound',
-            from_phone: toE164(requestFrom),
-            to_phone: toE164(requestTo),
-            twilio_call_sid: primaryCallSid,
-            call_sid: CallSid,
-            status: 'completed',
-            metadata: JSON.stringify({ source: 'twilio_studio_recording_status' }),
-            ...recordingData,
+          const twilioCall = (!requestFrom || !requestTo) ? await fetchTwilioCall(primaryCallSid) : null;
+          const recoveredFrom = requestFrom || twilioCall?.from || null;
+          const recoveredTo = requestTo || twilioCall?.to || null;
+
+          await db.transaction(async (trx) => {
+            // Serialize with /call-status, which may insert the same
+            // Studio-originated parent call at completion time.
+            await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [primaryCallSid]);
+
+            const existing = await trx('call_log').where('twilio_call_sid', primaryCallSid).first();
+            if (existing) {
+              await trx('call_log').where({ id: existing.id }).update(recordingData);
+              matchedSid = primaryCallSid;
+              logger.info(`[recording-status] Attached recording ${RecordingSid} to existing Studio-originated call ${primaryCallSid}`);
+              return;
+            }
+
+            if (!recoveredFrom || !recoveredTo) {
+              logger.warn(
+                `[recording-status] No parent call_log row and no recoverable From/To for CallSid=${primaryCallSid}; skipping orphan insert (recording=${RecordingSid})`
+              );
+              return;
+            }
+            if (twilioCall?.direction && !String(twilioCall.direction).startsWith('inbound')) {
+              logger.warn(
+                `[recording-status] No parent call_log row for non-inbound CallSid=${primaryCallSid}; skipping orphan insert (recording=${RecordingSid})`
+              );
+              return;
+            }
+
+            const fromPhone = toE164(recoveredFrom);
+            const toPhone = toE164(recoveredTo);
+            const numberConfig = TWILIO_NUMBERS.findByNumber(toPhone);
+            const customer = fromPhone ? await trx('customers').where({ phone: fromPhone }).first() : null;
+
+            await trx('call_log').insert({
+              customer_id: customer?.id || null,
+              direction: 'inbound',
+              from_phone: fromPhone,
+              to_phone: toPhone,
+              twilio_call_sid: primaryCallSid,
+              call_sid: CallSid,
+              status: twilioCall?.status || 'completed',
+              duration_seconds: parseInt(twilioCall?.duration || RecordingDuration || 0),
+              metadata: JSON.stringify({
+                location: numberConfig?.label || 'unknown',
+                numberType: numberConfig?.type || 'unknown',
+                domain: numberConfig?.domain || null,
+                source: twilioCall ? 'twilio_recording_status_recovered' : 'twilio_studio_recording_status',
+              }),
+              ...recordingData,
+            });
+            matchedSid = primaryCallSid;
+            logger.info(`[recording-status] Created Studio-originated call_log row ${primaryCallSid} from recording callback ${CallSid}`);
           });
-          matchedSid = primaryCallSid;
-          logger.info(`[recording-status] Created Studio-originated call_log row ${primaryCallSid} from recording callback ${CallSid}`);
         } catch (insertErr) {
-          logger.warn(`[recording-status] Failed to create Studio-originated call_log row for CallSid=${CallSid}: ${insertErr.message}`);
+          logger.warn(`[recording-status] Failed to recover Studio-originated call_log row for CallSid=${CallSid}: ${insertErr.message}`);
         }
       } else {
         // No parent row found by either SID. The previous fallback inserted
