@@ -1,7 +1,18 @@
 const MODELS = require('../config/models');
 const logger = require('./logger');
 
-const DETERMINISTIC_OUTCOMES = new Set(['inspection_only', 'customer_declined', 'follow_up_needed']);
+// Outcomes that always skip the AI path. These are customer-sensitive
+// situations where generated wording could go off-tone or contradict the
+// recorded outcome — we want predictable copy. customer_concern and
+// incomplete are included so an AI outage doesn't fall back to the
+// "Today we completed your service" default branch (Codex P2 on PR #588).
+const DETERMINISTIC_OUTCOMES = new Set([
+  'inspection_only',
+  'customer_declined',
+  'follow_up_needed',
+  'customer_concern',
+  'incomplete',
+]);
 
 function cleanText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
@@ -48,6 +59,22 @@ function deterministicRecap(input = {}) {
       `Today we completed the available work for your ${serviceType}.`,
       areas.length ? `We focused on ${areas.join(', ')}.` : 'We documented the areas that need continued attention.',
       note ? `Follow-up note: ${note}` : 'A follow-up is recommended so we can check progress and finish any remaining items.',
+    ]);
+  }
+
+  if (outcome === 'customer_concern') {
+    return sentenceJoin([
+      `Today we visited for your ${serviceType} and noted a concern that came up.`,
+      'We documented it so the office can follow up with the next step.',
+      note ? `Technician note: ${note}` : 'Please reply with any additional details and we will be in touch.',
+    ]);
+  }
+
+  if (outcome === 'incomplete') {
+    return sentenceJoin([
+      `Today we started your ${serviceType} but were not able to finish the full visit.`,
+      areas.length ? `We focused on ${areas.join(', ')}.` : 'We documented what was done so we can pick up where we left off.',
+      note ? `Technician note: ${note}` : 'We will reach out about scheduling the remaining work.',
     ]);
   }
 

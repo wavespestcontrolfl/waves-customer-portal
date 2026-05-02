@@ -44,4 +44,27 @@ describe('completion recap', () => {
   test('normalizes empty outcome to completed', () => {
     expect(normalizeOutcome('')).toBe('completed');
   });
+
+  test('customer_concern recap does not claim service was completed', () => {
+    const recap = deterministicRecap({
+      visitOutcome: 'customer_concern',
+      serviceType: 'Quarterly Pest Control',
+      notes: 'Customer asked about activity near the patio.',
+    });
+
+    expect(recap).not.toMatch(/we completed your/i);
+    expect(recap).toMatch(/concern/i);
+    expect(recap).toContain('Customer asked about activity near the patio.');
+  });
+
+  test('incomplete recap does not claim service was completed', () => {
+    const recap = deterministicRecap({
+      visitOutcome: 'incomplete',
+      serviceType: 'Lawn Care',
+      areasTreated: ['Front yard'],
+    });
+
+    expect(recap).not.toMatch(/we completed your/i);
+    expect(recap).toMatch(/not able to finish|remaining work/i);
+  });
 });
