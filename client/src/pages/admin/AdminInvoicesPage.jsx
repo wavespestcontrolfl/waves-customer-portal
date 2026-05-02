@@ -1015,12 +1015,23 @@ function RecordPaymentModal({ invoice, isMobile, onClose, onRecorded, onError })
 
 // ── Create Invoice ──
 function CreateInvoice({ showToast, onCreated, isMobile }) {
+  function defaultServiceDate() {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date());
+    const get = (type) => parts.find(part => part.type === type)?.value;
+    return `${get('year')}-${get('month')}-${get('day')}`;
+  }
   const newLineItem = () => ({ client_id: `li_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, description: '', quantity: 1, unit_price: 0 });
   const [customerQuery, setCustomerQuery] = useState('');
   const [customers, setCustomers] = useState([]);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [serviceRecords, setServiceRecords] = useState([]);
   const [selectedService, setSelectedService] = useState(null);
+  const [serviceDate, setServiceDate] = useState(defaultServiceDate);
   const [lineItems, setLineItems] = useState(() => [newLineItem()]);
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
@@ -1036,6 +1047,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const [availableDiscounts, setAvailableDiscounts] = useState([]);
   const [discountSearchIdx, setDiscountSearchIdx] = useState(null);
   const [discountQueries, setDiscountQueries] = useState({});
+  const [aiNotesLoading, setAiNotesLoading] = useState(false);
 
   // Load active, invoice-visible, non-tier discounts once. Tier discount is auto-applied
   // server-side from the customer's WaveGuard tier, so we exclude it from the picker.
@@ -1230,9 +1242,41 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
     return Number(reviewTiming) || 120;
   };
 
+  const handleWriteNotesWithAI = async () => {
+    const usableLines = lineItems.filter(i => i._kind !== 'discount' && i.description);
+    if (!notes.trim() && usableLines.length === 0) {
+      showToast('Add notes or services first');
+      return;
+    }
+    setAiNotesLoading(true);
+    try {
+      const result = await adminFetch('/admin/invoices/notes/ai', {
+        method: 'POST',
+        body: JSON.stringify({
+          input: notes,
+          customerName: selectedCustomer ? `${selectedCustomer.first_name || ''} ${selectedCustomer.last_name || ''}`.trim() : '',
+          services: usableLines.map(item => ({
+            description: item.description,
+            quantity: Number(item.quantity) || 1,
+          })),
+        }),
+      });
+      if (result.notes) {
+        setNotes(result.notes);
+        showToast('Notes written with AI');
+      } else {
+        showToast('AI did not return notes');
+      }
+    } catch (e) {
+      showToast(`AI notes failed: ${e.message}`);
+    }
+    setAiNotesLoading(false);
+  };
+
   const handleCreate = async () => {
     if (!selectedCustomer) { showToast('Select a customer'); return; }
     if (!lineItems.some(i => i._kind !== 'discount' && i.description && i.unit_price > 0)) { showToast('Add at least one line item'); return; }
+    if (!serviceDate) { showToast('Choose a service date'); return; }
     const dueDate = invoiceDueDate();
     if (!dueDate) { showToast('Choose a due date'); return; }
     const scheduledFor = invoiceScheduledFor();
@@ -1245,6 +1289,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
       const body = {
         customerId: selectedCustomer.id,
         serviceRecordId: selectedService?.id || null,
+        serviceDate,
         lineItems: lineItems.filter(i => i.description && Number(i.unit_price) !== 0).map(i => ({
           ...i, amount: lineAmount(i),
         })),
@@ -1376,6 +1421,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
               <select value={selectedService?.id || ''} onChange={e => {
                 const sr = serviceRecords.find(r => r.id === e.target.value);
                 setSelectedService(sr || null);
+                if (sr?.service_date) setServiceDate(sr.service_date);
                 if (sr && lineItems.length === 1 && !lineItems[0].description) {
                   setLineItems([{ ...lineItems[0], _kind: 'service', description: sr.service_type, quantity: 1, unit_price: 0 }]);
                 }
@@ -1389,6 +1435,16 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
               </select>
           </div>
         )}
+
+        <div style={panelStyle()}>
+          {sectionHeader('Service Date')}
+          <input
+            type="date"
+            value={serviceDate}
+            onChange={e => setServiceDate(e.target.value)}
+            style={sInput(isMobile)}
+          />
+        </div>
 
         <div style={panelStyle()}>
           {sectionHeader('Services')}
@@ -1409,7 +1465,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                     onChange={e => updateLineItem(i, 'description', e.target.value)}
                     onFocus={() => { if (item._kind !== 'discount') setServiceSearchIdx(i); }}
                     onBlur={() => setTimeout(() => { setServiceSearchIdx(prev => (prev === i ? null : prev)); }, 150)}
-                    placeholder={item._kind === 'discount' ? 'Discount' : 'Search service library or type custom...'}
+                    placeholder={item._kind === 'discount' ? 'Discount' : 'Search services'}
                     style={{ ...sInput(isMobile), color: D.text }}
                     readOnly={item._kind === 'discount'}
                   />
@@ -1503,7 +1559,24 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
         <div style={panelStyle()}>
           {sectionHeader('Delivery')}
           <div style={{ marginBottom: 14 }}>
-            <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8, display: 'block', marginBottom: 4 }}>Notes (optional)</label>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+              <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8, display: 'block' }}>Notes (optional)</label>
+              <button
+                type="button"
+                onClick={handleWriteNotesWithAI}
+                disabled={aiNotesLoading}
+                style={{
+                  ...sBtn('transparent', D.teal, isMobile),
+                  padding: isMobile ? '9px 10px' : '6px 8px',
+                  fontSize: isMobile ? 12 : 11,
+                  minHeight: isMobile ? 38 : 30,
+                  opacity: aiNotesLoading ? 0.55 : 1,
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {aiNotesLoading ? 'Writing...' : 'Write with AI'}
+              </button>
+            </div>
             <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} placeholder="" style={{ ...sInput(isMobile), resize: 'vertical' }} />
           </div>
 
@@ -1639,17 +1712,14 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                 <span style={summaryLabelStyle}>Tax ({Math.round(taxRate * 100)}%)</span><span style={summaryAmountStyle}>${tax.toFixed(2)}</span>
               </div>
             )}
+            <div style={{ ...summaryRowStyle(18, 700), marginTop: 8, paddingTop: 8, borderTop: `2px solid ${D.teal}` }}>
+              <span style={summaryLabelStyle}>Total</span><span style={summaryAmountStyle}>${total.toFixed(2)}</span>
+            </div>
             {cardCharge.surcharge > 0 && (
-              <div style={summaryRowStyle()}>
-                <span style={summaryLabelStyle}>Credit card fee (not ACH)</span><span style={summaryAmountStyle}>${cardCharge.surcharge.toFixed(2)}</span>
+              <div style={{ ...summaryRowStyle(), marginTop: 6 }}>
+                <span style={summaryLabelStyle}>Non-Cash Adjustment (3.99%)</span><span style={summaryAmountStyle}>${cardCharge.surcharge.toFixed(2)}</span>
               </div>
             )}
-            <div style={{ ...summaryRowStyle(18, 700), marginTop: 8, paddingTop: 8, borderTop: `2px solid ${D.teal}` }}>
-              <span style={summaryLabelStyle}>Invoice total</span><span style={summaryAmountStyle}>${total.toFixed(2)}</span>
-            </div>
-            <div style={summaryRowStyle(12, 700)}>
-              <span style={summaryLabelStyle}>Card total</span><span style={summaryAmountStyle}>${cardCharge.total.toFixed(2)}</span>
-            </div>
           </div>
         </div>
       </div>

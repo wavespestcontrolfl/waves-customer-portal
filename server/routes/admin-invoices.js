@@ -4,6 +4,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const InvoiceService = require('../services/invoice');
 const db = require('../models/db');
 const logger = require('../services/logger');
+const MODELS = require('../config/models');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -118,6 +119,62 @@ router.get('/service-records/:customerId', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /notes/ai — draft customer-facing invoice notes from tech input.
+router.post('/notes/ai', async (req, res, next) => {
+  try {
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
+
+    const rawInput = String(req.body.input || '').trim().slice(0, 2000);
+    const customerName = String(req.body.customerName || 'Customer').trim().slice(0, 160);
+    const services = Array.isArray(req.body.services) ? req.body.services.slice(0, 12) : [];
+    const serviceLines = services
+      .map(s => {
+        const description = String(s.description || '').trim().slice(0, 160);
+        const quantity = Number(s.quantity) || 1;
+        return description ? `- ${description}${quantity > 1 ? ` x${quantity}` : ''}` : null;
+      })
+      .filter(Boolean)
+      .join('\n') || '- No service lines provided';
+
+    if (!rawInput && serviceLines === '- No service lines provided') {
+      return res.status(400).json({ error: 'Add notes or service lines first' });
+    }
+
+    const prompt = `Write a short customer-facing invoice note for Waves Pest Control & Lawn Care.
+
+Requirements:
+- Plain text only.
+- 2 to 4 sentences.
+- Professional, friendly, and specific.
+- Use the technician input and service lines only.
+- Do not invent products, pests, locations, guarantees, follow-up dates, prices, discounts, or payment claims.
+- Do not include a greeting, subject line, sign-off, markdown, or bullets.
+
+Customer: ${customerName || 'Customer'}
+
+Service lines:
+${serviceLines}
+
+Technician input:
+${rawInput || '[none provided]'}`;
+
+    const Anthropic = require('@anthropic-ai/sdk');
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const msg = await anthropic.messages.create({
+      model: MODELS.FLAGSHIP,
+      max_tokens: 260,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const notes = (msg.content?.[0]?.text || '').trim();
+    logger.info(`[invoices] ai-notes ${notes.length} chars`);
+    res.json({ notes });
+  } catch (err) {
+    logger.error(`[invoices] ai-notes failed: ${err.message}`);
+    next(err);
+  }
+});
+
 // GET /:id — single invoice with full details
 router.get('/:id', async (req, res, next) => {
   try {
@@ -130,12 +187,15 @@ router.get('/:id', async (req, res, next) => {
 // POST / — create invoice manually
 router.post('/', async (req, res, next) => {
   try {
-    const { customerId, serviceRecordId, title, lineItems, notes, dueDate, taxRate, discountIds } = req.body;
+    const { customerId, serviceRecordId, title, lineItems, notes, dueDate, taxRate, discountIds, serviceDate } = req.body;
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
     if (!lineItems?.length) return res.status(400).json({ error: 'lineItems required' });
+    if (serviceDate && !/^\d{4}-\d{2}-\d{2}$/.test(String(serviceDate))) {
+      return res.status(400).json({ error: 'serviceDate must be YYYY-MM-DD' });
+    }
 
     const invoice = await InvoiceService.create({
-      customerId, serviceRecordId, title, lineItems, notes, dueDate, taxRate, discountIds,
+      customerId, serviceRecordId, title, lineItems, notes, dueDate, taxRate, discountIds, serviceDate,
     });
 
     const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';

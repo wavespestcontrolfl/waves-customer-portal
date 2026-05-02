@@ -142,12 +142,12 @@ const InvoiceService = {
    * Create an invoice — optionally linked to a service record.
    * If serviceRecordId is provided, pulls products, photos, tech info automatically.
    */
-  async create({ customerId, serviceRecordId, scheduledServiceId, title, lineItems, notes, dueDate, taxRate, discountIds }) {
+  async create({ customerId, serviceRecordId, scheduledServiceId, title, lineItems, notes, dueDate, taxRate, discountIds, serviceDate }) {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) throw new Error('Customer not found');
 
     // Pull service record context if linked
-    let serviceData = {};
+    let serviceData = serviceDate ? { service_date: serviceDate } : {};
     if (serviceRecordId) {
       const sr = await db('service_records')
         .where({ 'service_records.id': serviceRecordId })
@@ -165,10 +165,11 @@ const InvoiceService = {
           .orderBy('sort_order', 'asc')
           .select('photo_type', 's3_url', 'caption');
 
+        const invoiceServiceDate = serviceDate || sr.service_date;
         serviceData = {
           service_record_id: serviceRecordId,
           technician_id: sr.technician_id,
-          service_date: sr.service_date,
+          service_date: invoiceServiceDate,
           service_type: sr.service_type,
           tech_name: sr.tech_name,
           tech_notes: sr.technician_notes,
@@ -178,7 +179,10 @@ const InvoiceService = {
 
         // Auto-generate title from service type if not provided
         if (!title) {
-          const dateStr = new Date(sr.service_date).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'America/New_York' });
+          const dateForTitle = typeof invoiceServiceDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(invoiceServiceDate)
+            ? new Date(`${invoiceServiceDate}T12:00:00`)
+            : new Date(invoiceServiceDate);
+          const dateStr = dateForTitle.toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'America/New_York' });
           title = `${sr.service_type} — ${dateStr}`;
         }
       }
