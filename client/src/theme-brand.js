@@ -149,6 +149,8 @@ export const BUTTON_BASE = {
   display: 'inline-flex',
   alignItems: 'center',
   justifyContent: 'center',
+  minHeight: 36,
+  boxSizing: 'border-box',
   letterSpacing: '0.02em',
   transition: 'all 0.15s cubic-bezier(0.4, 0, 0.2, 1)',
 };

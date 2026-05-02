@@ -30,6 +30,18 @@ function SectionHeading({ children }) {
   return <div style={{ fontSize: 22, fontWeight: 400, color: B.navy, fontFamily: FONTS.display, letterSpacing: '0.02em' }}>{children}</div>;
 }
 
+const VISUALLY_HIDDEN = {
+  position: 'absolute',
+  width: 1,
+  height: 1,
+  padding: 0,
+  margin: -1,
+  overflow: 'hidden',
+  clip: 'rect(0, 0, 0, 0)',
+  whiteSpace: 'nowrap',
+  border: 0,
+};
+
 // Wave divider SVG — used between sections
 function WaveDivider() {
   return (
@@ -1291,15 +1303,16 @@ function HeroSlider({ onSwitchTab }) {
 
       {/* Arrow buttons */}
       {[
-        { dir: 'left', onClick: prev, char: '\u2039' },
-        { dir: 'right', onClick: next, char: '\u203A' },
-      ].map(({ dir, onClick, char }) => (
+        { dir: 'left', onClick: prev, char: '\u2039', label: 'Previous slide' },
+        { dir: 'right', onClick: next, char: '\u203A', label: 'Next slide' },
+      ].map(({ dir, onClick, char, label }) => (
         <button
           key={dir}
           onClick={onClick}
+          aria-label={label}
           style={{
             position: 'absolute', top: '50%', [dir]: 8, transform: 'translateY(-50%)',
-            width: 32, height: 32, borderRadius: '50%',
+            width: 40, height: 40, borderRadius: '50%',
             background: 'rgba(0,0,0,0.35)', color: '#fff', border: 'none',
             fontSize: 20, fontWeight: 700, cursor: 'pointer',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -1320,13 +1333,22 @@ function HeroSlider({ onSwitchTab }) {
           <button
             key={i}
             onClick={() => goTo(i)}
+            aria-label={`Go to slide ${i + 1}`}
+            aria-current={i === active ? 'true' : undefined}
             style={{
-              width: i === active ? 20 : 8, height: 8, borderRadius: 4,
-              background: i === active ? '#fff' : 'rgba(255,255,255,0.5)',
+              width: 36, height: 32, borderRadius: 8,
+              background: 'transparent',
               border: 'none', cursor: 'pointer', padding: 0,
               transition: 'all 0.3s ease',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
             }}
-          />
+          >
+            <span aria-hidden="true" style={{
+              width: i === active ? 20 : 8, height: 8, borderRadius: 4,
+              background: i === active ? '#fff' : 'rgba(255,255,255,0.5)',
+              display: 'block',
+            }} />
+          </button>
         ))}
       </div>
     </div>
@@ -2521,7 +2543,7 @@ function formatPhoneDisplay(phone) {
   return phone;
 }
 
-function ScheduleTab({ customer }) {
+function ScheduleTab({ customer, onRequestVisit }) {
   const [upcoming, setUpcoming] = useState([]);
   const [prefs, setPrefs] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -2816,7 +2838,14 @@ function ScheduleTab({ customer }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <style>{pulsingDotCss}</style>
 
-      <SectionHeading>Upcoming Services</SectionHeading>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <SectionHeading>Upcoming Services</SectionHeading>
+        <button onClick={onRequestVisit} style={{
+          ...BUTTON_BASE, padding: '9px 16px', fontSize: 12,
+          background: B.wavesBlue, color: '#fff', minHeight: 40,
+          flexShrink: 0,
+        }}>Request a Visit</button>
+      </div>
 
       {/* Empty state */}
       {upcomingOnly.length === 0 && (
@@ -2830,10 +2859,10 @@ function ScheduleTab({ customer }) {
             Your next quarterly pest treatment will be in {nextQuarterName}.
             {mosquitoResumes && <><br />Your mosquito service resumes in {mosquitoResumes}.</>}
           </div>
-          <button onClick={() => setShowRequestForm(true)} style={{
+          <button onClick={onRequestVisit} style={{
             ...BUTTON_BASE, padding: '10px 20px', fontSize: 14, marginTop: 16,
             background: B.wavesBlue, color: '#fff',
-          }}>+ Request a Visit</button>
+          }}>Request a Visit</button>
         </div>
       )}
 
@@ -3669,15 +3698,17 @@ function PropertySection({ title, defaultOpen, children }) {
 
 function PasswordField({ value, onChange, placeholder, label }) {
   const [show, setShow] = useState(false);
+  const inputLabel = label || placeholder || 'Secure field';
   return (
     <div style={{ marginBottom: 12 }}>
-      {label && <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>{label}</div>}
+      {label && <label style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4, display: 'block' }}>{label}</label>}
       <div style={{ position: 'relative' }}>
         <input
           type={show ? 'text' : 'password'}
           value={value || ''}
           onChange={e => onChange(e.target.value)}
           placeholder={placeholder}
+          aria-label={inputLabel}
           style={{
             width: '100%', padding: '11px 40px 11px 14px', borderRadius: 10,
             border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
@@ -3686,11 +3717,11 @@ function PasswordField({ value, onChange, placeholder, label }) {
           onFocus={e => e.target.style.borderColor = B.wavesBlue}
           onBlur={e => e.target.style.borderColor = B.grayLight}
         />
-        <button onClick={() => setShow(!show)} style={{
+        <button type="button" onClick={() => setShow(!show)} aria-label={show ? `Hide ${inputLabel}` : `Show ${inputLabel}`} style={{
           position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
           background: 'none', border: 'none', cursor: 'pointer', fontSize: 16,
-          color: B.grayMid, padding: 4,
-        }}>{show ? '' : '️'}</button>
+          color: B.grayMid, padding: 4, width: 36, height: 36,
+        }}><Icon name={show ? 'eyeOff' : 'eye'} size={18} strokeWidth={1.75} /></button>
       </div>
     </div>
   );
@@ -3711,18 +3742,18 @@ function PillSelector({ options, value, onChange }) {
   );
 }
 
-function NumberStepper({ value, onChange, min = 0, max = 99 }) {
+function NumberStepper({ value, onChange, min = 0, max = 99, label = 'Value' }) {
   const v = value || 0;
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-      <button onClick={() => onChange(Math.max(min, v - 1))} style={{
-        width: 32, height: 32, borderRadius: '50%', border: `1px solid ${B.grayLight}`,
+      <button type="button" onClick={() => onChange(Math.max(min, v - 1))} aria-label={`Decrease ${label}`} style={{
+        width: 40, height: 40, borderRadius: '50%', border: `1px solid ${B.grayLight}`,
         background: B.offWhite, cursor: 'pointer', fontSize: 16, color: B.navy,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}>−</button>
       <span style={{ fontSize: 18, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui, minWidth: 24, textAlign: 'center' }}>{v}</span>
-      <button onClick={() => onChange(Math.min(max, v + 1))} style={{
-        width: 32, height: 32, borderRadius: '50%', border: `1px solid ${B.grayLight}`,
+      <button type="button" onClick={() => onChange(Math.min(max, v + 1))} aria-label={`Increase ${label}`} style={{
+        width: 40, height: 40, borderRadius: '50%', border: `1px solid ${B.grayLight}`,
         background: B.offWhite, cursor: 'pointer', fontSize: 16, color: B.navy,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}>+</button>
@@ -3869,11 +3900,12 @@ function PropertyTab({ customer }) {
     return `Updated ${diff} days ago`;
   })() : null;
 
-  const textArea = (field, placeholder, rows = 2) => (
+  const textArea = (field, placeholder, rows = 2, label) => (
     <textarea
       value={prefs[field] || ''}
       onChange={e => updateField(field, e.target.value)}
       placeholder={placeholder}
+      aria-label={label || placeholder}
       rows={rows}
       style={{
         width: '100%', padding: '11px 14px', borderRadius: 10,
@@ -3887,12 +3919,13 @@ function PropertyTab({ customer }) {
 
   const textInput = (field, placeholder, label) => (
     <div style={{ marginBottom: 12 }}>
-      {label && <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>{label}</div>}
+      {label && <label style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4, display: 'block' }}>{label}</label>}
       <input
         type="text"
         value={prefs[field] || ''}
         onChange={e => updateField(field, e.target.value)}
         placeholder={placeholder}
+        aria-label={label || placeholder}
         style={{
           width: '100%', padding: '11px 14px', borderRadius: 10,
           border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
@@ -7506,6 +7539,16 @@ const MORE_TABS = [
   { id: 'property', label: 'My Property', icon: 'house' },
   { id: 'learn', label: 'Learn', icon: 'bulb' },
 ];
+const TAB_TITLES = {
+  dashboard: 'Customer Dashboard',
+  plan: 'My Plan',
+  visits: 'Visits',
+  billing: 'Billing',
+  refer: 'Refer and Earn',
+  documents: 'Documents',
+  property: 'My Property',
+  learn: 'Learn and Stay Informed',
+};
 
 // The sub-tabs on Visits surface their own IDs, so "Visits" stays lit
 // whether the customer is on Upcoming or Completed.
@@ -7597,7 +7640,7 @@ function MoreSheet({ activeTab, onSelect, onClose }) {
 // Wraps ScheduleTab (upcoming) + ServicesTab (completed) behind a single
 // "Visits" surface — a visit is one object moving from upcoming → completed,
 // so customers shouldn't have to know which tab holds which state.
-function VisitsTab({ customer, subTab, onSubTabChange }) {
+function VisitsTab({ customer, subTab, onSubTabChange, onRequestVisit }) {
   const active = subTab === 'completed' ? 'completed' : 'upcoming';
   const pill = (id, label) => {
     const isActive = active === id;
@@ -7630,7 +7673,7 @@ function VisitsTab({ customer, subTab, onSubTabChange }) {
           Tap <strong style={{ color: B.navy }}>Completed</strong> above to see your past visits and service reports.
         </div>
       )}
-      {active === 'upcoming' ? <ScheduleTab customer={customer} /> : <ServicesTab />}
+      {active === 'upcoming' ? <ScheduleTab customer={customer} onRequestVisit={onRequestVisit} /> : <ServicesTab />}
     </div>
   );
 }
@@ -7918,9 +7961,10 @@ export default function PortalPage() {
       {/* Content — bottom padding clears the CTA bar (60px) + bottom nav
           (60px) stack so fixed UI doesn't hide the last section. */}
       <div style={{ padding: `16px 16px ${isMobileShell ? 150 : 32}px`, maxWidth: 700, margin: '0 auto' }}>
+        {activeTab !== 'dashboard' && <h1 style={VISUALLY_HIDDEN}>{TAB_TITLES[activeTab] || 'Customer Portal'}</h1>}
         {activeTab === 'dashboard' && <DashboardTab customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'plan' && <MyPlanTab customer={customer} />}
-        {activeTab === 'visits' && <VisitsTab customer={customer} subTab={visitsSubTab} onSubTabChange={setVisitsSubTab} />}
+        {activeTab === 'visits' && <VisitsTab customer={customer} subTab={visitsSubTab} onSubTabChange={setVisitsSubTab} onRequestVisit={() => setShowReportIssue(true)} />}
         {activeTab === 'billing' && <BillingTab customer={customer} />}
         {activeTab === 'refer' && <ReferTab customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab customer={customer} onSwitchTab={switchTab} />}
@@ -7996,11 +8040,13 @@ export default function PortalPage() {
       {/* Floating Action Button — New Request. Sits above the bottom nav +
           CTA bar stack so it doesn't collide with either. */}
       <div style={{ position: 'fixed', bottom: isMobileShell ? 140 : 24, right: 16, zIndex: 99, display: 'flex', alignItems: 'center', gap: 10 }}>
-        <div style={{
+        <div onClick={() => setShowReportIssue(true)} role="button" tabIndex={0}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setShowReportIssue(true); }}
+          aria-label="New request" style={{
           background: B.navy, color: '#fff', padding: '8px 14px', borderRadius: 10,
           fontSize: 12, fontWeight: 700, fontFamily: FONTS.heading,
           boxShadow: '0 4px 15px rgba(0,0,0,0.2)',
-          whiteSpace: 'nowrap',
+          whiteSpace: 'nowrap', cursor: 'pointer',
         }}>New Request</div>
         <button onClick={() => setShowReportIssue(true)} aria-label="New request" style={{
           width: 56, height: 56, borderRadius: '50%',
@@ -8012,7 +8058,7 @@ export default function PortalPage() {
         }}
           onMouseEnter={e => { e.currentTarget.style.transform = 'scale(1.1)'; }}
           onMouseLeave={e => { e.currentTarget.style.transform = 'scale(1)'; }}
-        >+</button>
+        ><span aria-hidden="true">+</span><span style={VISUALLY_HIDDEN}>New Request</span></button>
       </div>
 
       {/* Report Issue Overlay */}
