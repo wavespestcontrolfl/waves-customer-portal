@@ -480,6 +480,23 @@ async function scheduleReviewAfterPaidInvoice(piId) {
       .first();
     if (!paidInvoice?.customer_id || !paidInvoice?.service_record_id) return;
 
+    const serviceRecord = await db('service_records')
+      .where({ id: paidInvoice.service_record_id })
+      .select('structured_notes')
+      .first();
+    let structuredNotes = serviceRecord?.structured_notes || {};
+    if (typeof structuredNotes === 'string') {
+      try { structuredNotes = JSON.parse(structuredNotes); } catch { structuredNotes = {}; }
+    }
+    if (structuredNotes.requestReview === false) {
+      logger.info(`[stripe-webhook] Skipping paid-invoice review request for invoice ${paidInvoice.invoice_number || paidInvoice.id}: completion opted out`);
+      return;
+    }
+    if (structuredNotes.visitOutcome && structuredNotes.visitOutcome !== 'completed') {
+      logger.info(`[stripe-webhook] Skipping paid-invoice review request for invoice ${paidInvoice.invoice_number || paidInvoice.id}: visit outcome ${structuredNotes.visitOutcome}`);
+      return;
+    }
+
     const ReviewService = require('../services/review-request');
     // ReviewService.create dedupes by service_record_id (returns the
     // existing row instead of inserting), so this is safe under webhook

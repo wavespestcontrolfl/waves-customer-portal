@@ -57,6 +57,20 @@ function normalizeServiceTypeForTemplate(s) {
   return s.replace(/\s+services?$/i, '');
 }
 
+function parseJsonObject(value) {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 // POST /api/admin/dispatch/recap-preview
@@ -329,6 +343,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
   let markedSucceeded = false;
+  let durableCompletionCommitted = false;
   try {
     const {
       idempotencyKey: bodyIdempotencyKey,
@@ -370,6 +385,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (claim.action === 'replay') return res.json(claim.payload);
     if (claim.action === 'conflict') return res.status(claim.status).json(claim.payload);
     completionAttempt = claim.attempt;
+    const resumingCommittedCompletion = claim.action === 'resume';
 
     // Status flip + completion artifacts + audit row + lifecycle
     // timestamps, all in one trx. Migrated to
@@ -396,8 +412,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const fromStatus = svc.status;
     const { transitionJobStatus } = require('../services/job-status');
     let record;
-    try {
-      await db.transaction(async (trx) => {
+    if (resumingCommittedCompletion) {
+      record = await db('service_records').where({ id: claim.serviceRecordId }).first();
+      if (!record) {
+        return res.status(409).json({
+          error: 'Completion resume state is missing its service record. Refresh and contact support if this continues.',
+          code: 'completion_resume_missing_record',
+        });
+      }
+      durableCompletionCommitted = true;
+    } else {
+      try {
+        await db.transaction(async (trx) => {
         // 1. service_record — the canonical "completion happened" audit.
         // scheduled_service_id is the FK back to the source row so
         // downstream code (e.g., tech-track's photo upload) can resolve
@@ -411,6 +437,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           technician_notes: technicianNotes || '',
           structured_notes: {
             visitOutcome,
+            requestReview: requestReview !== false,
             reviewSuppression,
             incompleteReason,
             customerRecap: customerRecap || null,
@@ -518,19 +545,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           });
         }
 
-        // Mark the attempt succeeded INSIDE the trx so it's atomic with
-        // the durable completion artifacts. A crash between trx commit
-        // and a post-commit markSucceeded would otherwise leave the
-        // attempt 'pending' while service_record / status_flip already
-        // exist; the 10-minute stale-pending reclaim could then re-run
-        // /complete and duplicate everything (Codex P0 on PR #588).
-        // The response is partial here — invoice/SMS info is refreshed
-        // at the end of the handler.
-        await CompletionAttempts.markCompletionAttemptSucceeded(
+        // The durable completion artifacts are committed, but billing /
+        // SMS / review side effects still need to run after commit. Keep
+        // the attempt resumable until those side effects finish so a
+        // process restart can continue from the service_record instead
+        // of replaying a partial success response.
+        await CompletionAttempts.markCompletionAttemptSideEffectsPending(
           completionAttempt,
           {
             record,
-            invoice: null,
             response: {
               success: true,
               serviceRecordId: record.id,
@@ -541,25 +564,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           trx
         );
       });
-    } catch (err) {
-      if (err && err.message && err.message.includes('not in state')) {
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);
-        return res.status(409).json({
-          error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
-        });
+        durableCompletionCommitted = true;
+      } catch (err) {
+        if (err && err.message && err.message.includes('not in state')) {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);
+          return res.status(409).json({
+            error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
+          });
+        }
+        throw err;
       }
-      throw err;
     }
 
-    // The trx committed atomically: service_record, service_products,
-    // status_log, lifecycle UPDATE, status flip, dispatch alerts AND
-    // the completion_attempt row's status='succeeded'. From this point
-    // on, all side effects are independently idempotent (review-request
-    // by service_record_id, SMS skip by structured_notes.sentSmsBody,
-    // invoice by service_record_id), so a crash mid-side-effect can't
-    // duplicate on the next retry — the per-service success guard in
-    // claimCompletionAttempt rejects the duplicate completion attempt.
-    markedSucceeded = true;
+    // The durable completion artifacts are committed. On normal first
+    // execution we can now run best-effort follow-up alerts and tracking;
+    // on resume we skip those already-committed/operational side paths and
+    // continue the customer-visible billing/SMS/review side effects below.
 
     // MOA-rotation violation detector (third dispatch alert generator).
     // checkLimits looks at property_application_history for past
@@ -577,7 +597,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // in the same MOA group; we only fire one alert per MOA group per
     // job. Without this guard a 3-product completion in the same
     // violating group would create 3 identical cards.
-    if (products?.length) {
+    if (!resumingCommittedCompletion && products?.length) {
       try {
         const LimitChecker = require('../services/application-limits');
         const { createAlert } = require('../services/dispatch-alerts');
@@ -644,12 +664,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     // Customer-visible track_state → 'complete' so /track/:token renders the
     // summary card. track_state is owned by services/track-transitions.js.
-    try {
-      await trackTransitions.markComplete(svc.id, {
-        actorType: 'admin',
-        actorId: req.technicianId,
-      });
-    } catch (e) { logger.error(`[admin-dispatch] markComplete failed: ${e.message}`); }
+    if (!resumingCommittedCompletion) {
+      try {
+        await trackTransitions.markComplete(svc.id, {
+          actorType: 'admin',
+          actorId: req.technicianId,
+        });
+      } catch (e) { logger.error(`[admin-dispatch] markComplete failed: ${e.message}`); }
+    }
 
     // Invoice + completion SMS:
     //   - If the appointment was flagged `create_invoice_on_complete` (scheduler's
@@ -661,12 +683,29 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       : (svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
     // Skip invoice creation if a paid invoice already exists for this service record
     // (covers the "customer paid prior to service report" case)
+    let invoiceCreated = false;
+    let payUrl = null;
+    let invoice = null;
     let alreadyPaid = false;
     try {
       const existingPaid = await db('invoices')
         .where({ service_record_id: record.id, status: 'paid' })
         .first();
       if (existingPaid) alreadyPaid = true;
+    } catch (e) { /* non-blocking */ }
+    let existingCompletionInvoice = null;
+    try {
+      existingCompletionInvoice = await db('invoices')
+        .where({ service_record_id: record.id })
+        .whereNot('status', 'void')
+        .orderBy('created_at', 'desc')
+        .first();
+      if (existingCompletionInvoice) {
+        invoice = existingCompletionInvoice;
+        payUrl = existingCompletionInvoice.token ? `${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/pay/${existingCompletionInvoice.token}` : null;
+        if (existingCompletionInvoice.status === 'paid') alreadyPaid = true;
+        else invoiceCreated = true;
+      }
     } catch (e) { /* non-blocking */ }
     // If the admin/tech marked this visit prepaid (cash, Zelle, phone CC, etc.)
     // and the recorded amount covers the would-be invoice, skip auto-invoicing.
@@ -683,16 +722,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         .orderBy('created_at', 'desc')
         .first();
     } catch (e) { /* column may not exist pre-migration — non-blocking */ }
-    const shouldInvoice = !alreadyPaid && !prepaidCovered && !preMintedInvoice
+    const shouldInvoice = !alreadyPaid && !prepaidCovered && !preMintedInvoice && !existingCompletionInvoice
       && (!!svc.create_invoice_on_complete || !!svc.cust_waveguard_tier) && invoiceAmount > 0;
     // Customer-facing SMS URL must be the canonical portal domain, not
     // the raw Railway URL (CLIENT_URL is set to the Railway hostname on
     // prod for app-internal redirects). PORTAL_URL can override for dev.
     const portalUrl = process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com';
 
-    let invoiceCreated = false;
-    let payUrl = null;
-    let invoice = null;
     if (shouldInvoice) {
       try {
         const InvoiceService = require('../services/invoice');
@@ -728,7 +764,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // SMS instead of firing a second message 90-180 min later. Single message
     // lands higher read-rates than two.
     const invoiceBlocksReview = invoiceCreated && !!invoice;
-    const effectiveRequestReview = !!requestReview && !reviewSuppression && !invoiceBlocksReview;
+    const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
+    const effectiveRequestReview = !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview;
 
     let bundledReviewUrl = null;
     if (sendCompletionSms && effectiveRequestReview && svc.cust_phone) {
@@ -744,12 +781,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       ? `\n\nEnjoyed the service? A quick review means the world: ${bundledReviewUrl}`
       : '';
 
-    if (sendCompletionSms && svc.cust_phone) {
+    const recordStructuredNotes = parseJsonObject(record.structured_notes);
+    const completionSmsAlreadyHandled = !!recordStructuredNotes.sentSmsBody;
+
+    if (sendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled) {
       try {
         const displayServiceType = normalizeServiceTypeForTemplate(svc.service_type);
         const recapText = (customerRecap || '').trim();
         const withRecap = (body) => recapText ? `${recapText}\n\n${body}` : body;
         let sentSmsBody = null;
+        let sentSmsType = null;
         if (invoiceCreated && payUrl) {
           const fallback = `Hello ${svc.first_name}! Your ${displayServiceType} service report is ready: ${portalUrl}\n\nInvoice for today's visit: ${payUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = await renderTemplate('service_complete_with_invoice', {
@@ -758,8 +799,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             portal_url: portalUrl,
             pay_url: payUrl,
           }, fallback);
+          sentSmsType = 'service_complete_with_invoice';
           sentSmsBody = withRecap(body + reviewSuffix);
-          await TwilioService.sendSMS(svc.cust_phone, sentSmsBody, { customerId: svc.customer_id, messageType: 'service_complete_with_invoice' });
         } else if (prepaidCovered || alreadyPaid) {
           const fallback = `Hello ${svc.first_name}! Thanks for your payment today. Your ${displayServiceType} service report is ready: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = await renderTemplate('service_complete_prepaid', {
@@ -767,23 +808,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             service_type: displayServiceType,
             portal_url: portalUrl,
           }, fallback);
+          sentSmsType = 'service_complete_prepaid';
           sentSmsBody = withRecap(body + reviewSuffix);
-          await TwilioService.sendSMS(svc.cust_phone, sentSmsBody, { customerId: svc.customer_id, messageType: 'service_complete_prepaid' });
         } else {
           const fallback = `Hello ${svc.first_name}! Your service report is ready. View it here: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = await renderTemplate('service_complete', { first_name: svc.first_name || '' }, fallback);
+          sentSmsType = 'service_complete';
           sentSmsBody = withRecap(body + reviewSuffix);
-          await TwilioService.sendSMS(svc.cust_phone, sentSmsBody, { customerId: svc.customer_id, messageType: 'service_complete' });
         }
         if (sentSmsBody) {
+          await TwilioService.sendSMS(svc.cust_phone, sentSmsBody, { customerId: svc.customer_id, messageType: sentSmsType });
+          const sentNotes = {
+            ...recordStructuredNotes,
+            sentSmsBody,
+            sentSmsAt: new Date().toISOString(),
+            sentSmsType,
+          };
           await db('service_records').where({ id: record.id }).update({
-            structured_notes: {
-              ...(record.structured_notes || {}),
-              sentSmsBody,
-            },
+            structured_notes: sentNotes,
           });
+          record.structured_notes = sentNotes;
         }
       } catch (e) { logger.error(`Completion SMS failed: ${e.message}`); }
+    } else if (sendCompletionSms && svc.cust_phone && completionSmsAlreadyHandled) {
+      logger.info(`[dispatch] Completion SMS already sent for service_record ${record.id}; skipping retry send`);
     }
 
     // Only schedule the delayed follow-up message when the review wasn't
@@ -800,18 +848,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (e) { logger.error(`[dispatch] Review request schedule failed: ${e.message}`); }
     }
 
-    try {
-      await db('activity_log').insert({
-        admin_user_id: req.technicianId, customer_id: svc.customer_id,
-        action: 'service_completed',
-        description: `${svc.tech_name} completed ${svc.service_type} for ${svc.first_name} ${svc.last_name}`,
-      });
-    } catch (e) {
-      logger.error(`[dispatch] activity log insert failed after completion: ${e.message}`);
+    if (!resumingCommittedCompletion) {
+      try {
+        await db('activity_log').insert({
+          admin_user_id: req.technicianId, customer_id: svc.customer_id,
+          action: 'service_completed',
+          description: `${svc.tech_name} completed ${svc.service_type} for ${svc.first_name} ${svc.last_name}`,
+        });
+      } catch (e) {
+        logger.error(`[dispatch] activity log insert failed after completion: ${e.message}`);
+      }
     }
 
     // Job form submission (non-blocking)
-    if (formResponses) {
+    if (!resumingCommittedCompletion && formResponses) {
       try {
         const JobForm = require('../services/job-form');
         await JobForm.saveSubmission({
@@ -827,12 +877,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     }
 
     // Job costing (non-blocking, fire-and-forget)
-    try {
-      const JobCosting = require('../services/job-costing');
-      JobCosting.calculateJobCost(svc.id).catch(e =>
-        logger.error(`[dispatch] Job cost calc failed: ${e.message}`)
-      );
-    } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }
+    if (!resumingCommittedCompletion) {
+      try {
+        const JobCosting = require('../services/job-costing');
+        JobCosting.calculateJobCost(svc.id).catch(e =>
+          logger.error(`[dispatch] Job cost calc failed: ${e.message}`)
+        );
+      } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }
+    }
 
     const responsePayload = {
       success: true,
@@ -844,17 +896,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // UPDATE of an already-succeeded row (set above immediately after the
     // trx commit), not a state transition.
     await CompletionAttempts.markCompletionAttemptSucceeded(completionAttempt, { record, invoice, response: responsePayload });
+    markedSucceeded = true;
     res.json(responsePayload);
   } catch (err) {
     // Only mark failed if we haven't already marked succeeded. After the
     // durable trx commits and the attempt is succeeded, an unhandled throw
     // in a recoverable side effect must NOT flip it back — that would
     // allow a retry to re-create service_record / invoice / SMS.
-    if (!markedSucceeded) {
+    if (!markedSucceeded && !durableCompletionCommitted) {
       await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);
     } else {
       logger.error(
-        `[dispatch] Post-success error in /complete (attempt ${completionAttempt?.id} stays succeeded): ${err.message}`
+        `[dispatch] Post-commit error in /complete (attempt ${completionAttempt?.id} remains resumable): ${err.message}`
       );
     }
     next(err);

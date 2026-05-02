@@ -1298,6 +1298,9 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
       setSuccess(true);
       setTimeout(() => onClose(true), 1200);
     } catch (e) {
+      if (e?.status >= 400 && e.status < 500 && e.status !== 409) {
+        completionIdempotencyKeyRef.current = null;
+      }
       alert('Failed to complete service: ' + e.message);
     }
     setSubmitting(false);

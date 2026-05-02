@@ -28,7 +28,12 @@ class ApiClient {
       ...options.headers,
     };
 
-    const response = await fetch(url, { ...options, headers });
+    let response;
+    try {
+      response = await fetch(url, { ...options, headers });
+    } catch (err) {
+      throw new Error(err?.message || 'Network request failed. Check your connection and try again.');
+    }
 
     // Handle token expiry — attempt refresh
     if (response.status === 401 && this.refreshToken) {
@@ -44,8 +49,17 @@ class ApiClient {
     }
 
     if (!response.ok) {
-      const error = await response.json().catch(() => ({ error: 'Request failed' }));
-      throw new Error(error.error || `HTTP ${response.status}`);
+      const contentType = response.headers.get('content-type') || '';
+      let message = '';
+
+      if (contentType.includes('application/json')) {
+        const error = await response.json().catch(() => null);
+        message = error?.error || error?.message || '';
+      } else {
+        message = (await response.text().catch(() => '')).trim();
+      }
+
+      throw new Error(message || `Request failed (${response.status})`);
     }
 
     return response.json();

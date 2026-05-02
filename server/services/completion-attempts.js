@@ -9,15 +9,61 @@ const logger = require('./logger');
 // would be stuck "completion_pending." 10 min is comfortably longer
 // than any normal completion (sub-second) plus webhook retries.
 const STALE_PENDING_MS = 10 * 60 * 1000;
+const STALE_SIDE_EFFECTS_MS = 10 * 60 * 1000;
 
 function isUniqueViolation(err) {
   return err?.code === '23505';
 }
 
 function hashCompletionRequest(body) {
+  const { idempotencyKey, timeOnSite, ...stableBody } = body || {};
   return crypto.createHash('sha256')
-    .update(JSON.stringify(body || {}))
+    .update(JSON.stringify(stableBody))
     .digest('hex');
+}
+
+function sideEffectsRunningPayload() {
+  return {
+    action: 'conflict',
+    status: 409,
+    payload: {
+      error: 'Completion side effects are still running for this service.',
+      code: 'completion_side_effects_running',
+    },
+  };
+}
+
+async function claimSideEffectsRun(row, requestHash, knex = db) {
+  if (!row?.service_record_id) return null;
+  if (row.request_hash && requestHash && row.request_hash !== requestHash) {
+    return {
+      action: 'conflict',
+      status: 409,
+      payload: {
+        error: 'Service completion has committed with a different completion payload.',
+        code: 'completion_resume_payload_mismatch',
+        serviceRecordId: row.service_record_id,
+      },
+    };
+  }
+
+  const staleCutoff = new Date(Date.now() - STALE_SIDE_EFFECTS_MS);
+  if (row.status === 'side_effects_running' && new Date(row.updated_at) >= staleCutoff) {
+    return sideEffectsRunningPayload();
+  }
+
+  let query = knex('service_completion_attempts')
+    .where({ id: row.id, status: row.status });
+  if (row.status === 'side_effects_running') {
+    query = query.andWhere('updated_at', '<', staleCutoff);
+  }
+  const [claimed] = await query.update({
+    status: 'side_effects_running',
+    updated_at: new Date(),
+  }).returning('*');
+
+  if (!claimed) return sideEffectsRunningPayload();
+  return { action: 'resume', attempt: claimed, serviceRecordId: claimed.service_record_id };
 }
 
 async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }, knex = db) {
@@ -63,6 +109,15 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
         invoiceId: priorSuccess.invoice_id || null,
       },
     };
+  }
+
+  const resumable = await knex('service_completion_attempts')
+    .where({ service_id: serviceId })
+    .whereIn('status', ['side_effects_pending', 'side_effects_running'])
+    .orderBy('updated_at', 'desc')
+    .first();
+  if (resumable?.service_record_id) {
+    return claimSideEffectsRun(resumable, requestHash, knex);
   }
 
   try {
@@ -172,6 +227,10 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
       return { action: 'replay', payload: { ...existing.response, replayed: true } };
     }
 
+    if ((existing.status === 'side_effects_pending' || existing.status === 'side_effects_running') && existing.service_record_id) {
+      return claimSideEffectsRun(existing, requestHash, knex);
+    }
+
     if (existing.status === 'pending') {
       return {
         action: 'conflict',
@@ -257,9 +316,21 @@ async function markCompletionAttemptSucceeded(attempt, { record, invoice, respon
   });
 }
 
+async function markCompletionAttemptSideEffectsPending(attempt, { record, response }, knex = db) {
+  if (!attempt?.id) return;
+  await knex('service_completion_attempts').where({ id: attempt.id }).update({
+    status: 'side_effects_running',
+    service_record_id: record?.id || null,
+    response,
+    error: null,
+    updated_at: new Date(),
+  });
+}
+
 module.exports = {
   claimCompletionAttempt,
   hashCompletionRequest,
   markCompletionAttemptFailed,
   markCompletionAttemptSucceeded,
+  markCompletionAttemptSideEffectsPending,
 };
