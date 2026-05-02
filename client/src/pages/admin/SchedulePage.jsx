@@ -1279,6 +1279,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   function handleCustomerRecapChange(value) {
     recapRequestRef.current += 1;
     if (recapAbortRef.current) recapAbortRef.current.abort();
+    setRecapLoading(false);
     setCustomerRecap(value);
     setRecapSource('manual');
     setRecapDraftStatus('manual');
