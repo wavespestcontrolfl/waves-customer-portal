@@ -284,6 +284,7 @@ const InvoiceService = {
     return this.create({
       customerId: sr.customer_id,
       serviceRecordId,
+      scheduledServiceId: sr.scheduled_service_id || undefined,
       lineItems,
       taxRate,
     });

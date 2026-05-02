@@ -30,7 +30,12 @@ router.use(requireTechOrAdmin);
 // plan engine can extend without a migration. Keep these names in
 // sync with what the protocol-rules table will reference.
 const GRASS_TYPES = ['st_augustine', 'bermuda', 'zoysia', 'bahia', 'mixed', 'unknown'];
-const SUN_EXPOSURES = ['full_sun', 'partial_shade', 'shade'];
+// 'heavy_shade' (not 'shade') — the value name itself signals severity
+// for the future plan engine, which treats sun exposure as a modifier
+// that gates hot herbicides / PGR rather than a separate protocol track.
+// Any pre-existing 'shade' rows were normalized in migration
+// 20260501000001_planner_data_prep.js.
+const SUN_EXPOSURES = ['full_sun', 'partial_shade', 'heavy_shade'];
 const IRRIGATION_TYPES = ['in_ground', 'manual', 'none', 'mixed'];
 
 // Canonical column whitelist for the upsert. Keeps the API a closed

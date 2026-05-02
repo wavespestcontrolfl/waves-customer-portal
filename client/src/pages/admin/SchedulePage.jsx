@@ -59,10 +59,19 @@ const CHIP_RECOMMENDATIONS = [
   'Callback recommended', 'Irrigation adjustment needed', 'Follow-up in 2 weeks',
   'Schedule interior next visit', 'Bait station replacement', 'Customer wants estimate',
 ];
-const AREAS_SERVICED_OPTIONS = [
-  'Front Yard', 'Back Yard', 'Side Yards', 'Interior', 'Garage',
-  'Lanai/Pool Cage', 'Perimeter', 'Fence Line', 'Beds',
+const VISIT_OUTCOME_OPTIONS = [
+  { value: 'completed', label: 'Completed' },
+  { value: 'inspection_only', label: 'Inspection only' },
+  { value: 'customer_declined', label: 'Customer declined' },
+  { value: 'follow_up_needed', label: 'Follow-up needed' },
+  { value: 'customer_concern', label: 'Customer concern' },
+  { value: 'incomplete', label: 'Incomplete' },
 ];
+const AREAS_BY_SERVICE = {
+  pest: ['Perimeter', 'Garage', 'Kitchen', 'Bathrooms', 'Entry points', 'Yard', 'Fence line', 'Trash area'],
+  lawn: ['Front yard', 'Back yard', 'Side yard', 'Landscape beds', 'Shrubs', 'Palms', 'Problem area', 'Irrigation zone'],
+  universal: ['Customer spoke with tech', 'No issues found', 'Follow-up recommended'],
+};
 const CUSTOMER_INTERACTION_OPTIONS = [
   { value: 'spoke', label: 'Customer home — spoke with them' },
   { value: 'not_home_full', label: 'Customer not home — full access' },
@@ -108,7 +117,11 @@ function adminFetch(path, options = {}) {
     },
     ...options,
   }).then(r => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) {
+      const err = new Error(`HTTP ${r.status}`);
+      err.status = r.status;
+      throw err;
+    }
     return r.json();
   });
 }
@@ -123,6 +136,16 @@ function detectServiceCategory(serviceType) {
   if (s.includes('mosquito')) return 'mosquito';
   if (s.includes('termite')) return 'termite';
   return 'pest';
+}
+
+function createCompletionIdempotencyKey(serviceId) {
+  const randomPart = window.crypto?.randomUUID?.()
+    || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `complete_${serviceId}_${randomPart}`;
+}
+
+function completionDraftKey(serviceId) {
+  return `waves_completion_draft_${serviceId}`;
 }
 
 function elapsedSince(isoTime) {
@@ -1015,6 +1038,11 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   const [soilMoisture, setSoilMoisture] = useState('');
   const [sendSms, setSendSms] = useState(true);
   const [requestReview, setRequestReview] = useState(true);
+  const [visitOutcome, setVisitOutcome] = useState('completed');
+  const [customerRecap, setCustomerRecap] = useState('');
+  const [recapSource, setRecapSource] = useState('');
+  const [recapLoading, setRecapLoading] = useState(false);
+  const [recapError, setRecapError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -1027,14 +1055,37 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   const [nextVisit, setNextVisit] = useState(null);
   const [nextVisitNote, setNextVisitNote] = useState('');
   const [showNextVisitNote, setShowNextVisitNote] = useState(false);
+  const [savedDraft, setSavedDraft] = useState(null);
+  const [showDraftPrompt, setShowDraftPrompt] = useState(false);
   const photoInputRef = useRef(null);
+  const recapRequestRef = useRef(0);
+  const completionIdempotencyKeyRef = useRef(null);
+  const draftReadyRef = useRef(false);
 
   const isLawn = detectServiceCategory(service.serviceType) === 'lawn';
+  const serviceCategory = detectServiceCategory(service.serviceType);
+  const areaOptions = [
+    ...(AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest),
+    ...AREAS_BY_SERVICE.universal,
+  ];
   const onSiteEntry = (service.statusLog || []).find(e => e.status === 'on_site');
   const onSiteTime = onSiteEntry ? onSiteEntry.at : service.checkInTime;
 
   const svcTypeLower = (service.serviceType || '').toLowerCase();
   const isCallback = svcTypeLower.includes('re-service') || svcTypeLower.includes('callback') || service.isCallback;
+  const invoiceAmount = service.estimatedPrice != null && Number(service.estimatedPrice) > 0
+    ? Number(service.estimatedPrice)
+    : Number(service.monthlyRate || 0);
+  const prepaidCovered = service.prepaidAmount != null
+    && Number(service.prepaidAmount) > 0
+    && Number(service.prepaidAmount) >= invoiceAmount;
+  const willInvoice = !prepaidCovered && (!!service.createInvoiceOnComplete || !!service.waveguardTier) && invoiceAmount > 0;
+  const willReview = !!requestReview && !willInvoice;
+  const smsPreview = [
+    customerRecap.trim(),
+    willInvoice ? '[pay link inserted]' : '',
+    willReview ? '[review link inserted]' : '',
+  ].filter(Boolean).join('\n\n');
 
   useEffect(() => {
     const iv = setInterval(() => setElapsed(elapsedSince(onSiteTime)), 1000);
@@ -1048,6 +1099,129 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         .catch(() => {});
     }
   }, [service.customerId]);
+
+  useEffect(() => {
+    draftReadyRef.current = false;
+    setSavedDraft(null);
+    setShowDraftPrompt(false);
+    try {
+      const raw = localStorage.getItem(completionDraftKey(service.id));
+      if (raw) {
+        const draft = JSON.parse(raw);
+        if (draft && draft.serviceId === service.id) {
+          setSavedDraft(draft);
+          setShowDraftPrompt(true);
+        }
+      }
+    } catch {
+      localStorage.removeItem(completionDraftKey(service.id));
+    } finally {
+      draftReadyRef.current = true;
+    }
+  }, [service.id]);
+
+  useEffect(() => {
+    if (!draftReadyRef.current || showDraftPrompt || success) return;
+    const hasDraftContent = notes.trim()
+      || customerRecap.trim()
+      || selectedProducts.length
+      || areasServiced.length
+      || customerInteraction
+      || customerConcern.trim()
+      || nextVisitNote.trim()
+      || visitOutcome !== 'completed';
+    if (!hasDraftContent) return;
+
+    const timer = setTimeout(() => {
+      const draft = {
+        serviceId: service.id,
+        savedAt: new Date().toISOString(),
+        notes,
+        selectedProducts,
+        soilTemp,
+        thatchMeasurement,
+        soilPh,
+        soilMoisture,
+        sendSms,
+        requestReview,
+        visitOutcome,
+        customerRecap,
+        recapSource,
+        areasServiced,
+        customerInteraction,
+        customerConcern,
+        nextVisitNote,
+        showNextVisitNote,
+      };
+      localStorage.setItem(completionDraftKey(service.id), JSON.stringify(draft));
+    }, 700);
+    return () => clearTimeout(timer);
+  }, [
+    service.id, showDraftPrompt, success, notes, selectedProducts, soilTemp, thatchMeasurement,
+    soilPh, soilMoisture, sendSms, requestReview, visitOutcome, customerRecap, recapSource,
+    areasServiced, customerInteraction, customerConcern, nextVisitNote, showNextVisitNote,
+  ]);
+
+  function restoreDraft() {
+    if (!savedDraft) return;
+    setNotes(savedDraft.notes || '');
+    setSelectedProducts(Array.isArray(savedDraft.selectedProducts) ? savedDraft.selectedProducts : []);
+    setSoilTemp(savedDraft.soilTemp || '');
+    setThatchMeasurement(savedDraft.thatchMeasurement || '');
+    setSoilPh(savedDraft.soilPh || '');
+    setSoilMoisture(savedDraft.soilMoisture || '');
+    setSendSms(savedDraft.sendSms !== false);
+    setRequestReview(savedDraft.requestReview !== false);
+    setVisitOutcome(savedDraft.visitOutcome || 'completed');
+    setCustomerRecap(savedDraft.customerRecap || '');
+    setRecapSource(savedDraft.recapSource || 'draft');
+    setAreasServiced(Array.isArray(savedDraft.areasServiced) ? savedDraft.areasServiced : []);
+    setCustomerInteraction(savedDraft.customerInteraction || '');
+    setCustomerConcern(savedDraft.customerConcern || '');
+    setNextVisitNote(savedDraft.nextVisitNote || '');
+    setShowNextVisitNote(!!savedDraft.showNextVisitNote);
+    setShowDraftPrompt(false);
+  }
+
+  function discardDraft() {
+    localStorage.removeItem(completionDraftKey(service.id));
+    setSavedDraft(null);
+    setShowDraftPrompt(false);
+  }
+
+  useEffect(() => {
+    const hasInput = notes.trim() || areasServiced.length || visitOutcome !== 'completed';
+    if (!hasInput) return;
+    const requestId = ++recapRequestRef.current;
+    setRecapLoading(true);
+    setRecapError('');
+    const timer = setTimeout(async () => {
+      try {
+        const result = await adminFetch('/admin/dispatch/recap-preview', {
+          method: 'POST',
+          body: JSON.stringify({
+            notes,
+            visitOutcome,
+            serviceType: service.serviceType,
+            areasTreated: areasServiced,
+            willInvoice,
+            willReview,
+          }),
+        });
+        if (requestId !== recapRequestRef.current) return;
+        if (result.recap) {
+          setCustomerRecap(result.recap);
+          setRecapSource(result.source || '');
+        }
+      } catch (err) {
+        if (requestId !== recapRequestRef.current) return;
+        setRecapError(err.message || 'Could not draft recap');
+      } finally {
+        if (requestId === recapRequestRef.current) setRecapLoading(false);
+      }
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [notes, visitOutcome, areasServiced, service.serviceType, willInvoice, willReview]);
 
   function addChipNote(prefix, text) {
     const line = `[${prefix}] ${text}`;
@@ -1092,11 +1266,19 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   async function handleSubmit() {
     setSubmitting(true);
     try {
+      if (!completionIdempotencyKeyRef.current) {
+        completionIdempotencyKeyRef.current = createCompletionIdempotencyKey(service.id);
+      }
       const body = {
+        idempotencyKey: completionIdempotencyKeyRef.current,
         technicianNotes: notes,
+        customerRecap,
+        visitOutcome,
+        reviewSuppression: willInvoice ? 'invoice_created' : null,
         products: selectedProducts.map(p => ({ productId: p.productId, rate: p.rate, rateUnit: p.rateUnit })),
         sendCompletionSms: sendSms,
         requestReview,
+        areasTreated: areasServiced,
         timeOnSite: elapsed,
         areasServiced,
         customerInteraction,
@@ -1116,9 +1298,13 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         if (soilMoisture) body.soilMoisture = parseFloat(soilMoisture);
       }
       await onSubmit(service.id, body);
+      localStorage.removeItem(completionDraftKey(service.id));
       setSuccess(true);
       setTimeout(() => onClose(true), 1200);
     } catch (e) {
+      if (e?.status >= 400 && e.status < 500 && e.status !== 409) {
+        completionIdempotencyKeyRef.current = null;
+      }
       alert('Failed to complete service: ' + e.message);
     }
     setSubmitting(false);
@@ -1251,6 +1437,28 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
           </div>
 
           <div style={{ padding: 20, maxWidth: 560, margin: '0 auto' }}>
+            {showDraftPrompt && (
+              <div style={{
+                background: M.card, border: `0.5px solid ${M.hairline}`, borderRadius: 14,
+                padding: 14, marginBottom: 16, display: 'flex', flexDirection: 'column', gap: 10,
+              }}>
+                <div style={{ fontFamily: font, fontSize: 14, fontWeight: 600, color: M.ink }}>
+                  Restore saved draft?
+                </div>
+                <div style={{ fontFamily: font, fontSize: 12, color: M.ink3 }}>
+                  Saved {savedDraft?.savedAt ? new Date(savedDraft.savedAt).toLocaleString() : 'recently'}
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button type="button" onClick={restoreDraft} style={{ ...primaryPill, height: 40, fontSize: 12 }}>
+                    Restore
+                  </button>
+                  <button type="button" onClick={discardDraft} style={{ ...secondaryPill, height: 40, fontSize: 12 }}>
+                    Discard
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Service meta */}
             <div style={{ fontFamily: font, fontSize: 13, color: M.ink3, marginBottom: 20, lineHeight: 1.4 }}>
               {service.serviceType}
@@ -1304,6 +1512,20 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
             )}
 
             {/* Technician notes */}
+            <Field label="Visit outcome">
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {VISIT_OUTCOME_OPTIONS.map(opt => (
+                  <Chip
+                    key={opt.value}
+                    selected={visitOutcome === opt.value}
+                    onClick={() => setVisitOutcome(opt.value)}
+                  >
+                    {visitOutcome === opt.value ? '✓ ' : ''}{opt.label}
+                  </Chip>
+                ))}
+              </div>
+            </Field>
+
             <Field label="Technician notes">
               <textarea
                 value={notes}
@@ -1482,9 +1704,9 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
 
             {/* Areas serviced */}
             {!quickComplete && (
-              <Field label="Areas serviced">
+              <Field label="Areas treated">
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                  {AREAS_SERVICED_OPTIONS.map(area => {
+                  {areaOptions.map(area => {
                     const selected = areasServiced.includes(area);
                     return (
                       <Chip key={area} selected={selected} onClick={() => toggleArea(area)}>
@@ -1492,6 +1714,66 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
                       </Chip>
                     );
                   })}
+                </div>
+              </Field>
+            )}
+
+            {/* Customer recap + final SMS preview */}
+            <Field label="Customer recap">
+              <textarea
+                value={customerRecap}
+                onChange={e => setCustomerRecap(e.target.value)}
+                rows={4}
+                placeholder="Customer-facing summary..."
+                style={{ ...mTextarea, minHeight: 112 }}
+              />
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginTop: 8, alignItems: 'center' }}>
+                <span style={{ fontFamily: font, fontSize: 12, color: recapError ? M.err : M.ink4 }}>
+                  {recapLoading ? 'Drafting recap…' : recapError || (recapSource ? `Draft: ${recapSource}` : '')}
+                </span>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setRecapLoading(true);
+                    setRecapError('');
+                    try {
+                      const result = await adminFetch('/admin/dispatch/recap-preview', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                          notes,
+                          visitOutcome,
+                          serviceType: service.serviceType,
+                          areasTreated: areasServiced,
+                          willInvoice,
+                          willReview,
+                        }),
+                      });
+                      if (result.recap) {
+                        setCustomerRecap(result.recap);
+                        setRecapSource(result.source || '');
+                      }
+                    } catch (err) {
+                      setRecapError(err.message || 'Could not draft recap');
+                    } finally {
+                      setRecapLoading(false);
+                    }
+                  }}
+                  disabled={recapLoading}
+                  style={{ ...tertiaryPill, width: 'auto', height: 36, padding: '0 14px', border: `1px solid ${M.hairline}`, fontSize: 12, opacity: recapLoading ? 0.5 : 1 }}
+                >
+                  Regenerate
+                </button>
+              </div>
+            </Field>
+
+            {sendSms && (
+              <Field label="Customer SMS preview">
+                <div style={{
+                  background: M.card, border: `0.5px solid ${M.hairline}`, borderRadius: 12,
+                  padding: 14, fontFamily: font, fontSize: 14, color: M.ink,
+                  lineHeight: 1.45, whiteSpace: 'pre-wrap',
+                }}>
+                  {smsPreview || 'Add notes to preview the customer message.'}
                 </div>
               </Field>
             )}
@@ -1733,6 +2015,41 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
 
         {/* Body */}
         <div style={{ flex: 1, padding: 24, overflowY: 'auto' }}>
+          {showDraftPrompt && (
+            <div style={{
+              background: D.card, border: `1px solid ${D.border}`, borderRadius: 10,
+              padding: 14, marginBottom: 16,
+            }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>Restore saved draft?</div>
+              <div style={{ fontSize: 12, color: D.muted, marginTop: 3 }}>
+                Saved {savedDraft?.savedAt ? new Date(savedDraft.savedAt).toLocaleString() : 'recently'}
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                <button onClick={restoreDraft} style={{ ...btnBase, width: 'auto', height: 36, padding: '0 14px', background: D.teal, color: '#fff' }}>
+                  Restore
+                </button>
+                <button onClick={discardDraft} style={{ ...btnBase, width: 'auto', height: 36, padding: '0 14px', background: 'transparent', color: D.muted, border: `1px solid ${D.border}` }}>
+                  Discard
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Visit Outcome */}
+          <label style={labelStyle}>Visit Outcome</label>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 16 }}>
+            {VISIT_OUTCOME_OPTIONS.map(opt => (
+              <button key={opt.value} onClick={() => setVisitOutcome(opt.value)} style={{
+                padding: '6px 12px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                background: visitOutcome === opt.value ? D.teal + '22' : D.card,
+                color: visitOutcome === opt.value ? D.teal : D.text,
+                border: `1px solid ${visitOutcome === opt.value ? D.teal : D.border}`,
+              }}>
+                {visitOutcome === opt.value ? '\u2713 ' : ''}{opt.label}
+              </button>
+            ))}
+          </div>
+
           {/* Technician Notes */}
           <label style={labelStyle}>Technician Notes</label>
           <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={quickComplete ? 3 : 5} style={{
@@ -1913,9 +2230,9 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
           {/* Areas Serviced */}
           {!quickComplete && (
             <div style={{ marginBottom: 20 }}>
-              <label style={labelStyle}>Areas Serviced</label>
+              <label style={labelStyle}>Areas Treated</label>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {AREAS_SERVICED_OPTIONS.map(area => {
+                {areaOptions.map(area => {
                   const selected = areasServiced.includes(area);
                   return (
                     <button key={area} onClick={() => toggleArea(area)} style={{
@@ -1929,6 +2246,60 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
                     </button>
                   );
                 })}
+              </div>
+            </div>
+          )}
+
+          {/* Customer Recap */}
+          <label style={labelStyle}>Customer Recap</label>
+          <textarea value={customerRecap} onChange={e => setCustomerRecap(e.target.value)} rows={4} style={{
+            width: '100%', background: D.input, color: D.text, border: `1px solid ${D.border}`,
+            borderRadius: 10, padding: 12, fontSize: 14, resize: 'vertical',
+            fontFamily: "'Nunito Sans', sans-serif", boxSizing: 'border-box', marginBottom: 8,
+          }} placeholder="Customer-facing summary..." />
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+            <span style={{ fontSize: 12, color: recapError ? D.red : D.muted }}>
+              {recapLoading ? 'Drafting recap...' : recapError || (recapSource ? `Draft: ${recapSource}` : '')}
+            </span>
+            <button onClick={async () => {
+              setRecapLoading(true);
+              setRecapError('');
+              try {
+                const result = await adminFetch('/admin/dispatch/recap-preview', {
+                  method: 'POST',
+                  body: JSON.stringify({
+                    notes,
+                    visitOutcome,
+                    serviceType: service.serviceType,
+                    areasTreated: areasServiced,
+                    willInvoice,
+                    willReview,
+                  }),
+                });
+                if (result.recap) {
+                  setCustomerRecap(result.recap);
+                  setRecapSource(result.source || '');
+                }
+              } catch (err) {
+                setRecapError(err.message || 'Could not draft recap');
+              } finally {
+                setRecapLoading(false);
+              }
+            }} disabled={recapLoading} style={{
+              ...btnBase, width: 'auto', height: 36, padding: '0 14px',
+              background: 'transparent', color: D.teal, border: `1px solid ${D.teal}44`,
+              opacity: recapLoading ? 0.5 : 1,
+            }}>Regenerate</button>
+          </div>
+
+          {sendSms && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={labelStyle}>Customer SMS Preview</label>
+              <div style={{
+                background: D.card, border: `1px solid ${D.border}`, borderRadius: 10,
+                padding: 12, color: D.text, fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap',
+              }}>
+                {smsPreview || 'Add notes to preview the customer message.'}
               </div>
             </div>
           )}

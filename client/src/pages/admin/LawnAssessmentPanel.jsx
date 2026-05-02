@@ -39,9 +39,11 @@ function resizeImage(dataUrl, maxEdge = 1600, quality = 0.85) {
 
 // Allowed values mirror server/routes/admin-customer-turf-profile.js.
 // Keep them in sync — the API rejects anything outside the closed set.
+// sun_exposure uses 'heavy_shade' (not 'shade') so the value name
+// signals severity to the future plan engine.
 const TURF_PROFILE_OPTIONS = {
   grass_type: ['st_augustine', 'bermuda', 'zoysia', 'bahia', 'mixed', 'unknown'],
-  sun_exposure: ['full_sun', 'partial_shade', 'shade'],
+  sun_exposure: ['full_sun', 'partial_shade', 'heavy_shade'],
   irrigation_type: ['in_ground', 'manual', 'none', 'mixed'],
 };
 

@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
@@ -9,6 +10,8 @@ const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
+const CompletionRecap = require('../services/completion-recap');
+const CompletionAttempts = require('../services/completion-attempts');
 
 // Haversine ETA for the dispatch board tech cards. Returns a whole
 // number of minutes, or null when any input is missing or the tech is
@@ -54,7 +57,46 @@ function normalizeServiceTypeForTemplate(s) {
   return s.replace(/\s+services?$/i, '');
 }
 
+const VALID_VISIT_OUTCOMES = new Set([
+  'completed',
+  'inspection_only',
+  'customer_declined',
+  'follow_up_needed',
+  'customer_concern',
+  'incomplete',
+]);
+
+function parseJsonObject(value) {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+// POST /api/admin/dispatch/recap-preview
+router.post('/recap-preview', async (req, res, next) => {
+  try {
+    const result = await CompletionRecap.generateRecap(req.body || {});
+    res.json({
+      recap: result.recap,
+      source: result.source,
+      smsPreview: CompletionRecap.composeCompletionSmsPreview({
+        recap: result.recap,
+        willInvoice: !!req.body?.willInvoice,
+        willReview: !!req.body?.willReview && !req.body?.willInvoice,
+      }),
+    });
+  } catch (err) { next(err); }
+});
 
 // GET /api/admin/dispatch/today (or /:date)
 router.get('/:date?', async (req, res, next) => {
@@ -115,6 +157,9 @@ router.get('/:date?', async (req, res, next) => {
         customerConfirmed: s.customer_confirmed,
         waveguardTier: s.waveguard_tier,
         monthlyRate: parseFloat(s.monthly_rate || 0),
+        estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+        prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
+        createInvoiceOnComplete: !!s.create_invoice_on_complete,
         lawnType: s.lawn_type,
         propertyAlerts: alerts,
         lastServiceDate: lastService?.service_date || null,
@@ -305,8 +350,36 @@ router.put('/:serviceId/status', async (req, res, next) => {
 
 // POST /api/admin/dispatch/:serviceId/complete
 router.post('/:serviceId/complete', async (req, res, next) => {
+  let completionAttempt = null;
+  let markedSucceeded = false;
+  let durableCompletionCommitted = false;
   try {
-    const { technicianNotes, products, soilTemp, thatchMeasurement, soilPh, soilMoisture, sendCompletionSms, requestReview, formResponses, formStartedAt } = req.body;
+    const {
+      idempotencyKey: bodyIdempotencyKey,
+      technicianNotes,
+      customerRecap,
+      visitOutcome = 'completed',
+      reviewSuppression = null,
+      incompleteReason = null,
+      products,
+      soilTemp,
+      thatchMeasurement,
+      soilPh,
+      soilMoisture,
+      sendCompletionSms,
+      requestReview,
+      areasTreated,
+      areasServiced,
+      customerInteraction,
+      formResponses,
+      formStartedAt,
+    } = req.body;
+    if (!VALID_VISIT_OUTCOMES.has(visitOutcome)) {
+      return res.status(400).json({
+        error: `visitOutcome must be one of: ${Array.from(VALID_VISIT_OUTCOMES).join(', ')}`,
+      });
+    }
+    const completionAreas = Array.isArray(areasTreated) ? areasTreated : (Array.isArray(areasServiced) ? areasServiced : []);
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
@@ -314,6 +387,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       .first();
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    const rawIdempotencyKey = req.get('Idempotency-Key') || bodyIdempotencyKey
+      || `legacy_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
+    const idempotencyKey = String(rawIdempotencyKey).trim().slice(0, 120);
+    const claim = await CompletionAttempts.claimCompletionAttempt({
+      serviceId: svc.id,
+      idempotencyKey,
+      requestHash: CompletionAttempts.hashCompletionRequest(req.body),
+    });
+    if (claim.action === 'replay') return res.json(claim.payload);
+    if (claim.action === 'conflict') return res.status(claim.status).json(claim.payload);
+    completionAttempt = claim.attempt;
+    const resumingCommittedCompletion = claim.action === 'resume';
 
     // Status flip + completion artifacts + audit row + lifecycle
     // timestamps, all in one trx. Migrated to
@@ -340,8 +426,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const fromStatus = svc.status;
     const { transitionJobStatus } = require('../services/job-status');
     let record;
-    try {
-      await db.transaction(async (trx) => {
+    if (resumingCommittedCompletion) {
+      record = await db('service_records').where({ id: claim.serviceRecordId }).first();
+      if (!record) {
+        return res.status(409).json({
+          error: 'Completion resume state is missing its service record. Refresh and contact support if this continues.',
+          code: 'completion_resume_missing_record',
+        });
+      }
+      durableCompletionCommitted = true;
+    } else {
+      try {
+        await db.transaction(async (trx) => {
         // 1. service_record — the canonical "completion happened" audit.
         // scheduled_service_id is the FK back to the source row so
         // downstream code (e.g., tech-track's photo upload) can resolve
@@ -353,20 +449,49 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           customer_id: svc.customer_id, technician_id: svc.technician_id,
           service_date: svc.scheduled_date, service_type: svc.service_type, status: 'completed',
           technician_notes: technicianNotes || '',
+          structured_notes: {
+            visitOutcome,
+            requestReview: requestReview !== false,
+            reviewSuppression,
+            incompleteReason,
+            customerRecap: customerRecap || null,
+          },
+          areas_serviced: completionAreas,
+          customer_interaction: customerInteraction || null,
           soil_temp: soilTemp || null, thatch_measurement: thatchMeasurement || null,
           soil_ph: soilPh || null, soil_moisture: soilMoisture || null,
         }).returning('*');
 
         // 2. service_products — children of the service_record.
         if (products?.length) {
+          const seenProductIds = new Set();
+          const validRateUnits = new Set(['oz', 'ml', 'g', 'lb', 'gal', 'oz/gal', 'oz/1000sf', 'lb/1000sf', 'g/1000sf']);
           for (const p of products) {
-            const product = p.productId ? await trx('products_catalog').where({ id: p.productId }).first() : null;
+            if (!p.productId) continue;
+            if (seenProductIds.has(p.productId)) continue;
+            seenProductIds.add(p.productId);
+            if (p.rateUnit && !validRateUnits.has(String(p.rateUnit).toLowerCase())) {
+              const err = new Error(`Invalid product unit for ${p.name || p.productId}`);
+              err.isOperational = true; err.statusCode = 400;
+              throw err;
+            }
+            const product = await trx('products_catalog').where({ id: p.productId }).first();
+            if (!product) {
+              const err = new Error(`Product not found: ${p.productId}`);
+              err.isOperational = true; err.statusCode = 400;
+              throw err;
+            }
+            if (product.active === false) {
+              const err = new Error(`Product is inactive: ${product.name}`);
+              err.isOperational = true; err.statusCode = 400;
+              throw err;
+            }
             await trx('service_products').insert({
               service_record_id: record.id,
-              product_name: product?.name || p.name || 'Unknown',
-              product_category: product?.category || p.category || null,
-              active_ingredient: product?.active_ingredient || null,
-              moa_group: product?.moa_group || null,
+              product_name: product.name,
+              product_category: product.category || p.category || null,
+              active_ingredient: product.active_ingredient || null,
+              moa_group: product.moa_group || null,
               application_rate: p.rate ? parseFloat(p.rate) : null,
               rate_unit: p.rateUnit || null,
               total_amount: p.totalAmount ? parseFloat(p.totalAmount) : null,
@@ -403,15 +528,72 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           transitionedBy: req.technicianId,
           trx,
         });
+
+        const { createAlert } = require('../services/dispatch-alerts');
+        const alertBase = {
+          techId: svc.technician_id,
+          jobId: svc.id,
+          trx,
+          payload: {
+            status: 'open',
+            serviceRecordId: record.id,
+            visitOutcome,
+            customerId: svc.customer_id,
+            customerName: `${svc.first_name || ''} ${svc.last_name || ''}`.trim(),
+            serviceType: svc.service_type,
+            note: technicianNotes || null,
+          },
+        };
+        if (visitOutcome === 'customer_concern') {
+          await createAlert({ ...alertBase, type: 'customer_concern', severity: 'warn' });
+        }
+        if (visitOutcome === 'follow_up_needed') {
+          await createAlert({ ...alertBase, type: 'follow_up_needed', severity: 'info' });
+        }
+        if (visitOutcome === 'incomplete') {
+          await createAlert({
+            ...alertBase,
+            type: 'follow_up_needed',
+            severity: 'warn',
+            payload: { ...alertBase.payload, incompleteReason: incompleteReason || null },
+          });
+        }
+
+        // The durable completion artifacts are committed, but billing /
+        // SMS / review side effects still need to run after commit. Keep
+        // the attempt resumable until those side effects finish so a
+        // process restart can continue from the service_record instead
+        // of replaying a partial success response.
+        await CompletionAttempts.markCompletionAttemptSideEffectsPending(
+          completionAttempt,
+          {
+            record,
+            response: {
+              success: true,
+              serviceRecordId: record.id,
+              invoiceId: null,
+              invoiceTotal: null,
+            },
+          },
+          trx
+        );
       });
-    } catch (err) {
-      if (err && err.message && err.message.includes('not in state')) {
-        return res.status(409).json({
-          error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
-        });
+        durableCompletionCommitted = true;
+      } catch (err) {
+        if (err && err.message && err.message.includes('not in state')) {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);
+          return res.status(409).json({
+            error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
+          });
+        }
+        throw err;
       }
-      throw err;
     }
+
+    // The durable completion artifacts are committed. On normal first
+    // execution we can now run best-effort follow-up alerts and tracking;
+    // on resume we skip those already-committed/operational side paths and
+    // continue the customer-visible billing/SMS/review side effects below.
 
     // MOA-rotation violation detector (third dispatch alert generator).
     // checkLimits looks at property_application_history for past
@@ -429,7 +611,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // in the same MOA group; we only fire one alert per MOA group per
     // job. Without this guard a 3-product completion in the same
     // violating group would create 3 identical cards.
-    if (products?.length) {
+    if (!resumingCommittedCompletion && products?.length) {
       try {
         const LimitChecker = require('../services/application-limits');
         const { createAlert } = require('../services/dispatch-alerts');
@@ -496,12 +678,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     // Customer-visible track_state → 'complete' so /track/:token renders the
     // summary card. track_state is owned by services/track-transitions.js.
-    try {
-      await trackTransitions.markComplete(svc.id, {
-        actorType: 'admin',
-        actorId: req.technicianId,
-      });
-    } catch (e) { logger.error(`[admin-dispatch] markComplete failed: ${e.message}`); }
+    if (!resumingCommittedCompletion) {
+      try {
+        await trackTransitions.markComplete(svc.id, {
+          actorType: 'admin',
+          actorId: req.technicianId,
+        });
+      } catch (e) { logger.error(`[admin-dispatch] markComplete failed: ${e.message}`); }
+    }
 
     // Invoice + completion SMS:
     //   - If the appointment was flagged `create_invoice_on_complete` (scheduler's
@@ -513,12 +697,43 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       : (svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
     // Skip invoice creation if a paid invoice already exists for this service record
     // (covers the "customer paid prior to service report" case)
+    let invoiceCreated = false;
+    let payUrl = null;
+    let invoice = null;
     let alreadyPaid = false;
     try {
       const existingPaid = await db('invoices')
         .where({ service_record_id: record.id, status: 'paid' })
         .first();
       if (existingPaid) alreadyPaid = true;
+    } catch (e) { /* non-blocking */ }
+    let existingCompletionInvoice = null;
+    try {
+      existingCompletionInvoice = await db('invoices')
+        .where({ service_record_id: record.id })
+        .whereNot('status', 'void')
+        .orderBy('created_at', 'desc')
+        .first();
+      if (!existingCompletionInvoice) {
+        existingCompletionInvoice = await db('invoices')
+          .where({ scheduled_service_id: svc.id })
+          .whereNot('status', 'void')
+          .orderBy('created_at', 'desc')
+          .first();
+        if (existingCompletionInvoice && !existingCompletionInvoice.service_record_id) {
+          await db('invoices').where({ id: existingCompletionInvoice.id }).update({
+            service_record_id: record.id,
+            technician_id: svc.technician_id || existingCompletionInvoice.technician_id || null,
+            updated_at: new Date(),
+          });
+        }
+      }
+      if (existingCompletionInvoice) {
+        invoice = existingCompletionInvoice;
+        payUrl = existingCompletionInvoice.token ? `${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/pay/${existingCompletionInvoice.token}` : null;
+        if (existingCompletionInvoice.status === 'paid') alreadyPaid = true;
+        else invoiceCreated = true;
+      }
     } catch (e) { /* non-blocking */ }
     // If the admin/tech marked this visit prepaid (cash, Zelle, phone CC, etc.)
     // and the recorded amount covers the would-be invoice, skip auto-invoicing.
@@ -535,16 +750,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         .orderBy('created_at', 'desc')
         .first();
     } catch (e) { /* column may not exist pre-migration — non-blocking */ }
-    const shouldInvoice = !alreadyPaid && !prepaidCovered && !preMintedInvoice
+    const shouldInvoice = !alreadyPaid && !prepaidCovered && !preMintedInvoice && !existingCompletionInvoice
       && (!!svc.create_invoice_on_complete || !!svc.cust_waveguard_tier) && invoiceAmount > 0;
     // Customer-facing SMS URL must be the canonical portal domain, not
     // the raw Railway URL (CLIENT_URL is set to the Railway hostname on
     // prod for app-internal redirects). PORTAL_URL can override for dev.
     const portalUrl = process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com';
 
-    let invoiceCreated = false;
-    let payUrl = null;
-    let invoice = null;
     if (shouldInvoice) {
       try {
         const InvoiceService = require('../services/invoice');
@@ -579,8 +791,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // mint the review row now and bundle its short URL into the one completion
     // SMS instead of firing a second message 90-180 min later. Single message
     // lands higher read-rates than two.
+    const invoiceBlocksReview = !!invoice && invoice.status !== 'paid';
+    const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
+    const effectiveRequestReview = !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview;
+
     let bundledReviewUrl = null;
-    if (sendCompletionSms && requestReview && svc.cust_phone) {
+    if (sendCompletionSms && effectiveRequestReview && svc.cust_phone) {
       try {
         const ReviewService = require('../services/review-request');
         bundledReviewUrl = await ReviewService.createInline({
@@ -593,9 +809,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       ? `\n\nEnjoyed the service? A quick review means the world: ${bundledReviewUrl}`
       : '';
 
-    if (sendCompletionSms && svc.cust_phone) {
+    const recordStructuredNotes = parseJsonObject(record.structured_notes);
+    const completionSmsAttemptedAt = recordStructuredNotes.completionSmsAttemptedAt
+      ? new Date(recordStructuredNotes.completionSmsAttemptedAt).getTime()
+      : 0;
+    const completionSmsSendingFresh = recordStructuredNotes.completionSmsStatus === 'sending'
+      && completionSmsAttemptedAt
+      && Date.now() - completionSmsAttemptedAt < 10 * 60 * 1000;
+    const completionSmsAlreadyHandled = !!recordStructuredNotes.sentSmsBody
+      || recordStructuredNotes.completionSmsStatus === 'sent'
+      || completionSmsSendingFresh;
+
+    if (sendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled) {
       try {
         const displayServiceType = normalizeServiceTypeForTemplate(svc.service_type);
+        const recapText = (customerRecap || '').trim();
+        const withRecap = (body) => recapText ? `${recapText}\n\n${body}` : body;
+        let sentSmsBody = null;
+        let sentSmsType = null;
         if (invoiceCreated && payUrl) {
           const fallback = `Hello ${svc.first_name}! Your ${displayServiceType} service report is ready: ${portalUrl}\n\nInvoice for today's visit: ${payUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = await renderTemplate('service_complete_with_invoice', {
@@ -604,7 +835,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             portal_url: portalUrl,
             pay_url: payUrl,
           }, fallback);
-          await TwilioService.sendSMS(svc.cust_phone, body + reviewSuffix, { customerId: svc.customer_id, messageType: 'service_complete_with_invoice' });
+          sentSmsType = 'service_complete_with_invoice';
+          sentSmsBody = withRecap(body + reviewSuffix);
         } else if (prepaidCovered || alreadyPaid) {
           const fallback = `Hello ${svc.first_name}! Thanks for your payment today. Your ${displayServiceType} service report is ready: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = await renderTemplate('service_complete_prepaid', {
@@ -612,18 +844,58 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             service_type: displayServiceType,
             portal_url: portalUrl,
           }, fallback);
-          await TwilioService.sendSMS(svc.cust_phone, body + reviewSuffix, { customerId: svc.customer_id, messageType: 'service_complete_prepaid' });
+          sentSmsType = 'service_complete_prepaid';
+          sentSmsBody = withRecap(body + reviewSuffix);
         } else {
           const fallback = `Hello ${svc.first_name}! Your service report is ready. View it here: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = await renderTemplate('service_complete', { first_name: svc.first_name || '' }, fallback);
-          await TwilioService.sendSMS(svc.cust_phone, body + reviewSuffix, { customerId: svc.customer_id, messageType: 'service_complete' });
+          sentSmsType = 'service_complete';
+          sentSmsBody = withRecap(body + reviewSuffix);
+        }
+        if (sentSmsBody) {
+          const sendingNotes = {
+            ...recordStructuredNotes,
+            completionSmsStatus: 'sending',
+            completionSmsType: sentSmsType,
+            completionSmsBody: sentSmsBody,
+            completionSmsAttemptedAt: new Date().toISOString(),
+          };
+          await db('service_records').where({ id: record.id }).update({
+            structured_notes: sendingNotes,
+          });
+          try {
+            await TwilioService.sendSMS(svc.cust_phone, sentSmsBody, { customerId: svc.customer_id, messageType: sentSmsType });
+          } catch (smsErr) {
+            await db('service_records').where({ id: record.id }).update({
+              structured_notes: {
+                ...sendingNotes,
+                completionSmsStatus: 'failed',
+                completionSmsError: smsErr.message,
+                completionSmsFailedAt: new Date().toISOString(),
+              },
+            });
+            throw smsErr;
+          }
+          const sentNotes = {
+            ...sendingNotes,
+            completionSmsStatus: 'sent',
+            sentSmsBody,
+            sentSmsAt: new Date().toISOString(),
+            sentSmsType,
+          };
+          await db('service_records').where({ id: record.id }).update({
+            structured_notes: sentNotes,
+          });
+          record.structured_notes = sentNotes;
         }
       } catch (e) { logger.error(`Completion SMS failed: ${e.message}`); }
+    } else if (sendCompletionSms && svc.cust_phone && completionSmsAlreadyHandled) {
+      logger.info(`[dispatch] Completion SMS already sent for service_record ${record.id}; skipping retry send`);
     }
 
     // Only schedule the delayed follow-up message when the review wasn't
     // already bundled into the completion SMS above.
-    if (requestReview && svc.cust_phone && !bundledReviewUrl) {
+    if (effectiveRequestReview && svc.cust_phone && !bundledReviewUrl) {
       try {
         const ReviewService = require('../services/review-request');
         await ReviewService.create({
@@ -635,14 +907,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (e) { logger.error(`[dispatch] Review request schedule failed: ${e.message}`); }
     }
 
-    await db('activity_log').insert({
-      admin_user_id: req.technicianId, customer_id: svc.customer_id,
-      action: 'service_completed',
-      description: `${svc.tech_name} completed ${svc.service_type} for ${svc.first_name} ${svc.last_name}`,
-    });
+    if (!resumingCommittedCompletion) {
+      try {
+        await db('activity_log').insert({
+          admin_user_id: req.technicianId, customer_id: svc.customer_id,
+          action: 'service_completed',
+          description: `${svc.tech_name} completed ${svc.service_type} for ${svc.first_name} ${svc.last_name}`,
+        });
+      } catch (e) {
+        logger.error(`[dispatch] activity log insert failed after completion: ${e.message}`);
+      }
+    }
 
     // Job form submission (non-blocking)
-    if (formResponses) {
+    if (!resumingCommittedCompletion && formResponses) {
       try {
         const JobForm = require('../services/job-form');
         await JobForm.saveSubmission({
@@ -658,20 +936,41 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     }
 
     // Job costing (non-blocking, fire-and-forget)
-    try {
-      const JobCosting = require('../services/job-costing');
-      JobCosting.calculateJobCost(svc.id).catch(e =>
-        logger.error(`[dispatch] Job cost calc failed: ${e.message}`)
-      );
-    } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }
+    if (!resumingCommittedCompletion) {
+      try {
+        const JobCosting = require('../services/job-costing');
+        void JobCosting.calculateJobCost(svc.id).catch(e =>
+          logger.error(`[dispatch] Job cost calc failed: ${e.message}`)
+        );
+      } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }
+    }
 
-    res.json({
+    const responsePayload = {
       success: true,
       serviceRecordId: record.id,
       invoiceId: invoice?.id || null,
       invoiceTotal: invoice?.total != null ? Number(invoice.total) : null,
-    });
-  } catch (err) { next(err); }
+    };
+    // Refresh the stored response with the final invoice info — this is an
+    // UPDATE of an already-succeeded row (set above immediately after the
+    // trx commit), not a state transition.
+    await CompletionAttempts.markCompletionAttemptSucceeded(completionAttempt, { record, invoice, response: responsePayload });
+    markedSucceeded = true;
+    res.json(responsePayload);
+  } catch (err) {
+    // Only mark failed if we haven't already marked succeeded. After the
+    // durable trx commits and the attempt is succeeded, an unhandled throw
+    // in a recoverable side effect must NOT flip it back — that would
+    // allow a retry to re-create service_record / invoice / SMS.
+    if (!markedSucceeded && !durableCompletionCommitted) {
+      await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);
+    } else {
+      logger.error(
+        `[dispatch] Post-commit error in /complete (attempt ${completionAttempt?.id} remains resumable): ${err.message}`
+      );
+    }
+    next(err);
+  }
 });
 
 // PUT /api/admin/dispatch/:serviceId/reorder
