@@ -1041,6 +1041,8 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const [saving, setSaving] = useState(false);
   const [sendAfterCreate, setSendAfterCreate] = useState(true);
   const [requestReview, setRequestReview] = useState(false);
+  const [reviewTiming, setReviewTiming] = useState('120');
+  const [reviewCustomAt, setReviewCustomAt] = useState('');
   const [serviceSearchIdx, setServiceSearchIdx] = useState(null);
   const [serviceResults, setServiceResults] = useState([]);
   const [availableDiscounts, setAvailableDiscounts] = useState([]);
@@ -1194,9 +1196,28 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const tax = afterDiscount * taxRate;
   const total = afterDiscount + tax;
 
+  const reviewDelayMinutes = () => {
+    if (!requestReview) return null;
+    if (reviewTiming === 'now') return 0;
+    if (reviewTiming === 'tomorrow_8') {
+      const target = new Date();
+      target.setDate(target.getDate() + 1);
+      target.setHours(8, 0, 0, 0);
+      return Math.max(0, Math.ceil((target.getTime() - Date.now()) / 60000));
+    }
+    if (reviewTiming === 'custom') {
+      const target = new Date(reviewCustomAt);
+      if (Number.isNaN(target.getTime())) return null;
+      return Math.max(0, Math.ceil((target.getTime() - Date.now()) / 60000));
+    }
+    return Number(reviewTiming) || 120;
+  };
+
   const handleCreate = async () => {
     if (!selectedCustomer) { showToast('Select a customer'); return; }
     if (!lineItems.some(i => i._kind !== 'discount' && i.description && i.unit_price > 0)) { showToast('Add at least one line item'); return; }
+    const reviewDelay = reviewDelayMinutes();
+    if (sendAfterCreate && requestReview && reviewDelay === null) { showToast('Choose a review request time'); return; }
     setSaving(true);
 
     try {
@@ -1214,7 +1235,11 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
       if (sendAfterCreate && invoice.id) {
         await adminFetch(`/admin/invoices/${invoice.id}/send`, {
           method: 'POST',
-          body: JSON.stringify({ requestReview }),
+          body: JSON.stringify({
+            requestReview,
+            reviewDelayMinutes: reviewDelay,
+            reviewTiming,
+          }),
         });
         showToast(`Invoice created & sent: ${invoice.invoice_number}`);
       } else {
@@ -1376,10 +1401,36 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             <label htmlFor="send-toggle" style={{ fontSize: 13, color: D.text }}>Send via SMS + email immediately after creating</label>
           </div>
 
-          {/* Review request toggle */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, opacity: sendAfterCreate ? 1 : 0.5 }}>
-            <input type="checkbox" checked={requestReview} onChange={e => setRequestReview(e.target.checked)} disabled={!sendAfterCreate} id="review-toggle" />
-            <label htmlFor="review-toggle" style={{ fontSize: 13, color: D.text }}>Send review request (2hr delay)</label>
+          {/* Review request timing */}
+          <div style={{ marginBottom: 16, opacity: sendAfterCreate ? 1 : 0.5 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: requestReview ? 8 : 0 }}>
+              <input type="checkbox" checked={requestReview} onChange={e => setRequestReview(e.target.checked)} disabled={!sendAfterCreate} id="review-toggle" />
+              <label htmlFor="review-toggle" style={{ fontSize: 13, color: D.text }}>Send review request</label>
+            </div>
+            {requestReview && (
+              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 8, paddingLeft: 22 }}>
+                <select
+                  value={reviewTiming}
+                  onChange={e => setReviewTiming(e.target.value)}
+                  disabled={!sendAfterCreate}
+                  style={sInput(isMobile)}
+                >
+                  <option value="now">Now</option>
+                  <option value="120">In 2 hours</option>
+                  <option value="tomorrow_8">Tomorrow at 8 AM</option>
+                  <option value="custom">Custom time</option>
+                </select>
+                {reviewTiming === 'custom' && (
+                  <input
+                    type="datetime-local"
+                    value={reviewCustomAt}
+                    onChange={e => setReviewCustomAt(e.target.value)}
+                    disabled={!sendAfterCreate}
+                    style={sInput(isMobile)}
+                  />
+                )}
+              </div>
+            )}
           </div>
 
           <button onClick={handleCreate} disabled={saving} style={{ ...sBtn('#111', D.white, isMobile), width: '100%', padding: 14, minHeight: isMobile ? 48 : undefined, opacity: saving ? 0.5 : 1 }}>

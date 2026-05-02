@@ -26,6 +26,105 @@ async function nextInvoiceNumber() {
   return `${prefix}${String(num).padStart(4, '0')}`;
 }
 
+function normalizeInvoiceLineItems(lineItems = []) {
+  return lineItems.map(item => {
+    const quantity = Number(item.quantity) || 1;
+    const unitPrice = Number(item.unit_price) || 0;
+    return {
+      ...item,
+      quantity,
+      unit_price: unitPrice,
+      amount: Math.round(quantity * unitPrice * 100) / 100,
+    };
+  });
+}
+
+async function calculateUpdateFinancials({ lineItems, customer, invoice, taxRate }) {
+  const items = normalizeInvoiceLineItems(lineItems);
+  const subtotal = Math.round(items.reduce((sum, item) => {
+    const amount = Number(item.amount ?? ((Number(item.quantity) || 1) * (Number(item.unit_price) || 0)));
+    return amount > 0 ? sum + amount : sum;
+  }, 0) * 100) / 100;
+  const serviceLineByClientId = new Map(
+    items
+      .filter(item => Number(item.amount) > 0 && item.client_id)
+      .map(item => [String(item.client_id), item])
+  );
+
+  let tierDiscount;
+  try {
+    tierDiscount = await DiscountEngine.getDiscountForTier(customer?.waveguard_tier);
+  } catch {
+    tierDiscount = TIER_DISCOUNTS_FALLBACK[customer?.waveguard_tier] || 0;
+  }
+  const tierDiscountAmount = Math.round(subtotal * tierDiscount * 100) / 100;
+  const tierDiscountLabel = tierDiscount > 0
+    ? `${customer.waveguard_tier} WaveGuard — ${Math.round(tierDiscount * 100)}% off`
+    : null;
+
+  const lineItemDiscountIds = items
+    .filter(item => Number(item.amount) < 0 && item.discount_id)
+    .map(item => item.discount_id);
+  const lineItemDiscountRows = lineItemDiscountIds.length
+    ? await db('discounts')
+        .whereIn('id', lineItemDiscountIds)
+        .where({ is_active: true, show_in_invoices: true, is_waveguard_tier_discount: false })
+    : [];
+  const lineItemDiscountRowById = new Map(lineItemDiscountRows.map(row => [String(row.id), row]));
+  const lineItemDiscountAmount = items
+    .filter(item => Number(item.amount) < 0)
+    .reduce((sum, item) => {
+      const row = item.discount_id ? lineItemDiscountRowById.get(String(item.discount_id)) : null;
+      const parent = item.discount_for ? serviceLineByClientId.get(String(item.discount_for)) : null;
+      if (!row || !parent) {
+        if (item.discount_id || item.discount_for) throw new Error('Invalid line-item discount');
+        return sum + Math.round(Math.abs(Number(item.amount) || 0) * 100) / 100;
+      }
+
+      const parentAmount = Math.max(0, Number(parent.amount) || 0);
+      const amt = Number(row.amount) || 0;
+      let dollars = 0;
+      if (row.discount_type === 'percentage' || row.discount_type === 'variable_percentage') {
+        dollars = Math.round(parentAmount * (amt / 100) * 100) / 100;
+        if (row.max_discount_dollars) dollars = Math.min(dollars, Number(row.max_discount_dollars));
+      } else if (row.discount_type === 'fixed_amount' || row.discount_type === 'variable_amount') {
+        dollars = amt;
+      } else if (row.discount_type === 'free_service') {
+        dollars = parentAmount;
+      }
+      dollars = Math.min(parentAmount, Math.max(0, Math.round(dollars * 100) / 100));
+      item.quantity = 1;
+      item.unit_price = -dollars;
+      item.amount = -dollars;
+      return sum + dollars;
+    }, 0);
+
+  const discountAmount = Math.min(subtotal, Math.round((tierDiscountAmount + lineItemDiscountAmount) * 100) / 100);
+  const afterDiscount = subtotal - discountAmount;
+  const isCommercial = customer?.property_type === 'commercial' || customer?.property_type === 'business';
+  let rate = 0;
+  let taxAmount = 0;
+  if (isCommercial) {
+    const defaultRate = invoice?.tax_rate != null ? Number(invoice.tax_rate) : 0.07;
+    rate = taxRate !== undefined ? Number(taxRate) : defaultRate;
+    taxAmount = Math.round(afterDiscount * rate * 100) / 100;
+  }
+  const labelParts = [
+    tierDiscountLabel,
+    lineItemDiscountAmount > 0 ? 'Line-item discounts' : null,
+  ].filter(Boolean);
+
+  return {
+    line_items: JSON.stringify(items),
+    subtotal,
+    discount_amount: discountAmount,
+    discount_label: labelParts.length ? labelParts.join(' + ') : null,
+    tax_rate: rate,
+    tax_amount: taxAmount,
+    total: Math.round((afterDiscount + taxAmount) * 100) / 100,
+  };
+}
+
 // WaveGuard tier discount percentages — now loaded from discount engine DB
 // Fallback map only used if discount-engine import fails
 const TIER_DISCOUNTS_FALLBACK = { 'One-Time': 0, Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
@@ -703,37 +802,20 @@ const InvoiceService = {
       }
     }
 
-    // Recalculate totals if line items changed
+    // Recalculate totals if line items changed. This mirrors the hardened
+    // create() rules: subtotal only counts positive service rows, negative
+    // discount rows are scoped to their parent line item, and residential
+    // tax is always forced to zero.
     if (updates.line_items) {
       const invoice = await db('invoices').where({ id }).first();
+      if (!invoice) return null;
       const customer = await db('customers').where({ id: invoice.customer_id }).first();
-      const items = updates.line_items;
-      const subtotal = items.reduce((sum, i) => sum + (i.quantity * i.unit_price), 0);
-      let tierDiscount;
-      try {
-        tierDiscount = await DiscountEngine.getDiscountForTier(customer?.waveguard_tier);
-      } catch {
-        tierDiscount = TIER_DISCOUNTS_FALLBACK[customer?.waveguard_tier] || 0;
-      }
-      const discountAmount = Math.round(subtotal * tierDiscount * 100) / 100;
-      const afterDiscount = subtotal - discountAmount;
-      // Residential customers are never taxed — force 0 regardless of
-      // what was stored or what the caller passed. Matches the guard in
-      // create() above.
-      const isCommercial = customer?.property_type === 'commercial' || customer?.property_type === 'business';
-      let rate = 0;
-      let taxAmount = 0;
-      if (isCommercial) {
-        const defaultRate = 0.07;
-        rate = updates.tax_rate !== undefined ? updates.tax_rate : (invoice.tax_rate != null ? Number(invoice.tax_rate) : defaultRate);
-        taxAmount = Math.round(afterDiscount * rate * 100) / 100;
-      }
-      data.subtotal = subtotal;
-      data.discount_amount = discountAmount;
-      data.discount_label = tierDiscount > 0 ? `${customer.waveguard_tier} WaveGuard — ${Math.round(tierDiscount * 100)}% off` : null;
-      data.tax_rate = rate;
-      data.tax_amount = taxAmount;
-      data.total = Math.round((afterDiscount + taxAmount) * 100) / 100;
+      Object.assign(data, await calculateUpdateFinancials({
+        lineItems: updates.line_items,
+        customer,
+        invoice,
+        taxRate: updates.tax_rate,
+      }));
     }
 
     const [invoice] = await db('invoices').where({ id }).update(data).returning('*');

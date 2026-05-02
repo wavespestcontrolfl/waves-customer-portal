@@ -305,7 +305,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           if (cancelled) return;
           setElementError(event.error?.message || null);
           const nextMethod = event.value?.type || null;
-          if (nextMethod && nextMethod !== selectedMethod) {
+          if (nextMethod) {
             setSelectedMethod(nextMethod);
             syncAmountForMethod(nextMethod);
           }

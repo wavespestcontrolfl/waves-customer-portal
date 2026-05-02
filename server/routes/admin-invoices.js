@@ -8,6 +8,17 @@ const { etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+function parseReviewDelayMinutes(body = {}) {
+  if (!body.requestReview) return null;
+  const raw = body.reviewDelayMinutes;
+  if (raw === undefined || raw === null || raw === '') return 120;
+  const minutes = Number(raw);
+  if (!Number.isFinite(minutes)) return 120;
+  const rounded = Math.max(0, Math.round(minutes));
+  const maxDelayMinutes = 60 * 24 * 30;
+  return Math.min(rounded, maxDelayMinutes);
+}
+
 // GET /stats
 router.get('/stats', async (req, res, next) => {
   try {
@@ -312,6 +323,7 @@ router.post('/:id/send', async (req, res, next) => {
   try {
     const { id } = req.params;
     const { requestReview } = req.body || {};
+    const reviewDelayMinutes = parseReviewDelayMinutes(req.body || {});
     const { sendInvoiceEmail } = require('../services/invoice-email');
 
     const sms = { ok: false };
@@ -344,7 +356,7 @@ router.post('/:id/send', async (req, res, next) => {
             customerId: inv.customer_id,
             serviceRecordId: inv.service_record_id || null,
             triggeredBy: 'auto',
-            delayMinutes: 120,
+            delayMinutes: reviewDelayMinutes,
           });
         }
       } catch (err) {

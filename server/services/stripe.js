@@ -751,14 +751,12 @@ const StripeService = {
     const saveCard = !!opts.saveCard;
     const cardOnly = !!opts.cardOnly;
     const baseAmount = parseFloat(invoice.total);
-    // Card-only flow (admin manual card entry): bake the 3.99% surcharge
-    // into the PI up front since we already know the tender is card.
-    // The default non-card path leaves the PI at base amount and relies
-    // on /update-amount to add surcharge when the Payment Element
-    // change event fires.
+    // The pay page defaults to card/wallet, so mint the first PI with the
+    // card-family surcharge already applied. ACH selection still calls
+    // /update-amount and drops the PI back to the base invoice total.
     const { base: cardBase, surcharge: cardSurcharge, total: cardTotal } = cardOnly
       ? computeChargeAmount(baseAmount, 'card')
-      : { base: baseAmount, surcharge: 0, total: baseAmount };
+      : computeChargeAmount(baseAmount, 'card');
     const amountCents = Math.round(cardTotal * 100);
 
     const piParams = {
@@ -772,7 +770,7 @@ const StripeService = {
         base_amount: String(cardBase),
         card_surcharge: String(cardSurcharge),
         save_card_opt_in: saveCard ? 'true' : 'false',
-        selected_method_category: cardOnly ? 'card' : 'unknown',
+        selected_method_category: 'card',
       },
     };
     if (cardOnly) {
