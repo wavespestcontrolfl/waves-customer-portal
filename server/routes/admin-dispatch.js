@@ -796,7 +796,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       : '';
 
     const recordStructuredNotes = parseJsonObject(record.structured_notes);
-    const completionSmsAlreadyHandled = !!recordStructuredNotes.sentSmsBody;
+    const completionSmsAlreadyHandled = !!recordStructuredNotes.sentSmsBody
+      || recordStructuredNotes.completionSmsStatus === 'sent'
+      || recordStructuredNotes.completionSmsStatus === 'sending';
 
     if (sendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled) {
       try {
@@ -831,9 +833,32 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           sentSmsBody = withRecap(body + reviewSuffix);
         }
         if (sentSmsBody) {
-          await TwilioService.sendSMS(svc.cust_phone, sentSmsBody, { customerId: svc.customer_id, messageType: sentSmsType });
-          const sentNotes = {
+          const sendingNotes = {
             ...recordStructuredNotes,
+            completionSmsStatus: 'sending',
+            completionSmsType: sentSmsType,
+            completionSmsBody: sentSmsBody,
+            completionSmsAttemptedAt: new Date().toISOString(),
+          };
+          await db('service_records').where({ id: record.id }).update({
+            structured_notes: sendingNotes,
+          });
+          try {
+            await TwilioService.sendSMS(svc.cust_phone, sentSmsBody, { customerId: svc.customer_id, messageType: sentSmsType });
+          } catch (smsErr) {
+            await db('service_records').where({ id: record.id }).update({
+              structured_notes: {
+                ...sendingNotes,
+                completionSmsStatus: 'failed',
+                completionSmsError: smsErr.message,
+                completionSmsFailedAt: new Date().toISOString(),
+              },
+            });
+            throw smsErr;
+          }
+          const sentNotes = {
+            ...sendingNotes,
+            completionSmsStatus: 'sent',
             sentSmsBody,
             sentSmsAt: new Date().toISOString(),
             sentSmsType,
