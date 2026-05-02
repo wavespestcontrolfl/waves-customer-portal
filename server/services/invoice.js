@@ -153,7 +153,16 @@ const InvoiceService = {
         const row = item.discount_id ? lineItemDiscountRowById.get(String(item.discount_id)) : null;
         const parent = item.discount_for ? serviceLineByClientId.get(String(item.discount_for)) : null;
         if (!row || !parent) {
-          throw new Error('Invalid line-item discount');
+          if (item.discount_id || item.discount_for) {
+            throw new Error('Invalid line-item discount');
+          }
+          return {
+            row: null,
+            name: item.description || 'Line item discount',
+            discount_type: 'fixed_amount',
+            amount: Math.round(Math.abs(Number(item.amount) || 0) * 100) / 100,
+            dollars: Math.round(Math.abs(Number(item.amount) || 0) * 100) / 100,
+          };
         }
         const parentAmount = Math.max(0, Number(parent.amount) || 0);
         const amt = Number(row.amount) || 0;
