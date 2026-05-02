@@ -91,18 +91,19 @@ const InvoiceService = {
         ...item,
         quantity,
         unit_price: unitPrice,
-        amount: Math.round(Number(item.amount ?? quantity * unitPrice) * 100) / 100,
+        amount: Math.round(quantity * unitPrice * 100) / 100,
       };
     });
     const serviceSubtotal = items.reduce((sum, item) => {
       const amount = Number(item.amount ?? ((Number(item.quantity) || 1) * (Number(item.unit_price) || 0)));
       return amount > 0 ? sum + amount : sum;
     }, 0);
-    const lineItemDiscountAmount = Math.abs(items.reduce((sum, item) => {
-      const amount = Number(item.amount ?? ((Number(item.quantity) || 1) * (Number(item.unit_price) || 0)));
-      return amount < 0 ? sum + amount : sum;
-    }, 0));
     const subtotal = Math.round(serviceSubtotal * 100) / 100;
+    const serviceLineByClientId = new Map(
+      items
+        .filter(item => Number(item.amount) > 0 && item.client_id)
+        .map(item => [String(item.client_id), item])
+    );
 
     // Apply WaveGuard tier discount via discount engine
     let tierDiscount;
@@ -150,14 +151,34 @@ const InvoiceService = {
       .filter(item => Number(item.amount) < 0)
       .map(item => {
         const row = item.discount_id ? lineItemDiscountRowById.get(String(item.discount_id)) : null;
+        const parent = item.discount_for ? serviceLineByClientId.get(String(item.discount_for)) : null;
+        if (!row || !parent) {
+          throw new Error('Invalid line-item discount');
+        }
+        const parentAmount = Math.max(0, Number(parent.amount) || 0);
+        const amt = Number(row.amount) || 0;
+        let dollars = 0;
+        if (row.discount_type === 'percentage' || row.discount_type === 'variable_percentage') {
+          dollars = Math.round(parentAmount * (amt / 100) * 100) / 100;
+          if (row.max_discount_dollars) dollars = Math.min(dollars, Number(row.max_discount_dollars));
+        } else if (row.discount_type === 'fixed_amount' || row.discount_type === 'variable_amount') {
+          dollars = amt;
+        } else if (row.discount_type === 'free_service') {
+          dollars = parentAmount;
+        }
+        dollars = Math.min(parentAmount, Math.max(0, Math.round(dollars * 100) / 100));
+        item.quantity = 1;
+        item.unit_price = -dollars;
+        item.amount = -dollars;
         return {
           row,
-          name: row?.name || item.description || 'Line item discount',
-          discount_type: row?.discount_type || 'fixed_amount',
-          amount: row ? Number(row.amount) || 0 : Math.abs(Number(item.amount) || 0),
-          dollars: Math.round(Math.abs(Number(item.amount) || 0) * 100) / 100,
+          name: row.name,
+          discount_type: row.discount_type,
+          amount: Number(row.amount) || 0,
+          dollars,
         };
       });
+    const lineItemDiscountAmount = lineItemDiscounts.reduce((sum, item) => sum + item.dollars, 0);
     const manualDiscountAmount = manualDiscounts.reduce((s, m) => s + m.dollars, 0)
       + lineItemDiscounts.reduce((s, m) => s + m.dollars, 0);
 
@@ -319,7 +340,10 @@ const InvoiceService = {
       }
       // Also record any non-tier discounts auto-applied or assigned to this customer
       // (kept for backwards compatibility — these don't reduce the invoice total).
-      const manualIds = new Set(manualDiscounts.map(m => m.row.id));
+      const manualIds = new Set([
+        ...manualDiscounts.map(m => m.row.id),
+        ...scaledLineItemDiscounts.map(m => m.row?.id).filter(Boolean),
+      ]);
       const extraResult = await DiscountEngine.calculateDiscounts(customerId, { subtotal, isEstimate: false });
       const extraToRecord = extraResult.discounts.filter(d => !manualIds.has(d.id));
       if (extraToRecord.length > 0) {
