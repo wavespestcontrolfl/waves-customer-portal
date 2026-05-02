@@ -777,7 +777,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // mint the review row now and bundle its short URL into the one completion
     // SMS instead of firing a second message 90-180 min later. Single message
     // lands higher read-rates than two.
-    const invoiceBlocksReview = invoiceCreated && !!invoice;
+    const invoiceBlocksReview = !!invoice && invoice.status !== 'paid';
     const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
     const effectiveRequestReview = !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview;
 
