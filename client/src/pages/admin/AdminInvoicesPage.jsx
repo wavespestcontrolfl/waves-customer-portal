@@ -1113,6 +1113,10 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
     const parent = lineItems[lineIdx];
     if (!parent || parent._kind === 'discount') return;
     const baseAmount = Math.max(0, lineAmount(parent));
+    if (!parent.description || baseAmount <= 0) {
+      showToast('Choose a service and enter a price before applying a discount');
+      return;
+    }
     const dollars = Math.min(baseAmount, Math.round(previewDiscount(discount, baseAmount) * 100) / 100);
     if (dollars <= 0) { showToast('Discount has no amount for this line'); return; }
     const discountItem = {
@@ -1283,11 +1287,27 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             </div>
           )}
 
-          {/* Line Items */}
+          {/* Services */}
           <div style={{ marginBottom: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 12, marginBottom: 8, flexWrap: 'wrap' }}>
+              <div>
+                <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8 }}>Services</div>
+                <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+                  Search the Services catalog, then add a per-line discount from Services &gt; Discounts.
+                </div>
+              </div>
+              <a href="/admin/service-library?tab=discounts" style={{ fontSize: 12, color: D.teal, textDecoration: 'none', fontWeight: 700 }}>
+                Services &gt; Discounts
+              </a>
+            </div>
             {lineItems.map((item, i) => (
               <div key={item.client_id || i} style={{ display: 'flex', gap: 8, marginBottom: item._kind === 'discount' ? 4 : 8, alignItems: 'flex-start', flexWrap: isMobile ? 'wrap' : 'nowrap', paddingLeft: item._kind === 'discount' ? (isMobile ? 14 : 24) : 0 }}>
                 <div style={{ position: 'relative', flex: isMobile ? '1 1 100%' : 3 }}>
+                  {item._kind !== 'discount' && (
+                    <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 4 }}>
+                      Service
+                    </div>
+                  )}
                   <input
                     value={item.description}
                     onChange={e => updateLineItem(i, 'description', e.target.value)}
@@ -1297,9 +1317,13 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                     style={{ ...sInput(isMobile), color: item._kind === 'discount' ? D.green : D.text }}
                     readOnly={item._kind === 'discount'}
                   />
-                  {serviceSearchIdx === i && serviceResults.length > 0 && (
+                  {serviceSearchIdx === i && (lineItems[i]?.description || '').length >= 2 && (
                     <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, zIndex: 20, maxHeight: 240, overflow: 'auto', marginTop: 4, boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }}>
-                      {serviceResults.map(svc => (
+                      {serviceResults.length === 0 ? (
+                        <div style={{ padding: '10px 12px', color: D.muted, fontSize: 12 }}>
+                          No services match. Check Services catalog.
+                        </div>
+                      ) : serviceResults.map(svc => (
                         <div
                           key={svc.id}
                           onMouseDown={e => { e.preventDefault(); pickService(i, svc); }}
@@ -1321,10 +1345,22 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                     </div>
                   )}
                 </div>
-                <input type="number" value={item.quantity} onChange={e => updateLineItem(i, 'quantity', e.target.value)}
-                  min="1" readOnly={item._kind === 'discount'} style={{ ...sInput(isMobile), flex: isMobile ? '0 0 72px' : 0.5, textAlign: 'center' }} />
+                <div style={{ flex: isMobile ? '0 0 72px' : 0.5 }}>
+                  {item._kind !== 'discount' && (
+                    <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 4, textAlign: 'center' }}>
+                      Qty
+                    </div>
+                  )}
+                  <input type="number" value={item.quantity} onChange={e => updateLineItem(i, 'quantity', e.target.value)}
+                    min="1" readOnly={item._kind === 'discount'} style={{ ...sInput(isMobile), textAlign: 'center' }} />
+                </div>
                 <div style={{ position: 'relative', flex: 1 }}>
-                  <span style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: D.muted, fontSize: isMobile ? 16 : 13 }}>$</span>
+                  {item._kind !== 'discount' && (
+                    <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 4 }}>
+                      Price
+                    </div>
+                  )}
+                  <span style={{ position: 'absolute', left: 10, top: item._kind === 'discount' ? '50%' : (isMobile ? 43 : 37), transform: 'translateY(-50%)', color: D.muted, fontSize: isMobile ? 16 : 13 }}>$</span>
                   <input type="number" value={item.unit_price || ''} onChange={e => updateLineItem(i, 'unit_price', e.target.value)}
                     placeholder="0.00" step="0.01" readOnly={item._kind === 'discount'} style={{ ...sInput(isMobile), paddingLeft: 22, color: item._kind === 'discount' ? D.green : D.text }} />
                 </div>
@@ -1334,31 +1370,32 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                 {item._kind !== 'discount' && (
                   <div style={{ flexBasis: '100%', paddingLeft: isMobile ? 0 : 0, position: 'relative' }}>
                     <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 4 }}>
-                      Discount for this line item
+                      Services &gt; Discounts for this line item
                     </div>
                     <input
                       value={discountQueries[item.client_id || i] || ''}
-                      onChange={e => { setDiscountQueries(prev => ({ ...prev, [item.client_id || i]: e.target.value })); if (item.description && Number(item.unit_price) > 0 && availableDiscounts.length > 0) setDiscountSearchIdx(i); }}
-                      onFocus={() => { if (item.description && Number(item.unit_price) > 0 && availableDiscounts.length > 0) setDiscountSearchIdx(i); }}
+                      onChange={e => { setDiscountQueries(prev => ({ ...prev, [item.client_id || i]: e.target.value })); if (availableDiscounts.length > 0) setDiscountSearchIdx(i); }}
+                      onFocus={() => { if (availableDiscounts.length > 0) setDiscountSearchIdx(i); }}
                       onBlur={() => setTimeout(() => { setDiscountSearchIdx(prev => (prev === i ? null : prev)); }, 150)}
                       placeholder={
-                        !item.description
-                          ? 'Add a service description before choosing a discount'
-                          : !(Number(item.unit_price) > 0)
-                            ? 'Enter a price before choosing a discount'
-                            : availableDiscounts.length === 0
-                              ? 'No invoice discounts are available'
-                              : `Search discount for ${item.description}...`
+                        availableDiscounts.length === 0
+                          ? 'No invoice discounts are available'
+                          : `Search Services > Discounts${item.description ? ` for ${item.description}` : ''}...`
                       }
-                      disabled={!item.description || !(Number(item.unit_price) > 0) || availableDiscounts.length === 0}
+                      disabled={availableDiscounts.length === 0}
                       style={{
                         ...sInput(isMobile),
                         fontSize: isMobile ? 15 : 12,
                         minHeight: isMobile ? 42 : 36,
                         padding: isMobile ? '10px 12px' : '8px 10px',
-                        opacity: (!item.description || !(Number(item.unit_price) > 0) || availableDiscounts.length === 0) ? 0.65 : 1,
+                        opacity: availableDiscounts.length === 0 ? 0.65 : 1,
                       }}
                     />
+                    {availableDiscounts.length === 0 && (
+                      <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+                        Enable invoice discounts in Services &gt; Discounts.
+                      </div>
+                    )}
                     {discountSearchIdx === i && (
                       <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, zIndex: 18, maxHeight: 220, overflow: 'auto', marginTop: 4, boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }}>
                         {matchingDiscounts(i).length === 0 ? (
