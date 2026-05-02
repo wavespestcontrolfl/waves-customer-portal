@@ -148,7 +148,10 @@ const TwilioService = {
       // etc.) before they ship to customers. See services/sms-guard.js.
       try {
         const { validateOutbound } = require('./sms-guard');
-        const guard = validateOutbound(body, { messageType: options.messageType });
+        const hasMedia = Array.isArray(options.mediaUrls) && options.mediaUrls.length > 0;
+        const guard = hasMedia && !String(body || '').trim()
+          ? { ok: true }
+          : validateOutbound(body, { messageType: options.messageType });
         if (!guard.ok) {
           logger.warn(`[SMS-GUARD BLOCKED] to=${maskPhone(to)} reason=${guard.reason} messageType=${options.messageType || 'n/a'} bodyLen=${body?.length || 0}`);
           // Best-effort alert to the operator so a blocked send gets human eyes.
@@ -219,18 +222,22 @@ const TwilioService = {
         return { success: false, sid: null, error: 'Twilio not configured' };
       }
 
-      const msgPayload = { body, from: fromNumber, to };
+      const msgPayload = { from: fromNumber, to };
+      if (body && String(body).trim()) msgPayload.body = body;
       // Include Waves logo for automated messages, not manual correspondence.
       // Admin composer can attach multiple images via `mediaUrls` (plural) —
       // preserve the legacy single-image `mediaUrl` path for existing callers.
       const isManual = options.messageType === 'manual' || options.skipLogo;
       const urls = [];
+      let explicitMedia = [];
       if (Array.isArray(options.mediaUrls) && options.mediaUrls.length > 0) {
         for (const u of options.mediaUrls.slice(0, 10)) {
           if (typeof u === 'string' && u) urls.push(u);
         }
+        explicitMedia = urls.map((url, index) => ({ url, index }));
       } else if (options.mediaUrl) {
         urls.push(options.mediaUrl);
+        explicitMedia = [{ url: options.mediaUrl, index: 0 }];
       } else if (!isManual) {
         urls.push(WAVES_LOGO_URL);
       }
@@ -252,6 +259,7 @@ const TwilioService = {
           status: 'sent',
           message_type: options.messageType || 'manual',
           admin_user_id: options.adminUserId || null,
+          metadata: options.media ? JSON.stringify({ media: options.media }) : null,
         });
       } catch (logErr) {
         logger.error(`SMS log failed: ${logErr.message}`);
@@ -266,6 +274,7 @@ const TwilioService = {
         authorType: options.adminUserId ? 'admin' : 'system',
         adminUserId: options.adminUserId || null,
         twilioSid: message.sid,
+        media: options.media || explicitMedia,
         messageType: options.messageType || 'manual',
         deliveryStatus: 'sent',
       }).catch(() => {});

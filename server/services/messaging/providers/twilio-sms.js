@@ -34,6 +34,7 @@ async function sendViaTwilio(input) {
       messageType,
       fromNumber: input.metadata && input.metadata.fromNumber,
       mediaUrls: input.metadata && input.metadata.mediaUrls,
+      media: input.metadata && input.metadata.media,
       customerLocationId: input.metadata && input.metadata.customerLocationId,
       // Preserve admin attribution. services/twilio.js writes
       // sms_log.admin_user_id from this option; without forwarding,

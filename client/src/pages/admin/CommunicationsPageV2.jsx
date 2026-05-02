@@ -35,8 +35,9 @@
 //   handled? If the operator edits the draft, do we still send the
 //   edited version (not the AI's original)? Single-flight on send?
 // - SMS send (POST /sms): single-flight against double-click. Empty /
-//   whitespace-only body must not submit. mediaUrls path needs the
-//   attach endpoint to complete first (multipart upload race).
+//   whitespace-only body must not submit unless image attachments are ready.
+//   mediaUrls path needs the attach endpoint to complete first
+//   (multipart upload race).
 // - AI auto-reply toggle: server-side state; if a customer replies
 //   while toggling, who handles it? Confirm the toggle flips
 //   atomically and the UI reflects the actual server state on
@@ -180,9 +181,39 @@ function TypeBadgeV2({ type }) {
   return <Badge tone="neutral">{type.replace(/_/g, ' ')}</Badge>;
 }
 
+function MessageMediaV2({ media = [], inverted = false }) {
+  const items = Array.isArray(media) ? media.filter((m) => m?.url) : [];
+  if (!items.length) return null;
+  return (
+    <div className="mt-2 grid grid-cols-2 gap-1.5">
+      {items.map((item, idx) => (
+        <a
+          key={item.key || item.url || idx}
+          href={item.url}
+          target="_blank"
+          rel="noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          className={cn(
+            'block overflow-hidden rounded-sm border-hairline u-focus-ring',
+            inverted ? 'border-white/30 bg-white/10' : 'border-zinc-300 bg-white',
+          )}
+        >
+          <img
+            src={item.url}
+            alt={item.fileName || `SMS attachment ${idx + 1}`}
+            className="h-28 w-full object-cover"
+            loading="lazy"
+          />
+        </a>
+      ))}
+    </div>
+  );
+}
+
 function SmsLogItemV2({ msg: m, onReply }) {
   const [expanded, setExpanded] = useState(false);
   const isLong = m.body && m.body.length > 80;
+  const hasMedia = Array.isArray(m.media) && m.media.length > 0;
   return (
     <div
       className="py-2.5 border-b border-hairline border-zinc-200 cursor-pointer"
@@ -213,8 +244,11 @@ function SmsLogItemV2({ msg: m, onReply }) {
               expanded ? 'whitespace-pre-wrap text-zinc-900' : 'text-ink-secondary',
             )}
           >
-            {expanded ? m.body : isLong ? m.body.slice(0, 80) + '…' : m.body}
+            {m.body
+              ? expanded ? m.body : isLong ? m.body.slice(0, 80) + '…' : m.body
+              : hasMedia ? `${m.media.length} photo${m.media.length === 1 ? '' : 's'}` : ''}
           </div>
+          {expanded && <MessageMediaV2 media={m.media} />}
         </div>
         <div className="flex flex-col items-end gap-1 flex-shrink-0">
           <div className="flex gap-1">
@@ -314,8 +348,9 @@ function ConversationViewV2({ thread, messages, onReply, onBack, onOpenProfile }
                 )}
               >
                 <div className="text-13 leading-normal whitespace-pre-wrap break-words">
-                  {m.body}
+                  {m.body || (Array.isArray(m.media) && m.media.length ? 'Photo' : '')}
                 </div>
+                <MessageMediaV2 media={m.media} inverted={isOut} />
                 <div
                   className={cn(
                     'flex items-center gap-1.5 mt-1',
@@ -446,7 +481,7 @@ function SmsTab() {
   };
 
   const handleSend = async () => {
-    if (!toNumber.trim() || !msgBody.trim()) return;
+    if (!toNumber.trim() || (!msgBody.trim() && attachments.length === 0)) return;
     setSending(true);
     setSendResult(null);
     try {
@@ -458,6 +493,7 @@ function SmsTab() {
           messageType: 'manual',
           fromNumber,
           mediaUrls: attachments.length > 0 ? attachments.map((a) => a.url) : undefined,
+          mediaAttachments: attachments.length > 0 ? attachments.map(({ previewUrl, ...a }) => a) : undefined,
         }),
       });
       setSendResult({ ok: true, text: 'Message sent.' });
@@ -622,7 +658,9 @@ function SmsTab() {
       if (m.customerName) thread.customerName = m.customerName;
       if (m.customerId) thread.customerId = m.customerId;
       if (ourNumber && allNums.has(ourNumber)) thread.ourNumber = ourNumber;
-      thread.lastMessage = m.body;
+      thread.lastMessage = m.body || (Array.isArray(m.media) && m.media.length
+        ? `${m.media.length} photo${m.media.length === 1 ? '' : 's'}`
+        : '');
       thread.lastTimestamp = m.createdAt;
       thread.lastDirection = m.direction;
     });
@@ -1026,7 +1064,7 @@ function SmsTab() {
             variant="primary"
             className="flex-1"
             onClick={handleSend}
-            disabled={sending || uploading || !toNumber.trim() || !msgBody.trim()}
+            disabled={sending || uploading || !toNumber.trim() || (!msgBody.trim() && attachments.length === 0)}
           >
             {sending ? 'Sending…' : uploading ? 'Uploading…' : 'Send'}
           </Button>

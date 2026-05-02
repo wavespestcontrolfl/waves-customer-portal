@@ -9,6 +9,7 @@ const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { normalizePhone } = require('../utils/phone');
+const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -21,8 +22,13 @@ const ADMIN_PHONES = [
 // POST /api/admin/communications/sms — send an SMS from admin
 router.post('/sms', async (req, res, next) => {
   try {
-    const { to, body, customerId, messageType, fromNumber, mediaUrls } = req.body;
-    if (!to || !body) return res.status(400).json({ error: 'to and body required' });
+    const { to, body, customerId, messageType, fromNumber, mediaUrls, mediaAttachments } = req.body;
+    const cleanBody = typeof body === 'string' ? body.trim() : '';
+    const cleanMediaUrls = Array.isArray(mediaUrls) ? mediaUrls.filter((u) => typeof u === 'string' && u.trim()) : [];
+    const media = mediaFromOutboundAttachments(mediaAttachments, cleanMediaUrls);
+    if (!to || (!cleanBody && media.length === 0)) {
+      return res.status(400).json({ error: 'to and body or media required' });
+    }
     if (fromNumber && !TWILIO_NUMBERS.findByNumber(fromNumber)) {
       return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
     }
@@ -40,7 +46,7 @@ router.post('/sms', async (req, res, next) => {
 
     const result = await sendCustomerMessage({
       to,
-      body,
+      body: cleanBody,
       channel: 'sms',
       audience: trustedCustomerId ? 'customer' : 'lead',
       purpose: 'conversational',
@@ -50,7 +56,8 @@ router.post('/sms', async (req, res, next) => {
         original_message_type: messageType || 'manual',
         adminUserId: req.technicianId,
         fromNumber: fromNumber || undefined,
-        mediaUrls: Array.isArray(mediaUrls) ? mediaUrls : undefined,
+        mediaUrls: cleanMediaUrls.length ? cleanMediaUrls : undefined,
+        media,
       },
     });
     if (result.blocked || result.sent === false) {
@@ -158,7 +165,7 @@ router.get('/log', async (req, res, next) => {
       .select(
         'messages.id', 'messages.direction', 'messages.body',
         'messages.delivery_status as status', 'messages.message_type',
-        'messages.created_at',
+        'messages.created_at', 'messages.media',
         'conversations.customer_id', 'conversations.our_endpoint_id',
         'conversations.contact_phone',
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone'
@@ -197,7 +204,7 @@ router.get('/log', async (req, res, next) => {
     const offset = searchTerm ? 0 : (parseInt(page) - 1) * parseInt(limit);
     const rows = await query.limit(effectiveLimit).offset(offset);
 
-    const messages = rows.map(m => {
+    const messages = await Promise.all(rows.map(async (m) => {
       const customerName = m.first_name ? `${m.first_name} ${m.last_name || ''}`.trim() : null;
       const ours = m.our_endpoint_id;
       const contact = m.contact_phone || m.customer_phone;
@@ -208,8 +215,9 @@ router.get('/log', async (req, res, next) => {
         body: m.body, status: m.status, messageType: m.message_type,
         customerId: m.customer_id, customerName,
         createdAt: m.created_at,
+        media: await signMediaForClient(m.media),
       };
-    });
+    }));
 
     res.json({ messages });
   } catch (err) { next(err); }

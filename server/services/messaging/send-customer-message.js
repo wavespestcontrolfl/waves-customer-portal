@@ -107,7 +107,7 @@ async function sendCustomerMessage(input) {
 
   // 5. Run validator pipeline. Each entry is { name, fn }; fn is invoked
   //    with (input, policy, contactState).
-  const segmentMeta = countSegments(sendInput.body);
+  const segmentMeta = countSegments(sendInput.body || '');
   const pipeline = [
     { name: 'require_input_ids',          fn: () => validateRequiredIds(sendInput, policy) },
     { name: 'check_suppression',          fn: () => checkSuppression(sendInput, policy, contactState) },
@@ -200,8 +200,12 @@ function validateContract(input) {
   if (!input.to || typeof input.to !== 'string') {
     return { ok: false, reason: 'to (recipient) is required' };
   }
-  if (!input.body || typeof input.body !== 'string') {
+  const hasMedia = Array.isArray(input.metadata?.mediaUrls) && input.metadata.mediaUrls.length > 0;
+  if (typeof input.body !== 'string') {
     return { ok: false, reason: 'body is required' };
+  }
+  if (!input.body.trim() && !hasMedia) {
+    return { ok: false, reason: 'body or media is required' };
   }
   if (!policyModule.MESSAGE_CHANNELS.includes(input.channel)) {
     return { ok: false, reason: `channel must be one of: ${policyModule.MESSAGE_CHANNELS.join(', ')}` };

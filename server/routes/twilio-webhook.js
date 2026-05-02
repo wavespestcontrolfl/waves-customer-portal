@@ -7,6 +7,7 @@ const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { recordSuppression, clearSuppression } = require('../services/messaging/validators/suppression');
 const { updateByTwilioSid } = require('../services/conversations');
+const { uploadTwilioMedia } = require('../services/sms-media');
 
 const WAVES_ADMIN_PHONE = '+19413187612';
 
@@ -47,6 +48,8 @@ router.post('/sms', async (req, res) => {
       return res.type('text/xml').send('<Response></Response>');
     }
 
+    const inboundMedia = await uploadTwilioMedia(req.body);
+
     // Try to match sender to a customer
     const customer = await db('customers').where({ phone: From }).first();
 
@@ -62,6 +65,7 @@ router.post('/sms', async (req, res) => {
       body: Body,
       authorType: 'customer',
       twilioSid: MessageSid,
+      media: inboundMedia,
       metadata: { location: numberConfig?.label, numberType: numberConfig?.type },
     }).catch(() => {});
 
@@ -233,7 +237,12 @@ router.post('/sms', async (req, res) => {
       direction: 'inbound', from_phone: From, to_phone: To,
       message_body: Body, twilio_sid: MessageSid, status: 'received',
       message_type: messageType,
-      metadata: JSON.stringify({ locationId: numberConfig.locationId, source: numberConfig.type, domain: numberConfig.domain }),
+      metadata: JSON.stringify({
+        locationId: numberConfig.locationId,
+        source: numberConfig.type,
+        domain: numberConfig.domain,
+        media: inboundMedia,
+      }),
     }).returning('id');
 
     await db('activity_log').insert({
@@ -248,24 +257,27 @@ router.post('/sms', async (req, res) => {
     });
 
     // In-app + push notification for inbound SMS from known customers
-    if (customer && Body && numberConfig.type === 'location') {
+    if (customer && (Body || inboundMedia.length) && numberConfig.type === 'location') {
       try {
         const { triggerNotification } = require('../services/notification-triggers');
         await triggerNotification('sms_reply', {
           fromName: `${customer.first_name} ${customer.last_name}`,
           fromPhone: From,
-          message: Body,
+          message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}`,
           threadId: customer.id,
         });
       } catch (e) { logger.error(`[notifications] sms_reply trigger failed: ${e.message}`); }
     }
 
     // Notify Adam of every inbound SMS (skip only if it would create a loop — same from AND to)
-    if (Body && process.env.ADAM_PHONE && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
       try {
         const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
+        const mediaText = inboundMedia.length
+          ? `\nMedia: ${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}`
+          : '';
         await TwilioService.sendSMS(process.env.ADAM_PHONE,
-          `📩 New SMS\nFrom: ${senderName}\n"${(Body || '').slice(0, 120)}"`,
+          `📩 New SMS\nFrom: ${senderName}\n"${(Body || '').slice(0, 120)}"${mediaText}`,
           { messageType: 'internal_alert' }
         );
       } catch (e) { logger.error(`SMS notification failed: ${e.message}`); }
