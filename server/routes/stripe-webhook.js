@@ -299,16 +299,13 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
     } catch (e) {
       logger.error(`[invoice-followups] stopOnPayment failed: ${e.message}`);
     }
-    // Awaited inline so the side effect runs inside the same processing
-    // path as the webhook event row (processed=true is written by the
-    // outer handler only after this returns). ReviewService.create is
-    // idempotent by service_record_id, so a Stripe retry that gets past
-    // the event-id dedupe (mid-flight crash) won't enqueue a duplicate.
-    // try/catch keeps a transient ReviewService failure from triggering
-    // Stripe webhook retries — the invoice is already marked paid and a
-    // missing review request is recoverable manually.
-    await scheduleReviewAfterPaidInvoice(piId);
   }
+  // Awaited inline so the side effect runs inside the same processing
+  // path as the webhook event row (processed=true is written by the
+  // outer handler only after this returns). Run even when the invoice was
+  // already paid so webhook retry after a mid-flight crash can recover.
+  // ReviewService.create is idempotent by service_record_id.
+  await scheduleReviewAfterPaidInvoice(piId);
 
   // ── Auto-send payment receipt SMS ─────────────────────────
   //

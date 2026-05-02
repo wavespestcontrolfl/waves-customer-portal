@@ -57,6 +57,15 @@ function normalizeServiceTypeForTemplate(s) {
   return s.replace(/\s+services?$/i, '');
 }
 
+const VALID_VISIT_OUTCOMES = new Set([
+  'completed',
+  'inspection_only',
+  'customer_declined',
+  'follow_up_needed',
+  'customer_concern',
+  'incomplete',
+]);
+
 function parseJsonObject(value) {
   if (!value) return {};
   if (typeof value === 'object' && !Array.isArray(value)) return value;
@@ -365,6 +374,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       formResponses,
       formStartedAt,
     } = req.body;
+    if (!VALID_VISIT_OUTCOMES.has(visitOutcome)) {
+      return res.status(400).json({
+        error: `visitOutcome must be one of: ${Array.from(VALID_VISIT_OUTCOMES).join(', ')}`,
+      });
+    }
     const completionAreas = Array.isArray(areasTreated) ? areasTreated : (Array.isArray(areasServiced) ? areasServiced : []);
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
