@@ -4,11 +4,16 @@ class ApiClient {
   constructor() {
     this.token = localStorage.getItem('waves_token');
     this.refreshToken = localStorage.getItem('waves_refresh_token');
+    this.getCache = new Map();
+    this.inflightGets = new Map();
+    this.getCacheTtlMs = 60 * 1000;
   }
 
   setTokens(token, refreshToken) {
     this.token = token;
     this.refreshToken = refreshToken;
+    this.getCache.clear();
+    this.inflightGets.clear();
     localStorage.setItem('waves_token', token);
     if (refreshToken) localStorage.setItem('waves_refresh_token', refreshToken);
   }
@@ -16,53 +21,78 @@ class ApiClient {
   clearTokens() {
     this.token = null;
     this.refreshToken = null;
+    this.getCache.clear();
+    this.inflightGets.clear();
     localStorage.removeItem('waves_token');
     localStorage.removeItem('waves_refresh_token');
   }
 
   async request(path, options = {}) {
     const url = `${API_BASE}${path}`;
+    const method = (options.method || 'GET').toUpperCase();
+    const canCacheGet = method === 'GET' && path.startsWith('/feed/');
+    const cacheKey = canCacheGet ? `${this.token || 'anon'}:${path}` : null;
+
+    if (canCacheGet) {
+      const cached = this.getCache.get(cacheKey);
+      if (cached && Date.now() - cached.ts < this.getCacheTtlMs) return cached.data;
+      const pending = this.inflightGets.get(cacheKey);
+      if (pending) return pending;
+    }
+
     const headers = {
       'Content-Type': 'application/json',
       ...(this.token && { Authorization: `Bearer ${this.token}` }),
       ...options.headers,
     };
 
-    let response;
-    try {
-      response = await fetch(url, { ...options, headers });
-    } catch (err) {
-      throw new Error(err?.message || 'Network request failed. Check your connection and try again.');
-    }
-
-    // Handle token expiry — attempt refresh
-    if (response.status === 401 && this.refreshToken) {
-      const refreshed = await this.attemptRefresh();
-      if (refreshed) {
-        headers.Authorization = `Bearer ${this.token}`;
-        return fetch(url, { ...options, headers });
-      }
-      // Refresh failed — force logout
-      this.clearTokens();
-      window.location.href = '/login';
-      return;
-    }
-
-    if (!response.ok) {
-      const contentType = response.headers.get('content-type') || '';
-      let message = '';
-
-      if (contentType.includes('application/json')) {
-        const error = await response.json().catch(() => null);
-        message = error?.error || error?.message || '';
-      } else {
-        message = (await response.text().catch(() => '')).trim();
+    const execute = async () => {
+      let response;
+      try {
+        response = await fetch(url, { ...options, headers });
+      } catch (err) {
+        throw new Error(err?.message || 'Network request failed. Check your connection and try again.');
       }
 
-      throw new Error(message || `Request failed (${response.status})`);
-    }
+      // Handle token expiry — attempt refresh
+      if (response.status === 401 && this.refreshToken) {
+        const refreshed = await this.attemptRefresh();
+        if (refreshed) {
+          headers.Authorization = `Bearer ${this.token}`;
+          response = await fetch(url, { ...options, headers });
+        } else {
+          // Refresh failed — force logout
+          this.clearTokens();
+          window.location.href = '/login';
+          return;
+        }
+      }
 
-    return response.json();
+      if (!response.ok) {
+        const contentType = response.headers.get('content-type') || '';
+        let message = '';
+
+        if (contentType.includes('application/json')) {
+          const error = await response.json().catch(() => null);
+          message = error?.error || error?.message || '';
+        } else {
+          message = (await response.text().catch(() => '')).trim();
+        }
+
+        throw new Error(message || `Request failed (${response.status})`);
+      }
+
+      const data = await response.json();
+      if (canCacheGet) this.getCache.set(cacheKey, { data, ts: Date.now() });
+      return data;
+    };
+
+    const requestPromise = execute().finally(() => {
+      if (canCacheGet) this.inflightGets.delete(cacheKey);
+    });
+    if (canCacheGet) this.inflightGets.set(cacheKey, requestPromise);
+    if (!canCacheGet) this.getCache.clear();
+    return requestPromise;
   }
 
   async attemptRefresh() {
