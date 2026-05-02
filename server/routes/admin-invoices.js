@@ -4,12 +4,27 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const InvoiceService = require('../services/invoice');
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 function parseReviewDelayMinutes(body = {}) {
   if (!body.requestReview) return null;
+  if (body.reviewTiming === 'now') return 0;
+  if (body.reviewTiming === 'tomorrow_8') {
+    const targetDay = etDateString(addETDays(new Date(), 1));
+    const target = parseETDateTime(`${targetDay}T08:00`);
+    return Math.max(0, Math.ceil((target.getTime() - Date.now()) / 60000));
+  }
+  if (body.reviewTiming === 'custom') {
+    if (body.reviewScheduledFor) {
+      const target = parseETDateTime(body.reviewScheduledFor);
+      if (!Number.isNaN(target.getTime())) {
+        return Math.max(0, Math.ceil((target.getTime() - Date.now()) / 60000));
+      }
+    }
+    return 120;
+  }
   const raw = body.reviewDelayMinutes;
   if (raw === undefined || raw === null || raw === '') return 120;
   const minutes = Number(raw);

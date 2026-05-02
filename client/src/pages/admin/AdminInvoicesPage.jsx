@@ -1199,16 +1199,9 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const reviewDelayMinutes = () => {
     if (!requestReview) return null;
     if (reviewTiming === 'now') return 0;
-    if (reviewTiming === 'tomorrow_8') {
-      const target = new Date();
-      target.setDate(target.getDate() + 1);
-      target.setHours(8, 0, 0, 0);
-      return Math.max(0, Math.ceil((target.getTime() - Date.now()) / 60000));
-    }
     if (reviewTiming === 'custom') {
       const target = new Date(reviewCustomAt);
-      if (Number.isNaN(target.getTime())) return null;
-      return Math.max(0, Math.ceil((target.getTime() - Date.now()) / 60000));
+      return reviewCustomAt && !Number.isNaN(target.getTime()) ? 0 : null;
     }
     return Number(reviewTiming) || 120;
   };
@@ -1239,6 +1232,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             requestReview,
             reviewDelayMinutes: reviewDelay,
             reviewTiming,
+            reviewScheduledFor: reviewTiming === 'custom' ? reviewCustomAt : null,
           }),
         });
         showToast(`Invoice created & sent: ${invoice.invoice_number}`);
