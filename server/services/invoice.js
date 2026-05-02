@@ -9,6 +9,8 @@ const { shortenOrPassthrough } = require('./short-url');
 // ══════════════════════════════════════════════════════════════
 // HELPERS
 // ══════════════════════════════════════════════════════════════
+const SEND_FINALIZABLE_STATUSES = ['draft', 'scheduled', 'sending', 'sent', 'viewed', 'overdue'];
+
 function generateToken() {
   // 32 random bytes → 64 hex chars. Unguessable. Legacy short tokens still resolve via DB lookup.
   return crypto.randomBytes(32).toString('hex');
@@ -614,16 +616,19 @@ const InvoiceService = {
         throw err;
       }
 
-      await db('invoices').where({ id: invoiceId }).update({
-        status: ['draft', 'scheduled', 'sending'].includes(invoice.status) ? 'sent' : invoice.status,
-        sent_at: new Date(),
-        sms_sent_at: new Date(),
-        scheduled_send_at: null,
-        scheduled_send_error: null,
-        scheduled_request_review: false,
-        scheduled_review_delay_minutes: null,
-        updated_at: new Date(),
-      });
+      await db('invoices')
+        .where({ id: invoiceId })
+        .whereIn('status', SEND_FINALIZABLE_STATUSES)
+        .update({
+          status: db.raw("CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END"),
+          sent_at: new Date(),
+          sms_sent_at: new Date(),
+          scheduled_send_at: null,
+          scheduled_send_error: null,
+          scheduled_request_review: false,
+          scheduled_review_delay_minutes: null,
+          updated_at: new Date(),
+        });
 
       // Kick off the per-invoice automated follow-up sequence (Day 0/3/7/14/30)
       try {
@@ -687,20 +692,32 @@ const InvoiceService = {
 
     const ok = sms.ok || email.ok;
     if (ok) {
-      await db('invoices').where({ id: invoiceId }).update({
-        status: 'sent',
-        sent_at: new Date(),
-        scheduled_send_at: null,
-        scheduled_send_error: null,
-        scheduled_request_review: false,
-        scheduled_review_delay_minutes: null,
-        updated_at: new Date(),
-      }).catch(() => {});
+      await db('invoices')
+        .where({ id: invoiceId })
+        .whereIn('status', SEND_FINALIZABLE_STATUSES)
+        .update({
+          status: db.raw("CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END"),
+          sent_at: new Date(),
+          scheduled_send_at: null,
+          scheduled_send_error: null,
+          scheduled_request_review: false,
+          scheduled_review_delay_minutes: null,
+          updated_at: new Date(),
+        });
     }
     return { ok, sms, email };
   },
 
   async processScheduledSends({ limit = 25 } = {}) {
+    await db('invoices')
+      .where({ status: 'sending' })
+      .where('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"))
+      .update({
+        status: 'scheduled',
+        scheduled_send_error: 'Recovered from stale sending claim',
+        updated_at: new Date(),
+      });
+
     const due = await db('invoices')
       .where({ status: 'scheduled' })
       .whereNotNull('scheduled_send_at')

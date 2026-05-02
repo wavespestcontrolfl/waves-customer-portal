@@ -291,6 +291,8 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
   const getDisplayStatus = (inv) => {
     if (inv.status === 'paid') return { key: 'paid', label: 'Paid', color: D.green };
     if (inv.status === 'void') return { key: 'void', label: 'Void', color: D.muted };
+    if (inv.status === 'scheduled') return { key: 'scheduled', label: 'Scheduled', color: D.amber };
+    if (inv.status === 'sending') return { key: 'sending', label: 'Sending', color: D.amber };
     if (inv.status === 'draft') return { key: 'draft', label: 'Draft', color: D.muted };
     if (inv.due_date) {
       const due = new Date(inv.due_date + 'T23:59:59');
@@ -1185,15 +1187,21 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const total = afterDiscount + tax;
 
   const dateOnly = (date) => {
-    const y = date.getFullYear();
-    const m = String(date.getMonth() + 1).padStart(2, '0');
-    const d = String(date.getDate()).padStart(2, '0');
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(date);
+    const get = (type) => parts.find(part => part.type === type)?.value;
+    const y = get('year');
+    const m = get('month');
+    const d = get('day');
     return `${y}-${m}-${d}`;
   };
   const addDays = (days) => {
-    const d = new Date();
-    d.setDate(d.getDate() + days);
-    return d;
+    const [y, m, d] = dateOnly(new Date()).split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, d + days, 12, 0, 0));
   };
   const invoiceDueDate = () => {
     if (dueTiming === 'today') return dateOnly(new Date());
@@ -1205,9 +1213,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const invoiceScheduledFor = () => {
     if (sendTiming === 'now' || sendTiming === 'draft') return null;
     if (sendTiming === 'tomorrow_8') {
-      const d = addDays(1);
-      d.setHours(8, 0, 0, 0);
-      return `${dateOnly(d)}T08:00`;
+      return `${dateOnly(addDays(1))}T08:00`;
     }
     return sendCustomAt || null;
   };

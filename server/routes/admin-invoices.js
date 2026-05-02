@@ -34,6 +34,23 @@ function parseReviewDelayMinutes(body = {}) {
   return Math.min(rounded, maxDelayMinutes);
 }
 
+function parseReviewDelayMinutesFrom(body = {}, baseDate = new Date()) {
+  if (!body.requestReview) return null;
+  if (body.reviewTiming === 'now') return 0;
+  if (body.reviewTiming === 'tomorrow_8') {
+    const targetDay = etDateString(addETDays(baseDate, 1));
+    const target = parseETDateTime(`${targetDay}T08:00`);
+    return Math.max(0, Math.ceil((target.getTime() - baseDate.getTime()) / 60000));
+  }
+  if (body.reviewTiming === 'custom' && body.reviewScheduledFor) {
+    const target = parseETDateTime(body.reviewScheduledFor);
+    if (!Number.isNaN(target.getTime())) {
+      return Math.max(0, Math.ceil((target.getTime() - baseDate.getTime()) / 60000));
+    }
+  }
+  return parseReviewDelayMinutes(body);
+}
+
 // GET /stats
 router.get('/stats', async (req, res, next) => {
   try {
@@ -352,11 +369,11 @@ router.post('/:id/send', async (req, res, next) => {
 router.post('/:id/schedule-send', async (req, res, next) => {
   try {
     const { scheduledFor, requestReview } = req.body || {};
-    const reviewDelayMinutes = parseReviewDelayMinutes(req.body || {});
     if (!scheduledFor) return res.status(400).json({ error: 'scheduledFor required' });
     const when = parseETDateTime(scheduledFor);
     if (Number.isNaN(when.getTime())) return res.status(400).json({ error: 'invalid scheduledFor' });
     if (when.getTime() <= Date.now()) return res.status(400).json({ error: 'scheduledFor must be in the future' });
+    const reviewDelayMinutes = parseReviewDelayMinutesFrom(req.body || {}, when);
 
     const [invoice] = await db('invoices')
       .where({ id: req.params.id })
