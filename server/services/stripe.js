@@ -1005,6 +1005,13 @@ const StripeService = {
         }
       }
 
+      const chargedCents = Number(pi.amount_received || pi.amount || 0);
+      const chargedTotal = chargedCents > 0
+        ? Math.round((chargedCents / 100) * 100) / 100
+        : parseFloat(invoice.total);
+      const metadataBaseAmount = Number(pi.metadata?.base_amount ?? invoice.total);
+      const metadataCardSurcharge = Number(pi.metadata?.card_surcharge ?? 0);
+
       // Update invoice + record payment atomically
       const paymentRecord = await db.transaction(async trx => {
         await trx('invoices')
@@ -1022,6 +1029,7 @@ const StripeService = {
             // template can render "Bank •1234" via {card_line}.
             card_last_four: cardLastFour || bankLastFour,
             receipt_url: receiptUrl,
+            total: chargedTotal,
           });
 
         const [record] = await trx('payments').insert({
@@ -1030,12 +1038,17 @@ const StripeService = {
           stripe_payment_intent_id: paymentIntentId,
           stripe_charge_id: typeof charge === 'string' ? charge : null,
           payment_date: etDateString(),
-          amount: parseFloat(invoice.total),
+          amount: chargedTotal,
           status: 'paid',
-          description: `Invoice ${invoice.invoice_number}`,
+          description: metadataCardSurcharge > 0
+            ? `Invoice ${invoice.invoice_number} (includes $${metadataCardSurcharge.toFixed(2)} card processing fee)`
+            : `Invoice ${invoice.invoice_number}`,
           metadata: JSON.stringify({
             invoice_id: invoiceId,
             stripe_receipt_url: receiptUrl,
+            base_amount: metadataBaseAmount,
+            card_surcharge: metadataCardSurcharge,
+            charged_amount: chargedTotal,
           }),
         }).returning('*');
 

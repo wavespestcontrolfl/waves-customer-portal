@@ -284,28 +284,34 @@ router.post(
 async function handlePaymentIntentSucceeded(paymentIntent) {
   const piId = paymentIntent.id;
   logger.info(`[stripe-webhook] PaymentIntent succeeded: ${piId}`);
+  const chargedCents = Number(paymentIntent.amount_received || paymentIntent.amount || 0);
+  const chargedTotal = chargedCents > 0 ? Math.round((chargedCents / 100) * 100) / 100 : null;
 
   // Update payments table
+  const paymentUpdates = {
+    status: 'paid',
+    stripe_charge_id: paymentIntent.latest_charge || null,
+  };
+  if (chargedTotal !== null) paymentUpdates.amount = chargedTotal;
   const updated = await db('payments')
     .where({ stripe_payment_intent_id: piId, status: 'processing' })
-    .update({
-      status: 'paid',
-      stripe_charge_id: paymentIntent.latest_charge || null,
-    });
+    .update(paymentUpdates);
 
   if (updated > 0) {
     logger.info(`[stripe-webhook] Updated ${updated} payment(s) to paid for PI: ${piId}`);
   }
 
   // Update invoices table
+  const invoiceUpdates = {
+    status: 'paid',
+    paid_at: new Date().toISOString(),
+    stripe_charge_id: paymentIntent.latest_charge || null,
+  };
+  if (chargedTotal !== null) invoiceUpdates.total = chargedTotal;
   const invoiceUpdated = await db('invoices')
     .where({ stripe_payment_intent_id: piId })
     .whereNot({ status: 'paid' })
-    .update({
-      status: 'paid',
-      paid_at: new Date().toISOString(),
-      stripe_charge_id: paymentIntent.latest_charge || null,
-    });
+    .update(invoiceUpdates);
 
   if (invoiceUpdated > 0) {
     logger.info(`[stripe-webhook] Updated ${invoiceUpdated} invoice(s) to paid for PI: ${piId}`);
