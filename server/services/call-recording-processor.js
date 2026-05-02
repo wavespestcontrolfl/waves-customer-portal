@@ -50,6 +50,36 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
   }
 }
 
+async function findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType, trx = db }) {
+  if (!customerId) return null;
+
+  const marker = `Call SID: ${call.twilio_call_sid}`;
+  const marked = await trx('scheduled_services')
+    .where({ customer_id: customerId })
+    .whereNotIn('status', ['cancelled', 'rescheduled'])
+    .where('notes', 'like', `%${marker}%`)
+    .orderBy('created_at', 'asc')
+    .first();
+  if (marked) return marked;
+
+  if (!scheduledDate || !windowStart || !serviceType) return null;
+
+  const callCreatedAt = call.created_at ? new Date(call.created_at) : null;
+  const query = trx('scheduled_services')
+    .where({ customer_id: customerId, booking_source: 'phone_call' })
+    .where('scheduled_date', scheduledDate)
+    .whereRaw('window_start::time = ?::time', [windowStart])
+    .whereRaw('LOWER(TRIM(service_type)) = LOWER(TRIM(?))', [serviceType])
+    .whereNotIn('status', ['cancelled', 'rescheduled'])
+    .orderBy('created_at', 'asc');
+
+  if (callCreatedAt && !isNaN(callCreatedAt.getTime())) {
+    query.where('created_at', '>=', new Date(callCreatedAt.getTime() - 5 * 60 * 1000));
+  }
+
+  return query.first();
+}
+
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
@@ -742,7 +772,23 @@ const CallRecordingProcessor = {
     let appointmentResult = null;
     const timeStr = (extracted.preferred_date_time || '').toLowerCase();
     const hasSpecificTime = /\d{1,2}:\d{2}|\d{1,2}\s*(am|pm|a\.m|p\.m)|noon|midday/i.test(timeStr);
-    if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime) {
+    const hasServiceForAppointment = !!(extracted.matched_service || extracted.requested_service);
+    const isOutboundCall = String(call.direction || '').toLowerCase().startsWith('outbound');
+    const canCreateAppointmentFromCall = !isOutboundCall && hasServiceForAppointment;
+    if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && !canCreateAppointmentFromCall) {
+      appointmentResult = {
+        service: extracted.matched_service || extracted.requested_service || null,
+        dateTime: extracted.preferred_date_time,
+        scheduleCreated: false,
+        smsSent: false,
+        skippedReason: isOutboundCall ? 'outbound_call' : 'missing_service',
+      };
+      logger.info(
+        `[call-proc] Skipping appointment auto-create for ${callSid}: ` +
+        `${appointmentResult.skippedReason} (direction=${call.direction || 'unknown'}, service=${appointmentResult.service || 'none'})`
+      );
+    }
+    if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && canCreateAppointmentFromCall) {
       try {
         const customer = await db('customers').where({ id: customerId }).first();
         if (customer?.phone) {
@@ -808,6 +854,7 @@ const CallRecordingProcessor = {
           let scheduledServiceId = null;
           let scheduledDateForLog = null;
           let windowStartForLog = null;
+          let scheduleWasReused = false;
           try {
             const parsedDt = parseETDateTime(extracted.preferred_date_time);
             let scheduledDate, windowStart;
@@ -867,34 +914,59 @@ const CallRecordingProcessor = {
                 const displayH = hh % 12 || 12;
                 windowDisplay = `${displayH}:${String(mm).padStart(2, '0')} ${ampm}`;
               }
-              const [svc] = await db('scheduled_services').insert({
-                customer_id: customerId,
-                scheduled_date: scheduledDate,
-                window_start: windowStart || '09:00',
-                window_end: windowEnd || '10:00',
-                window_display: windowDisplay,
-                service_type: extracted.matched_service || extracted.requested_service || 'General Pest Control',
-                status: 'confirmed',
-                customer_confirmed: true,
-                confirmed_at: new Date(),
-                notes: [
-                  'Booked via phone call.',
-                  needsServiceAddress ? 'ADDRESS NEEDED - confirm service street address before dispatch.' : null,
-                  extracted.call_summary || null,
-                ].filter(Boolean).join(' ').trim(),
-                booking_source: 'phone_call',
-              }).returning('*');
+              const serviceType = extracted.matched_service || extracted.requested_service || 'General Pest Control';
+              let reusedExistingSchedule = false;
+              const svc = await db.transaction(async (trx) => {
+                await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', callSid]);
+                const existing = await findExistingCallAppointment({
+                  customerId,
+                  call,
+                  scheduledDate,
+                  windowStart: windowStart || '09:00',
+                  serviceType,
+                  trx,
+                });
+                if (existing) {
+                  reusedExistingSchedule = true;
+                  return existing;
+                }
+                const [created] = await trx('scheduled_services').insert({
+                  customer_id: customerId,
+                  scheduled_date: scheduledDate,
+                  window_start: windowStart || '09:00',
+                  window_end: windowEnd || '10:00',
+                  window_display: windowDisplay,
+                  service_type: serviceType,
+                  status: 'confirmed',
+                  customer_confirmed: true,
+                  confirmed_at: new Date(),
+                  notes: [
+                    'Booked via phone call.',
+                    `Call SID: ${callSid}.`,
+                    needsServiceAddress ? 'ADDRESS NEEDED - confirm service street address before dispatch.' : null,
+                    extracted.call_summary || null,
+                  ].filter(Boolean).join(' ').trim(),
+                  booking_source: 'phone_call',
+                }).returning('*');
+                return created;
+              });
+              if (reusedExistingSchedule) {
+                scheduleWasReused = true;
+                logger.info(`[call-proc] Reusing existing phone-call scheduled service ${svc.id} for ${callSid}; not creating duplicate`);
+              }
               scheduledServiceId = svc.id;
               scheduledDateForLog = scheduledDate;
               windowStartForLog = windowStart;
-              logger.info(`[call-proc] Scheduled service created: ${svc.id} on ${scheduledDate} at ${windowStart}`);
-              await registerScheduleSideEffects({
-                scheduledServiceId: svc.id,
-                customerId,
-                scheduledDate,
-                windowStart: windowStart || '09:00',
-                serviceType: svc.service_type,
-              });
+              if (!scheduleWasReused) {
+                logger.info(`[call-proc] Scheduled service created: ${svc.id} on ${scheduledDate} at ${windowStart}`);
+                await registerScheduleSideEffects({
+                  scheduledServiceId: svc.id,
+                  customerId,
+                  scheduledDate,
+                  windowStart: windowStart || '09:00',
+                  serviceType: svc.service_type,
+                });
+              }
 
               // Stitch the schedule row back into the draft estimate's
               // estimate_data JSON when the same call produced both, so the
@@ -930,7 +1002,19 @@ const CallRecordingProcessor = {
 
           // Only send the confirmation SMS if the schedule row landed.
           if (scheduledServiceId) {
-            if (!alreadySent) {
+            if (scheduleWasReused) {
+              logger.info(`[call-proc] Skipping appointment SMS for reused scheduled service ${scheduledServiceId}`);
+              appointmentResult = {
+                smsSent: false,
+                smsSkippedReason: 'existing_schedule',
+                scheduleReused: true,
+                scheduledServiceId,
+                service: serviceType,
+                dateTime: extracted.preferred_date_time,
+                scheduledDate: scheduledDateForLog,
+                windowStart: windowStartForLog,
+              };
+            } else if (!alreadySent) {
               const sendResult = await sendCustomerMessage({
                 to: customer.phone,
                 body: smsBody,
