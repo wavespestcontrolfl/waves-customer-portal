@@ -1277,6 +1277,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   }, [canAutoDraftRecap, notes, selectedProducts.length, visitOutcome, areasServiced, service.serviceType, customerInteraction, willInvoice, willReview]);
 
   function handleCustomerRecapChange(value) {
+    recapRequestRef.current += 1;
+    if (recapAbortRef.current) recapAbortRef.current.abort();
     setCustomerRecap(value);
     setRecapSource('manual');
     setRecapDraftStatus('manual');
@@ -1284,6 +1286,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   }
 
   async function regenerateCustomerRecap() {
+    const requestId = ++recapRequestRef.current;
     if (recapAbortRef.current) recapAbortRef.current.abort();
     const controller = new AbortController();
     recapAbortRef.current = controller;
@@ -1304,6 +1307,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
           force: true,
         }),
       });
+      if (requestId !== recapRequestRef.current) return;
       if (result.recap) {
         setCustomerRecap(result.recap);
         setRecapSource(result.source || 'ai');
@@ -1311,12 +1315,13 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         setRecapStaleAfterEdit(false);
       }
     } catch (err) {
+      if (requestId !== recapRequestRef.current) return;
       if (err?.name !== 'AbortError') {
         setRecapError(err.message || 'Could not draft recap');
         setRecapDraftStatus('failed');
       }
     } finally {
-      setRecapLoading(false);
+      if (requestId === recapRequestRef.current) setRecapLoading(false);
     }
   }
 
