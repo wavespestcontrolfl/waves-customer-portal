@@ -39,7 +39,24 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
       };
     }
 
+    // Strict idempotency: if the prior attempt under this key has a
+    // recorded request_hash and the new payload doesn't match it, the
+    // client is reusing the key with different data. Reject before
+    // replaying a stale response or rerunning under a different body.
+    const hashMismatch =
+      existing.request_hash && requestHash && existing.request_hash !== requestHash;
+
     if (existing.status === 'succeeded' && existing.response) {
+      if (hashMismatch) {
+        return {
+          action: 'conflict',
+          status: 409,
+          payload: {
+            error: 'Idempotency key reused with a different completion payload.',
+            code: 'idempotency_key_mismatch',
+          },
+        };
+      }
       return { action: 'replay', payload: { ...existing.response, replayed: true } };
     }
 
@@ -55,6 +72,16 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
     }
 
     if (existing.status === 'failed') {
+      if (hashMismatch) {
+        return {
+          action: 'conflict',
+          status: 409,
+          payload: {
+            error: 'Idempotency key reused with a different completion payload.',
+            code: 'idempotency_key_mismatch',
+          },
+        };
+      }
       const [row] = await knex('service_completion_attempts')
         .where({ id: existing.id, status: 'failed' })
         .update({

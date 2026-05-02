@@ -118,6 +118,57 @@ describe('completion attempts', () => {
     });
   });
 
+  test('succeeded replay rejects when request hash differs from stored', async () => {
+    const response = { success: true, serviceRecordId: 'record-1' };
+    const knex = makeKnex([
+      { insertError: uniqueViolation() },
+      { first: { id: 'attempt-1', status: 'succeeded', response, request_hash: 'hash-old' } },
+    ]);
+
+    const result = await claimCompletionAttempt({
+      serviceId: 'svc-1',
+      idempotencyKey: 'key-1',
+      requestHash: 'hash-new',
+    }, knex);
+
+    expect(result.action).toBe('conflict');
+    expect(result.status).toBe(409);
+    expect(result.payload.code).toBe('idempotency_key_mismatch');
+  });
+
+  test('failed retry rejects when request hash differs from stored', async () => {
+    const knex = makeKnex([
+      { insertError: uniqueViolation() },
+      { first: { id: 'attempt-1', status: 'failed', request_hash: 'hash-old' } },
+    ]);
+
+    const result = await claimCompletionAttempt({
+      serviceId: 'svc-1',
+      idempotencyKey: 'key-1',
+      requestHash: 'hash-new',
+    }, knex);
+
+    expect(result.action).toBe('conflict');
+    expect(result.status).toBe(409);
+    expect(result.payload.code).toBe('idempotency_key_mismatch');
+  });
+
+  test('succeeded replay still works when stored request_hash is null (legacy rows)', async () => {
+    const response = { success: true };
+    const knex = makeKnex([
+      { insertError: uniqueViolation() },
+      { first: { id: 'attempt-1', status: 'succeeded', response, request_hash: null } },
+    ]);
+
+    const result = await claimCompletionAttempt({
+      serviceId: 'svc-1',
+      idempotencyKey: 'key-1',
+      requestHash: 'hash-new',
+    }, knex);
+
+    expect(result.action).toBe('replay');
+  });
+
   test('different key while service has a pending attempt returns 409', async () => {
     const knex = makeKnex([
       { insertError: uniqueViolation() },
