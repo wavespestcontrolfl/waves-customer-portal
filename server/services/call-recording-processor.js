@@ -146,6 +146,11 @@ IMPORTANT — wants_estimate rules:
 - true even if they also booked an appointment — quote intent and service intent are not mutually exclusive.
 - false for existing-customer service questions, complaints, billing calls, rescheduling, voicemail, or spam.
 
+IMPORTANT — customer name rules:
+- Capture both first_name and last_name whenever the caller clearly states both.
+- If only one name is clearly stated, put it in first_name and leave last_name null.
+- Do not invent a last name from caller ID, address, email, or context.
+
 Return ONLY valid JSON.`;
 
   const res = await fetch(
@@ -177,8 +182,14 @@ Return ONLY valid JSON.`;
     return JSON.parse(cleaned);
   } catch (e) {
     logger.error(`[call-proc] Invalid JSON from Gemini: ${e.message} — raw: ${cleaned.slice(0, 200)}`);
-    return { first_name: null, is_spam: false, is_voicemail: false, call_summary: 'AI extraction returned invalid JSON', lead_quality: 'cold' };
+    return { first_name: null, wants_estimate: false, is_spam: false, is_voicemail: false, call_summary: 'AI extraction returned invalid JSON', lead_quality: 'cold' };
   }
+}
+
+function hasEstimateIntent(transcription, extracted = {}) {
+  if (extracted.wants_estimate) return true;
+  const text = String(transcription || '').toLowerCase();
+  return /\b(quote|estimate|pricing|price|cost|how much|what would it cost|give me a number)\b/.test(text);
 }
 
 // ── Lead Synopsis via Claude (Sales Strategist prompt) ──
@@ -289,9 +300,9 @@ const CallRecordingProcessor = {
         .whereRaw("processing_status IS DISTINCT FROM 'processed'")
         .where(function () {
           this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
-            .orWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+            .orWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
         })
-        .update({ processing_status: 'processing', processing_token: procToken, updated_at: new Date() });
+        .update({ processing_status: 'processing', processing_token: procToken, processing_started_at: new Date(), updated_at: new Date() });
       if (claimed === 0) {
         logger.info(`[call-proc] Concurrent run detected for ${callSid} — skipping`);
         return { success: true, skipped: true, reason: 'already_processing' };
@@ -315,9 +326,9 @@ const CallRecordingProcessor = {
         .where({ twilio_call_sid: callSid })
         .where(function () {
           this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
-            .orWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+            .orWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
         })
-        .update({ processing_status: 'processing', processing_token: procToken, updated_at: new Date() });
+        .update({ processing_status: 'processing', processing_token: procToken, processing_started_at: new Date(), updated_at: new Date() });
       if (claimed === 0) {
         logger.info(`[call-proc] Force run blocked by in-flight peer for ${callSid} — skipping`);
         return { success: true, skipped: true, reason: 'already_processing' };
@@ -364,6 +375,7 @@ const CallRecordingProcessor = {
       await db('call_log').where({ id: call.id }).update({
         processing_status: 'no_transcription',
         processing_token: null,
+        processing_started_at: null,
         updated_at: new Date(),
       });
       return { success: false, error: 'No transcription available' };
@@ -378,6 +390,7 @@ const CallRecordingProcessor = {
       await db('call_log').where({ id: call.id }).update({
         processing_status: 'extraction_failed',
         processing_token: null,
+        processing_started_at: null,
         updated_at: new Date(),
       });
       return { success: false, error: `AI extraction failed: ${err.message}` };
@@ -389,6 +402,7 @@ const CallRecordingProcessor = {
         ai_extraction: JSON.stringify(extracted),
         processing_status: extracted.is_spam ? 'spam' : 'voicemail',
         processing_token: null,
+        processing_started_at: null,
         updated_at: new Date(),
       });
       logger.info(`[call-proc] Skipping ${callSid}: ${extracted.is_spam ? 'spam' : 'voicemail'}`);
@@ -415,7 +429,7 @@ const CallRecordingProcessor = {
         if (Object.keys(updates).length > 0) {
           await db('customers').where({ id: customerId }).update(updates);
         }
-      } else if (extracted.first_name) {
+      } else if (extracted.first_name && phone) {
         // Create new customer
         const loc = resolveLocation(extracted.city || '');
         const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
@@ -443,13 +457,13 @@ const CallRecordingProcessor = {
 
           const [newCust] = await db('customers').insert({
             first_name: capitalizeName(extracted.first_name),
-            last_name: capitalizeName(extracted.last_name || ''),
+            last_name: extracted.last_name ? capitalizeName(extracted.last_name) : null,
             phone,
             email: extracted.email || null,
-            address_line1: addrLine,
-            city: addrCity,
+            address_line1: addrLine || null,
+            city: addrCity || null,
             state: addrState,
-            zip: addrZip,
+            zip: addrZip || null,
             referral_code: code,
             lead_source: leadSource.source || 'phone_call',
             lead_source_detail: numberConfig?.domain || 'inbound call',
@@ -472,15 +486,16 @@ const CallRecordingProcessor = {
         } catch (err) {
           logger.error(`[call-proc] Customer creation failed: ${err.message}`);
         }
+      } else if (!extracted.first_name) {
+        logger.info(`[call-proc] Skipping new customer creation for ${callSid}: first name not confirmed`);
       }
     }
 
     // Step 4: Update call log with extraction results.
-    // If we extracted a name but couldn't create/match a customer, mark the
-    // row 'customer_creation_failed' instead of 'processed' so admin can
-    // see and retry it — leaving it 'processed' silently orphans the call
-    // (no lead, no estimate, no SMS, no flag).
-    const customerExpected = !!(extracted.first_name && !extracted.is_voicemail && !extracted.is_spam);
+    // Keep the row claimed as 'processing' while downstream side effects run.
+    // The terminal status is written only after leads/estimates/scheduling have
+    // had a chance to land, so a crash cannot mark the call processed early.
+    const customerExpected = !!(extracted.first_name && phone && !extracted.is_voicemail && !extracted.is_spam);
     const customerLanded = !!customerId;
     const finalStatus = (customerExpected && !customerLanded) ? 'customer_creation_failed' : 'processed';
     await db('call_log').where({ id: call.id }).update({
@@ -489,20 +504,15 @@ const CallRecordingProcessor = {
       call_summary: extracted.call_summary || null,
       sentiment: extracted.sentiment || null,
       lead_quality: extracted.lead_quality || null,
-      processing_status: finalStatus,
-      processing_token: null,
       updated_at: new Date(),
     });
-    if (finalStatus === 'customer_creation_failed') {
-      logger.warn(`[call-proc] Marked ${callSid} customer_creation_failed — extracted name="${extracted.first_name}" but no customerId`);
-    }
 
     // Step 4b: Create lead in leads table for pipeline tracking
     // Note: we create the lead DIRECTLY here instead of going through lead-attribution,
     // because Step 3 already created the customer — attribution would find the customer
     // and skip lead creation (race condition).
     let leadId = null;
-    if (customerId && extracted.first_name && !extracted.is_spam) {
+    if (customerId && !extracted.is_spam) {
       try {
         // Check if lead already exists for this phone
         const existingLead = phone ? await db('leads').where('phone', phone).orderBy('created_at', 'desc').first() : null;
@@ -621,17 +631,31 @@ const CallRecordingProcessor = {
     // already surfaces these; `source: 'call_recording'` is the discriminator
     // so Virginia can tell auto-queued ones from hand-started drafts.
     let estimateQueueResult = null;
-    if (customerId && extracted.wants_estimate && !extracted.is_spam && !extracted.is_voicemail) {
+    const wantsEstimate = hasEstimateIntent(transcription, extracted);
+    if (wantsEstimate && !customerId && !phone) {
+      logger.warn(`[call-proc] Skipping estimate enqueue for ${callSid} — no stable customer or phone dedupe key`);
+      estimateQueueResult = { skipped: true, reason: 'missing_customer_or_phone' };
+    } else if (wantsEstimate && !extracted.is_spam && !extracted.is_voicemail) {
       try {
-        // Dedup: skip if an open draft already exists for this customer in the
-        // last 24h, so reprocessing or back-to-back calls don't stack duplicates.
-        const recentDraft = await db('estimates')
-          .where({ customer_id: customerId, status: 'draft' })
-          .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
-          .first();
+        // Dedup: skip if an open draft already exists for this customer or
+        // caller phone in the last 24h, so reprocessing or back-to-back calls
+        // don't stack duplicates.
+        const recentDraft = (customerId || phone)
+          ? await db('estimates')
+            .where({ status: 'draft' })
+            .where(function () {
+              if (customerId) this.where('customer_id', customerId);
+              if (phone) {
+                if (customerId) this.orWhere('customer_phone', phone);
+                else this.where('customer_phone', phone);
+              }
+            })
+            .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
+            .first()
+          : null;
 
         if (recentDraft) {
-          logger.info(`[call-proc] Skipping estimate enqueue — draft ${recentDraft.id} exists for customer ${customerId}`);
+          logger.info(`[call-proc] Skipping estimate enqueue — draft ${recentDraft.id} exists for ${customerId ? `customer ${customerId}` : 'caller phone'}`);
           estimateQueueResult = { skipped: true, existingEstimateId: recentDraft.id };
         } else {
           const customerName = [extracted.first_name, extracted.last_name].filter(Boolean).map(capitalizeName).join(' ') || null;
@@ -645,7 +669,7 @@ const CallRecordingProcessor = {
           const urgency = extracted.lead_quality === 'hot' ? 3 : extracted.lead_quality === 'warm' ? 2 : 1;
 
           const [est] = await db('estimates').insert({
-            customer_id: customerId,
+            customer_id: customerId || null,
             status: 'draft',
             source: 'call_recording',
             service_interest: extracted.matched_service || extracted.requested_service || null,
@@ -671,7 +695,7 @@ const CallRecordingProcessor = {
             }),
           }).returning('*');
 
-          logger.info(`[call-proc] Queued draft estimate ${est.id} (${extracted.matched_service || 'unspecified service'}) for customer ${customerId}`);
+          logger.info(`[call-proc] Queued draft estimate ${est.id} (${extracted.matched_service || 'unspecified service'}) for ${customerId ? `customer ${customerId}` : 'caller phone'}`);
           estimateQueueResult = { created: true, estimateId: est.id, token };
         }
       } catch (err) {
@@ -691,6 +715,7 @@ const CallRecordingProcessor = {
         if (customer?.phone) {
           const firstName = customer.first_name || extracted.first_name || '';
           const serviceType = extracted.matched_service || extracted.requested_service || 'service';
+          const needsServiceAddress = !customer.address_line1 && !extracted.address_line1;
 
           // Use SMS template if available, fall back to inline
           let smsBody;
@@ -804,7 +829,11 @@ const CallRecordingProcessor = {
                 status: 'confirmed',
                 customer_confirmed: true,
                 confirmed_at: new Date(),
-                notes: `Booked via phone call. ${extracted.call_summary || ''}`.trim(),
+                notes: [
+                  'Booked via phone call.',
+                  needsServiceAddress ? 'ADDRESS NEEDED - confirm service street address before dispatch.' : null,
+                  extracted.call_summary || null,
+                ].filter(Boolean).join(' ').trim(),
                 booking_source: 'phone_call',
               }).returning('*');
               scheduledServiceId = svc.id;
@@ -942,6 +971,21 @@ const CallRecordingProcessor = {
       }
     }
 
+    const finalized = await db('call_log')
+      .where({ id: call.id })
+      .where('processing_token', procToken)
+      .update({
+        processing_status: finalStatus,
+        processing_token: null,
+        processing_started_at: null,
+        updated_at: new Date(),
+      });
+    if (finalized === 0) {
+      logger.warn(`[call-proc] Skipped final status write for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
+    } else if (finalStatus === 'customer_creation_failed') {
+      logger.warn(`[call-proc] Marked ${callSid} customer_creation_failed — required customer fields were incomplete`);
+    }
+
     logger.info(`[call-proc] Completed processing for ${callSid}: customer=${customerId}, appointment=${!!extracted.appointment_confirmed}`);
 
     return {
@@ -967,6 +1011,7 @@ const CallRecordingProcessor = {
           .update({
             processing_status: 'extraction_failed',
             processing_token: null,
+            processing_started_at: null,
             updated_at: new Date(),
           });
         if (released === 0) {
@@ -1016,7 +1061,7 @@ const CallRecordingProcessor = {
         .orWhere('processing_status', 'no_transcription')
         .orWhere(function () {
           this.where('processing_status', 'processing')
-            .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+            .andWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
         });
       })
       .where(db.raw('COALESCE(recording_duration_seconds, duration_seconds, 0) > ?', [10]))

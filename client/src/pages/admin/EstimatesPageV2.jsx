@@ -364,6 +364,7 @@ const SOURCE_ICON = {
   lead_webhook: { Icon: Globe, title: 'Website lead' },
   referral: { Icon: Users, title: 'Referral' },
   ai_agent: { Icon: Bot, title: 'AI agent draft — review before sending' },
+  call_recording: { Icon: Phone, title: 'Phone call recording draft' },
 };
 
 function EstimatePipelineViewV2() {

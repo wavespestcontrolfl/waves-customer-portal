@@ -13,10 +13,11 @@ const SIZES = {
 };
 
 const CARET =
-  'bg-no-repeat bg-[right_0.5rem_center] bg-[length:0.6rem]';
+  "bg-no-repeat bg-[right_0.5rem_center] bg-[length:0.6rem] " +
+  '[&]:bg-[image:var(--select-caret)]';
 
 const CARET_STYLE = {
-  backgroundImage: "url(\"data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2010%206'%3E%3Cpath%20d='M1%201l4%204%204-4'%20stroke='%2352525B'%20stroke-width='1'%20fill='none'%20stroke-linecap='round'%20stroke-linejoin='round'/%3E%3C/svg%3E\")",
+  '--select-caret': "url(\"data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2010%206'%3E%3Cpath%20d='M1%201l4%204%204-4'%20stroke='%2352525B'%20stroke-width='1'%20fill='none'%20stroke-linecap='round'%20stroke-linejoin='round'/%3E%3C/svg%3E\")",
 };
 
 export const Select = forwardRef(function Select(

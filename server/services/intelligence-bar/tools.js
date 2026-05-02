@@ -700,7 +700,7 @@ async function findDuplicates(input) {
 
   if (match_on === 'phone') {
     const dupes = await db('customers')
-      .select('phone', db.raw('COUNT(*) as count'), db.raw("string_agg(first_name || ' ' || last_name, ', ') as names"))
+      .select('phone', db.raw('COUNT(*) as count'), db.raw("string_agg(TRIM(first_name || ' ' || COALESCE(last_name, '')), ', ') as names"))
       .whereNotNull('phone').where('phone', '!=', '')
       .groupBy('phone').having(db.raw('COUNT(*)'), '>', 1)
       .orderByRaw('COUNT(*) DESC').limit(50);
@@ -709,7 +709,7 @@ async function findDuplicates(input) {
 
   if (match_on === 'email') {
     const dupes = await db('customers')
-      .select('email', db.raw('COUNT(*) as count'), db.raw("string_agg(first_name || ' ' || last_name, ', ') as names"))
+      .select('email', db.raw('COUNT(*) as count'), db.raw("string_agg(TRIM(first_name || ' ' || COALESCE(last_name, '')), ', ') as names"))
       .whereNotNull('email').where('email', '!=', '')
       .groupBy('email').having(db.raw('COUNT(*)'), '>', 1)
       .orderByRaw('COUNT(*) DESC').limit(50);
@@ -719,13 +719,13 @@ async function findDuplicates(input) {
   if (match_on === 'name_address') {
     const dupes = await db('customers')
       .select(
-        db.raw("LOWER(first_name || ' ' || last_name) as full_name"),
+        db.raw("LOWER(TRIM(first_name || ' ' || COALESCE(last_name, ''))) as full_name"),
         'address_line1',
         db.raw('COUNT(*) as count'),
         db.raw("string_agg(id::text, ', ') as ids"),
       )
       .whereNotNull('address_line1').where('address_line1', '!=', '')
-      .groupByRaw("LOWER(first_name || ' ' || last_name), address_line1")
+      .groupByRaw("LOWER(TRIM(first_name || ' ' || COALESCE(last_name, ''))), address_line1")
       .having(db.raw('COUNT(*)'), '>', 1)
       .orderByRaw('COUNT(*) DESC').limit(50);
     return { match_on: 'name_address', duplicates: dupes };

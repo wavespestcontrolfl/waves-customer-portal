@@ -238,7 +238,7 @@ class GoogleBusinessService {
           let customerId = null;
           if (reviewerName && reviewerName !== 'Anonymous') {
             const customer = await db('customers')
-              .whereRaw("LOWER(first_name || ' ' || last_name) = LOWER(?)", [reviewerName])
+              .whereRaw("LOWER(TRIM(first_name || ' ' || COALESCE(last_name, ''))) = LOWER(?)", [reviewerName])
               .first();
             if (customer) customerId = customer.id;
           }
