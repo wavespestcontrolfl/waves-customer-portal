@@ -145,10 +145,12 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   const [displayedSurcharge, setDisplayedSurcharge] = useState(initialCharge.surcharge);
   const [displayedTotal, setDisplayedTotal] = useState(initialCharge.total);
   const [syncingAmount, setSyncingAmount] = useState(false);
+  const [amountSyncError, setAmountSyncError] = useState(false);
 
   const syncAmountForMethod = useCallback(async (methodCategory, saveCardOverride) => {
     if (!paymentIntentId || !token) return;
     setSyncingAmount(true);
+    setAmountSyncError(false);
     try {
       const res = await fetch(`${API_BASE}/pay/${token}/update-amount`, {
         method: 'POST',
@@ -159,14 +161,18 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           saveCard: saveCardOverride !== undefined ? saveCardOverride : !!saveCard,
         }),
       });
-      const data = await res.json();
-      if (res.ok) {
-        setDisplayedBase(data.base);
-        setDisplayedSurcharge(data.surcharge);
-        setDisplayedTotal(data.total);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Could not update payment total');
       }
-    } catch {
-      /* Stripe will charge the PI's current amount */
+      setDisplayedBase(data.base);
+      setDisplayedSurcharge(data.surcharge);
+      setDisplayedTotal(data.total);
+    } catch (err) {
+      if (methodCategory === 'us_bank_account') {
+        setAmountSyncError(true);
+        setElementError(err.message || 'Could not update the bank-transfer total. Select card or try again.');
+      }
     } finally {
       setSyncingAmount(false);
     }
@@ -306,6 +312,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           setElementError(event.error?.message || null);
           const nextMethod = event.value?.type || null;
           if (nextMethod) {
+            if (nextMethod !== 'us_bank_account') setAmountSyncError(false);
             setSelectedMethod(nextMethod);
             syncAmountForMethod(nextMethod);
           }
@@ -357,7 +364,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
     }
   };
 
-  const disabled = !ready || processing || syncingAmount;
+  const disabled = !ready || processing || syncingAmount || amountSyncError;
 
   return (
     <div>
@@ -443,7 +450,9 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
             ? 'Loading payment form…'
             : syncingAmount
               ? 'Updating total…'
-              : `Pay ${fmtCurrency(buttonAmount)}`}
+              : amountSyncError
+                ? 'Update total to continue'
+                : `Pay ${fmtCurrency(buttonAmount)}`}
       </BrandButton>
 
       <div style={{ textAlign: 'center', marginTop: 12, fontSize: 12, color: 'var(--text-muted)' }}>
