@@ -117,7 +117,11 @@ function adminFetch(path, options = {}) {
     },
     ...options,
   }).then(r => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) {
+      const err = new Error(`HTTP ${r.status}`);
+      err.status = r.status;
+      throw err;
+    }
     return r.json();
   });
 }
