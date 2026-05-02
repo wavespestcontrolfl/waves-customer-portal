@@ -5,7 +5,7 @@
  *   1. Transcribe audio (Gemini or Twilio built-in)
  *   2. AI extraction: customer info, appointment details, pain points, sentiment
  *   3. Create/update customer in portal DB
- *   4. If appointment detected → send confirmation SMS + log
+ *   4. If appointment detected → create calendar row, register reminders, send confirmation SMS + log
  *   5. Tag lead in Beehiiv + enroll in automation
  *   6. Full audit trail in call_log
  */
@@ -26,6 +26,29 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString } = require('../utils/datetime-et');
+
+async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType }) {
+  try {
+    const AppointmentReminders = require('./appointment-reminders');
+    await AppointmentReminders.registerAppointment(
+      scheduledServiceId,
+      customerId,
+      `${scheduledDate}T${windowStart || '08:00'}`,
+      serviceType,
+      'call_recording',
+      { sendConfirmation: false }
+    );
+  } catch (err) {
+    logger.error(`[call-proc] Appointment reminder registration failed: ${err.message}`);
+  }
+
+  try {
+    const { syncJobsFromSchedule } = require('./dispatch/schedule-bridge');
+    await syncJobsFromSchedule(scheduledDate);
+  } catch (err) {
+    logger.error(`[call-proc] Dispatch calendar sync failed: ${err.message}`);
+  }
+}
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -865,6 +888,13 @@ const CallRecordingProcessor = {
               scheduledDateForLog = scheduledDate;
               windowStartForLog = windowStart;
               logger.info(`[call-proc] Scheduled service created: ${svc.id} on ${scheduledDate} at ${windowStart}`);
+              await registerScheduleSideEffects({
+                scheduledServiceId: svc.id,
+                customerId,
+                scheduledDate,
+                windowStart: windowStart || '09:00',
+                serviceType: svc.service_type,
+              });
 
               // Stitch the schedule row back into the draft estimate's
               // estimate_data JSON when the same call produced both, so the
@@ -906,7 +936,7 @@ const CallRecordingProcessor = {
                 body: smsBody,
                 channel: 'sms',
                 audience: 'customer',
-                purpose: 'appointment',
+                purpose: 'appointment_confirmation',
                 customerId,
                 appointmentId: scheduledServiceId,
                 identityTrustLevel: 'phone_matches_customer',
