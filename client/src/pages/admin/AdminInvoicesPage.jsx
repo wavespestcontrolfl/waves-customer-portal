@@ -81,24 +81,6 @@ const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius:
 const sInput = (isMobile) => ({ width: '100%', padding: isMobile ? '12px 14px' : '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: isMobile ? 16 : 13, outline: 'none', boxSizing: 'border-box', minHeight: isMobile ? 44 : undefined });
 
 const STATUS_COLORS = { draft: D.muted, sent: D.blue, viewed: D.teal, paid: D.green, overdue: D.red, void: D.muted };
-const HIDDEN_INVOICE_DISCOUNT_NAMES = new Set([
-  'waveguard member discount',
-  'waveguard member discount (termite inspection)',
-  'military discount',
-  'family & friends',
-  'multi-home discount',
-  'prepayment discount',
-  'referral credit',
-  'senior discount',
-  'free termite inspection',
-  'custom percentage discount',
-  'custom dollar discount',
-]);
-
-function isHiddenInvoiceDiscount(discount) {
-  return HIDDEN_INVOICE_DISCOUNT_NAMES.has(String(discount?.name || '').trim().toLowerCase());
-}
-
 export default function AdminInvoicesPage() {
   const [tab, setTab] = useState('list');
   const [stats, setStats] = useState(null);
@@ -1059,7 +1041,6 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             x.is_active
             && x.show_in_invoices
             && !x.is_waveguard_tier_discount
-            && !isHiddenInvoiceDiscount(x)
           ));
         setAvailableDiscounts(list);
       })
@@ -1350,15 +1331,33 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                 {lineItems.length > 1 && (
                   <button onClick={() => removeLineItem(i)} style={{ background: 'none', border: 'none', color: D.red, cursor: 'pointer', fontSize: 18, padding: isMobile ? '12px 12px' : '10px 4px', minHeight: isMobile ? 44 : undefined, minWidth: isMobile ? 44 : undefined }}>x</button>
                 )}
-                {item._kind !== 'discount' && availableDiscounts.length > 0 && item.description && Number(item.unit_price) > 0 && (
+                {item._kind !== 'discount' && (
                   <div style={{ flexBasis: '100%', paddingLeft: isMobile ? 0 : 0, position: 'relative' }}>
+                    <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 4 }}>
+                      Discount for this line item
+                    </div>
                     <input
                       value={discountQueries[item.client_id || i] || ''}
-                      onChange={e => { setDiscountQueries(prev => ({ ...prev, [item.client_id || i]: e.target.value })); setDiscountSearchIdx(i); }}
-                      onFocus={() => setDiscountSearchIdx(i)}
+                      onChange={e => { setDiscountQueries(prev => ({ ...prev, [item.client_id || i]: e.target.value })); if (item.description && Number(item.unit_price) > 0 && availableDiscounts.length > 0) setDiscountSearchIdx(i); }}
+                      onFocus={() => { if (item.description && Number(item.unit_price) > 0 && availableDiscounts.length > 0) setDiscountSearchIdx(i); }}
                       onBlur={() => setTimeout(() => { setDiscountSearchIdx(prev => (prev === i ? null : prev)); }, 150)}
-                      placeholder={`Search discount for ${item.description}...`}
-                      style={{ ...sInput(isMobile), fontSize: isMobile ? 15 : 12, minHeight: isMobile ? 42 : 36, padding: isMobile ? '10px 12px' : '8px 10px' }}
+                      placeholder={
+                        !item.description
+                          ? 'Add a service description before choosing a discount'
+                          : !(Number(item.unit_price) > 0)
+                            ? 'Enter a price before choosing a discount'
+                            : availableDiscounts.length === 0
+                              ? 'No invoice discounts are available'
+                              : `Search discount for ${item.description}...`
+                      }
+                      disabled={!item.description || !(Number(item.unit_price) > 0) || availableDiscounts.length === 0}
+                      style={{
+                        ...sInput(isMobile),
+                        fontSize: isMobile ? 15 : 12,
+                        minHeight: isMobile ? 42 : 36,
+                        padding: isMobile ? '10px 12px' : '8px 10px',
+                        opacity: (!item.description || !(Number(item.unit_price) > 0) || availableDiscounts.length === 0) ? 0.65 : 1,
+                      }}
                     />
                     {discountSearchIdx === i && (
                       <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, zIndex: 18, maxHeight: 220, overflow: 'auto', marginTop: 4, boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }}>
