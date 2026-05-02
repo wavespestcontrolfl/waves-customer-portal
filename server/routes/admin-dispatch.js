@@ -328,6 +328,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
 // POST /api/admin/dispatch/:serviceId/complete
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
+  let markedSucceeded = false;
   try {
     const {
       idempotencyKey: bodyIdempotencyKey,
@@ -526,6 +527,31 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
       throw err;
     }
+
+    // The durable completion artifacts (service_record, service_products,
+    // status_log, lifecycle UPDATE, status flip, dispatch alerts) have all
+    // committed. Mark the attempt succeeded NOW with a partial response so
+    // that any subsequent side-effect failure can't flip this attempt back
+    // to 'failed' and let a retry re-create those artifacts. The response
+    // payload is refreshed at the end of the handler with invoice IDs.
+    //
+    // All side effects below are wrapped in their own try/catch and are
+    // independently idempotent (review-request by service_record_id, SMS
+    // skip by structured_notes.sentSmsBody, invoice by service_record_id,
+    // etc.), so a process crash mid-side-effect does not duplicate on the
+    // next webhook/UI retry — the per-service success guard in
+    // claimCompletionAttempt rejects the duplicate completion attempt.
+    await CompletionAttempts.markCompletionAttemptSucceeded(completionAttempt, {
+      record,
+      invoice: null,
+      response: {
+        success: true,
+        serviceRecordId: record.id,
+        invoiceId: null,
+        invoiceTotal: null,
+      },
+    });
+    markedSucceeded = true;
 
     // MOA-rotation violation detector (third dispatch alert generator).
     // checkLimits looks at property_application_history for past
@@ -806,10 +832,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       invoiceId: invoice?.id || null,
       invoiceTotal: invoice?.total != null ? Number(invoice.total) : null,
     };
+    // Refresh the stored response with the final invoice info — this is an
+    // UPDATE of an already-succeeded row (set above immediately after the
+    // trx commit), not a state transition.
     await CompletionAttempts.markCompletionAttemptSucceeded(completionAttempt, { record, invoice, response: responsePayload });
     res.json(responsePayload);
   } catch (err) {
-    await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);
+    // Only mark failed if we haven't already marked succeeded. After the
+    // durable trx commits and the attempt is succeeded, an unhandled throw
+    // in a recoverable side effect must NOT flip it back — that would
+    // allow a retry to re-create service_record / invoice / SMS.
+    if (!markedSucceeded) {
+      await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);
+    } else {
+      logger.error(
+        `[dispatch] Post-success error in /complete (attempt ${completionAttempt?.id} stays succeeded): ${err.message}`
+      );
+    }
     next(err);
   }
 });
