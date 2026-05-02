@@ -3828,14 +3828,14 @@ function ServicePrefsSection() {
               disabled={busy === r.key}
               aria-label={`${r.title} ${on ? 'enabled' : 'disabled'}`}
               style={{
-                position: 'relative', width: 46, height: 26, borderRadius: 26,
+                position: 'relative', width: 50, height: 32, borderRadius: 32,
                 background: on ? B.wavesBlue : B.grayLight,
                 border: 'none', cursor: busy === r.key ? 'wait' : 'pointer',
                 flexShrink: 0, transition: 'background .15s',
               }}
             >
               <span style={{
-                position: 'absolute', top: 3, left: on ? 23 : 3,
+                position: 'absolute', top: 6, left: on ? 26 : 4,
                 width: 20, height: 20, borderRadius: '50%', background: '#fff',
                 boxShadow: '0 1px 2px rgba(0,0,0,0.15)', transition: 'left .15s',
               }} />
@@ -5608,6 +5608,7 @@ function MyPlanTab({ customer }) {
                   ) : (
                     <a href="sms:+19412975749?body=Hi Waves, I'd like to discuss adjusting my WaveGuard plan." style={{
                       fontSize: 10, color: B.wavesBlue, fontWeight: 600, textDecoration: 'none',
+                      minHeight: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                     }}>Contact us</a>
                   )}
                 </div>
@@ -5728,13 +5729,13 @@ function MyPlanTab({ customer }) {
             <button onClick={() => setShowPauseForm(true)} style={{
               background: 'none', border: 'none', cursor: 'pointer',
               fontSize: 12, color: B.grayMid, fontWeight: 600, fontFamily: FONTS.body,
-              textDecoration: 'underline', textUnderlineOffset: 3, padding: '4px 8px',
+              textDecoration: 'underline', textUnderlineOffset: 3, padding: '8px 10px', minHeight: 36,
             }}>Pause My Plan</button>
             <span style={{ color: B.grayLight }}>|</span>
             <button onClick={() => setShowCancelForm(true)} style={{
               background: 'none', border: 'none', cursor: 'pointer',
               fontSize: 12, color: B.grayMid, fontWeight: 500, fontFamily: FONTS.body,
-              textDecoration: 'underline', textUnderlineOffset: 3, padding: '4px 8px',
+              textDecoration: 'underline', textUnderlineOffset: 3, padding: '8px 10px', minHeight: 36,
             }}>Cancel</button>
           </div>
         )}
