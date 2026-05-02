@@ -129,6 +129,22 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
     return claimSideEffectsRun(resumable, requestHash, knex);
   }
 
+  const completedRecord = await knex('service_records')
+    .where({ scheduled_service_id: serviceId })
+    .orderBy('created_at', 'desc')
+    .first();
+  if (completedRecord) {
+    return {
+      action: 'conflict',
+      status: 409,
+      payload: {
+        error: 'Service has already been completed.',
+        code: 'service_already_completed',
+        serviceRecordId: completedRecord.id,
+      },
+    };
+  }
+
   try {
     const [row] = await knex('service_completion_attempts').insert({
       service_id: serviceId,

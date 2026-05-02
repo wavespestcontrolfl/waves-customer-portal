@@ -58,6 +58,7 @@ function makeKnex(ops) {
 // success?" lookup. This shorthand stands for "no, no prior success."
 const noPriorSuccess = () => ({ first: undefined });
 const noResumableCompletion = () => ({ first: undefined });
+const noCompletedRecord = () => ({ first: undefined });
 
 describe('completion attempts', () => {
   test('first request claims and proceeds', async () => {
@@ -65,6 +66,7 @@ describe('completion attempts', () => {
     const knex = makeKnex([
       noPriorSuccess(),
       noResumableCompletion(),
+      noCompletedRecord(),
       { returning: [row] },
     ]);
 
@@ -75,7 +77,7 @@ describe('completion attempts', () => {
     }, knex);
 
     expect(result).toEqual({ action: 'proceed', attempt: row });
-    expect(knex.calls[2].op.insertPayload).toMatchObject({
+    expect(knex.calls[3].op.insertPayload).toMatchObject({
       service_id: 'svc-1',
       idempotency_key: 'key-1',
       status: 'pending',
@@ -87,6 +89,7 @@ describe('completion attempts', () => {
     const knex = makeKnex([
       noPriorSuccess(),
       noResumableCompletion(),
+      noCompletedRecord(),
       { insertError: uniqueViolation() },
       { first: { id: 'attempt-1', status: 'pending' } },
     ]);
@@ -158,6 +161,7 @@ describe('completion attempts', () => {
     const knex = makeKnex([
       noPriorSuccess(),
       noResumableCompletion(),
+      noCompletedRecord(),
       { insertError: uniqueViolation() },
       { first: { id: 'attempt-1', status: 'failed', error: 'transient' } },
       { returning: [retried] },
@@ -170,8 +174,8 @@ describe('completion attempts', () => {
     }, knex);
 
     expect(result).toEqual({ action: 'proceed', attempt: retried });
-    expect(knex.calls[4].op.whereCriteria).toEqual({ id: 'attempt-1', status: 'failed' });
-    expect(knex.calls[4].op.updatePayload).toMatchObject({
+    expect(knex.calls[5].op.whereCriteria).toEqual({ id: 'attempt-1', status: 'failed' });
+    expect(knex.calls[5].op.updatePayload).toMatchObject({
       status: 'pending',
       request_hash: 'hash-2',
       response: null,
@@ -183,6 +187,7 @@ describe('completion attempts', () => {
     const knex = makeKnex([
       noPriorSuccess(),
       noResumableCompletion(),
+      noCompletedRecord(),
       { insertError: uniqueViolation() },
       { first: { id: 'attempt-1', status: 'failed', request_hash: 'hash-1' } },
       { returning: [] },
@@ -228,6 +233,7 @@ describe('completion attempts', () => {
     const knex = makeKnex([
       noPriorSuccess(),
       noResumableCompletion(),
+      noCompletedRecord(),
       { insertError: uniqueViolation() },
       { first: { id: 'attempt-1', status: 'failed', request_hash: 'hash-old' } },
     ]);
@@ -270,6 +276,7 @@ describe('completion attempts', () => {
     const knex = makeKnex([
       noPriorSuccess(),
       noResumableCompletion(),
+      noCompletedRecord(),
       { insertError: uniqueViolation() },
       { first: undefined },     // no same-key match
       { first: undefined },     // no stale pending → no reclaim path
@@ -302,6 +309,7 @@ describe('completion attempts', () => {
     const knex = makeKnex([
       noPriorSuccess(),
       noResumableCompletion(),
+      noCompletedRecord(),
       { insertError: uniqueViolation() },   // first insert hits partial index
       { first: undefined },                 // no same-key match
       { first: stale },                     // stale pending found
@@ -318,8 +326,8 @@ describe('completion attempts', () => {
 
     expect(result).toEqual({ action: 'proceed', attempt: newRow });
     // Reclaim UPDATE was scoped to the stale row + status='pending' guard.
-    expect(knex.calls[6].op.whereCriteria).toEqual({ id: 'orphan-1', status: 'pending' });
-    expect(knex.calls[6].op.updatePayload.status).toBe('failed');
+    expect(knex.calls[7].op.whereCriteria).toEqual({ id: 'orphan-1', status: 'pending' });
+    expect(knex.calls[7].op.updatePayload.status).toBe('failed');
   });
 
   test('different key falls through to 409 when reclaim race is lost', async () => {
@@ -333,6 +341,7 @@ describe('completion attempts', () => {
     const knex = makeKnex([
       noPriorSuccess(),
       noResumableCompletion(),
+      noCompletedRecord(),
       { insertError: uniqueViolation() },
       { first: undefined },             // no same-key match
       { first: stale },                 // stale pending found
@@ -351,28 +360,16 @@ describe('completion attempts', () => {
     expect(result.payload.code).toBe('service_completion_pending');
   });
 
-  test('stale-pending reclaim refuses when service_record already exists (P0 defense in depth)', async () => {
-    // The trx for /complete commits service_record + status flip + the
-    // attempt's status='succeeded' in one shot now (PR #588), so the
-    // window is tiny. But an out-of-band path could still leave a
-    // pending attempt orphaned with a committed service_record. The
-    // 10-min reclaim must NOT re-run /complete in that case — duplicate
-    // service_records / invoices / SMS would result.
-    const stale = {
-      id: 'orphan-1',
-      idempotency_key: 'old-key',
-      status: 'pending',
-      updated_at: new Date(Date.now() - 12 * 60 * 1000),
-    };
+  test('fresh key refuses when service_record already exists (P0 defense in depth)', async () => {
+    // A deploy, manual repair, or legacy path could leave a committed
+    // service_record without a succeeded attempt row. A fresh panel key must
+    // still refuse instead of re-running service_record / invoice / SMS work.
     const completedRecord = { id: 'record-1', scheduled_service_id: 'svc-1' };
 
     const knex = makeKnex([
       noPriorSuccess(),
       noResumableCompletion(),
-      { insertError: uniqueViolation() },
-      { first: undefined },             // no same-key match
-      { first: stale },                 // stale pending found
-      { first: completedRecord },       // service_records HAS a record → bail out
+      { first: completedRecord },
     ]);
 
     const result = await claimCompletionAttempt({
@@ -385,9 +382,7 @@ describe('completion attempts', () => {
     expect(result.status).toBe(409);
     expect(result.payload.code).toBe('service_already_completed');
     expect(result.payload.serviceRecordId).toBe('record-1');
-    // Six table calls total: priorSuccess + resumable + insert + same-key + stale + service_records.
-    // No reclaim UPDATE, no new INSERT.
-    expect(knex.calls).toHaveLength(6);
+    expect(knex.calls).toHaveLength(3);
   });
 
   test('side-effect pending completion is atomically claimed before resume', async () => {

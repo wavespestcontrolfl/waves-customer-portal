@@ -700,6 +700,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         .whereNot('status', 'void')
         .orderBy('created_at', 'desc')
         .first();
+      if (!existingCompletionInvoice) {
+        existingCompletionInvoice = await db('invoices')
+          .where({ scheduled_service_id: svc.id })
+          .whereNot('status', 'void')
+          .orderBy('created_at', 'desc')
+          .first();
+        if (existingCompletionInvoice && !existingCompletionInvoice.service_record_id) {
+          await db('invoices').where({ id: existingCompletionInvoice.id }).update({
+            service_record_id: record.id,
+            technician_id: svc.technician_id || existingCompletionInvoice.technician_id || null,
+            updated_at: new Date(),
+          });
+        }
+      }
       if (existingCompletionInvoice) {
         invoice = existingCompletionInvoice;
         payUrl = existingCompletionInvoice.token ? `${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/pay/${existingCompletionInvoice.token}` : null;
