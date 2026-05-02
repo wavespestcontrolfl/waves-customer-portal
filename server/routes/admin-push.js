@@ -16,8 +16,9 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { triggerNotification, listTriggers } = require('../services/notification-triggers');
-const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
+const { listTriggers } = require('../services/notification-triggers');
+const PushService = require('../services/push-notifications');
+const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 
 // VAPID public key is public by design (browsers need it to subscribe).
 // Keep this endpoint UNAUTHENTICATED so an expired admin token can't
@@ -45,8 +46,8 @@ router.get('/diagnostics', adminAuthenticate, requireAdmin, (req, res) => {
   });
 });
 
-// All write operations + preferences still require admin
-router.use(adminAuthenticate, requireAdmin);
+// Subscription and preference operations require a signed-in admin portal user.
+router.use(adminAuthenticate, requireTechOrAdmin);
 
 router.post('/subscribe', async (req, res, next) => {
   try {
@@ -69,7 +70,7 @@ router.post('/subscribe', async (req, res, next) => {
 
     const [row] = await db('push_subscriptions').insert({
       admin_user_id: adminUserId,
-      role: 'admin',
+      role: req.techRole === 'technician' ? 'technician' : 'admin',
       subscription_data: subData,
       device_info: deviceInfo || req.headers['user-agent']?.slice(0, 100) || null,
       active: true,
@@ -97,6 +98,26 @@ router.post('/unsubscribe', async (req, res, next) => {
 
 // Bell list/read endpoints live at /api/admin/notifications (admin-notifications.js).
 // This file owns push subscriptions + per-trigger preferences + test fire only.
+
+router.get('/subscription-status', async (req, res, next) => {
+  try {
+    const rows = await db('push_subscriptions')
+      .where({ admin_user_id: req.technicianId })
+      .select('id', 'active', 'device_info', 'created_at');
+    const active = rows.filter((r) => r.active).length;
+    res.json({
+      ok: true,
+      active,
+      total: rows.length,
+      devices: rows.map((r) => ({
+        id: r.id,
+        active: !!r.active,
+        deviceInfo: r.device_info,
+        createdAt: r.created_at,
+      })),
+    });
+  } catch (err) { next(err); }
+});
 
 router.get('/preferences', async (req, res, next) => {
   try {
@@ -155,13 +176,35 @@ router.put('/preferences', async (req, res, next) => {
 
 router.post('/test', async (req, res, next) => {
   try {
-    await triggerNotification('new_lead', {
-      name: 'Test Lead',
-      source: 'manual test',
-      zip: '34292',
-      leadId: null,
+    const status = PushService.status();
+    if (!status.available || !status.configured) {
+      return res.status(503).json({
+        ok: false,
+        error: status.error || 'Web push is not configured on the server',
+        status,
+      });
+    }
+
+    const result = await PushService.sendToAdminUser(req.technicianId, {
+      title: 'Waves test notification',
+      body: 'Push is working on this device.',
+      url: '/admin/communications#notifications',
+      tag: 'waves-test',
+      priority: 'normal',
+      vibrate: [150],
+      silent: false,
     });
-    res.json({ ok: true, message: 'Test notification dispatched' });
+    if (result.sent === 0) {
+      return res.status(409).json({
+        ok: false,
+        sent: 0,
+        result,
+        error: result.subscriptions === 0
+          ? 'No active push subscription found for this admin user. Enable push on this iPhone first.'
+          : 'No push notifications were delivered. The stored subscription may be expired; disable and re-enable push on this device.',
+      });
+    }
+    res.json({ ok: true, sent: result.sent, result, message: 'Test notification delivered' });
   } catch (err) { next(err); }
 });
 

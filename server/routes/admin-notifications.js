@@ -4,6 +4,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate } = require('../middleware/admin-auth');
 const NotificationService = require('../services/notification-service');
+const PushService = require('../services/push-notifications');
 const { computeDashboardAlerts, toNotifications } = require('../services/dashboard-alerts');
 
 router.use(adminAuthenticate);
@@ -226,10 +227,14 @@ router.get('/diagnose', async (req, res, next) => {
     const report = { targetUserId: userId, callerUserId: req.technicianId, checks: {} };
 
     // 1. VAPID env present (push silently no-ops without these)
+    const pushStatus = PushService.status();
     report.checks.vapid = {
-      ok: Boolean(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY),
+      ok: pushStatus.available && pushStatus.configured,
       publicKeyPresent: Boolean(process.env.VAPID_PUBLIC_KEY),
       privateKeyPresent: Boolean(process.env.VAPID_PRIVATE_KEY),
+      webPushAvailable: pushStatus.available,
+      configured: pushStatus.configured,
+      error: pushStatus.error,
     };
 
     // 2. web-push module loadable

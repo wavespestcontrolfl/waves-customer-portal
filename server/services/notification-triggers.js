@@ -245,8 +245,9 @@ async function triggerNotification(triggerKey, payload = {}) {
       }
     }
 
+    const stats = { bellWritten, push: null };
+
     // Push: send to all admin/technician subscriptions whose user has push enabled.
-    // (Push service queries push_subscriptions itself; we filter by checking prefs.)
     try {
       const enabledUserIds = activeAdmins
         .filter((u) => {
@@ -256,10 +257,6 @@ async function triggerNotification(triggerKey, payload = {}) {
         .map((u) => u.id);
 
       if (enabledUserIds.length > 0) {
-        const subs = await db('push_subscriptions')
-          .whereIn('admin_user_id', enabledUserIds)
-          .where({ active: true });
-
         const wantsSoundByUser = new Map(
           activeAdmins.map((u) => {
             const pref = prefsByUser.get(u.id);
@@ -267,11 +264,11 @@ async function triggerNotification(triggerKey, payload = {}) {
           })
         );
 
-        const webpush = safeRequire('web-push');
-        if (webpush && process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
-          for (const sub of subs) {
-            const wantsSound = wantsSoundByUser.get(sub.admin_user_id);
-            const notif = {
+        stats.push = await PushService.sendToAdminUsers(
+          enabledUserIds,
+          (adminUserId) => {
+            const wantsSound = wantsSoundByUser.get(adminUserId);
+            return {
               title: built.title,
               body: built.body,
               url: built.link || '/admin',
@@ -280,28 +277,17 @@ async function triggerNotification(triggerKey, payload = {}) {
               vibrate: wantsSound ? PRIORITY_VIBRATE[trigger.priority] : [0],
               silent: !wantsSound,
             };
-            try {
-              await webpush.sendNotification(JSON.parse(sub.subscription_data), JSON.stringify(notif));
-            } catch (err) {
-              if (err.statusCode === 410 || err.statusCode === 404) {
-                await db('push_subscriptions').where({ id: sub.id }).update({ active: false });
-              } else {
-                logger.error(`[notification-triggers] push send failed: ${err.message}`);
-              }
-            }
           }
-        }
+        );
       }
     } catch (e) {
       logger.error(`[notification-triggers] push dispatch failed: ${e.message}`);
     }
+    return stats;
   } catch (err) {
     logger.error(`[notification-triggers] dispatch failed for ${triggerKey}: ${err.message}`);
+    return { bellWritten: false, push: null, error: err.message };
   }
-}
-
-function safeRequire(mod) {
-  try { return require(mod); } catch { return null; }
 }
 
 function listTriggers() {

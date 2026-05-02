@@ -47,7 +47,7 @@ export default function PushSettings() {
   const [pushError, setPushError] = useState('');
 
   useEffect(() => {
-    isPushEnabled().then(setPushOn);
+    isPushEnabled({ apiBase: API_BASE, verifyServer: true }).then(setPushOn);
     adminFetch('/admin/push/preferences')
       .then((r) => setPrefs(r.preferences || []))
       .catch(() => setPrefs([]));
@@ -59,8 +59,8 @@ export default function PushSettings() {
     setBusy(true);
     setPushError('');
     try {
-      if (pushOn) { await disablePush(); setPushOn(false); showToast('Push disabled on this device'); }
-      else { await ensurePushSubscription(); setPushOn(true); showToast('Push enabled on this device'); }
+      if (pushOn) { await disablePush({ apiBase: API_BASE }); setPushOn(false); showToast('Push disabled on this device'); }
+      else { await ensurePushSubscription({ apiBase: API_BASE }); setPushOn(true); showToast('Push enabled on this device'); }
     } catch (e) { setPushError(e.message || 'Failed to enable push notifications'); }
     finally { setBusy(false); }
   };
@@ -82,7 +82,10 @@ export default function PushSettings() {
   };
 
   const test = async () => {
-    try { await sendTestPush(); showToast('Test notification sent'); }
+    try {
+      const result = await sendTestPush({ apiBase: API_BASE });
+      showToast(result.sent ? 'Test notification sent' : 'No active device subscription');
+    }
     catch (e) { alert(e.message); }
   };
 

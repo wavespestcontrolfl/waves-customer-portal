@@ -58,7 +58,11 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   // operational push.
   useEffect(() => {
     if (!open || type !== 'admin') return;
-    isPushEnabled().then(setPushOn).catch(() => setPushOn(false));
+    isPushEnabled({
+      apiBase: API_BASE,
+      token: localStorage.getItem(tokenKey),
+      verifyServer: true,
+    }).then(setPushOn).catch(() => setPushOn(false));
   }, [open, type]);
 
   const handleEnablePush = async () => {
@@ -249,8 +253,8 @@ export default function NotificationBell({ type = 'admin', customerId }) {
               )}
               {!loading && tab === 'account' && notifications.map(n => (
                 <div key={n.id}
-                  onClick={() => {
-                    if (!n.read_at) markRead(n.id);
+                  onClick={async () => {
+                    if (!n.read_at) await markRead(n.id);
                     if (n.link) { setOpen(false); window.location.href = n.link; }
                   }}
                   style={{
@@ -350,8 +354,8 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                   }}>{group}</div>
                   {items.map(n => (
                     <div key={n.id}
-                      onClick={() => {
-                        if (!n.read_at) markRead(n.id);
+                      onClick={async () => {
+                        if (!n.read_at) await markRead(n.id);
                         if (n.link) { setOpen(false); window.location.href = n.link; }
                       }}
                       style={{

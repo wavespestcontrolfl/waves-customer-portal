@@ -15,6 +15,17 @@ function urlBase64ToUint8Array(base64String) {
   return out;
 }
 
+function arrayBufferEquals(a, b) {
+  if (!a || !b) return false;
+  const aa = new Uint8Array(a);
+  const bb = new Uint8Array(b);
+  if (aa.length !== bb.length) return false;
+  for (let i = 0; i < aa.length; i++) {
+    if (aa[i] !== bb[i]) return false;
+  }
+  return true;
+}
+
 // iOS detection covers iPad-on-MacIntel where userAgent reports Mac but
 // touch points reveal a tablet. Web Push on iOS is gated to Home Screen
 // installs (display: standalone) per Apple's iOS 16.4+ rules — both the
@@ -56,14 +67,22 @@ async function getRegistration() {
   return reg;
 }
 
-export async function isPushEnabled() {
+export async function isPushEnabled({ apiBase = '/api', token, verifyServer = false } = {}) {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) return false;
   if (Notification.permission !== 'granted') return false;
   try {
     const reg = await navigator.serviceWorker.getRegistration();
     if (!reg) return false;
     const sub = await reg.pushManager.getSubscription();
-    return !!sub;
+    if (!sub) return false;
+    if (!verifyServer) return true;
+    const authToken = token || localStorage.getItem('waves_admin_token');
+    const res = await fetch(`${apiBase}/admin/push/subscription-status`, {
+      headers: { Authorization: `Bearer ${authToken}` },
+    });
+    if (!res.ok) return true;
+    const status = await res.json();
+    return (status.active || 0) > 0;
   } catch { return false; }
 }
 
@@ -120,12 +139,17 @@ export async function ensurePushSubscription({ apiBase = '/api', token } = {}) {
     throw new Error('Server returned no VAPID public key. Visit /api/admin/push/diagnostics in your browser (while logged in) to see what env vars the server is actually reading.');
   }
 
+  const applicationServerKey = urlBase64ToUint8Array(publicKey);
   let sub = await reg.pushManager.getSubscription();
+  if (sub?.options?.applicationServerKey && !arrayBufferEquals(sub.options.applicationServerKey, applicationServerKey)) {
+    await sub.unsubscribe();
+    sub = null;
+  }
   if (!sub) {
     try {
       sub = await reg.pushManager.subscribe({
         userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(publicKey),
+        applicationServerKey,
       });
     } catch (e) {
       throw new Error(`Browser refused subscription: ${e.message}. (If on iOS, the site must be installed to home screen first.)`);
@@ -172,5 +196,9 @@ export async function sendTestPush({ apiBase = '/api', token } = {}) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
   });
-  return res.json();
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || body.ok === false) {
+    throw new Error(body.error || body.message || `Test push failed (HTTP ${res.status})`);
+  }
+  return body;
 }

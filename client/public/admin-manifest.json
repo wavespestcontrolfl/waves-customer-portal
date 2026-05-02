@@ -1,6 +1,7 @@
 {
   "name": "Waves Admin",
   "short_name": "Waves Admin",
+  "id": "/admin/",
   "description": "Waves Pest Control admin portal — dispatch, customers, billing, reports.",
   "start_url": "/admin/",
   "scope": "/admin/",
