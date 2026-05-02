@@ -9,6 +9,7 @@ import BrandFooter from '../components/BrandFooter';
 import NewsletterSignup from '../components/NewsletterSignup';
 import Icon from '../components/Icon';
 import { etDateString } from '../lib/timezone';
+import useIsMobile from '../hooks/useIsMobile';
 
 // Normalize date strings from API — handles both "2026-04-02" and "2026-04-02T00:00:00.000Z"
 function parseDate(d) {
@@ -7714,6 +7715,7 @@ function ChatWidget({ customer, onClose }) {
 
 export default function PortalPage() {
   const { customer, logout } = useAuth();
+  const isMobileShell = useIsMobile(900);
   // Honor ?tab=billing etc. so deep-links from SMS (e.g. the "update your
   // card" link in autopay-failure texts) land the customer on the right tab.
   // Returns [tabId, visitsSubTab, openRequest]. Legacy ?tab=schedule /
@@ -7850,7 +7852,7 @@ export default function PortalPage() {
 
       {/* Content — bottom padding clears the CTA bar (60px) + bottom nav
           (60px) stack so fixed UI doesn't hide the last section. */}
-      <div style={{ padding: '16px 16px 150px', maxWidth: 700, margin: '0 auto' }}>
+      <div style={{ padding: `16px 16px ${isMobileShell ? 150 : 32}px`, maxWidth: 700, margin: '0 auto' }}>
         {activeTab === 'dashboard' && <DashboardTab customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'plan' && <MyPlanTab customer={customer} />}
         {activeTab === 'visits' && <VisitsTab customer={customer} subTab={visitsSubTab} onSubTabChange={setVisitsSubTab} />}
@@ -7862,19 +7864,21 @@ export default function PortalPage() {
       </div>
 
       {/* Footer */}
-      <div style={{ maxWidth: 700, margin: '0 auto', padding: '0 20px 80px' }}>
+      <div style={{ maxWidth: 700, margin: '0 auto', padding: `0 20px ${isMobileShell ? 80 : 48}px` }}>
         <BrandFooter />
       </div>
 
       {/* Bottom nav — primary destinations pinned as icons, rest behind
           "More". Sits above the CTA bar (which stays anchored at bottom:0). */}
-      <BottomNav
-        activeTab={activeTab}
-        onSelect={switchTab}
-        onOpenMore={() => setShowMoreSheet(true)}
-        moreActive={showMoreSheet}
-      />
-      {showMoreSheet && (
+      {isMobileShell && (
+        <BottomNav
+          activeTab={activeTab}
+          onSelect={switchTab}
+          onOpenMore={() => setShowMoreSheet(true)}
+          moreActive={showMoreSheet}
+        />
+      )}
+      {isMobileShell && showMoreSheet && (
         <MoreSheet
           activeTab={activeTab}
           onSelect={(id) => { switchTab(id); setShowMoreSheet(false); }}
@@ -7883,7 +7887,7 @@ export default function PortalPage() {
       )}
 
       {/* Bottom CTA */}
-      <div style={{
+      {isMobileShell && <div style={{
         position: 'fixed', bottom: 0, left: 0, right: 0,
         background: 'rgba(255,255,255,0.97)', backdropFilter: 'blur(12px)',
         borderTop: `1px solid ${B.grayLight}`, padding: '10px 12px',
@@ -7919,14 +7923,14 @@ export default function PortalPage() {
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           textDecoration: 'none',
         }}><Icon name="mail" size={16} strokeWidth={1.75} /> Email</a>
-      </div>
+      </div>}
 
       {/* AI Chat Widget */}
       {showChat && <ChatWidget customer={customer} onClose={() => setShowChat(false)} />}
 
       {/* Floating Action Button — New Request. Sits above the bottom nav +
           CTA bar stack so it doesn't collide with either. */}
-      <div style={{ position: 'fixed', bottom: 140, right: 16, zIndex: 99, display: 'flex', alignItems: 'center', gap: 10 }}>
+      <div style={{ position: 'fixed', bottom: isMobileShell ? 140 : 24, right: 16, zIndex: 99, display: 'flex', alignItems: 'center', gap: 10 }}>
         <div style={{
           background: B.navy, color: '#fff', padding: '8px 14px', borderRadius: 10,
           fontSize: 12, fontWeight: 700, fontFamily: FONTS.heading,

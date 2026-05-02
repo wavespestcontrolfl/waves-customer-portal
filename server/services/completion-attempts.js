@@ -257,6 +257,52 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
     }
 
     if (existing.status === 'pending') {
+      if (hashMismatch) {
+        return {
+          action: 'conflict',
+          status: 409,
+          payload: {
+            error: 'Idempotency key reused with a different completion payload.',
+            code: 'idempotency_key_mismatch',
+          },
+        };
+      }
+
+      const staleCutoff = new Date(Date.now() - STALE_PENDING_MS);
+      if (new Date(existing.updated_at) < staleCutoff) {
+        const completedRecord = await knex('service_records')
+          .where({ scheduled_service_id: serviceId })
+          .orderBy('created_at', 'desc')
+          .first();
+        if (completedRecord) {
+          return {
+            action: 'conflict',
+            status: 409,
+            payload: {
+              error: 'Service has already been completed.',
+              code: 'service_already_completed',
+              serviceRecordId: completedRecord.id,
+            },
+          };
+        }
+
+        const [reclaimed] = await knex('service_completion_attempts')
+          .where({ id: existing.id, status: 'pending' })
+          .andWhere('updated_at', '<', staleCutoff)
+          .update({
+            request_hash: requestHash,
+            error: null,
+            updated_at: new Date(),
+          })
+          .returning('*');
+        if (reclaimed) {
+          logger.warn(
+            `[completion-attempts] reclaimed stale same-key pending attempt ${reclaimed.id} for service ${serviceId}`
+          );
+          return { action: 'proceed', attempt: reclaimed };
+        }
+      }
+
       return {
         action: 'conflict',
         status: 409,

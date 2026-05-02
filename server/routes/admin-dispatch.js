@@ -357,6 +357,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const {
       idempotencyKey: bodyIdempotencyKey,
       technicianNotes,
+      customerConcernText,
       customerRecap,
       visitOutcome = 'completed',
       reviewSuppression = null,
@@ -380,6 +381,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       });
     }
     const completionAreas = Array.isArray(areasTreated) ? areasTreated : (Array.isArray(areasServiced) ? areasServiced : []);
+    const concernText = typeof customerConcernText === 'string' ? customerConcernText.trim() : '';
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
@@ -454,6 +456,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             requestReview: requestReview !== false,
             reviewSuppression,
             incompleteReason,
+            customerConcernText: concernText || null,
             customerRecap: customerRecap || null,
           },
           areas_serviced: completionAreas,
@@ -541,7 +544,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             customerId: svc.customer_id,
             customerName: `${svc.first_name || ''} ${svc.last_name || ''}`.trim(),
             serviceType: svc.service_type,
-            note: technicianNotes || null,
+            note: concernText || technicianNotes || null,
           },
         };
         if (visitOutcome === 'customer_concern') {
