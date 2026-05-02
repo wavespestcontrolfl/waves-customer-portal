@@ -13,6 +13,50 @@ function hashCompletionRequest(body) {
 }
 
 async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }, knex = db) {
+  // Per-service terminal-state guard. The unique index on
+  // (service_id, idempotency_key) plus the partial pending-only
+  // index don't prevent a NEW attempt under a fresh key for an
+  // already-succeeded service. Panel mounts generate a fresh key
+  // each time, so a lost response followed by reload would let
+  // /complete re-run and create a duplicate service_record /
+  // invoice / SMS — money-correctness bug.
+  //
+  // Guard: if any prior attempt for this service has succeeded,
+  // replay (same key) or 409 (different key) — never insert a new
+  // pending row.
+  const priorSuccess = await knex('service_completion_attempts')
+    .where({ service_id: serviceId, status: 'succeeded' })
+    .orderBy('updated_at', 'desc')
+    .first();
+  if (priorSuccess) {
+    if (priorSuccess.idempotency_key === idempotencyKey && priorSuccess.response) {
+      // Same client retry after success — replay stored response.
+      if (priorSuccess.request_hash && requestHash && priorSuccess.request_hash !== requestHash) {
+        return {
+          action: 'conflict',
+          status: 409,
+          payload: {
+            error: 'Idempotency key reused with a different completion payload.',
+            code: 'idempotency_key_mismatch',
+          },
+        };
+      }
+      return { action: 'replay', payload: { ...priorSuccess.response, replayed: true } };
+    }
+    // Different idempotency key for an already-completed service —
+    // refuse to run side effects again.
+    return {
+      action: 'conflict',
+      status: 409,
+      payload: {
+        error: 'Service has already been completed.',
+        code: 'service_already_completed',
+        serviceRecordId: priorSuccess.service_record_id || null,
+        invoiceId: priorSuccess.invoice_id || null,
+      },
+    };
+  }
+
   try {
     const [row] = await knex('service_completion_attempts').insert({
       service_id: serviceId,

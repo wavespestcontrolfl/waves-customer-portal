@@ -27,6 +27,10 @@ function makeKnex(ops) {
         op.whereCriteria = criteria;
         return chain;
       }),
+      orderBy: jest.fn((col, dir) => {
+        op.orderBy = { col, dir };
+        return chain;
+      }),
       update: jest.fn((payload) => {
         op.updatePayload = payload;
         return chain;
@@ -41,10 +45,17 @@ function makeKnex(ops) {
   return knex;
 }
 
+// claimCompletionAttempt always begins with a per-service "any prior
+// success?" lookup. This shorthand stands for "no, no prior success."
+const noPriorSuccess = () => ({ first: undefined });
+
 describe('completion attempts', () => {
   test('first request claims and proceeds', async () => {
     const row = { id: 'attempt-1', status: 'pending' };
-    const knex = makeKnex([{ returning: [row] }]);
+    const knex = makeKnex([
+      noPriorSuccess(),
+      { returning: [row] },
+    ]);
 
     const result = await claimCompletionAttempt({
       serviceId: 'svc-1',
@@ -53,7 +64,7 @@ describe('completion attempts', () => {
     }, knex);
 
     expect(result).toEqual({ action: 'proceed', attempt: row });
-    expect(knex.calls[0].op.insertPayload).toMatchObject({
+    expect(knex.calls[1].op.insertPayload).toMatchObject({
       service_id: 'svc-1',
       idempotency_key: 'key-1',
       status: 'pending',
@@ -63,6 +74,7 @@ describe('completion attempts', () => {
 
   test('same key while pending returns 409', async () => {
     const knex = makeKnex([
+      noPriorSuccess(),
       { insertError: uniqueViolation() },
       { first: { id: 'attempt-1', status: 'pending' } },
     ]);
@@ -78,11 +90,10 @@ describe('completion attempts', () => {
     expect(result.payload.code).toBe('completion_pending');
   });
 
-  test('same key after success replays stored response', async () => {
+  test('same key after success replays stored response (upfront fast path)', async () => {
     const response = { success: true, serviceRecordId: 'record-1', invoiceId: 'invoice-1' };
     const knex = makeKnex([
-      { insertError: uniqueViolation() },
-      { first: { id: 'attempt-1', status: 'succeeded', response } },
+      { first: { id: 'attempt-1', idempotency_key: 'key-1', status: 'succeeded', response } },
     ]);
 
     const result = await claimCompletionAttempt({
@@ -92,11 +103,48 @@ describe('completion attempts', () => {
     }, knex);
 
     expect(result).toEqual({ action: 'replay', payload: { ...response, replayed: true } });
+    // No insert attempted — fast path returned before catch block.
+    expect(knex.calls).toHaveLength(1);
+  });
+
+  test('different key after success returns 409 service_already_completed (P0 dedupe)', async () => {
+    // Money-correctness: panel reload generates a fresh idempotency key.
+    // Without the per-service guard, the new key would slip past both
+    // unique constraints and re-run /complete on an already-completed
+    // service, creating a duplicate service_record / invoice / SMS.
+    const response = { success: true, serviceRecordId: 'record-1', invoiceId: 'invoice-1' };
+    const knex = makeKnex([
+      {
+        first: {
+          id: 'attempt-1',
+          idempotency_key: 'old-key',
+          status: 'succeeded',
+          response,
+          service_record_id: 'record-1',
+          invoice_id: 'invoice-1',
+        },
+      },
+    ]);
+
+    const result = await claimCompletionAttempt({
+      serviceId: 'svc-1',
+      idempotencyKey: 'fresh-key-after-reload',
+      requestHash: 'hash-1',
+    }, knex);
+
+    expect(result.action).toBe('conflict');
+    expect(result.status).toBe(409);
+    expect(result.payload.code).toBe('service_already_completed');
+    expect(result.payload.serviceRecordId).toBe('record-1');
+    expect(result.payload.invoiceId).toBe('invoice-1');
+    // No insert attempted.
+    expect(knex.calls).toHaveLength(1);
   });
 
   test('failed attempt can retry with the same key', async () => {
     const retried = { id: 'attempt-1', status: 'pending' };
     const knex = makeKnex([
+      noPriorSuccess(),
       { insertError: uniqueViolation() },
       { first: { id: 'attempt-1', status: 'failed', error: 'transient' } },
       { returning: [retried] },
@@ -109,8 +157,8 @@ describe('completion attempts', () => {
     }, knex);
 
     expect(result).toEqual({ action: 'proceed', attempt: retried });
-    expect(knex.calls[2].op.whereCriteria).toEqual({ id: 'attempt-1', status: 'failed' });
-    expect(knex.calls[2].op.updatePayload).toMatchObject({
+    expect(knex.calls[3].op.whereCriteria).toEqual({ id: 'attempt-1', status: 'failed' });
+    expect(knex.calls[3].op.updatePayload).toMatchObject({
       status: 'pending',
       request_hash: 'hash-2',
       response: null,
@@ -119,10 +167,8 @@ describe('completion attempts', () => {
   });
 
   test('failed retry that loses the reclaim race returns 409 instead of proceeding', async () => {
-    // Two retries hit the same failed row. Only one UPDATE WHERE status='failed'
-    // can match (the other already flipped it to pending). The loser must NOT
-    // proceed with stale `existing` or both callers run completion side effects.
     const knex = makeKnex([
+      noPriorSuccess(),
       { insertError: uniqueViolation() },
       { first: { id: 'attempt-1', status: 'failed', request_hash: 'hash-1' } },
       { returning: [] },
@@ -142,8 +188,15 @@ describe('completion attempts', () => {
   test('succeeded replay rejects when request hash differs from stored', async () => {
     const response = { success: true, serviceRecordId: 'record-1' };
     const knex = makeKnex([
-      { insertError: uniqueViolation() },
-      { first: { id: 'attempt-1', status: 'succeeded', response, request_hash: 'hash-old' } },
+      {
+        first: {
+          id: 'attempt-1',
+          idempotency_key: 'key-1',
+          status: 'succeeded',
+          response,
+          request_hash: 'hash-old',
+        },
+      },
     ]);
 
     const result = await claimCompletionAttempt({
@@ -159,6 +212,7 @@ describe('completion attempts', () => {
 
   test('failed retry rejects when request hash differs from stored', async () => {
     const knex = makeKnex([
+      noPriorSuccess(),
       { insertError: uniqueViolation() },
       { first: { id: 'attempt-1', status: 'failed', request_hash: 'hash-old' } },
     ]);
@@ -177,8 +231,15 @@ describe('completion attempts', () => {
   test('succeeded replay still works when stored request_hash is null (legacy rows)', async () => {
     const response = { success: true };
     const knex = makeKnex([
-      { insertError: uniqueViolation() },
-      { first: { id: 'attempt-1', status: 'succeeded', response, request_hash: null } },
+      {
+        first: {
+          id: 'attempt-1',
+          idempotency_key: 'key-1',
+          status: 'succeeded',
+          response,
+          request_hash: null,
+        },
+      },
     ]);
 
     const result = await claimCompletionAttempt({
@@ -192,6 +253,7 @@ describe('completion attempts', () => {
 
   test('different key while service has a pending attempt returns 409', async () => {
     const knex = makeKnex([
+      noPriorSuccess(),
       { insertError: uniqueViolation() },
       { first: undefined },
     ]);
