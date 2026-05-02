@@ -84,8 +84,25 @@ const InvoiceService = {
     }
 
     // Calculate financials
-    const items = lineItems || [];
-    const subtotal = items.reduce((sum, item) => sum + (item.quantity * item.unit_price), 0);
+    const items = (lineItems || []).map(item => {
+      const quantity = Number(item.quantity) || 1;
+      const unitPrice = Number(item.unit_price) || 0;
+      return {
+        ...item,
+        quantity,
+        unit_price: unitPrice,
+        amount: Math.round(Number(item.amount ?? quantity * unitPrice) * 100) / 100,
+      };
+    });
+    const serviceSubtotal = items.reduce((sum, item) => {
+      const amount = Number(item.amount ?? ((Number(item.quantity) || 1) * (Number(item.unit_price) || 0)));
+      return amount > 0 ? sum + amount : sum;
+    }, 0);
+    const lineItemDiscountAmount = Math.abs(items.reduce((sum, item) => {
+      const amount = Number(item.amount ?? ((Number(item.quantity) || 1) * (Number(item.unit_price) || 0)));
+      return amount < 0 ? sum + amount : sum;
+    }, 0));
+    const subtotal = Math.round(serviceSubtotal * 100) / 100;
 
     // Apply WaveGuard tier discount via discount engine
     let tierDiscount;
@@ -120,7 +137,29 @@ const InvoiceService = {
       }
       return { row: d, dollars: Math.round(dollars * 100) / 100 };
     });
-    const manualDiscountAmount = manualDiscounts.reduce((s, m) => s + m.dollars, 0);
+    const lineItemDiscountIds = items
+      .filter(item => Number(item.amount) < 0 && item.discount_id)
+      .map(item => item.discount_id);
+    const lineItemDiscountRows = lineItemDiscountIds.length
+      ? await db('discounts')
+          .whereIn('id', lineItemDiscountIds)
+          .where({ is_active: true, show_in_invoices: true, is_waveguard_tier_discount: false })
+      : [];
+    const lineItemDiscountRowById = new Map(lineItemDiscountRows.map(row => [String(row.id), row]));
+    const lineItemDiscounts = items
+      .filter(item => Number(item.amount) < 0)
+      .map(item => {
+        const row = item.discount_id ? lineItemDiscountRowById.get(String(item.discount_id)) : null;
+        return {
+          row,
+          name: row?.name || item.description || 'Line item discount',
+          discount_type: row?.discount_type || 'fixed_amount',
+          amount: row ? Number(row.amount) || 0 : Math.abs(Number(item.amount) || 0),
+          dollars: Math.round(Math.abs(Number(item.amount) || 0) * 100) / 100,
+        };
+      });
+    const manualDiscountAmount = manualDiscounts.reduce((s, m) => s + m.dollars, 0)
+      + lineItemDiscounts.reduce((s, m) => s + m.dollars, 0);
 
     // Cap combined discount at subtotal so total never goes negative. When the
     // sum exceeds subtotal, scale each component proportionally so per-discount
@@ -130,11 +169,16 @@ const InvoiceService = {
     const uncappedDiscount = Math.round((tierDiscountAmount + manualDiscountAmount) * 100) / 100;
     let scaledTierDiscountAmount = tierDiscountAmount;
     let scaledManualDiscounts = manualDiscounts;
+    let scaledLineItemDiscounts = lineItemDiscounts;
     let discountAmount = uncappedDiscount;
     if (uncappedDiscount > subtotal && uncappedDiscount > 0) {
       const factor = subtotal / uncappedDiscount;
       scaledTierDiscountAmount = Math.round(tierDiscountAmount * factor * 100) / 100;
       scaledManualDiscounts = manualDiscounts.map(m => ({
+        ...m,
+        dollars: Math.round(m.dollars * factor * 100) / 100,
+      }));
+      scaledLineItemDiscounts = lineItemDiscounts.map(m => ({
         ...m,
         dollars: Math.round(m.dollars * factor * 100) / 100,
       }));
@@ -144,20 +188,34 @@ const InvoiceService = {
       // decrement discounts.total_discount_given via .increment() in
       // DiscountEngine.recordInvoiceDiscounts.
       const scaledSum = Math.round(
-        (scaledTierDiscountAmount + scaledManualDiscounts.reduce((s, m) => s + m.dollars, 0)) * 100
+        (
+          scaledTierDiscountAmount
+          + scaledManualDiscounts.reduce((s, m) => s + m.dollars, 0)
+          + scaledLineItemDiscounts.reduce((s, m) => s + m.dollars, 0)
+        ) * 100
       ) / 100;
       const remainder = Math.round((subtotal - scaledSum) * 100) / 100;
       if (remainder !== 0) {
         let targetIdx = -1; // -1 = tier slot, >=0 = manual index
+        let targetGroup = 'manual';
         let targetDollars = scaledTierDiscountAmount;
         scaledManualDiscounts.forEach((m, i) => {
-          if (m.dollars > targetDollars) { targetIdx = i; targetDollars = m.dollars; }
+          if (m.dollars > targetDollars) { targetIdx = i; targetGroup = 'manual'; targetDollars = m.dollars; }
+        });
+        scaledLineItemDiscounts.forEach((m, i) => {
+          if (m.dollars > targetDollars) { targetIdx = i; targetGroup = 'line'; targetDollars = m.dollars; }
         });
         if (targetIdx === -1) {
           scaledTierDiscountAmount = Math.round((scaledTierDiscountAmount + remainder) * 100) / 100;
-        } else {
+        } else if (targetGroup === 'manual') {
           const m = scaledManualDiscounts[targetIdx];
           scaledManualDiscounts[targetIdx] = {
+            ...m,
+            dollars: Math.round((m.dollars + remainder) * 100) / 100,
+          };
+        } else {
+          const m = scaledLineItemDiscounts[targetIdx];
+          scaledLineItemDiscounts[targetIdx] = {
             ...m,
             dollars: Math.round((m.dollars + remainder) * 100) / 100,
           };
@@ -169,6 +227,7 @@ const InvoiceService = {
     const labelParts = [
       tierDiscountLabel,
       ...manualDiscounts.map(m => m.row.name),
+      lineItemDiscountAmount > 0 ? 'Line-item discounts' : null,
     ].filter(Boolean);
     const discountLabel = labelParts.length ? labelParts.join(' + ') : null;
 
@@ -243,6 +302,15 @@ const InvoiceService = {
           name: m.row.name,
           discount_type: m.row.discount_type,
           amount: Number(m.row.amount) || 0,
+          discount_dollars: m.dollars,
+        });
+      }
+      for (const m of scaledLineItemDiscounts) {
+        auditRows.push({
+          id: m.row?.id || null,
+          name: m.name,
+          discount_type: m.discount_type,
+          amount: m.amount,
           discount_dollars: m.dollars,
         });
       }

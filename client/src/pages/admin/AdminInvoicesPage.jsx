@@ -1030,12 +1030,13 @@ function RecordPaymentModal({ invoice, isMobile, onClose, onRecorded, onError })
 
 // ── Create Invoice ──
 function CreateInvoice({ showToast, onCreated, isMobile }) {
+  const newLineItem = () => ({ client_id: `li_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, description: '', quantity: 1, unit_price: 0 });
   const [customerQuery, setCustomerQuery] = useState('');
   const [customers, setCustomers] = useState([]);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [serviceRecords, setServiceRecords] = useState([]);
   const [selectedService, setSelectedService] = useState(null);
-  const [lineItems, setLineItems] = useState([{ description: '', quantity: 1, unit_price: 0 }]);
+  const [lineItems, setLineItems] = useState(() => [newLineItem()]);
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [sendAfterCreate, setSendAfterCreate] = useState(true);
@@ -1043,8 +1044,8 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const [serviceSearchIdx, setServiceSearchIdx] = useState(null);
   const [serviceResults, setServiceResults] = useState([]);
   const [availableDiscounts, setAvailableDiscounts] = useState([]);
-  const [selectedDiscountIds, setSelectedDiscountIds] = useState([]);
-  const [discountQuery, setDiscountQuery] = useState('');
+  const [discountSearchIdx, setDiscountSearchIdx] = useState(null);
+  const [discountQueries, setDiscountQueries] = useState({});
 
   // Load active, invoice-visible, non-tier discounts once. Tier discount is auto-applied
   // server-side from the customer's WaveGuard tier, so we exclude it from the picker.
@@ -1062,12 +1063,6 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
       })
       .catch(() => {});
   }, []);
-
-  const toggleDiscount = (id) => {
-    setSelectedDiscountIds(prev =>
-      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
-    );
-  };
 
   // Customer search
   useEffect(() => {
@@ -1105,6 +1100,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
     const updated = [...lineItems];
     updated[i] = {
       ...updated[i],
+      _kind: 'service',
       description: svc.name,
       unit_price: Number(svc.base_price) || updated[i].unit_price || 0,
     };
@@ -1113,35 +1109,84 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
     setServiceResults([]);
   };
 
-  const addLineItem = () => setLineItems([...lineItems, { description: '', quantity: 1, unit_price: 0 }]);
-  const removeLineItem = (i) => setLineItems(lineItems.filter((_, idx) => idx !== i));
+  const formatDiscountLabel = (d) => d.discount_type === 'percentage' || d.discount_type === 'variable_percentage'
+    ? `${Number(d.amount)}%`
+    : d.discount_type === 'fixed_amount' || d.discount_type === 'variable_amount'
+    ? `$${Number(d.amount).toFixed(2)}`
+    : d.discount_type === 'free_service'
+    ? 'free'
+    : '';
+
+  const matchingDiscounts = (lineIdx) => {
+    const lineKey = lineItems[lineIdx]?.client_id || lineIdx;
+    const q = (discountQueries[lineKey] || '').trim().toLowerCase();
+    if (!q) return availableDiscounts.slice(0, 10);
+    return availableDiscounts
+      .filter(d => `${d.name || ''} ${d.description || ''} ${formatDiscountLabel(d)}`.toLowerCase().includes(q))
+      .slice(0, 10);
+  };
+
+  const addDiscountToLine = (lineIdx, discount) => {
+    const parent = lineItems[lineIdx];
+    if (!parent || parent._kind === 'discount') return;
+    const baseAmount = Math.max(0, lineAmount(parent));
+    const dollars = Math.min(baseAmount, Math.round(previewDiscount(discount, baseAmount) * 100) / 100);
+    if (dollars <= 0) { showToast('Discount has no amount for this line'); return; }
+    const discountItem = {
+      client_id: `li_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      _kind: 'discount',
+      discount_id: discount.id,
+      discount_for: parent.client_id,
+      description: `${discount.name} (${parent.description || 'line item'})`,
+      quantity: 1,
+      unit_price: -dollars,
+      amount: -dollars,
+    };
+    const updated = [...lineItems];
+    let insertAt = lineIdx + 1;
+    while (updated[insertAt]?._kind === 'discount' && updated[insertAt]?.discount_for === parent.client_id) insertAt += 1;
+    updated.splice(insertAt, 0, discountItem);
+    setLineItems(updated);
+    setDiscountSearchIdx(null);
+    setDiscountQueries(prev => ({ ...prev, [parent.client_id || lineIdx]: '' }));
+  };
+
+  const addLineItem = () => setLineItems([...lineItems, newLineItem()]);
+  const removeLineItem = (i) => {
+    const id = lineItems[i]?.client_id;
+    setLineItems(lineItems.filter((item, idx) => idx !== i && item.discount_for !== id));
+    setDiscountSearchIdx(prev => (prev === i ? null : prev));
+  };
   const updateLineItem = (i, field, value) => {
     const updated = [...lineItems];
     updated[i] = { ...updated[i], [field]: field === 'description' ? value : parseFloat(value) || 0 };
     setLineItems(updated);
   };
 
-  const subtotal = lineItems.reduce((sum, i) => sum + (i.quantity * i.unit_price), 0);
+  const lineAmount = (item) => Math.round(((Number(item.quantity) || 1) * (Number(item.unit_price) || 0)) * 100) / 100;
+  const serviceLineItems = lineItems.filter(i => i._kind !== 'discount');
+  const subtotal = serviceLineItems.reduce((sum, i) => sum + Math.max(0, lineAmount(i)), 0);
+  const lineDiscountAmt = Math.abs(lineItems
+    .filter(i => i._kind === 'discount')
+    .reduce((sum, i) => sum + Math.min(0, lineAmount(i)), 0));
   // WaveGuard tier discounts — keep aligned with server/services/pricing-engine/constants.js
   // WAVEGUARD.tiers (see docs/pricing/POLICY.md).
   const tierDiscount = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 }[selectedCustomer?.waveguard_tier] || 0;
   const discountAmt = subtotal * tierDiscount;
 
   // Mirror server discount-engine math so the preview matches stored totals.
-  const previewDiscount = (disc) => {
+  const previewDiscount = (disc, baseAmount) => {
     const amt = Number(disc.amount) || 0;
     if (disc.discount_type === 'percentage' || disc.discount_type === 'variable_percentage') {
-      let dollars = subtotal * (amt / 100);
+      let dollars = baseAmount * (amt / 100);
       if (disc.max_discount_dollars) dollars = Math.min(dollars, Number(disc.max_discount_dollars));
       return dollars;
     }
     if (disc.discount_type === 'fixed_amount' || disc.discount_type === 'variable_amount') return amt;
-    if (disc.discount_type === 'free_service') return subtotal;
+    if (disc.discount_type === 'free_service') return baseAmount;
     return 0;
   };
-  const selectedDiscounts = availableDiscounts.filter(d => selectedDiscountIds.includes(d.id));
-  const manualDiscountAmt = selectedDiscounts.reduce((sum, d) => sum + previewDiscount(d), 0);
-  const totalDiscountAmt = Math.min(subtotal, discountAmt + manualDiscountAmt);
+  const totalDiscountAmt = Math.min(subtotal, discountAmt + lineDiscountAmt);
 
   const afterDiscount = subtotal - totalDiscountAmt;
   const isCommercial = selectedCustomer?.property_type === 'commercial' || selectedCustomer?.property_type === 'business';
@@ -1151,18 +1196,17 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
 
   const handleCreate = async () => {
     if (!selectedCustomer) { showToast('Select a customer'); return; }
-    if (!lineItems.some(i => i.description && i.unit_price > 0)) { showToast('Add at least one line item'); return; }
+    if (!lineItems.some(i => i._kind !== 'discount' && i.description && i.unit_price > 0)) { showToast('Add at least one line item'); return; }
     setSaving(true);
 
     try {
       const body = {
         customerId: selectedCustomer.id,
         serviceRecordId: selectedService?.id || null,
-        lineItems: lineItems.filter(i => i.description && i.unit_price > 0).map(i => ({
-          ...i, amount: i.quantity * i.unit_price,
+        lineItems: lineItems.filter(i => i.description && Number(i.unit_price) !== 0).map(i => ({
+          ...i, amount: lineAmount(i),
         })),
         notes: notes || null,
-        discountIds: selectedDiscountIds,
       };
 
       const invoice = await adminFetch('/admin/invoices', { method: 'POST', body: JSON.stringify(body) });
@@ -1226,7 +1270,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                 const sr = serviceRecords.find(r => r.id === e.target.value);
                 setSelectedService(sr || null);
                 if (sr && lineItems.length === 1 && !lineItems[0].description) {
-                  setLineItems([{ description: sr.service_type, quantity: 1, unit_price: 0 }]);
+                  setLineItems([{ ...lineItems[0], _kind: 'service', description: sr.service_type, quantity: 1, unit_price: 0 }]);
                 }
               }} style={sInput(isMobile)}>
                 <option value="">No service linked</option>
@@ -1242,15 +1286,16 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
           {/* Line Items */}
           <div style={{ marginBottom: 16 }}>
             {lineItems.map((item, i) => (
-              <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'flex-start', flexWrap: isMobile ? 'wrap' : 'nowrap' }}>
+              <div key={item.client_id || i} style={{ display: 'flex', gap: 8, marginBottom: item._kind === 'discount' ? 4 : 8, alignItems: 'flex-start', flexWrap: isMobile ? 'wrap' : 'nowrap', paddingLeft: item._kind === 'discount' ? (isMobile ? 14 : 24) : 0 }}>
                 <div style={{ position: 'relative', flex: isMobile ? '1 1 100%' : 3 }}>
                   <input
                     value={item.description}
                     onChange={e => updateLineItem(i, 'description', e.target.value)}
-                    onFocus={() => setServiceSearchIdx(i)}
+                    onFocus={() => { if (item._kind !== 'discount') setServiceSearchIdx(i); }}
                     onBlur={() => setTimeout(() => { setServiceSearchIdx(prev => (prev === i ? null : prev)); }, 150)}
-                    placeholder="Search service library or type custom..."
-                    style={sInput(isMobile)}
+                    placeholder={item._kind === 'discount' ? 'Discount' : 'Search service library or type custom...'}
+                    style={{ ...sInput(isMobile), color: item._kind === 'discount' ? D.green : D.text }}
+                    readOnly={item._kind === 'discount'}
                   />
                   {serviceSearchIdx === i && serviceResults.length > 0 && (
                     <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, zIndex: 20, maxHeight: 240, overflow: 'auto', marginTop: 4, boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }}>
@@ -1277,78 +1322,47 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                   )}
                 </div>
                 <input type="number" value={item.quantity} onChange={e => updateLineItem(i, 'quantity', e.target.value)}
-                  min="1" style={{ ...sInput(isMobile), flex: isMobile ? '0 0 72px' : 0.5, textAlign: 'center' }} />
+                  min="1" readOnly={item._kind === 'discount'} style={{ ...sInput(isMobile), flex: isMobile ? '0 0 72px' : 0.5, textAlign: 'center' }} />
                 <div style={{ position: 'relative', flex: 1 }}>
                   <span style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: D.muted, fontSize: isMobile ? 16 : 13 }}>$</span>
                   <input type="number" value={item.unit_price || ''} onChange={e => updateLineItem(i, 'unit_price', e.target.value)}
-                    placeholder="0.00" step="0.01" style={{ ...sInput(isMobile), paddingLeft: 22 }} />
+                    placeholder="0.00" step="0.01" readOnly={item._kind === 'discount'} style={{ ...sInput(isMobile), paddingLeft: 22, color: item._kind === 'discount' ? D.green : D.text }} />
                 </div>
                 {lineItems.length > 1 && (
                   <button onClick={() => removeLineItem(i)} style={{ background: 'none', border: 'none', color: D.red, cursor: 'pointer', fontSize: 18, padding: isMobile ? '12px 12px' : '10px 4px', minHeight: isMobile ? 44 : undefined, minWidth: isMobile ? 44 : undefined }}>x</button>
+                )}
+                {item._kind !== 'discount' && availableDiscounts.length > 0 && item.description && Number(item.unit_price) > 0 && (
+                  <div style={{ flexBasis: '100%', paddingLeft: isMobile ? 0 : 0, position: 'relative' }}>
+                    <input
+                      value={discountQueries[item.client_id || i] || ''}
+                      onChange={e => { setDiscountQueries(prev => ({ ...prev, [item.client_id || i]: e.target.value })); setDiscountSearchIdx(i); }}
+                      onFocus={() => setDiscountSearchIdx(i)}
+                      onBlur={() => setTimeout(() => { setDiscountSearchIdx(prev => (prev === i ? null : prev)); }, 150)}
+                      placeholder={`Search discount for ${item.description}...`}
+                      style={{ ...sInput(isMobile), fontSize: isMobile ? 15 : 12, minHeight: isMobile ? 42 : 36, padding: isMobile ? '10px 12px' : '8px 10px' }}
+                    />
+                    {discountSearchIdx === i && (
+                      <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, zIndex: 18, maxHeight: 220, overflow: 'auto', marginTop: 4, boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }}>
+                        {matchingDiscounts(i).length === 0 ? (
+                          <div style={{ padding: '10px 12px', color: D.muted, fontSize: 12 }}>No discounts match.</div>
+                        ) : matchingDiscounts(i).map(d => (
+                          <div
+                            key={d.id}
+                            onMouseDown={e => { e.preventDefault(); addDiscountToLine(i, d); }}
+                            style={{ padding: '10px 12px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 13, display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}
+                          >
+                            <span style={{ color: D.heading, fontWeight: 600, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</span>
+                            <span style={{ color: D.green, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, whiteSpace: 'nowrap' }}>{formatDiscountLabel(d)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
             ))}
             <button onClick={addLineItem} style={{ ...sBtn('transparent', D.teal, isMobile), padding: isMobile ? '12px 14px' : '6px 12px', fontSize: isMobile ? 14 : 12 }}>+ Add line item</button>
           </div>
-
-          {/* Discounts */}
-          {availableDiscounts.length > 0 && (() => {
-            const formatLabel = (d) => d.discount_type === 'percentage' || d.discount_type === 'variable_percentage'
-              ? `${Number(d.amount)}%`
-              : d.discount_type === 'fixed_amount' || d.discount_type === 'variable_amount'
-              ? `$${Number(d.amount).toFixed(2)}`
-              : d.discount_type === 'free_service'
-              ? 'free'
-              : '';
-            // Always show selected chips so a query never hides an active selection.
-            const q = discountQuery.trim().toLowerCase();
-            const matches = (d) => {
-              if (!q) return true;
-              const hay = `${d.name || ''} ${d.description || ''} ${formatLabel(d)}`.toLowerCase();
-              return hay.includes(q);
-            };
-            const visibleDiscounts = availableDiscounts.filter(
-              d => selectedDiscountIds.includes(d.id) || matches(d)
-            );
-            return (
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.8, display: 'block', marginBottom: 8 }}>Discounts (optional)</label>
-                <input
-                  value={discountQuery}
-                  onChange={e => setDiscountQuery(e.target.value)}
-                  placeholder="Search discounts..."
-                  style={{ ...sInput(isMobile), marginBottom: 8 }}
-                />
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                  {visibleDiscounts.length === 0 ? (
-                    <span style={{ fontSize: 12, color: D.muted, padding: '6px 0' }}>No discounts match.</span>
-                  ) : visibleDiscounts.map(d => {
-                    const active = selectedDiscountIds.includes(d.id);
-                    const label = formatLabel(d);
-                    return (
-                      <button
-                        key={d.id}
-                        type="button"
-                        onClick={() => toggleDiscount(d.id)}
-                        style={{
-                          background: active ? D.green : 'transparent',
-                          color: active ? D.white : D.text,
-                          border: `1px solid ${active ? D.green : D.border}`,
-                          borderRadius: 16,
-                          padding: isMobile ? '8px 12px' : '6px 10px',
-                          fontSize: 12,
-                          cursor: 'pointer',
-                          minHeight: isMobile ? 36 : undefined,
-                        }}
-                      >
-                        {active ? '- ' : '+ '}{d.name}{label ? ` (${label})` : ''}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            );
-          })()}
 
           {/* Notes */}
           <div style={{ marginBottom: 16 }}>
@@ -1379,12 +1393,15 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
         <div style={sCard}>
           <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Preview</div>
 
-          {lineItems.filter(i => i.description).map((item, i) => (
-            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: D.text, marginBottom: 6 }}>
+          {lineItems.filter(i => i.description).map((item, i) => {
+            const amount = lineAmount(item);
+            return (
+            <div key={item.client_id || i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: item._kind === 'discount' ? D.green : D.text, marginBottom: 6, paddingLeft: item._kind === 'discount' ? 12 : 0 }}>
               <span>{item.description}{item.quantity > 1 ? ` x${item.quantity}` : ''}</span>
-              <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>${(item.quantity * item.unit_price).toFixed(2)}</span>
+              <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{amount < 0 ? '-' : ''}${Math.abs(amount).toFixed(2)}</span>
             </div>
-          ))}
+            );
+          })}
 
           <div style={{ borderTop: `1px solid ${D.border}`, marginTop: 12, paddingTop: 12 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: D.muted, marginBottom: 4 }}>
@@ -1395,11 +1412,11 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                 <span>{selectedCustomer?.waveguard_tier} -{Math.round(tierDiscount * 100)}%</span><span>-${discountAmt.toFixed(2)}</span>
               </div>
             )}
-            {selectedDiscounts.map(d => (
-              <div key={d.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: D.green, marginBottom: 4 }}>
-                <span>{d.name}</span><span>-${previewDiscount(d).toFixed(2)}</span>
+            {lineDiscountAmt > 0 && (
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: D.green, marginBottom: 4 }}>
+                <span>Line-item discounts</span><span>-${lineDiscountAmt.toFixed(2)}</span>
               </div>
-            ))}
+            )}
             {tax > 0 && (
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: D.muted, marginBottom: 4 }}>
                 <span>Tax ({Math.round(taxRate * 100)}%)</span><span>${tax.toFixed(2)}</span>
