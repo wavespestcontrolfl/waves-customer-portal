@@ -299,7 +299,15 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
     } catch (e) {
       logger.error(`[invoice-followups] stopOnPayment failed: ${e.message}`);
     }
-    scheduleReviewAfterPaidInvoice(piId);
+    // Awaited inline so the side effect runs inside the same processing
+    // path as the webhook event row (processed=true is written by the
+    // outer handler only after this returns). ReviewService.create is
+    // idempotent by service_record_id, so a Stripe retry that gets past
+    // the event-id dedupe (mid-flight crash) won't enqueue a duplicate.
+    // try/catch keeps a transient ReviewService failure from triggering
+    // Stripe webhook retries — the invoice is already marked paid and a
+    // missing review request is recoverable manually.
+    await scheduleReviewAfterPaidInvoice(piId);
   }
 
   // ── Auto-send payment receipt SMS ─────────────────────────
@@ -464,27 +472,28 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
   });
 }
 
-function scheduleReviewAfterPaidInvoice(piId) {
-  setImmediate(async () => {
-    try {
-      const paidInvoice = await db('invoices')
-        .where({ stripe_payment_intent_id: piId })
-        .select('id', 'customer_id', 'service_record_id', 'invoice_number')
-        .first();
-      if (!paidInvoice?.customer_id || !paidInvoice?.service_record_id) return;
+async function scheduleReviewAfterPaidInvoice(piId) {
+  try {
+    const paidInvoice = await db('invoices')
+      .where({ stripe_payment_intent_id: piId })
+      .select('id', 'customer_id', 'service_record_id', 'invoice_number')
+      .first();
+    if (!paidInvoice?.customer_id || !paidInvoice?.service_record_id) return;
 
-      const ReviewService = require('../services/review-request');
-      const request = await ReviewService.create({
-        customerId: paidInvoice.customer_id,
-        serviceRecordId: paidInvoice.service_record_id,
-        triggeredBy: 'auto',
-        delayMinutes: 120,
-      });
-      logger.info(`[stripe-webhook] Queued review request ${request.id} after invoice ${paidInvoice.invoice_number || paidInvoice.id} payment`);
-    } catch (err) {
-      logger.error(`[stripe-webhook] Paid-invoice review request schedule failed for PI ${piId}: ${err.message}`);
-    }
-  });
+    const ReviewService = require('../services/review-request');
+    // ReviewService.create dedupes by service_record_id (returns the
+    // existing row instead of inserting), so this is safe under webhook
+    // retries.
+    const request = await ReviewService.create({
+      customerId: paidInvoice.customer_id,
+      serviceRecordId: paidInvoice.service_record_id,
+      triggeredBy: 'auto',
+      delayMinutes: 120,
+    });
+    logger.info(`[stripe-webhook] Queued review request ${request.id} after invoice ${paidInvoice.invoice_number || paidInvoice.id} payment`);
+  } catch (err) {
+    logger.error(`[stripe-webhook] Paid-invoice review request schedule failed for PI ${piId}: ${err.message}`);
+  }
 }
 
 async function notifyPaymentSuccess(paymentIntent) {
