@@ -92,7 +92,21 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
           updated_at: new Date(),
         })
         .returning('*');
-      return { action: 'proceed', attempt: row || existing };
+      // The conditional UPDATE matches at most one row across concurrent
+      // retries. The loser of that race gets nothing back — another
+      // retry already flipped the row to pending, so this caller must
+      // not proceed and double-execute the side effects.
+      if (!row) {
+        return {
+          action: 'conflict',
+          status: 409,
+          payload: {
+            error: 'Completion already pending.',
+            code: 'completion_pending',
+          },
+        };
+      }
+      return { action: 'proceed', attempt: row };
     }
 
     return {

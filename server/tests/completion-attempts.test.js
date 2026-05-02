@@ -118,6 +118,27 @@ describe('completion attempts', () => {
     });
   });
 
+  test('failed retry that loses the reclaim race returns 409 instead of proceeding', async () => {
+    // Two retries hit the same failed row. Only one UPDATE WHERE status='failed'
+    // can match (the other already flipped it to pending). The loser must NOT
+    // proceed with stale `existing` or both callers run completion side effects.
+    const knex = makeKnex([
+      { insertError: uniqueViolation() },
+      { first: { id: 'attempt-1', status: 'failed', request_hash: 'hash-1' } },
+      { returning: [] },
+    ]);
+
+    const result = await claimCompletionAttempt({
+      serviceId: 'svc-1',
+      idempotencyKey: 'key-1',
+      requestHash: 'hash-1',
+    }, knex);
+
+    expect(result.action).toBe('conflict');
+    expect(result.status).toBe(409);
+    expect(result.payload.code).toBe('completion_pending');
+  });
+
   test('succeeded replay rejects when request hash differs from stored', async () => {
     const response = { success: true, serviceRecordId: 'record-1' };
     const knex = makeKnex([
