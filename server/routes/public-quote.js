@@ -9,6 +9,7 @@ const { shortenOrPassthrough } = require('../services/short-url');
 const { subscribeOrResubscribe } = require('../services/newsletter-subscribers');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 const smsTemplatesRouter = require('./admin-sms-templates');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 const WAVES_ADMIN_PHONE = '+19413187612';
 const PORTAL_BASE_URL = 'https://portal.wavespestcontrol.com';
@@ -341,12 +342,27 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         const customerBody = await renderTemplate(
           'estimate_accepted_onetime',
           { first_name: firstName, service_label: serviceLabel, booking_url: bookingUrl },
-          `Hey ${firstName}! Thanks for booking your ${serviceLabel} with Waves. Pick your time here — we'll show you slots when a tech will already be in your neighborhood: ${bookingUrl}\n\nQuestions? Just reply. — Waves`
+          `Hey ${firstName}! Thanks for booking your ${serviceLabel} with Waves. Pick your time here and we'll show slots when a tech will already be in your neighborhood: ${bookingUrl}. Questions? Just reply. - Waves`
         );
-        await TwilioService.sendSMS(normalizedPhone, customerBody,
-          { mediaUrl: 'https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png', messageType: 'auto_reply' }
-        );
-        logger.info(`[public-quote] Customer SMS sent to ${firstName} (${normalizedPhone})`);
+        const smsResult = await sendCustomerMessage({
+          to: normalizedPhone,
+          body: customerBody,
+          channel: 'sms',
+          audience: 'lead',
+          purpose: 'conversational',
+          leadId: lead.id,
+          identityTrustLevel: 'phone_provided_unverified',
+          entryPoint: 'public_quote_booking_sms',
+          metadata: {
+            original_message_type: 'auto_reply',
+            mediaUrls: ['https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png'],
+          },
+        });
+        if (!smsResult.sent) {
+          logger.warn(`[public-quote] Customer SMS blocked/failed for lead ${lead.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+        } else {
+          logger.info(`[public-quote] Customer SMS sent for lead ${lead.id}`);
+        }
       } catch (e) { logger.error(`[public-quote] Customer SMS failed: ${e.message}`); }
     }
 

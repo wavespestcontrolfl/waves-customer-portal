@@ -736,8 +736,23 @@ router.post('/:id/send-sms', async (req, res, next) => {
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
     if (!lead.phone) return res.status(400).json({ error: 'Lead has no phone number' });
 
-    const TwilioService = require('../services/twilio');
-    await TwilioService.sendSMS(lead.phone, message, { messageType: 'lead_outreach' });
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    const sendResult = await sendCustomerMessage({
+      to: lead.phone,
+      body: message,
+      channel: 'sms',
+      audience: 'lead',
+      purpose: 'conversational',
+      leadId: lead.id,
+      identityTrustLevel: 'phone_provided_unverified',
+      metadata: {
+        original_message_type: 'lead_outreach',
+        adminUserId: req.technicianId,
+      },
+    });
+    if (sendResult.blocked || sendResult.sent === false) {
+      return res.status(422).json(sendResult);
+    }
 
     // Log activity
     await db('lead_activities').insert({

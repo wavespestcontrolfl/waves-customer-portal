@@ -3,6 +3,18 @@ const db = require('../models/db');
 const TwilioService = require('./twilio');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { sendCustomerMessage } = require('./messaging/send-customer-message');
+
+function purposeForScheduledMessageType(messageType) {
+  const type = String(messageType || '').toLowerCase();
+  if (type.includes('billing') || type.includes('payment') || type.includes('invoice')) return 'billing';
+  if (type.includes('review')) return 'review_request';
+  if (type.includes('referral')) return 'referral';
+  if (type.includes('retention') || type.includes('renewal') || type.includes('save')) return 'retention';
+  if (type.includes('marketing') || type.includes('seasonal') || type.includes('promo')) return 'marketing';
+  if (type.includes('appointment') || type.includes('reminder') || type.includes('confirmation') || type.includes('en_route')) return 'appointment';
+  return 'conversational';
+}
 
 function initScheduledJobs() {
   const { isEnabled, logGateStatus } = require('../config/feature-gates');
@@ -253,11 +265,33 @@ function initScheduledJobs() {
 
       for (const msg of scheduled) {
         try {
-          await TwilioService.sendSMS(msg.to_phone, msg.message_body, {
-            customerId: msg.customer_id, messageType: 'scheduled',
+          const purpose = purposeForScheduledMessageType(msg.message_type);
+          const smsResult = await sendCustomerMessage({
+            to: msg.to_phone,
+            body: msg.message_body,
+            channel: 'sms',
+            audience: msg.customer_id ? 'customer' : 'lead',
+            purpose,
+            customerId: msg.customer_id || undefined,
+            identityTrustLevel: msg.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
+            entryPoint: 'scheduled_sms_cron',
+            consentBasis: purpose === 'marketing' || purpose === 'retention' ? {
+              status: 'opted_in',
+              source: 'scheduled_sms',
+              capturedAt: msg.created_at || new Date().toISOString(),
+            } : undefined,
+            metadata: {
+              original_message_type: msg.message_type || 'scheduled',
+              scheduled_sms_log_id: msg.id,
+            },
           });
-          await db('sms_log').where({ id: msg.id }).update({ status: 'sent', created_at: new Date() });
-          logger.info(`[scheduled-sms] Sent scheduled SMS to ${msg.to_phone}`);
+          if (smsResult.sent) {
+            await db('sms_log').where({ id: msg.id }).update({ status: 'sent', created_at: new Date() });
+            logger.info(`[scheduled-sms] Sent scheduled SMS ${msg.id}`);
+          } else {
+            await db('sms_log').where({ id: msg.id }).update({ status: 'blocked' });
+            logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+          }
         } catch (err) {
           await db('sms_log').where({ id: msg.id }).update({ status: 'failed' });
           logger.error(`[scheduled-sms] Failed: ${err.message}`);

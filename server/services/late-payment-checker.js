@@ -8,7 +8,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const TwilioService = require('./twilio');
+const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 const LatePaymentService = {
   async checkAndNotify(daysOverdue = 7) {
@@ -88,9 +88,22 @@ const LatePaymentService = {
       }
 
       try {
-        await TwilioService.sendSMS(customer.phone, body);
+        const sendResult = await sendCustomerMessage({
+          to: customer.phone,
+          body,
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'payment_link',
+          customerId: customer.id,
+          invoiceId: inv.id,
+          entryPoint: 'late_payment_checker',
+          metadata: { original_message_type: 'late_payment' },
+        });
+        if (sendResult.blocked || sendResult.sent === false) {
+          throw new Error(`late payment SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+        }
         notified++;
-        logger.info(`[late-payment] Reminder sent to ${name} ${customer.last_name || ''} (${customer.phone}) — ${daysSince} days overdue`);
+        logger.info(`[late-payment] Reminder sent for customer ${customer.id} — ${daysSince} days overdue`);
 
         await db('activity_log').insert({
           customer_id: customer.id,

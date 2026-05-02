@@ -9,6 +9,7 @@ const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { shortenOrPassthrough } = require('../services/short-url');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
 const slotReservation = require('../services/slot-reservation');
 const rateLimit = require('express-rate-limit');
@@ -1568,12 +1569,27 @@ router.put('/:token/accept', async (req, res, next) => {
           const customerBody = await renderTemplate(
             'estimate_accepted_onetime',
             { first_name: firstName, service_label: primarySvc.label, booking_url: bookingUrl },
-            `Hey ${firstName}! Thanks for booking your ${primarySvc.label} with Waves. Pick your time here — we'll show you slots when a tech will already be in your neighborhood: ${bookingUrl}`
+            `Hey ${firstName}! Thanks for booking your ${primarySvc.label} with Waves. Pick your time here - we'll show you slots when a tech will already be in your neighborhood: ${bookingUrl}`
           );
-          await TwilioService.sendSMS(estimate.customer_phone, customerBody,
-            { mediaUrl: 'https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png' }
-          );
-          logger.info(`[estimate-accept] One-time booking SMS sent to ${firstName} (${estimate.customer_phone}) — ${primarySvc.label}`);
+          const sendResult = await sendCustomerMessage({
+            to: estimate.customer_phone,
+            body: customerBody,
+            channel: 'sms',
+            audience: customerId ? 'customer' : 'lead',
+            purpose: 'estimate_followup',
+            customerId: customerId || undefined,
+            estimateId: estimate.id,
+            identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
+            consentBasis: customerId ? undefined : {
+              status: 'transactional_allowed',
+              source: 'estimate_token_acceptance',
+              capturedAt: new Date().toISOString(),
+            },
+            entryPoint: 'estimate_accept_onetime_booking',
+            metadata: { original_message_type: 'estimate_accepted_onetime' },
+          });
+          if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+          logger.info(`[estimate-accept] One-time booking SMS sent for estimate ${estimate.id} - ${primarySvc.label}`);
         } else {
           const longObUrl = onboardingToken ? `https://portal.wavespestcontrol.com/onboard/${onboardingToken}` : '';
           const obUrl = longObUrl
@@ -1589,10 +1605,25 @@ router.put('/:token/accept', async (req, res, next) => {
             { first_name: firstName, onboarding_url: obUrl },
             `Hello ${firstName}! Thanks for approving your estimate. Complete your setup here so we can get you on the schedule: ${obUrl}`
           );
-          await TwilioService.sendSMS(estimate.customer_phone, customerBody,
-            { mediaUrl: 'https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png' }
-          );
-          logger.info(`[estimate-accept] Acceptance SMS sent to ${firstName} (${estimate.customer_phone})`);
+          const sendResult = await sendCustomerMessage({
+            to: estimate.customer_phone,
+            body: customerBody,
+            channel: 'sms',
+            audience: customerId ? 'customer' : 'lead',
+            purpose: 'estimate_followup',
+            customerId: customerId || undefined,
+            estimateId: estimate.id,
+            identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
+            consentBasis: customerId ? undefined : {
+              status: 'transactional_allowed',
+              source: 'estimate_token_acceptance',
+              capturedAt: new Date().toISOString(),
+            },
+            entryPoint: 'estimate_accept_onboarding',
+            metadata: { original_message_type: 'estimate_accepted_customer' },
+          });
+          if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+          logger.info(`[estimate-accept] Acceptance SMS sent for estimate ${estimate.id}`);
         }
       } catch (e) { logger.error(`[estimate-accept] Acceptance SMS failed: ${e.message}`); }
     }

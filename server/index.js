@@ -280,11 +280,8 @@ app.use('/api/admin/seo-diagnosis', require('./routes/admin-seo-diagnosis'));
 // /transcription /call-status /outbound-* (twilio-voice-webhook.js) all
 // authenticate inbound requests against X-Twilio-Signature.
 //
-// PR1 ships this in TWILIO_SIGNATURE_VALIDATION=log mode by default (logs
-// failures, allows traffic through) so we can confirm wiring against real
-// signed traffic on every endpoint without a behavior-change risk. Flip
-// to 'enforce' via env var (no code change) once each endpoint has been
-// observed with a valid signature in logs.
+// Defaults to TWILIO_SIGNATURE_VALIDATION=enforce so public Twilio callbacks
+// fail closed unless an operator explicitly opts into log/disabled mode.
 //
 // See server/middleware/twilio-signature.js + docs/call-triage-discovery.md §14.
 const { validateTwilioSignature } = require('./middleware/twilio-signature');

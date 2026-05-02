@@ -2,9 +2,9 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const TwilioService = require('../services/twilio');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 router.use(authenticate);
 
@@ -123,13 +123,28 @@ router.post('/', async (req, res, next) => {
 
     // Send SMS to referee
     try {
-      await TwilioService.sendSMS(
-        refereePhone.trim(),
-        `Hi ${refereeName.trim()}! Your neighbor ${customer.first_name} thinks you'd love Waves Pest Control 🌊\n\n` +
-        `You'll both get $25 off when you sign up for any WaveGuard plan.\n\n` +
-        `Get a free quote: https://wavespestcontrol.com?ref=${customer.referral_code}\n\n` +
-        `Or call us: (941) 318-7612`
-      );
+      const smsResult = await sendCustomerMessage({
+        to: refereePhone.trim(),
+        body: `Hi ${refereeName.trim()}! Your neighbor ${customer.first_name} thinks you'd love Waves Pest Control. Get a free quote: https://wavespestcontrol.com?ref=${customer.referral_code} or call us: (941) 318-7612`,
+        channel: 'sms',
+        audience: 'lead',
+        purpose: 'referral',
+        identityTrustLevel: 'phone_provided_unverified',
+        consentBasis: {
+          status: 'transactional_allowed',
+          source: 'referral_invite_form',
+          capturedAt: new Date().toISOString(),
+        },
+        entryPoint: 'referrals_legacy_invite',
+        metadata: {
+          original_message_type: 'referral_invite',
+          referral_id: referral.id,
+          referrer_customer_id: req.customerId,
+        },
+      });
+      if (!smsResult.sent) {
+        throw new Error(smsResult.reason || smsResult.code || 'SMS send blocked/failed');
+      }
 
       // Update status to contacted
       await db('referrals')

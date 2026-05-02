@@ -1,5 +1,5 @@
 const db = require('../models/db');
-const TwilioService = require('./twilio');
+const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 
@@ -169,9 +169,21 @@ class AppointmentTagger {
     const prepSMS = this.getPrepSMS(pestType, service);
     if (!prepSMS) return;
 
-    await TwilioService.sendSMS(service.phone, prepSMS, {
-      customerId: service.customer_id, messageType: 'prep_info',
+    const prepResult = await sendCustomerMessage({
+      to: service.phone,
+      body: prepSMS,
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'appointment',
+      customerId: service.customer_id,
+      appointmentId: service.id,
+      identityTrustLevel: 'phone_matches_customer',
+      metadata: { original_message_type: 'prep_info', pest_type: pestType },
     });
+    if (!prepResult.sent) {
+      logger.warn(`[appointment-tagger] Prep SMS blocked/failed for customer ${service.customer_id}: ${prepResult.code || prepResult.reason || 'unknown'}`);
+      return;
+    }
 
     // Beehiiv tag if email available
     if (service.email && process.env.BEEHIIV_API_KEY) {
@@ -215,8 +227,8 @@ class AppointmentTagger {
     if (!date) date = 'your scheduled date';
 
     const msgs = {
-      cockroach: `Hi ${service.first_name}! Your cockroach treatment is ${date}. To prep:\n• Clear under sinks and behind appliances\n• Remove items from cabinet bases\n• Clean food debris, take out trash night before\n• Leave home 2-4h after treatment (pets too)\n• Don't clean treated areas for 2 weeks\nQuestions? Reply here. — Waves`,
-      bed_bug: `Hi ${service.first_name}! Bed bug treatment prep for ${date} is CRITICAL:\n• Strip bedding — wash/dry on HIGH HEAT (130°F+)\n• Remove items from nightstands/dressers near bed\n• Pull beds 6" from walls\n• Bag all clothing — wash/dry HIGH HEAT\n• Vacuum mattress, box spring, baseboards — empty vacuum outside\n• DO NOT move items to other rooms\nQuestions? Reply here. — Adam, Waves`,
+      cockroach: `Hi ${service.first_name}! Your cockroach treatment is ${date}. To prep: clear under sinks/behind appliances, remove items from cabinet bases, clean food debris, and leave home 2-4h after treatment. Questions? Reply here. - Waves`,
+      bed_bug: `Hi ${service.first_name}! Bed bug prep for ${date}: strip bedding and dry on high heat, pull beds 6 inches from walls, bag clothing for wash/dry, vacuum mattress/baseboards, and do not move items to other rooms. Questions? Reply here. - Waves`,
     };
     return msgs[pestType];
   }
@@ -227,12 +239,23 @@ class AppointmentTagger {
     if (sent) return;
 
     const tier = service.waveguard_tier;
-    const perks = { Platinum: 'unlimited callbacks, priority scheduling, 20% off, $500K termite guarantee', Gold: 'unlimited callbacks, priority scheduling, 15% off', Silver: 'unlimited callbacks, 10% off', Bronze: 'unlimited callbacks' }[tier] || 'regular scheduled service';
+    const perks = { Platinum: 'unlimited callbacks, priority scheduling, savings on add-ons, and termite guarantee coverage', Gold: 'unlimited callbacks, priority scheduling, and add-on savings', Silver: 'unlimited callbacks and add-on savings', Bronze: 'unlimited callbacks' }[tier] || 'regular scheduled service';
 
-    await TwilioService.sendSMS(service.phone,
-      `Welcome to the Waves family, ${service.first_name}! 🌊\n\nYour first ${service.service_type || 'service'} is coming up. Your WaveGuard ${tier || ''} includes ${perks}.\n\nYour tech will text when en route. After service, you'll get a detailed report.\n\nPortal: wavespestcontrol.com/portal\nQuestions? Reply here. — Adam, Waves`,
-      { customerId: service.customer_id, messageType: 'welcome' }
-    );
+    const welcomeResult = await sendCustomerMessage({
+      to: service.phone,
+      body: `Welcome to Waves, ${service.first_name}! Your first ${service.service_type || 'service'} is coming up. Your WaveGuard ${tier || ''} includes ${perks}. Your tech will text when en route. Portal: wavespestcontrol.com/portal Questions? Reply here. - Waves`,
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'appointment',
+      customerId: service.customer_id,
+      appointmentId: service.id,
+      identityTrustLevel: 'phone_matches_customer',
+      metadata: { original_message_type: 'welcome' },
+    });
+    if (!welcomeResult.sent) {
+      logger.warn(`[appointment-tagger] Welcome SMS blocked/failed for customer ${service.customer_id}: ${welcomeResult.code || welcomeResult.reason || 'unknown'}`);
+      return;
+    }
 
     await db('sms_sequences').insert({ customer_id: service.customer_id, sequence_type: 'new_customer_welcome', status: 'completed' });
     await db('customer_interactions').insert({ customer_id: service.customer_id, interaction_type: 'sms_outbound', subject: 'Welcome SMS sent' });

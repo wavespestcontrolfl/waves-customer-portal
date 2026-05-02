@@ -10,6 +10,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { etDateString } = require('../../utils/datetime-et');
+const { sendCustomerMessage } = require('../messaging/send-customer-message');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -448,10 +449,24 @@ async function replyViaSms({ email_id, customer_name, message }) {
 
     if (!phone) return { error: 'Could not find phone number for this customer' };
 
-    const TwilioService = require('../twilio');
-    await TwilioService.sendSMS(phone, message, {
-      customerId: custId, messageType: 'manual', adminUserId: 'intelligence_bar_email',
+    const smsResult = await sendCustomerMessage({
+      to: phone,
+      body: message,
+      channel: 'sms',
+      audience: custId ? 'customer' : 'lead',
+      purpose: 'conversational',
+      customerId: custId || undefined,
+      identityTrustLevel: custId ? 'phone_matches_customer' : 'phone_provided_unverified',
+      entryPoint: 'intelligence_bar_email_sms_reply',
+      metadata: {
+        original_message_type: 'manual',
+        adminUserId: 'intelligence_bar_email',
+        email_id,
+      },
     });
+    if (!smsResult.sent) {
+      return { error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' };
+    }
 
     // Mark the email as responded via SMS
     if (email_id) {

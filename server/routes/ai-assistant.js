@@ -4,6 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const WavesAssistant = require('../services/ai-assistant/assistant');
 const logger = require('../services/logger');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 // =========================================================================
 // PORTAL CHAT — customer-facing (uses customer auth, not admin auth)
@@ -125,7 +126,35 @@ router.post('/admin/conversations/:id/reply', adminAuthenticate, requireTechOrAd
     const conv = await db('agent_sessions').where('id', req.params.id).first();
     if (!conv) return res.status(404).json({ error: 'Conversation not found' });
 
-    // Save the admin reply
+    // If SMS channel, actually send the SMS
+    if (conv.channel === 'sms' && conv.channel_identifier) {
+      try {
+        const smsResult = await sendCustomerMessage({
+          to: conv.channel_identifier,
+          body: message,
+          channel: 'sms',
+          audience: 'lead',
+          purpose: 'conversational',
+          customerId: conv.customer_id || undefined,
+          identityTrustLevel: conv.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
+          entryPoint: 'ai_assistant_admin_reply',
+          metadata: {
+            original_message_type: 'manual',
+            agent_session_id: conv.id,
+            adminUserId: req.technicianId,
+          },
+        });
+        if (!smsResult.sent) {
+          return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
+        }
+      } catch (err) {
+        logger.error(`Admin reply SMS failed: ${err.message}`);
+        return res.status(502).json({ error: 'SMS send failed' });
+      }
+    }
+
+    // Save only after the provider/policy path accepts the send, so the thread
+    // cannot show a customer-visible reply that was blocked before delivery.
     await db('agent_messages').insert({
       conversation_id: conv.id,
       role: 'assistant',
@@ -133,19 +162,6 @@ router.post('/admin/conversations/:id/reply', adminAuthenticate, requireTechOrAd
       channel: conv.channel,
       sent_to_customer: true,
     });
-
-    // If SMS channel, actually send the SMS
-    if (conv.channel === 'sms' && conv.channel_identifier) {
-      try {
-        const TwilioService = require('../services/twilio');
-        await TwilioService.sendSMS(conv.channel_identifier, message, {
-          customerId: conv.customer_id,
-          messageType: 'manual',
-        });
-      } catch (err) {
-        logger.error(`Admin reply SMS failed: ${err.message}`);
-      }
-    }
 
     await db('agent_sessions').where('id', conv.id).update({
       last_activity_at: new Date(),

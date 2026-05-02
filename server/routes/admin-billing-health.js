@@ -109,7 +109,7 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
           channel: 'sms',
           to: customer.phone,
           customerId,
-          purpose: 'billing',
+          purpose: 'payment_receipt',
           identityTrustLevel: 'admin_operator',
           body: `Hi ${customer.first_name}, your payment to Waves was successfully processed. Thank you!${receiptLine}`,
           metadata: { source: 'admin_manual_charge', paymentId: payment?.id || null },

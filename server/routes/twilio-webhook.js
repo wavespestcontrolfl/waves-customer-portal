@@ -5,15 +5,31 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const TwilioService = require('../services/twilio');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
+const { recordSuppression, clearSuppression } = require('../services/messaging/validators/suppression');
+const { updateByTwilioSid } = require('../services/conversations');
 
 const WAVES_ADMIN_PHONE = '+19413187612';
+
+function normalizeE164(phone) {
+  if (!phone) return null;
+  const trimmed = String(phone).trim();
+  const digits = trimmed.replace(/\D/g, '');
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+  return trimmed.startsWith('+') ? trimmed : trimmed || null;
+}
+
+function maskPhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 4 ? `***${digits.slice(-4)}` : '***';
+}
 
 // POST /api/webhooks/twilio/sms — inbound SMS webhook
 router.post('/sms', async (req, res) => {
   try {
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('webhooks')) {
-      logger.info(`[GATE BLOCKED] Inbound SMS webhook from ${req.body.From} (gate: webhooks)`);
+      logger.info(`[GATE BLOCKED] Inbound SMS webhook from ${maskPhone(req.body.From)} (gate: webhooks)`);
       return res.type('text/xml').send('<Response></Response>');
     }
 
@@ -54,42 +70,68 @@ router.post('/sms', async (req, res) => {
     const STOP_KEYWORDS = ['STOP', 'UNSUBSCRIBE', 'CANCEL', 'QUIT', 'END'];
     const START_KEYWORDS = ['START', 'SUBSCRIBE', 'YES'];
 
-    if (customer && STOP_KEYWORDS.includes(bodyTrimmed)) {
+    if (STOP_KEYWORDS.includes(bodyTrimmed)) {
+      const normalizedFrom = normalizeE164(From);
+      await recordSuppression({
+        phone: normalizedFrom || From,
+        reason: 'opt_out_keyword',
+        source: `twilio_webhook_${bodyTrimmed}`,
+        capturedBody: Body,
+      });
       try {
-        await db('notification_prefs').where({ customer_id: customer.id }).update({ sms_enabled: false });
-        logger.info(`[sms-optout] Customer ${customer.id} (${customer.first_name}) opted out of SMS`);
+        if (customer) {
+          await db('notification_prefs')
+            .insert({ customer_id: customer.id, sms_enabled: false })
+            .onConflict('customer_id')
+            .merge({ sms_enabled: false });
+        }
+        logger.info(`[sms-optout] ${customer ? `Customer ${customer.id}` : `Unknown sender ${maskPhone(From)}`} opted out of SMS`);
       } catch (e) { logger.error(`[sms-optout] Failed to update prefs: ${e.message}`); }
 
       await db('sms_log').insert({
-        customer_id: customer.id, direction: 'inbound', from_phone: From, to_phone: To,
+        customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
         message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'opt_out',
       }).catch(() => {});
 
-      await db('activity_log').insert({
-        customer_id: customer.id, action: 'sms_opt_out',
-        description: `${customer.first_name} ${customer.last_name} unsubscribed from SMS (keyword: ${bodyTrimmed})`,
-      }).catch(() => {});
+      if (customer) {
+        await db('activity_log').insert({
+          customer_id: customer.id, action: 'sms_opt_out',
+          description: `${customer.first_name} ${customer.last_name} unsubscribed from SMS (keyword: ${bodyTrimmed})`,
+        }).catch(() => {});
+      }
 
       return res.type('text/xml').send(
         `<Response><Message>You've been unsubscribed from Waves Pest Control SMS. Reply START to re-subscribe.</Message></Response>`
       );
     }
 
-    if (customer && START_KEYWORDS.includes(bodyTrimmed)) {
+    if (START_KEYWORDS.includes(bodyTrimmed)) {
+      const normalizedFrom = normalizeE164(From);
+      await clearSuppression({
+        phone: normalizedFrom || From,
+        source: `twilio_webhook_${bodyTrimmed}`,
+      });
       try {
-        await db('notification_prefs').where({ customer_id: customer.id }).update({ sms_enabled: true });
-        logger.info(`[sms-optin] Customer ${customer.id} (${customer.first_name}) re-subscribed to SMS`);
+        if (customer) {
+          await db('notification_prefs')
+            .insert({ customer_id: customer.id, sms_enabled: true })
+            .onConflict('customer_id')
+            .merge({ sms_enabled: true });
+        }
+        logger.info(`[sms-optin] ${customer ? `Customer ${customer.id}` : `Unknown sender ${maskPhone(From)}`} re-subscribed to SMS`);
       } catch (e) { logger.error(`[sms-optin] Failed to update prefs: ${e.message}`); }
 
       await db('sms_log').insert({
-        customer_id: customer.id, direction: 'inbound', from_phone: From, to_phone: To,
+        customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
         message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'opt_in',
       }).catch(() => {});
 
-      await db('activity_log').insert({
-        customer_id: customer.id, action: 'sms_opt_in',
-        description: `${customer.first_name} ${customer.last_name} re-subscribed to SMS`,
-      }).catch(() => {});
+      if (customer) {
+        await db('activity_log').insert({
+          customer_id: customer.id, action: 'sms_opt_in',
+          description: `${customer.first_name} ${customer.last_name} re-subscribed to SMS`,
+        }).catch(() => {});
+      }
 
       return res.type('text/xml').send(
         `<Response><Message>You've been re-subscribed to Waves Pest Control SMS.</Message></Response>`
@@ -428,6 +470,7 @@ router.post('/status', async (req, res) => {
     const { MessageSid, MessageStatus } = req.body;
     if (MessageSid && MessageStatus) {
       await db('sms_log').where({ twilio_sid: MessageSid }).update({ status: MessageStatus });
+      await updateByTwilioSid(MessageSid, { delivery_status: MessageStatus, updated_at: new Date() });
     }
   } catch (err) {
     logger.error(`Status webhook error: ${err.message}`);

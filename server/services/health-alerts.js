@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 // ---------------------------------------------------------------------------
 // Alert rule definitions
@@ -96,6 +97,39 @@ const ALERT_RULES = [
     ],
   },
 ];
+
+function purposeForHealthTemplate(template) {
+  if (template === 'payment_reminder') return 'billing';
+  if (template === 'retention_offer' || template === 'rebook') return 'retention';
+  return 'support_resolution';
+}
+
+async function sendHealthSms(customer, msg, action = {}) {
+  const purpose = purposeForHealthTemplate(action.template);
+  const result = await sendCustomerMessage({
+    to: customer.phone,
+    body: msg,
+    channel: 'sms',
+    audience: 'customer',
+    purpose,
+    customerId: customer.id,
+    identityTrustLevel: 'phone_matches_customer',
+    entryPoint: 'health_alerts',
+    consentBasis: purpose === 'retention' ? {
+      status: 'opted_in',
+      source: 'health_alert_action',
+      capturedAt: new Date().toISOString(),
+    } : undefined,
+    metadata: {
+      original_message_type: 'health_outreach',
+      action_template: action.template,
+    },
+  });
+  if (!result.sent) {
+    logger.warn(`[health-alerts] SMS blocked/failed for customer ${customer.id}: ${result.code || result.reason || 'unknown'}`);
+  }
+  return result;
+}
 
 // ---------------------------------------------------------------------------
 // Generate alerts for a customer
@@ -206,7 +240,6 @@ async function executeAction(alertId, actionIndex) {
 
   if (action.type === 'sms') {
     try {
-      const TwilioService = require('./twilio');
       const smsTemplatesRouter = require('../routes/admin-sms-templates');
       const TEMPLATE_KEY_MAP = {
         check_in: 'health_check_in',
@@ -234,11 +267,10 @@ async function executeAction(alertId, actionIndex) {
       } catch { /* use fallback */ }
 
       if (customer.phone) {
-        await TwilioService.sendSMS(customer.phone, msg, {
-          customerId: customer.id,
-          messageType: 'health_outreach',
-        });
-        result = { success: true, message: `SMS sent to ${customer.phone}` };
+        const smsResult = await sendHealthSms(customer, msg, action);
+        result = smsResult.sent
+          ? { success: true, message: 'SMS sent' }
+          : { success: false, message: `SMS blocked/failed: ${smsResult.code || smsResult.reason || 'unknown'}` };
       } else {
         result = { success: false, message: 'Customer has no phone number' };
       }
@@ -248,12 +280,13 @@ async function executeAction(alertId, actionIndex) {
   } else if (action.type === 'send_sms') {
     // Alias — same as sms
     try {
-      const TwilioService = require('./twilio');
       const msg = (action.message || `Hi ${customer.first_name || 'there'}, this is Adam from Waves Pest Control. Just checking in — everything going well? Let us know if you need anything!`)
         .replace(/{first_name}/g, customer.first_name || 'there');
       if (customer.phone) {
-        await TwilioService.sendSMS(customer.phone, msg, { customerId: customer.id, messageType: 'health_outreach' });
-        result = { success: true, message: `SMS sent to ${customer.phone}` };
+        const smsResult = await sendHealthSms(customer, msg, action);
+        result = smsResult.sent
+          ? { success: true, message: 'SMS sent' }
+          : { success: false, message: `SMS blocked/failed: ${smsResult.code || smsResult.reason || 'unknown'}` };
       } else {
         result = { success: false, message: 'Customer has no phone number' };
       }

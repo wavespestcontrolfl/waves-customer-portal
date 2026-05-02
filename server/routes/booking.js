@@ -4,6 +4,8 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const TwilioService = require('../services/twilio');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 // Shared geocoder (same approach as admin-schedule-find-time.js)
 async function geocodeAddress(address) {
@@ -296,6 +298,10 @@ router.post('/confirm', async (req, res, next) => {
           longitude: new_customer.lng || null,
         }).returning('id');
         custId = created.id || created;
+        await db('notification_prefs')
+          .insert({ customer_id: custId })
+          .onConflict('customer_id')
+          .ignore();
       }
     }
 
@@ -303,8 +309,12 @@ router.post('/confirm', async (req, res, next) => {
 
     const customer = await db('customers').where('id', custId).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
-
-    const config = (await db('booking_config').first()) || {};
+    await db('notification_prefs')
+      .insert({ customer_id: custId })
+      .onConflict('customer_id')
+      .ignore();
+	
+	    const config = (await db('booking_config').first()) || {};
     const duration = duration_minutes || config.slot_duration_minutes || 60;
 
     // Compute end time if not provided
@@ -357,7 +367,7 @@ router.post('/confirm', async (req, res, next) => {
       service_type: resolvedServiceType,
     }).returning('*');
 
-    await db('scheduled_services').insert({
+    const [serviceRow] = await db('scheduled_services').insert({
       customer_id: custId,
       technician_id: technician_id || null,
       scheduled_date: slot_date,
@@ -372,7 +382,7 @@ router.post('/confirm', async (req, res, next) => {
       self_booking_id: booking.id,
       estimated_duration_minutes: duration,
       zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
-    });
+    }).returning('*');
 
     // Sync to dispatch board (best-effort)
     try {
@@ -382,17 +392,26 @@ router.post('/confirm', async (req, res, next) => {
 
     // SMS notifications (best-effort)
     try {
-      const TwilioService = require('../services/twilio');
       const dateLabel = new Date(slot_date + 'T12:00:00').toLocaleDateString('en-US', {
         weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
       });
       const startLabel = minToTime12(timeToMin(slot_start));
       const endLabel = minToTime12(endMin);
 
-      await TwilioService.sendSMS(customer.phone,
-        `Your Waves appointment is confirmed!\n\n📅 ${dateLabel}\n⏰ ${startLabel} – ${endLabel}\n📍 ${customer.address_line1}, ${customer.city}\n\nConfirmation: ${confCode}\n\nReply RESCHEDULE if you need to change. 🌊`,
-        { customerId: custId, messageType: 'booking_confirmation' }
-      );
+      const customerSms = await sendCustomerMessage({
+        to: customer.phone,
+        body: `Your Waves appointment is confirmed for ${dateLabel}, ${startLabel} - ${endLabel} at ${customer.address_line1}, ${customer.city}. Confirmation: ${confCode}. Reply RESCHEDULE if you need to change.`,
+        channel: 'sms',
+        audience: 'customer',
+        purpose: 'appointment_confirmation',
+        customerId: custId,
+        appointmentId: serviceRow?.id,
+        identityTrustLevel: 'phone_matches_customer',
+        metadata: { original_message_type: 'booking_confirmation', source: source || 'portal' },
+      });
+      if (!customerSms.sent) {
+        logger.warn(`[booking:confirm] Customer SMS blocked/failed for customer ${custId}: ${customerSms.code || customerSms.reason || 'unknown'}`);
+      }
 
       if (process.env.ADAM_PHONE) {
         await TwilioService.sendSMS(process.env.ADAM_PHONE,

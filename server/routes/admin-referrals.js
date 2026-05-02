@@ -4,6 +4,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -117,11 +118,28 @@ router.post('/enroll', async (req, res, next) => {
 
     // Send enrollment SMS
     try {
-      const TwilioService = require('../services/twilio');
-      await TwilioService.sendSMS(customerPhone,
-        `Hey ${firstName}! You're now enrolled in the Waves Referral Program. Share your link and earn $50 for every new customer: ${clickiLink}`,
-        { messageType: 'referral_enrollment' }
-      );
+      const smsResult = await sendCustomerMessage({
+        to: customerPhone,
+        body: `Hey ${firstName}! You're now enrolled in the Waves Referral Program. Share your link and earn a reward for every new customer: ${clickiLink}`,
+        channel: 'sms',
+        audience: customerId ? 'customer' : 'lead',
+        purpose: 'referral',
+        customerId: customerId || undefined,
+        identityTrustLevel: customerId ? 'phone_matches_customer' : 'phone_provided_unverified',
+        consentBasis: customerId ? undefined : {
+          status: 'transactional_allowed',
+          source: 'admin_referral_enrollment',
+          capturedAt: new Date().toISOString(),
+        },
+        entryPoint: 'admin_referral_enrollment',
+        metadata: {
+          original_message_type: 'referral_enrollment',
+          promoter_id: promoter.id,
+        },
+      });
+      if (!smsResult.sent) {
+        logger.warn(`[admin-referrals] Enrollment SMS blocked/failed for promoter ${promoter.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+      }
     } catch (e) { logger.error(`Enrollment SMS failed: ${e.message}`); }
 
     res.json({ promoter });

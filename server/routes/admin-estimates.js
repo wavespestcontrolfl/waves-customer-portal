@@ -2,12 +2,12 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const db = require('../models/db');
-const TwilioService = require('../services/twilio');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { wrapEmail, plainText } = require('../services/email-template');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 async function renderTemplate(templateKey, vars, fallback) {
   try {
@@ -108,10 +108,26 @@ async function sendEstimateNow(estimate, sendMethod) {
         try {
           const fallback = `Hello ${firstName}! Your Waves estimate is ready: ${viewUrl}\n\nQuestions or requests? Reply to this message. Thank you for considering Waves!`;
           const smsBody = await renderTemplate('estimate_sent', { first_name: firstName, estimate_url: viewUrl }, fallback);
-          const result = await TwilioService.sendSMS(normalized, smsBody);
-          if (result && result.success === false) {
-            channels.sms = { ok: false, error: result.error || 'Twilio send failed' };
-            logger.error(`Estimate SMS failed: ${result.error || 'unknown'}`);
+          const result = await sendCustomerMessage({
+            to: normalized,
+            body: smsBody,
+            channel: 'sms',
+            audience: estimate.customer_id ? 'customer' : 'lead',
+            purpose: 'estimate_followup',
+            customerId: estimate.customer_id || undefined,
+            estimateId: estimate.id,
+            identityTrustLevel: estimate.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
+            consentBasis: estimate.customer_id ? undefined : {
+              status: 'transactional_allowed',
+              source: 'admin_estimate_send',
+              capturedAt: estimate.created_at || new Date().toISOString(),
+            },
+            entryPoint: 'admin_estimate_send',
+            metadata: { original_message_type: 'estimate_sent' },
+          });
+          if (!result.sent) {
+            channels.sms = { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
+            logger.error(`Estimate SMS failed: ${result.reason || result.code || 'unknown'}`);
           } else {
             channels.sms = { ok: true };
           }
@@ -406,12 +422,31 @@ router.post('/:id/follow-up', async (req, res, next) => {
     const firstName = estimate.customer_name?.split(' ')[0] || 'there';
 
     const msg = req.body.message || (
-      `Hey ${firstName}! Just following up on your Waves Pest Control estimate 🌊\n\n` +
+      `Hey ${firstName}! Just following up on your Waves Pest Control estimate.\n\n` +
       `You can review it anytime here: ${viewUrl}\n\n` +
       `We'd love to help protect your home. Reply here or call (941) 297-5749 with any questions!`
     );
 
-    await TwilioService.sendSMS(estimate.customer_phone, msg);
+    const smsResult = await sendCustomerMessage({
+      to: estimate.customer_phone,
+      body: msg,
+      channel: 'sms',
+      audience: estimate.customer_id ? 'customer' : 'lead',
+      purpose: 'estimate_followup',
+      customerId: estimate.customer_id || undefined,
+      estimateId: estimate.id,
+      identityTrustLevel: estimate.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
+      consentBasis: estimate.customer_id ? undefined : {
+        status: 'transactional_allowed',
+        source: 'admin_estimate_follow_up',
+        capturedAt: estimate.created_at || new Date().toISOString(),
+      },
+      entryPoint: 'admin_estimate_follow_up',
+      metadata: { original_message_type: 'estimate_followup_manual' },
+    });
+    if (!smsResult.sent) {
+      return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
+    }
     await db('estimates').where({ id: estimate.id }).update({
       follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
       last_follow_up_at: db.fn.now(),

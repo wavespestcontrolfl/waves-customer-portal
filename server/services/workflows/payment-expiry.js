@@ -1,6 +1,6 @@
 const db = require('../../models/db');
-const TwilioService = require('../twilio');
 const logger = require('../logger');
+const { sendCustomerMessage } = require('../messaging/send-customer-message');
 
 class PaymentExpiry {
   /**
@@ -48,11 +48,22 @@ class PaymentExpiry {
           `to avoid any interruption in service. ` +
           `Need help? Reply to this text. - Waves Pest Control`;
 
-        await TwilioService.sendSMS(customer.phone, body, {
+        const sendResult = await sendCustomerMessage({
+          to: customer.phone,
+          body,
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'autopay',
           customerId: card.customer_id,
-          messageType: 'payment_expiry',
-          customerLocationId: customer.location_id,
+          entryPoint: 'payment_expiry_workflow',
+          metadata: {
+            original_message_type: 'payment_expiry',
+            customerLocationId: customer.location_id,
+          },
         });
+        if (sendResult.blocked || sendResult.sent === false) {
+          throw new Error(`payment expiry SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+        }
 
         // Create inventory_alerts entry for dashboard visibility
         await db('inventory_alerts').insert({

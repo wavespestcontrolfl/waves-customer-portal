@@ -1,8 +1,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
-const TwilioService = require('./twilio');
 const { logAutopay, eventExistsRecently } = require('./autopay-log');
 const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
+const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 /**
  * Autopay Notifications
@@ -49,12 +49,20 @@ async function sendPreChargeReminders() {
       if (already) { skipped++; continue; }
 
       const dateStr = target.toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' });
-      const amt = parseFloat(c.monthly_rate || 0).toFixed(2);
-
-      await TwilioService.sendSMS(
-        c.phone,
-        `Hi ${c.first_name}, this is a friendly reminder from Waves: your WaveGuard auto-pay of $${amt} will process on ${dateStr}. Need to update your card or pause? Log in at your customer portal. Thank you!`
-      );
+      const body = `Hi ${c.first_name}, this is a friendly reminder from Waves: your WaveGuard auto-pay will process on ${dateStr}. Need to update your card or pause? Log in at your customer portal. Thank you!`;
+      const sendResult = await sendCustomerMessage({
+        to: c.phone,
+        body,
+        channel: 'sms',
+        audience: 'customer',
+        purpose: 'autopay',
+        customerId: c.id,
+        entryPoint: 'autopay_pre_charge_reminder',
+        metadata: { original_message_type: 'autopay_pre_charge' },
+      });
+      if (sendResult.blocked || sendResult.sent === false) {
+        throw new Error(`autopay reminder SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+      }
 
       await logAutopay(c.id, 'pre_charge_reminder_sent', {
         amountCents: Math.round(parseFloat(c.monthly_rate) * 100),
@@ -112,9 +120,21 @@ async function sendCardExpiryWarnings() {
       const expStr = `${String(r.exp_month).padStart(2, '0')}/${String(r.exp_year).slice(-2)}`;
       const body = expired
         ? `Hi ${r.first_name}, your ${r.brand || 'card'} ending in ${r.last4} on file with Waves has expired (${expStr}). Please update it in your customer portal to keep auto-pay active. Thank you!`
-        : `Hi ${r.first_name}, heads up — your ${r.brand || 'card'} ending in ${r.last4} on file with Waves expires ${expStr}. Update it in your customer portal to avoid any auto-pay disruption. Thank you!`;
+        : `Hi ${r.first_name}, heads up - your ${r.brand || 'card'} ending in ${r.last4} on file with Waves expires ${expStr}. Update it in your customer portal to avoid any auto-pay disruption. Thank you!`;
 
-      await TwilioService.sendSMS(r.phone, body);
+      const sendResult = await sendCustomerMessage({
+        to: r.phone,
+        body,
+        channel: 'sms',
+        audience: 'customer',
+        purpose: 'autopay',
+        customerId: r.customer_id,
+        entryPoint: 'autopay_card_expiry_warning',
+        metadata: { original_message_type: 'payment_expiry' },
+      });
+      if (sendResult.blocked || sendResult.sent === false) {
+        throw new Error(`card expiry SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+      }
 
       await logAutopay(r.customer_id, eventType, {
         paymentMethodId: r.payment_method_id,

@@ -6,6 +6,7 @@ const PipelineManager = require('../services/pipeline-manager');
 const LeadScorer = require('../services/lead-scorer');
 const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 const { aiTriageLead } = require('../services/lead-triage');
 const { etDateString } = require('../utils/datetime-et');
@@ -370,9 +371,24 @@ router.post('/', async (req, res) => {
         }
       } catch (tErr) { logger.warn(`[lead-webhook] template render failed, using fallback: ${tErr.message}`); }
 
-      await TwilioService.sendSMS(phoneFormatted, replyMsg,
-        { customerId: customer.id, messageType: 'auto_reply', customerLocationId: location.id }
-      );
+      const smsResult = await sendCustomerMessage({
+        to: phoneFormatted,
+        body: replyMsg,
+        channel: 'sms',
+        audience: 'lead',
+        purpose: 'conversational',
+        customerId: customer.id,
+        identityTrustLevel: 'phone_matches_customer',
+        entryPoint: 'lead_webhook_auto_reply',
+        metadata: {
+          original_message_type: 'auto_reply',
+          customerLocationId: location.id,
+          lead_source: leadSource.source,
+        },
+      });
+      if (!smsResult.sent) {
+        logger.warn(`[lead-webhook] Auto-reply blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+      }
 
       // Seed the intake state machine so the customer's next inbound SMS
       // gets routed through server/services/lead-intake.js (classify →

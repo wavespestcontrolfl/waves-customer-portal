@@ -6,6 +6,7 @@ const TwilioService = require('../services/twilio');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 router.use(authenticate);
 
@@ -282,8 +283,21 @@ router.put('/:id/step', async (req, res, next) => {
     try {
       if (step === 3) {
         const etaText = etaMinutes ? `ETA: ~${etaMinutes} minutes.` : '';
-        await TwilioService.sendSMS(customer.phone,
-          `🌊 ${techName} is headed to your property! ${etaText} Please make sure gates are unlocked and pets are secured. Track live in your Waves portal. 🚐`);
+        const smsResult = await sendCustomerMessage({
+          to: customer.phone,
+          body: `${techName} is headed to your property. ${etaText} Please make sure gates are unlocked and pets are secured. Track live in your Waves portal.`,
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'appointment',
+          customerId: customer.id,
+          appointmentId: tracker.scheduled_service_id,
+          identityTrustLevel: 'phone_matches_customer',
+          entryPoint: 'tracking_step_update',
+          metadata: { original_message_type: 'en_route' },
+        });
+        if (!smsResult.sent) {
+          logger.warn(`Tracking SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+        }
       }
     } catch (smsErr) {
       logger.error(`Tracking SMS failed: ${smsErr.message}`);

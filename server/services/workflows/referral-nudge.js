@@ -1,6 +1,6 @@
 const db = require('../../models/db');
-const TwilioService = require('../twilio');
 const logger = require('../logger');
+const { sendCustomerMessage } = require('../messaging/send-customer-message');
 
 class ReferralNudge {
   /**
@@ -59,14 +59,28 @@ class ReferralNudge {
         } catch { /* fall through to inline */ }
         if (!body) {
           const shareText = referralLink ? referralLink : `Use code ${referralCode}`;
-          body = `Hello ${customer.first_name}! Share your link — they get $25 off, you get $25: ${shareText}`;
+          body = `Hello ${customer.first_name}! Share your Waves referral link with a friend: ${shareText}`;
         }
 
-        await TwilioService.sendSMS(customer.phone, body, {
+        const smsResult = await sendCustomerMessage({
+          to: customer.phone,
+          body,
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'referral',
           customerId,
-          messageType: 'referral_nudge',
-          customerLocationId: customer.location_id,
+          identityTrustLevel: 'phone_matches_customer',
+          entryPoint: 'referral_nudge',
+          metadata: {
+            original_message_type: 'referral_nudge',
+            customerLocationId: customer.location_id,
+            rating,
+          },
         });
+        if (!smsResult.sent) {
+          logger.warn(`Referral nudge blocked/failed for customer ${customerId}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+          return;
+        }
 
         await db('customer_interactions').insert({
           customer_id: customerId,

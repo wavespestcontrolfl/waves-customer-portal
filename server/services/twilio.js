@@ -87,7 +87,7 @@ const TwilioService = {
         .services(config.twilio.verifyServiceSid)
         .verifications.create({ to: phone, channel: 'sms' });
 
-      logger.info(`Verification sent to ${phone}: ${verification.status}`);
+      logger.info(`Verification sent to ${maskPhone(phone)}: ${verification.status}`);
       return { success: true, status: verification.status };
     } catch (err) {
       logger.error(`Twilio verification send failed: ${err.message}`);
@@ -106,7 +106,7 @@ const TwilioService = {
         .services(config.twilio.verifyServiceSid)
         .verificationChecks.create({ to: phone, code });
 
-      logger.info(`Verification check for ${phone}: ${check.status}`);
+      logger.info(`Verification check for ${maskPhone(phone)}: ${check.status}`);
       return { success: check.status === 'approved', status: check.status };
     } catch (err) {
       logger.error(`Twilio verification check failed: ${err.message}`);
@@ -139,7 +139,7 @@ const TwilioService = {
 
       const { isEnabled } = require('../config/feature-gates');
       if (!isEnabled('twilioSms')) {
-        logger.info(`[GATE BLOCKED] SMS to ${to}: "${body.substring(0, 60)}..." (gate: twilioSms)`);
+        logger.info(`[GATE BLOCKED] SMS to ${maskPhone(to)} (messageType=${options.messageType || 'n/a'}, bodyLen=${body?.length || 0}, gate=twilioSms)`);
         return { success: true, sid: 'gate-blocked', gateBlocked: true };
       }
 
@@ -150,7 +150,7 @@ const TwilioService = {
         const { validateOutbound } = require('./sms-guard');
         const guard = validateOutbound(body, { messageType: options.messageType });
         if (!guard.ok) {
-          logger.warn(`[SMS-GUARD BLOCKED] to=${to} reason=${guard.reason} body="${body.substring(0, 120)}"`);
+          logger.warn(`[SMS-GUARD BLOCKED] to=${maskPhone(to)} reason=${guard.reason} messageType=${options.messageType || 'n/a'} bodyLen=${body?.length || 0}`);
           // Best-effort alert to the operator so a blocked send gets human eyes.
           // Non-blocking — if the alert path breaks we still refuse the send.
           // Honors OWNER_SMS_DISABLED (the kill switch above only applied to
@@ -165,7 +165,7 @@ const TwilioService = {
                   await c.messages.create({
                     to: ownerPhone,
                     from: options.fromNumber || ownerPhone,
-                    body: `[SMS-GUARD] Blocked outbound to ${to}\nReason: ${guard.reason}\nPreview: "${body.substring(0, 120)}"`,
+                    body: `[SMS-GUARD] Blocked outbound to ${maskPhone(to)}\nReason: ${guard.reason}\nMessage type: ${options.messageType || 'n/a'}\nBody length: ${body?.length || 0}`,
                   }).catch(() => {});
                 }
               }
@@ -185,7 +185,7 @@ const TwilioService = {
           const templates = require('../routes/admin-sms-templates');
           const active = await templates.isTemplateActive(options.messageType);
           if (!active) {
-            logger.info(`[SMS DISABLED] Template "${options.messageType}" is off — skipping SMS to ${to}`);
+            logger.info(`[SMS DISABLED] Template "${options.messageType}" is off — skipping SMS to ${maskPhone(to)}`);
             return { success: true, sid: 'template-disabled', templateDisabled: true };
           }
         } catch { /* template check failed — send anyway */ }
@@ -215,7 +215,7 @@ const TwilioService = {
 
       const c = getClient();
       if (!c) {
-        logger.warn(`[twilio] Cannot send SMS — client not initialized. To: ${to}`);
+        logger.warn(`[twilio] Cannot send SMS — client not initialized. To: ${maskPhone(to)}`);
         return { success: false, sid: null, error: 'Twilio not configured' };
       }
 
@@ -236,7 +236,7 @@ const TwilioService = {
       }
       if (urls.length > 0) msgPayload.mediaUrl = urls;
       const message = await c.messages.create(msgPayload);
-      logger.info(`SMS sent to ${to} from ${fromNumber}: ${message.sid}`);
+      logger.info(`SMS sent to ${maskPhone(to)} from ${maskPhone(fromNumber)}: ${message.sid}`);
 
       // Log to sms_log (legacy) AND dual-write to unified messages.
       // PR 2 cuts the inbox read path over to messages; sms_log stays as
@@ -272,7 +272,7 @@ const TwilioService = {
 
       return { success: true, sid: message.sid, fromNumber };
     } catch (err) {
-      logger.error(`SMS send failed to ${to}: ${err.message}`);
+      logger.error(`SMS send failed to ${maskPhone(to)}: ${err.message}`);
       throw new Error('Failed to send SMS');
     }
   },

@@ -19,8 +19,8 @@
  */
 
 const db = require('../models/db');
-const TwilioService = require('./twilio');
 const logger = require('./logger');
+const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 // ── Automation definitions ──
 const AUTOMATIONS = {
@@ -175,6 +175,14 @@ const AUTOMATIONS = {
   },
 };
 
+function purposeForAutomation(key) {
+  if (['new_recurring', 'lawn_service', 'new_appointment', 'bed_bug', 'cockroach'].includes(key)) return 'appointment';
+  if (key === 'service_renewal') return 'retention';
+  if (key === 'referral_nudge') return 'referral';
+  if (key === 'payment_failed') return 'billing';
+  return 'marketing';
+}
+
 // ASM (Advanced Suppression Manager) group classification for SendGrid.
 //
 // Newsletter group = promotional intent. A user who unsubs from the monthly
@@ -252,8 +260,23 @@ const EmailAutomationService = {
         }
 
         if (smsBody) {
-          await TwilioService.sendSMS(customer.phone, smsBody);
-          smsResult = { sent: true, to: customer.phone };
+          const sendResult = await sendCustomerMessage({
+            to: customer.phone,
+            body: smsBody,
+            channel: 'sms',
+            audience: 'customer',
+            purpose: purposeForAutomation(key),
+            customerId: customer.id,
+            identityTrustLevel: 'phone_matches_customer',
+            entryPoint: 'email_automation_sms',
+            metadata: {
+              original_message_type: `auto_${key}`,
+              automation_key: key,
+            },
+          });
+          smsResult = sendResult.sent
+            ? { sent: true }
+            : { sent: false, blocked: sendResult.blocked, error: sendResult.code || sendResult.reason || 'SMS send blocked/failed' };
         }
       } catch (err) {
         logger.error(`[email-auto] SMS failed for ${key}: ${err.message}`);

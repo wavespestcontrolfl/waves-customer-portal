@@ -6,6 +6,7 @@ const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
 
@@ -143,12 +144,24 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
     // Send customer confirmation SMS
     try {
       const responseTime = validUrgency === 'urgent' ? '2 hours' : '24 hours';
-      await TwilioService.sendSMS(
-        req.customer.phone,
-        `🌊 Waves Pest Control\n\n` +
-        `We received your ${categoryLabel} request! Our team will review it within ${responseTime}.\n\n` +
-        `We'll text you when it's been assigned to a technician. Track progress in your customer portal.`
-      );
+      const smsResult = await sendCustomerMessage({
+        to: req.customer.phone,
+        body: `Waves Pest Control: We received your ${categoryLabel} request. Our team will review it within ${responseTime}. We'll text you when it's been assigned to a technician. Track progress in your customer portal.`,
+        channel: 'sms',
+        audience: 'customer',
+        purpose: 'support_resolution',
+        customerId: req.customer.id,
+        identityTrustLevel: 'authenticated_portal',
+        entryPoint: 'customer_service_request',
+        metadata: {
+          original_message_type: 'service_request_confirmation',
+          service_request_id: request.id,
+          urgency: validUrgency,
+        },
+      });
+      if (!smsResult.sent) {
+        logger.warn(`Request confirmation SMS blocked/failed for customer ${req.customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+      }
     } catch (smsErr) {
       logger.error(`Failed to send confirmation SMS for request ${request.id}: ${smsErr.message}`);
     }

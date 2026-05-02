@@ -11,10 +11,10 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const TwilioService = require('./twilio');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const config = require('../config/invoice-followups');
 const { shortenOrPassthrough } = require('./short-url');
+const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 /**
  * Try to load the SMS body from the editable sms_templates table first.
@@ -238,15 +238,31 @@ async function fireStep(row) {
   const body = await resolveBody(step, {
     name: customer.first_name || 'there',
     invoiceTitle: row.title || 'your service',
-    amount,
+    amount: 'the balance',
     serviceDate,
     payUrl,
   });
 
-  await TwilioService.sendSMS(customer.phone, body, {
+  const sendResult = await sendCustomerMessage({
+    to: customer.phone,
+    body,
+    channel: 'sms',
+    audience: 'customer',
+    purpose: 'payment_link',
     customerId: customer.id,
-    messageType: 'invoice_followup',
+    invoiceId: row.invoice_id,
+    entryPoint: 'invoice_followup_sequence',
+    metadata: { original_message_type: 'invoice_followup' },
   });
+  if (sendResult.blocked || sendResult.sent === false) {
+    logger.warn(`[invoice-followups] SMS blocked for sequence ${row.id}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
+    await db('invoice_followup_sequences').where({ id: row.id }).update({
+      status: 'paused',
+      paused_reason: sendResult.code || 'sms_blocked',
+      next_touch_at: null,
+    });
+    return;
+  }
 
   const nextIndex = row.step_index + 1;
   const anchorAt = row.invoice_sent_at || row.invoice_sms_sent_at || row.invoice_created_at || row.created_at;
@@ -304,10 +320,20 @@ async function stopOnPayment(invoiceId) {
           name: customer.first_name,
           payUrl,
         });
-        await TwilioService.sendSMS(customer.phone, body, {
+        const sendResult = await sendCustomerMessage({
+          to: customer.phone,
+          body,
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'payment_receipt',
           customerId: customer.id,
-          messageType: 'invoice_thank_you',
+          invoiceId,
+          entryPoint: 'invoice_followup_thank_you',
+          metadata: { original_message_type: 'invoice_thank_you' },
         });
+        if (sendResult.blocked || sendResult.sent === false) {
+          logger.warn(`[invoice-followups] thank-you SMS blocked for invoice ${invoiceId}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
+        }
       }
     } catch (err) {
       logger.error(`[invoice-followups] thank-you SMS failed: ${err.message}`);

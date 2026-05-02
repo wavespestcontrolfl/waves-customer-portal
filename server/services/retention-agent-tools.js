@@ -4,6 +4,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 async function executeRetentionTool(toolName, input) {
   switch (toolName) {
@@ -151,11 +152,29 @@ async function executeRetentionTool(toolName, input) {
       const customer = await db('customers').where('id', input.customer_id).first();
       if (!customer?.phone) return { error: 'No phone number' };
 
-      const TwilioService = require('../twilio');
-      await TwilioService.sendSMS(customer.phone, input.message, {
+      const smsResult = await sendCustomerMessage({
+        to: customer.phone,
+        body: input.message,
+        channel: 'sms',
+        audience: 'customer',
+        purpose: 'retention',
         customerId: customer.id,
-        messageType: 'retention_outreach',
+        identityTrustLevel: 'phone_matches_customer',
+        entryPoint: 'retention_agent_tool',
+        consentBasis: {
+          status: 'opted_in',
+          source: 'customer_retention_preferences',
+          capturedAt: customer.updated_at || customer.created_at || new Date().toISOString(),
+        },
+        metadata: {
+          original_message_type: 'retention_outreach',
+          outreach_id: input.outreach_id,
+        },
       });
+      if (!smsResult.sent) {
+        logger.warn(`[retention-agent] SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+        return { sent: false, blocked: true, reason: smsResult.code || smsResult.reason };
+      }
 
       // Update outreach record if provided
       if (input.outreach_id) {

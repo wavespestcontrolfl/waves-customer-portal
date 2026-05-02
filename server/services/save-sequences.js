@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 // ---------------------------------------------------------------------------
 // Sequence templates
@@ -133,7 +134,6 @@ async function executeStep(sequenceId, stepIndex) {
 
   if (step.type === 'sms' && step.template) {
     try {
-      const TwilioService = require('./twilio');
       let msg = step.template;
       msg = msg.replace(/{first_name}/g, customer.first_name || 'there');
       msg = msg.replace(/{owner_name}/g, 'Adam');
@@ -143,11 +143,30 @@ async function executeStep(sequenceId, stepIndex) {
       msg = msg.replace(/{services_list}/g, 'pest control & lawn care');
 
       if (customer.phone) {
-        await TwilioService.sendSMS(customer.phone, msg, {
+        const smsResult = await sendCustomerMessage({
+          to: customer.phone,
+          body: msg,
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'retention',
           customerId: customer.id,
-          messageType: 'save_sequence',
+          identityTrustLevel: 'phone_matches_customer',
+          entryPoint: 'save_sequence',
+          consentBasis: {
+            status: 'opted_in',
+            source: 'customer_retention_preferences',
+            capturedAt: customer.updated_at || customer.created_at || new Date().toISOString(),
+          },
+          metadata: {
+            original_message_type: 'save_sequence',
+            sequence_id: sequence.id,
+            sequence_type: sequence.sequence_type,
+            step_number: step.step,
+          },
         });
-        result = { success: true, message: `SMS sent to ${customer.phone}` };
+        result = smsResult.sent
+          ? { success: true, message: 'SMS sent' }
+          : { success: false, message: `SMS blocked/failed: ${smsResult.code || smsResult.reason || 'unknown'}` };
       } else {
         result = { success: false, message: 'No phone number' };
       }

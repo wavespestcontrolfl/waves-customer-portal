@@ -18,11 +18,11 @@
  *   2. validates against X-Twilio-Signature using the official twilio
  *      SDK's validateRequest.
  *   3. behaves according to TWILIO_SIGNATURE_VALIDATION env var:
- *        'log'      (default) — log failures, allow request through.
- *                   Use in prod for soft-launch until we've seen at
- *                   least one valid signature on every endpoint.
- *        'enforce'  — return 403 on invalid/missing signature.
- *                   Staging always; prod after log-mode burn-in.
+ *        'enforce'  (default) — return 403 on invalid/missing signature.
+ *                   Public Twilio webhooks mutate customer-facing comms, so
+ *                   prod must fail closed unless explicitly disabled.
+ *        'log'      — log failures, allow request through.
+ *                   Use only for short-lived rollout/debug windows.
  *        'disabled' — no-op. For local dev where Twilio doesn't sign.
  *
  * Logging policy: never log req.body in any mode (caller phone /
@@ -73,10 +73,11 @@ function guessSource(req) {
 }
 
 function getMode() {
-  const v = (process.env.TWILIO_SIGNATURE_VALIDATION || 'log').toLowerCase();
+  const v = (process.env.TWILIO_SIGNATURE_VALIDATION || 'enforce').toLowerCase();
   if (v === MODE_ENFORCE) return MODE_ENFORCE;
   if (v === MODE_DISABLED) return MODE_DISABLED;
-  return MODE_LOG;
+  if (v === MODE_LOG) return MODE_LOG;
+  return MODE_ENFORCE;
 }
 
 /**

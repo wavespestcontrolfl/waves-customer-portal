@@ -8,6 +8,7 @@ const { WAVES_LOCATIONS } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 const PORTAL_DOMAIN = process.env.PORTAL_DOMAIN || 'portal.wavespestcontrol.com';
 
@@ -457,11 +458,24 @@ router.post('/send-request', async (req, res, next) => {
     const rateUrl = `https://${PORTAL_DOMAIN}/rate/${reviewReq.token}`;
     const svcLabel = reviewReq.service_type || 'pest control service';
 
-    const TwilioService = require('../services/twilio');
-    await TwilioService.sendSMS(customer.phone,
-      `Hey ${firstName}! Thanks for choosing Waves 🌊 We'd love to hear how your ${svcLabel} went — it only takes 10 seconds:\n\n${rateUrl}\n\nThank you! — Waves Pest Control`,
-      { customerId: customer.id, messageType: 'review_request', customerLocationId: customer.nearest_location_id }
-    );
+    const smsResult = await sendCustomerMessage({
+      to: customer.phone,
+      body: `Hey ${firstName}! Thanks for choosing Waves. We'd love to hear how your ${svcLabel} went. It only takes 10 seconds: ${rateUrl} Thank you! - Waves Pest Control`,
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'review_request',
+      customerId: customer.id,
+      identityTrustLevel: 'phone_matches_customer',
+      entryPoint: 'admin_reviews_manual_request',
+      metadata: {
+        original_message_type: 'review_request',
+        customerLocationId: customer.nearest_location_id,
+        review_request_id: reviewReq.id,
+      },
+    });
+    if (!smsResult.sent) {
+      return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
+    }
 
     await db('activity_log').insert({
       customer_id: customer.id, action: 'review_requested',

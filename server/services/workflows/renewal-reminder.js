@@ -1,6 +1,6 @@
 const db = require('../../models/db');
-const TwilioService = require('../twilio');
 const logger = require('../logger');
+const { sendCustomerMessage } = require('../messaging/send-customer-message');
 
 class RenewalReminder {
   /**
@@ -46,11 +46,31 @@ class RenewalReminder {
               `Don't let your coverage lapse — reply RENEW or call us to take care of it. ` +
               `- Waves Pest Control`;
 
-            await TwilioService.sendSMS(customer.phone, body, {
+            const smsResult = await sendCustomerMessage({
+              to: customer.phone,
+              body,
+              channel: 'sms',
+              audience: 'customer',
+              purpose: 'retention',
               customerId: customer.id,
-              messageType: 'renewal',
-              customerLocationId: customer.location_id,
+              identityTrustLevel: 'phone_matches_customer',
+              entryPoint: 'renewal_reminder',
+              consentBasis: {
+                status: 'opted_in',
+                source: 'customer_retention_preferences',
+                capturedAt: customer.updated_at || customer.created_at || new Date().toISOString(),
+              },
+              metadata: {
+                original_message_type: 'renewal',
+                customerLocationId: customer.location_id,
+                renewal_field: field.column,
+                days_out: daysOut,
+              },
             });
+            if (!smsResult.sent) {
+              logger.warn(`Renewal reminder blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+              continue;
+            }
 
             await db('customer_interactions').insert({
               customer_id: customer.id,

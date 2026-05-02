@@ -7,6 +7,7 @@ const HealthScorer = require('../services/customer-intelligence/health-scorer');
 const RetentionEngine = require('../services/customer-intelligence/retention-engine');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -136,11 +137,32 @@ router.put('/retention/:id/approve', async (req, res, next) => {
       const customer = await db('customers').where('id', outreach.customer_id).first();
       if (customer?.phone) {
         try {
-          const TwilioService = require('../services/twilio');
-          await TwilioService.sendSMS(customer.phone, outreach.message_content, {
-            customerId: customer.id, messageType: 'retention',
+          const smsResult = await sendCustomerMessage({
+            to: customer.phone,
+            body: outreach.message_content,
+            channel: 'sms',
+            audience: 'customer',
+            purpose: 'retention',
+            customerId: customer.id,
+            identityTrustLevel: 'phone_matches_customer',
+            entryPoint: 'admin_customer_intel_retention_approve',
+            consentBasis: {
+              status: 'opted_in',
+              source: 'customer_retention_preferences',
+              capturedAt: customer.updated_at || customer.created_at || new Date().toISOString(),
+            },
+            metadata: {
+              original_message_type: 'retention',
+              outreach_id: outreach.id,
+              adminUserId: req.technicianId,
+            },
           });
-          updates.status = 'sent';
+          if (smsResult.sent) {
+            updates.status = 'sent';
+          } else {
+            updates.status = 'blocked';
+            logger.warn(`Retention SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+          }
         } catch (err) {
           logger.error(`Retention SMS failed: ${err.message}`);
         }

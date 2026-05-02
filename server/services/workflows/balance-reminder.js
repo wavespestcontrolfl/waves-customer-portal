@@ -3,6 +3,7 @@ const TwilioService = require('../twilio');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { shortenOrPassthrough } = require('../short-url');
+const { sendCustomerMessage } = require('../messaging/send-customer-message');
 
 class BalanceReminder {
 
@@ -64,41 +65,63 @@ class BalanceReminder {
     const totalBalance = outstanding.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
     const oldest = outstanding[0];
     const daysOverdue = Math.max(0, Math.floor((Date.now() - new Date(oldest.payment_date)) / 86400000));
+    const oldestInvoice = await db('invoices')
+      .where({ customer_id: customerId })
+      .whereIn('status', ['sent', 'viewed', 'overdue', 'unpaid'])
+      .orderByRaw('COALESCE(due_date::timestamp, created_at) asc')
+      .first();
 
     return {
       totalBalance,
       invoiceCount: outstanding.length,
-      oldestInvoiceUrl: `${process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com'}/pay/${customerId}`,
+      oldestInvoiceId: oldestInvoice?.id || null,
+      oldestInvoiceUrl: oldestInvoice?.token
+        ? `${process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com'}/pay/${oldestInvoice.token}`
+        : `${process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com'}/pay/${customerId}`,
       oldestDueDate: oldest.payment_date,
       daysOverdue,
     };
   }
 
   async sendReminder(service, balance, tier, daysUntil) {
+    if (!balance.oldestInvoiceId) {
+      throw new Error('balance reminder payment-link SMS skipped: no unpaid invoice id found');
+    }
     const datePretty = new Date(service.scheduled_date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
-    const amt = balance.totalBalance.toFixed(2);
     const link = await shortenOrPassthrough(balance.oldestInvoiceUrl, {
-      kind: 'invoice', customerId: service.cust_id,
+      kind: 'invoice', entityType: 'invoices', entityId: balance.oldestInvoiceId, customerId: service.cust_id,
     });
 
     const messages = {
-      gentle: `Hello ${service.first_name}! Waves here. We're scheduled to see you on ${datePretty}.\n\nOur records show an outstanding balance of $${amt} on your account. To avoid any interruption in service, please take care of it before your appointment: ${link}`,
-      firm: `Hi ${service.first_name}, quick reminder from Waves — your ${service.service_type || 'service'} is ${daysUntil === 1 ? 'tomorrow' : `in ${daysUntil} days`} and there's a $${amt} balance.\n\nPlease take care of it so we can keep you on schedule: ${link}\n\nIf there's an issue, just reply. — Waves`,
-      urgent: `${service.first_name}, your Waves service is ${daysUntil === 0 ? 'today' : 'tomorrow'} and your account has a $${amt} outstanding balance.\n\nPay now to keep your appointment: ${link}\n\nAlready paid? Disregard — may take a few hours to process. — Waves`,
+      gentle: `Hello ${service.first_name}! Waves here. We're scheduled to see you on ${datePretty}.\n\nOur records show an outstanding balance on your account. To avoid any interruption in service, please take care of it before your appointment: ${link}`,
+      firm: `Hi ${service.first_name}, quick reminder from Waves - your ${service.service_type || 'service'} is ${daysUntil === 1 ? 'tomorrow' : `in ${daysUntil} days`} and there's an outstanding balance.\n\nPlease take care of it so we can keep you on schedule: ${link}\n\nIf there's an issue, just reply. - Waves`,
+      urgent: `${service.first_name}, your Waves service is ${daysUntil === 0 ? 'today' : 'tomorrow'} and your account has an outstanding balance.\n\nPay now to keep your appointment: ${link}\n\nAlready paid? Disregard - it may take a few hours to process. - Waves`,
     };
 
-    await TwilioService.sendSMS(service.phone, messages[tier], {
-      customerId: service.cust_id, messageType: 'balance_reminder',
+    const sendResult = await sendCustomerMessage({
+      to: service.phone,
+      body: messages[tier],
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'payment_link',
+      customerId: service.cust_id,
+      invoiceId: balance.oldestInvoiceId,
+      entryPoint: 'balance_reminder_workflow',
+      metadata: { original_message_type: 'balance_reminder' },
     });
+    if (sendResult.blocked || sendResult.sent === false) {
+      throw new Error(`balance reminder SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+    }
 
     await db('customer_interactions').insert({
       customer_id: service.cust_id, interaction_type: 'sms_outbound',
-      subject: `Balance reminder (${tier}) — $${amt}`,
-      body: `Sent ${tier} reminder. Balance: $${amt}. Service: ${datePretty}. Days until: ${daysUntil}.`,
+      subject: `Balance reminder (${tier})`,
+      body: `Sent ${tier} reminder. Service: ${datePretty}. Days until: ${daysUntil}.`,
       metadata: JSON.stringify({ tier, balance: balance.totalBalance, daysUntil, daysOverdue: balance.daysOverdue }),
     });
 
     if (balance.daysOverdue >= 30 && tier === 'urgent') {
+      const amt = balance.totalBalance.toFixed(2);
       await TwilioService.sendSMS(process.env.ADAM_PHONE || '+19413187612',
         `💰 Overdue: ${service.first_name} ${service.last_name} — $${amt} (${balance.daysOverdue} days). Service ${daysUntil === 0 ? 'today' : 'tomorrow'}.`,
         { messageType: 'internal_alert' }
@@ -127,14 +150,20 @@ class BalanceReminder {
         .where('created_at', '>', new Date(Date.now() - 7 * 86400000)).first();
       if (sentRecently) continue;
 
-      const link = balance.oldestInvoiceUrl;
-
       // Get oldest unpaid invoice for title and service date
       const oldestInvoice = await db('invoices')
         .where({ customer_id: customer.id })
         .whereIn('status', ['sent', 'overdue', 'unpaid'])
-        .orderBy('created_at', 'asc')
+        .orderByRaw('COALESCE(due_date::timestamp, created_at) asc')
         .first();
+      if (!oldestInvoice?.id || !oldestInvoice?.token) {
+        logger.warn(`[balance-reminder] late-payment SMS skipped for customer ${customer.id}: no unpaid invoice id/token found`);
+        continue;
+      }
+      const link = await shortenOrPassthrough(
+        `${process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com'}/pay/${oldestInvoice.token}`,
+        { kind: 'invoice', entityType: 'invoices', entityId: oldestInvoice.id, customerId: customer.id }
+      );
       const invoiceTitle = oldestInvoice?.title || oldestInvoice?.service_type || 'your service';
       let completedOn = '';
       if (oldestInvoice?.service_date) {
@@ -161,11 +190,25 @@ class BalanceReminder {
       } else continue;
 
       if (message) {
-        await TwilioService.sendSMS(customer.phone, message, { customerId: customer.id, messageType: 'late_payment' });
+        const sendResult = await sendCustomerMessage({
+          to: customer.phone,
+          body: message,
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'payment_link',
+          customerId: customer.id,
+          invoiceId: oldestInvoice.id,
+          entryPoint: 'balance_reminder_late_payment_check',
+          metadata: { original_message_type: 'late_payment' },
+        });
+        if (sendResult.blocked || sendResult.sent === false) {
+          logger.warn(`[balance-reminder] late-payment SMS blocked for customer ${customer.id}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
+          continue;
+        }
         await db('customer_interactions').insert({
           customer_id: customer.id, interaction_type: 'sms_outbound',
           subject: `Late payment tier ${count + 1} — ${balance.daysOverdue} days`,
-          body: `$${amt} overdue ${balance.daysOverdue} days. Tier ${count + 1} sent.`,
+          body: `$${balance.totalBalance.toFixed(2)} overdue ${balance.daysOverdue} days. Tier ${count + 1} sent.`,
         });
         sent++;
       }
@@ -183,10 +226,19 @@ class BalanceReminder {
       .where('created_at', '>', new Date(Date.now() - 7 * 86400000)).first();
 
     if (recentReminder) {
-      await TwilioService.sendSMS(customer.phone,
-        `${customer.first_name}, got it — thank you for the payment! Your account is all caught up. See you at your next service. — Waves 🌊`,
-        { customerId, messageType: 'confirmation' }
-      );
+      const sendResult = await sendCustomerMessage({
+        to: customer.phone,
+        body: `${customer.first_name}, got it - thank you for the payment! Your account is all caught up. See you at your next service. - Waves`,
+        channel: 'sms',
+        audience: 'customer',
+        purpose: 'payment_receipt',
+        customerId,
+        entryPoint: 'balance_reminder_payment_received',
+        metadata: { original_message_type: 'confirmation' },
+      });
+      if (sendResult.blocked || sendResult.sent === false) {
+        logger.warn(`[balance-reminder] payment thank-you SMS blocked for customer ${customerId}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
+      }
     }
 
     if (customer.pipeline_stage === 'at_risk') {

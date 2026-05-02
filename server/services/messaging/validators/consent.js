@@ -55,6 +55,14 @@ async function checkConsentForPurpose(input, policy, contactState) {
     if (
       input.audience === 'lead' &&
       policy.requireConsent === 'transactional' &&
+      input.consentBasis &&
+      ['transactional_allowed', 'opted_in'].includes(input.consentBasis.status)
+    ) {
+      return { ok: true };
+    }
+    if (
+      input.audience === 'lead' &&
+      policy.requireConsent === 'transactional' &&
       input.purpose === 'conversational'
     ) {
       return { ok: true };

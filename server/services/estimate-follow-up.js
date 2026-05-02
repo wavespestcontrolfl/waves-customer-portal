@@ -11,11 +11,11 @@
  */
 
 const db = require('../models/db');
-const TwilioService = require('./twilio');
 const EmailService = require('./email');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
+const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 // ── Safety gates (see: "don't be annoying" PR) ──────────────────────────
 // Centralized so the behavior stays consistent across all four stages.
@@ -125,8 +125,28 @@ async function sendDualChannel(est, { sms, email }) {
   let attempted = false;
   if (est.customer_phone) {
     try {
-      await TwilioService.sendSMS(est.customer_phone, sms);
-      attempted = true;
+      const result = await sendCustomerMessage({
+        to: est.customer_phone,
+        body: sms,
+        channel: 'sms',
+        audience: est.customer_id ? 'customer' : 'lead',
+        purpose: 'estimate_followup',
+        customerId: est.customer_id || undefined,
+        estimateId: est.id,
+        identityTrustLevel: est.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
+        consentBasis: est.customer_id ? undefined : {
+          status: 'transactional_allowed',
+          source: 'estimate_follow_up',
+          capturedAt: est.created_at || new Date().toISOString(),
+        },
+        entryPoint: 'estimate_follow_up_cron',
+        metadata: { original_message_type: 'estimate_followup' },
+      });
+      if (result.blocked || result.sent === false) {
+        logger.warn(`[est-followup] SMS blocked for estimate ${est.id}: ${result.code || 'unknown'} ${result.reason || ''}`);
+      } else {
+        attempted = true;
+      }
     } catch (e) {
       logger.error(`[est-followup] SMS failed for estimate ${est.id}: ${e.message}`);
     }
@@ -181,7 +201,7 @@ const EstimateFollowUp = {
           const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
           const smsBody = await renderTemplate('estimate_followup_unviewed',
             { first_name: firstName, estimate_url: url },
-            `Hey ${firstName}! Just wanted to make sure you saw your Waves Pest Control estimate 🌊\n\n${url}\n\nTake a look when you get a chance — we're here if you have any questions! (941) 318-7612`
+            `Hey ${firstName}! Just wanted to make sure you saw your Waves Pest Control estimate.\n\n${url}\n\nTake a look when you get a chance - we're here if you have any questions! (941) 318-7612`
           );
           const ok = await sendDualChannel(est, {
             sms: smsBody,
@@ -240,7 +260,7 @@ const EstimateFollowUp = {
           const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
           const smsBody = await renderTemplate('estimate_followup_viewed',
             { first_name: firstName, estimate_url: url },
-            `Hi ${firstName}! I noticed you checked out your Waves estimate — any questions I can answer? 🌊\n\n${url}\n\nI'm happy to walk through it with you. Just reply here or call (941) 318-7612.\n\n— Adam, Waves Pest Control`
+            `Hi ${firstName}! I noticed you checked out your Waves estimate - any questions I can answer?\n\n${url}\n\nI'm happy to walk through it with you. Just reply here or call (941) 318-7612.\n\n- Adam, Waves Pest Control`
           );
           const ok = await sendDualChannel(est, {
             sms: smsBody,
@@ -298,7 +318,7 @@ const EstimateFollowUp = {
           const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
           const smsBody = await renderTemplate('estimate_followup_final',
             { first_name: firstName, estimate_url: url },
-            `Hey ${firstName} — last check-in from me! Your Waves estimate is still available:\n\n${url}\n\nWe'd love to earn your business. No pressure at all — just reply if you'd like to move forward or have any questions.\n\n— Adam 🌊`
+            `Hey ${firstName} - last check-in from me! Your Waves estimate is still available:\n\n${url}\n\nWe'd love to earn your business. No pressure at all - just reply if you'd like to move forward or have any questions.\n\n- Adam`
           );
           const ok = await sendDualChannel(est, {
             sms: smsBody,
@@ -359,7 +379,7 @@ const EstimateFollowUp = {
           const expDate = new Date(est.expires_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' });
           const smsBody = await renderTemplate('estimate_followup_expiring',
             { first_name: firstName, estimate_url: url, expires_at: expDate },
-            `Hi ${firstName}! Just a heads up — your Waves Pest Control estimate expires on ${expDate}.\n\n${url}\n\nLet us know if you'd like to move forward! (941) 318-7612 🌊`
+            `Hi ${firstName}! Just a heads up - your Waves Pest Control estimate expires on ${expDate}.\n\n${url}\n\nLet us know if you'd like to move forward! (941) 318-7612`
           );
           const ok = await sendDualChannel(est, {
             sms: smsBody,

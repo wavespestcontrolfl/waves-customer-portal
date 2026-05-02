@@ -22,6 +22,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { PROJECT_TYPES, PROJECT_TYPE_KEYS, isValidProjectType, getProjectType } = require('../services/project-types');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -206,12 +207,24 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
         if (!normalized) {
           channels.sms = { ok: false, error: `Invalid phone format: ${customer.phone}` };
         } else {
-          const TwilioService = require('../services/twilio');
           const smsBody = `Hi ${firstName}! Your Waves ${typeLabel} report is ready: ${reportUrl}\n\nQuestions? Reply here.`;
-          const result = await TwilioService.sendSMS(normalized, smsBody);
-          channels.sms = result && result.success === false
-            ? { ok: false, error: result.error || 'Twilio send failed' }
-            : { ok: true };
+          const result = await sendCustomerMessage({
+            to: normalized,
+            body: smsBody,
+            channel: 'sms',
+            audience: 'customer',
+            purpose: 'support_resolution',
+            customerId: customer.id,
+            identityTrustLevel: 'phone_matches_customer',
+            entryPoint: 'admin_project_report_send',
+            metadata: {
+              original_message_type: 'project_report',
+              project_id: project.id,
+            },
+          });
+          channels.sms = result.sent
+            ? { ok: true }
+            : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
         }
       } catch (e) {
         logger.error(`[projects] send sms failed: ${e.message}`);
