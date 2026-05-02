@@ -1606,6 +1606,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                     value={satFeedback}
                     onChange={e => setSatFeedback(e.target.value)}
                     placeholder="What could we have done differently?"
+                    aria-label="Service feedback"
                     rows={3}
                     style={{
                       width: '100%', padding: '12px 14px', borderRadius: 12,
@@ -2206,6 +2207,7 @@ function ServicesTab() {
           <input
             type="text"
             placeholder="Search notes..."
+            aria-label="Search service notes"
             value={searchTerm}
             onChange={e => setSearchTerm(e.target.value)}
             style={{
@@ -3240,7 +3242,7 @@ function BillingTab({ customer }) {
           background: value === opt ? `${B.wavesBlue}15` : 'transparent',
           color: value === opt ? B.wavesBlue : B.grayMid,
           fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: FONTS.heading,
-          transition: 'all 0.2s ease',
+          transition: 'all 0.2s ease', minHeight: 36,
         }}>{opt}</button>
       ))}
     </div>
@@ -3417,7 +3419,7 @@ function BillingTab({ customer }) {
           <button onClick={handleAddCard} disabled={stripeLoading} style={{
             padding: '6px 14px', borderRadius: 8, border: `1px solid ${B.wavesBlue}`,
             background: 'transparent', color: B.wavesBlue, fontSize: 12, fontWeight: 600, cursor: 'pointer',
-            opacity: stripeLoading ? 0.6 : 1,
+            opacity: stripeLoading ? 0.6 : 1, minHeight: 36,
           }}>{stripeLoading && !showAddCard ? 'Loading...' : '+ Add New'}</button>
         </div>
 
@@ -3443,12 +3445,12 @@ function BillingTab({ customer }) {
               ) : (
                 <button onClick={() => handleSetDefault(c.id)} style={{
                   padding: '4px 10px', borderRadius: 6, border: `1px solid ${B.wavesBlue}`,
-                  background: 'transparent', color: B.wavesBlue, fontSize: 12, cursor: 'pointer',
+                  background: 'transparent', color: B.wavesBlue, fontSize: 12, cursor: 'pointer', minHeight: 36,
                 }}>Set Default</button>
               )}
               <button onClick={() => handleRemoveCard(c.id)} style={{
                 padding: '4px 10px', borderRadius: 6, border: `1px solid ${B.grayLight}`,
-                background: 'transparent', color: B.red, fontSize: 12, cursor: 'pointer',
+                background: 'transparent', color: B.red, fontSize: 12, cursor: 'pointer', minHeight: 36,
               }}>Remove</button>
             </div>
           </div>
@@ -3625,6 +3627,7 @@ function BillingTab({ customer }) {
             value={billingEmail}
             onChange={e => setBillingEmail(e.target.value)}
             placeholder={customer?.email || 'billing@example.com'}
+            aria-label="Billing email"
             style={{
               width: '100%', padding: '10px 14px', borderRadius: 10, border: `1px solid ${B.grayLight}`,
               fontSize: 14, fontFamily: FONTS.body, color: B.navy, background: B.offWhite,
@@ -3644,15 +3647,16 @@ function BillingTab({ customer }) {
           </div>
           <button
             onClick={() => setPaymentSmsEnabled(!paymentSmsEnabled)}
+            aria-label={`Payment confirmation texts ${paymentSmsEnabled ? 'enabled' : 'disabled'}`}
             style={{
-              width: 48, height: 26, borderRadius: 13, border: 'none', cursor: 'pointer',
+              width: 48, height: 32, borderRadius: 16, border: 'none', cursor: 'pointer',
               background: paymentSmsEnabled ? B.green : B.grayLight,
               position: 'relative', transition: 'background 0.2s ease',
             }}
           >
             <div style={{
               width: 22, height: 22, borderRadius: 11, background: '#fff',
-              position: 'absolute', top: 2,
+              position: 'absolute', top: 5,
               left: paymentSmsEnabled ? 24 : 2,
               transition: 'left 0.2s ease',
               boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
@@ -4086,6 +4090,7 @@ function PropertyTab({ customer }) {
                       value={pet.name || ''}
                       onChange={e => updatePet('name', e.target.value)}
                       placeholder="e.g., Max"
+                      aria-label={`Pet ${idx + 1} name`}
                       style={{
                         width: '100%', padding: '11px 14px', borderRadius: 10,
                         border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
@@ -4115,6 +4120,7 @@ function PropertyTab({ customer }) {
                       value={pet.breed || ''}
                       onChange={e => updatePet('breed', e.target.value)}
                       placeholder="e.g., Golden Retriever"
+                      aria-label={`Pet ${idx + 1} breed`}
                       style={{
                         width: '100%', padding: '11px 14px', borderRadius: 10,
                         border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
@@ -4213,6 +4219,7 @@ function PropertyTab({ customer }) {
                 type="date"
                 value={prefs.blackoutStart || ''}
                 onChange={e => updateField('blackoutStart', e.target.value || null)}
+                aria-label="Blackout start date"
                 style={{
                   width: '100%', padding: '11px 14px', borderRadius: 10,
                   border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
@@ -4228,6 +4235,7 @@ function PropertyTab({ customer }) {
                 type="date"
                 value={prefs.blackoutEnd || ''}
                 onChange={e => updateField('blackoutEnd', e.target.value || null)}
+                aria-label="Blackout end date"
                 style={{
                   width: '100%', padding: '11px 14px', borderRadius: 10,
                   border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
@@ -4845,6 +4853,7 @@ function LearnTab({ customer }) {
             <input
               type="text" value={faqSearch} onChange={e => setFaqSearch(e.target.value)}
               placeholder="Search questions..."
+              aria-label="Search pest and lawn questions"
               style={{
                 width: '100%', padding: '10px 14px 10px 36px', borderRadius: 10,
                 border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
@@ -5757,6 +5766,7 @@ function MyPlanTab({ customer }) {
                 value={pauseReason}
                 onChange={e => setPauseReason(e.target.value)}
                 placeholder="Traveling, seasonal, etc."
+                aria-label="Pause reason"
                 style={{
                   width: '100%', padding: '10px 14px', borderRadius: 10, fontSize: 14,
                   border: `1px solid ${B.grayLight}`, fontFamily: FONTS.body, outline: 'none',
@@ -5830,6 +5840,7 @@ function MyPlanTab({ customer }) {
                 value={cancelDetails}
                 onChange={e => setCancelDetails(e.target.value)}
                 placeholder="Anything else you'd like us to know?"
+                aria-label="Cancellation details"
                 rows={3}
                 style={{
                   width: '100%', padding: '10px 14px', borderRadius: 10, fontSize: 14,
@@ -6617,6 +6628,7 @@ function ReferTab({ customer, onSwitchTab }) {
         <input
           type="text" value={name} onChange={e => setName(e.target.value)}
           placeholder="Friend's name"
+          aria-label="Friend's name"
           style={{
             width: '100%', padding: '11px 14px', borderRadius: 10, marginBottom: 10,
             border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
@@ -6628,6 +6640,7 @@ function ReferTab({ customer, onSwitchTab }) {
         <input
           type="tel" value={phone} onChange={e => setPhone(e.target.value)}
           placeholder="Their phone number"
+          aria-label="Friend's phone number"
           style={{
             width: '100%', padding: '11px 14px', borderRadius: 10, marginBottom: 14,
             border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
@@ -6901,6 +6914,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
           <input
             type="text" value={search} onChange={e => setSearch(e.target.value)}
             placeholder="Search by document name or date..."
+            aria-label="Search documents"
             style={{
               width: '100%', padding: '10px 14px 10px 36px', borderRadius: 10,
               border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
@@ -7098,13 +7112,14 @@ function DocumentSection({ title, catKey, items, emptyMessage, onDownload, onSha
                           background: share === 'copied' ? B.green : B.offWhite,
                           color: share === 'copied' ? '#fff' : B.grayDark,
                           border: share === 'copied' ? 'none' : `1px solid ${B.grayLight}`,
-                        }}>{share === 'copied' ? '' : share === 'copying' ? '...' : '↗'}</button>
+                          width: 36,
+                        }} aria-label={`Share ${doc.name || 'document'}`}>{share === 'copied' ? '' : share === 'copying' ? '...' : '↗'}</button>
                       )}
                       <button onClick={() => onDownload(doc)} style={{
                         ...BUTTON_BASE, padding: '5px 8px', fontSize: 12, borderRadius: 8,
                         background: B.offWhite, color: B.navy,
-                        border: `1px solid ${B.grayLight}`,
-                      }}>⬇</button>
+                        border: `1px solid ${B.grayLight}`, width: 36,
+                      }} aria-label={`Download ${doc.name || 'document'}`}>⬇</button>
                     </div>
                   </div>
 
@@ -7257,7 +7272,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
         <div style={{ fontSize: 17, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>New Request</div>
         <button onClick={onClose} aria-label="Close" style={{
           background: B.offWhite, border: 'none', cursor: 'pointer',
-          color: B.grayMid, width: 32, height: 32, borderRadius: '50%',
+          color: B.grayMid, width: 40, height: 40, borderRadius: '50%',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}><Icon name="close" size={16} strokeWidth={2} /></button>
       </div>
@@ -7398,6 +7413,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
             <textarea
               value={description} onChange={e => { if (e.target.value.length <= 500) setDescription(e.target.value); }}
               rows={5}
+              aria-label="Describe what's happening"
               style={{
                 width: '100%', padding: '12px 14px', borderRadius: 12,
                 border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
@@ -7802,6 +7818,7 @@ function ChatWidget({ customer, onClose }) {
             onChange={e => setInput(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && send()}
             placeholder="Type a message..."
+            aria-label="Chat message"
             style={{
               flex: 1, padding: '10px 14px', borderRadius: 24, border: `1px solid ${B.grayLight}`,
               fontSize: 14, fontFamily: FONTS.body, outline: 'none', background: B.offWhite,
@@ -7855,6 +7872,40 @@ export default function PortalPage() {
     if (id === 'request') { setShowReportIssue(true); return; }
     setActiveTab(id);
   };
+  const headerNavItems = [
+    ...PRIMARY_TABS,
+    ...MORE_TABS,
+  ];
+  const headerNavButton = (tab) => {
+    const isActive = activeTab === tab.id;
+    return (
+      <button
+        key={tab.id}
+        type="button"
+        onClick={() => switchTab(tab.id)}
+        aria-current={isActive ? 'page' : undefined}
+        style={{
+          border: 'none',
+          borderRadius: 999,
+          minHeight: 36,
+          padding: '8px 12px',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          flex: '0 0 auto',
+          background: isActive ? 'rgba(255,255,255,0.18)' : 'transparent',
+          color: isActive ? B.white : B.blueLight,
+          fontFamily: FONTS.heading,
+          fontSize: 12,
+          fontWeight: 700,
+          cursor: 'pointer',
+        }}
+      >
+        <Icon name={tab.icon} size={15} strokeWidth={1.75} />
+        {tab.label}
+      </button>
+    );
+  };
   const [showChat, setShowChat] = useState(false);
   const [showMoreSheet, setShowMoreSheet] = useState(false);
   const [requestRefreshKey, setRequestRefreshKey] = useState(0);
@@ -7897,6 +7948,15 @@ export default function PortalPage() {
             <div style={{ fontSize: 9, color: B.blueLight, fontWeight: 600, letterSpacing: 0.5, textTransform: 'uppercase' }}>Customer Portal</div>
           </div>
         </div>
+        {!isMobileShell && (
+          <nav aria-label="Customer portal" style={{
+            flex: 1, minWidth: 0, margin: '0 18px',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            gap: 4, overflowX: 'auto', scrollbarWidth: 'none',
+          }}>
+            {headerNavItems.map(headerNavButton)}
+          </nav>
+        )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           <NotificationBell type="customer" />
           <div ref={menuRef} style={{ position: 'relative' }}>
@@ -8040,14 +8100,14 @@ export default function PortalPage() {
       {/* Floating Action Button — New Request. Sits above the bottom nav +
           CTA bar stack so it doesn't collide with either. */}
       <div style={{ position: 'fixed', bottom: isMobileShell ? 140 : 24, right: 16, zIndex: 99, display: 'flex', alignItems: 'center', gap: 10 }}>
-        <div onClick={() => setShowReportIssue(true)} role="button" tabIndex={0}
+        <button type="button" onClick={() => setShowReportIssue(true)}
           onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setShowReportIssue(true); }}
           aria-label="New request" style={{
           background: B.navy, color: '#fff', padding: '8px 14px', borderRadius: 10,
           fontSize: 12, fontWeight: 700, fontFamily: FONTS.heading,
           boxShadow: '0 4px 15px rgba(0,0,0,0.2)',
-          whiteSpace: 'nowrap', cursor: 'pointer',
-        }}>New Request</div>
+          whiteSpace: 'nowrap', cursor: 'pointer', border: 'none', minHeight: 40,
+        }}>New Request</button>
         <button onClick={() => setShowReportIssue(true)} aria-label="New request" style={{
           width: 56, height: 56, borderRadius: '50%',
           background: B.red, color: '#fff', border: 'none', cursor: 'pointer',
@@ -8058,7 +8118,7 @@ export default function PortalPage() {
         }}
           onMouseEnter={e => { e.currentTarget.style.transform = 'scale(1.1)'; }}
           onMouseLeave={e => { e.currentTarget.style.transform = 'scale(1)'; }}
-        ><span aria-hidden="true">+</span><span style={VISUALLY_HIDDEN}>New Request</span></button>
+        ><span aria-hidden="true">+</span></button>
       </div>
 
       {/* Report Issue Overlay */}
