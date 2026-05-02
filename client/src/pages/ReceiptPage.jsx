@@ -49,6 +49,11 @@ function fmtCurrency(n) {
   return `$${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+function isDiscountLineItem(item) {
+  const amount = Number(item?.amount ?? ((Number(item?.quantity) || 1) * (Number(item?.unit_price) || 0)));
+  return item?._kind === 'discount' || item?.discount_for || amount < 0;
+}
+
 function fmtDate(d) {
   if (!d) return '';
   const dt = typeof d === 'string'
@@ -149,6 +154,7 @@ export default function ReceiptPage() {
   }
 
   const { invoice, service, customer, payment } = data;
+  const visibleLineItems = (invoice.lineItems || []).filter(item => !isDiscountLineItem(item));
   const paid = invoice.status === 'paid';
   const paidAt = invoice.paidAt || payment?.paymentDate;
   const methodDisplay = payment?.cardBrand && payment?.cardLastFour
@@ -366,7 +372,7 @@ export default function ReceiptPage() {
           </div>
 
           {/* Line items — mirrors PayPageV2 for visual continuity */}
-          {invoice.lineItems?.length > 0 && (
+          {visibleLineItems.length > 0 && (
             <div style={{ marginBottom: 20, borderTop: '1px solid var(--border)' }}>
               <div style={{
                 display: 'grid',
@@ -383,7 +389,7 @@ export default function ReceiptPage() {
                 <div style={{ textAlign: 'right' }}>Qty</div>
                 <div style={{ textAlign: 'right', minWidth: 80 }}>Amount</div>
               </div>
-              {invoice.lineItems.map((item, idx) => (
+              {visibleLineItems.map((item, idx) => (
                 <div
                   key={idx}
                   style={{
@@ -391,7 +397,7 @@ export default function ReceiptPage() {
                     gridTemplateColumns: '1fr auto auto',
                     gap: '0 16px',
                     padding: '12px 0',
-                    borderBottom: idx < invoice.lineItems.length - 1 ? '1px solid var(--border)' : 'none',
+                    borderBottom: idx < visibleLineItems.length - 1 ? '1px solid var(--border)' : 'none',
                     fontSize: 14,
                     color: 'var(--text)',
                   }}

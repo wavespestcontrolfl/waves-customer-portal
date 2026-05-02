@@ -118,6 +118,11 @@ function fmtCurrency(n) {
   return `$${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+function isDiscountLineItem(item) {
+  const amount = Number(item?.amount ?? ((Number(item?.quantity) || 1) * (Number(item?.unit_price) || 0)));
+  return item?._kind === 'discount' || item?.discount_for || amount < 0;
+}
+
 function fmtDate(d) {
   if (!d) return '';
   const dt = typeof d === 'string'
@@ -169,10 +174,9 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       setDisplayedSurcharge(data.surcharge);
       setDisplayedTotal(data.total);
     } catch (err) {
-      if (methodCategory === 'us_bank_account') {
-        setAmountSyncError(true);
-        setElementError(err.message || 'Could not update the bank-transfer total. Select card or try again.');
-      }
+      setAmountSyncError(true);
+      const methodLabel = methodCategory === 'us_bank_account' ? 'bank-transfer' : 'card';
+      setElementError(err.message || `Could not update the ${methodLabel} total. Select another method or try again.`);
     } finally {
       setSyncingAmount(false);
     }
@@ -582,6 +586,7 @@ export default function PayPageV2() {
   }
 
   const { invoice, service, customer } = data;
+  const visibleLineItems = (invoice.lineItems || []).filter(item => !isDiscountLineItem(item));
   const isOverdue = invoice.status !== 'paid'
     && invoice.dueDate
     && new Date(invoice.dueDate).getTime() < Date.now();
@@ -630,7 +635,7 @@ export default function PayPageV2() {
           </div>
 
           {/* Line items */}
-          {invoice.lineItems?.length > 0 && (
+          {visibleLineItems.length > 0 && (
             <div style={{ marginBottom: 20, borderTop: '1px solid var(--border)' }}>
               <div style={{
                 display: 'grid',
@@ -647,7 +652,7 @@ export default function PayPageV2() {
                 <div style={{ textAlign: 'right' }}>Qty</div>
                 <div style={{ textAlign: 'right', minWidth: 80 }}>Amount</div>
               </div>
-              {invoice.lineItems.map((item, idx) => (
+              {visibleLineItems.map((item, idx) => (
                 <div
                   key={idx}
                   style={{
@@ -655,7 +660,7 @@ export default function PayPageV2() {
                     gridTemplateColumns: '1fr auto auto',
                     gap: '0 16px',
                     padding: '12px 0',
-                    borderBottom: idx < invoice.lineItems.length - 1 ? '1px solid var(--border)' : 'none',
+                    borderBottom: idx < visibleLineItems.length - 1 ? '1px solid var(--border)' : 'none',
                     fontSize: 14,
                     color: 'var(--text)',
                   }}

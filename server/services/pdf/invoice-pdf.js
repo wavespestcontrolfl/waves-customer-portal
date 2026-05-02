@@ -111,6 +111,10 @@ function invoiceMetaBlock(doc, invoice, payment, x, y, mode) {
 }
 
 function lineItemsTable(doc, lineItems, x, y, width) {
+  const visibleLineItems = (lineItems || []).filter((item) => {
+    const amount = Number(item?.amount ?? ((Number(item?.quantity) || 1) * (Number(item?.unit_price) || 0)));
+    return item?._kind !== 'discount' && !item?.discount_for && amount >= 0;
+  });
   doc.save();
   doc.moveTo(x, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
   y += 8;
@@ -124,7 +128,7 @@ function lineItemsTable(doc, lineItems, x, y, width) {
   y += 6;
 
   doc.fontSize(10).font('Helvetica').fillColor(INK);
-  for (const item of (lineItems || [])) {
+  for (const item of visibleLineItems) {
     const description = String(item.description || '').slice(0, 200);
     const qty = Number(item.quantity || 1);
     const rate = Number(item.unit_price || 0);
