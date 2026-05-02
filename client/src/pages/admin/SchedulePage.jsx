@@ -1040,7 +1040,9 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   const [requestReview, setRequestReview] = useState(true);
   const [visitOutcome, setVisitOutcome] = useState('completed');
   const [customerRecap, setCustomerRecap] = useState('');
-  const [recapSource, setRecapSource] = useState('');
+  const [recapSource, setRecapSource] = useState('template');
+  const [recapStaleAfterEdit, setRecapStaleAfterEdit] = useState(false);
+  const [recapDraftStatus, setRecapDraftStatus] = useState('idle');
   const [recapLoading, setRecapLoading] = useState(false);
   const [recapError, setRecapError] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -1059,6 +1061,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   const [showDraftPrompt, setShowDraftPrompt] = useState(false);
   const photoInputRef = useRef(null);
   const recapRequestRef = useRef(0);
+  const recapAbortRef = useRef(null);
   const completionIdempotencyKeyRef = useRef(null);
   const draftReadyRef = useRef(false);
 
@@ -1080,12 +1083,45 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
     && Number(service.prepaidAmount) > 0
     && Number(service.prepaidAmount) >= invoiceAmount;
   const willInvoice = !prepaidCovered && (!!service.createInvoiceOnComplete || !!service.waveguardTier) && invoiceAmount > 0;
-  const willReview = !!requestReview && !willInvoice;
+  const isIncompleteVisit = visitOutcome === 'incomplete';
+  const reviewSuppressionReason = isIncompleteVisit
+    ? 'incomplete'
+    : visitOutcome === 'customer_declined'
+      ? 'customer_declined'
+      : (visitOutcome === 'customer_concern' || customerInteraction === 'concern')
+        ? 'customer_concern'
+        : willInvoice
+          ? 'invoice_created'
+          : null;
+  const willReview = !!requestReview && !willInvoice && !reviewSuppressionReason;
   const smsPreview = [
     customerRecap.trim(),
-    willInvoice ? '[pay link inserted]' : '',
+    !isIncompleteVisit && willInvoice ? '[pay link inserted]' : '',
     willReview ? '[review link inserted]' : '',
   ].filter(Boolean).join('\n\n');
+  const canAutoDraftRecap = !isIncompleteVisit
+    && notes.trim().length >= 15
+    && (selectedProducts.length > 0 || areasServiced.length > 0 || visitOutcome !== 'completed' || customerInteraction);
+  const recapStatusText = recapLoading
+    ? 'Drafting customer recap...'
+    : recapError
+      ? "Couldn't draft. Edit manually or send without SMS."
+      : recapStaleAfterEdit
+        ? 'Notes changed since this draft'
+        : recapDraftStatus === 'manual'
+          ? 'Edited by tech'
+          : recapSource && recapSource !== 'template'
+            ? `Draft: ${recapSource}`
+            : '';
+  const completionCtaLabel = submitting
+    ? 'Completing...'
+    : isIncompleteVisit
+      ? 'Mark Visit Incomplete'
+      : !sendSms
+        ? 'Complete Service'
+        : willInvoice
+          ? 'Complete & Send Invoice'
+          : 'Complete & Send Recap';
 
   useEffect(() => {
     const iv = setInterval(() => setElapsed(elapsedSince(onSiteTime)), 1000);
@@ -1175,6 +1211,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
     setVisitOutcome(savedDraft.visitOutcome || 'completed');
     setCustomerRecap(savedDraft.customerRecap || '');
     setRecapSource(savedDraft.recapSource || 'draft');
+    setRecapDraftStatus(savedDraft.recapSource === 'manual' ? 'manual' : 'ready');
+    setRecapStaleAfterEdit(false);
     setAreasServiced(Array.isArray(savedDraft.areasServiced) ? savedDraft.areasServiced : []);
     setCustomerInteraction(savedDraft.customerInteraction || '');
     setCustomerConcern(savedDraft.customerConcern || '');
@@ -1190,15 +1228,23 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   }
 
   useEffect(() => {
-    const hasInput = notes.trim() || areasServiced.length || visitOutcome !== 'completed';
-    if (!hasInput) return;
+    if (!canAutoDraftRecap) return;
+    if (recapSource === 'manual') {
+      if (customerRecap.trim()) setRecapStaleAfterEdit(true);
+      return;
+    }
     const requestId = ++recapRequestRef.current;
-    setRecapLoading(true);
+    if (recapAbortRef.current) recapAbortRef.current.abort();
+    const controller = new AbortController();
+    recapAbortRef.current = controller;
     setRecapError('');
     const timer = setTimeout(async () => {
       try {
+        setRecapLoading(true);
+        setRecapDraftStatus('drafting');
         const result = await adminFetch('/admin/dispatch/recap-preview', {
           method: 'POST',
+          signal: controller.signal,
           body: JSON.stringify({
             notes,
             visitOutcome,
@@ -1212,16 +1258,67 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         if (result.recap) {
           setCustomerRecap(result.recap);
           setRecapSource(result.source || '');
+          setRecapDraftStatus('ready');
+          setRecapStaleAfterEdit(false);
         }
       } catch (err) {
+        if (err?.name === 'AbortError') return;
         if (requestId !== recapRequestRef.current) return;
         setRecapError(err.message || 'Could not draft recap');
+        setRecapDraftStatus('failed');
       } finally {
         if (requestId === recapRequestRef.current) setRecapLoading(false);
       }
     }, 600);
-    return () => clearTimeout(timer);
-  }, [notes, visitOutcome, areasServiced, service.serviceType, willInvoice, willReview]);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [canAutoDraftRecap, notes, selectedProducts.length, visitOutcome, areasServiced, service.serviceType, customerInteraction, willInvoice, willReview]);
+
+  function handleCustomerRecapChange(value) {
+    setCustomerRecap(value);
+    setRecapSource('manual');
+    setRecapDraftStatus('manual');
+    setRecapStaleAfterEdit(false);
+  }
+
+  async function regenerateCustomerRecap() {
+    if (recapAbortRef.current) recapAbortRef.current.abort();
+    const controller = new AbortController();
+    recapAbortRef.current = controller;
+    setRecapLoading(true);
+    setRecapDraftStatus('drafting');
+    setRecapError('');
+    try {
+      const result = await adminFetch('/admin/dispatch/recap-preview', {
+        method: 'POST',
+        signal: controller.signal,
+        body: JSON.stringify({
+          notes,
+          visitOutcome,
+          serviceType: service.serviceType,
+          areasTreated: areasServiced,
+          willInvoice,
+          willReview,
+          force: true,
+        }),
+      });
+      if (result.recap) {
+        setCustomerRecap(result.recap);
+        setRecapSource(result.source || 'ai');
+        setRecapDraftStatus('ready');
+        setRecapStaleAfterEdit(false);
+      }
+    } catch (err) {
+      if (err?.name !== 'AbortError') {
+        setRecapError(err.message || 'Could not draft recap');
+        setRecapDraftStatus('failed');
+      }
+    } finally {
+      setRecapLoading(false);
+    }
+  }
 
   function addChipNote(prefix, text) {
     const line = `[${prefix}] ${text}`;
@@ -1274,10 +1371,10 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         technicianNotes: notes,
         customerRecap,
         visitOutcome,
-        reviewSuppression: willInvoice ? 'invoice_created' : null,
+        reviewSuppression: reviewSuppressionReason,
         products: selectedProducts.map(p => ({ productId: p.productId, rate: p.rate, rateUnit: p.rateUnit })),
-        sendCompletionSms: sendSms,
-        requestReview,
+        sendCompletionSms: isIncompleteVisit ? false : sendSms,
+        requestReview: willReview,
         areasTreated: areasServiced,
         timeOnSite: elapsed,
         areasServiced,
@@ -1719,54 +1816,41 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
             )}
 
             {/* Customer recap + final SMS preview */}
-            <Field label="Customer recap">
-              <textarea
-                value={customerRecap}
-                onChange={e => setCustomerRecap(e.target.value)}
-                rows={4}
-                placeholder="Customer-facing summary..."
-                style={{ ...mTextarea, minHeight: 112 }}
-              />
-              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginTop: 8, alignItems: 'center' }}>
-                <span style={{ fontFamily: font, fontSize: 12, color: recapError ? M.err : M.ink4 }}>
-                  {recapLoading ? 'Drafting recap…' : recapError || (recapSource ? `Draft: ${recapSource}` : '')}
-                </span>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    setRecapLoading(true);
-                    setRecapError('');
-                    try {
-                      const result = await adminFetch('/admin/dispatch/recap-preview', {
-                        method: 'POST',
-                        body: JSON.stringify({
-                          notes,
-                          visitOutcome,
-                          serviceType: service.serviceType,
-                          areasTreated: areasServiced,
-                          willInvoice,
-                          willReview,
-                        }),
-                      });
-                      if (result.recap) {
-                        setCustomerRecap(result.recap);
-                        setRecapSource(result.source || '');
-                      }
-                    } catch (err) {
-                      setRecapError(err.message || 'Could not draft recap');
-                    } finally {
-                      setRecapLoading(false);
-                    }
-                  }}
-                  disabled={recapLoading}
-                  style={{ ...tertiaryPill, width: 'auto', height: 36, padding: '0 14px', border: `1px solid ${M.hairline}`, fontSize: 12, opacity: recapLoading ? 0.5 : 1 }}
-                >
-                  Regenerate
-                </button>
-              </div>
-            </Field>
+            {isIncompleteVisit ? (
+              <Field label="Customer recap">
+                <div style={{
+                  background: M.card, border: `0.5px solid ${M.hairline}`, borderRadius: 12,
+                  padding: 14, fontFamily: font, fontSize: 13, color: M.ink3, lineHeight: 1.45,
+                }}>
+                  This visit will be closed without a customer recap, charge, or review request. The office will see the reason and follow up.
+                </div>
+              </Field>
+            ) : (
+              <Field label="Customer recap">
+                <textarea
+                  value={customerRecap}
+                  onChange={e => handleCustomerRecapChange(e.target.value)}
+                  rows={4}
+                  placeholder="Customer-facing summary..."
+                  style={{ ...mTextarea, minHeight: 112 }}
+                />
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginTop: 8, alignItems: 'center' }}>
+                  <span style={{ fontFamily: font, fontSize: 12, color: recapError ? M.err : (recapStaleAfterEdit ? M.warn : M.ink4) }}>
+                    {recapStatusText}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={regenerateCustomerRecap}
+                    disabled={recapLoading}
+                    style={{ ...tertiaryPill, width: 'auto', height: 36, padding: '0 14px', border: `1px solid ${M.hairline}`, fontSize: 12, opacity: recapLoading ? 0.5 : 1 }}
+                  >
+                    Regenerate
+                  </button>
+                </div>
+              </Field>
+            )}
 
-            {sendSms && (
+            {sendSms && !isIncompleteVisit && (
               <Field label="Customer SMS preview">
                 <div style={{
                   background: M.card, border: `0.5px solid ${M.hairline}`, borderRadius: 12,
@@ -1854,11 +1938,12 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
                 background: M.card, border: `0.5px solid ${M.hairline}`, borderRadius: 12,
                 marginBottom: 8, cursor: 'pointer',
               }}>
-                <input type="checkbox" checked={sendSms}
+                <input type="checkbox" checked={sendSms && !isIncompleteVisit}
+                       disabled={isIncompleteVisit}
                        onChange={e => setSendSms(e.target.checked)}
                        style={{ width: 18, height: 18, accentColor: M.ink }} />
                 <span style={{ fontFamily: font, fontSize: 15, color: M.ink }}>
-                  Send completion SMS to customer
+                  {isIncompleteVisit ? 'Completion SMS suppressed' : 'Send completion SMS to customer'}
                 </span>
               </label>
               <label style={{
@@ -1866,11 +1951,12 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
                 background: M.card, border: `0.5px solid ${M.hairline}`, borderRadius: 12,
                 cursor: 'pointer',
               }}>
-                <input type="checkbox" checked={requestReview}
+                <input type="checkbox" checked={requestReview && !reviewSuppressionReason}
+                       disabled={!!reviewSuppressionReason}
                        onChange={e => setRequestReview(e.target.checked)}
                        style={{ width: 18, height: 18, accentColor: M.ink }} />
                 <span style={{ fontFamily: font, fontSize: 15, color: M.ink }}>
-                  Send review request (2hr delay)
+                  {reviewSuppressionReason ? 'Review request suppressed' : 'Send review request (2hr delay)'}
                 </span>
               </label>
             </Field>
@@ -1925,7 +2011,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
               disabled={submitting}
               style={{ ...primaryPill, opacity: submitting ? 0.5 : 1 }}
             >
-              {submitting ? 'Completing…' : 'Complete service'}
+              {completionCtaLabel.replace('...', '…')}
             </button>
           </div>
         </div>
@@ -2252,47 +2338,34 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
 
           {/* Customer Recap */}
           <label style={labelStyle}>Customer Recap</label>
-          <textarea value={customerRecap} onChange={e => setCustomerRecap(e.target.value)} rows={4} style={{
-            width: '100%', background: D.input, color: D.text, border: `1px solid ${D.border}`,
-            borderRadius: 10, padding: 12, fontSize: 14, resize: 'vertical',
-            fontFamily: "'Nunito Sans', sans-serif", boxSizing: 'border-box', marginBottom: 8,
-          }} placeholder="Customer-facing summary..." />
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 16 }}>
-            <span style={{ fontSize: 12, color: recapError ? D.red : D.muted }}>
-              {recapLoading ? 'Drafting recap...' : recapError || (recapSource ? `Draft: ${recapSource}` : '')}
-            </span>
-            <button onClick={async () => {
-              setRecapLoading(true);
-              setRecapError('');
-              try {
-                const result = await adminFetch('/admin/dispatch/recap-preview', {
-                  method: 'POST',
-                  body: JSON.stringify({
-                    notes,
-                    visitOutcome,
-                    serviceType: service.serviceType,
-                    areasTreated: areasServiced,
-                    willInvoice,
-                    willReview,
-                  }),
-                });
-                if (result.recap) {
-                  setCustomerRecap(result.recap);
-                  setRecapSource(result.source || '');
-                }
-              } catch (err) {
-                setRecapError(err.message || 'Could not draft recap');
-              } finally {
-                setRecapLoading(false);
-              }
-            }} disabled={recapLoading} style={{
-              ...btnBase, width: 'auto', height: 36, padding: '0 14px',
-              background: 'transparent', color: D.teal, border: `1px solid ${D.teal}44`,
-              opacity: recapLoading ? 0.5 : 1,
-            }}>Regenerate</button>
-          </div>
+          {isIncompleteVisit ? (
+            <div style={{
+              background: D.card, border: `1px solid ${D.border}`, borderRadius: 10,
+              padding: 12, color: D.muted, fontSize: 13, lineHeight: 1.5, marginBottom: 16,
+            }}>
+              This visit will be closed without a customer recap, charge, or review request. The office will see the reason and follow up.
+            </div>
+          ) : (
+            <>
+              <textarea value={customerRecap} onChange={e => handleCustomerRecapChange(e.target.value)} rows={4} style={{
+                width: '100%', background: D.input, color: D.text, border: `1px solid ${D.border}`,
+                borderRadius: 10, padding: 12, fontSize: 14, resize: 'vertical',
+                fontFamily: "'Nunito Sans', sans-serif", boxSizing: 'border-box', marginBottom: 8,
+              }} placeholder="Customer-facing summary..." />
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+                <span style={{ fontSize: 12, color: recapError ? D.red : (recapStaleAfterEdit ? D.amber : D.muted) }}>
+                  {recapStatusText}
+                </span>
+                <button onClick={regenerateCustomerRecap} disabled={recapLoading} style={{
+                  ...btnBase, width: 'auto', height: 36, padding: '0 14px',
+                  background: 'transparent', color: D.teal, border: `1px solid ${D.teal}44`,
+                  opacity: recapLoading ? 0.5 : 1,
+                }}>Regenerate</button>
+              </div>
+            </>
+          )}
 
-          {sendSms && (
+          {sendSms && !isIncompleteVisit && (
             <div style={{ marginBottom: 20 }}>
               <label style={labelStyle}>Customer SMS Preview</label>
               <div style={{
@@ -2358,12 +2431,12 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
           {/* Options */}
           <label style={labelStyle}>Options</label>
           <label style={checkboxRow}>
-            <input type="checkbox" checked={sendSms} onChange={e => setSendSms(e.target.checked)} />
-            <span>Send completion SMS to customer</span>
+            <input type="checkbox" checked={sendSms && !isIncompleteVisit} disabled={isIncompleteVisit} onChange={e => setSendSms(e.target.checked)} />
+            <span>{isIncompleteVisit ? 'Completion SMS suppressed' : 'Send completion SMS to customer'}</span>
           </label>
           <label style={checkboxRow}>
-            <input type="checkbox" checked={requestReview} onChange={e => setRequestReview(e.target.checked)} />
-            <span>Send review request (2hr delay)</span>
+            <input type="checkbox" checked={requestReview && !reviewSuppressionReason} disabled={!!reviewSuppressionReason} onChange={e => setRequestReview(e.target.checked)} />
+            <span>{reviewSuppressionReason ? 'Review request suppressed' : 'Send review request (2hr delay)'}</span>
           </label>
 
           {/* Next Visit Prompt */}
@@ -2403,11 +2476,11 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
             ...btnBase, width: '100%', background: D.green, color: '#fff', fontSize: 14, height: 52,
             opacity: submitting ? 0.6 : 1, flexDirection: 'column', lineHeight: 1.3,
           }}>
-            {submitting ? 'Completing...' : (
+            {submitting ? completionCtaLabel : (
               <>
-                <span style={{ fontSize: 15, fontWeight: 700 }}>Complete Service</span>
+                <span style={{ fontSize: 15, fontWeight: 700 }}>{completionCtaLabel}</span>
                 <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.85 }}>
-                  {sendSms ? `SMS + Report sent to ${service.customerName}` : `Report saved for ${service.customerName}`}
+                  {isIncompleteVisit ? 'Office follow-up alert will be created' : sendSms ? `SMS + Report sent to ${service.customerName}` : `Report saved for ${service.customerName}`}
                 </span>
               </>
             )}

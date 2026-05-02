@@ -32,17 +32,27 @@ function sentenceJoin(parts) {
   return parts.map(cleanText).filter(Boolean).join(' ');
 }
 
+function sanitizeRecap(value) {
+  let text = cleanText(value)
+    .replace(/^["']+|["']+$/g, '')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/[–—]/g, '-');
+  text = text.replace(/\s*-\s*Waves\s*$/i, '').trim();
+  if (text.length > 232) text = text.slice(0, 232).replace(/\s+\S*$/, '').trim();
+  return text ? `${text} - Waves` : '';
+}
+
 function deterministicRecap(input = {}) {
   const outcome = normalizeOutcome(input.visitOutcome);
   const serviceType = cleanText(input.serviceType) || 'service';
   const areas = safeAreas(input.areasTreated || input.areasServiced);
-  const note = cleanText(input.notes || input.technicianNotes);
 
   if (outcome === 'inspection_only') {
     return sentenceJoin([
       `Today we completed an inspection for your ${serviceType}.`,
       areas.length ? `We checked ${areas.join(', ')} and noted the current conditions.` : 'We checked the accessible areas and noted the current conditions.',
-      note ? `Technician note: ${note}` : 'No treatment was needed during this visit.',
+      'No treatment was needed during this visit.',
     ]);
   }
 
@@ -50,7 +60,7 @@ function deterministicRecap(input = {}) {
     return sentenceJoin([
       `Today we stopped by for your scheduled ${serviceType}, but service was not completed at the property.`,
       'We documented the visit so the office can help with the next step.',
-      note ? `Technician note: ${note}` : 'Please reply if you would like us to reschedule.',
+      'Please reply if you would like us to reschedule.',
     ]);
   }
 
@@ -58,7 +68,7 @@ function deterministicRecap(input = {}) {
     return sentenceJoin([
       `Today we completed the available work for your ${serviceType}.`,
       areas.length ? `We focused on ${areas.join(', ')}.` : 'We documented the areas that need continued attention.',
-      note ? `Follow-up note: ${note}` : 'A follow-up is recommended so we can check progress and finish any remaining items.',
+      'A follow-up is recommended so we can check progress and finish any remaining items.',
     ]);
   }
 
@@ -66,7 +76,7 @@ function deterministicRecap(input = {}) {
     return sentenceJoin([
       `Today we visited for your ${serviceType} and noted a concern that came up.`,
       'We documented it so the office can follow up with the next step.',
-      note ? `Technician note: ${note}` : 'Please reply with any additional details and we will be in touch.',
+      'Please reply with any additional details and we will be in touch.',
     ]);
   }
 
@@ -74,7 +84,7 @@ function deterministicRecap(input = {}) {
     return sentenceJoin([
       `Today we started your ${serviceType} but were not able to finish the full visit.`,
       areas.length ? `We focused on ${areas.join(', ')}.` : 'We documented what was done so we can pick up where we left off.',
-      note ? `Technician note: ${note}` : 'We will reach out about scheduling the remaining work.',
+      'We will reach out about scheduling the remaining work.',
     ]);
   }
 
@@ -102,7 +112,8 @@ Rules:
 - Do not say eliminated, guaranteed, pest-free, eradicated, or solved forever.
 - Do not blame the customer.
 - Stay neutral if the visit was declined, incomplete, or follow-up only.
-- Plain text only. No markdown. No greeting, sign-off, bullets, or headings.
+- Plain text only. No markdown. No greeting, bullets, or headings.
+- End with " - Waves".
 
 Inputs:
 Service type: ${serviceType}
@@ -134,17 +145,17 @@ async function aiRecap(input = {}) {
 async function generateRecap(input = {}) {
   const outcome = normalizeOutcome(input.visitOutcome);
   if (DETERMINISTIC_OUTCOMES.has(outcome)) {
-    return { recap: deterministicRecap(input), source: 'deterministic' };
+    return { recap: sanitizeRecap(deterministicRecap(input)), source: 'deterministic' };
   }
 
   try {
     const recap = await aiRecap(input);
-    if (recap) return { recap, source: 'ai' };
+    if (recap) return { recap: sanitizeRecap(recap), source: 'ai' };
   } catch (err) {
     logger.warn(`[completion-recap] AI recap failed, using fallback: ${err.message}`);
   }
 
-  return { recap: deterministicRecap(input), source: 'fallback' };
+  return { recap: sanitizeRecap(deterministicRecap(input)), source: 'fallback' };
 }
 
 function composeCompletionSmsPreview({ recap, willInvoice, willReview }) {
@@ -161,4 +172,5 @@ module.exports = {
   deterministicRecap,
   generateRecap,
   normalizeOutcome,
+  sanitizeRecap,
 };

@@ -380,6 +380,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         error: `visitOutcome must be one of: ${Array.from(VALID_VISIT_OUTCOMES).join(', ')}`,
       });
     }
+    const isIncompleteVisit = visitOutcome === 'incomplete';
     const completionAreas = Array.isArray(areasTreated) ? areasTreated : (Array.isArray(areasServiced) ? areasServiced : []);
     const concernText = typeof customerConcernText === 'string' ? customerConcernText.trim() : '';
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
@@ -449,15 +450,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         [record] = await trx('service_records').insert({
           scheduled_service_id: svc.id,
           customer_id: svc.customer_id, technician_id: svc.technician_id,
-          service_date: svc.scheduled_date, service_type: svc.service_type, status: 'completed',
+          service_date: svc.scheduled_date, service_type: svc.service_type, status: isIncompleteVisit ? 'incomplete' : 'completed',
           technician_notes: technicianNotes || '',
           structured_notes: {
             visitOutcome,
-            requestReview: requestReview !== false,
+            requestReview: isIncompleteVisit ? false : requestReview !== false,
             reviewSuppression,
             incompleteReason,
             customerConcernText: concernText || null,
             customerRecap: customerRecap || null,
+            areasTreated: completionAreas,
           },
           areas_serviced: completionAreas,
           customer_interaction: customerInteraction || null,
@@ -556,7 +558,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (visitOutcome === 'incomplete') {
           await createAlert({
             ...alertBase,
-            type: 'follow_up_needed',
+            type: 'visit_incomplete',
             severity: 'warn',
             payload: { ...alertBase.payload, incompleteReason: incompleteReason || null },
           });
@@ -614,7 +616,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // in the same MOA group; we only fire one alert per MOA group per
     // job. Without this guard a 3-product completion in the same
     // violating group would create 3 identical cards.
-    if (!resumingCommittedCompletion && products?.length) {
+    if (!isIncompleteVisit && !resumingCommittedCompletion && products?.length) {
       try {
         const LimitChecker = require('../services/application-limits');
         const { createAlert } = require('../services/dispatch-alerts');
@@ -681,13 +683,25 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     // Customer-visible track_state → 'complete' so /track/:token renders the
     // summary card. track_state is owned by services/track-transitions.js.
-    if (!resumingCommittedCompletion) {
+    if (!isIncompleteVisit && !resumingCommittedCompletion) {
       try {
         await trackTransitions.markComplete(svc.id, {
           actorType: 'admin',
           actorId: req.technicianId,
         });
       } catch (e) { logger.error(`[admin-dispatch] markComplete failed: ${e.message}`); }
+    }
+
+    if (isIncompleteVisit) {
+      const responsePayload = {
+        success: true,
+        serviceRecordId: record.id,
+        invoiceId: null,
+        invoiceTotal: null,
+      };
+      await CompletionAttempts.markCompletionAttemptSucceeded(completionAttempt, { record, invoice: null, response: responsePayload });
+      markedSucceeded = true;
+      return res.json(responsePayload);
     }
 
     // Invoice + completion SMS:
