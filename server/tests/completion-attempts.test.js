@@ -27,6 +27,10 @@ function makeKnex(ops) {
         op.whereCriteria = criteria;
         return chain;
       }),
+      andWhere: jest.fn((...args) => {
+        op.andWhereArgs = args;
+        return chain;
+      }),
       orderBy: jest.fn((col, dir) => {
         op.orderBy = { col, dir };
         return chain;
@@ -251,16 +255,78 @@ describe('completion attempts', () => {
     expect(result.action).toBe('replay');
   });
 
-  test('different key while service has a pending attempt returns 409', async () => {
+  test('different key while service has a fresh pending attempt returns 409', async () => {
     const knex = makeKnex([
       noPriorSuccess(),
       { insertError: uniqueViolation() },
-      { first: undefined },
+      { first: undefined },     // no same-key match
+      { first: undefined },     // no stale pending → no reclaim
     ]);
 
     const result = await claimCompletionAttempt({
       serviceId: 'svc-1',
       idempotencyKey: 'different-key',
+      requestHash: 'hash-1',
+    }, knex);
+
+    expect(result.action).toBe('conflict');
+    expect(result.status).toBe(409);
+    expect(result.payload.code).toBe('service_completion_pending');
+  });
+
+  test('different key reclaims a stale pending attempt and proceeds', async () => {
+    // Caller crashed mid-completion 12min ago; a new retry comes in
+    // with a fresh idempotency key. The partial pending-only unique
+    // index would otherwise block this forever.
+    const stale = {
+      id: 'orphan-1',
+      idempotency_key: 'old-key',
+      status: 'pending',
+      updated_at: new Date(Date.now() - 12 * 60 * 1000),
+    };
+    const reclaimed = { ...stale, status: 'failed' };
+    const newRow = { id: 'attempt-2', status: 'pending', idempotency_key: 'fresh-key' };
+
+    const knex = makeKnex([
+      noPriorSuccess(),
+      { insertError: uniqueViolation() },   // first insert hits partial index
+      { first: undefined },                 // no same-key match
+      { first: stale },                     // stale pending found
+      { returning: [reclaimed] },           // conditional UPDATE wins reclaim
+      { returning: [newRow] },              // re-insert succeeds
+    ]);
+
+    const result = await claimCompletionAttempt({
+      serviceId: 'svc-1',
+      idempotencyKey: 'fresh-key',
+      requestHash: 'hash-1',
+    }, knex);
+
+    expect(result).toEqual({ action: 'proceed', attempt: newRow });
+    // Reclaim UPDATE was scoped to the stale row + status='pending' guard.
+    expect(knex.calls[4].op.whereCriteria).toEqual({ id: 'orphan-1', status: 'pending' });
+    expect(knex.calls[4].op.updatePayload.status).toBe('failed');
+  });
+
+  test('different key falls through to 409 when reclaim race is lost', async () => {
+    const stale = {
+      id: 'orphan-1',
+      idempotency_key: 'old-key',
+      status: 'pending',
+      updated_at: new Date(Date.now() - 12 * 60 * 1000),
+    };
+
+    const knex = makeKnex([
+      noPriorSuccess(),
+      { insertError: uniqueViolation() },
+      { first: undefined },             // no same-key match
+      { first: stale },                 // stale pending found
+      { returning: [] },                // another retry already reclaimed it
+    ]);
+
+    const result = await claimCompletionAttempt({
+      serviceId: 'svc-1',
+      idempotencyKey: 'fresh-key',
       requestHash: 'hash-1',
     }, knex);
 

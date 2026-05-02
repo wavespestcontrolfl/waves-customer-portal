@@ -2,6 +2,14 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 
+// A pending attempt that hasn't transitioned to succeeded/failed within
+// this window is treated as orphaned (caller process crashed between
+// INSERT and markSucceeded/markFailed). Without a reclaim path, the
+// partial unique index would block every retry forever and the service
+// would be stuck "completion_pending." 10 min is comfortably longer
+// than any normal completion (sub-second) plus webhook retries.
+const STALE_PENDING_MS = 10 * 60 * 1000;
+
 function isUniqueViolation(err) {
   return err?.code === '23505';
 }
@@ -73,6 +81,43 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
       .first();
 
     if (!existing) {
+      // No row by (service_id, idempotency_key) — the partial unique
+      // index on (service_id) WHERE status='pending' must have fired,
+      // meaning a different-key attempt is already pending. Before
+      // returning 409, check whether that pending row is orphaned
+      // (caller crashed mid-completion). If so, mark it failed and
+      // retry the original insert so this caller can proceed.
+      const stalePending = await knex('service_completion_attempts')
+        .where({ service_id: serviceId, status: 'pending' })
+        .andWhere('updated_at', '<', new Date(Date.now() - STALE_PENDING_MS))
+        .first();
+
+      if (stalePending) {
+        const [reclaimed] = await knex('service_completion_attempts')
+          .where({ id: stalePending.id, status: 'pending' })
+          .update({
+            status: 'failed',
+            error: 'Reclaimed: pending attempt exceeded stale threshold (caller likely crashed)',
+            updated_at: new Date(),
+          })
+          .returning('*');
+        if (reclaimed) {
+          logger.warn(
+            `[completion-attempts] reclaimed stale pending attempt ${reclaimed.id} for service ${serviceId} (key ${reclaimed.idempotency_key})`
+          );
+          // Pending row is now failed — partial unique index is clear.
+          // Retry the original insert under this caller's key.
+          const [row] = await knex('service_completion_attempts').insert({
+            service_id: serviceId,
+            idempotency_key: idempotencyKey,
+            status: 'pending',
+            request_hash: requestHash,
+          }).returning('*');
+          return { action: 'proceed', attempt: row };
+        }
+        // Lost the reclaim race to another retry — fall through.
+      }
+
       return {
         action: 'conflict',
         status: 409,
