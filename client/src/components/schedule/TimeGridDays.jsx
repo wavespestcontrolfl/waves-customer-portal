@@ -15,7 +15,7 @@ import {
   useDroppable,
   pointerWithin,
 } from '@dnd-kit/core';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Leaf } from 'lucide-react';
 import { cn } from '../ui';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
 import { etStartOfWeek } from '../../lib/timezone';
@@ -124,6 +124,10 @@ function statusBlockFill(status) {
   }
 }
 
+function isLawnService(service) {
+  return String(service?.serviceType || '').toLowerCase().includes('lawn');
+}
+
 // Greedy interval-scheduling lane layout: overlapping services share a
 // cluster; within a cluster each goes into the first lane whose last
 // assigned service ends at or before this one starts.
@@ -168,7 +172,7 @@ function computeLanes(services) {
   return result;
 }
 
-function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit }) {
+function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit, onTreatmentPlan }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -210,6 +214,21 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
         })()}
       </div>
       <div className="font-bold truncate">{service.customerName || 'Unassigned'}</div>
+      {isLawnService(service) && onTreatmentPlan && (
+        <button
+          type="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onTreatmentPlan(service);
+          }}
+          className="absolute top-0.5 right-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring"
+          title="Treatment plan"
+          aria-label="Open treatment plan"
+        >
+          <Leaf size={12} strokeWidth={1.75} />
+        </button>
+      )}
       {height > SLOT_HEIGHT && (
         <div className="opacity-80 truncate text-10">
           {service.serviceType || ''}{service.technicianName ? ` · ${service.technicianName}` : ''}
@@ -239,7 +258,7 @@ function SlotDroppable({ date, slotIdx, onCreateStart }) {
   );
 }
 
-function AnytimeStrip({ services, dayLabel, onEdit }) {
+function AnytimeStrip({ services, dayLabel, onEdit, onTreatmentPlan }) {
   return (
     <div
       className="px-2 py-1.5 bg-zinc-50 flex flex-col gap-1 overflow-y-auto"
@@ -256,13 +275,14 @@ function AnytimeStrip({ services, dayLabel, onEdit }) {
           service={svc}
           dayLabel={dayLabel}
           onEdit={onEdit}
+          onTreatmentPlan={onTreatmentPlan}
         />
       ))}
     </div>
   );
 }
 
-function DayColumn({ day, onEdit, onCreateSlot }) {
+function DayColumn({ day, onEdit, onTreatmentPlan, onCreateSlot }) {
   // Unassigned services render in the UnassignedRail; assigned flexible
   // services render above the timed grid so they are still visible.
   const assignedServices = (day.services || []).filter((s) => s.technicianId);
@@ -329,6 +349,7 @@ function DayColumn({ day, onEdit, onCreateSlot }) {
         services={anytimeServices}
         dayLabel={`${day.dayOfWeek} ${day.dayNum}`}
         onEdit={onEdit}
+        onTreatmentPlan={onTreatmentPlan}
       />
       <div ref={gridRef} className="relative" style={{ height: GRID_HEIGHT }}>
         {Array.from({ length: SLOT_COUNT }).map((_, idx) => (
@@ -368,6 +389,7 @@ function DayColumn({ day, onEdit, onCreateSlot }) {
                 laneIdx={lane.laneIdx}
                 laneCount={lane.laneCount}
                 onEdit={onEdit}
+                onTreatmentPlan={onTreatmentPlan}
               />
             );
           });
@@ -406,7 +428,7 @@ function TimeAxis({ headerHeight }) {
   );
 }
 
-function RailItem({ service, dayLabel, onEdit }) {
+function RailItem({ service, dayLabel, onEdit, onTreatmentPlan }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -440,11 +462,25 @@ function RailItem({ service, dayLabel, onEdit }) {
       {service.serviceType && (
         <div className="truncate text-zinc-700">{service.serviceType}</div>
       )}
+      {isLawnService(service) && onTreatmentPlan && (
+        <button
+          type="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onTreatmentPlan(service);
+          }}
+          className="mt-1 h-7 w-full inline-flex items-center justify-center gap-1 rounded-xs bg-zinc-900 text-white text-10 uppercase tracking-label u-focus-ring"
+        >
+          <Leaf size={12} strokeWidth={1.75} />
+          Plan
+        </button>
+      )}
     </div>
   );
 }
 
-function UnassignedRail({ items, onEdit, collapsed, onToggleCollapsed }) {
+function UnassignedRail({ items, onEdit, onTreatmentPlan, collapsed, onToggleCollapsed }) {
   const { setNodeRef, isOver } = useDroppable({
     id: 'rail-unassigned',
     data: { target: 'rail' },
@@ -509,6 +545,7 @@ function UnassignedRail({ items, onEdit, collapsed, onToggleCollapsed }) {
                 service={service}
                 dayLabel={dayLabel}
                 onEdit={onEdit}
+                onTreatmentPlan={onTreatmentPlan}
               />
             ))}
           </div>
@@ -526,6 +563,7 @@ export default function TimeGridDays({
   dayCount = 7,   // 1 (Day) | 5 (Mon–Fri) | 7 (Mon–Sun)
   selectedDate,   // optional — highlight this day
   onEdit,
+  onTreatmentPlan,
   onChange,
   onDateClick,
   onCreateSlot,
@@ -792,6 +830,7 @@ export default function TimeGridDays({
             <UnassignedRail
               items={unassignedList}
               onEdit={onEdit}
+              onTreatmentPlan={onTreatmentPlan}
               collapsed={unassignedCollapsed}
               onToggleCollapsed={() => setUnassignedCollapsed((v) => !v)}
             />
@@ -809,6 +848,7 @@ export default function TimeGridDays({
                   key={day.date}
                   day={day}
                   onEdit={onEdit}
+                  onTreatmentPlan={onTreatmentPlan}
                   onCreateSlot={onCreateSlot}
                 />
               ))}

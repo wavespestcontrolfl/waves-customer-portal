@@ -51,6 +51,7 @@ import MobileAppointmentDetailSheet from '../../components/schedule/MobileAppoin
 import MobileCheckoutSheet from '../../components/schedule/MobileCheckoutSheet';
 import MobilePaymentSheet from '../../components/schedule/MobilePaymentSheet';
 import MobileServiceEditModal from '../../components/schedule/MobileServiceEditModal';
+import TreatmentPlanPanel from '../../components/schedule/TreatmentPlanPanel';
 import MarkPrepaidModal from '../../components/schedule/MarkPrepaidModal';
 import RecurringAlertsBannerV2 from '../../components/schedule/RecurringAlertsBannerV2';
 import CreateAppointmentModal from '../../components/schedule/CreateAppointmentModal';
@@ -189,7 +190,7 @@ function PropertyAlertsV2({ alerts }) {
   );
 }
 
-function ServiceCardV2({ service, zoneColors, onStatusChange, onComplete, onReschedule, onDelete, onProtocol, onEdit }) {
+function ServiceCardV2({ service, zoneColors, onStatusChange, onComplete, onReschedule, onDelete, onProtocol, onTreatmentPlan, onEdit }) {
   const [updating, setUpdating] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editType, setEditType] = useState(service.serviceType || '');
@@ -496,6 +497,7 @@ function ServiceCardV2({ service, zoneColors, onStatusChange, onComplete, onResc
         )}
         {status === 'completed' && <Badge tone="strong">Completed</Badge>}
         <Button size="sm" variant="secondary" onClick={() => onProtocol?.(service)}>Protocol</Button>
+        {isLawn && <Button size="sm" variant="secondary" onClick={() => onTreatmentPlan?.(service)}>Treatment Plan</Button>}
         {isLawn && !lawnDone && (
           <>
             <input ref={lawnFileRef} type="file" accept="image/*" multiple capture="environment" onChange={handleLawnPhotos} className="hidden" />
@@ -517,7 +519,7 @@ function ServiceCardV2({ service, zoneColors, onStatusChange, onComplete, onResc
   );
 }
 
-function TechSectionV2({ tech, zoneColors, zoneLabels, onStatusChange, onComplete, onReschedule, onDelete, onProtocol, onEdit }) {
+function TechSectionV2({ tech, zoneColors, zoneLabels, onStatusChange, onComplete, onReschedule, onDelete, onProtocol, onTreatmentPlan, onEdit }) {
   const [collapsed, setCollapsed] = useState(false);
   const completedCount = tech.completedServices || tech.services.filter((s) => s.status === 'completed').length;
   const totalHrs = Math.round(((tech.estimatedServiceMinutes || 0) + (tech.estimatedDriveMinutes || 0)) / 60 * 10) / 10;
@@ -587,6 +589,7 @@ function TechSectionV2({ tech, zoneColors, zoneLabels, onStatusChange, onComplet
                 onReschedule={onReschedule}
                 onDelete={onDelete}
                 onProtocol={onProtocol}
+                onTreatmentPlan={onTreatmentPlan}
                 onEdit={onEdit}
               />
             </div>
@@ -756,6 +759,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
   const [editingLineService, setEditingLineService] = useState(null);
   const [prepaidService, setPrepaidService] = useState(null);
   const [protocolService, setProtocolService] = useState(null);
+  const [treatmentPlanService, setTreatmentPlanService] = useState(null);
   const [showNewAppt, setShowNewAppt] = useState(false);
   const [newApptDefaults, setNewApptDefaults] = useState(null);
   const [scheduleRefreshKey, setScheduleRefreshKey] = useState(0);
@@ -1235,6 +1239,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
           date={date}
           onEdit={(svc) => setDetailService(svc)}
           onEnRoute={handleEnRoute}
+          onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
         />
       )}
       {viewMode === 'week' && !isMobile && (
@@ -1245,6 +1250,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
           hideUnassignedRail={false}
           refreshKey={scheduleRefreshKey}
           onEdit={(svc) => setEditingService(svc)}
+          onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
           onChange={() => fetchSchedule(date)}
           onStatsChange={handleGridStatsChange}
           onCreateSlot={({ date: slotDate, windowStart, windowEnd }) => {
@@ -1261,6 +1267,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
           hideUnassignedRail={isMobile}
           refreshKey={scheduleRefreshKey}
           onEdit={(svc) => setEditingService(svc)}
+          onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
           onChange={() => fetchSchedule(date)}
           onStatsChange={handleGridStatsChange}
           onCreateSlot={({ date: slotDate, windowStart, windowEnd }) => {
@@ -1421,6 +1428,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
               services={services}
               technicians={technicians}
               onEdit={(svc) => setEditingService(svc)}
+              onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
               onChange={() => fetchSchedule(date)}
               onDateChange={setDate}
               onCreateSlot={({ date: slotDate, windowStart, techId }) => {
@@ -1438,6 +1446,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
               services={services}
               onEdit={(svc) => setDetailService(svc)}
               onEnRoute={handleEnRoute}
+              onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
             />
           </div>
         </>
@@ -1478,6 +1487,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
           service={detailService}
           onClose={() => setDetailService(null)}
           onEdit={(svc) => { setDetailService(null); setEditingService(svc); }}
+          onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
           onReviewCheckout={(svc) => setCheckoutService(svc)}
           onBookNext={(svc) => {
             setDetailService(null);
@@ -1573,6 +1583,12 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
             setCompletingService(svc);
             fetchSchedule(date);
           }}
+        />
+      )}
+      {treatmentPlanService && (
+        <TreatmentPlanPanel
+          service={treatmentPlanService}
+          onClose={() => setTreatmentPlanService(null)}
         />
       )}
     </div>

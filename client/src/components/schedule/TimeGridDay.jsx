@@ -15,6 +15,7 @@ import {
   useDroppable,
   pointerWithin,
 } from '@dnd-kit/core';
+import { Leaf } from 'lucide-react';
 import { Badge, cn } from '../ui';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
 
@@ -34,6 +35,10 @@ const TIME_AXIS_WIDTH = 64;
 const TECH_ACCENT_COLORS = ['#18181B', '#52525B', '#A1A1AA', '#D4D4D8'];
 function techAccent(idx) {
   return TECH_ACCENT_COLORS[idx % TECH_ACCENT_COLORS.length];
+}
+
+function isLawnService(service) {
+  return String(service?.serviceType || '').toLowerCase().includes('lawn');
 }
 
 function parseISODate(iso) {
@@ -269,7 +274,7 @@ function NowLine() {
   );
 }
 
-function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit, onResize, isSelected, onToggleSelect, routeOrder, accent }) {
+function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit, onResize, onTreatmentPlan, isSelected, onToggleSelect, routeOrder, accent }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -343,11 +348,26 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
     >
       {routeOrder != null && (
         <div
-          className="absolute top-0.5 right-0.5 u-nums text-10 font-medium bg-white/85 text-zinc-700 px-1 rounded-xs"
+          className={cn('absolute top-0.5 u-nums text-10 font-medium bg-white/85 text-zinc-700 px-1 rounded-xs', isLawnService(service) ? 'right-6' : 'right-0.5')}
           style={{ minWidth: 14, textAlign: 'center', lineHeight: '14px' }}
         >
           {routeOrder}
         </div>
+      )}
+      {isLawnService(service) && onTreatmentPlan && (
+        <button
+          type="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onTreatmentPlan(service);
+          }}
+          className="absolute top-0.5 right-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring"
+          title="Treatment plan"
+          aria-label="Open treatment plan"
+        >
+          <Leaf size={12} strokeWidth={1.75} />
+        </button>
       )}
       <div className="opacity-90 truncate text-10">
         {service.windowDisplay || minutesToHHMM(parseHHMM(service.windowStart) || 0)}
@@ -391,7 +411,7 @@ function SlotDroppable({ techId, slotIdx, onCreateStart }) {
   );
 }
 
-function TechColumn({ tech, services, onEdit, onCreateSlot, onResize, selection, onToggleSelect, accent, showNowLine }) {
+function TechColumn({ tech, services, onEdit, onTreatmentPlan, onCreateSlot, onResize, selection, onToggleSelect, accent, showNowLine }) {
   const gridRef = useRef(null);
   const [sel, setSel] = useState(null); // { startIdx, endIdx }
   const selRef = useRef(sel);
@@ -490,6 +510,7 @@ function TechColumn({ tech, services, onEdit, onCreateSlot, onResize, selection,
                 laneIdx={lane.laneIdx}
                 laneCount={lane.laneCount}
                 onEdit={onEdit}
+                onTreatmentPlan={onTreatmentPlan}
                 onResize={onResize}
                 isSelected={selection?.has(svc.id)}
                 onToggleSelect={onToggleSelect}
@@ -536,7 +557,7 @@ function TimeAxis() {
   );
 }
 
-function AllDayStrip({ services, onEdit }) {
+function AllDayStrip({ services, onEdit, onTreatmentPlan }) {
   if (services.length === 0) return null;
   return (
     <div
@@ -545,21 +566,34 @@ function AllDayStrip({ services, onEdit }) {
     >
       <span className="text-10 uppercase tracking-label text-ink-tertiary self-center mr-2">All-day</span>
       {services.map((svc) => (
-        <button
-          key={svc.id}
-          type="button"
-          onClick={() => onEdit?.(svc)}
-          className="px-2 py-1 rounded-sm bg-white text-11 text-zinc-900 truncate max-w-[200px]"
-          style={{ border: '1px solid #D4D4D8' }}
-        >
-          {svc.customerName || 'Unassigned'} · {svc.serviceType || ''}
-        </button>
+        <span key={svc.id} className="inline-flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => onEdit?.(svc)}
+            className="px-2 py-1 rounded-sm bg-white text-11 text-zinc-900 truncate max-w-[200px]"
+            style={{ border: '1px solid #D4D4D8' }}
+          >
+            {svc.customerName || 'Unassigned'} · {svc.serviceType || ''}
+          </button>
+          {isLawnService(svc) && onTreatmentPlan && (
+            <button
+              type="button"
+              onClick={() => onTreatmentPlan(svc)}
+              className="h-6 w-6 inline-flex items-center justify-center rounded-sm bg-white text-zinc-800 u-focus-ring"
+              style={{ border: '1px solid #D4D4D8' }}
+              title="Treatment plan"
+              aria-label="Open treatment plan"
+            >
+              <Leaf size={13} strokeWidth={1.75} />
+            </button>
+          )}
+        </span>
       ))}
     </div>
   );
 }
 
-function RailItem({ service, onEdit, isSelected, onToggleSelect }) {
+function RailItem({ service, onEdit, onTreatmentPlan, isSelected, onToggleSelect }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -596,11 +630,25 @@ function RailItem({ service, onEdit, isSelected, onToggleSelect }) {
       {service.serviceType && (
         <div className="truncate text-zinc-700">{service.serviceType}</div>
       )}
+      {isLawnService(service) && onTreatmentPlan && (
+        <button
+          type="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onTreatmentPlan(service);
+          }}
+          className="mt-1 h-7 w-full inline-flex items-center justify-center gap-1 rounded-xs bg-zinc-900 text-white text-10 uppercase tracking-label u-focus-ring"
+        >
+          <Leaf size={12} strokeWidth={1.75} />
+          Plan
+        </button>
+      )}
     </div>
   );
 }
 
-function UnassignedRail({ services, onEdit, selection, onToggleSelect }) {
+function UnassignedRail({ services, onEdit, onTreatmentPlan, selection, onToggleSelect }) {
   const [open, setOpen] = useState(true);
   const { setNodeRef, isOver } = useDroppable({
     id: 'rail-unassigned',
@@ -657,6 +705,7 @@ function UnassignedRail({ services, onEdit, selection, onToggleSelect }) {
                 key={svc.id}
                 service={svc}
                 onEdit={onEdit}
+                onTreatmentPlan={onTreatmentPlan}
                 isSelected={selection?.has(svc.id)}
                 onToggleSelect={onToggleSelect}
               />
@@ -725,6 +774,7 @@ export default function TimeGridDay({
   services,
   technicians,
   onEdit,
+  onTreatmentPlan,
   onChange,
   onCreateSlot,
   onDateChange,
@@ -1028,7 +1078,7 @@ export default function TimeGridDay({
       style={{ border: '1px solid #E4E4E7' }}
     >
       {onDateChange && <WeekStrip date={date} onDateChange={onDateChange} />}
-      <AllDayStrip services={allDay} onEdit={onEdit} />
+      <AllDayStrip services={allDay} onEdit={onEdit} onTreatmentPlan={onTreatmentPlan} />
       {selection.size > 0 && (
         <BulkActionBar
           count={selection.size}
@@ -1045,6 +1095,7 @@ export default function TimeGridDay({
             <UnassignedRail
               services={unassignedInRail}
               onEdit={onEdit}
+              onTreatmentPlan={onTreatmentPlan}
               selection={selection}
               onToggleSelect={toggleSelection}
             />
@@ -1063,6 +1114,7 @@ export default function TimeGridDay({
                     tech={tech}
                     services={byTech[tech.id] || []}
                     onEdit={onEdit}
+                    onTreatmentPlan={onTreatmentPlan}
                     onCreateSlot={onCreateSlot ? handleCreateSlot : undefined}
                     onResize={handleResize}
                     selection={selection}
