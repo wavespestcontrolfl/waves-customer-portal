@@ -374,6 +374,28 @@ function initScheduledJobs() {
           'completion_sms_review_service_record_id',
         ]);
 
+      const pendingReviewRows = await db('scheduled_services')
+        .whereNotNull('completion_sms_sent_at')
+        .where({ completion_sms_request_review: true })
+        .select('id', 'customer_id', 'completion_sms_review_service_record_id')
+        .limit(20);
+      for (const reviewRow of pendingReviewRows) {
+        try {
+          const ReviewService = require('./review-request');
+          await ReviewService.create({
+            customerId: reviewRow.customer_id,
+            serviceRecordId: reviewRow.completion_sms_review_service_record_id || null,
+            triggeredBy: 'auto',
+            delayMinutes: 120,
+          });
+          await db('scheduled_services').where({ id: reviewRow.id }).update({
+            completion_sms_request_review: false,
+          });
+        } catch (reviewErr) {
+          logger.error(`[dispatch] Deferred review request retry failed after completion SMS for service ${reviewRow.id}: ${reviewErr.name || 'Error'}`);
+        }
+      }
+
       if (claimed.length === 0) return;
 
       // Resolve customer phones for the claimed rows in one query.
@@ -416,7 +438,6 @@ function initScheduledJobs() {
             completion_sms_claim_at: null,
             completion_sms_body: null,
             completion_sms_message_type: null,
-            completion_sms_request_review: false,
           });
           sent += 1;
           if (row.completion_sms_request_review) {
@@ -427,6 +448,9 @@ function initScheduledJobs() {
                 serviceRecordId: row.completion_sms_review_service_record_id || null,
                 triggeredBy: 'auto',
                 delayMinutes: 120,
+              });
+              await db('scheduled_services').where({ id: row.id }).update({
+                completion_sms_request_review: false,
               });
             } catch (reviewErr) {
               logger.error(`[dispatch] Deferred review request schedule failed after completion SMS for service ${row.id}: ${reviewErr.name || 'Error'}`);
