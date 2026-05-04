@@ -2,8 +2,70 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { etParts } = require('../utils/datetime-et');
+const {
+  buildMixOrder,
+  calculateProductAmount,
+  matchCatalogProduct,
+  parseProtocolLines,
+  isConditionalSelected,
+} = require('../services/waveguard-plan-engine');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const TRACK_MAP = {
+  A_St_Aug_Sun: 'st_augustine',
+  B_St_Aug_Shade: 'st_augustine',
+  C1_Bermuda: 'bermuda',
+  C2_Zoysia: 'zoysia',
+  D_Bahia: 'bahia',
+};
+
+function monthAbbr(value) {
+  const n = parseInt(value, 10);
+  if (Number.isFinite(n) && n >= 1 && n <= 12) return MONTH_ABBR[n - 1];
+  const raw = String(value || '').slice(0, 3).toLowerCase();
+  return MONTH_ABBR.find((m) => m.toLowerCase() === raw) || MONTH_ABBR[etParts(new Date()).month - 1];
+}
+
+async function getProtocolProducts() {
+  return db('products_catalog')
+    .where(function () {
+      this.where({ active: true }).orWhereNull('active');
+    })
+    .select(
+      'id', 'name', 'category', 'active_ingredient', 'moa_group',
+      'frac_group', 'irac_group', 'hrac_group',
+      'analysis_n', 'analysis_p', 'analysis_k',
+      'default_rate_per_1000', 'rate_unit',
+      'mixing_order_category', 'mixing_instructions',
+      'label_verified_at', 'rainfast_minutes', 'rei_hours',
+      'labeled_turf_species', 'excluded_turf_species',
+      'requires_surfactant', 'allows_surfactant',
+      'label_source_note',
+    )
+    .catch(() => []);
+}
+
+async function getActiveCalibration(equipmentSystemId) {
+  const query = db('equipment_calibrations as ec')
+    .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
+    .where('ec.active', true)
+    .where('es.active', true)
+    .select(
+      'ec.*',
+      'es.name as system_name',
+      'es.system_type',
+      'es.tank_capacity_gal',
+      'es.default_application_type',
+    )
+    .orderByRaw("case when es.name ilike '110-Gallon Spray Tank #1%' then 0 when es.system_type = 'tank' then 1 else 2 end")
+    .orderBy('es.name', 'asc');
+
+  if (equipmentSystemId) query.where('ec.equipment_system_id', equipmentSystemId);
+  return query.first().catch(() => null);
+}
 
 // GET /api/admin/protocols/photos/relevant — context-aware photo references
 router.get('/photos/relevant', async (req, res, next) => {
@@ -85,6 +147,133 @@ router.get('/equipment', async (req, res, next) => {
     res.json({ checklists: checklists.map(c => ({
       ...c, checklist_items: typeof c.checklist_items === 'string' ? JSON.parse(c.checklist_items) : c.checklist_items,
     }))});
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/protocols/lawn-mix — generic tech-facing protocol preview.
+router.get('/lawn-mix', async (req, res, next) => {
+  try {
+    const protocols = require('../config/protocols.json');
+    const trackKey = TRACK_MAP[req.query.track] || req.query.track || 'st_augustine';
+    const track = protocols.lawn?.[trackKey];
+    if (!track) return res.status(404).json({ error: 'Lawn protocol track not found' });
+
+    const month = monthAbbr(req.query.month);
+    const visit = track.visits?.find((v) => v.month === month);
+    if (!visit) return res.status(404).json({ error: 'Protocol visit not found for month' });
+
+    const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
+    const calibration = await getActiveCalibration(req.query.equipmentSystemId || null);
+    const calibrationExpired = !!(
+      calibration?.expires_at && new Date(calibration.expires_at) < new Date()
+    );
+    const products = await getProtocolProducts();
+    const baseLines = parseProtocolLines(visit.primary, 'base');
+    const conditionalLines = parseProtocolLines(visit.secondary, 'conditional');
+    const allLines = [...baseLines, ...conditionalLines];
+
+    const items = allLines.map((line) => {
+      const product = matchCatalogProduct(line, products);
+      const selected = isConditionalSelected({ ...line, product }, {
+        selectedConditionalProductIds: req.query.selectedConditionalProductIds,
+        selectedConditionalProductNames: req.query.selectedConditionalProductNames,
+        selectedConditionalRaw: req.query.selectedConditionalRaw,
+      });
+      const carrier = calibrationExpired ? 0 : Number(calibration?.carrier_gal_per_1000 || 0);
+      const jobMix = selected && product && carrier
+        ? calculateProductAmount({ product, lawnSqft: areaSqft, carrierGalPer1000: carrier })
+        : null;
+      const tankCapacity = Number(calibration?.tank_capacity_gal || 0);
+      const tankCoverageSqft = carrier && tankCapacity ? (tankCapacity / carrier) * 1000 : 0;
+      const fullTankMix = selected && product && carrier && tankCoverageSqft
+        ? calculateProductAmount({ product, lawnSqft: tankCoverageSqft, carrierGalPer1000: carrier })
+        : null;
+
+      return {
+        raw: line.raw,
+        role: line.role,
+        conditional: line.conditional,
+        selected,
+        matched: !!product,
+        product: product ? {
+          id: product.id,
+          name: product.name,
+          category: product.category,
+          activeIngredient: product.active_ingredient,
+          groups: {
+            moa: product.moa_group || null,
+            frac: product.frac_group || null,
+            irac: product.irac_group || null,
+            hrac: product.hrac_group || null,
+          },
+          labelVerifiedAt: product.label_verified_at || null,
+          rainfastMinutes: product.rainfast_minutes || null,
+          reiHours: product.rei_hours || null,
+          labeledTurfSpecies: product.labeled_turf_species || [],
+          excludedTurfSpecies: product.excluded_turf_species || [],
+          requiresSurfactant: product.requires_surfactant,
+          allowsSurfactant: product.allows_surfactant,
+          mixingOrderCategory: product.mixing_order_category,
+          mixingInstructions: product.mixing_instructions,
+          labelSourceNote: product.label_source_note,
+        } : null,
+        jobMix,
+        fullTankMix,
+      };
+    });
+
+    const selectedItems = items.filter((item) => item.selected);
+    const warnings = [];
+    if (!calibration) {
+      warnings.push({
+        code: 'missing_calibration',
+        message: 'No active calibration was found for the selected equipment. Mix amounts require a current carrier rate.',
+      });
+    }
+    if (calibrationExpired) {
+      warnings.push({
+        code: 'expired_calibration',
+        message: `Calibration for ${calibration.system_name || 'selected equipment'} is expired. Mix amounts are withheld until the rig is recalibrated.`,
+      });
+    }
+    if (items.some((item) => !item.matched)) {
+      warnings.push({
+        code: 'unmatched_product',
+        message: 'Some protocol lines do not match a product catalog row yet; label-rate math is unavailable for those lines.',
+      });
+    }
+
+    res.json({
+      track: { key: trackKey, name: track.name },
+      month,
+      visit: {
+        visit: visit.visit,
+        objective: visit.notes,
+        primary: visit.primary,
+        secondary: visit.secondary,
+        tiers: visit.tiers,
+      },
+      equipment: calibration ? {
+        equipmentSystemId: calibration.equipment_system_id,
+        calibrationId: calibration.id,
+        systemName: calibration.system_name,
+        systemType: calibration.system_type,
+        carrierGalPer1000: Number(calibration.carrier_gal_per_1000),
+        tankCapacityGal: calibration.tank_capacity_gal ? Number(calibration.tank_capacity_gal) : null,
+        tankCoverageSqft: calibration.tank_capacity_gal && calibration.carrier_gal_per_1000
+          ? Math.round((Number(calibration.tank_capacity_gal) / Number(calibration.carrier_gal_per_1000)) * 1000)
+          : null,
+        expiresAt: calibration.expires_at || null,
+      } : null,
+      areaSqft,
+      items,
+      selectedItems,
+      mixingOrder: buildMixOrder(selectedItems.map((item) => ({
+        raw: item.raw,
+        product: products.find((p) => String(p.id) === String(item.product?.id)) || null,
+      }))),
+      warnings,
+    });
   } catch (err) { next(err); }
 });
 

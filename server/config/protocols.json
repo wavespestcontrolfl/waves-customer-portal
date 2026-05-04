@@ -1,7 +1,7 @@
 {
   "lawn": {
     "st_augustine": {
-      "name": "ST. AUGUSTINE (v4.0 — shade conditionals embedded)",
+      "name": "ST. AUGUSTINE (v4.0 — unified SWFL protocol)",
       "notes": [
         "⚠ PRODIAMINE TIMING: Apply Visit 1 by January 15. Soil temps can hit 55°F germination window by late Jan in Sarasota/Man",
         "⚠ CELSIUS CAP: Maximum 3 applications per property per year. Log every Celsius app. If maxed, use Blindside WDG or Three",
@@ -10,9 +10,7 @@
         "★ NEW v4: Soil-test branching — P index >80 skip 24-2-11, K >80 ppm skip K-Flow. Chinch IPM ≥20/sq ft threshold + MOA ro",
         "★ NEW v4: FRAC rotation — Headway (11+3) Jan → Medallion (7) Feb → Torque (12) Oct. SpeedZone Apr weather-gated at 90°F.",
         "★ NEW v4: Aug drive-by scout + Dec wellness touchpoint for Basic/Std. Thatch measurement V3+V10. Irrigation VWC audit V2",
-        "★ SHADE PROPERTIES: If shadeClassification is MODERATE_SHADE or HEAVY_SHADE, apply shade rules. See shade_rules object.",
-        "★ SHADE: Celsius ONLY for broadleaf (no SpeedZone). NO PGR. Pillar replaces Headway for FRAC 11+3. TARR pull-tests required.",
-        "★ SHADE N BUDGET: Heavy 1.0-1.5 lb/yr, Moderate 1.5-2.0 lb/yr. Max 2 fert apps for Heavy Shade."
+        "★ ST. AUGUSTINE IS ONE TRACK: Do not split the protocol into full-sun vs shade programs. Use site observations only as condition checks for stress, disease, irrigation, and herbicide safety."
       ],
       "visits": [
         {
@@ -196,41 +194,12 @@
           "notes": "★ MAJOR: Basic/Std get Dec touchpoint (was Premium-only). Eliminates 3-month dead zone. Annual report. Retention play vs competitor door-knocks."
         }
       ],
-      "shade_rules": {
-        "classification_options": [
-          "FULL_SUN",
-          "MODERATE_SHADE",
-          "HEAVY_SHADE"
-        ],
-        "default": "FULL_SUN",
-        "broadleaf": "Celsius WG ONLY — NEVER SpeedZone (phytotoxicity risk)",
-        "pgr": "NO PGR on shade — turf is growth-limited",
-        "fungicide_frac_11_3": "Pillar SC instead of Headway (no azoxystrobin alone due to TARR risk)",
-        "tarr_protocol": "Pull-test at V3+V10; Pillar preventive if TARR-history",
-        "irrigation_vwc_threshold": "35% (lower than Full Sun 40%)",
-        "n_rate_per_app": {
-          "FULL_SUN": "0.75 lb N/1K",
-          "MODERATE_SHADE": "0.625 lb N/1K",
-          "HEAVY_SHADE": "0.50 lb N/1K"
-        },
-        "annual_n_budget": {
-          "FULL_SUN": "2.5-3.0 lb N/K/yr",
-          "MODERATE_SHADE": "1.5-2.0 lb N/K/yr",
-          "HEAVY_SHADE": "1.0-1.5 lb N/K/yr"
-        },
-        "max_fert_apps": {
-          "FULL_SUN": 3,
-          "MODERATE_SHADE": 2,
-          "HEAVY_SHADE": 2
-        },
-        "biostimulant": "CarbonPro-L in May for root support (Enhanced/Premium shade only)",
-        "blindside_wdg": "Post-Celsius fallback for resistant broadleaf (shade)",
-        "material_cost_modifiers": {
-          "basic": -19.5,
-          "standard": -25.4,
-          "enhanced": -40.5,
-          "premium": -67
-        }
+      "site_condition_rules": {
+        "default": "standard_st_augustine",
+        "stress_check": "If turf is heat, drought, scalp, or disease stressed, hold PGR and hot herbicide until manager review.",
+        "herbicide_heat_gate": "SpeedZone Southern is weather-gated at 90°F; use Celsius WG fallback when heat risk is high.",
+        "disease_check": "Pull-test and inspect roots when thinning or patch symptoms are present; choose fungicide by diagnosis, not by sun/shade label.",
+        "irrigation_vwc_threshold": "Use VWC/audit notes to adjust irrigation recommendations; do not create a separate St. Augustine shade program."
       }
     },
     "bermuda": {

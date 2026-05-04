@@ -990,8 +990,9 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
     else setDate(addMonthsISO(date, dir));
   }
 
-  if (loading) return <div className="py-16 text-center text-13 text-ink-secondary">Loading schedule…</div>;
-  if (error) {
+  const isReferencePanel = activeTab !== 'board' && viewMode === 'day';
+  if (loading && !isReferencePanel) return <div className="py-16 text-center text-13 text-ink-secondary">Loading schedule…</div>;
+  if (error && !isReferencePanel) {
     if (isRateLimitError(error)) {
       return (
         <div className="py-16 text-center text-13 text-alert-fg">
@@ -1006,14 +1007,15 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
       </div>
     );
   }
-  if (!data) return null;
+  if (!data && !isReferencePanel) return null;
 
-  const services = data.services || [];
-  const techSummary = data.techSummary || [];
-  const unassigned = data.unassigned || [];
-  const technicians = data.technicians || [];
-  const zoneColors = data.zoneColors || {};
-  const zoneLabels = data.zoneLabels || {};
+  const safeData = data || {};
+  const services = safeData.services || [];
+  const techSummary = safeData.techSummary || [];
+  const unassigned = safeData.unassigned || [];
+  const technicians = safeData.technicians || [];
+  const zoneColors = safeData.zoneColors || {};
+  const zoneLabels = safeData.zoneLabels || {};
 
   // Stats source by viewMode:
   //   - Day:           single-day `services` from /admin/schedule?date=X.
@@ -1080,7 +1082,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
 
   const unassignedCount = unassigned.length;
   const newCustomers = services.filter((s) => !s.lastServiceDate);
-  const weatherData = data.weather || {};
+  const weatherData = safeData.weather || {};
   const rainProbability = weatherData.rainProbability ?? weatherData.rain_probability ?? null;
   const windSpeed = weatherData.windSpeed ?? weatherData.wind_speed ?? null;
   const weatherTemp = weatherData.temp ?? weatherData.temperature ?? null;
