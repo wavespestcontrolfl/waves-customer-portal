@@ -356,7 +356,7 @@ function initScheduledJobs() {
               status: 'scheduled',
               updated_at: new Date(),
             });
-            logger.error(`Scheduled invoice ${inv.invoice_number} both channels failed: sms=${channels.sms.error} email=${channels.email.error}`);
+            logger.error(`Scheduled invoice ${inv.invoice_number} both channels failed: smsOk=${!!channels.sms.ok} emailOk=${!!channels.email.ok}`);
           }
         } catch (e) {
           if (claimedInvoice) {
