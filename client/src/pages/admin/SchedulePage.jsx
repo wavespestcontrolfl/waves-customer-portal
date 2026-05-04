@@ -77,6 +77,12 @@ const N_LIMIT_APPROVAL_REASONS = [
   { value: 'ledger_adjustment_pending', label: 'Ledger adjustment pending' },
   { value: 'site_specific_agronomic_need', label: 'Site-specific agronomic need' },
 ];
+const TANK_CLEANOUT_METHODS = [
+  'Triple rinse',
+  'Clean water flush',
+  'Tank cleaner flush',
+  'Dedicated tank, no residue risk',
+];
 const AREAS_BY_SERVICE = {
   pest: ['Perimeter', 'Garage', 'Kitchen', 'Bathrooms', 'Entry points', 'Yard', 'Fence line', 'Trash area'],
   lawn: ['Front yard', 'Back yard', 'Side yard', 'Landscape beds', 'Shrubs', 'Palms', 'Problem area', 'Irrigation zone'],
@@ -1084,6 +1090,11 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   const [officeApprovalNote, setOfficeApprovalNote] = useState('');
   const [nLimitApprovalReasonCode, setNLimitApprovalReasonCode] = useState('');
   const [nLimitApprovalNote, setNLimitApprovalNote] = useState('');
+  const [tankLastProduct, setTankLastProduct] = useState('');
+  const [tankLastProductCategory, setTankLastProductCategory] = useState('');
+  const [tankCleanoutCompleted, setTankCleanoutCompleted] = useState('');
+  const [tankCleanoutMethod, setTankCleanoutMethod] = useState('');
+  const [tankCleanoutNote, setTankCleanoutNote] = useState('');
   const [savedDraft, setSavedDraft] = useState(null);
   const [showDraftPrompt, setShowDraftPrompt] = useState(false);
   const photoInputRef = useRef(null);
@@ -1162,10 +1173,16 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   const nLimitSummaryText = treatmentPlanAnnualN
     ? `Used ${treatmentPlanAnnualN.used ?? 0}, visit ${treatmentPlanAnnualN.visit ?? 0}, projected ${treatmentPlanAnnualN.projected ?? 0} / ${treatmentPlanAnnualN.limit ?? 0} ${treatmentPlanAnnualN.unit || 'lb N / 1,000 sqft / year'}.`
     : '';
+  const tankCleanoutRequired = calibrationRequired && !isIncompleteVisit && !!equipmentSystemId;
+  const tankCleanoutCompletionBlocked = tankCleanoutRequired
+    && (!tankLastProduct.trim() || tankCleanoutCompleted !== 'yes' || !tankCleanoutMethod.trim());
+  const tankCleanoutHelpText = 'Record the prior tank product and confirm cleanout before completing this WaveGuard lawn visit.';
   const completionCtaLabel = submitting
     ? 'Completing...'
     : calibrationRequired && !isIncompleteVisit && !equipmentSystemId
       ? 'Select Equipment Calibration'
+    : tankCleanoutCompletionBlocked
+      ? 'Tank Cleanout Required'
     : blackoutCompletionBlocked
       ? canApproveOfficeExceptions ? 'Office Approval Required' : 'Admin Approval Required'
     : nLimitCompletionBlocked
@@ -1261,6 +1278,10 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
       || customerInteraction
       || customerConcern.trim()
       || nextVisitNote.trim()
+      || tankLastProduct.trim()
+      || tankCleanoutCompleted
+      || tankCleanoutMethod.trim()
+      || tankCleanoutNote.trim()
       || visitOutcome !== 'completed';
     if (!hasDraftContent) return;
 
@@ -1290,6 +1311,11 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         officeApprovalNote,
         nLimitApprovalReasonCode,
         nLimitApprovalNote,
+        tankLastProduct,
+        tankLastProductCategory,
+        tankCleanoutCompleted,
+        tankCleanoutMethod,
+        tankCleanoutNote,
       };
       localStorage.setItem(completionDraftKey(service.id), JSON.stringify(draft));
     }, 700);
@@ -1301,6 +1327,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
     equipmentSystemId, calibrationId,
     officeApprovalReasonCode, officeApprovalNote,
     nLimitApprovalReasonCode, nLimitApprovalNote,
+    tankLastProduct, tankLastProductCategory, tankCleanoutCompleted, tankCleanoutMethod, tankCleanoutNote,
   ]);
 
   function restoreDraft() {
@@ -1329,6 +1356,11 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
     setOfficeApprovalNote(savedDraft.officeApprovalNote || '');
     setNLimitApprovalReasonCode(savedDraft.nLimitApprovalReasonCode || '');
     setNLimitApprovalNote(savedDraft.nLimitApprovalNote || '');
+    setTankLastProduct(savedDraft.tankLastProduct || '');
+    setTankLastProductCategory(savedDraft.tankLastProductCategory || '');
+    setTankCleanoutCompleted(savedDraft.tankCleanoutCompleted || '');
+    setTankCleanoutMethod(savedDraft.tankCleanoutMethod || '');
+    setTankCleanoutNote(savedDraft.tankCleanoutNote || '');
     setShowDraftPrompt(false);
   }
 
@@ -1495,6 +1527,10 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
       alert(calibrationHelpText || 'Select calibrated equipment before completing this WaveGuard lawn visit.');
       return;
     }
+    if (tankCleanoutCompletionBlocked) {
+      alert(tankCleanoutHelpText);
+      return;
+    }
     if (blackoutCompletionBlocked) {
       alert(canApproveOfficeExceptions
         ? 'Office approval is required before completing this WaveGuard lawn visit during an N/P blackout.'
@@ -1528,6 +1564,15 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
           ? {
               reasonCode: nLimitApprovalReasonCode,
               note: nLimitApprovalNote,
+            }
+          : null,
+        tankCleanout: tankCleanoutRequired
+          ? {
+              lastProductInTank: tankLastProduct,
+              lastProductCategory: tankLastProductCategory,
+              cleanoutCompleted: tankCleanoutCompleted === 'yes',
+              cleanoutMethod: tankCleanoutMethod,
+              note: tankCleanoutNote,
             }
           : null,
         products: selectedProducts.map(p => ({
@@ -1805,6 +1850,62 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
                 }}>
                   {isIncompleteVisit ? 'Calibration is not required when marking a visit incomplete.' : calibrationHelpText}
                 </div>
+              </Field>
+            )}
+
+            {tankCleanoutRequired && (
+              <Field label="Tank cleanout">
+                <div style={{
+                  marginBottom: 10, fontFamily: font, fontSize: 12,
+                  color: tankCleanoutCompletionBlocked ? M.err : M.ink3, lineHeight: 1.35,
+                }}>
+                  {tankCleanoutHelpText}
+                </div>
+                <input
+                  value={tankLastProduct}
+                  onChange={e => setTankLastProduct(e.target.value)}
+                  placeholder="Last product in tank"
+                  style={mInput}
+                />
+                <select
+                  value={tankLastProductCategory}
+                  onChange={e => setTankLastProductCategory(e.target.value)}
+                  style={{ ...mInput, marginTop: 8 }}
+                >
+                  <option value="">Prior product type</option>
+                  <option value="herbicide">Herbicide / weed control</option>
+                  <option value="insecticide">Insecticide</option>
+                  <option value="fungicide">Fungicide</option>
+                  <option value="fertilizer">Fertilizer / nutrient</option>
+                  <option value="water_only">Water only</option>
+                  <option value="unknown">Unknown</option>
+                </select>
+                <select
+                  value={tankCleanoutCompleted}
+                  onChange={e => setTankCleanoutCompleted(e.target.value)}
+                  style={{ ...mInput, marginTop: 8 }}
+                >
+                  <option value="">Cleanout completed?</option>
+                  <option value="yes">Yes</option>
+                  <option value="no">No</option>
+                </select>
+                <select
+                  value={tankCleanoutMethod}
+                  onChange={e => setTankCleanoutMethod(e.target.value)}
+                  style={{ ...mInput, marginTop: 8 }}
+                >
+                  <option value="">Cleanout method</option>
+                  {TANK_CLEANOUT_METHODS.map(method => (
+                    <option key={method} value={method}>{method}</option>
+                  ))}
+                </select>
+                <textarea
+                  value={tankCleanoutNote}
+                  onChange={e => setTankCleanoutNote(e.target.value)}
+                  rows={2}
+                  placeholder="Cleanout note"
+                  style={{ ...mTextarea, minHeight: 72, marginTop: 8 }}
+                />
               </Field>
             )}
 
@@ -2290,8 +2391,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
             <button
               type="button"
               onClick={() => handleSubmit()}
-              disabled={submitting || calibrationCompletionBlocked || blackoutCompletionBlocked || nLimitCompletionBlocked}
-              style={{ ...primaryPill, opacity: submitting || calibrationCompletionBlocked || blackoutCompletionBlocked || nLimitCompletionBlocked ? 0.5 : 1 }}
+              disabled={submitting || calibrationCompletionBlocked || tankCleanoutCompletionBlocked || blackoutCompletionBlocked || nLimitCompletionBlocked}
+              style={{ ...primaryPill, opacity: submitting || calibrationCompletionBlocked || tankCleanoutCompletionBlocked || blackoutCompletionBlocked || nLimitCompletionBlocked ? 0.5 : 1 }}
             >
               {completionCtaLabel.replace('...', '…')}
             </button>
@@ -2426,6 +2527,64 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
               }}>
                 {isIncompleteVisit ? 'Calibration is not required when marking a visit incomplete.' : calibrationHelpText}
               </div>
+            </div>
+          )}
+
+          {tankCleanoutRequired && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={labelStyle}>Tank Cleanout</label>
+              <div style={{ fontSize: 12, color: tankCleanoutCompletionBlocked ? D.red : D.muted, lineHeight: 1.4, marginBottom: 8 }}>
+                {tankCleanoutHelpText}
+              </div>
+              <input
+                value={tankLastProduct}
+                onChange={e => setTankLastProduct(e.target.value)}
+                placeholder="Last product in tank"
+                style={inputStyle}
+              />
+              <select
+                value={tankLastProductCategory}
+                onChange={e => setTankLastProductCategory(e.target.value)}
+                style={{ ...inputStyle, marginTop: 8 }}
+              >
+                <option value="">Prior product type</option>
+                <option value="herbicide">Herbicide / weed control</option>
+                <option value="insecticide">Insecticide</option>
+                <option value="fungicide">Fungicide</option>
+                <option value="fertilizer">Fertilizer / nutrient</option>
+                <option value="water_only">Water only</option>
+                <option value="unknown">Unknown</option>
+              </select>
+              <select
+                value={tankCleanoutCompleted}
+                onChange={e => setTankCleanoutCompleted(e.target.value)}
+                style={{ ...inputStyle, marginTop: 8 }}
+              >
+                <option value="">Cleanout completed?</option>
+                <option value="yes">Yes</option>
+                <option value="no">No</option>
+              </select>
+              <select
+                value={tankCleanoutMethod}
+                onChange={e => setTankCleanoutMethod(e.target.value)}
+                style={{ ...inputStyle, marginTop: 8 }}
+              >
+                <option value="">Cleanout method</option>
+                {TANK_CLEANOUT_METHODS.map(method => (
+                  <option key={method} value={method}>{method}</option>
+                ))}
+              </select>
+              <textarea
+                value={tankCleanoutNote}
+                onChange={e => setTankCleanoutNote(e.target.value)}
+                rows={2}
+                placeholder="Cleanout note"
+                style={{
+                  width: '100%', background: D.input, color: D.text, border: `1px solid ${D.border}`,
+                  borderRadius: 10, padding: 12, fontSize: 14, resize: 'vertical',
+                  fontFamily: "'Nunito Sans', sans-serif", boxSizing: 'border-box', marginTop: 8,
+                }}
+              />
             </div>
           )}
 
@@ -2861,9 +3020,9 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
 
         {/* Footer */}
         <div style={{ padding: '16px 24px', borderTop: `1px solid ${D.border}`, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <button onClick={() => handleSubmit()} disabled={submitting || calibrationCompletionBlocked || blackoutCompletionBlocked || nLimitCompletionBlocked} style={{
+          <button onClick={() => handleSubmit()} disabled={submitting || calibrationCompletionBlocked || tankCleanoutCompletionBlocked || blackoutCompletionBlocked || nLimitCompletionBlocked} style={{
             ...btnBase, width: '100%', background: D.green, color: '#fff', fontSize: 14, height: 52,
-            opacity: submitting || calibrationCompletionBlocked || blackoutCompletionBlocked || nLimitCompletionBlocked ? 0.6 : 1, flexDirection: 'column', lineHeight: 1.3,
+            opacity: submitting || calibrationCompletionBlocked || tankCleanoutCompletionBlocked || blackoutCompletionBlocked || nLimitCompletionBlocked ? 0.6 : 1, flexDirection: 'column', lineHeight: 1.3,
           }}>
             {submitting ? completionCtaLabel : (
               <>

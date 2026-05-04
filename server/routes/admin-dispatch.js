@@ -97,6 +97,65 @@ function annualNLockoutBlocks(plan) {
     .filter((block) => block.code === 'annual_n_budget_exceeded');
 }
 
+function normalizeTankCleanout(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const lastProductInTank = String(input.lastProductInTank || input.last_product_in_tank || '').trim().slice(0, 160);
+  const cleanoutMethod = String(input.cleanoutMethod || input.cleanout_method || '').trim().slice(0, 160);
+  const note = String(input.note || '').trim().slice(0, 500);
+  const categoryRaw = String(input.lastProductCategory || input.last_product_category || '').trim().toLowerCase();
+  const cleanoutCompleted = input.cleanoutCompleted === true
+    || input.cleanout_completed === true
+    || String(input.cleanoutCompleted || input.cleanout_completed || '').toLowerCase() === 'yes';
+  return {
+    lastProductInTank,
+    lastProductCategory: categoryRaw || null,
+    cleanoutCompleted,
+    cleanoutMethod,
+    note: note || null,
+  };
+}
+
+function tankCleanoutLockoutBlocks(cleanout) {
+  const blocks = [];
+  if (!cleanout?.lastProductInTank) {
+    blocks.push({
+      code: 'missing_tank_last_product',
+      severity: 'block',
+      message: 'Record the last product in the tank before completing this WaveGuard lawn visit.',
+    });
+  }
+  if (!cleanout?.cleanoutCompleted) {
+    blocks.push({
+      code: 'missing_tank_cleanout_confirmation',
+      severity: 'block',
+      message: 'Confirm tank cleanout before completing this WaveGuard lawn visit.',
+    });
+  }
+  if (!cleanout?.cleanoutMethod) {
+    blocks.push({
+      code: 'missing_tank_cleanout_method',
+      severity: 'block',
+      message: 'Record the tank cleanout method before completing this WaveGuard lawn visit.',
+    });
+  }
+  return blocks;
+}
+
+function tankCleanoutWarnings(cleanout, selectedCalibration) {
+  const equipmentName = String(selectedCalibration?.system_name || selectedCalibration?.name || '').toLowerCase();
+  const productText = `${cleanout?.lastProductInTank || ''} ${cleanout?.lastProductCategory || ''}`.toLowerCase();
+  const tankTwo = /\b(tank\s*#?\s*2|#2)\b/.test(equipmentName);
+  const herbicide = /herbicide|weed|sedge|kyllinga|celsius|dismiss|speedzone|quinclorac|sulfentrazone/.test(productText);
+  if (tankTwo && herbicide) {
+    return [{
+      code: 'tank_2_herbicide_cleanout',
+      severity: 'warning',
+      message: 'Tank #2 was marked with prior herbicide use; cleanout is recorded for this completion.',
+    }];
+  }
+  return [];
+}
+
 function normalizeOfficeApproval(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
   const reasonCode = String(input.reasonCode || input.reason_code || '').trim().slice(0, 80);
@@ -415,6 +474,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       customerInteraction,
       officeApproval,
       nLimitApproval,
+      tankCleanout,
       formResponses,
       formStartedAt,
     } = req.body;
@@ -428,8 +488,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const concernText = typeof customerConcernText === 'string' ? customerConcernText.trim() : '';
     const normalizedOfficeApproval = normalizeOfficeApproval(officeApproval);
     const normalizedNLimitApproval = normalizeOfficeApproval(nLimitApproval);
+    const normalizedTankCleanout = normalizeTankCleanout(tankCleanout);
     let waveguardBlackoutApproval = null;
     let waveguardNLimitApproval = null;
+    let waveguardTankCleanout = null;
     let waveguardEquipmentSystemId = equipmentSystemId || null;
     let waveguardCalibrationId = calibrationId || null;
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
@@ -523,6 +585,27 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         waveguardEquipmentSystemId = selectedCalibration.equipment_system_id || waveguardEquipmentSystemId;
         waveguardCalibrationId = selectedCalibration.id || waveguardCalibrationId;
       }
+      const cleanoutBlocks = tankCleanoutLockoutBlocks(normalizedTankCleanout);
+      if (cleanoutBlocks.length) {
+        const validationErr = new Error('WaveGuard tank cleanout lockout');
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
+        return res.status(400).json({
+          error: 'Tank cleanout record required',
+          code: 'waveguard_tank_cleanout_lockout',
+          details: cleanoutBlocks.map((block) => block.message),
+          blocks: cleanoutBlocks,
+        });
+      }
+      waveguardTankCleanout = {
+        ...normalizedTankCleanout,
+        equipmentSystemId: waveguardEquipmentSystemId || null,
+        calibrationId: waveguardCalibrationId || null,
+        equipmentName: selectedCalibration?.system_name || selectedCalibration?.name || null,
+        warnings: tankCleanoutWarnings(normalizedTankCleanout, selectedCalibration),
+        recordedByTechnicianId: req.technicianId,
+        recordedByRole: req.techRole || null,
+        recordedAt: new Date().toISOString(),
+      };
     }
 
     // Status flip + completion artifacts + audit row + lifecycle
@@ -585,6 +668,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             waveguardCalibrationId,
             waveguardBlackoutApproval,
             waveguardNLimitApproval,
+            waveguardTankCleanout,
           },
           areas_serviced: completionAreas,
           customer_interaction: customerInteraction || null,
