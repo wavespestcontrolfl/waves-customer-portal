@@ -235,10 +235,33 @@ function extractAssertions(result) {
   };
 }
 
+function wireLocalModeHooks() {
+  if (!LOCAL_MODE) return;
+  beforeAll(async () => {
+    if (!process.env.DATABASE_URL) {
+      console.warn('[LOCAL mode] DATABASE_URL unset — running against in-memory constants. Baseline parity with prod NOT guaranteed; set DATABASE_URL for math parity.');
+      return;
+    }
+    require('../models/db');
+    const synced = await localEngine.syncConstantsFromDB();
+    if (!synced) {
+      throw new Error(
+        `[LOCAL mode] syncConstantsFromDB returned false. ` +
+        `The adapter regression suite would otherwise compare against in-memory defaults instead of synced pricing_config values.`
+      );
+    }
+  }, 30_000);
+
+  afterAll(async () => {
+    try { await require('../models/db').destroy(); } catch { /* ignore */ }
+  });
+}
+
 if (CAPTURE_MODE) {
   const captured = {};
 
   describe('pricing engine v1 adapter regression — CAPTURE BASELINE', () => {
+    wireLocalModeHooks();
     for (const tc of REGRESSION_CASES) {
       test(`capture ${tc.name}`, async () => {
         const result = await postCalculateEstimate({
@@ -268,6 +291,7 @@ if (CAPTURE_MODE) {
   const baseline = JSON.parse(fs.readFileSync(BASELINE_PATH, 'utf8'));
 
   describe('pricing engine v1 adapter regression — diff vs baseline', () => {
+    wireLocalModeHooks();
     for (const tc of REGRESSION_CASES) {
       test(tc.name, async () => {
         const result = await postCalculateEstimate({

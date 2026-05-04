@@ -29,7 +29,7 @@ function buildSubscriberQuery(segmentFilter) {
   if (f.customersOnly) q = q.whereNotNull('customer_id');
   if (f.leadsOnly) q = q.whereNull('customer_id');
   if (Array.isArray(f.tags) && f.tags.length) {
-    q = q.whereRaw('tags ?| array[' + f.tags.map(() => '?').join(',') + ']', f.tags);
+    q = q.whereRaw('tags \\?| array[' + f.tags.map(() => '?').join(',') + ']', f.tags);
   }
   return q;
 }

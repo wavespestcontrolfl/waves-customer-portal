@@ -325,7 +325,10 @@ function wireLocalModeHooks() {
     // full rationale.
     require('../models/db'); // fail-loud if knexfile has no config for env
     try {
-      await localEngine.syncConstantsFromDB();
+      const synced = await localEngine.syncConstantsFromDB();
+      if (!synced) {
+        throw new Error('syncConstantsFromDB returned false');
+      }
     } catch (err) {
       throw new Error(
         `[LOCAL mode] syncConstantsFromDB failed (${err.message}). ` +

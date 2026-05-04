@@ -71,10 +71,10 @@
     "recurring": {
       "tier": "Platinum",
       "discount": 0.2,
-      "annualBeforeDiscount": 3929,
-      "annualAfterDiscount": 3143.2,
-      "monthlyTotal": 261.93,
-      "savings": 785.8,
+      "annualBeforeDiscount": 3901,
+      "annualAfterDiscount": 3120.8,
+      "monthlyTotal": 260.07,
+      "savings": 780.2,
       "serviceCount": 4
     },
     "results": {
@@ -102,19 +102,19 @@
       ],
       "pestTiers": [
         {
-          "mo": 49.67,
+          "mo": 47.33,
           "apps": 4,
           "recommended": true,
           "label": "Quarterly"
         },
         {
-          "mo": 63.33,
+          "mo": 60.35,
           "apps": 6,
           "recommended": false,
           "label": "Bi-Monthly"
         },
         {
-          "mo": 104.3,
+          "mo": 99.4,
           "apps": 12,
           "recommended": false,
           "label": "Monthly"
@@ -154,8 +154,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 3242.2,
-      "year2": 3143.2
+      "year1": 3219.8,
+      "year2": 3120.8
     }
   },
   "v1adapter_boracare_attic_2000sf": {
@@ -345,18 +345,18 @@
       "tmBait": null
     },
     "oneTime": {
-      "total": 330,
+      "total": 444,
       "tmInstall": 0,
       "items": [
         {
           "name": "One-Time Pest",
-          "price": 330
+          "price": 444
         }
       ],
       "specItems": []
     },
     "totals": {
-      "year1": 330,
+      "year1": 444,
       "year2": 0
     }
   },
@@ -378,18 +378,18 @@
       "tmBait": null
     },
     "oneTime": {
-      "total": 150,
+      "total": 199,
       "tmInstall": 0,
       "items": [
         {
           "name": "One-Time Pest",
-          "price": 150
+          "price": 199
         }
       ],
       "specItems": []
     },
     "totals": {
-      "year1": 150,
+      "year1": 199,
       "year2": 0
     }
   },
@@ -454,25 +454,25 @@
       "ts": [],
       "mq": [],
       "tmBait": {
-        "ai": 0,
-        "ti": 1313,
+        "ai": 695,
+        "ti": 0,
         "bmo": 35,
         "pmo": 65
       }
     },
     "oneTime": {
-      "total": 1313,
-      "tmInstall": 1313,
+      "total": 695,
+      "tmInstall": 695,
       "items": [
         {
-          "name": "Trelona Installation",
-          "price": 1313
+          "name": "Advance Installation",
+          "price": 695
         }
       ],
       "specItems": []
     },
     "totals": {
-      "year1": 1733,
+      "year1": 1115,
       "year2": 420
     }
   },
@@ -480,9 +480,9 @@
     "recurring": {
       "tier": "Bronze",
       "discount": 0,
-      "annualBeforeDiscount": 828,
-      "annualAfterDiscount": 828,
-      "monthlyTotal": 69,
+      "annualBeforeDiscount": 0,
+      "annualAfterDiscount": 0,
+      "monthlyTotal": 0,
       "savings": 0,
       "serviceCount": 0
     },

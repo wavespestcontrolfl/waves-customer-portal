@@ -30,7 +30,7 @@ describe('newsletter buildSubscriberQuery', () => {
   test('null filter targets every active subscriber', () => {
     const { sql, bindings } = shapeOf(null);
     expect(sql).toMatch(/from "newsletter_subscribers"/);
-    expect(sql).toMatch(/"status" = \$1/);
+    expect(sql).toMatch(/"status" = (?:\$1|\?)/);
     expect(bindings).toContain('active');
     expect(sql).not.toMatch(/customer_id/);
     expect(sql).not.toMatch(/source/);
@@ -50,7 +50,7 @@ describe('newsletter buildSubscriberQuery', () => {
 
   test('sources filter binds each value via whereIn', () => {
     const { sql, bindings } = shapeOf({ sources: ['website', 'quote_wizard'] });
-    expect(sql).toMatch(/"source" in \(\$\d+, \$\d+\)/);
+    expect(sql).toMatch(/"source" in \((?:\$\d+|\?), (?:\$\d+|\?)\)/);
     expect(bindings).toEqual(expect.arrayContaining(['website', 'quote_wizard']));
   });
 
@@ -61,10 +61,7 @@ describe('newsletter buildSubscriberQuery', () => {
 
   test('tags filter uses jsonb ?| operator with N bindings', () => {
     const { sql, bindings } = shapeOf({ tags: ['platinum-tier', 'hurricane-prep'] });
-    // Knex emits the raw fragment we passed; verify both bindings made it
-    // through and the ?| operator is present (escaped as ?\| by some
-    // parameter parsers — accept either rendering).
-    expect(sql).toMatch(/tags \?\|? array\[\?,\?\]/);
+    expect(sql).toMatch(/tags \\?\?\| array\[\?,\?\]/);
     expect(bindings).toEqual(expect.arrayContaining(['platinum-tier', 'hurricane-prep']));
   });
 
@@ -74,10 +71,10 @@ describe('newsletter buildSubscriberQuery', () => {
       tags: ['vip'],
       sources: ['admin_manual'],
     });
-    expect(sql).toMatch(/"status" = \$1/);
+    expect(sql).toMatch(/"status" = (?:\$1|\?)/);
     expect(sql).toMatch(/"customer_id" is not null/);
     expect(sql).toMatch(/"source" in/);
-    expect(sql).toMatch(/tags \?\|? array/);
+    expect(sql).toMatch(/tags \\?\?\| array/);
     expect(bindings).toEqual(expect.arrayContaining(['active', 'admin_manual', 'vip']));
   });
 
