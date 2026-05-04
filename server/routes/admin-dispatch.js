@@ -434,6 +434,10 @@ function parseJsonObject(value) {
   return {};
 }
 
+function serializeJsonb(value) {
+  return JSON.stringify(value ?? null);
+}
+
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 // POST /api/admin/dispatch/recap-preview
@@ -939,18 +943,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     } else {
       try {
         await db.transaction(async (trx) => {
-        // 1. service_record — the canonical "completion happened" audit.
-        // scheduled_service_id is the FK back to the source row so
-        // downstream code (e.g., tech-track's photo upload) can resolve
-        // record-from-service unambiguously. Codex P1 on PR #340 — the
-        // old (customer_id, technician_id, service_date) soft-join
-        // collided on same-day same-customer-same-tech double visits.
-        [record] = await trx('service_records').insert({
-          scheduled_service_id: svc.id,
-          customer_id: svc.customer_id, technician_id: svc.technician_id,
-          service_date: svc.scheduled_date, service_type: svc.service_type, status: isIncompleteVisit ? 'incomplete' : 'completed',
-          technician_notes: technicianNotes || '',
-          structured_notes: {
+          const structuredNotes = {
             visitOutcome,
             requestReview: isIncompleteVisit ? false : requestReview !== false,
             reviewSuppression,
@@ -965,8 +958,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             waveguardManagerApproval,
             waveguardTankCleanout,
             inventoryDeductions,
-          },
-          areas_serviced: completionAreas,
+          };
+
+        // 1. service_record — the canonical "completion happened" audit.
+        // scheduled_service_id is the FK back to the source row so
+        // downstream code (e.g., tech-track's photo upload) can resolve
+        // record-from-service unambiguously. Codex P1 on PR #340 — the
+        // old (customer_id, technician_id, service_date) soft-join
+        // collided on same-day same-customer-same-tech double visits.
+        [record] = await trx('service_records').insert({
+          scheduled_service_id: svc.id,
+          customer_id: svc.customer_id, technician_id: svc.technician_id,
+          service_date: svc.scheduled_date, service_type: svc.service_type, status: isIncompleteVisit ? 'incomplete' : 'completed',
+          technician_notes: technicianNotes || '',
+          structured_notes: serializeJsonb(structuredNotes),
+          areas_serviced: serializeJsonb(completionAreas),
           customer_interaction: customerInteraction || null,
           soil_temp: soilTemp || null, thatch_measurement: thatchMeasurement || null,
           soil_ph: soilPh || null, soil_moisture: soilMoisture || null,
@@ -1055,7 +1061,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           };
           await trx('service_records')
             .where({ id: record.id })
-            .update({ structured_notes: record.structured_notes });
+            .update({ structured_notes: serializeJsonb(record.structured_notes) });
         }
 
         // 3. Legacy audit row INSIDE the trx — race rejection rolls it
@@ -1433,7 +1439,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             completionSmsAttemptedAt: new Date().toISOString(),
           };
           await db('service_records').where({ id: record.id }).update({
-            structured_notes: sendingNotes,
+            structured_notes: serializeJsonb(sendingNotes),
           });
           const smsResult = await sendCustomerMessage({
             to: svc.cust_phone,
@@ -1447,13 +1453,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             metadata: { original_message_type: sentSmsType, service_record_id: record.id },
           });
           if (!smsResult.sent) {
+            const failedNotes = {
+              ...sendingNotes,
+              completionSmsStatus: smsResult.blocked ? 'blocked' : 'failed',
+              completionSmsError: smsResult.reason || smsResult.code || 'SMS send failed',
+              completionSmsFailedAt: new Date().toISOString(),
+            };
             await db('service_records').where({ id: record.id }).update({
-              structured_notes: {
-                ...sendingNotes,
-                completionSmsStatus: smsResult.blocked ? 'blocked' : 'failed',
-                completionSmsError: smsResult.reason || smsResult.code || 'SMS send failed',
-                completionSmsFailedAt: new Date().toISOString(),
-              },
+              structured_notes: serializeJsonb(failedNotes),
             });
             logger.warn(`[dispatch] Completion SMS blocked/failed for customer ${svc.customer_id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
           } else {
@@ -1465,7 +1472,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               sentSmsType,
             };
             await db('service_records').where({ id: record.id }).update({
-              structured_notes: sentNotes,
+              structured_notes: serializeJsonb(sentNotes),
             });
             record.structured_notes = sentNotes;
           }
