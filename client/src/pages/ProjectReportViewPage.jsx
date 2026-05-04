@@ -105,6 +105,55 @@ function humanizeKey(k) {
   return FIELD_LABELS[k] || k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
+function includesAny(text, words) {
+  const value = String(text || '').toLowerCase();
+  return words.some(word => value.includes(word));
+}
+
+function buildClientSnapshot({ projectType, findings, recommendations }) {
+  const allText = [
+    projectType,
+    recommendations,
+    ...Object.values(findings || {}),
+  ].filter(Boolean).join(' ').toLowerCase();
+
+  const hasAction = shouldShowBookingCta(recommendations);
+  const hasMoisture = includesAny(allText, ['moisture', 'wood rot', 'rot ', 'leak', 'eave', 'attic']);
+  const hasWdo = includesAny(allText, ['termite', 'wdo', 'wood-destroying', 'shelter tube', 'frass', 'boracare', 'bora care']);
+  const hasRodent = includesAny(allText, ['rodent', 'rat', 'mouse', 'entry point', 'exclusion', 'trap']);
+  const clean = includesAny(allText, ['no visible signs', 'no activity', 'none observed', 'not observed']) && !hasAction;
+
+  if (clean) {
+    return {
+      priority: 'Monitor',
+      meaning: 'No visible active issue was documented at the time of inspection.',
+      next: 'Keep routine service and address new activity, moisture, or access issues if they appear.',
+    };
+  }
+  if (hasWdo || hasMoisture) {
+    return {
+      priority: hasAction ? 'Action recommended' : 'Review recommended',
+      meaning: 'Moisture, wood damage, or WDO evidence can affect structural materials and may worsen if the source is not corrected.',
+      next: hasAction ? 'Review the recommendation and schedule the listed treatment or follow-up.' : 'Review the findings and contact Waves if you want help prioritizing repairs or treatment.',
+    };
+  }
+  if (hasRodent) {
+    return {
+      priority: hasAction ? 'Action recommended' : 'Review recommended',
+      meaning: 'Rodent access points and travel signs can continue producing activity until entry routes are corrected.',
+      next: hasAction ? 'Schedule the recommended exclusion, trapping, or follow-up plan.' : 'Review the mapped areas and contact Waves with any activity changes.',
+    };
+  }
+  if (hasAction) {
+    return {
+      priority: 'Action recommended',
+      meaning: 'The inspection found conditions that benefit from a targeted service or follow-up.',
+      next: 'Use the recommendation below to book the correct next visit.',
+    };
+  }
+  return null;
+}
+
 export default function ProjectReportViewPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
@@ -145,6 +194,11 @@ export default function ProjectReportViewPage() {
   const projectDateLabel = formatReportDate(data.projectDate || data.sentAt);
   const sentDateLabel = data.sentAt ? formatReportDate(data.sentAt) : '';
   const showSentDate = sentDateLabel && reportDateKey(data.sentAt) !== reportDateKey(data.projectDate);
+  const clientSnapshot = buildClientSnapshot({
+    projectType: data.projectType,
+    findings,
+    recommendations: data.recommendations,
+  });
 
   return (
     <div style={{ minHeight: '100vh', background: B.offWhite, fontFamily: FONTS.body }}>
@@ -188,6 +242,26 @@ export default function ProjectReportViewPage() {
           )}
           {data.cityState && (
             <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>{data.cityState}</div>
+          )}
+
+          {clientSnapshot && (
+            <div style={{
+              marginTop: 16,
+              padding: '12px 14px',
+              borderRadius: 10,
+              background: '#FFF9DB',
+              border: `1px solid ${B.yellow}`,
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: B.blueDeeper, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                Next step: {clientSnapshot.priority}
+              </div>
+              <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, marginTop: 6 }}>
+                {clientSnapshot.meaning}
+              </div>
+              <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.5, marginTop: 6 }}>
+                {clientSnapshot.next}
+              </div>
+            </div>
           )}
 
           {/* Findings */}
@@ -323,12 +397,12 @@ function PhotoGrid({ title, photos, noCard }) {
                 style={{ width: '100%', height: '100%', objectFit: 'cover' }}
               />
             ) : null}
-            {ph.category && (
+            {(ph.caption || ph.category) && (
               <div style={{
                 position: 'absolute', left: 0, right: 0, bottom: 0,
                 padding: '4px 6px', background: 'rgba(0,0,0,0.5)', color: '#fff',
                 fontSize: 10, fontWeight: 600, textTransform: 'capitalize',
-              }}>{ph.category.replace(/_/g, ' ')}</div>
+              }}>{ph.caption || ph.category.replace(/_/g, ' ')}</div>
             )}
           </a>
         ))}
