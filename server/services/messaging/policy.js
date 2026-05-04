@@ -108,7 +108,8 @@ const TRUST_RANK = {
  *                             audience where emoji is permitted (see internal_briefing).
  *   - allowExactPrice         Customer/lead audiences are NEVER allowed exact dollar
  *                             amounts in outbound SMS. Internal/admin can quote.
- *   - maxSegments             Hard cap on SMS segment count.
+ *   - maxSegments             Advisory SMS segment target for UI/audit only.
+ *                             The send pipeline does not block on length.
  *   - requireConsent          Which consent shape the validator must see.
  *                               'transactional' — sms_enabled true is enough
  *                               'marketing'     — sms_enabled true AND

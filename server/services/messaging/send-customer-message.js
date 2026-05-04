@@ -12,7 +12,7 @@
  *   2. Suppression is checked before every customer/lead send.
  *   3. Customer-facing emoji and exact-price leaks fail closed.
  *   4. Sensitive purposes (payment_link, billing) require identity context.
- *   5. Segment count is computed, logged, and enforced.
+ *   5. Segment count is computed and logged for audit/visibility.
  *   6. Internal BI keeps its emoji/3-segment behavior via audience='internal'.
  *   7. Every send attempt — sent OR blocked — is recorded in the audit log.
  *
@@ -27,7 +27,6 @@
  *   validate_identity_trust            — identityTrustLevel >= policy.minIdentityTrust
  *   validate_no_customer_emoji         — fail closed when audience in [customer, lead]
  *   validate_no_price_leak             — fail closed when audience in [customer, lead]
- *   validate_segment_count             — GSM-7/UCS-2 aware
  *   persist_audit_log                  — every attempt, blocked or sent
  *   send_via_provider                  — twilio for sms; email/portal_chat in follow-up
  *   persist_delivery_attempt           — fold provider outcome into audit row
@@ -45,7 +44,7 @@ const { loadContactState, checkConsentForPurpose } = require('./validators/conse
 const { loadSuppressionState, checkSuppression } = require('./validators/suppression');
 const { validateRequiredIds, validateIdentityTrust, resolveTrustLevel } = require('./validators/identity');
 const { validateNoCustomerEmoji, validateNoPriceLeak } = require('./validators/voice');
-const { validateSegmentCount, countSegments } = require('./segment-counter');
+const { countSegments } = require('./segment-counter');
 const { persistAudit } = require('./audit');
 const { sendViaTwilio } = require('./providers/twilio-sms');
 
@@ -115,7 +114,6 @@ async function sendCustomerMessage(input) {
     { name: 'validate_identity_trust',    fn: () => validateIdentityTrust(sendInput, policy, contactState) },
     { name: 'validate_no_customer_emoji', fn: () => validateNoCustomerEmoji(sendInput, policy) },
     { name: 'validate_no_price_leak',     fn: () => validateNoPriceLeak(sendInput, policy) },
-    { name: 'validate_segment_count',     fn: () => validateSegmentCount(sendInput, policy) },
   ];
 
   const validatorsPassed = [];
