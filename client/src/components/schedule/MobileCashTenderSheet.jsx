@@ -1,9 +1,9 @@
 // Cash tender with numpad — Square-style per IMG_3862. The amount field
 // defaults to the invoice total via placeholder; numpad taps build a
 // cents-based amount that overrides on submit. Tender fires the existing
-// /admin/schedule/:id/prepaid endpoint with method='cash'; the completion
-// flow already knows to skip auto-invoicing and send a thank-you SMS when
-// a prepayment is on record.
+// /admin/invoices/:id/record-payment endpoint with method='cash'. Checkout
+// mints the invoice before this sheet opens, so cash needs to settle that
+// invoice instead of writing only a scheduled-service prepaid marker.
 
 import { ArrowLeft, Delete } from 'lucide-react';
 import { useState } from 'react';
@@ -16,7 +16,7 @@ function fmt(cents) {
 }
 
 export default function MobileCashTenderSheet({
-  service,
+  invoiceId,
   amount,           // invoice total (dollars)
   onClose,
   onRecorded,
@@ -49,23 +49,31 @@ export default function MobileCashTenderSheet({
       setError('Enter an amount');
       return;
     }
-    if (!service?.id) {
-      setError('Missing appointment id');
+    if (!invoiceId) {
+      setError('Missing invoice id');
+      return;
+    }
+    if (Math.round(submitAmount * 100) !== Math.round(Number(amount || 0) * 100)) {
+      setError('Cash payment must match the invoice total');
       return;
     }
     setSaving(true);
     setError(null);
     try {
-      const r = await fetch(`${API_BASE}/admin/schedule/${service.id}/prepaid`, {
+      const r = await fetch(`${API_BASE}/admin/invoices/${invoiceId}/record-payment`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
         },
-        body: JSON.stringify({ amount: submitAmount, method: 'cash', note: null }),
+        body: JSON.stringify({ method: 'cash', note: null, sendReceipt: false }),
       });
-      if (!r.ok) throw new Error(await r.text().catch(() => `${r.status}`));
-      onRecorded?.({ amount: submitAmount, method: 'cash' });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || 'Failed to record payment');
+      }
+      const data = await r.json();
+      onRecorded?.({ amount: submitAmount, method: 'cash', invoice: data.invoice });
       onClose?.();
     } catch (e) {
       setError(e.message || 'Failed to record payment');

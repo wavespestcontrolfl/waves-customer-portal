@@ -774,6 +774,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       tankCleanout,
       formResponses,
       formStartedAt,
+      invoiceAlreadySent = false,
     } = req.body;
     if (!VALID_VISIT_OUTCOMES.has(visitOutcome)) {
       return res.status(400).json({
@@ -979,6 +980,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             incompleteReason,
             customerConcernText: concernText || null,
             customerRecap: customerRecap || null,
+            invoiceAlreadySent: !!invoiceAlreadySent,
             areasTreated: completionAreas,
             waveguardEquipmentSystemId,
             waveguardCalibrationId,
@@ -1416,6 +1418,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       ? `\n\nEnjoyed the service? A quick review means the world: ${bundledReviewUrl}`
       : '';
 
+    const suppressCompletionInvoiceLink = !!invoiceAlreadySent;
     const recordStructuredNotes = parseJsonObject(record.structured_notes);
     const completionSmsAttemptedAt = recordStructuredNotes.completionSmsAttemptedAt
       ? new Date(recordStructuredNotes.completionSmsAttemptedAt).getTime()
@@ -1439,7 +1442,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         let sentSmsBody = null;
         let completionSmsWasTruncated = false;
         let sentSmsType = null;
-        if (invoiceCreated && payUrl) {
+        if (invoiceCreated && payUrl && !suppressCompletionInvoiceLink) {
           const fallback = `Hello ${svc.first_name}! Your ${displayServiceType} service report is ready: ${portalUrl}\n\nInvoice for today's visit: ${payUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = await renderTemplate('service_complete_with_invoice', {
             first_name: svc.first_name || '',
@@ -1500,6 +1503,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             await db('service_records').where({ id: record.id }).update({
               structured_notes: serializeJsonb(failedNotes),
             });
+            record.structured_notes = failedNotes;
             logger.warn(`[dispatch] Completion SMS blocked/failed for customer ${svc.customer_id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
           } else {
             const sentNotes = {
@@ -1515,7 +1519,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             record.structured_notes = sentNotes;
           }
         }
-      } catch (e) { logger.error(`Completion SMS failed: ${e.message}`); }
+      } catch (e) {
+        const failedNotes = {
+          ...parseJsonObject(record.structured_notes),
+          completionSmsStatus: 'failed',
+          completionSmsError: e.message || 'SMS send failed',
+          completionSmsFailedAt: new Date().toISOString(),
+        };
+        await db('service_records').where({ id: record.id }).update({
+          structured_notes: serializeJsonb(failedNotes),
+        }).catch((updateErr) => logger.error(`Completion SMS failure status update failed: ${updateErr.message}`));
+        record.structured_notes = failedNotes;
+        logger.error(`Completion SMS failed: ${e.message}`);
+      }
     } else if (sendCompletionSms && svc.cust_phone && completionSmsAlreadyHandled) {
       logger.info(`[dispatch] Completion SMS already sent for service_record ${record.id}; skipping retry send`);
     }
@@ -1572,11 +1588,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }
     }
 
+    const finalRecordNotes = parseJsonObject(record.structured_notes);
+    const completionSmsStatus = finalRecordNotes.completionSmsStatus
+      || (sendCompletionSms ? (svc.cust_phone ? 'not_sent' : 'no_phone') : 'not_requested');
     const responsePayload = {
       success: true,
       serviceRecordId: record.id,
       invoiceId: invoice?.id || null,
       invoiceTotal: invoice?.total != null ? Number(invoice.total) : null,
+      completionSmsStatus,
+      completionSmsError: finalRecordNotes.completionSmsError || null,
+      completionSmsType: finalRecordNotes.completionSmsType || finalRecordNotes.sentSmsType || null,
+      completionSmsTruncated: !!finalRecordNotes.completionSmsTruncated,
     };
     // Refresh the stored response with the final invoice info — this is an
     // UPDATE of an already-succeeded row (set above immediately after the

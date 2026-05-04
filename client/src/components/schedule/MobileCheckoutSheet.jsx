@@ -186,7 +186,13 @@ export default function MobileCheckoutSheet({
       if (!r.ok) throw new Error(await r.text().catch(() => `${r.status}`));
       const data = await r.json();
       if (!data.invoiceId) throw new Error('No invoice id returned');
-      onChargeSuccess?.({ service, invoiceId: data.invoiceId, invoiceToken: data.token, amount: total });
+      const confirmedTotal = Number(data.total);
+      onChargeSuccess?.({
+        service,
+        invoiceId: data.invoiceId,
+        invoiceToken: data.token,
+        amount: Number.isFinite(confirmedTotal) ? confirmedTotal : total,
+      });
     } catch (e) {
       setMintError(e.message || 'Failed to create invoice');
       setMinting(false);

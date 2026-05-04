@@ -1,8 +1,8 @@
 // Check tender — Square-style per IMG_3864. Amount is for tracking only;
 // no actual processing happens (the customer hands over a physical check).
-// Fires the existing /admin/schedule/:id/prepaid endpoint with
-// method='check' so the completion flow knows not to auto-invoice and
-// sends a thank-you SMS instead of a pay-link SMS.
+// Fires /admin/invoices/:id/record-payment with method='check'. Checkout
+// mints the invoice before this sheet opens, so the check payment must mark
+// that invoice paid for AR and completion-SMS branching.
 
 import { ArrowLeft } from 'lucide-react';
 import { useState } from 'react';
@@ -10,7 +10,7 @@ import { useState } from 'react';
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 export default function MobileCheckTenderSheet({
-  service,
+  invoiceId,
   amount,           // invoice total (dollars)
   onClose,
   onRecorded,
@@ -23,27 +23,32 @@ export default function MobileCheckTenderSheet({
 
   async function handleRecord() {
     if (saving) return;
-    if (!service?.id) {
-      setError('Missing appointment id');
+    if (!invoiceId) {
+      setError('Missing invoice id');
       return;
     }
     setSaving(true);
     setError(null);
     try {
-      const r = await fetch(`${API_BASE}/admin/schedule/${service.id}/prepaid`, {
+      const r = await fetch(`${API_BASE}/admin/invoices/${invoiceId}/record-payment`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
         },
         body: JSON.stringify({
-          amount: Number(amount || 0),
           method: 'check',
           note: note.trim() || null,
+          reference: note.trim() || null,
+          sendReceipt: false,
         }),
       });
-      if (!r.ok) throw new Error(await r.text().catch(() => `${r.status}`));
-      onRecorded?.({ amount: Number(amount || 0), method: 'check', note });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || 'Failed to record payment');
+      }
+      const data = await r.json();
+      onRecorded?.({ amount: Number(amount || 0), method: 'check', note, invoice: data.invoice });
       onClose?.();
     } catch (e) {
       setError(e.message || 'Failed to record payment');
