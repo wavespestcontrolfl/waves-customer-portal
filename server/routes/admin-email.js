@@ -1,7 +1,8 @@
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const gmailClient = require('../services/email/gmail-client');
 const { syncEmails } = require('../services/email/email-sync');
 const { classifyEmail } = require('../services/email/email-classifier');
@@ -10,17 +11,25 @@ const { unblockSender } = require('../services/email/spam-blocker');
 const logger = require('../services/logger');
 
 const MAX_PAGE_LIMIT = 200;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const DOMAIN_RE = /^(?!-)(?:[a-z0-9-]{1,63}\.)+[a-z]{2,63}$/i;
 
-// Gate everything except the browser-initiated OAuth endpoints.
-// /oauth/start is hit via <a href> (no Authorization header possible)
+function redactEmail(value) {
+  const normalized = value ? String(value).trim().toLowerCase() : '';
+  const [local, domain] = normalized.split('@');
+  if (!local || !domain) return normalized || 'unknown';
+  return `${local.slice(0, 1)}***@${domain}`;
+}
+
+// Gate everything except Google's OAuth callback.
 // /oauth/callback is hit by Google's redirect (no Authorization header possible)
 // All other routes require admin auth.
-const OAUTH_PUBLIC_PATHS = new Set(['/oauth/start', '/oauth/callback']);
+const OAUTH_PUBLIC_PATHS = new Set(['/oauth/callback']);
 router.use((req, res, next) => {
   if (OAUTH_PUBLIC_PATHS.has(req.path)) return next();
   return adminAuthenticate(req, res, (err) => {
     if (err) return next(err);
-    return requireTechOrAdmin(req, res, next);
+    return requireAdmin(req, res, next);
   });
 });
 
@@ -28,11 +37,41 @@ router.use((req, res, next) => {
 // OAuth flow
 // ============================================
 
-// GET /oauth/start — redirect to Google OAuth
-router.get('/oauth/start', (req, res) => {
+async function createOauthState() {
+  const state = crypto.randomBytes(32).toString('base64url');
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+  const existing = await db('email_sync_state').first();
+  if (existing) {
+    await db('email_sync_state').where('id', existing.id).update({
+      oauth_state: state,
+      oauth_state_expires_at: expiresAt,
+    });
+  } else {
+    await db('email_sync_state').insert({
+      emails_synced: 0,
+      oauth_state: state,
+      oauth_state_expires_at: expiresAt,
+    });
+  }
+  return state;
+}
+
+// GET /oauth/auth-url — create signed OAuth URL for an authenticated admin
+router.get('/oauth/auth-url', async (req, res) => {
   try {
-    const url = gmailClient.getAuthUrl();
-    res.redirect(url);
+    const state = await createOauthState();
+    res.json({ url: gmailClient.getAuthUrl(state) });
+  } catch (err) {
+    logger.error(`[email] OAuth start error: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /oauth/start — authenticated redirect fallback for non-SPA callers
+router.get('/oauth/start', async (req, res) => {
+  try {
+    const state = await createOauthState();
+    res.redirect(gmailClient.getAuthUrl(state));
   } catch (err) {
     logger.error(`[email] OAuth start error: ${err.message}`);
     res.status(500).json({ error: err.message });
@@ -42,10 +81,22 @@ router.get('/oauth/start', (req, res) => {
 // GET /oauth/callback — handle Google callback
 router.get('/oauth/callback', async (req, res) => {
   try {
-    const { code } = req.query;
+    const { code, state } = req.query;
     if (!code) return res.status(400).send('Missing authorization code');
+    if (!state) return res.status(400).send('Missing OAuth state');
+
+    const syncState = await db('email_sync_state').first();
+    const stateExpires = syncState?.oauth_state_expires_at ? new Date(syncState.oauth_state_expires_at) : null;
+    if (!syncState?.oauth_state || syncState.oauth_state !== state || !stateExpires || stateExpires < new Date()) {
+      logger.warn('[email] OAuth callback rejected: invalid or expired state');
+      return res.status(400).send('Invalid or expired OAuth state');
+    }
 
     await gmailClient.handleCallback(code);
+    await db('email_sync_state').where('id', syncState.id).update({
+      oauth_state: null,
+      oauth_state_expires_at: null,
+    });
     logger.info('[email] Gmail OAuth connected successfully');
 
     // Trigger initial sync in the background
@@ -300,7 +351,10 @@ router.get('/stats', async (req, res) => {
   try {
     const [unread] = await db('emails').where({ is_read: false, is_archived: false }).count('* as count');
     const [total] = await db('emails').where({ is_archived: false }).count('* as count');
-    const [vendor] = await db('emails').where({ classification: 'vendor', is_archived: false }).count('* as count');
+    const [vendor] = await db('emails')
+      .where({ is_archived: false })
+      .whereIn('classification', ['vendor_invoice', 'vendor_communication'])
+      .count('* as count');
     const [starred] = await db('emails').where({ is_starred: true, is_archived: false }).count('* as count');
 
     const today = new Date();
@@ -472,7 +526,12 @@ router.post('/block', async (req, res) => {
     const { email_address, domain, reason } = req.body;
     if (!email_address && !domain) return res.status(400).json({ error: 'email_address or domain required' });
 
-    const blockDomain = domain || email_address.split('@')[1];
+    const blockEmail = email_address ? String(email_address).trim().toLowerCase() : null;
+    const blockDomain = domain ? String(domain).trim().toLowerCase().replace(/^@/, '') : null;
+    if (!blockEmail && !blockDomain) return res.status(400).json({ error: 'email_address or domain required' });
+    if (blockEmail && !EMAIL_RE.test(blockEmail)) return res.status(400).json({ error: 'Invalid email address' });
+    if (blockDomain && !DOMAIN_RE.test(blockDomain)) return res.status(400).json({ error: 'Invalid domain' });
+    const filterFrom = blockEmail || `@${blockDomain}`;
 
     // Create Gmail filter
     let gmailFilterId = null;
@@ -480,7 +539,7 @@ router.post('/block', async (req, res) => {
       const gmail = await gmailClient.getGmail();
       const filter = await gmail.users.settings.filters.create({
         userId: 'me',
-        requestBody: { criteria: { from: `@${blockDomain}` }, action: { removeLabelIds: ['INBOX'], addLabelIds: ['TRASH'] } },
+        requestBody: { criteria: { from: filterFrom }, action: { removeLabelIds: ['INBOX'], addLabelIds: ['TRASH'] } },
       });
       gmailFilterId = filter.data.id;
     } catch (e) {
@@ -489,14 +548,15 @@ router.post('/block', async (req, res) => {
 
     const [entry] = await db('blocked_email_senders')
       .insert({
-        email_address: email_address || null,
+        email_address: blockEmail,
         domain: blockDomain,
         gmail_filter_id: gmailFilterId,
         reason: reason || 'Manual block',
+        blocked_count: 0,
       })
       .returning('*');
 
-    logger.info(`[email] Manually blocked domain: ${blockDomain}`);
+    logger.info(`[email] Manually blocked sender: ${blockEmail ? redactEmail(blockEmail) : `@${blockDomain}`}`);
     res.json(entry);
   } catch (err) {
     res.status(500).json({ error: err.message });

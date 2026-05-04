@@ -2,30 +2,55 @@ const { google } = require('googleapis');
 const db = require('../../models/db');
 const logger = require('../logger');
 
+const SHARED_EMAIL_DOMAINS = new Set([
+  'gmail.com',
+  'googlemail.com',
+  'outlook.com',
+  'hotmail.com',
+  'live.com',
+  'msn.com',
+  'icloud.com',
+  'me.com',
+  'mac.com',
+  'yahoo.com',
+  'aol.com',
+  'proton.me',
+  'protonmail.com',
+]);
+
+function redactEmail(value) {
+  const normalized = value ? String(value).trim().toLowerCase() : '';
+  const [local, domain] = normalized.split('@');
+  if (!local || !domain) return 'unknown';
+  return `${local.slice(0, 1)}***@${domain}`;
+}
+
 async function blockSpamSender(email) {
-  const domain = email.from_address?.split('@')[1];
+  const fromAddress = email.from_address?.trim().toLowerCase();
+  const domain = fromAddress?.split('@')[1];
   if (!domain) return;
+  const redactedFrom = redactEmail(fromAddress);
 
   // Don't block known good domains
   const isVendor = await db('vendor_email_domains').where('domain', domain).first();
   if (isVendor) return;
 
   // Don't block customer emails
-  const isCustomer = await db('customers').where('email', email.from_address).first();
+  const isCustomer = await db('customers').where('email', fromAddress).first();
   if (isCustomer) return;
 
   // Check if already blocked
-  const existing = await db('blocked_email_senders')
-    .where('domain', domain)
-    .orWhere('email_address', email.from_address)
-    .first();
+  const existingQuery = db('blocked_email_senders').where('email_address', fromAddress);
+  if (!SHARED_EMAIL_DOMAINS.has(domain)) existingQuery.orWhere('domain', domain);
+  const existing = await existingQuery.first();
 
   if (existing) {
     await db('blocked_email_senders').where({ id: existing.id }).increment('blocked_count', 1);
     return;
   }
 
-  // Create Gmail filter to auto-delete future emails from this domain
+  // Auto-spam decisions block the exact sender. Domain-wide blocks stay manual
+  // because one bad shared-domain sender should not trash unrelated customers.
   let filterId = null;
   try {
     const gmailClient = require('./gmail-client');
@@ -35,25 +60,25 @@ async function blockSpamSender(email) {
       const filter = await gmail.users.settings.filters.create({
         userId: 'me',
         requestBody: {
-          criteria: { from: `@${domain}` },
+          criteria: { from: fromAddress },
           action: { removeLabelIds: ['INBOX'], addLabelIds: ['TRASH'] },
         },
       });
       filterId = filter.data.id;
-      logger.info(`[spam-blocker] Gmail filter created for @${domain}: ${filterId}`);
+      logger.info(`[spam-blocker] Gmail filter created for ${redactedFrom}: ${filterId}`);
     }
   } catch (err) {
-    logger.warn(`[spam-blocker] Gmail filter creation failed for @${domain}: ${err.message}`);
+    logger.warn(`[spam-blocker] Gmail filter creation failed for ${redactedFrom}: ${err.message}`);
   }
 
   await db('blocked_email_senders').insert({
-    domain,
-    email_address: email.from_address,
+    domain: null,
+    email_address: fromAddress,
     gmail_filter_id: filterId,
     reason: 'spam_auto',
   });
 
-  logger.info(`[spam-blocker] Blocked: @${domain} (${email.from_address})`);
+  logger.info(`[spam-blocker] Blocked sender: ${redactedFrom}`);
 }
 
 async function unblockSender(id) {
@@ -80,10 +105,11 @@ async function unblockSender(id) {
 
 async function isBlocked(fromAddress) {
   if (!fromAddress) return false;
-  const domain = fromAddress.split('@')[1];
+  const normalized = fromAddress.trim().toLowerCase();
+  const domain = normalized.split('@')[1];
   const blocked = await db('blocked_email_senders')
     .where('domain', domain)
-    .orWhere('email_address', fromAddress)
+    .orWhere('email_address', normalized)
     .first();
 
   if (blocked) {

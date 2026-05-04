@@ -701,11 +701,11 @@ router.put('/:serviceId/status', async (req, res, next) => {
 
       try {
         const AppointmentReminders = require('../services/appointment-reminders');
-        for (const target of targets) {
-          await AppointmentReminders.handleCancellation(target.id, {
-            sendNotification: notifyCustomer !== false && String(target.id) === String(svc.id),
-          });
-        }
+        const targetIds = targets.map((target) => target.id);
+        await AppointmentReminders.handleSeriesCancellation(targetIds, svc.id, {
+          sendNotification: notifyCustomer !== false,
+          scope,
+        });
       } catch (e) { logger.error(`[admin-dispatch] series cancellation reminder handling failed: ${e.message}`); }
 
       for (const target of targets) {
