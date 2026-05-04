@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const DiscountEngine = require('../services/discount-engine');
 const logger = require('../services/logger');
 
@@ -46,30 +46,40 @@ router.get('/', async (req, res, next) => {
 });
 
 // POST /api/admin/discounts — create discount
-router.post('/', async (req, res, next) => {
+router.post('/', requireAdmin, async (req, res, next) => {
   try {
-    const data = buildDiscountData(req.body);
+    const data = buildDiscountData(req.body, { generateKey: true });
+    if (!data.name || !String(data.name).trim()) return res.status(400).json({ error: 'Discount name is required' });
+    if (!data.discount_key) return res.status(400).json({ error: 'Discount key is required' });
     const [disc] = await db('discounts').insert(data).returning('*');
     DiscountEngine.clearCache();
     logger.info(`[discounts] Created: ${disc.name}`);
     res.status(201).json(disc);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'Discount key or promo code already exists' });
+    next(err);
+  }
 });
 
 // PUT /api/admin/discounts/:id — update
-router.put('/:id', async (req, res, next) => {
+router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
     const data = buildDiscountData(req.body);
+    if (data.name !== undefined && !String(data.name).trim()) return res.status(400).json({ error: 'Discount name is required' });
+    if (data.discount_key !== undefined && !data.discount_key) return res.status(400).json({ error: 'Discount key is required' });
     data.updated_at = new Date();
     const [disc] = await db('discounts').where({ id: req.params.id }).update(data).returning('*');
     if (!disc) return res.status(404).json({ error: 'Discount not found' });
     DiscountEngine.clearCache();
     res.json(disc);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'Discount key or promo code already exists' });
+    next(err);
+  }
 });
 
 // DELETE /api/admin/discounts/:id — soft delete (set is_active = false)
-router.delete('/:id', async (req, res, next) => {
+router.delete('/:id', requireAdmin, async (req, res, next) => {
   try {
     const [disc] = await db('discounts').where({ id: req.params.id })
       .update({ is_active: false, updated_at: new Date() }).returning('*');
@@ -80,7 +90,7 @@ router.delete('/:id', async (req, res, next) => {
 });
 
 // POST /api/admin/discounts/:id/assign — assign discount to customer
-router.post('/:id/assign', async (req, res, next) => {
+router.post('/:id/assign', requireAdmin, async (req, res, next) => {
   try {
     const { customerId, reason } = req.body;
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
@@ -98,7 +108,7 @@ router.post('/:id/assign', async (req, res, next) => {
 });
 
 // DELETE /api/admin/discounts/:id/assign/:customerId — remove assignment
-router.delete('/:id/assign/:customerId', async (req, res, next) => {
+router.delete('/:id/assign/:customerId', requireAdmin, async (req, res, next) => {
   try {
     await db('customer_discounts')
       .where({ discount_id: req.params.id, customer_id: req.params.customerId })
@@ -139,7 +149,7 @@ router.get('/stats', async (req, res, next) => {
 });
 
 // ── helpers ──
-function buildDiscountData(body) {
+function buildDiscountData(body, { generateKey = false } = {}) {
   const fields = [
     'discount_key', 'name', 'description', 'discount_type', 'amount', 'max_discount_dollars',
     'applies_to', 'service_category_filter', 'service_key_filter',
@@ -155,6 +165,14 @@ function buildDiscountData(body) {
   const data = {};
   for (const f of fields) {
     if (body[f] !== undefined) data[f] = body[f];
+  }
+  if (typeof data.discount_key === 'string') data.discount_key = data.discount_key.trim();
+  if (typeof data.name === 'string') data.name = data.name.trim();
+  if (generateKey && !data.discount_key && typeof data.name === 'string' && data.name.trim()) {
+    data.discount_key = data.name.trim().toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_|_$/g, '')
+      .substring(0, 80);
   }
   // Uppercase promo code
   if (data.promo_code) data.promo_code = data.promo_code.toUpperCase().trim();

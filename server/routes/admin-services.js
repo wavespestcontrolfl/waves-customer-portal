@@ -78,6 +78,7 @@ router.post('/', async (req, res, next) => {
     res.status(201).json(service);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Service key already exists' });
+    if (err.status === 400) return res.status(400).json({ error: err.message });
     res.status(500).json({ error: err.message || 'Failed to create service' });
   }
 });
@@ -98,6 +99,8 @@ router.put('/:id', async (req, res, next) => {
     if (!service) return res.status(404).json({ error: 'Service not found' });
     res.json(service);
   } catch (err) {
+    if (err.status === 400) return res.status(400).json({ error: err.message });
+    if (err.code === '23505') return res.status(409).json({ error: 'Service key already exists' });
     res.status(500).json({ error: err.message || 'Failed to update service' });
   }
 });

@@ -75,12 +75,16 @@ function ServiceForm({ svc, onSave, onCancel }) {
   const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
 
   const submit = async () => {
+    if (!String(form.name || '').trim()) {
+      setError('Service name is required');
+      return;
+    }
     setSaving(true); setError('');
     try { await onSave(form); } catch (e) { setError(e.message || 'Save failed'); } finally { setSaving(false); }
   };
 
   const inp = (key, type = 'text') => (
-    <input style={sInput} type={type} value={form[key] ?? ''} onChange={e => set(key, type === 'number' ? (e.target.value === '' ? '' : Number(e.target.value)) : e.target.value)} />
+    <input style={sInput} type={type} required={key === 'name'} value={form[key] ?? ''} onChange={e => set(key, type === 'number' ? (e.target.value === '' ? '' : Number(e.target.value)) : e.target.value)} />
   );
   const sel = (key, options) => (
     <select style={sInput} value={form[key] || ''} onChange={e => set(key, e.target.value)}>
@@ -110,7 +114,7 @@ function ServiceForm({ svc, onSave, onCancel }) {
           {sel('billing_type', [{ value: 'recurring', label: 'Recurring' }, { value: 'one_time', label: 'One-Time' }, { value: 'free', label: 'Free' }])}
         </Field>
         <Field label="Frequency" half>
-          {sel('frequency', [{ value: '', label: 'N/A' }, { value: 'monthly', label: 'Monthly' }, { value: 'bimonthly', label: 'Bi-Monthly' }, { value: 'quarterly', label: 'Quarterly' }, { value: 'annual', label: 'Annual' }])}
+          {sel('frequency', [{ value: '', label: 'N/A' }, { value: 'monthly', label: 'Monthly' }, { value: 'every_6_weeks', label: 'Every 6 Weeks' }, { value: 'bimonthly', label: 'Bi-Monthly' }, { value: 'quarterly', label: 'Quarterly' }, { value: 'semiannual', label: 'Semiannual' }, { value: 'annual', label: 'Annual' }])}
         </Field>
         <Field label="Visits/Year" half>{inp('visits_per_year', 'number')}</Field>
         <Field label="Duration (min)" half>{inp('default_duration_minutes', 'number')}</Field>

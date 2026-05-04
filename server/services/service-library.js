@@ -18,6 +18,71 @@ const SERVICE_COLS = [
   'created_at', 'updated_at',
 ];
 
+const VALID_CATEGORIES = new Set([
+  'pest_control', 'lawn_care', 'mosquito', 'termite', 'rodent',
+  'tree_shrub', 'inspection', 'specialty', 'other',
+]);
+const VALID_BILLING_TYPES = new Set(['recurring', 'one_time', 'free']);
+const VALID_PRICING_TYPES = new Set(['variable', 'fixed', 'quoted']);
+const VALID_FREQUENCIES = new Set(['', 'monthly', 'every_6_weeks', 'bimonthly', 'quarterly', 'semiannual', 'annual']);
+
+function validationError(message) {
+  const err = new Error(message);
+  err.status = 400;
+  return err;
+}
+
+function normalizeServiceKey(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_|_$/g, '')
+    .substring(0, 80);
+}
+
+function validateServicePayload(data, { partial = false } = {}) {
+  if (!partial || data.name !== undefined) {
+    if (typeof data.name !== 'string' || !data.name.trim()) {
+      throw validationError('Service name is required');
+    }
+    data.name = data.name.trim();
+  }
+
+  if (data.service_key !== undefined) {
+    data.service_key = normalizeServiceKey(data.service_key);
+    if (!data.service_key) {
+      if (partial) throw validationError('Service key is required');
+      delete data.service_key;
+    }
+  }
+
+  if (data.category !== undefined && !VALID_CATEGORIES.has(data.category)) {
+    throw validationError('Invalid service category');
+  }
+  if (data.billing_type !== undefined && !VALID_BILLING_TYPES.has(data.billing_type)) {
+    throw validationError('Invalid billing type');
+  }
+  if (data.pricing_type !== undefined && !VALID_PRICING_TYPES.has(data.pricing_type)) {
+    throw validationError('Invalid pricing type');
+  }
+  if (data.frequency !== undefined && data.frequency !== null && !VALID_FREQUENCIES.has(String(data.frequency))) {
+    throw validationError('Invalid service frequency');
+  }
+
+  for (const key of [
+    'default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes',
+    'scheduling_buffer_minutes', 'follow_up_interval_days', 'visits_per_year',
+    'base_price', 'price_range_min', 'price_range_max',
+    'min_tech_skill_level', 'typical_materials_cost', 'sort_order',
+  ]) {
+    if (data[key] === undefined || data[key] === '' || data[key] === null) continue;
+    const parsed = Number(data[key]);
+    if (!Number.isFinite(parsed)) throw validationError(`Invalid numeric value for ${key}`);
+    if (parsed < 0) throw validationError(`${key} cannot be negative`);
+  }
+}
+
 /**
  * Paginated list of services with filters
  */
@@ -91,9 +156,10 @@ async function getServiceByKey(serviceKey) {
  * Create a new service
  */
 async function createService(data) {
+  validateServicePayload(data);
   // Generate service_key if not provided
   if (!data.service_key && data.name) {
-    data.service_key = data.name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').substring(0, 80);
+    data.service_key = normalizeServiceKey(data.name);
   }
   // Only insert known columns; convert empty-string numerics to null
   const allowed = [
@@ -166,6 +232,7 @@ async function createService(data) {
  * Update an existing service
  */
 async function updateService(id, data) {
+  validateServicePayload(data, { partial: true });
   // Only update columns that exist on the services table
   const allowed = [
     'service_key', 'name', 'short_name', 'description', 'internal_notes',
