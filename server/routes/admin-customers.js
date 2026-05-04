@@ -156,7 +156,7 @@ async function attachMatchedCustomerToAccount(trx, customer) {
   return accountId;
 }
 
-async function findAccountByContact(trx, { phone, email }) {
+async function findAccountByContact(trx, { phone }) {
   const digits = phoneLast10(phone);
   if (digits) {
     const byCustomerPhone = await trx('customers')
@@ -168,20 +168,6 @@ async function findAccountByContact(trx, { phone, email }) {
     if (byCustomerPhone) {
       const accountId = await attachMatchedCustomerToAccount(trx, byCustomerPhone);
       return { accountId, existingCustomer: { ...byCustomerPhone, account_id: accountId }, matchType: 'phone' };
-    }
-  }
-
-  const cleanEmail = email ? String(email).trim().toLowerCase() : '';
-  if (cleanEmail) {
-    const byCustomerEmail = await trx('customers')
-      .whereRaw('LOWER(email) = ?', [cleanEmail])
-      .whereNull('deleted_at')
-      .orderBy('is_primary_profile', 'desc')
-      .orderBy('created_at', 'asc')
-      .first();
-    if (byCustomerEmail) {
-      const accountId = await attachMatchedCustomerToAccount(trx, byCustomerEmail);
-      return { accountId, existingCustomer: { ...byCustomerEmail, account_id: accountId }, matchType: 'email' };
     }
   }
 
