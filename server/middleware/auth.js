@@ -25,9 +25,14 @@ async function authenticate(req, res, next) {
       return res.status(401).json({ error: 'Customer not found or inactive' });
     }
 
+    const customerAccountId = customer.account_id || customer.id;
+    if (decoded.accountId && String(decoded.accountId) !== String(customerAccountId)) {
+      return res.status(401).json({ error: 'Invalid token account' });
+    }
+
     req.customer = customer;
     req.customerId = customer.id;
-    req.accountId = decoded.accountId || customer.account_id || customer.id;
+    req.accountId = decoded.accountId || customerAccountId;
     next();
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
