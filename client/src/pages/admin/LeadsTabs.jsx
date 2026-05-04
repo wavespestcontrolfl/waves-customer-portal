@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { callViaBridge } from '../../components/admin/CallBridgeLink';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const ROBOTO = "'Roboto', Arial, sans-serif";
 
 function adminFetch(path, opts = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -25,7 +26,7 @@ const C = {
   amber: '#A16207', red: '#991B1B', purple: '#18181B', white: '#FFFFFF',
   heading: '#09090B', input: '#FFFFFF', inputBorder: '#D4D4D8',
 };
-const mono = { fontFamily: "'JetBrains Mono', monospace" };
+const mono = { fontFamily: ROBOTO };
 
 const STATUS_COLORS = {
   new: '#18181B',              // zinc-900 — neutral entry
@@ -41,6 +42,17 @@ const STATUS_COLORS = {
 };
 const STATUSES = ['new','contacted','estimate_sent','estimate_viewed','negotiating','won','lost','unresponsive','disqualified','duplicate'];
 const LEAD_TYPES = ['inbound_call','inbound_sms','form_submission','chat_widget','walk_in','referral','ai_agent','voicemail','email_inquiry'];
+
+function leadEstimateParams(lead) {
+  const params = new URLSearchParams({ tab: 'new' });
+  const customerName = [lead.first_name, lead.last_name].filter(Boolean).join(' ').trim();
+  if (customerName) params.set('customerName', customerName);
+  if (lead.phone) params.set('customerPhone', lead.phone);
+  if (lead.email) params.set('customerEmail', lead.email);
+  if (lead.address) params.set('address', lead.address);
+  if (lead.service_interest) params.set('serviceInterest', lead.service_interest);
+  return params;
+}
 
 function Badge({ label, color, style }) {
   return <span style={{ display:'inline-block', padding:'2px 10px', borderRadius:9999, fontSize:11, fontWeight:600,
@@ -67,7 +79,7 @@ function TabBar({ tabs, active, onChange }) {
       background: active===t.key ? '#18181B' : 'transparent',
       color: active===t.key ? '#FFFFFF' : '#A1A1AA',
       fontSize:14, fontWeight:700, transition:'all 0.2s',
-      fontFamily:"'DM Sans', sans-serif",
+      fontFamily: ROBOTO,
     }}>{t.label}</button>)}
   </div>;
 }
@@ -306,8 +318,11 @@ export function LeadsSection() {
   // ═════════════════════════════════════════════════════════════════════════
   const renderPipeline = () => {
     const ov = overview || {};
-    const funnelStages = ['new','contacted','estimate_sent','won'];
-    const funnelData = funnelStages.map(s => funnel.find(f => f.stage === s) || { stage:s, label:s, count:0 });
+    const pipelineOrder = ['new','contacted','estimate_sent','negotiating','won','lost','unresponsive','disqualified'];
+    const funnelData = pipelineOrder
+      .map(s => funnel.find(f => f.stage === s) || { stage:s, label:s.replace(/_/g, ' '), count:0 })
+      .filter(f => f.count > 0 || ['new','contacted','estimate_sent','won','lost'].includes(f.stage));
+    const maxPipelineCount = Math.max(...funnelData.map(d => d.count), 1);
 
     return <>
       {/* Metric Cards */}
@@ -320,21 +335,18 @@ export function LeadsSection() {
         <MetricCard label="Monthly ROI" value={ov.roi != null ? fmtPct(ov.roi) : '--'} color={roiColor(ov.roi||0)} />
       </div>
 
-      {/* Funnel */}
+      {/* Pipeline status */}
       <Card style={{ marginBottom:24 }}>
-        <h2 style={{ margin:'0 0 16px', color:C.heading, fontSize:12, fontWeight:500, fontFamily:"'Montserrat', sans-serif", letterSpacing:'0.02em' }}>Lead Funnel</h2>
-        <div style={{ display:'flex', alignItems:'flex-end', gap:2, height:120 }}>
-          {funnelData.map((f, i) => {
-            const maxCount = Math.max(...funnelData.map(d => d.count), 1);
-            const h = Math.max(20, (f.count / maxCount) * 100);
-            const dropoff = i > 0 && funnelData[i-1].count > 0
-              ? Math.round((1 - f.count / funnelData[i-1].count) * 100) : null;
-            return <div key={f.stage} style={{ flex:1, textAlign:'center' }}>
+        <h2 style={{ margin:'0 0 6px', color:C.heading, fontSize:12, fontWeight:500, fontFamily:ROBOTO, letterSpacing:'0.02em' }}>Pipeline Status</h2>
+        <div style={{ margin:'0 0 14px', color:C.muted, fontSize:12 }}>Current lead counts by status for the selected month.</div>
+        <div style={{ display:'flex', alignItems:'flex-end', gap:6, height:130 }}>
+          {funnelData.map((f) => {
+            const h = Math.max(18, (f.count / maxPipelineCount) * 104);
+            return <div key={f.stage} style={{ flex:'1 1 84px', minWidth:70, textAlign:'center' }}>
               <div style={{ fontSize:18, fontWeight:700, color:C.heading, ...mono, marginBottom:4 }}>{f.count}</div>
               <div style={{ height:h, backgroundColor:STATUS_COLORS[f.stage]||C.teal, borderRadius:'6px 6px 0 0',
                 margin:'0 auto', width:'70%', minWidth:30, transition:'height 0.3s' }} />
-              <div style={{ fontSize:11, color:C.muted, marginTop:6 }}>{f.label || f.stage}</div>
-              {dropoff != null && <div style={{ fontSize:10, color:C.red, marginTop:2 }}>-{dropoff}%</div>}
+              <div style={{ fontSize:11, color:C.muted, marginTop:6, textTransform:'capitalize' }}>{f.label || f.stage.replace(/_/g, ' ')}</div>
             </div>;
           })}
         </div>
@@ -358,7 +370,7 @@ export function LeadsSection() {
           <option value="monthly_value">Value</option>
         </select>
         <div style={{ flex:1 }} />
-        <Btn onClick={() => { setFormData({}); setShowModal('newLead'); }}>+ New Lead</Btn>
+        <Btn onClick={() => { if (sources.length === 0) loadSources(); setFormData({}); setShowModal('newLead'); }}>+ New Lead</Btn>
       </div>
 
       {/* Leads Table */}
@@ -467,14 +479,7 @@ export function LeadsSection() {
                         ]});
                       }}>Send Text</Btn>
                       <Btn small color={C.purple} onClick={()=>{
-                        const params = new URLSearchParams();
-                        if (lead.first_name) params.set('first_name', lead.first_name);
-                        if (lead.last_name) params.set('last_name', lead.last_name);
-                        if (lead.phone) params.set('phone', lead.phone);
-                        if (lead.email) params.set('email', lead.email);
-                        if (lead.address) params.set('address', lead.address);
-                        if (lead.service_interest) params.set('service_interest', lead.service_interest);
-                        navigate(`/admin/estimates?${params}`);
+                        navigate(`/admin/estimates?${leadEstimateParams(lead).toString()}`);
                       }}>Create Estimate</Btn>
                       <Btn small color={C.amber} onClick={()=>setCallbackForm({ leadId:lead.id, date:'', time:'', notes:'' })}>Schedule Callback</Btn>
                       {lead.phone && (
@@ -571,7 +576,7 @@ export function LeadsSection() {
   const renderSources = () => {
     return <>
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
-        <h2 style={{ margin:0, color:C.heading, fontSize:12, fontWeight:500, fontFamily:"'Montserrat', sans-serif", letterSpacing:'0.02em' }}>Lead Sources ({sources.length})</h2>
+        <h2 style={{ margin:0, color:C.heading, fontSize:12, fontWeight:500, fontFamily:ROBOTO, letterSpacing:'0.02em' }}>Lead Sources ({sources.length})</h2>
         <div style={{ display:'flex', gap:8 }}>
           <Btn small onClick={()=>{ setFormData({ source_type:'phone_tracking', cost_type:'per_month' }); setShowModal('newSource'); }}>+ Add Source</Btn>
         </div>
@@ -641,7 +646,7 @@ export function LeadsSection() {
   const renderCampaigns = () => {
     return <>
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
-        <h2 style={{ margin:0, color:C.heading, fontSize:12, fontWeight:500, fontFamily:"'Montserrat', sans-serif", letterSpacing:'0.02em' }}>Marketing Campaigns ({campaigns.length})</h2>
+        <h2 style={{ margin:0, color:C.heading, fontSize:12, fontWeight:500, fontFamily:ROBOTO, letterSpacing:'0.02em' }}>Marketing Campaigns ({campaigns.length})</h2>
         <Btn onClick={()=>{ setFormData({ channel:'website_organic' }); setShowModal('newCampaign'); }}>+ New Campaign</Btn>
       </div>
       <div style={{ display:'flex', gap:16, flexWrap:'wrap' }}>
@@ -711,7 +716,7 @@ export function LeadsSection() {
     return <>
       {/* Channel Comparison */}
       <Card style={{ marginBottom:24 }}>
-        <h2 style={{ margin:'0 0 16px', color:C.heading, fontSize:12, fontWeight:500, fontFamily:"'Montserrat', sans-serif", letterSpacing:'0.02em' }}>Channel Comparison</h2>
+        <h2 style={{ margin:'0 0 16px', color:C.heading, fontSize:12, fontWeight:500, fontFamily:ROBOTO, letterSpacing:'0.02em' }}>Channel Comparison</h2>
         {byChannel.length === 0 && <div style={{ color:C.muted, fontSize:13 }}>No channel data available yet</div>}
         {byChannel.map(ch => <div key={ch.channel} style={{ marginBottom:12 }}>
           <div style={{ display:'flex', justifyContent:'space-between', fontSize:12, marginBottom:4 }}>
@@ -735,7 +740,7 @@ export function LeadsSection() {
 
       {/* Source ROI Matrix */}
       <Card style={{ marginBottom:24 }}>
-        <h2 style={{ margin:'0 0 16px', color:C.heading, fontSize:12, fontWeight:500, fontFamily:"'Montserrat', sans-serif", letterSpacing:'0.02em' }}>Source ROI Matrix</h2>
+        <h2 style={{ margin:'0 0 16px', color:C.heading, fontSize:12, fontWeight:500, fontFamily:ROBOTO, letterSpacing:'0.02em' }}>Source ROI Matrix</h2>
         {scatterSources.length === 0 ? <div style={{ color:C.muted, fontSize:13 }}>No source data with leads yet</div> :
         <svg viewBox="0 0 400 300" style={{ width:'100%', maxWidth:600, height:'auto' }}>
           {/* Quadrant lines */}
@@ -766,7 +771,7 @@ export function LeadsSection() {
       <div style={{ display:'flex', gap:16, flexWrap:'wrap', marginBottom:24 }}>
         {/* Response Time vs Conversion */}
         <Card style={{ flex:'1 1 400px' }}>
-          <h2 style={{ margin:'0 0 16px', color:C.heading, fontSize:12, fontWeight:500, fontFamily:"'Montserrat', sans-serif", letterSpacing:'0.02em' }}>Response Time vs Conversion</h2>
+          <h2 style={{ margin:'0 0 16px', color:C.heading, fontSize:12, fontWeight:500, fontFamily:ROBOTO, letterSpacing:'0.02em' }}>Response Time vs Conversion</h2>
           {responseBuckets.length === 0 ? <div style={{ color:C.muted, fontSize:13 }}>No response data yet</div> :
           <div style={{ display:'flex', alignItems:'flex-end', gap:6, height:140 }}>
             {responseBuckets.map((b, i) => {
@@ -791,7 +796,7 @@ export function LeadsSection() {
 
         {/* Lost Lead Analysis */}
         <Card style={{ flex:'1 1 300px' }}>
-          <h2 style={{ margin:'0 0 16px', color:C.heading, fontSize:12, fontWeight:500, fontFamily:"'Montserrat', sans-serif", letterSpacing:'0.02em' }}>Lost Lead Reasons</h2>
+          <h2 style={{ margin:'0 0 16px', color:C.heading, fontSize:12, fontWeight:500, fontFamily:ROBOTO, letterSpacing:'0.02em' }}>Lost Lead Reasons</h2>
           {totalLost === 0 ? <div style={{ color:C.muted, fontSize:13 }}>No lost leads yet</div> :
           <div style={{ display:'flex', gap:24, alignItems:'center' }}>
             <svg viewBox="0 0 100 100" style={{ width:120, height:120, flexShrink:0 }}>
@@ -831,7 +836,7 @@ export function LeadsSection() {
       {/* Phone Number ROI Table */}
       <Card style={{ padding:0, overflow:'auto' }}>
         <div style={{ padding:'16px 20px', borderBottom:`1px solid ${C.border}` }}>
-          <h2 style={{ margin:0, color:C.heading, fontSize:12, fontWeight:500, fontFamily:"'Montserrat', sans-serif", letterSpacing:'0.02em' }}>Phone Number ROI</h2>
+          <h2 style={{ margin:0, color:C.heading, fontSize:12, fontWeight:500, fontFamily:ROBOTO, letterSpacing:'0.02em' }}>Phone Number ROI</h2>
         </div>
         <table style={{ width:'100%', borderCollapse:'collapse', minWidth:700 }}>
           <thead>
@@ -966,7 +971,7 @@ export function LeadsSection() {
   // ═════════════════════════════════════════════════════════════════════════
   // MAIN RENDER
   // ═════════════════════════════════════════════════════════════════════════
-  return <div style={{ padding:24, maxWidth:1400, margin:'0 auto', color:C.text }}>
+  return <div style={{ padding:24, maxWidth:1400, margin:'0 auto', color:C.text, fontFamily:ROBOTO }}>
     <TabBar tabs={[
       { key:'pipeline', label:'Pipeline' },
       { key:'sources', label:'Sources' },

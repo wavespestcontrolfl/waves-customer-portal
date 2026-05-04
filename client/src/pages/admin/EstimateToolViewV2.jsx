@@ -23,7 +23,7 @@
 //   dimmed = opacity-50 (no green/teal tint)
 // - "Recurring -15% one-time" chip = neutral Badge
 // - Manual discount panel = neutral Card
-// - JetBrains Mono preserved for numeric columns via u-nums + font-mono
+// - Roboto enforced across the full Create Estimate experience
 // - Existing customer banner = neutral Card with dot indicator
 import React, {
   useState, useEffect, useRef, useCallback, useMemo, createContext, useContext, Component,
@@ -32,6 +32,7 @@ import { calculateEstimate, fmt, fmtInt } from '../../lib/estimateEngine';
 import { Button, Badge, Card, cn } from '../../components/ui';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const ROBOTO = "'Roboto', Arial, sans-serif";
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -66,7 +67,7 @@ class EstimateErrorBoundary extends Component {
       return (
         <Card className="p-10 text-center border-alert-fg">
           <div className="text-18 font-medium text-alert-fg mb-3">Estimate Render Error</div>
-          <pre className="text-12 text-ink-secondary mb-4 whitespace-pre-wrap text-left max-h-48 overflow-auto font-mono">
+          <pre className="text-12 text-ink-secondary mb-4 whitespace-pre-wrap text-left max-h-48 overflow-auto">
             {this.state.error.message}{'\n'}{this.state.error.stack}
           </pre>
           <Button onClick={() => this.setState({ error: null })}>Try Again</Button>
@@ -186,7 +187,7 @@ function StatusLine({ status }) {
   return (
     <div
       className={cn(
-        'font-mono text-12 px-3 py-2 rounded-xs mb-3 whitespace-pre-line border-hairline',
+        ' text-12 px-3 py-2 rounded-xs mb-3 whitespace-pre-line border-hairline',
         isErr ? 'bg-alert-bg text-alert-fg border-alert-fg' : 'bg-zinc-50 text-ink-secondary border-zinc-200',
       )}
     >
@@ -219,8 +220,8 @@ function TierRowV2({ name, detail, price, recommended, dimmed, onSelect, selecte
         {selected && <span className="text-11 u-nums">✓</span>}
         {!selected && recommended && <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900" title="Recommended" />}
       </div>
-      <div className="font-mono text-12 text-ink-secondary break-words">{detail}</div>
-      <div className="font-mono text-14 font-medium text-zinc-900 text-right u-nums">{price}</div>
+      <div className="text-12 text-ink-secondary break-words">{detail}</div>
+      <div className="text-14 font-medium text-zinc-900 text-right u-nums">{price}</div>
     </div>
   );
 }
@@ -235,7 +236,7 @@ function Tag({ children }) {
 
 function FieldVerifyTag({ children }) {
   return (
-    <span className="inline-block text-11 font-medium uppercase tracking-label px-2 py-0.5 rounded-xs bg-alert-bg text-alert-fg ml-2 align-middle font-mono">
+    <span className="inline-block text-11 font-medium uppercase tracking-label px-2 py-0.5 rounded-xs bg-alert-bg text-alert-fg ml-2 align-middle">
       {children}
     </span>
   );
@@ -243,7 +244,7 @@ function FieldVerifyTag({ children }) {
 
 function DiscBadge({ children }) {
   return (
-    <span className="inline-block text-11 font-medium uppercase tracking-label px-2 py-0.5 rounded-xs bg-zinc-900 text-white ml-2 align-middle font-mono u-nums">
+    <span className="inline-block text-11 font-medium uppercase tracking-label px-2 py-0.5 rounded-xs bg-zinc-900 text-white ml-2 align-middle u-nums">
       {children}
     </span>
   );
@@ -275,6 +276,7 @@ export default function EstimateToolViewV2({
   initialCustomerName = '',
   initialCustomerPhone = '',
   initialCustomerEmail = '',
+  initialServiceInterest = '',
 } = {}) {
   // ── Google Maps script (verbatim from V1) ─────────────────────
   const addressRef = useRef(null);
@@ -288,7 +290,7 @@ export default function EstimateToolViewV2({
       const style = document.createElement('style');
       style.id = 'pac-dark-style';
       style.textContent = `
-        .pac-container { background: #FFFFFF !important; border: 1px solid #E4E4E7 !important; border-radius: 4px !important; margin-top: 4px !important; z-index: 99999 !important; font-family: 'Inter', sans-serif !important; box-shadow: 0 8px 24px rgba(0,0,0,0.1) !important; }
+        .pac-container { background: #FFFFFF !important; border: 1px solid #E4E4E7 !important; border-radius: 4px !important; margin-top: 4px !important; z-index: 99999 !important; font-family: 'Roboto', Arial, sans-serif !important; box-shadow: 0 8px 24px rgba(0,0,0,0.1) !important; }
         .pac-item { padding: 8px 12px !important; border-top: 1px solid #E4E4E7 !important; color: #3F3F46 !important; cursor: pointer !important; font-size: 14px !important; }
         .pac-item:first-child { border-top: none !important; }
         .pac-item:hover, .pac-item-selected { background: #FAFAFA !important; }
@@ -352,6 +354,7 @@ export default function EstimateToolViewV2({
     customerName: initialCustomerName || '',
     customerPhone: initialCustomerPhone || '',
     customerEmail: initialCustomerEmail || '',
+    leadServiceInterest: initialServiceInterest || '',
     homeSqFt: '', stories: '1', lotSqFt: '', propertyType: 'Single Family',
     hasPool: 'NO', hasPoolCage: 'NO', hasLargeDriveway: 'NO',
     shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE',
@@ -373,6 +376,25 @@ export default function EstimateToolViewV2({
     svcFlea: false, svcWasp: false, svcRoach: false, svcBedbug: false, svcExclusion: false,
     showOneTimeOption: false, billByInvoice: false,
   });
+
+  useEffect(() => {
+    const incoming = {
+      customerId: initialCustomerId,
+      address: initialAddress,
+      customerName: initialCustomerName,
+      customerPhone: initialCustomerPhone,
+      customerEmail: initialCustomerEmail,
+      leadServiceInterest: initialServiceInterest,
+    };
+    if (!Object.values(incoming).some(Boolean)) return;
+    setForm((f) => {
+      const next = { ...f };
+      for (const [key, value] of Object.entries(incoming)) {
+        if (value) next[key] = value;
+      }
+      return next;
+    });
+  }, [initialAddress, initialCustomerEmail, initialCustomerId, initialCustomerName, initialCustomerPhone, initialServiceInterest]);
 
   // ── live preview (verbatim from V1) ───────────────────────────
   const livePreview = useMemo(() => {
@@ -895,6 +917,7 @@ export default function EstimateToolViewV2({
       boracareSqft: '', preslabSqft: '',
       customerId: '',
       customerName: '', customerPhone: '', customerEmail: '',
+      leadServiceInterest: '',
       _boracareAuto: false, _preslabAuto: false,
     }));
     setEstimate(null);
@@ -932,7 +955,13 @@ export default function EstimateToolViewV2({
   // ═══════════════════════════════════════════════════════════════
   return (
     <FormCtx.Provider value={formCtx}>
-      <div className="max-w-[1440px] mx-auto px-4 md:px-7 pb-7">
+      <div className="max-w-[1440px] mx-auto px-4 md:px-7 pb-7 waves-roboto-scope" style={{ fontFamily: ROBOTO }}>
+        <style>{`
+          .waves-roboto-scope,
+          .waves-roboto-scope * {
+            font-family: ${ROBOTO} !important;
+          }
+        `}</style>
         <div className="grid gap-7 grid-cols-1 lg:grid-cols-[440px_1fr]">
           {/* ═══ LEFT COLUMN: FORM ═══ */}
           <div className="space-y-4">
@@ -974,7 +1003,7 @@ export default function EstimateToolViewV2({
                         className="w-full text-left px-3 py-2 border-b-hairline border-zinc-200 last:border-b-0 hover:bg-zinc-50 cursor-pointer"
                       >
                         <div className="text-14 text-zinc-900 font-medium">{name}</div>
-                        <div className="font-mono text-12 text-ink-secondary">
+                        <div className="text-12 text-ink-secondary">
                           {c.address || 'no address on file'}
                           {c.phone ? ` · ${c.phone}` : ''}
                         </div>
@@ -998,6 +1027,11 @@ export default function EstimateToolViewV2({
                   className={INPUT_CLS}
                 />
               </FieldV2>
+              {form.leadServiceInterest && (
+                <div className="mb-3 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
+                  Lead interest: <strong>{form.leadServiceInterest}</strong>
+                </div>
+              )}
               <StatusLine status={lookupStatus} />
               <div className="grid grid-cols-2 gap-2 mb-2">
                 <Button onClick={doLookup} variant="primary" size="md">Property Lookup</Button>
@@ -1375,7 +1409,7 @@ export default function EstimateToolViewV2({
                       }
                     }}
                     placeholder="9415551234"
-                    className={cn(INPUT_CLS, 'h-12 text-18 font-mono tracking-wider')}
+                    className={cn(INPUT_CLS, 'h-12 text-18 tracking-wider')}
                   />
                 </FieldV2>
                 {form.customerName && (
@@ -1513,7 +1547,7 @@ export default function EstimateToolViewV2({
                 <div
                   className="text-zinc-900 mb-3"
                   style={{
-                    fontFamily: "'Montserrat', sans-serif",
+                    fontFamily: ROBOTO,
                     fontSize: 12,
                     fontWeight: 500,
                     letterSpacing: '0.02em',
@@ -1553,7 +1587,7 @@ export default function EstimateToolViewV2({
                     {(E.recurring.serviceCount > 0 || E.oneTime.total > 0 || E.recurring.palmInjectionMo > 0 || E.recurring.rodentBaitMo > 0) && (
                       <>
                         <div className="bg-zinc-50 border-hairline border-zinc-900 rounded-sm p-6 mb-6 text-center">
-                          <div className="font-mono text-28 font-medium text-zinc-900 u-nums">
+                          <div className="text-28 font-medium text-zinc-900 u-nums">
                             {fmt(E.recurring.grandTotal || (E.recurring.monthlyTotal + (E.recurring.rodentBaitMo || 0) + (E.recurring.palmInjectionMo || 0)))}/mo
                           </div>
                           <div className="text-12 text-ink-secondary mt-1">
@@ -1563,19 +1597,19 @@ export default function EstimateToolViewV2({
                           <div className="flex justify-center gap-10 mt-3 flex-wrap">
                             {E.oneTime.total > 0 && (
                               <div className="text-center">
-                                <div className="font-mono text-18 font-medium text-zinc-900 u-nums">{fmtInt(E.oneTime.total)}</div>
+                                <div className="text-18 font-medium text-zinc-900 u-nums">{fmtInt(E.oneTime.total)}</div>
                                 <div className="text-11 text-ink-secondary uppercase tracking-label">
                                   {E.oneTime.tmInstall > 0 ? `One-Time (incl ${fmtInt(E.oneTime.tmInstall)} install)` : 'WaveGuard Membership'}
                                 </div>
                               </div>
                             )}
                             <div className="text-center">
-                              <div className="font-mono text-18 font-medium text-zinc-900 u-nums">{fmt(E.totals.year1)}</div>
+                              <div className="text-18 font-medium text-zinc-900 u-nums">{fmt(E.totals.year1)}</div>
                               <div className="text-11 text-ink-secondary uppercase tracking-label">Year 1 Total</div>
                             </div>
                             {E.recurring.savings > 0 && (
                               <div className="text-center">
-                                <div className="font-mono text-18 font-medium text-zinc-900 u-nums">-{fmt(E.recurring.savings)}</div>
+                                <div className="text-18 font-medium text-zinc-900 u-nums">-{fmt(E.recurring.savings)}</div>
                                 <div className="text-11 text-ink-secondary uppercase tracking-label">Bundle Savings/yr</div>
                               </div>
                             )}
@@ -1643,7 +1677,7 @@ export default function EstimateToolViewV2({
                                 {m.type === 'up' ? '▲' : m.type === 'down' ? '▼' : '·'}
                               </span>
                               <span className="text-12 text-ink-secondary flex-1">{m.label}</span>
-                              <span className="text-11 font-mono font-medium text-zinc-900 u-nums">
+                              <span className="text-11 font-medium text-zinc-900 u-nums">
                                 {m.impact != null ? (m.impact >= 0 ? '+$' + m.impact : '-$' + Math.abs(m.impact)) : '$0'}
                               </span>
                             </div>
@@ -1699,7 +1733,7 @@ export default function EstimateToolViewV2({
                               ))}
                             </TierGridV2>
                             {R.pest?.rOG > 0 && (
-                              <div className="font-mono text-11 text-ink-secondary mt-1">
+                              <div className="text-11 text-ink-secondary mt-1">
                                 Roach modifier: +{fmt(R.pest.rOG)}/visit ({R.pestRoachMod === 'GERMAN' ? 'German' : 'Regular'})
                               </div>
                             )}
@@ -1754,7 +1788,7 @@ export default function EstimateToolViewV2({
                               <TierRowV2 name="Advance" detail={`${fmtInt(R.tmBait.ai)} install | Basic $35 | Premier $65/mo`} price="$35-65" dimmed />
                               <TierRowV2 name="Trelona" detail={`${fmtInt(R.tmBait.ti)} install | Basic $35 | Premier $65/mo`} price="$35-65" recommended />
                             </TierGridV2>
-                            <div className="font-mono text-11 text-ink-secondary mt-1">Install cost is a one-time setup fee, not a recurring charge</div>
+                            <div className="text-11 text-ink-secondary mt-1">Install cost is a one-time setup fee, not a recurring charge</div>
                           </div>
                         )}
 
@@ -1764,7 +1798,7 @@ export default function EstimateToolViewV2({
                             <TierGridV2>
                               <TierRowV2 name="Monthly" detail={`${R.rodBaitSize} property`} price={`$${R.rodBaitMo}/mo`} recommended />
                             </TierGridV2>
-                            <div className="font-mono text-11 text-ink-secondary mt-1">Not included in WaveGuard bundle discount — priced separately</div>
+                            <div className="text-11 text-ink-secondary mt-1">Not included in WaveGuard bundle discount — priced separately</div>
                           </div>
                         )}
                       </>
@@ -1819,7 +1853,7 @@ export default function EstimateToolViewV2({
                                   <TierRowV2 name="Treatment" detail={item.detail} price={fmtInt(item.basePrice || item.price)} />
                                   {item.warrAdd > 0 && <TierRowV2 name="5yr Warranty" detail="Extended transferable" price="+$200" />}
                                 </TierGridV2>
-                                {!item.warrAdd && <div className="font-mono text-11 text-ink-secondary mt-1">Includes 1-yr builder warranty | $225/yr renewal after</div>}
+                                {!item.warrAdd && <div className="text-11 text-ink-secondary mt-1">Includes 1-yr builder warranty | $225/yr renewal after</div>}
                               </div>
                             );
                           }
@@ -1830,7 +1864,7 @@ export default function EstimateToolViewV2({
                                 <TierGridV2>
                                   <TierRowV2 name={item.tierName} detail={item.detail} price={fmtInt(item.price)} />
                                 </TierGridV2>
-                                <div className="font-mono text-11 text-ink-secondary mt-1">For localized drywood, wall voids, door/window frames</div>
+                                <div className="text-11 text-ink-secondary mt-1">For localized drywood, wall voids, door/window frames</div>
                               </div>
                             );
                           }
@@ -1841,7 +1875,7 @@ export default function EstimateToolViewV2({
                                 <TierGridV2>
                                   <TierRowV2 name={item.spacing} detail={item.detail} price={fmtInt(item.price)} />
                                 </TierGridV2>
-                                {item.warn6 && <div className="font-mono text-11 text-ink-secondary mt-1">Sod may be more cost-effective at 6"</div>}
+                                {item.warn6 && <div className="text-11 text-ink-secondary mt-1">Sod may be more cost-effective at 6"</div>}
                               </div>
                             );
                           }
@@ -1871,7 +1905,7 @@ export default function EstimateToolViewV2({
                           {E.specItems.map((s, i) => (
                             <div key={i} className="bg-white border-hairline border-zinc-200 rounded-sm p-4">
                               <div className="text-11 font-medium text-ink-secondary uppercase tracking-label mb-1">{s.name}</div>
-                              <div className="font-mono text-18 font-medium text-zinc-900 u-nums">{s.onProg ? '$0 — Included' : fmtInt(s.price)}</div>
+                              <div className="text-18 font-medium text-zinc-900 u-nums">{s.onProg ? '$0 — Included' : fmtInt(s.price)}</div>
                               <div className="text-12 text-ink-secondary mt-1">{s.det}</div>
                             </div>
                           ))}
@@ -1892,26 +1926,26 @@ export default function EstimateToolViewV2({
                             </div>
                             {E.recurring.savings > 0 && (
                               <div className="text-zinc-900 text-14 font-medium mt-1">
-                                Bundling saves <span className="u-nums font-mono">{fmt(E.recurring.savings)}</span>/year
+                                Bundling saves <span className="u-nums">{fmt(E.recurring.savings)}</span>/year
                               </div>
                             )}
                             <div className="grid grid-cols-[1fr_auto] gap-y-1 gap-x-4 text-13 mt-3 p-3 bg-white rounded-xs border-hairline border-zinc-200">
                               {E.recurring.services.map((s, i) => (
                                 <React.Fragment key={i}>
                                   <div className="text-ink-secondary">{s.name}</div>
-                                  <div className="font-mono text-zinc-900 text-right u-nums">{fmt(s.mo)}/mo</div>
+                                  <div className="text-zinc-900 text-right u-nums">{fmt(s.mo)}/mo</div>
                                 </React.Fragment>
                               ))}
                               <div className="font-medium text-zinc-900 border-t border-hairline border-zinc-200 pt-1 mt-1">Total before discount</div>
-                              <div className="font-mono font-medium border-t border-hairline border-zinc-200 pt-1 mt-1 text-right text-zinc-900 u-nums">{fmt(Math.round(E.recurring.annualBeforeDiscount / 12 * 100) / 100)}/mo</div>
+                              <div className="font-medium border-t border-hairline border-zinc-200 pt-1 mt-1 text-right text-zinc-900 u-nums">{fmt(Math.round(E.recurring.annualBeforeDiscount / 12 * 100) / 100)}/mo</div>
                               {E.recurring.discount > 0 && (
                                 <>
                                   <div className="text-ink-secondary">{E.recurring.waveGuardTier} discount (-{Math.round(E.recurring.discount * 100)}%)</div>
-                                  <div className="font-mono text-zinc-900 text-right u-nums">-{fmt(Math.round(E.recurring.savings / 12 * 100) / 100)}/mo</div>
+                                  <div className="text-zinc-900 text-right u-nums">-{fmt(Math.round(E.recurring.savings / 12 * 100) / 100)}/mo</div>
                                 </>
                               )}
                               <div className="font-medium text-zinc-900">Your monthly rate</div>
-                              <div className="font-mono font-medium text-zinc-900 text-right u-nums">{fmt(E.recurring.monthlyTotal)}/mo</div>
+                              <div className="font-medium text-zinc-900 text-right u-nums">{fmt(E.recurring.monthlyTotal)}/mo</div>
                             </div>
                           </div>
                         )}
@@ -1921,19 +1955,19 @@ export default function EstimateToolViewV2({
                           {E.recurring.serviceCount > 0 && (
                             <div className="flex justify-between items-center py-1.5 text-14">
                               <span className="text-ink-secondary">Recurring (after WaveGuard)</span>
-                              <span className="font-mono font-medium text-zinc-900 u-nums">{fmt(E.recurring.annualAfterDiscount)}/yr ({fmt(E.recurring.monthlyTotal)}/mo)</span>
+                              <span className="font-medium text-zinc-900 u-nums">{fmt(E.recurring.annualAfterDiscount)}/yr ({fmt(E.recurring.monthlyTotal)}/mo)</span>
                             </div>
                           )}
                           {E.recurring.rodentBaitMo > 0 && (
                             <div className="flex justify-between items-center py-1.5 text-14">
                               <span className="text-ink-secondary">Rodent bait (separate)</span>
-                              <span className="font-mono font-medium text-zinc-900 u-nums">{fmtInt(E.recurring.rodentBaitMo * 12)}/yr (${E.recurring.rodentBaitMo}/mo)</span>
+                              <span className="font-medium text-zinc-900 u-nums">{fmtInt(E.recurring.rodentBaitMo * 12)}/yr (${E.recurring.rodentBaitMo}/mo)</span>
                             </div>
                           )}
                           {E.recurring.palmInjectionMo > 0 && (
                             <div className="flex justify-between items-center py-1.5 text-14">
                               <span className="text-ink-secondary">Palm injection (separate)</span>
-                              <span className="font-mono font-medium text-zinc-900 u-nums">{fmtInt(E.recurring.palmInjectionAnn || E.recurring.palmInjectionMo * 12)}/yr ({fmt(E.recurring.palmInjectionMo)}/mo)</span>
+                              <span className="font-medium text-zinc-900 u-nums">{fmtInt(E.recurring.palmInjectionAnn || E.recurring.palmInjectionMo * 12)}/yr ({fmt(E.recurring.palmInjectionMo)}/mo)</span>
                             </div>
                           )}
                           {E.manualDiscount && E.manualDiscount.amount > 0 && (
@@ -1941,42 +1975,42 @@ export default function EstimateToolViewV2({
                               <span className="text-ink-secondary">
                                 {E.manualDiscount.label || (E.manualDiscount.type === 'PERCENT' ? `Discount (${E.manualDiscount.value}%)` : `Discount`)}
                               </span>
-                              <span className="font-mono font-medium text-zinc-900 u-nums">-{fmt(E.manualDiscount.amount)}/yr</span>
+                              <span className="font-medium text-zinc-900 u-nums">-{fmt(E.manualDiscount.amount)}/yr</span>
                             </div>
                           )}
                           {E.oneTime.tmInstall > 0 && (
                             <div className="flex justify-between items-center py-1.5 text-14">
                               <span className="text-ink-secondary">Termite bait install (Trelona)</span>
-                              <span className="font-mono font-medium text-zinc-900 u-nums">{fmtInt(E.oneTime.tmInstall)}</span>
+                              <span className="font-medium text-zinc-900 u-nums">{fmtInt(E.oneTime.tmInstall)}</span>
                             </div>
                           )}
                           {E.oneTime.otSubtotal > 0 && (
                             <>
                               <div className="flex justify-between items-center py-2 text-14 border-t border-hairline border-zinc-200 mt-1.5">
                                 <span className="font-medium text-zinc-900">One-Time Services</span>
-                                <span className="font-mono font-medium text-zinc-900 u-nums">{fmtInt(E.oneTime.otSubtotal)}</span>
+                                <span className="font-medium text-zinc-900 u-nums">{fmtInt(E.oneTime.otSubtotal)}</span>
                               </div>
                               {E.oneTime.items.map((item, i) => (
                                 <div key={i} className="flex justify-between items-center py-0.5 pl-4 text-13 text-ink-secondary">
                                   <span>{item.name}{item.waivedWithPrepay ? <span className="text-11 text-ink-tertiary ml-1">waived with annual prepay</span> : ''}</span>
-                                  <span className="font-mono text-13 u-nums">{fmtInt(item.price)}</span>
+                                  <span className="text-13 u-nums">{fmtInt(item.price)}</span>
                                 </div>
                               ))}
                               {E.oneTime.specItems.map((s, i) => (
                                 <div key={`sp-${i}`} className="flex justify-between items-center py-0.5 pl-4 text-13 text-ink-secondary">
                                   <span>{s.name}</span>
-                                  <span className="font-mono text-13 u-nums">{fmtInt(s.price)}</span>
+                                  <span className="text-13 u-nums">{fmtInt(s.price)}</span>
                                 </div>
                               ))}
                             </>
                           )}
                           <div className="flex justify-between items-center py-3 text-18 font-medium border-t-2 border-zinc-900 mt-2">
                             <span className="text-zinc-900">Year 1 Total</span>
-                            <span className="font-mono font-medium text-zinc-900 u-nums">{fmt(E.totals.year1)}</span>
+                            <span className="font-medium text-zinc-900 u-nums">{fmt(E.totals.year1)}</span>
                           </div>
                           <div className="flex justify-between items-center py-1.5 text-14">
                             <span className="text-ink-secondary">Year 2+ Annual</span>
-                            <span className="font-mono font-medium text-zinc-900 u-nums">{fmt(E.totals.year2)}/yr ({fmt(E.totals.year2mo)}/mo)</span>
+                            <span className="font-medium text-zinc-900 u-nums">{fmt(E.totals.year2)}/yr ({fmt(E.totals.year2mo)}/mo)</span>
                           </div>
                         </div>
                       </>

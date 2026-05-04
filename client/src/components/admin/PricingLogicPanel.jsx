@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 
+const ROBOTO = "'Roboto', Arial, sans-serif";
+
 const D = {
   bg: '#F1F5F9', card: '#FFFFFF', border: '#E2E8F0',
   teal: '#0A7EC2', green: '#16A34A', amber: '#F0A500',
@@ -21,20 +23,20 @@ const af = (p, o = {}) =>
 
 // ── Category tabs ──
 const TABS = [
-  { key: 'global', label: 'Global Constants', icon: '⚙️' },
-  { key: 'zone', label: 'Zones', icon: '📍' },
-  { key: 'lawn', label: 'Lawn Care', icon: '🌿' },
-  { key: 'pest', label: 'Pest Control', icon: '🪲' },
-  { key: 'tree_shrub', label: 'Tree & Shrub', icon: '🌳' },
-  { key: 'palm', label: 'Palm Injection', icon: '🌴' },
-  { key: 'mosquito', label: 'Mosquito', icon: '🦟' },
-  { key: 'termite', label: 'Termite', icon: '🐛' },
-  { key: 'rodent', label: 'Rodent', icon: '🐀' },
-  { key: 'one_time', label: 'One-Time', icon: '⚡' },
-  { key: 'waveguard', label: 'WaveGuard', icon: '🛡️' },
-  { key: 'products', label: 'Products', icon: '📦' },
-  { key: 'proposals', label: 'Proposals', icon: '📋' },
-  { key: 'changelog', label: 'Changelog', icon: '📜' },
+  { key: 'global', label: 'Global Constants' },
+  { key: 'zone', label: 'Zones' },
+  { key: 'lawn', label: 'Lawn Care' },
+  { key: 'pest', label: 'Pest Control' },
+  { key: 'tree_shrub', label: 'Tree & Shrub' },
+  { key: 'palm', label: 'Palm Injection' },
+  { key: 'mosquito', label: 'Mosquito' },
+  { key: 'termite', label: 'Termite' },
+  { key: 'rodent', label: 'Rodent' },
+  { key: 'one_time', label: 'One-Time' },
+  { key: 'waveguard', label: 'WaveGuard' },
+  { key: 'products', label: 'Products' },
+  { key: 'proposals', label: 'Proposals' },
+  { key: 'changelog', label: 'Changelog' },
 ];
 
 // Category pill color map for changelog entries
@@ -85,7 +87,7 @@ function ChangelogTab() {
   return (
     <div style={{ background: D.card, borderRadius: 12, border: `1px solid ${D.border}`, padding: 20 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <h2 style={{ margin: 0, fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: "'Montserrat', sans-serif", letterSpacing: '0.02em' }}>Pricing Changelog</h2>
+        <h2 style={{ margin: 0, fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: ROBOTO, letterSpacing: '0.02em' }}>Pricing Changelog</h2>
         <label style={{ fontSize: 12, color: D.muted }}>
           Filter
           <select value={filter} onChange={e => setFilter(e.target.value)} style={{
@@ -124,13 +126,13 @@ function ChangelogTab() {
                       onClick={() => setExpandedId(isOpen ? null : e.id)}
                       style={{ borderBottom: `1px solid ${D.border}22`, cursor: 'pointer', background: isOpen ? `${D.teal}08` : 'transparent' }}
                     >
-                      <td style={{ padding: '10px', fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: D.text }}>{formatDate(e.changed_at)}</td>
-                      <td style={{ padding: '10px', fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: D.text }}>
+                      <td style={{ padding: '10px', fontFamily: ROBOTO, fontSize: 11, color: D.text }}>{formatDate(e.changed_at)}</td>
+                      <td style={{ padding: '10px', fontFamily: ROBOTO, fontSize: 11, color: D.text }}>
                         {e.version_from}{e.version_from !== e.version_to ? ` → ${e.version_to}` : ''}
                       </td>
                       <td style={{ padding: '10px' }}>{catPill(e.category)}</td>
                       <td style={{ padding: '10px', color: '#0F172A', fontSize: 13 }}>{e.summary}</td>
-                      <td style={{ padding: '10px', fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: D.muted }}>{e.changed_by}</td>
+                      <td style={{ padding: '10px', fontFamily: ROBOTO, fontSize: 11, color: D.muted }}>{e.changed_by}</td>
                     </tr>
                     {isOpen && (
                       <tr style={{ background: `${D.teal}06` }}>
@@ -141,7 +143,7 @@ function ChangelogTab() {
                           {Array.isArray(e.affected_services) && e.affected_services.length > 0 && (
                             <>
                               <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 }}>Affected Services</div>
-                              <div style={{ fontSize: 12, color: D.text, marginBottom: 14, fontFamily: "'JetBrains Mono', monospace" }}>
+                              <div style={{ fontSize: 12, color: D.text, marginBottom: 14, fontFamily: ROBOTO }}>
                                 {e.affected_services.join(', ')}
                               </div>
                             </>
@@ -151,13 +153,13 @@ function ChangelogTab() {
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                               <div>
                                 <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 }}>Before</div>
-                                <pre style={{ fontSize: 11, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, padding: 10, margin: 0, overflow: 'auto', fontFamily: "'JetBrains Mono', monospace", color: D.text }}>
+                                <pre style={{ fontSize: 11, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, padding: 10, margin: 0, overflow: 'auto', fontFamily: ROBOTO, color: D.text }}>
                                   {e.before_value != null ? JSON.stringify(e.before_value, null, 2) : '—'}
                                 </pre>
                               </div>
                               <div>
                                 <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 }}>After</div>
-                                <pre style={{ fontSize: 11, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, padding: 10, margin: 0, overflow: 'auto', fontFamily: "'JetBrains Mono', monospace", color: D.text }}>
+                                <pre style={{ fontSize: 11, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, padding: 10, margin: 0, overflow: 'auto', fontFamily: ROBOTO, color: D.text }}>
                                   {e.after_value != null ? JSON.stringify(e.after_value, null, 2) : '—'}
                                 </pre>
                               </div>
@@ -215,7 +217,7 @@ function ProposalsTab() {
       <span style={{
         fontSize: 10, padding: '2px 8px', borderRadius: 12, fontWeight: 700,
         background: `${color}18`, color, border: `1px solid ${color}55`,
-        fontFamily: "'JetBrains Mono', monospace",
+        fontFamily: ROBOTO,
       }}>{n > 0 ? '+' : ''}{n.toFixed(1)}%</span>
     );
   };
@@ -259,7 +261,7 @@ function ProposalsTab() {
   return (
     <div style={{ background: D.card, borderRadius: 12, border: `1px solid ${D.border}`, padding: 20 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-        <h2 style={{ margin: 0, fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: "'Montserrat', sans-serif", letterSpacing: '0.02em' }}>Pricing Proposals</h2>
+        <h2 style={{ margin: 0, fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: ROBOTO, letterSpacing: '0.02em' }}>Pricing Proposals</h2>
         <div style={{ display: 'flex', gap: 6 }}>
           {statusOptions.map(s => (
             <button
@@ -310,8 +312,8 @@ function ProposalsTab() {
               {proposals.map(p => (
                 <tr key={p.id} style={{ borderBottom: `1px solid ${D.border}22`, cursor: 'pointer' }}
                     onClick={() => { setSelected(p); setReviewNotes(p.review_notes || ''); }}>
-                  <td style={{ padding: '8px 10px', color: '#0F172A', fontFamily: "'JetBrains Mono', monospace", fontSize: 12, fontWeight: 600 }}>{p.config_key}</td>
-                  <td style={{ padding: '8px 10px', color: D.text, fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>
+                  <td style={{ padding: '8px 10px', color: '#0F172A', fontFamily: ROBOTO, fontSize: 12, fontWeight: 600 }}>{p.config_key}</td>
+                  <td style={{ padding: '8px 10px', color: D.text, fontFamily: ROBOTO, fontSize: 12 }}>
                     <span style={{ color: D.muted }}>{formatValue(p.current_value)}</span>
                     <span style={{ margin: '0 6px', color: D.muted }}>→</span>
                     <span style={{ color: '#0F172A', fontWeight: 600 }}>{formatValue(p.proposed_value)}</span>
@@ -356,13 +358,13 @@ function ProposalsTab() {
 
             <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: '8px 12px', fontSize: 12, marginBottom: 16 }}>
               <div style={{ color: D.muted, fontWeight: 600 }}>Config Key</div>
-              <div style={{ fontFamily: "'JetBrains Mono', monospace", color: '#0F172A' }}>{selected.config_key}</div>
+              <div style={{ fontFamily: ROBOTO, color: '#0F172A' }}>{selected.config_key}</div>
 
               <div style={{ color: D.muted, fontWeight: 600 }}>Current</div>
-              <div style={{ fontFamily: "'JetBrains Mono', monospace", color: D.text }}>{formatValue(selected.current_value)}</div>
+              <div style={{ fontFamily: ROBOTO, color: D.text }}>{formatValue(selected.current_value)}</div>
 
               <div style={{ color: D.muted, fontWeight: 600 }}>Proposed</div>
-              <div style={{ fontFamily: "'JetBrains Mono', monospace", color: '#0F172A', fontWeight: 600 }}>{formatValue(selected.proposed_value)}</div>
+              <div style={{ fontFamily: ROBOTO, color: '#0F172A', fontWeight: 600 }}>{formatValue(selected.proposed_value)}</div>
 
               <div style={{ color: D.muted, fontWeight: 600 }}>% Change</div>
               <div>{pctBadge(selected.pct_change) || <span style={{ color: D.muted }}>—</span>}</div>
@@ -384,7 +386,7 @@ function ProposalsTab() {
             {selected.evidence && (
               <div style={{ marginBottom: 12 }}>
                 <div style={{ fontSize: 12, color: D.muted, fontWeight: 600, marginBottom: 4 }}>Evidence</div>
-                <pre style={{ background: D.bg, padding: 10, borderRadius: 6, fontSize: 11, fontFamily: "'JetBrains Mono', monospace", color: D.text, overflowX: 'auto', margin: 0, maxHeight: 160 }}>
+                <pre style={{ background: D.bg, padding: 10, borderRadius: 6, fontSize: 11, fontFamily: ROBOTO, color: D.text, overflowX: 'auto', margin: 0, maxHeight: 160 }}>
                   {JSON.stringify(typeof selected.evidence === 'string' ? JSON.parse(selected.evidence) : selected.evidence, null, 2)}
                 </pre>
               </div>
@@ -393,7 +395,7 @@ function ProposalsTab() {
             {selected.price_impact && (
               <div style={{ marginBottom: 12 }}>
                 <div style={{ fontSize: 12, color: D.muted, fontWeight: 600, marginBottom: 4 }}>Price Impact</div>
-                <pre style={{ background: D.bg, padding: 10, borderRadius: 6, fontSize: 11, fontFamily: "'JetBrains Mono', monospace", color: D.text, overflowX: 'auto', margin: 0, maxHeight: 160 }}>
+                <pre style={{ background: D.bg, padding: 10, borderRadius: 6, fontSize: 11, fontFamily: ROBOTO, color: D.text, overflowX: 'auto', margin: 0, maxHeight: 160 }}>
                   {JSON.stringify(typeof selected.price_impact === 'string' ? JSON.parse(selected.price_impact) : selected.price_impact, null, 2)}
                 </pre>
               </div>
@@ -409,7 +411,7 @@ function ProposalsTab() {
                 style={{
                   width: '100%', minHeight: 80, padding: 10, borderRadius: 6,
                   border: `1px solid ${D.border}`, background: D.input, color: '#0F172A',
-                  fontSize: 12, fontFamily: "'DM Sans', sans-serif", resize: 'vertical', outline: 'none',
+                  fontSize: 12, fontFamily: ROBOTO, resize: 'vertical', outline: 'none',
                 }}
               />
             </div>
@@ -468,14 +470,14 @@ function EditCell({ value, onSave, type = 'number', width = 70 }) {
         onChange={e => setVal(e.target.value)}
         onBlur={() => { onSave(type === 'number' ? Number(val) : val); setEditing(false); }}
         onKeyDown={e => { if (e.key === 'Enter') { onSave(type === 'number' ? Number(val) : val); setEditing(false); } if (e.key === 'Escape') setEditing(false); }}
-        style={{ width, padding: '4px 6px', background: D.input, border: `1px solid ${D.teal}`, borderRadius: 4, color: '#0F172A', fontSize: 13, fontFamily: "'JetBrains Mono', monospace", textAlign: 'right', outline: 'none' }}
+        style={{ width, padding: '4px 6px', background: D.input, border: `1px solid ${D.teal}`, borderRadius: 4, color: '#0F172A', fontSize: 13, fontFamily: ROBOTO, textAlign: 'right', outline: 'none' }}
       />
     );
   }
   return (
     <span
       onClick={() => { setVal(value); setEditing(true); }}
-      style={{ cursor: 'pointer', padding: '4px 6px', borderRadius: 4, fontSize: 13, fontFamily: "'JetBrains Mono', monospace", color: '#0F172A', display: 'inline-block', minWidth: width, textAlign: 'right' }}
+      style={{ cursor: 'pointer', padding: '4px 6px', borderRadius: 4, fontSize: 13, fontFamily: ROBOTO, color: '#0F172A', display: 'inline-block', minWidth: width, textAlign: 'right' }}
       title="Click to edit"
     >
       {typeof value === 'number' ? (value < 1 && value > 0 ? `${(value * 100).toFixed(1)}%` : value.toLocaleString(undefined, { minimumFractionDigits: value % 1 ? 2 : 0, maximumFractionDigits: 4 })) : value}
@@ -576,7 +578,7 @@ function ConfigCard({ config, onUpdate }) {
               {arr.map((row, i) => (
                 <tr key={i}>
                   {cols.map(c => (
-                    <td key={c} style={{ padding: '3px 8px', color: '#0F172A', fontFamily: "'JetBrains Mono', monospace" }}>
+                    <td key={c} style={{ padding: '3px 8px', color: '#0F172A', fontFamily: ROBOTO }}>
                       {parentKey ? (
                         <EditCell value={row[c]} onSave={v => updateCell(i, c, v)} type={typeof row[c] === 'number' ? 'number' : 'text'} width={70} />
                       ) : (
@@ -600,7 +602,7 @@ function ConfigCard({ config, onUpdate }) {
       );
     }
     // Array of arrays (bracket data)
-    return <pre style={{ fontSize: 11, color: D.muted, margin: 0, fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'pre-wrap' }}>{JSON.stringify(arr, null, 2)}</pre>;
+    return <pre style={{ fontSize: 11, color: D.muted, margin: 0, fontFamily: ROBOTO, whiteSpace: 'pre-wrap' }}>{JSON.stringify(arr, null, 2)}</pre>;
   };
 
   return (
@@ -631,7 +633,7 @@ function ConfigCard({ config, onUpdate }) {
                 value={rawText}
                 onChange={e => setRawText(e.target.value)}
                 rows={Math.min(20, rawText.split('\n').length + 1)}
-                style={{ width: '100%', padding: 10, background: '#FFFFFF', border: `1px solid ${D.border}`, borderRadius: 8, color: '#0F172A', fontSize: 12, fontFamily: "'JetBrains Mono', monospace", resize: 'vertical', outline: 'none', boxSizing: 'border-box' }}
+                style={{ width: '100%', padding: 10, background: '#FFFFFF', border: `1px solid ${D.border}`, borderRadius: 8, color: '#0F172A', fontSize: 12, fontFamily: ROBOTO, resize: 'vertical', outline: 'none', boxSizing: 'border-box' }}
               />
               <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
                 <button onClick={handleRawSave} disabled={saving} style={{ fontSize: 11, padding: '4px 12px', borderRadius: 4, border: 'none', cursor: 'pointer', background: D.green, color: D.white }}>{saving ? '...' : 'Save'}</button>
@@ -643,7 +645,7 @@ function ConfigCard({ config, onUpdate }) {
           ) : Array.isArray(data) ? (
             renderArray(data)
           ) : (
-            <pre style={{ fontSize: 11, color: D.muted, margin: 0, fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'pre-wrap' }}>{JSON.stringify(data, null, 2)}</pre>
+            <pre style={{ fontSize: 11, color: D.muted, margin: 0, fontFamily: ROBOTO, whiteSpace: 'pre-wrap' }}>{JSON.stringify(data, null, 2)}</pre>
           )}
         </div>
       )}
@@ -688,7 +690,7 @@ function LawnBracketsTab() {
   const sqftBrackets = [...new Set(trackData.map(r => r.sqft_bracket))].sort((a, b) => a - b);
 
   return (
-    <div>
+    <div style={{ fontFamily: ROBOTO }}>
       <div style={{ display: 'flex', gap: 6, marginBottom: 16 }}>
         {trackKeys.map(tk => (
           <button
@@ -720,7 +722,7 @@ function LawnBracketsTab() {
           <tbody>
             {sqftBrackets.map(sqft => (
               <tr key={sqft} style={{ borderBottom: `1px solid ${D.border}22` }}>
-                <td style={{ padding: '6px 12px', color: D.text, fontFamily: "'JetBrains Mono', monospace", fontSize: 13 }}>
+                <td style={{ padding: '6px 12px', color: D.text, fontFamily: ROBOTO, fontSize: 13 }}>
                   {sqft === 0 ? '0' : sqft.toLocaleString()}
                 </td>
                 {tiers.map(tier => {
@@ -764,7 +766,7 @@ function DiscountRulesTab() {
 
   return (
     <div>
-      <h2 style={{ margin: '0 0 12px', fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: "'Montserrat', sans-serif", letterSpacing: '0.02em' }}>Service Discount Rules</h2>
+      <h2 style={{ margin: '0 0 12px', fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: ROBOTO, letterSpacing: '0.02em' }}>Service Discount Rules</h2>
       <div style={{ overflowX: 'auto' }}>
         <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
           <thead>
@@ -792,7 +794,7 @@ function DiscountRulesTab() {
                     style={{ accentColor: D.teal, width: 16, height: 16, cursor: 'pointer' }}
                   />
                 </td>
-                <td style={{ padding: '8px', textAlign: 'center', fontFamily: "'JetBrains Mono', monospace" }}>
+                <td style={{ padding: '8px', textAlign: 'center', fontFamily: ROBOTO }}>
                   {r.max_discount_pct !== null && r.max_discount_pct !== undefined ? (
                     <EditCell value={Number(r.max_discount_pct)} onSave={v => handleUpdate(r.service_key, 'max_discount_pct', v)} width={50} />
                   ) : (
@@ -807,7 +809,7 @@ function DiscountRulesTab() {
                     style={{ accentColor: D.red, width: 16, height: 16, cursor: 'pointer' }}
                   />
                 </td>
-                <td style={{ padding: '8px', textAlign: 'center', fontFamily: "'JetBrains Mono', monospace" }}>
+                <td style={{ padding: '8px', textAlign: 'center', fontFamily: ROBOTO }}>
                   {r.flat_credit ? (
                     <EditCell value={Number(r.flat_credit)} onSave={v => handleUpdate(r.service_key, 'flat_credit', v)} width={50} />
                   ) : (
@@ -842,7 +844,7 @@ function ProductsTab() {
 
   return (
     <div>
-      <h2 style={{ margin: '0 0 4px', fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: "'Montserrat', sans-serif", letterSpacing: '0.02em' }}>Product Cost Reference</h2>
+      <h2 style={{ margin: '0 0 4px', fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: ROBOTO, letterSpacing: '0.02em' }}>Product Cost Reference</h2>
       <div style={{ fontSize: 12, color: D.muted, marginBottom: 16 }}>
         {products.length} products loaded. Full catalog available under Inventory tab.
       </div>
@@ -863,8 +865,8 @@ function ProductsTab() {
                 <td style={{ padding: '5px 8px', color: D.text, fontSize: 12 }}>{p.product_name || p.name}</td>
                 <td style={{ padding: '5px 8px', color: D.muted, fontSize: 11 }}>{p.category}</td>
                 <td style={{ padding: '5px 8px', color: D.muted, fontSize: 11, maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.active_ingredient || '—'}</td>
-                <td style={{ padding: '5px 8px', textAlign: 'right', fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: D.green }}>${Number(p.best_price || 0).toFixed(2)}</td>
-                <td style={{ padding: '5px 8px', textAlign: 'right', fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: D.muted }}>{p.unit_price ? `$${Number(p.unit_price).toFixed(4)}` : '—'}</td>
+                <td style={{ padding: '5px 8px', textAlign: 'right', fontFamily: ROBOTO, fontSize: 12, color: D.green }}>${Number(p.best_price || 0).toFixed(2)}</td>
+                <td style={{ padding: '5px 8px', textAlign: 'right', fontFamily: ROBOTO, fontSize: 11, color: D.muted }}>{p.unit_price ? `$${Number(p.unit_price).toFixed(4)}` : '—'}</td>
               </tr>
             ))}
           </tbody>
@@ -920,7 +922,7 @@ export default function PricingLogicPanel() {
   const filteredConfigs = configs.filter(c => c.category === activeTab);
 
   return (
-    <div>
+    <div style={{ fontFamily: ROBOTO }}>
       {/* Tab strip */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 20, padding: '4px 0', borderBottom: `1px solid ${D.border}` }}>
         {TABS.map(t => (
@@ -935,7 +937,7 @@ export default function PricingLogicPanel() {
               borderBottom: activeTab === t.key ? `2px solid ${D.teal}` : '2px solid transparent',
             }}
           >
-            {t.icon} {t.label}
+            {t.label}
           </button>
         ))}
       </div>
@@ -947,7 +949,7 @@ export default function PricingLogicPanel() {
           {/* Lawn tab has special bracket grid */}
           {activeTab === 'lawn' && (
             <div style={{ marginBottom: 20 }}>
-              <h2 style={{ margin: '0 0 12px', fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: "'Montserrat', sans-serif", letterSpacing: '0.02em' }}>Monthly Price Brackets</h2>
+              <h2 style={{ margin: '0 0 12px', fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: ROBOTO, letterSpacing: '0.02em' }}>Monthly Price Brackets</h2>
               <LawnBracketsTab />
             </div>
           )}
@@ -972,12 +974,12 @@ export default function PricingLogicPanel() {
           {activeTab !== 'products' && activeTab !== 'changelog' && activeTab !== 'proposals' && filteredConfigs.length > 0 && (
             <div>
               {activeTab !== 'lawn' && activeTab !== 'waveguard' && (
-                <h2 style={{ margin: '0 0 12px', fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: "'Montserrat', sans-serif", letterSpacing: '0.02em' }}>
+                <h2 style={{ margin: '0 0 12px', fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: ROBOTO, letterSpacing: '0.02em' }}>
                   {TABS.find(t => t.key === activeTab)?.label || activeTab} Configuration
                 </h2>
               )}
-              {activeTab === 'waveguard' && <h2 style={{ margin: '12px 0 12px', fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: "'Montserrat', sans-serif", letterSpacing: '0.02em' }}>Tier Configuration</h2>}
-              {activeTab === 'lawn' && <h2 style={{ margin: '12px 0 12px', fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: "'Montserrat', sans-serif", letterSpacing: '0.02em' }}>Lawn Pricing Config</h2>}
+              {activeTab === 'waveguard' && <h2 style={{ margin: '12px 0 12px', fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: ROBOTO, letterSpacing: '0.02em' }}>Tier Configuration</h2>}
+              {activeTab === 'lawn' && <h2 style={{ margin: '12px 0 12px', fontSize: 12, fontWeight: 500, color: '#0F172A', fontFamily: ROBOTO, letterSpacing: '0.02em' }}>Lawn Pricing Config</h2>}
               {filteredConfigs.map(c => (
                 <ConfigCard key={c.config_key} config={c} onUpdate={handleConfigUpdate} />
               ))}
