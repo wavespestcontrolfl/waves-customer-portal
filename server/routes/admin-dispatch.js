@@ -13,6 +13,7 @@ const CompletionRecap = require('../services/completion-recap');
 const CompletionAttempts = require('../services/completion-attempts');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { recordServiceProductNutrients } = require('../services/nutrient-ledger');
+const { buildPlanForService } = require('../services/waveguard-plan-engine');
 
 // Haversine ETA for the dispatch board tech cards. Returns a whole
 // number of minutes, or null when any input is missing or the tech is
@@ -66,6 +67,21 @@ const VALID_VISIT_OUTCOMES = new Set([
   'customer_concern',
   'incomplete',
 ]);
+
+function isWaveGuardLawnCompletion(svc) {
+  const serviceType = String(svc?.service_type || '').toLowerCase();
+  return !!svc?.cust_waveguard_tier && serviceType.includes('lawn');
+}
+
+function calibrationLockoutBlocks(plan) {
+  const lockoutCodes = new Set([
+    'missing_calibration',
+    'equipment_selection_required',
+    'expired_calibration',
+  ]);
+  return (plan?.equipmentCalibration?.blocks || [])
+    .filter((block) => lockoutCodes.has(block.code));
+}
 
 function parseJsonObject(value) {
   if (!value) return {};
@@ -364,6 +380,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       reviewSuppression = null,
       incompleteReason = null,
       products,
+      equipmentSystemId,
+      calibrationId,
       soilTemp,
       thatchMeasurement,
       soilPh,
@@ -384,6 +402,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const isIncompleteVisit = visitOutcome === 'incomplete';
     const completionAreas = Array.isArray(areasTreated) ? areasTreated : (Array.isArray(areasServiced) ? areasServiced : []);
     const concernText = typeof customerConcernText === 'string' ? customerConcernText.trim() : '';
+    let waveguardEquipmentSystemId = equipmentSystemId || null;
+    let waveguardCalibrationId = calibrationId || null;
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
@@ -404,6 +424,29 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (claim.action === 'conflict') return res.status(claim.status).json(claim.payload);
     completionAttempt = claim.attempt;
     const resumingCommittedCompletion = claim.action === 'resume';
+
+    if (claim.action === 'proceed' && !isIncompleteVisit && isWaveGuardLawnCompletion(svc)) {
+      const plan = await buildPlanForService(svc.id, {
+        equipmentSystemId: equipmentSystemId || null,
+        calibrationId: calibrationId || null,
+      });
+      const calibrationBlocks = calibrationLockoutBlocks(plan);
+      if (calibrationBlocks.length) {
+        const validationErr = new Error('Equipment calibration lockout');
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
+        return res.status(400).json({
+          error: 'Equipment calibration lockout',
+          code: 'waveguard_calibration_lockout',
+          details: calibrationBlocks.map((block) => block.message),
+          blocks: calibrationBlocks,
+        });
+      }
+      const selectedCalibration = plan?.equipmentCalibration?.selected;
+      if (selectedCalibration) {
+        waveguardEquipmentSystemId = selectedCalibration.equipment_system_id || waveguardEquipmentSystemId;
+        waveguardCalibrationId = selectedCalibration.id || waveguardCalibrationId;
+      }
+    }
 
     // Status flip + completion artifacts + audit row + lifecycle
     // timestamps, all in one trx. Migrated to
@@ -461,6 +504,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             customerConcernText: concernText || null,
             customerRecap: customerRecap || null,
             areasTreated: completionAreas,
+            waveguardEquipmentSystemId,
+            waveguardCalibrationId,
           },
           areas_serviced: completionAreas,
           customer_interaction: customerInteraction || null,

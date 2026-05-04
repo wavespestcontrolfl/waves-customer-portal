@@ -1063,6 +1063,10 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   const [nextVisit, setNextVisit] = useState(null);
   const [nextVisitNote, setNextVisitNote] = useState('');
   const [showNextVisitNote, setShowNextVisitNote] = useState(false);
+  const [equipmentSystemId, setEquipmentSystemId] = useState('');
+  const [calibrationId, setCalibrationId] = useState('');
+  const [equipmentCalibrations, setEquipmentCalibrations] = useState([]);
+  const [equipmentCalibrationError, setEquipmentCalibrationError] = useState('');
   const [savedDraft, setSavedDraft] = useState(null);
   const [showDraftPrompt, setShowDraftPrompt] = useState(false);
   const photoInputRef = useRef(null);
@@ -1072,6 +1076,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   const draftReadyRef = useRef(false);
 
   const isLawn = detectServiceCategory(service.serviceType) === 'lawn';
+  const calibrationRequired = isLawn && !!service.waveguardTier;
   const serviceCategory = detectServiceCategory(service.serviceType);
   const areaOptions = [
     ...(AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest),
@@ -1121,6 +1126,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
             : '';
   const completionCtaLabel = submitting
     ? 'Completing...'
+    : calibrationRequired && !isIncompleteVisit && !equipmentSystemId
+      ? 'Select Equipment Calibration'
     : isIncompleteVisit
       ? 'Mark Visit Incomplete'
       : !sendSms
@@ -1141,6 +1148,26 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         .catch(() => {});
     }
   }, [service.customerId]);
+
+  useEffect(() => {
+    if (!calibrationRequired) return;
+    let cancelled = false;
+    setEquipmentCalibrationError('');
+    adminFetch('/admin/equipment-systems/calibrations')
+      .then((data) => {
+        if (cancelled) return;
+        const rows = Array.isArray(data.calibrations) ? data.calibrations : [];
+        setEquipmentCalibrations(rows);
+        if (!equipmentSystemId && rows.length === 1) {
+          setEquipmentSystemId(rows[0].equipment_system_id || '');
+          setCalibrationId(rows[0].id || '');
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) setEquipmentCalibrationError(err.message || 'Could not load equipment calibrations');
+      });
+    return () => { cancelled = true; };
+  }, [calibrationRequired]);
 
   useEffect(() => {
     draftReadyRef.current = false;
@@ -1194,6 +1221,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         customerConcern,
         nextVisitNote,
         showNextVisitNote,
+        equipmentSystemId,
+        calibrationId,
       };
       localStorage.setItem(completionDraftKey(service.id), JSON.stringify(draft));
     }, 700);
@@ -1202,6 +1231,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
     service.id, showDraftPrompt, success, notes, selectedProducts, soilTemp, thatchMeasurement,
     soilPh, soilMoisture, sendSms, requestReview, visitOutcome, customerRecap, recapSource,
     areasServiced, customerInteraction, customerConcern, nextVisitNote, showNextVisitNote,
+    equipmentSystemId, calibrationId,
   ]);
 
   function restoreDraft() {
@@ -1224,6 +1254,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
     setCustomerConcern(savedDraft.customerConcern || '');
     setNextVisitNote(savedDraft.nextVisitNote || '');
     setShowNextVisitNote(!!savedDraft.showNextVisitNote);
+    setEquipmentSystemId(savedDraft.equipmentSystemId || '');
+    setCalibrationId(savedDraft.calibrationId || '');
     setShowDraftPrompt(false);
   }
 
@@ -1358,6 +1390,11 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   function toggleArea(area) {
     setAreasServiced(prev => prev.includes(area) ? prev.filter(a => a !== area) : [...prev, area]);
   }
+  function handleEquipmentSelect(value) {
+    setEquipmentSystemId(value);
+    const selected = equipmentCalibrations.find(c => c.equipment_system_id === value);
+    setCalibrationId(selected?.id || '');
+  }
   function handlePhotoSelect(e) {
     const files = Array.from(e.target.files || []);
     if (servicePhotos.length + files.length > 5) {
@@ -1381,6 +1418,10 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   }
 
   async function handleSubmit() {
+    if (calibrationCompletionBlocked) {
+      alert(calibrationHelpText || 'Select calibrated equipment before completing this WaveGuard lawn visit.');
+      return;
+    }
     setSubmitting(true);
     try {
       if (!completionIdempotencyKeyRef.current) {
@@ -1392,6 +1433,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         customerRecap,
         visitOutcome,
         reviewSuppression: reviewSuppressionReason,
+        equipmentSystemId: equipmentSystemId || null,
+        calibrationId: calibrationId || null,
         products: selectedProducts.map(p => ({
           productId: p.productId,
           rate: p.rate,
@@ -1436,6 +1479,18 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   const filteredProducts = (products || []).filter(p =>
     p.name.toLowerCase().includes(productSearch.toLowerCase())
   );
+  const selectedCalibration = equipmentCalibrations.find(c => c.equipment_system_id === equipmentSystemId) || null;
+  const selectedCalibrationExpired = !!selectedCalibration?.expires_at
+    && new Date(selectedCalibration.expires_at).getTime() < Date.now();
+  const calibrationCompletionBlocked = calibrationRequired
+    && !isIncompleteVisit
+    && (!equipmentSystemId || selectedCalibrationExpired);
+  const calibrationHelpText = equipmentCalibrationError
+    || (selectedCalibrationExpired
+      ? 'Selected calibration is expired. Record a new calibration before completing this visit.'
+      : calibrationRequired
+        ? 'WaveGuard lawn visits require current calibrated spray equipment before completion.'
+        : '');
 
   const chipGroupStyle = { marginBottom: 8 };
   const chipLabelStyle = { fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 4, display: 'block' };
@@ -1632,6 +1687,31 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
                   Callback visit — will be noted as included with WaveGuard membership on the customer's report.
                 </div>
               </div>
+            )}
+
+            {calibrationRequired && (
+              <Field label="Equipment calibration">
+                <select
+                  value={equipmentSystemId}
+                  onChange={e => handleEquipmentSelect(e.target.value)}
+                  disabled={isIncompleteVisit}
+                  style={mInput}
+                >
+                  <option value="">Select calibrated equipment</option>
+                  {equipmentCalibrations.map(c => (
+                    <option key={c.id} value={c.equipment_system_id}>
+                      {c.system_name || 'Equipment'} · {c.carrier_gal_per_1000 || '—'} gal/1K
+                    </option>
+                  ))}
+                </select>
+                <div style={{
+                  marginTop: 8, fontFamily: font, fontSize: 12,
+                  color: selectedCalibrationExpired || equipmentCalibrationError ? M.err : M.ink3,
+                  lineHeight: 1.35,
+                }}>
+                  {isIncompleteVisit ? 'Calibration is not required when marking a visit incomplete.' : calibrationHelpText}
+                </div>
+              </Field>
             )}
 
             {/* Technician notes */}
@@ -2052,8 +2132,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
             <button
               type="button"
               onClick={() => handleSubmit()}
-              disabled={submitting}
-              style={{ ...primaryPill, opacity: submitting ? 0.5 : 1 }}
+              disabled={submitting || calibrationCompletionBlocked}
+              style={{ ...primaryPill, opacity: submitting || calibrationCompletionBlocked ? 0.5 : 1 }}
             >
               {completionCtaLabel.replace('...', '…')}
             </button>
@@ -2161,6 +2241,32 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
                 <button onClick={discardDraft} style={{ ...btnBase, width: 'auto', height: 36, padding: '0 14px', background: 'transparent', color: D.muted, border: `1px solid ${D.border}` }}>
                   Discard
                 </button>
+              </div>
+            </div>
+          )}
+
+          {calibrationRequired && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={labelStyle}>Equipment Calibration</label>
+              <select
+                value={equipmentSystemId}
+                onChange={e => handleEquipmentSelect(e.target.value)}
+                disabled={isIncompleteVisit}
+                style={inputStyle}
+              >
+                <option value="">Select calibrated equipment</option>
+                {equipmentCalibrations.map(c => (
+                  <option key={c.id} value={c.equipment_system_id}>
+                    {c.system_name || 'Equipment'} · {c.carrier_gal_per_1000 || '—'} gal/1K
+                  </option>
+                ))}
+              </select>
+              <div style={{
+                fontSize: 12,
+                color: selectedCalibrationExpired || equipmentCalibrationError ? D.red : D.muted,
+                lineHeight: 1.4,
+              }}>
+                {isIncompleteVisit ? 'Calibration is not required when marking a visit incomplete.' : calibrationHelpText}
               </div>
             </div>
           )}
@@ -2529,9 +2635,9 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
 
         {/* Footer */}
         <div style={{ padding: '16px 24px', borderTop: `1px solid ${D.border}`, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <button onClick={() => handleSubmit()} disabled={submitting} style={{
+          <button onClick={() => handleSubmit()} disabled={submitting || calibrationCompletionBlocked} style={{
             ...btnBase, width: '100%', background: D.green, color: '#fff', fontSize: 14, height: 52,
-            opacity: submitting ? 0.6 : 1, flexDirection: 'column', lineHeight: 1.3,
+            opacity: submitting || calibrationCompletionBlocked ? 0.6 : 1, flexDirection: 'column', lineHeight: 1.3,
           }}>
             {submitting ? completionCtaLabel : (
               <>
