@@ -63,6 +63,7 @@ export default function PublicBookingPage() {
     setSelectedSlot(null);
     setExistingCustomerId(null);
     setAddressMayMatchCustomer(false);
+    setContact({ firstName: '', lastName: '', phone: '', email: '' });
     setError('');
   }, []);
 
@@ -109,10 +110,10 @@ export default function PublicBookingPage() {
     setExistingCustomerId(customer.id);
     setContact(c => ({
       ...c,
-      firstName: c.firstName || customer.first_name || '',
-      lastName: c.lastName || customer.last_name || '',
-      phone: c.phone || customer.phone || '',
-      email: c.email || customer.email || '',
+      firstName: customer.first_name || '',
+      lastName: customer.last_name || '',
+      phone: customer.phone || '',
+      email: customer.email || '',
     }));
   }, []);
 
