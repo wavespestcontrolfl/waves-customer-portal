@@ -87,6 +87,19 @@ const toolHealthRoutes = require('./routes/tool-health');
 
 const app = express();
 
+const SERVICE_ESTIMATE_SLUGS = new Set([
+  'mosquito',
+  'termite',
+  'lawn',
+  'flea',
+  'cockroach',
+  'bed-bug',
+  'dethatching',
+  'dehatching',
+  'top-dressing',
+  'overseeding',
+]);
+
 // Railway terminates TLS upstream and forwards via X-Forwarded-For.
 // Trust a single proxy hop so express-rate-limit can key on the real client IP.
 app.set('trust proxy', 1);
@@ -248,8 +261,13 @@ app.use('/api/admin/estimates', adminEstimateRoutes);
 app.use('/api/admin/estimates', require('./routes/admin-estimate-slots'));
 app.use('/api/admin/lookup', adminPropertyLookupRoutes);
 app.use('/api/estimates', estimatePublicRoutes);
-// Customer-facing estimate URL — server-rendered HTML
-app.get('/estimate/:token', estimatePublicRoutes.handleEstimateView);
+// Customer-facing estimate URL. Service slugs render the SPA quote wizard;
+// everything else remains a server-rendered accepted-estimate token.
+app.get('/estimate/:token', (req, res, next) => {
+  const slug = String(req.params.token || '').toLowerCase();
+  if (SERVICE_ESTIMATE_SLUGS.has(slug)) return next();
+  return estimatePublicRoutes.handleEstimateView(req, res, next);
+});
 app.use('/api/public/quote', publicQuoteRoutes);
 app.use('/api/public/estimator', publicPropertyLookupRoutes);
 app.use('/api/admin/reviews', adminReviewRoutes);

@@ -40,10 +40,118 @@ const INTEREST_OPTIONS = [
 ];
 
 const OTHER_OPTIONS = [
-  { value: 'termite',  label: 'Termite',  icon: 'bug'      },
-  { value: 'mosquito', label: 'Mosquito', icon: 'mosquito' },
-  { value: 'rodent',   label: 'Rodent',   icon: 'rodent'   },
+  { value: 'termite',     label: 'Termite',      icon: 'bug'      },
+  { value: 'mosquito',    label: 'Mosquito',     icon: 'mosquito' },
+  { value: 'rodent',      label: 'Rodent',       icon: 'rodent'   },
+  { value: 'flea',        label: 'Flea',         icon: 'bug'      },
+  { value: 'cockroach',   label: 'Cockroach',    icon: 'bug'      },
+  { value: 'bed_bug',     label: 'Bed Bug',      icon: 'bug'      },
+  { value: 'dethatching', label: 'Dethatching',  icon: 'leaf'     },
+  { value: 'top_dressing', label: 'Top Dressing', icon: 'leaf'    },
+  { value: 'overseeding', label: 'Overseeding',  icon: 'leaf'     },
 ];
+
+const SERVICE_LANDING_CONFIGS = {
+  mosquito: {
+    title: 'Get a Mosquito Control Estimate.',
+    subtitle: 'Monthly yard treatments for mosquitoes, fleas, ticks, and no-see-ums around the places you actually use.',
+    leftTitle: 'Take Your Yard Back.',
+    leftSubtitle: 'Tell us where you need service and a Waves specialist will price the right mosquito plan for your property.',
+    interest: 'other',
+    otherService: 'mosquito',
+    startKey: 'name',
+  },
+  termite: {
+    title: 'Get a Termite Estimate.',
+    subtitle: 'Treatment and protection quotes for active termite concerns, inspections, and long-term prevention.',
+    leftTitle: 'Protect the Structure First.',
+    leftSubtitle: 'Send the basics and a Waves specialist will match the right termite option to the property.',
+    interest: 'other',
+    otherService: 'termite',
+    startKey: 'name',
+  },
+  lawn: {
+    title: 'Get a Lawn Care Estimate in 60 Seconds.',
+    subtitle: 'Fertilization, weed control, and seasonal treatments built for Southwest Florida lawns.',
+    leftTitle: 'A Healthier Lawn Without Guesswork.',
+    leftSubtitle: 'We measure your property, confirm your grass type, and price the right recurring lawn plan.',
+    interest: 'lawn',
+    startKey: 'frequency',
+  },
+  flea: {
+    title: 'Get a Flea Control Estimate.',
+    subtitle: 'Targeted service for flea pressure indoors, outdoors, and around pets.',
+    leftTitle: 'Stop the Flea Cycle.',
+    leftSubtitle: 'Send your property details and a Waves specialist will quote the right treatment plan.',
+    interest: 'other',
+    otherService: 'flea',
+    startKey: 'name',
+  },
+  cockroach: {
+    title: 'Get a Cockroach Control Estimate.',
+    subtitle: 'Treatment plans for roach activity inside, outside, kitchens, garages, and entry points.',
+    leftTitle: 'Fast Roach Control, Done Properly.',
+    leftSubtitle: 'Tell us where the activity is and a Waves specialist will price the right treatment.',
+    interest: 'other',
+    otherService: 'cockroach',
+    startKey: 'name',
+  },
+  'bed-bug': {
+    title: 'Get a Bed Bug Estimate.',
+    subtitle: 'Inspection-led bed bug quotes for bedrooms, furniture, rentals, and urgent treatment needs.',
+    leftTitle: 'Handle Bed Bugs Quickly.',
+    leftSubtitle: 'Share the basics and a Waves specialist will follow up with the next step and pricing.',
+    interest: 'other',
+    otherService: 'bed_bug',
+    startKey: 'name',
+  },
+  dethatching: {
+    title: 'Get a Dethatching Estimate.',
+    subtitle: 'Lawn dethatching quotes for thick thatch, weak growth, and turf recovery.',
+    leftTitle: 'Give Your Lawn Room to Breathe.',
+    leftSubtitle: 'Send the property details and we will quote the right dethatching approach for the turf.',
+    interest: 'other',
+    otherService: 'dethatching',
+    startKey: 'name',
+  },
+  'top-dressing': {
+    title: 'Get a Top Dressing Estimate.',
+    subtitle: 'Top dressing quotes to improve soil contact, smooth uneven areas, and support turf recovery.',
+    leftTitle: 'Improve the Lawn From the Soil Up.',
+    leftSubtitle: 'Tell us where you need work and a Waves specialist will quote the right top dressing plan.',
+    interest: 'other',
+    otherService: 'top_dressing',
+    startKey: 'name',
+  },
+  overseeding: {
+    title: 'Get an Overseeding Estimate.',
+    subtitle: 'Seasonal overseeding quotes for fuller turf and better lawn recovery.',
+    leftTitle: 'Fill In Thin Turf.',
+    leftSubtitle: 'Share the property details and we will quote the right overseeding plan for your lawn.',
+    interest: 'other',
+    otherService: 'overseeding',
+    startKey: 'name',
+  },
+};
+SERVICE_LANDING_CONFIGS.dehatching = SERVICE_LANDING_CONFIGS.dethatching;
+
+function createInitialIntake(serviceConfig) {
+  return {
+    interest: serviceConfig?.interest || '',
+    frequency: serviceConfig?.frequency || '',
+    otherService: serviceConfig?.otherService || '',
+    name: '',
+    email: '',
+    phone: '',
+    address: '',
+  };
+}
+
+function initialIndexFor(serviceConfig) {
+  if (!serviceConfig?.startKey) return 0;
+  const steps = serviceConfig.interest === 'other' ? STEPS_OTHER : STEPS_PRICED;
+  return Math.max(0, steps.indexOf(serviceConfig.startKey));
+}
 
 const FREQUENCY_OPTIONS = [
   { value: 'ongoing',  label: 'Ongoing Service', icon: 'repeat' },
@@ -130,11 +238,16 @@ function formatPhoneDigits(d) {
   return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
 }
 
-export default function QuotePage() {
+export default function QuotePage({ serviceSlug = '' }) {
+  const normalizedServiceSlug = String(serviceSlug || '').toLowerCase();
+  const serviceConfig = SERVICE_LANDING_CONFIGS[normalizedServiceSlug] || null;
+  const startingIntake = createInitialIntake(serviceConfig);
+  const minIntakeIdx = initialIndexFor(serviceConfig);
+
   const [stage, setStage] = useState('intake'); // intake | lookup | confirm | result
-  const [intakeIdx, setIntakeIdx] = useState(0);
+  const [intakeIdx, setIntakeIdx] = useState(minIntakeIdx);
   const [dir, setDir] = useState('next');
-  const [intake, setIntake] = useState({ interest: '', frequency: '', otherService: '', name: '', email: '', phone: '', address: '' });
+  const [intake, setIntake] = useState(startingIntake);
   const [address, setAddress] = useState({ formatted: '', line1: '', city: '', state: 'FL', zip: '' });
 
   const [error, setError] = useState('');
@@ -182,6 +295,30 @@ export default function QuotePage() {
   });
 
   const inputRef = useRef(null);
+
+  useEffect(() => {
+    setStage('intake');
+    setIntakeIdx(minIntakeIdx);
+    setIntake(createInitialIntake(serviceConfig));
+    setAddress({ formatted: '', line1: '', city: '', state: 'FL', zip: '' });
+    setResult(null);
+    setError('');
+    setLookupStatus(''); setLookupSub('');
+    setLeadId(null); setEnriched(null); setSatellite(null); setAiSources(null);
+    setSvcPest(false); setSvcLawn(false);
+    setHomeSqFt(''); setLotSqFt('');
+    setUpsellSelected({}); setUpsellLoading(false); setUpsellError('');
+    setNewsletterOptIn(false);
+    setSubscribeStatus('idle');
+  }, [normalizedServiceSlug]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!serviceConfig) {
+      document.title = 'Waves — Customer Portal';
+      return;
+    }
+    document.title = `${serviceConfig.title.replace(/\.$/, '')} | Waves Pest Control`;
+  }, [serviceConfig]);
 
   // Step list + total stages depend on whether the user picked "other".
   const isOtherFlow = intake.interest === 'other';
@@ -240,7 +377,7 @@ export default function QuotePage() {
   function goBack() {
     setError('');
     setDir('prev');
-    if (intakeIdx > 0) setIntakeIdx(i => i - 1);
+    if (intakeIdx > minIntakeIdx) setIntakeIdx(i => i - 1);
   }
 
   async function submitIntake() {
@@ -315,7 +452,7 @@ export default function QuotePage() {
           interest: 'other',
           otherService: intake.otherService,
           service_interest: otherLabel,
-          source: 'quote-page-divert',
+          source: normalizedServiceSlug ? `quote-page-${normalizedServiceSlug}` : 'quote-page-divert',
           attribution: attribution || undefined,
         }),
       });
@@ -440,8 +577,8 @@ export default function QuotePage() {
 
   function resetAll() {
     setStage('intake');
-    setIntakeIdx(0);
-    setIntake({ interest: '', frequency: '', otherService: '', name: '', email: '', phone: '', address: '' });
+    setIntakeIdx(minIntakeIdx);
+    setIntake(createInitialIntake(serviceConfig));
     setAddress({ formatted: '', line1: '', city: '', state: 'FL', zip: '' });
     setResult(null);
     setError('');
@@ -558,9 +695,9 @@ export default function QuotePage() {
       <section style={sHero}>
         <div style={sHeroOverlay} aria-hidden />
         <div style={{ position: 'relative', maxWidth: 880, margin: '0 auto' }}>
-          <h1 style={sH1}>Get a Free Quote in 60 Seconds.</h1>
+          <h1 style={sH1}>{serviceConfig?.title || 'Get a Free Quote in 60 Seconds.'}</h1>
           <p style={sHeroSub}>
-            Tell us about your property — we'll analyze it with satellite + records and send a price same-day. Serving Manatee, Sarasota, and Charlotte counties.
+            {serviceConfig?.subtitle || "Tell us about your property — we'll analyze it with satellite + records and send a price same-day. Serving Manatee, Sarasota, and Charlotte counties."}
           </p>
           <Button variant="primary" as="a" href="tel:+19412975749" style={{ fontSize: 16 }}>
             Call (941) 297-5749
@@ -574,9 +711,9 @@ export default function QuotePage() {
       <section style={sFormSection}>
         <div className="qp-form-grid" style={sFormWrap}>
           <div style={sLeft}>
-            <h2 style={sLeftH2}>Get Your Price. Keep Your Saturday.</h2>
+            <h2 style={sLeftH2}>{serviceConfig?.leftTitle || 'Get Your Price. Keep Your Saturday.'}</h2>
             <p style={sLeftSub}>
-              Tell us what's going on. We'll handle the rest — most quotes go out same-day.
+              {serviceConfig?.leftSubtitle || "Tell us what's going on. We'll handle the rest — most quotes go out same-day."}
             </p>
             <h3 style={sLeftH3}>Here's what happens next</h3>
             <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 16 }}>
@@ -742,10 +879,10 @@ export default function QuotePage() {
                 <div style={{
                   marginTop: 24,
                   display: 'flex',
-                  justifyContent: intakeIdx > 0 ? 'space-between' : 'flex-end',
+                  justifyContent: intakeIdx > minIntakeIdx ? 'space-between' : 'flex-end',
                   gap: 12,
                 }}>
-                  {intakeIdx > 0 && (
+                  {intakeIdx > minIntakeIdx && (
                     <Button variant="tertiary" onClick={goBack} style={{ textTransform: 'none' }}>← Back</Button>
                   )}
                   {currentKey !== 'interest' && currentKey !== 'frequency' && currentKey !== 'otherService' && (
