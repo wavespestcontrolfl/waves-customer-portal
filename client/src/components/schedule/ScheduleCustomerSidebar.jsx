@@ -190,7 +190,7 @@ export default function ScheduleCustomerSidebar({
   const cancelAppointment = async () => {
     if (!service?.id || cancelling) return;
     if (!canCancelAppointment) return;
-    if (cancelScope !== 'this_only') return;
+    if (cancelScope !== 'this_only' && !canCancelSeries) return;
     setCancelling(true);
     try {
       const reasonParts = [];
@@ -201,6 +201,7 @@ export default function ScheduleCustomerSidebar({
         method: 'PUT',
         body: {
           status: 'cancelled',
+          scope: cancelScope,
           notes: reasonParts.join('\n') || 'Cancelled from appointment sidebar',
           notifyCustomer,
         },
@@ -494,9 +495,6 @@ export default function ScheduleCustomerSidebar({
                 {!canCancelSeries && (
                   <div className="mt-2 text-12 text-ink-tertiary">Series options are available for recurring appointments.</div>
                 )}
-                {cancelScope !== 'this_only' && (
-                  <div className="mt-2 text-12 text-alert-fg">Series cancellation is not available for this appointment yet.</div>
-                )}
               </div>
 
               <div className="mt-6">
@@ -550,7 +548,7 @@ export default function ScheduleCustomerSidebar({
               <button
                 type="button"
                 onClick={cancelAppointment}
-                disabled={cancelling || cancelScope !== 'this_only'}
+                disabled={cancelling || (cancelScope !== 'this_only' && !canCancelSeries)}
                 className="h-10 px-4 rounded-sm bg-red-600 text-13 font-medium uppercase tracking-label text-white disabled:opacity-50 u-focus-ring"
               >
                 {cancelling ? 'Cancelling...' : 'Cancel appointment(s)'}
