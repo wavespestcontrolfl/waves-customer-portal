@@ -46,12 +46,13 @@ async function getAuthClient() {
   return oauth2;
 }
 
-function getAuthUrl() {
+function getAuthUrl(state) {
   const oauth2 = getOAuth2Client();
   return oauth2.generateAuthUrl({
     access_type: 'offline',
     scope: SCOPES,
     prompt: 'consent',
+    state,
     login_hint: process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com',
   });
 }
@@ -78,12 +79,23 @@ async function getGmail() {
 
 async function listMessages(query = '', maxResults = 50) {
   const gmail = await getGmail();
-  const res = await gmail.users.messages.list({
-    userId: 'me',
-    q: query,
-    maxResults,
-  });
-  return res.data.messages || [];
+  const messages = [];
+  let pageToken;
+
+  do {
+    const remaining = maxResults ? Math.max(maxResults - messages.length, 0) : 500;
+    if (remaining === 0) break;
+    const res = await gmail.users.messages.list({
+      userId: 'me',
+      q: query,
+      maxResults: Math.min(remaining, 500),
+      pageToken,
+    });
+    messages.push(...(res.data.messages || []));
+    pageToken = res.data.nextPageToken;
+  } while (pageToken && (!maxResults || messages.length < maxResults));
+
+  return messages;
 }
 
 async function getMessage(messageId) {
