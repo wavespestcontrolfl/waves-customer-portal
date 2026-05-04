@@ -320,6 +320,52 @@ function initScheduledJobs() {
         .update({ send_claim_at: new Date() })
         .returning(['id', 'invoice_number', 'send_method']);
 
+      const pendingReviewInvoices = await db('invoices')
+        .whereNull('scheduled_at')
+        .where({ request_review_after_send: true })
+        .whereNotIn('status', ['paid', 'void', 'refunded'])
+        .where(function () {
+          this.whereNull('send_claim_at')
+            .orWhere('send_claim_at', '<', new Date(Date.now() - claimTtlMs));
+        })
+        .update({ send_claim_at: new Date() })
+        .returning(['id', 'invoice_number', 'customer_id', 'service_record_id']);
+      for (const inv of pendingReviewInvoices) {
+        try {
+          if (inv.service_record_id) {
+            const existing = await db('review_requests')
+              .where({ service_record_id: inv.service_record_id })
+              .first();
+            if (existing) {
+              await db('invoices').where({ id: inv.id }).update({
+                request_review_after_send: false,
+                send_claim_at: null,
+                updated_at: new Date(),
+              });
+              continue;
+            }
+          }
+          const ReviewService = require('./review-request');
+          await ReviewService.create({
+            customerId: inv.customer_id,
+            serviceRecordId: inv.service_record_id || null,
+            triggeredBy: 'auto',
+            delayMinutes: 120,
+          });
+          await db('invoices').where({ id: inv.id }).update({
+            request_review_after_send: false,
+            send_claim_at: null,
+            updated_at: new Date(),
+          });
+        } catch (reviewErr) {
+          await db('invoices').where({ id: inv.id }).update({
+            send_claim_at: null,
+            updated_at: new Date(),
+          }).catch(() => {});
+          logger.error(`Scheduled invoice ${inv.invoice_number} review retry failed: ${reviewErr.name || 'Error'}`);
+        }
+      }
+
       if (claimed.length === 0) return;
 
       const { sendInvoiceNow } = require('../routes/admin-invoices');
@@ -328,9 +374,13 @@ function initScheduledJobs() {
         try {
           const channels = await sendInvoiceNow(inv.id, { sendMethod: inv.send_method || 'both' });
           if (channels.sms.ok || channels.email.ok) sent += 1;
-          else logger.error(`Scheduled invoice ${inv.invoice_number} both channels failed: sms=${channels.sms.error} email=${channels.email.error}`);
+          else {
+            await db('invoices').where({ id: inv.id }).update({ send_claim_at: null });
+            logger.error(`Scheduled invoice ${inv.invoice_number} both channels failed: smsOk=${!!channels.sms.ok} emailOk=${!!channels.email.ok}`);
+          }
         } catch (e) {
-          logger.error(`Scheduled invoice ${inv.invoice_number} failed: ${e.message}`);
+          await db('invoices').where({ id: inv.id }).update({ send_claim_at: null }).catch(() => {});
+          logger.error(`Scheduled invoice ${inv.invoice_number} failed: ${e.name || 'Error'}`);
         }
       }
       logger.info(`Scheduled invoices: ${sent}/${claimed.length} sent`);
@@ -361,7 +411,45 @@ function initScheduledJobs() {
             .orWhere('completion_sms_claim_at', '<', new Date(Date.now() - claimTtlMs));
         })
         .update({ completion_sms_claim_at: new Date() })
-        .returning(['id', 'customer_id', 'completion_sms_body', 'completion_sms_message_type']);
+        .returning([
+          'id',
+          'customer_id',
+          'completion_sms_body',
+          'completion_sms_message_type',
+          'completion_sms_request_review',
+          'completion_sms_review_service_record_id',
+        ]);
+
+      const pendingReviewRows = await db('scheduled_services')
+        .whereNotNull('completion_sms_sent_at')
+        .where('completion_sms_sent_at', '<=', new Date(Date.now() - 120 * 60000))
+        .where({ completion_sms_request_review: true })
+        .where(function () {
+          this.whereNull('completion_sms_review_claim_at')
+            .orWhere('completion_sms_review_claim_at', '<', new Date(Date.now() - claimTtlMs));
+        })
+        .update({ completion_sms_review_claim_at: new Date() })
+        .returning(['id', 'customer_id', 'completion_sms_review_service_record_id']);
+      for (const reviewRow of pendingReviewRows) {
+        try {
+          const ReviewService = require('./review-request');
+          await ReviewService.create({
+            customerId: reviewRow.customer_id,
+            serviceRecordId: reviewRow.completion_sms_review_service_record_id || null,
+            triggeredBy: 'auto',
+            delayMinutes: 0,
+          });
+          await db('scheduled_services').where({ id: reviewRow.id }).update({
+            completion_sms_request_review: false,
+            completion_sms_review_claim_at: null,
+          });
+        } catch (reviewErr) {
+          await db('scheduled_services').where({ id: reviewRow.id }).update({
+            completion_sms_review_claim_at: null,
+          }).catch(() => {});
+          logger.error(`[dispatch] Deferred review request retry failed after completion SMS for service ${reviewRow.id}: ${reviewErr.name || 'Error'}`);
+        }
+      }
 
       if (claimed.length === 0) return;
 
@@ -380,6 +468,10 @@ function initScheduledJobs() {
           if (!row.cust_phone || !row.completion_sms_body) {
             await db('scheduled_services').where({ id: row.id }).update({
               completion_sms_sent_at: new Date(),
+              completion_sms_claim_at: null,
+              completion_sms_body: null,
+              completion_sms_message_type: null,
+              completion_sms_request_review: false,
             });
             continue;
           }
@@ -392,15 +484,20 @@ function initScheduledJobs() {
             messageType: row.completion_sms_message_type || 'service_complete',
           });
           if (result && result.success === false) {
-            logger.error(`Deferred completion SMS for service ${row.id} soft-failed: ${result.error || 'unknown'}`);
+            await db('scheduled_services').where({ id: row.id }).update({ completion_sms_claim_at: null });
+            logger.error(`Deferred completion SMS for service ${row.id} soft-failed`);
             continue;
           }
           await db('scheduled_services').where({ id: row.id }).update({
             completion_sms_sent_at: new Date(),
+            completion_sms_claim_at: null,
+            completion_sms_body: null,
+            completion_sms_message_type: null,
           });
           sent += 1;
         } catch (e) {
-          logger.error(`Deferred completion SMS for service ${row.id} failed: ${e.message}`);
+          await db('scheduled_services').where({ id: row.id }).update({ completion_sms_claim_at: null }).catch(() => {});
+          logger.error(`Deferred completion SMS for service ${row.id} failed: ${e.name || 'Error'}`);
         }
       }
       logger.info(`Deferred completion SMS: ${sent}/${due.length} sent`);

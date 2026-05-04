@@ -6,7 +6,7 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const { resolveLocation } = require('../config/locations');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
-const { etDateString, bumpPastQuietHours } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime, bumpPastQuietHours } = require('../utils/datetime-et');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 
@@ -317,7 +317,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // completion texts don't hit phones late at night.
     let scheduledSendAt = null;
     if (scheduledAt) {
-      const when = new Date(scheduledAt);
+      const when = parseETDateTime(scheduledAt);
       if (isNaN(when.getTime())) return res.status(400).json({ error: 'Invalid scheduledAt' });
       if (when <= new Date()) return res.status(400).json({ error: 'scheduledAt must be in the future' });
       scheduledSendAt = bumpPastQuietHours(when);
@@ -615,6 +615,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const reviewSuffix = bundledReviewUrl
       ? `\n\nEnjoyed the service? A quick review means the world: ${bundledReviewUrl}`
       : '';
+    const completionSmsDeferred = !!(sendCompletionSms && svc.cust_phone && scheduledSendAt);
 
     if (sendCompletionSms && svc.cust_phone) {
       try {
@@ -651,6 +652,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             completion_sms_scheduled_at: scheduledSendAt,
             completion_sms_body: finalBody,
             completion_sms_message_type: messageType,
+            completion_sms_request_review: !!requestReview,
+            completion_sms_review_service_record_id: requestReview ? record.id : null,
           });
         } else {
           await TwilioService.sendSMS(svc.cust_phone, finalBody, { customerId: svc.customer_id, messageType });
@@ -658,14 +661,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (e) { logger.error(`Completion SMS ${scheduledSendAt ? 'queue' : 'send'} failed: ${e.message}`); }
     }
 
-    // Only schedule the delayed follow-up message when the review wasn't
-    // already bundled into the completion SMS above. When the tech scheduled
-    // the completion SMS for later, slide the review-request delay so it
-    // lands ~2h after the SMS itself, not 2h after the underlying completion.
-    // The 2h slide can push the review past 8 PM ET (e.g. 7:30 PM SMS →
-    // 9:30 PM review ask), so run that absolute moment through the same
-    // quiet-hours bump before deriving delayMinutes.
-    if (requestReview && svc.cust_phone && !bundledReviewUrl) {
+    // Only schedule the delayed follow-up message here when the review wasn't
+    // already bundled or deferred with the completion SMS. Deferred completion
+    // SMS rows create their review request only after the cron send succeeds.
+    // If a scheduledAt is present but no completion SMS was queued, honor the
+    // same quiet-hours bump before deriving the review delay.
+    if (requestReview && svc.cust_phone && !bundledReviewUrl && !completionSmsDeferred) {
       try {
         const ReviewService = require('../services/review-request');
         const reviewAt = scheduledSendAt

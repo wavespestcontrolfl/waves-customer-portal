@@ -1092,14 +1092,14 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   }
 
   async function handleSubmit() {
-    let scheduledIso = null;
+    let scheduledValue = null;
     if (scheduleSend) {
       const when = scheduledAt ? new Date(scheduledAt) : null;
       if (!when || isNaN(when.getTime()) || when <= new Date()) {
         alert('Pick a future scheduled time');
         return;
       }
-      scheduledIso = when.toISOString();
+      scheduledValue = scheduledAt;
     }
     setSubmitting(true);
     try {
@@ -1108,7 +1108,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         products: selectedProducts.map(p => ({ productId: p.productId, rate: p.rate, rateUnit: p.rateUnit })),
         sendCompletionSms: sendSms,
         requestReview,
-        scheduledAt: scheduledIso,
+        scheduledAt: scheduledValue,
         timeOnSite: elapsed,
         areasServiced,
         customerInteraction,

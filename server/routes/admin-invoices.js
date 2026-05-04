@@ -4,9 +4,14 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const InvoiceService = require('../services/invoice');
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { etDateString, bumpPastQuietHours } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime, bumpPastQuietHours } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+function normalizeSendMethod(sendMethod) {
+  const method = sendMethod || 'both';
+  return ['sms', 'email', 'both'].includes(method) ? method : null;
+}
 
 // GET /stats
 router.get('/stats', async (req, res, next) => {
@@ -305,15 +310,20 @@ router.put('/:id', async (req, res, next) => {
 // Shared dispatch — used by the route's immediate path AND the scheduled-send
 // cron tick. Either channel failing alone doesn't abort the other; missing
 // phone / email is treated as channel-skipped, not an error. Idempotent
-// cleanup at the bottom transitions a status='scheduled' row back to 'sent'
+// cleanup at the bottom transitions a scheduled cron claim back to 'sent'
 // once one channel lands so the cron can stop picking it up.
 async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = false } = {}) {
   const { sendInvoiceEmail } = require('../services/invoice-email');
+  const normalizedSendMethod = normalizeSendMethod(sendMethod);
+  if (!normalizedSendMethod) {
+    const error = `Invalid sendMethod: ${sendMethod}`;
+    return { sms: { ok: false, error }, email: { ok: false, error } };
+  }
 
   const sms = { ok: false };
   const email = { ok: false };
 
-  if (sendMethod === 'sms' || sendMethod === 'both') {
+  if (normalizedSendMethod === 'sms' || normalizedSendMethod === 'both') {
     try {
       await InvoiceService.sendViaSMS(invoiceId);
       sms.ok = true;
@@ -322,7 +332,7 @@ async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = 
     }
   }
 
-  if (sendMethod === 'email' || sendMethod === 'both') {
+  if (normalizedSendMethod === 'email' || normalizedSendMethod === 'both') {
     try {
       const r = await sendInvoiceEmail(invoiceId);
       if (r?.ok) email.ok = true;
@@ -333,7 +343,7 @@ async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = 
   }
 
   // InvoiceService.sendViaSMS only flips draft → sent. A scheduled-send row
-  // therefore stays status='scheduled' after dispatch; clear it explicitly
+  // therefore stays status='sending' after dispatch; clear it explicitly
   // so the cron tick stops re-picking it up. We also fire any deferred
   // review-request the user opted into at scheduling time — only now that
   // we know at least one channel landed, mirroring the immediate-path
@@ -410,7 +420,7 @@ async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = 
 
 // POST /:id/send — send invoice via SMS + email, immediately or scheduled.
 // Body: { requestReview?: boolean, scheduledAt?: ISO string, sendMethod?: 'sms'|'email'|'both' }
-// When `scheduledAt` is set to a future instant the row's `scheduled_at`
+// When `scheduledAt` is set to a future ET wall-clock time the row's `scheduled_at`
 // column is stamped (status is left alone so a resend of an existing
 // 'overdue' / 'viewed' invoice keeps its lifecycle state); the
 // scheduler.js 5-minute cron picks it up. The review request (if
@@ -421,15 +431,8 @@ router.post('/:id/send', async (req, res, next) => {
   try {
     const { id } = req.params;
     const { requestReview, scheduledAt, sendMethod } = req.body || {};
-
-    // Reject unknown send_method values up front. sendInvoiceNow only
-    // dispatches channels for sms|email|both — anything else would cause
-    // both branches to skip, leaving a scheduled row to thrash through
-    // cron retries forever without ever delivering.
-    const finalSendMethod = sendMethod || 'both';
-    if (!['sms', 'email', 'both'].includes(finalSendMethod)) {
-      return res.status(400).json({ error: "sendMethod must be 'sms', 'email', or 'both'" });
-    }
+    const finalSendMethod = normalizeSendMethod(sendMethod);
+    if (!finalSendMethod) return res.status(400).json({ error: 'sendMethod must be one of: sms, email, both' });
 
     // ── SCHEDULED PATH ──
     // Persist the user's review-request intent on the row instead of
@@ -438,7 +441,7 @@ router.post('/:id/send', async (req, res, next) => {
     // a cron-time delivery failure doesn't leave the customer with a
     // review prompt for an invoice they never received.
     if (scheduledAt) {
-      const when = new Date(scheduledAt);
+      const when = parseETDateTime(scheduledAt);
       if (isNaN(when.getTime())) return res.status(400).json({ error: 'Invalid scheduledAt' });
       if (when <= new Date()) return res.status(400).json({ error: 'scheduledAt must be in the future' });
 
@@ -468,8 +471,6 @@ router.post('/:id/send', async (req, res, next) => {
         request_review_after_send: !!requestReview,
         updated_at: new Date(),
       });
-      if (!updated) return res.status(404).json({ error: 'Invoice not found' });
-
       // Surface both the picked time and the actual landing time so the UI
       // can confirm "scheduled for tomorrow at 10 AM" if the bump fired.
       return res.json({
