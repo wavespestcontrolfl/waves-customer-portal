@@ -87,7 +87,13 @@ export default function PublicBookingPage() {
       if (!res.ok) throw new Error(data.error || 'Could not load availability');
       setAvailability(data.days || []);
       setCuratedSlots(data.slots || []);
-      if (data.lat && data.lng) setCoords({ lat: data.lat, lng: data.lng });
+      if (data.lat && data.lng) {
+        setCoords(current => (
+          current?.lat === data.lat && current?.lng === data.lng
+            ? current
+            : { lat: data.lat, lng: data.lng }
+        ));
+      }
       if ((!data.slots || data.slots.length === 0) && (!data.days || data.days.length === 0)) {
         setError('No times available in the next 2 weeks. Call (941) 297-5749 and we\'ll get you on the schedule.');
       }
@@ -244,7 +250,6 @@ export default function PublicBookingPage() {
             </h2>
             <div style={{ display: 'grid', gap: 14, marginBottom: 24, marginTop: 18 }}>
               <div>
-                <label style={labelStyle}>Start typing your address</label>
                 <AddressAutocomplete
                   autoFocus
                   value={address.line1}
