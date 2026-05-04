@@ -703,17 +703,21 @@ export default function TimeGridDays({
           body: JSON.stringify({ technicianId: null }),
         });
       } else {
-        await adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
+        const notifyCustomer = notificationType === 'sms';
+        const result = await adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
           method: 'POST',
           body: JSON.stringify({
             newDate: toDate,
             newWindow,
             reasonCode: 'dispatch_drag',
             reasonText: 'Rescheduled via drag-and-drop on multi-day grid',
-            notifyCustomer: notificationType === 'sms',
+            notifyCustomer,
             scope: scope || 'this_only',
           }),
         });
+        if (notifyCustomer && result?.notificationSent === false) {
+          alert(`Appointment moved, but SMS notification failed: ${result.notificationError || 'customer was not notified'}`);
+        }
       }
       const j = await adminFetch(`/admin/schedule/week?start=${monday}`);
       setData(j);

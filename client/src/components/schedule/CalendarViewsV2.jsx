@@ -429,17 +429,21 @@ export function MonthViewV2({ date, onDateClick }) {
     const { svc, toDate, newWindow } = pending;
     setBusy(true);
     try {
-      await adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
+      const notifyCustomer = notificationType === 'sms';
+      const result = await adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
         method: 'POST',
         body: JSON.stringify({
           newDate: toDate,
           newWindow,
           reasonCode: 'dispatch_drag',
           reasonText: 'Rescheduled via drag-and-drop on month grid',
-          notifyCustomer: notificationType === 'sms',
+          notifyCustomer,
           scope: scope || 'this_only',
         }),
       });
+      if (notifyCustomer && result?.notificationSent === false) {
+        alert(`Appointment moved, but SMS notification failed: ${result.notificationError || 'customer was not notified'}`);
+      }
       await reload();
       setPending(null);
     } catch (err) {

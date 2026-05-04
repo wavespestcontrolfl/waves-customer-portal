@@ -65,9 +65,12 @@ const MOBILE_TABS = [
   { path: '/admin/more', icon: Menu, label: 'More' },
 ];
 
-function isTabActive(pathname, tabPath) {
+function isTabActive(pathname, tabPath, search = '') {
   if (pathname === tabPath) return true;
   if (tabPath === '/admin/dashboard' && pathname === '/admin') return true;
+  if (tabPath === '/admin/schedule' && pathname === '/admin/dispatch') {
+    return new URLSearchParams(search).get('tab') === 'schedule';
+  }
   if (pathname.startsWith(tabPath + '/')) return true;
   return false;
 }
@@ -407,6 +410,7 @@ export default function AdminLayoutV2() {
               {items.map(({ path, icon: Icon, label }) => {
                 const isActive =
                   location.pathname === path ||
+                  (path === '/admin/schedule' && location.pathname === '/admin/dispatch' && new URLSearchParams(location.search).get('tab') === 'schedule') ||
                   (path === '/admin/dashboard' && location.pathname === '/admin');
                 return (
                   <Link
@@ -556,7 +560,7 @@ export default function AdminLayoutV2() {
         >
           <div style={{ display: 'flex', alignItems: 'stretch', height: 56 }}>
             {MOBILE_TABS.map(({ path, icon: Icon, label }) => {
-              const active = isTabActive(location.pathname, path);
+              const active = isTabActive(location.pathname, path, location.search);
               return (
                 <Link
                   key={path}
