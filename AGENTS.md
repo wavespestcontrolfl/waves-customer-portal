@@ -12,6 +12,20 @@ The pre-push hook in `.git/hooks/pre-push` blocks pushes that contain any P0
 finding and warns on P1. Reviewers must return JSON matching
 `.github/codex-review-schema.json`. Cite `file:line` for every finding.
 
+## Codex local database policy
+
+- Prefer a Railway dev or preview Postgres branch for Codex sessions:
+  set `DATABASE_URL=postgresql://<user>:<pass>@<host>:<port>/<db>?sslmode=require`
+  in the Codex environment/secrets panel. Do not point Codex at production.
+- If `DATABASE_URL` is unset, `pg` may try the OS-user database
+  (for example `adambenetti`) and `npm run db:migrate` can fail before
+  `npm run dev` starts because `package.json` has `predev: npm run db:migrate`.
+- When the sandbox has no dev database, it is acceptable to skip migrations,
+  verify frontend-only work with `npm run dev:client` or `npm run build`, and
+  note in the final/PR summary that migrations were not run locally.
+- For backend or migration work, get a real dev `DATABASE_URL` before claiming
+  end-to-end DB verification.
+
 ## Review guidelines
 
 ### Treat as P0
