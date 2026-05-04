@@ -38,6 +38,28 @@ const GENERAL_TYPE_LABELS = Object.fromEntries(
   Object.entries(TYPE_LABELS).filter(([key]) => key !== WDO_TYPE)
 );
 const GENERAL_PROJECT_TYPES = Object.keys(GENERAL_TYPE_LABELS);
+const TECHNICAL_SNIPPETS = [
+  {
+    label: 'Moisture risk',
+    text: 'Moisture should be corrected because elevated moisture can support wood decay and create conditions that are more favorable for wood-destroying organisms.',
+  },
+  {
+    label: 'Wood rot',
+    text: 'Visible wood rot should be repaired after the moisture source is corrected so damaged material does not continue to deteriorate.',
+  },
+  {
+    label: 'Termite treatment',
+    text: 'A targeted termite treatment is recommended in the affected areas to address documented activity or conducive conditions while limiting unnecessary application elsewhere.',
+  },
+  {
+    label: 'Rodent entry',
+    text: 'Entry points should be sealed with durable materials after active trapping pressure is reduced, so rodents are not locked inside and future access is limited.',
+  },
+  {
+    label: 'Sanitation',
+    text: 'Reducing food, water, and harborage sources will improve treatment performance and help prevent pest pressure from rebuilding between services.',
+  },
+];
 
 function mergeProjectsUnique(...lists) {
   const byId = new Map();
@@ -69,6 +91,52 @@ function dateOnlyValue(raw) {
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
   if (/^\d{4}-\d{2}-\d{2}T00:00:00(?:\.000)?Z$/.test(raw)) return raw.slice(0, 10);
   return '';
+}
+
+function hasMeaningfulValue(value) {
+  return value !== null && value !== undefined && String(value).trim() !== '';
+}
+
+function evaluateProjectReadiness({ project, typeCfg, findings, recommendations, projectDate, photos }) {
+  const required = [
+    { label: 'Inspection date', ok: hasMeaningfulValue(projectDate) },
+    { label: 'Customer', ok: hasMeaningfulValue(project?.customer_name) },
+    { label: 'Report title or type', ok: hasMeaningfulValue(project?.title) || hasMeaningfulValue(typeCfg?.label) },
+    { label: 'Findings captured', ok: Object.values(findings || {}).some(hasMeaningfulValue) },
+    { label: 'Recommendation / notes', ok: hasMeaningfulValue(recommendations) },
+    { label: 'Photos attached', ok: (photos || []).length > 0 },
+  ];
+  if (project?.project_type === WDO_TYPE) {
+    required.push(
+      { label: 'Property inspected', ok: hasMeaningfulValue(findings?.property_address) },
+      { label: 'FDACS finding selected', ok: hasMeaningfulValue(findings?.wdo_finding) },
+      { label: 'Visible/access scope', ok: hasMeaningfulValue(findings?.inspection_scope) },
+    );
+  }
+
+  const text = [
+    recommendations,
+    ...Object.values(findings || {}),
+  ].filter(Boolean).join(' ').toLowerCase();
+  const quality = [];
+  if (recommendations && recommendations.length < 80) {
+    quality.push('Recommendation is short; add what was found, why it matters, and the next step.');
+  }
+  if (/\b(termite|roach|ant|rodent|mouse|rat|bed bug|wdo)\b/.test(text) && !/\b(kitchen|bath|attic|garage|eave|exterior|interior|bedroom|crawlspace|foundation|wall|ceiling|floor|window|door)\b/.test(text)) {
+    quality.push('Pest or WDO activity is mentioned without a clear location.');
+  }
+  if (/\b(treat|treatment|apply|application|boracare|bora care|bait|exclusion|follow[-\s]?up)\b/.test(text) && !recommendations) {
+    quality.push('Treatment language appears in findings but the recommendation field is empty.');
+  }
+  if (/\b(eliminate|eradicate|guarantee|100%|pest-free|impenetrable)\b/.test(text)) {
+    quality.push('Avoid overpromising language such as guarantee, eradicate, eliminate, or pest-free.');
+  }
+
+  return {
+    required,
+    missing: required.filter(item => !item.ok),
+    quality,
+  };
 }
 
 export default function ProjectsPage() {
@@ -415,6 +483,21 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
   }
 
   async function handleSend() {
+    const readiness = evaluateProjectReadiness({
+      project: { ...project, title: editTitle },
+      typeCfg,
+      findings: editFindings,
+      recommendations: editRecs,
+      projectDate: editProjectDate,
+      photos: data?.photos || [],
+    });
+    if (readiness.missing.length || readiness.quality.length) {
+      const lines = [
+        ...readiness.missing.map(item => `Missing: ${item.label}`),
+        ...readiness.quality.map(item => `Review: ${item}`),
+      ];
+      if (!confirm(`This report has items to review before sending:\n\n${lines.join('\n')}\n\nSend anyway?`)) return;
+    }
     if (!confirm('Send report to customer? This generates a public link and marks the project as Sent.')) return;
     setSaving(true);
     try {
@@ -510,6 +593,11 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
     setSaving(false);
   }
 
+  function appendTechnicalSnippet(text) {
+    setEditRecs(prev => prev.trim() ? `${prev.trimEnd()}\n\n${text}` : text);
+    setDirty(true);
+  }
+
   if (loading || !project) {
     return (
       <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, padding: 24, color: D.muted }}>
@@ -519,6 +607,14 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
   }
 
   const status = STATUS_STYLES[project.status] || STATUS_STYLES.draft;
+  const readiness = evaluateProjectReadiness({
+    project: { ...project, title: editTitle },
+    typeCfg,
+    findings: editFindings,
+    recommendations: editRecs,
+    projectDate: editProjectDate,
+    photos: data?.photos || [],
+  });
 
   return (
     <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, display: 'flex', flexDirection: 'column' }}>
@@ -606,6 +702,8 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
           </div>
         )}
 
+        <ReadinessPanel readiness={readiness} />
+
         {/* Title */}
         <div>
           <Label>Report title</Label>
@@ -687,6 +785,27 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
             placeholder={`Write freely, or tap "Write with AI" to draft the three customer-facing sections from the findings above.`}
             style={{ ...inputStyle, resize: 'vertical', minHeight: 160, fontFamily: "'DM Sans', sans-serif" }}
           />
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+            {TECHNICAL_SNIPPETS.map(snippet => (
+              <button
+                key={snippet.label}
+                type="button"
+                onClick={() => appendTechnicalSnippet(snippet.text)}
+                style={{
+                  padding: '5px 8px',
+                  borderRadius: 6,
+                  border: `1px solid ${D.inputBorder}`,
+                  background: D.card,
+                  color: D.heading,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                {snippet.label}
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Photos */}
@@ -786,6 +905,64 @@ function PhotoThumb({ photo, projectId, onDelete }) {
           aria-label="Remove photo"
         >×</button>
       </div>
+    </div>
+  );
+}
+
+function ReadinessPanel({ readiness }) {
+  const complete = readiness.missing.length === 0;
+  const hasQualityNotes = readiness.quality.length > 0;
+  return (
+    <div style={{
+      padding: '10px 12px',
+      background: complete && !hasQualityNotes ? '#ECFDF5' : '#FFFBEB',
+      border: `1px solid ${complete && !hasQualityNotes ? '#A7F3D0' : '#FDE68A'}`,
+      borderRadius: 8,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 800, color: D.heading }}>Pre-send review</div>
+          <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+            {complete ? 'Required report details are present.' : `${readiness.missing.length} required item${readiness.missing.length === 1 ? '' : 's'} still need attention.`}
+          </div>
+        </div>
+        <span style={{
+          flexShrink: 0,
+          fontSize: 10,
+          fontWeight: 800,
+          color: complete && !hasQualityNotes ? '#065F46' : '#92400E',
+          textTransform: 'uppercase',
+          letterSpacing: 0.5,
+        }}>
+          {complete && !hasQualityNotes ? 'Ready' : 'Review'}
+        </span>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 6, marginTop: 10 }}>
+        {readiness.required.map(item => (
+          <div
+            key={item.label}
+            style={{
+              fontSize: 11,
+              color: item.ok ? '#166534' : '#92400E',
+              background: item.ok ? '#F0FDF4' : '#FEF3C7',
+              border: `1px solid ${item.ok ? '#BBF7D0' : '#FDE68A'}`,
+              borderRadius: 6,
+              padding: '5px 7px',
+            }}
+          >
+            {item.ok ? 'Done' : 'Missing'}: {item.label}
+          </div>
+        ))}
+      </div>
+      {hasQualityNotes && (
+        <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 5 }}>
+          {readiness.quality.map(note => (
+            <div key={note} style={{ fontSize: 11, color: '#92400E', lineHeight: 1.4 }}>
+              Review: {note}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
