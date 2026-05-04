@@ -11,6 +11,7 @@ import Icon from '../components/Icon';
  */
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const BOOK_URL = 'https://www.wavespestcontrol.com/book/';
 
 const TYPE_LABELS = {
   wdo_inspection: 'WDO Inspection',
@@ -19,6 +20,38 @@ const TYPE_LABELS = {
   rodent_exclusion: 'Rodent Exclusion',
   bed_bug: 'Bed Bug Treatment',
 };
+
+function formatReportDate(value) {
+  if (!value) return '';
+  const raw = String(value);
+  const dateOnlyValue = dateOnly(raw);
+  const date = dateOnlyValue ? new Date(`${dateOnlyValue}T12:00:00`) : new Date(raw);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
+}
+
+function dateOnly(value) {
+  if (!value) return '';
+  const raw = String(value);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  if (/^\d{4}-\d{2}-\d{2}T00:00:00(?:\.000)?Z$/.test(raw)) return raw.slice(0, 10);
+  return '';
+}
+
+function reportDateKey(value) {
+  const dateOnlyValue = dateOnly(value);
+  if (dateOnlyValue) return dateOnlyValue;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const get = (type) => parts.find(part => part.type === type)?.value || '';
+  return `${get('year')}-${get('month')}-${get('day')}`;
+}
 
 // Human-readable labels for finding keys. Keep in sync with
 // server/services/project-types.js — if a key isn't listed we fall back to
@@ -109,6 +142,9 @@ export default function ProjectReportViewPage() {
   const findingsEntries = Object.entries(findings).filter(([, v]) => v !== null && v !== undefined && v !== '');
   const primaryPhotos = (data.photos || []).filter(p => p.visit === 'primary');
   const followupPhotos = (data.photos || []).filter(p => p.visit === 'followup');
+  const projectDateLabel = formatReportDate(data.projectDate || data.sentAt);
+  const sentDateLabel = data.sentAt ? formatReportDate(data.sentAt) : '';
+  const showSentDate = sentDateLabel && reportDateKey(data.sentAt) !== reportDateKey(data.projectDate);
 
   return (
     <div style={{ minHeight: '100vh', background: B.offWhite, fontFamily: FONTS.body }}>
@@ -144,9 +180,12 @@ export default function ProjectReportViewPage() {
             {data.title || typeLabel}
           </div>
           <div style={{ fontSize: 14, color: B.grayDark, marginTop: 4 }}>
-            {data.sentAt && new Date(data.sentAt).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
+            {projectDateLabel && `Inspection date: ${projectDateLabel}`}
             {data.technicianName ? ` · ${data.technicianName}` : ''}
           </div>
+          {showSentDate && (
+            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>Report sent: {sentDateLabel}</div>
+          )}
           {data.cityState && (
             <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>{data.cityState}</div>
           )}
@@ -235,12 +274,20 @@ export default function ProjectReportViewPage() {
         {/* CTA */}
         <div style={{ textAlign: 'center', marginTop: 20, padding: '16px 0' }}>
           <div style={{ fontSize: 14, color: B.grayDark }}>Questions about this report?</div>
-          <a href="sms:+19412975749" style={{
-            ...BUTTON_BASE, padding: '0 22px', height: 44, fontSize: 14, marginTop: 8,
-            borderRadius: 999, background: B.yellow, color: B.blueDeeper,
-            textDecoration: 'none', display: 'inline-flex', alignItems: 'center',
-            fontWeight: 800,
-          }}><Icon name="message" size={16} strokeWidth={2} style={{ marginRight: 6 }} /> Text Us — (941) 297-5749</a>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, justifyContent: 'center', marginTop: 8 }}>
+            <a href="sms:+19412975749" style={{
+              ...BUTTON_BASE, padding: '0 22px', height: 44, fontSize: 14,
+              borderRadius: 999, background: B.yellow, color: B.blueDeeper,
+              textDecoration: 'none', display: 'inline-flex', alignItems: 'center',
+              fontWeight: 800,
+            }}><Icon name="message" size={16} strokeWidth={2} style={{ marginRight: 6 }} /> Text Us — (941) 297-5749</a>
+            <a href="tel:+19412975749" style={{
+              ...BUTTON_BASE, padding: '0 22px', height: 44, fontSize: 14,
+              borderRadius: 999, background: B.navy, color: '#fff',
+              textDecoration: 'none', display: 'inline-flex', alignItems: 'center',
+              fontWeight: 800,
+            }}><Icon name="phone" size={16} strokeWidth={2} style={{ marginRight: 6 }} /> Call Us — (941) 297-5749</a>
+          </div>
         </div>
 
         <BrandFooter />
@@ -335,6 +382,7 @@ function RecommendationsBlock({ text }) {
               {titleCase(s.heading)}
             </div>
             <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.65, whiteSpace: 'pre-wrap' }}>{s.body}</div>
+            {s.heading === 'WHAT WE RECOMMEND' && shouldShowBookingCta(s.body) && <BookingCta />}
           </div>
         ))}
       </div>
@@ -344,6 +392,43 @@ function RecommendationsBlock({ text }) {
     <div style={{ marginTop: 16, padding: '12px 14px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
       <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 4 }}>Recommendations</div>
       <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{text}</div>
+      {shouldShowBookingCta(text) && <BookingCta />}
+    </div>
+  );
+}
+
+function shouldShowBookingCta(text) {
+  const value = String(text || '');
+  const negativeBeforeAction = /\b(no|not|none|without|unnecessary|isn'?t|not currently)\b.{0,55}\b(service|appointment|schedule|booking|treatment|treat|application|follow[-\s]?up|inspection|exclusion)\b/i.test(value);
+  const actionBeforeNegative = /\b(service|appointment|booking|treatment|application|follow[-\s]?up|inspection|exclusion)\b.{0,55}\b(no|not|unnecessary|isn'?t)\b/i.test(value);
+  const negativeAction = negativeBeforeAction || actionBeforeNegative;
+  if (negativeAction) return false;
+  return /\b(schedule|book|appointment|recommend(?:ed)? (?:service|treatment|follow[-\s]?up|inspection)|apply|application|treatment|treat|follow[-\s]?up|exclusion|bait|boracare|bora care|termite|rodent|bed bug)\b/i.test(value);
+}
+
+function BookingCta() {
+  return (
+    <div style={{ marginTop: 14 }}>
+      <a
+        href={BOOK_URL}
+        target="_blank"
+        rel="noreferrer"
+        style={{
+          ...BUTTON_BASE,
+          padding: '0 18px',
+          height: 40,
+          fontSize: 14,
+          borderRadius: 999,
+          background: B.yellow,
+          color: B.blueDeeper,
+          textDecoration: 'none',
+          display: 'inline-flex',
+          alignItems: 'center',
+          fontWeight: 800,
+        }}
+      >
+        <Icon name="calendar" size={15} strokeWidth={2} style={{ marginRight: 6 }} /> Book an appointment
+      </a>
     </div>
   );
 }

@@ -24,6 +24,7 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const { PROJECT_TYPES, PROJECT_TYPE_KEYS, isValidProjectType, getProjectType } = require('../services/project-types');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { wrapEmail, formatDate, plainText } = require('../services/email-template');
+const { etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -35,6 +36,11 @@ const s3 = new S3Client({
     : undefined,
 });
 const PHOTO_PREFIX = 'project-photos/';
+const AI_PHOTO_LIMIT = 8;
+const AI_PHOTO_MAX_BYTES = 4.5 * 1024 * 1024;
+const AI_PHOTO_TOTAL_MAX_BYTES = 12 * 1024 * 1024;
+const AI_SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 function escapeHtml(value) {
   return String(value || '')
@@ -45,7 +51,103 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, customer, tech }) {
+function normalizeDateOnly(value) {
+  if (!value) return null;
+  if (typeof value === 'string' && DATE_RE.test(value)) return value;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString().slice(0, 10);
+}
+
+async function resolveProjectDate({ project_date, service_record_id, scheduled_service_id }) {
+  const explicit = normalizeDateOnly(project_date);
+  if (explicit) return explicit;
+  if (service_record_id) {
+    const row = await db('service_records').where({ id: service_record_id }).select('service_date').first();
+    const serviceDate = normalizeDateOnly(row?.service_date);
+    if (serviceDate) return serviceDate;
+  }
+  if (scheduled_service_id) {
+    const row = await db('scheduled_services').where({ id: scheduled_service_id }).select('scheduled_date').first();
+    const scheduledDate = normalizeDateOnly(row?.scheduled_date);
+    if (scheduledDate) return scheduledDate;
+  }
+  return etDateString();
+}
+
+async function streamToBuffer(stream) {
+  if (!stream) return Buffer.alloc(0);
+  if (typeof stream.transformToByteArray === 'function') {
+    return Buffer.from(await stream.transformToByteArray());
+  }
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  return Buffer.concat(chunks);
+}
+
+function inferImageMediaType(key) {
+  const lower = String(key || '').toLowerCase();
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  return 'image/jpeg';
+}
+
+function resolveAiImageMediaType(contentType, key) {
+  const normalized = String(contentType || '').split(';')[0].trim().toLowerCase();
+  if (normalized.startsWith('image/') && !AI_SUPPORTED_IMAGE_TYPES.has(normalized)) {
+    throw new Error(`unsupported image type for AI review: ${normalized}`);
+  }
+  const mediaType = AI_SUPPORTED_IMAGE_TYPES.has(normalized) ? normalized : inferImageMediaType(key);
+  if (!AI_SUPPORTED_IMAGE_TYPES.has(mediaType)) {
+    throw new Error(`unsupported image type for AI review: ${normalized || key || 'unknown'}`);
+  }
+  return mediaType;
+}
+
+async function buildAiPhotoInputs(photos = []) {
+  if (!photos.length) return { photoLines: '[no photos attached]', imageBlocks: [] };
+  if (!config.s3?.bucket) return { photoLines: '[photo review unavailable: S3 not configured]', imageBlocks: [] };
+  const imageBlocks = [];
+  const photoLines = [];
+  let totalBytes = 0;
+  for (const ph of photos.slice(0, AI_PHOTO_LIMIT)) {
+    const label = [
+      ph.category ? `category=${ph.category}` : null,
+      ph.caption ? `caption=${ph.caption}` : null,
+      ph.visit ? `visit=${ph.visit}` : null,
+    ].filter(Boolean).join(', ') || 'no field note';
+    try {
+      const object = await s3.send(new GetObjectCommand({ Bucket: config.s3.bucket, Key: ph.s3_key }));
+      const buffer = await streamToBuffer(object.Body);
+      if (!buffer.length) throw new Error('empty image body');
+      if (buffer.length > AI_PHOTO_MAX_BYTES) throw new Error('image too large for AI review');
+      if (totalBytes + buffer.length > AI_PHOTO_TOTAL_MAX_BYTES) {
+        throw new Error('AI photo payload budget reached');
+      }
+      const mediaType = resolveAiImageMediaType(object.ContentType, ph.s3_key);
+      photoLines.push(`Photo ${imageBlocks.length + 1}: ${label}`);
+      imageBlocks.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: mediaType,
+          data: buffer.toString('base64'),
+        },
+      });
+      totalBytes += buffer.length;
+    } catch (err) {
+      logger.warn(`[projects] ai photo skipped ${ph.id}: ${err.message}`);
+      photoLines.push(`Photo skipped: ${label}`);
+    }
+  }
+  return {
+    photoLines: photoLines.length ? photoLines.join('\n') : '[no photos attached]',
+    imageBlocks,
+  };
+}
+
+function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, customer, tech, projectDate, photoLines }) {
   const labelMap = Object.fromEntries((typeCfg.findingsFields || []).map(f => [f.key, f.label]));
   const findingsLines = Object.entries(findings || {})
     .filter(([, v]) => v !== null && v !== undefined && String(v).trim() !== '')
@@ -85,6 +187,8 @@ The narrative sits alongside structured findings (field/value pairs), photos, an
 
 8. **Length.** Each section 2–4 sentences. Total output roughly 100–180 words.
 
+9. **Photo-grounded drafting.** Review attached photos when provided. Use visible conditions in the images to support the narrative only when they are consistent with the structured findings or technician notes. If a photo suggests something not captured in the fields, mention it cautiously as a visible condition and avoid diagnosing beyond the evidence.
+
 ## VOICE
 
 Write like a knowledgeable field specialist drafting a professional summary — someone who understands the science and the stakes, and who communicates plainly.
@@ -94,6 +198,7 @@ The tone is:
 - Technically informed but readable at a 9th-grade level
 - Confident without bragging
 - Clean, modern, premium
+- Useful to the client: explain why the finding matters, what risk it creates, and what practical next step reduces that risk
 
 Think: a well-written inspection report from a specialist you trust.
 Do not think: action movie, military briefing, advertising copy, or fear-based sales pitch.
@@ -103,6 +208,7 @@ Do not think: action movie, military briefing, advertising copy, or fear-based s
 - Vary sentence openings. Do not start more than one sentence in a row with "We."
 - Blend what was done with why it matters in the same sentence when you can.
 - Avoid repeating the same word more than twice across all three sections (especially: treatment, inspect, applied, control, recommend).
+- Add technical value without jargon dumping. Good examples: moisture supports wood decay; wood-to-ground contact increases WDO risk; gaps or rub marks can indicate rodent travel; sanitation and moisture can sustain pest pressure.
 
 ## SECTIONS
 
@@ -151,12 +257,16 @@ Sensitive topic — no stigma, no judgment. Address: rooms treated, treatment me
 Customer: ${customer?.first_name || ''} ${customer?.last_name || ''}
 Project type: ${typeCfg.label}
 Technician: ${tech?.name || 'Not specified'}
+Project / inspection date: ${projectDate || '[not provided]'}
 
 Structured findings:
 ${findingsLines}
 
 Technician's raw recommendations / notes:
 ${rawRecommendations || '[none provided]'}
+
+Attached photo review:
+${photoLines || '[no photos attached]'}
 
 ## OUTPUT FORMAT
 
@@ -177,13 +287,29 @@ WHAT WE RECOMMEND
 Do not include the customer name as a header. Do not add greetings, sign-offs, or any text outside these three sections.`;
 }
 
-async function draftProjectReport({ typeCfg, findings, rawRecommendations, customer, tech }) {
+async function draftProjectReport({ typeCfg, findings, rawRecommendations, customer, tech, projectDate, photos = [] }) {
   const Anthropic = require('@anthropic-ai/sdk');
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const { photoLines, imageBlocks } = await buildAiPhotoInputs(photos);
+  const prompt = buildProjectReportPrompt({
+    typeCfg,
+    findings,
+    rawRecommendations,
+    customer,
+    tech,
+    projectDate,
+    photoLines,
+  });
   const msg = await anthropic.messages.create({
     model: MODELS.FLAGSHIP,
     max_tokens: 1200,
-    messages: [{ role: 'user', content: buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, customer, tech }) }],
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: prompt },
+        ...imageBlocks,
+      ],
+    }],
   });
   return msg.content?.[0]?.text || '';
 }
@@ -275,15 +401,17 @@ router.post('/', async (req, res, next) => {
   try {
     const {
       customer_id, project_type, title, findings, recommendations,
-      service_record_id, scheduled_service_id,
+      service_record_id, scheduled_service_id, project_date,
     } = req.body;
 
     if (!customer_id) return res.status(400).json({ error: 'customer_id required' });
     if (!isValidProjectType(project_type)) return res.status(400).json({ error: 'Invalid project_type' });
+    const projectDate = await resolveProjectDate({ project_date, service_record_id, scheduled_service_id });
 
     const [row] = await db('projects').insert({
       customer_id,
       project_type,
+      project_date: projectDate,
       title: title || null,
       findings: findings || null,
       recommendations: recommendations || null,
@@ -305,7 +433,7 @@ router.post('/ai-write-preview', requireAdmin, async (req, res, next) => {
   try {
     if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
 
-    const { project_type, findings, recommendations, customer_id } = req.body;
+    const { project_type, findings, recommendations, customer_id, project_date } = req.body;
     if (!isValidProjectType(project_type)) return res.status(400).json({ error: 'Invalid project_type' });
 
     const typeCfg = getProjectType(project_type);
@@ -317,6 +445,7 @@ router.post('/ai-write-preview', requireAdmin, async (req, res, next) => {
       rawRecommendations: recommendations || '',
       customer,
       tech,
+      projectDate: normalizeDateOnly(project_date),
     });
 
     logger.info(`[projects] ai-write-preview ${project_type} — ${report.length} chars`);
@@ -336,8 +465,9 @@ router.put('/:id', async (req, res, next) => {
     if (!project) return res.status(404).json({ error: 'Project not found' });
 
     const updates = {};
-    const allowed = ['title', 'findings', 'recommendations', 'followup_date', 'followup_findings'];
+    const allowed = ['title', 'project_date', 'findings', 'recommendations', 'followup_date', 'followup_findings'];
     for (const f of allowed) if (req.body[f] !== undefined) updates[f] = req.body[f];
+    if (updates.project_date !== undefined) updates.project_date = normalizeDateOnly(updates.project_date);
     if (Object.keys(updates).length === 0) return res.json({ project });
 
     await db('projects').where({ id: req.params.id }).update({ ...updates, updated_at: db.fn.now() });
@@ -435,9 +565,11 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
           ].filter(Boolean).join(' ');
           const heading = `Your ${safeTypeLabel} report is ready`;
           const intro = `Hi ${safeFirstName}, your technician's report is posted. You can review the visit summary, photos, findings, and recommendations online.`;
+          const projectDate = normalizeDateOnly(project.project_date) || normalizeDateOnly(project.created_at);
           const lines = [
             ['Report', safeTypeLabel],
             safeTitle ? ['Title', safeTitle] : null,
+            projectDate ? ['Inspection date', formatDate(projectDate)] : null,
             clientName ? ['Client', escapeHtml(clientName)] : null,
             customer?.email ? ['Email', escapeHtml(customer.email)] : null,
             customer?.phone ? ['Phone', escapeHtml(customer.phone)] : null,
@@ -460,6 +592,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
             '',
             `Report: ${typeLabel}`,
             project.title ? `Title: ${project.title}` : null,
+            projectDate ? `Inspection date: ${formatDate(projectDate)}` : null,
             clientName ? `Client: ${clientName}` : null,
             customer?.email ? `Email: ${customer.email}` : null,
             customer?.phone ? `Phone: ${customer.phone}` : null,
@@ -551,11 +684,16 @@ router.post('/:id/ai-write', requireAdmin, async (req, res, next) => {
     const rawRecommendations = (req.body.recommendations !== undefined
       ? req.body.recommendations
       : project.recommendations) || '';
+    const projectDate = normalizeDateOnly(req.body.project_date) || normalizeDateOnly(project.project_date) || normalizeDateOnly(project.created_at);
 
     const customer = await db('customers').where({ id: project.customer_id }).first();
     const tech = project.created_by_tech_id
       ? await db('technicians').where({ id: project.created_by_tech_id }).first()
       : null;
+    const photos = await db('project_photos')
+      .where({ project_id: project.id })
+      .orderBy(['visit', 'sort_order', 'created_at'])
+      .limit(AI_PHOTO_LIMIT);
 
     const report = await draftProjectReport({
       typeCfg,
@@ -563,6 +701,8 @@ router.post('/:id/ai-write', requireAdmin, async (req, res, next) => {
       rawRecommendations,
       customer,
       tech,
+      projectDate,
+      photos,
     });
     logger.info(`[projects] ai-write ${project.id} — ${report.length} chars`);
     res.json({ report });

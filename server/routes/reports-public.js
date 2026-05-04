@@ -76,6 +76,7 @@ router.get('/project/:token/data', async (req, res, next) => {
       customerName: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
       cityState: `${project.city || ''}${project.state ? ', ' + project.state : ''}`.trim().replace(/^,\s*/, ''),
       technicianName: project.technician_name,
+      projectDate: project.project_date || project.created_at,
       sentAt: project.sent_at,
       findings: project.findings,
       recommendations: project.recommendations,
