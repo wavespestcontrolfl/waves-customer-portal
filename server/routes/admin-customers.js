@@ -114,6 +114,11 @@ function cleanState(value) {
   return cleaned ? cleaned.slice(0, 2) : 'FL';
 }
 
+function cleanOptionalState(value) {
+  const cleaned = cleanText(value).toUpperCase();
+  return cleaned ? cleaned.slice(0, 2) : null;
+}
+
 async function createDefaultCustomerRows(trx, customerId) {
   await trx('property_preferences')
     .insert({ customer_id: customerId })
@@ -1040,7 +1045,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         else if (v === 'has_left_google_review') { updates[v] = !!req.body[k]; }
         else if (v === 'email') { updates[v] = cleanEmail(req.body[k]); }
         else if (v === 'phone') { updates[v] = cleanText(req.body[k]); }
-        else if (v === 'state') { updates[v] = cleanState(req.body[k]); }
+        else if (v === 'state') { updates[v] = cleanOptionalState(req.body[k]); }
         else { updates[v] = req.body[k]; }
       }
     }
