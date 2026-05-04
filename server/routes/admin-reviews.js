@@ -9,8 +9,26 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { getServiceContact } = require('../services/customer-contact');
 
 const PORTAL_DOMAIN = process.env.PORTAL_DOMAIN || 'portal.wavespestcontrol.com';
+const DRAFT_REPLY_PREFIX = '[DRAFT]';
+
+function isDraftReply(reply) {
+  return typeof reply === 'string' && reply.trim().startsWith(DRAFT_REPLY_PREFIX);
+}
+
+function whereNeedsRealReply(qb) {
+  qb.where(function () {
+    this.whereNull('google_reviews.review_reply')
+      .orWhere('google_reviews.review_reply', 'like', `${DRAFT_REPLY_PREFIX}%`);
+  });
+}
+
+function whereHasRealReply(qb) {
+  qb.whereNotNull('google_reviews.review_reply')
+    .where('google_reviews.review_reply', 'not like', `${DRAFT_REPLY_PREFIX}%`);
+}
 
 /**
  * Generate a unique review request token and create a review_requests record.
@@ -28,7 +46,6 @@ async function createReviewRequest({ customerId, locationId, techName, serviceTy
     service_type: serviceType || null,
     service_date: serviceDate || null,
     status: 'pending',
-    sent_at: db.fn.now(),
     expires_at: expiresAt.toISOString(),
   }).returning('*');
 
@@ -40,7 +57,7 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // GET /api/admin/reviews — all reviews with filters
 router.get('/', async (req, res, next) => {
   try {
-    const { location, rating, responded, search, page = 1, limit = 30 } = req.query;
+    const { location, rating, responded, search, page = 1, limit = 200 } = req.query;
 
     // Exclude stats rows and dismissed reviews from actual reviews.
     // Scoped to active WAVES_LOCATIONS so the displayed list stays
@@ -60,17 +77,21 @@ router.get('/', async (req, res, next) => {
       )
       .orderBy('google_reviews.review_created_at', 'desc');
 
-    if (location) query = query.where('google_reviews.location_id', location);
+    if (location && location !== 'all') query = query.where('google_reviews.location_id', location);
     if (rating) query = query.where('google_reviews.star_rating', parseInt(rating));
-    if (responded === 'true') query = query.whereNotNull('google_reviews.review_reply');
-    if (responded === 'false') query = query.whereNull('google_reviews.review_reply');
+    if (responded === 'true') query = query.modify(whereHasRealReply);
+    if (responded === 'false') query = query.modify(whereNeedsRealReply);
     if (search) query = query.where(function () {
       this.whereILike('google_reviews.reviewer_name', `%${search}%`)
-        .orWhereILike('google_reviews.review_text', `%${search}%`);
+        .orWhereILike('google_reviews.review_text', `%${search}%`)
+        .orWhereILike('customers.first_name', `%${search}%`)
+        .orWhereILike('customers.last_name', `%${search}%`)
+        .orWhereRaw("LOWER(customers.first_name || ' ' || COALESCE(customers.last_name, '')) LIKE LOWER(?)", [`%${search}%`]);
     });
 
-    const offset = (parseInt(page) - 1) * parseInt(limit);
-    const reviews = await query.limit(parseInt(limit)).offset(offset);
+    const parsedLimit = Math.max(1, Math.min(500, parseInt(limit, 10) || 200));
+    const offset = (Math.max(1, parseInt(page, 10) || 1) - 1) * parsedLimit;
+    const reviews = await query.limit(parsedLimit).offset(offset);
 
     // Get real Google stats from Places API (stored during sync).
     // Restrict to currently-configured WAVES_LOCATIONS so a `_stats`
@@ -101,8 +122,8 @@ router.get('/', async (req, res, next) => {
         db.raw('COUNT(*) as total'),
         db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),
       ).first(),
-      reviewsOnly.clone().whereNull('review_reply').count('* as count').first(),
-      reviewsOnly.clone().whereNotNull('review_reply').count('* as count').first(),
+      reviewsOnly.clone().modify(whereNeedsRealReply).count('* as count').first(),
+      reviewsOnly.clone().modify(whereHasRealReply).count('* as count').first(),
       reviewsOnly.clone().where('review_created_at', '>=', new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString()).count('* as count').first(),
       reviewsOnly.clone().select('location_id')
         .count('* as count')
@@ -116,6 +137,17 @@ router.get('/', async (req, res, next) => {
       .whereIn('location_id', activeLocationIds)
       .select('star_rating').count('* as count')
       .groupBy('star_rating').orderBy('star_rating', 'desc');
+    const locationBreakdownRows = await reviewsOnly.clone()
+      .select('location_id', 'star_rating')
+      .count('* as count')
+      .groupBy('location_id', 'star_rating');
+    const locationBreakdown = {};
+    for (const row of locationBreakdownRows) {
+      if (!locationBreakdown[row.location_id]) {
+        locationBreakdown[row.location_id] = { '5': 0, '4': 0, '3': 0, '2': 0, '1': 0 };
+      }
+      locationBreakdown[row.location_id][String(row.star_rating)] = parseInt(row.count, 10) || 0;
+    }
 
     // Use Google's real totals if available
     const totalGoogleReviews = Object.values(googleStats).reduce((s, g) => s + (g.totalReviews || 0), 0);
@@ -128,7 +160,7 @@ router.get('/', async (req, res, next) => {
     // without contributing to the total, breaking `total - unresponded`.
     const ratedLocationIds = Object.keys(googleStats).filter(id => (googleStats[id]?.totalReviews || 0) > 0);
     const unrespondedInRatedRow = ratedLocationIds.length > 0
-      ? await reviewsOnly.clone().whereIn('location_id', ratedLocationIds).whereNull('review_reply').count('* as count').first()
+      ? await reviewsOnly.clone().whereIn('location_id', ratedLocationIds).modify(whereNeedsRealReply).count('* as count').first()
       : { count: 0 };
     const avgGoogleRating = Object.values(googleStats).length > 0
       ? (Object.values(googleStats).reduce((s, g) => s + (g.rating || 0), 0) / Object.values(googleStats).filter(g => g.rating).length).toFixed(1)
@@ -159,7 +191,9 @@ router.get('/', async (req, res, next) => {
         id: r.id, googleReviewId: r.google_review_id, locationId: r.location_id,
         reviewerName: r.reviewer_name, reviewerPhoto: r.reviewer_photo_url,
         starRating: r.star_rating, reviewText: r.review_text,
-        reply: r.review_reply, replyUpdatedAt: r.reply_updated_at,
+        reply: isDraftReply(r.review_reply) ? null : r.review_reply,
+        draftReply: isDraftReply(r.review_reply) ? r.review_reply.replace(/^\[DRAFT\]\s*/, '') : null,
+        replyUpdatedAt: isDraftReply(r.review_reply) ? null : r.reply_updated_at,
         reviewCreatedAt: r.review_created_at,
         matchedCustomer: r.cust_first ? { name: `${r.cust_first} ${r.cust_last}`, tier: r.cust_tier, id: r.customer_id } : null,
         syncedAt: r.synced_at,
@@ -177,6 +211,7 @@ router.get('/', async (req, res, next) => {
         responded: parseInt(respondedCountRow?.count || 0),
         newThisMonth: parseInt(thisMonth?.count || 0),
         breakdown: Object.fromEntries(breakdown.map(b => [b.star_rating, parseInt(b.count)])),
+        locationBreakdown,
         perLocation: perLocation.map(l => {
           const gs = googleStats[l.location_id];
           return {
@@ -200,8 +235,10 @@ router.post('/:id/reply', async (req, res, next) => {
     const review = await db('google_reviews').where({ id: req.params.id }).first();
     if (!review) return res.status(404).json({ error: 'Review not found' });
 
-    // Try to post reply to Google
+    // Try to post reply to Google. When GBP is configured, do not mark the
+    // review replied locally unless Google accepted the reply.
     let googlePosted = false;
+    let googleError = null;
     if (gbp.configured) {
       let resourceName = review.gbp_review_name;
 
@@ -232,11 +269,19 @@ router.post('/:id/reply', async (req, res, next) => {
           await gbp.replyToReview(resourceName, replyText, review.location_id);
           googlePosted = true;
         } catch (e) {
+          googleError = e.message;
           logger.error(`Google reply failed: ${e.message}`);
         }
       } else {
-        logger.warn(`No GBP resource name for review ${req.params.id} — reply saved locally only`);
+        logger.warn(`No GBP resource name for review ${req.params.id} — reply not saved locally`);
       }
+    }
+
+    if (gbp.configured && !googlePosted) {
+      return res.status(502).json({
+        error: googleError || 'Could not post reply to Google. Reply was not saved locally.',
+        googlePosted: false,
+      });
     }
 
     await db('google_reviews').where({ id: req.params.id }).update({
@@ -347,6 +392,9 @@ router.get('/outreach-candidates', async (req, res, next) => {
     // Active customers with completed services inside window who haven't left a review
     const customers = await db('customers')
       .where('customers.active', true)
+      .where(function () {
+        this.where('customers.has_left_google_review', false).orWhereNull('customers.has_left_google_review');
+      })
       .whereExists(function () {
         this.select(db.raw(1)).from('scheduled_services')
           .whereRaw('scheduled_services.customer_id = customers.id')
@@ -362,6 +410,10 @@ router.get('/outreach-candidates', async (req, res, next) => {
         'customers.first_name',
         'customers.last_name',
         'customers.phone',
+        'customers.email',
+        'customers.service_contact_name',
+        'customers.service_contact_phone',
+        'customers.service_contact_email',
         'customers.address_line1',
         'customers.city',
         'customers.zip',
@@ -402,8 +454,18 @@ router.get('/outreach-candidates', async (req, res, next) => {
       askMap[a.customer_id] = { askCount: Number(a.askCount) || 0, lastAsked: a.lastAsked };
     });
 
+    const candidatePayload = await Promise.all(customers.map(async c => {
+      const contact = getServiceContact(c);
+      const displayPhone = contact.phone || c.phone || null;
+      return {
+        customer: c,
+        phone: displayPhone,
+        phoneSource: contact.phone && contact.phone !== c.phone ? 'service_contact' : 'customer',
+      };
+    }));
+
     res.json({
-      customers: customers.map(c => {
+      customers: candidatePayload.map(({ customer: c, phone, phoneSource }) => {
         const ls = lastSvcMap[c.id];
         const ask = askMap[c.id] || { askCount: 0, lastAsked: null };
         return {
@@ -411,7 +473,8 @@ router.get('/outreach-candidates', async (req, res, next) => {
           name: `${c.first_name} ${c.last_name}`,
           firstName: c.first_name,
           lastName: c.last_name,
-          phone: c.phone,
+          phone,
+          phoneSource,
           addressLine1: c.address_line1,
           city: c.city,
           zip: c.zip,
@@ -437,9 +500,36 @@ router.post('/send-request', async (req, res, next) => {
 
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    if (customer.has_left_google_review) {
+      return res.status(409).json({ error: 'Customer is marked as already having left a Google review' });
+    }
+
+    const contact = getServiceContact(customer);
+    if (!contact.phone) return res.status(400).json({ error: 'No SMS-capable phone on file' });
+
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000);
+    const [askCountRow, recentAsk] = await Promise.all([
+      db('sms_log')
+        .where({ customer_id: customer.id, message_type: 'review_request' })
+        .count('* as count')
+        .first()
+        .catch(() => ({ count: 0 })),
+      db('sms_log')
+        .where({ customer_id: customer.id, message_type: 'review_request' })
+        .where('created_at', '>=', thirtyDaysAgo)
+        .first()
+        .catch(() => null),
+    ]);
+    const askCount = Number(askCountRow?.count) || 0;
+    if (askCount >= 3) {
+      return res.status(409).json({ error: 'Customer has already received 3 review requests' });
+    }
+    if (recentAsk) {
+      return res.status(409).json({ error: 'Customer received a review request in the last 30 days' });
+    }
 
     const loc = WAVES_LOCATIONS.find(l => l.id === customer.nearest_location_id) || WAVES_LOCATIONS[0];
-    const firstName = customer.first_name || 'there';
+    const firstName = contact.name || customer.first_name || 'there';
 
     // Get last completed service for context
     const lastSvc = await db('scheduled_services')
@@ -459,7 +549,7 @@ router.post('/send-request', async (req, res, next) => {
     const svcLabel = reviewReq.service_type || 'pest control service';
 
     const smsResult = await sendCustomerMessage({
-      to: customer.phone,
+      to: contact.phone,
       body: `Hey ${firstName}! Thanks for choosing Waves. We'd love to hear how your ${svcLabel} went. It only takes 10 seconds: ${rateUrl} Thank you! - Waves Pest Control`,
       channel: 'sms',
       audience: 'customer',
@@ -474,8 +564,15 @@ router.post('/send-request', async (req, res, next) => {
       },
     });
     if (!smsResult.sent) {
+      await db('review_requests').where({ id: reviewReq.id }).update({ status: 'failed' }).catch(() => {});
       return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
     }
+
+    await db('review_requests').where({ id: reviewReq.id }).update({
+      status: 'sent',
+      sent_at: db.fn.now(),
+      sms_sent_at: db.fn.now(),
+    }).catch(() => {});
 
     await db('activity_log').insert({
       customer_id: customer.id, action: 'review_requested',
@@ -507,7 +604,8 @@ router.post('/sync', async (req, res, next) => {
 // GET /api/admin/reviews/gbp-locations — all location details from Places API
 router.get('/gbp-locations', async (req, res, next) => {
   try {
-    const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY || 'AIzaSyCvzQ84QWUKMby5YcbM8MhDBlEZ2oF7Bsk';
+    const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY;
+    if (!GOOGLE_KEY) return res.status(503).json({ error: 'GOOGLE_MAPS_API_KEY not configured' });
     const fields = 'name,formatted_address,formatted_phone_number,opening_hours,website,photos,types,business_status,url,rating,user_ratings_total';
 
     const locations = [];
@@ -564,9 +662,10 @@ router.get('/export', async (req, res, next) => {
       .orderBy('review_created_at', 'desc');
 
     const header = 'Location,Reviewer,Rating,Review Text,Reply,Review Date,Synced At\n';
-    const rows = reviews.map(r =>
-      `"${r.location_id}","${(r.reviewer_name || '').replace(/"/g, '""')}",${r.star_rating},"${(r.review_text || '').replace(/"/g, '""')}","${(r.review_reply || '').replace(/"/g, '""')}","${r.review_created_at || ''}","${r.synced_at || ''}"`
-    ).join('\n');
+    const rows = reviews.map(r => {
+      const reply = isDraftReply(r.review_reply) ? '' : (r.review_reply || '');
+      return `"${r.location_id}","${(r.reviewer_name || '').replace(/"/g, '""')}",${r.star_rating},"${(r.review_text || '').replace(/"/g, '""')}","${reply.replace(/"/g, '""')}","${r.review_created_at || ''}","${r.synced_at || ''}"`;
+    }).join('\n');
 
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename=waves-reviews-export.csv');
@@ -607,7 +706,7 @@ router.get('/stats', async (req, res, next) => {
     // --- Avg response time (review_created_at to reply_updated_at) ---
     const responseTimes = await db('google_reviews')
       .where('reviewer_name', '!=', '_stats')
-      .whereNotNull('review_reply')
+      .modify(whereHasRealReply)
       .whereNotNull('reply_updated_at')
       .whereNotNull('review_created_at')
       .select(
@@ -620,7 +719,7 @@ router.get('/stats', async (req, res, next) => {
     const twentyFourHoursAgo = new Date(Date.now() - 24 * 3600000).toISOString();
     const unansweredRow = await db('google_reviews')
       .where('reviewer_name', '!=', '_stats')
-      .whereNull('review_reply')
+      .modify(whereNeedsRealReply)
       .where('review_created_at', '<', twentyFourHoursAgo)
       .count('* as count')
       .first();

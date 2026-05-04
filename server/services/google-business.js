@@ -8,6 +8,11 @@ const logger = require('./logger');
 const db = require('../models/db');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const MODELS = require('../config/models');
+const DRAFT_REPLY_PREFIX = '[DRAFT]';
+
+function isDraftReply(reply) {
+  return typeof reply === 'string' && reply.trim().startsWith(DRAFT_REPLY_PREFIX);
+}
 
 /**
  * Google Business Profile service — fully separate credentials per account.
@@ -252,21 +257,22 @@ class GoogleBusinessService {
               customer_id: customerId || existing.customer_id,
               synced_at: db.fn.now(),
             };
-            // Only update reply from Google if we don't have a local reply already
-            if (ownerReply && !existing.review_reply) {
+            // Only update reply from Google if we don't have a real local reply already.
+            if (ownerReply && (!existing.review_reply || isDraftReply(existing.review_reply))) {
               upd.review_reply = ownerReply;
               upd.reply_updated_at = db.fn.now();
             }
             await db('google_reviews').where({ id: existing.id }).update(upd);
             totalSynced++;
           } else {
-            await db('google_reviews').insert({
+            const [insertedReview] = await db('google_reviews').insert({
               google_review_id: googleId, location_id: loc.id,
               reviewer_name: reviewerName, reviewer_photo_url: reviewerPhoto,
               star_rating: rating, review_text: reviewText,
               review_reply: ownerReply, reply_updated_at: ownerReply ? new Date() : null,
               review_created_at: createdAt, customer_id: customerId, synced_at: db.fn.now(),
-            });
+            }).returning('id');
+            const insertedReviewId = insertedReview?.id || insertedReview;
             totalNew++;
             totalSynced++;
 
@@ -289,7 +295,8 @@ class GoogleBusinessService {
                 logger.error(`[gbp] Negative review SMS alert failed: ${smsErr.message}`);
               }
 
-              // Auto-generate AI draft reply (saved to google_reviews, not posted)
+              // Store generated drafts with a sentinel prefix so the Reviews UI
+              // can surface them without counting them as real Google replies.
               try {
                 const Anthropic = require('@anthropic-ai/sdk');
                 const aiClient = new Anthropic();
@@ -300,13 +307,16 @@ class GoogleBusinessService {
                 });
                 const draftReply = aiMsg.content[0]?.text || '';
                 if (draftReply) {
-                  // Store as draft in metadata (not posted as actual reply)
-                  const reviewRecord = await db('google_reviews').where({ google_review_id: googleId }).first();
-                  if (reviewRecord) {
-                    await db('google_reviews').where({ id: reviewRecord.id }).update({
-                      review_reply: `[DRAFT] ${draftReply}`,
+                  if (!ownerReply && insertedReviewId) {
+                    await db('google_reviews').where({ id: insertedReviewId }).update({
+                      review_reply: `${DRAFT_REPLY_PREFIX} ${draftReply}`,
                     });
                   }
+                  await db('activity_log').insert({
+                    action: 'review_reply_draft_generated',
+                    description: `AI reply draft generated for ${rating}-star review on ${loc.name}`,
+                    metadata: JSON.stringify({ locationId: loc.id, rating, googleReviewId: googleId, reviewRowId: insertedReviewId || null }),
+                  }).catch(() => {});
                 }
               } catch (aiErr) {
                 logger.error(`[gbp] AI draft reply generation failed: ${aiErr.message}`);

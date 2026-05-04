@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Phone, MessageSquare, Trash2 } from 'lucide-react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { Phone, MessageSquare } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -7,9 +7,11 @@ function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
     ...options,
-  }).then(r => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.json();
+  }).then(async r => {
+    const text = await r.text();
+    const data = text ? JSON.parse(text) : {};
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    return data;
   });
 }
 
@@ -93,36 +95,6 @@ const STAGES = {
   declined: { label: 'Declined', color: C.t3, tag: 'pur' },
   issue: { label: 'Issue', color: C.red, tag: 'red' },
 };
-
-const SUP_RULES_DEFAULT = [
-  { id: 'reviewed_6m', label: 'Reviewed in last 6 months', desc: 'Skip customers who already left a review recently', enabled: true },
-  { id: 'asked_3x', label: 'Asked 3× with no response', desc: 'Stop asking after 3 unanswered requests', enabled: true },
-  { id: 'open_complaint', label: 'Open complaint / unresolved issue', desc: 'Auto-suppress customers flagged with issues', enabled: true },
-  { id: 'collections', label: 'In collections flow', desc: 'Never ask for review during late-payment sequence', enabled: true },
-  { id: 'opted_out', label: 'Opted out / negative response', desc: 'Customer replied STOP or expressed refusal', enabled: true },
-  { id: 'cooldown_30d', label: '30-day cooldown after ask', desc: 'Minimum gap between review requests', enabled: true },
-];
-
-const SEQUENCES = [
-  { id: 'standard', name: 'Standard Review Ask', steps: [
-    { day: 0, label: 'Initial Ask', icon: '📤', template: 'friendly_ask' },
-    { day: 3, label: 'Soft Reminder', icon: '💬', template: 'soft_reminder' },
-    { day: 7, label: 'Final Nudge', icon: '🙏', template: 'final_nudge' },
-  ]},
-  { id: 'recovery', name: 'Issue Recovery → Review', steps: [
-    { day: 0, label: 'Resolution Check', icon: '🔧', template: 'resolution_check' },
-    { day: 2, label: 'Satisfaction Confirm', icon: '😊', template: 'satisfaction_confirm' },
-    { day: 5, label: 'Review Ask', icon: '⭐', template: 'recovery_review' },
-  ]},
-  { id: 'winback', name: 'Win-Back (60+ days)', steps: [
-    { day: 0, label: 'Check-In', icon: '👋', template: 'winback_checkin' },
-    { day: 4, label: 'Review Ask', icon: '⭐', template: 'winback_ask' },
-  ]},
-  { id: 'post_service', name: 'Post-Service Auto (2hr trigger)', steps: [
-    { day: 0, label: 'Auto-Send (2hr)', icon: '⚡', template: 'post_service_hot' },
-    { day: 3, label: 'Follow-Up', icon: '💬', template: 'soft_reminder' },
-  ]},
-];
 
 const TEMPLATES = [
   { id: 'friendly_ask', name: 'Friendly Ask', sentiment: 'happy', body: 'Hey {first}! This is Adam with Waves Pest Control. Thanks for being a great customer — it means the world to our small family business.\n\nIf you have 30 seconds, a quick Google review would help us more than you know:\n\n{review_url}\n\nThank you!' },
@@ -278,7 +250,6 @@ export default function ReviewVelocityEngine() {
   const [activityLog, setActivityLog] = useState(() => {
     try { return JSON.parse(localStorage.getItem('wrev_activity_log') || '[]'); } catch { return []; }
   });
-  const [supRules, setSupRules] = useState(SUP_RULES_DEFAULT);
   const [drawerCust, setDrawerCust] = useState(null);
   const [toast, setToast] = useState('');
   const [batchModal, setBatchModal] = useState(false);
@@ -371,9 +342,6 @@ export default function ReviewVelocityEngine() {
   const tabs = [
     { key: 'dashboard', label: 'Dashboard' },
     { key: 'pipeline', label: 'Pipeline', count: pipelineList.length },
-    { key: 'sequences', label: 'Sequences' },
-    { key: 'templates', label: 'Templates' },
-    { key: 'suppression', label: 'Suppression' },
     { key: 'log', label: 'Activity Log' },
   ];
 
@@ -391,15 +359,6 @@ export default function ReviewVelocityEngine() {
       addLog('stage', `Failed to send to ${c.name}: ${result.error}`);
       showToast(`Failed: ${result.error}`);
     }
-  };
-
-  // Manual stage override — in-memory only for PR 1 (stage is otherwise derived
-  // from server askCount on next reload). PR 2 adds review_outreach_state table
-  // for persisted overrides.
-  const setStage = (id, stage) => {
-    updateCustomer(id, { stage });
-    const c = customers.find(x => x.id === id);
-    addLog('stage', `${c?.name || 'Customer'} moved to ${STAGES[stage]?.label}`);
   };
 
   return (
@@ -447,19 +406,12 @@ export default function ReviewVelocityEngine() {
       )}
       {page === 'pipeline' && (
         <Pipeline
-          customers={pipelineList} allCustomers={customers} selectedIds={selectedIds} setSelectedIds={setSelectedIds}
+          customers={pipelineList} selectedIds={selectedIds} setSelectedIds={setSelectedIds}
           currentFilter={currentFilter} setCurrentFilter={setCurrentFilter}
           pipeSearch={pipeSearch} setPipeSearch={setPipeSearch}
-          setStage={setStage} quickSend={quickSend} setDrawerCust={setDrawerCust}
+          quickSend={quickSend} setDrawerCust={setDrawerCust}
           setBatchModal={setBatchModal} addLog={addLog} showToast={showToast}
-          updateCustomer={updateCustomer} saveState={saveState}
         />
-      )}
-      {page === 'sequences' && <SequencesPage customers={customers} />}
-      {page === 'templates' && <TemplatesPage showToast={showToast} />}
-      {page === 'suppression' && (
-        <SuppressionPage customers={customers} supRules={supRules} setSupRules={setSupRules}
-          updateCustomer={updateCustomer} showToast={showToast} saveState={saveState} />
       )}
       {page === 'log' && <ActivityLogPage activityLog={activityLog} setActivityLog={setActivityLog} saveState={saveState} />}
 
@@ -619,7 +571,7 @@ function Dashboard({ customers, eligible, sent, reviewed, winback, queue, activi
 // ══════════════════════════════════════════════════════════════
 // PIPELINE
 // ══════════════════════════════════════════════════════════════
-function Pipeline({ customers, allCustomers, selectedIds, setSelectedIds, currentFilter, setCurrentFilter, pipeSearch, setPipeSearch, setStage, quickSend, setDrawerCust, setBatchModal, addLog, showToast, updateCustomer, saveState }) {
+function Pipeline({ customers, selectedIds, setSelectedIds, currentFilter, setCurrentFilter, pipeSearch, setPipeSearch, quickSend, setDrawerCust, setBatchModal }) {
   const filters = [
     { key: 'all', label: 'All' },
     { key: 'hot', label: 'Hot Leads' },
@@ -645,17 +597,6 @@ function Pipeline({ customers, allCustomers, selectedIds, setSelectedIds, curren
     } else {
       setSelectedIds(new Set());
     }
-  };
-
-  const batchStage = (stage) => {
-    selectedIds.forEach(id => setStage(id, stage));
-    addLog('stage', `${selectedIds.size} customers moved to ${STAGES[stage]?.label}`);
-    setSelectedIds(new Set());
-  };
-
-  // PR 1: suppression has no backing table yet. Drop in a later PR — no-op + toast.
-  const batchSuppress = () => {
-    showToast('Suppression persists in a later PR');
   };
 
   return (
@@ -687,9 +628,6 @@ function Pipeline({ customers, allCustomers, selectedIds, setSelectedIds, curren
           <span style={{ fontSize: 12, fontWeight: 700, color: C.acc }}>{selectedIds.size} selected</span>
           <div style={{ width: 1, height: 20, background: C.bdr }} />
           <Btn variant="primary" onClick={() => setBatchModal(true)}>📤 Batch Send</Btn>
-          <Btn onClick={() => batchStage('sms_sent')}>Mark: SMS Sent</Btn>
-          <Btn onClick={() => batchStage('reviewed')}>Mark: Reviewed</Btn>
-          <Btn onClick={batchSuppress}>Suppress</Btn>
           <Btn onClick={() => setSelectedIds(new Set())}>Clear</Btn>
         </div>
       )}
@@ -730,14 +668,7 @@ function Pipeline({ customers, allCustomers, selectedIds, setSelectedIds, curren
                   <td style={tdStyle}>
                     <Tag type={c.sentiment === 'happy' ? 'grn' : c.sentiment === 'issue' ? 'red' : 'org'}>{c.sentiment}</Tag>
                   </td>
-                  <td style={tdStyle}>
-                    <select
-                      value={c.stage} onChange={e => setStage(c.id, e.target.value)}
-                      style={{ fontSize: 11, padding: '4px 10px', borderRadius: 8, border: `1px solid ${C.bdr}`, background: C.input, color: C.t2, cursor: 'pointer', outline: 'none' }}
-                    >
-                      {Object.entries(STAGES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
-                    </select>
-                  </td>
+                  <td style={tdStyle}><Tag type={STAGES[c.stage]?.tag || 'acc'}>{STAGES[c.stage]?.label || c.stage}</Tag></td>
                   <td style={tdStyle}>
                     <div style={{ fontSize: 12, color: C.t2 }}>{c.lastSvc}</div>
                     <div style={{ fontSize: 11, color: C.t3 }}>{c.lastDate} · {c.daysAgo}d ago</div>
@@ -787,20 +718,6 @@ function Pipeline({ customers, allCustomers, selectedIds, setSelectedIds, curren
                       >
                         Edit
                       </button>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (!window.confirm(`Remove ${c.name} from the review pipeline?`)) return;
-                          updateCustomer(c.id, { suppressed: true, suppressReason: 'Manually removed' });
-                          showToast(`${c.name} removed from pipeline`);
-                        }}
-                        aria-label="Remove from pipeline"
-                        title="Remove from pipeline"
-                        style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', height: 24, width: 24, border: `1px solid ${C.red}33`, borderRadius: 4, color: C.red, background: '#fff', cursor: 'pointer' }}
-                      >
-                        <Trash2 size={12} strokeWidth={1.75} />
-                      </button>
                     </div>
                   </td>
                 </tr>
@@ -818,142 +735,6 @@ function Pipeline({ customers, allCustomers, selectedIds, setSelectedIds, curren
 
 const thStyle = { fontSize: 11, fontWeight: 700, color: C.acc, textAlign: 'left', padding: '10px 16px', borderBottom: `1px solid ${C.bdr}`, textTransform: 'uppercase', letterSpacing: '0.04em', fontFamily: C.sans };
 const tdStyle = { padding: '12px 16px', borderBottom: `1px solid ${C.bdr}`, fontSize: 13, verticalAlign: 'middle', fontFamily: C.sans };
-
-// ══════════════════════════════════════════════════════════════
-// SEQUENCES
-// ══════════════════════════════════════════════════════════════
-function SequencesPage({ customers }) {
-  return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div style={{ fontSize: 15, fontWeight: 700 }}>Follow-Up Sequences</div>
-      </div>
-      {SEQUENCES.map(seq => (
-        <div key={seq.id} style={{ background: C.surface, border: `1px solid ${C.bdr}`, borderRadius: 12, padding: 16, marginBottom: 10 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-            <div style={{ fontSize: 14, fontWeight: 700 }}>{seq.name}</div>
-            <Tag type="acc">{seq.id}</Tag>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 0, padding: '10px 0' }}>
-            {seq.steps.map((step, i) => (
-              <div key={i} style={{ flex: 1, minWidth: 100, display: 'flex', flexDirection: 'column', alignItems: 'center', position: 'relative' }}>
-                <div style={{
-                  width: 32, height: 32, borderRadius: '50%', display: 'grid', placeItems: 'center', fontSize: 14,
-                  border: `2px solid ${C.acc}`, background: C.accG, zIndex: 1,
-                }}>{step.icon}</div>
-                {i < seq.steps.length - 1 && (
-                  <div style={{ position: 'absolute', top: 16, left: 'calc(50% + 16px)', width: 'calc(100% - 32px)', height: 2, background: C.bdr }} />
-                )}
-                <div style={{ fontSize: 11, fontWeight: 500, color: C.t2, marginTop: 6, textAlign: 'center' }}>{step.label}</div>
-                <div style={{ fontSize: 11, color: C.acc, marginTop: 2 }}>{step.day === 0 ? 'Immediate' : `Day ${step.day}`}</div>
-                <div style={{ fontSize: 10, color: C.t3, marginTop: 2 }}>{step.template}</div>
-              </div>
-            ))}
-          </div>
-          <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-            <Btn style={{ fontSize: 10 }}>Edit Steps</Btn>
-            <Btn style={{ fontSize: 10 }}>{customers.filter(c => c.seqId === seq.id).length} customers enrolled</Btn>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════
-// TEMPLATES
-// ══════════════════════════════════════════════════════════════
-function TemplatesPage({ showToast }) {
-  return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div style={{ fontSize: 15, fontWeight: 700 }}>Message Templates</div>
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 10 }}>
-        {TEMPLATES.map(t => (
-          <div key={t.id} onClick={() => showToast(`Template: ${t.name}`)} style={{
-            background: C.surface, border: `1px solid ${C.bdr}`, borderRadius: 12, padding: 14,
-            cursor: 'pointer', transition: 'all .15s',
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <div style={{ fontSize: 12, fontWeight: 600 }}>{t.name}</div>
-              <Tag type={t.sentiment === 'happy' ? 'grn' : t.sentiment === 'issue' ? 'red' : 'org'}>{t.sentiment}</Tag>
-            </div>
-            <div style={{ fontSize: 11, color: C.t3, lineHeight: 1.6, whiteSpace: 'pre-wrap', maxHeight: 80, overflow: 'hidden' }}>{t.body}</div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════
-// SUPPRESSION
-// ══════════════════════════════════════════════════════════════
-function SuppressionPage({ customers, supRules, setSupRules, updateCustomer, showToast }) {
-  const suppressed = customers.filter(c => c.suppressed);
-
-  const toggleRule = (id) => {
-    setSupRules(prev => prev.map(r => r.id === id ? { ...r, enabled: !r.enabled } : r));
-  };
-
-  const unsuppress = (id) => {
-    const c = customers.find(x => x.id === id);
-    updateCustomer(id, { suppressed: false, suppressReason: null });
-    showToast(`${c?.name || 'Customer'} restored to pipeline`);
-  };
-
-  return (
-    <div>
-      <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 16 }}>Suppression Rules & Do-Not-Ask List</div>
-
-      <div style={{ marginBottom: 16 }}>
-        <SectionLabel>Auto-Suppression Rules</SectionLabel>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginTop: 10 }}>
-          {supRules.map(r => (
-            <div key={r.id} style={{ background: C.surface, border: `1px solid ${C.bdr}`, borderRadius: 12, padding: 12, display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 2 }}>{r.label}</div>
-                <div style={{ fontSize: 10, color: C.t3 }}>{r.desc}</div>
-              </div>
-              <label style={{ position: 'relative', display: 'inline-block', width: 36, height: 20, flexShrink: 0, cursor: 'pointer' }}>
-                <input type="checkbox" checked={r.enabled} onChange={() => toggleRule(r.id)} style={{ opacity: 0, width: 0, height: 0, position: 'absolute' }} />
-                <span style={{ position: 'absolute', cursor: 'pointer', inset: 0, background: r.enabled ? C.acc : C.bdr, borderRadius: 20, transition: '.2s' }} />
-                <span style={{ position: 'absolute', left: r.enabled ? 18 : 2, top: 2, width: 16, height: 16, background: 'white', borderRadius: '50%', transition: '.2s' }} />
-              </label>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div>
-        <SectionLabel>Manually Suppressed Customers</SectionLabel>
-        <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 10 }}>
-          <thead>
-            <tr>
-              <th style={thStyle}>Customer</th>
-              <th style={thStyle}>Reason</th>
-              <th style={thStyle}>Suppressed</th>
-              <th style={thStyle}>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {suppressed.length > 0 ? suppressed.map(c => (
-              <tr key={c.id}>
-                <td style={{ ...tdStyle, fontWeight: 500 }}>{c.name}</td>
-                <td style={tdStyle}><Tag type="red">{c.suppressReason || 'Manual'}</Tag></td>
-                <td style={{ ...tdStyle, fontSize: 11, color: C.t3 }}>—</td>
-                <td style={tdStyle}><Btn onClick={() => unsuppress(c.id)} style={{ padding: '3px 8px', fontSize: 10 }}>Restore</Btn></td>
-              </tr>
-            )) : (
-              <tr><td colSpan={4} style={{ color: C.t3, textAlign: 'center', padding: 20 }}>No suppressed customers</td></tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
 
 // ══════════════════════════════════════════════════════════════
 // ACTIVITY LOG
@@ -1154,12 +935,9 @@ function DrawerSection({ title, children }) {
 // BATCH MODAL
 // ══════════════════════════════════════════════════════════════
 function BatchModal({ selectedIds, customers, onClose, addLog, showToast, setSelectedIds, sendReviewRequest }) {
-  const [tplId, setTplId] = useState(TEMPLATES[0].id);
-  const [stagger, setStagger] = useState('0');
   const [sending, setSending] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
 
-  // PR 1: stagger is cosmetic (all sends fire immediately). True scheduler ships in PR 5.
   const confirm = async () => {
     const targets = [...selectedIds]
       .map(id => customers.find(x => x.id === id))
@@ -1180,40 +958,14 @@ function BatchModal({ selectedIds, customers, onClose, addLog, showToast, setSel
     onClose();
   };
 
-  const happyTpls = TEMPLATES.filter(t => t.sentiment === 'happy' || t.sentiment === 'neutral');
-
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.65)', zIndex: 200, display: 'grid', placeItems: 'center', backdropFilter: 'blur(6px)' }} onClick={onClose}>
       <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.bdrA}`, borderRadius: 16, padding: 24, minWidth: 440, maxWidth: 560, boxShadow: '0 24px 64px rgba(0,0,0,.12)' }}>
         <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 6, margin: 0, color: C.heading }}>📤 Batch Send Review Requests</h3>
         <p style={{ fontSize: 12, color: C.t2, lineHeight: 1.6, marginBottom: 14 }}>
-          You're about to send personalized review request SMS to <strong>{selectedIds.size}</strong> customers.
-          Each message will be personalized with their name and routed to the correct GBP link.
+          You're about to send the canonical review-request SMS to <strong>{selectedIds.size}</strong> customers.
+          The server enforces the already-reviewed flag, 30-day cooldown, and 3-request cap.
         </p>
-
-        <div style={{ marginBottom: 12 }}>
-          <SectionLabel>Stagger Delivery</SectionLabel>
-          <select value={stagger} onChange={e => setStagger(e.target.value)} style={{
-            width: '100%', padding: 8, background: C.input, border: `1px solid ${C.bdr}`, borderRadius: 8,
-            color: C.t1, fontSize: 12, outline: 'none',
-          }}>
-            <option value="0">Send all immediately</option>
-            <option value="5">Every 5 minutes</option>
-            <option value="15">Every 15 minutes</option>
-            <option value="30">Every 30 minutes</option>
-            <option value="60">Every hour</option>
-          </select>
-        </div>
-
-        <div style={{ marginBottom: 12 }}>
-          <SectionLabel>Template</SectionLabel>
-          <select value={tplId} onChange={e => setTplId(e.target.value)} style={{
-            width: '100%', padding: 8, background: C.input, border: `1px solid ${C.bdr}`, borderRadius: 8,
-            color: C.t1, fontSize: 12, outline: 'none',
-          }}>
-            {happyTpls.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-          </select>
-        </div>
 
         {sending && (
           <div style={{ fontSize: 12, color: C.t2, padding: '10px 12px', background: C.input, borderRadius: 8, marginTop: 8 }}>
