@@ -121,7 +121,8 @@ function etWeekStart(date = new Date()) {
 }
 
 // Quiet-hours guard for customer-facing scheduled sends. If `date` falls at
-// or after 8 PM ET, returns 10 AM ET on the following ET calendar day.
+// or after 8 PM ET, returns 10 AM ET on the following ET calendar day. If it
+// falls before 10 AM ET, returns 10 AM ET on that same ET calendar day.
 // Mirrors the same evening cutoff `calculateReviewSendTime()` already enforces
 // in services/review-request.js — we don't prod customers' phones after 8 PM.
 // Returns the input unchanged when it's already inside the daytime window.
@@ -129,9 +130,9 @@ function etWeekStart(date = new Date()) {
 // thresholds (e.g. 9 PM TCPA-strict).
 function bumpPastQuietHours(date, { eveningCutoffHour = 20, morningResumeHour = 10 } = {}) {
   const et = etParts(date);
-  if (et.hour < eveningCutoffHour) return new Date(date);
-  const nextDay = etParts(addETDays(date, 1));
-  const ymd = `${nextDay.year}-${String(nextDay.month).padStart(2, '0')}-${String(nextDay.day).padStart(2, '0')}`;
+  if (et.hour >= morningResumeHour && et.hour < eveningCutoffHour) return new Date(date);
+  const target = et.hour >= eveningCutoffHour ? etParts(addETDays(date, 1)) : et;
+  const ymd = `${target.year}-${String(target.month).padStart(2, '0')}-${String(target.day).padStart(2, '0')}`;
   const hhmm = `${String(morningResumeHour).padStart(2, '0')}:00`;
   return parseETDateTime(`${ymd}T${hhmm}`);
 }
