@@ -49,7 +49,26 @@ function mergeProjectsUnique(...lists) {
 
 function fmtDate(d) {
   if (!d) return '—';
-  return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  const raw = String(d);
+  const dateOnly = dateOnlyValue(raw);
+  const date = dateOnly ? new Date(`${dateOnly}T12:00:00`) : new Date(raw);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
+}
+
+function dateInputValue(d) {
+  if (!d) return '';
+  const raw = String(d);
+  const dateOnly = dateOnlyValue(raw);
+  if (dateOnly) return dateOnly;
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 10);
+}
+
+function dateOnlyValue(raw) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  if (/^\d{4}-\d{2}-\d{2}T00:00:00(?:\.000)?Z$/.test(raw)) return raw.slice(0, 10);
+  return '';
 }
 
 export default function ProjectsPage() {
@@ -334,7 +353,7 @@ function ProjectRow({ project, active, onSelect, compactType }) {
           {project.title || TYPE_LABELS[project.project_type] || project.project_type}
         </div>
         <div style={{ display: 'flex', gap: 10, marginTop: 6, fontSize: 11, color: D.muted }}>
-          <span>{fmtDate(project.created_at)}</span>
+          <span>{fmtDate(project.project_date || project.created_at)}</span>
           <span>·</span>
           <span>{project.tech_name || 'Tech'}</span>
           {project.photo_count > 0 && (<><span>·</span><span>{project.photo_count} 📸</span></>)}
@@ -351,6 +370,7 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
   const [editFindings, setEditFindings] = useState({});
   const [editRecs, setEditRecs] = useState('');
   const [editTitle, setEditTitle] = useState('');
+  const [editProjectDate, setEditProjectDate] = useState('');
   const [dirty, setDirty] = useState(false);
   const [sentLink, setSentLink] = useState('');
   const [aiWriting, setAiWriting] = useState(false);
@@ -364,6 +384,7 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
       setEditFindings(d.project.findings || {});
       setEditRecs(d.project.recommendations || '');
       setEditTitle(d.project.title || '');
+      setEditProjectDate(dateInputValue(d.project.project_date || d.project.created_at));
       setDirty(false);
       if (d.project.report_token) {
         setSentLink(`${window.location.origin}/report/project/${d.project.report_token}`);
@@ -384,7 +405,7 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
     try {
       await adminFetch(`/admin/projects/${projectId}`, {
         method: 'PUT',
-        body: { title: editTitle || null, findings: editFindings, recommendations: editRecs || null },
+        body: { title: editTitle || null, project_date: editProjectDate || null, findings: editFindings, recommendations: editRecs || null },
       });
       setDirty(false);
       await load();
@@ -403,7 +424,7 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
       if (dirty) {
         await adminFetch(`/admin/projects/${projectId}`, {
           method: 'PUT',
-          body: { title: editTitle || null, findings: editFindings, recommendations: editRecs || null },
+          body: { title: editTitle || null, project_date: editProjectDate || null, findings: editFindings, recommendations: editRecs || null },
         });
         setDirty(false);
       }
@@ -425,7 +446,7 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
     try {
       const r = await adminFetch(`/admin/projects/${projectId}/ai-write`, {
         method: 'POST',
-        body: { findings: editFindings, recommendations: editRecs },
+        body: { findings: editFindings, recommendations: editRecs, project_date: editProjectDate || null },
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d?.error || 'AI draft failed');
@@ -438,7 +459,7 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
         try {
           await adminFetch(`/admin/projects/${projectId}`, {
             method: 'PUT',
-            body: { title: editTitle || null, findings: editFindings, recommendations: aiText },
+            body: { title: editTitle || null, project_date: editProjectDate || null, findings: editFindings, recommendations: aiText },
           });
           setDirty(false);
           await load();
@@ -518,7 +539,7 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
               fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999,
               background: status.bg, color: status.fg, textTransform: 'uppercase', letterSpacing: 0.5,
             }}>{status.label}</span>
-            <span style={{ fontSize: 11, color: D.muted }}>Created {fmtDate(project.created_at)} by {project.tech_name || '—'}</span>
+            <span style={{ fontSize: 11, color: D.muted }}>Inspection {fmtDate(project.project_date || project.created_at)} by {project.tech_name || '—'}</span>
             {project.sent_at && (
               <span style={{ fontSize: 11, color: D.muted }}>· Sent {fmtDate(project.sent_at)}</span>
             )}
@@ -597,6 +618,16 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
           />
         </div>
 
+        <div>
+          <Label>Inspection / project date</Label>
+          <input
+            type="date"
+            value={editProjectDate}
+            onChange={(e) => { setEditProjectDate(e.target.value); setDirty(true); }}
+            style={inputStyle}
+          />
+        </div>
+
         {/* Type-specific findings */}
         {typeCfg?.findingsFields?.map(field => (
           <div key={field.key}>
@@ -636,7 +667,7 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
               type="button"
               onClick={handleAiWrite}
               disabled={aiWriting || saving}
-              title="Claude drafts What We Inspected / Found / Recommend from the findings and tech notes."
+              title="Claude drafts What We Inspected / Found / Recommend from findings, tech notes, and attached photos."
               style={{
                 padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700,
                 background: aiWriting ? D.muted : D.card, color: D.heading,

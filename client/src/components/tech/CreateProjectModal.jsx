@@ -170,9 +170,17 @@ const QUICK_ACTIONS = {
   ],
 };
 
+function todayDateInput() {
+  const d = new Date();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+
 export default function CreateProjectModal({
   onClose, onCreated,
   defaultCustomerId, defaultServiceRecordId, defaultScheduledServiceId,
+  defaultProjectDate,
   defaultProjectType = '',
   allowedProjectTypes = null,
   allowAiDraft = false,
@@ -206,6 +214,9 @@ export default function CreateProjectModal({
   const [customerQuery, setCustomerQuery] = useState('');
   const [customerResults, setCustomerResults] = useState([]);
   const [customerLabel, setCustomerLabel] = useState('');
+  const [projectDate, setProjectDate] = useState(
+    defaultProjectDate || (defaultServiceRecordId || defaultScheduledServiceId ? '' : todayDateInput())
+  );
   const [title, setTitle] = useState('');
   const [findings, setFindings] = useState({});
   const [recommendations, setRecommendations] = useState('');
@@ -273,6 +284,7 @@ export default function CreateProjectModal({
         body: {
           customer_id: customerId || null,
           project_type: projectType,
+          project_date: projectDate || null,
           findings,
           recommendations,
         },
@@ -302,6 +314,7 @@ export default function CreateProjectModal({
         body: {
           customer_id: customerId,
           project_type: projectType,
+          project_date: projectDate || null,
           title: title || null,
           findings,
           recommendations: recommendations || null,
@@ -493,6 +506,16 @@ export default function CreateProjectModal({
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
                   placeholder={`${typeCfg.label} — ${new Date().toLocaleDateString()}`}
+                  style={inputStyle}
+                />
+              </div>
+
+              <div>
+                <label style={labelStyle}>Inspection / project date</label>
+                <input
+                  type="date"
+                  value={projectDate}
+                  onChange={(e) => setProjectDate(e.target.value)}
                   style={inputStyle}
                 />
               </div>
