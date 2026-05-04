@@ -13,7 +13,7 @@ const CompletionRecap = require('../services/completion-recap');
 const CompletionAttempts = require('../services/completion-attempts');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { recordServiceProductNutrients } = require('../services/nutrient-ledger');
-const { buildPlanForService } = require('../services/waveguard-plan-engine');
+const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
 
 // Haversine ETA for the dispatch board tech cards. Returns a whole
 // number of minutes, or null when any input is missing or the tech is
@@ -95,6 +95,68 @@ function blackoutLockoutBlocks(plan) {
 function annualNLockoutBlocks(plan) {
   return (plan?.propertyGate?.blocks || [])
     .filter((block) => block.code === 'annual_n_budget_exceeded');
+}
+
+async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
+  const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
+  if (!productIds.length) return [];
+
+  const [profile, catalogProducts] = await Promise.all([
+    db('customer_turf_profiles')
+      .where({ customer_id: svc.customer_id, active: true })
+      .first()
+      .catch(() => null),
+    db('products_catalog')
+      .whereIn('id', productIds)
+      .select('id', 'name', 'analysis_n', 'analysis_p')
+      .catch(() => []),
+  ]);
+  if (!profile) return [];
+
+  const county = String(profile.county || '').trim();
+  const city = String(profile.municipality || svc.city || '').trim();
+  if (!county && !city) return [];
+
+  let ordinanceQuery = db('municipality_ordinances').where({ active: true });
+  ordinanceQuery = ordinanceQuery.where(function () {
+    if (county) this.orWhere(function () {
+      this.where({ jurisdiction_type: 'county' }).whereILike('county', county);
+    });
+    if (city) this.orWhere(function () {
+      this.where({ jurisdiction_type: 'city' }).whereILike('city', city);
+    });
+  });
+  const ordinances = await ordinanceQuery.catch(() => []);
+  if (!ordinances.length) return [];
+
+  const productById = new Map(catalogProducts.map((product) => [String(product.id), product]));
+  const hasNitrogen = productIds.some((id) => Number(productById.get(String(id))?.analysis_n || 0) > 0);
+  const hasPhosphorus = productIds.some((id) => Number(productById.get(String(id))?.analysis_p || 0) > 0);
+  if (!hasNitrogen && !hasPhosphorus) return [];
+
+  const serviceDate = svc.scheduled_date instanceof Date
+    ? svc.scheduled_date
+    : new Date(`${String(svc.scheduled_date).slice(0, 10)}T12:00:00`);
+  const blocks = [];
+  for (const rule of ordinances.filter((row) => isDateInWindow(serviceDate, row))) {
+    if (rule.restricted_nitrogen && hasNitrogen) {
+      blocks.push({
+        code: 'actual_nitrogen_blackout',
+        severity: 'block',
+        message: `${rule.jurisdiction_name} restricts nitrogen; actual completion products include nitrogen.`,
+        source: rule.source_name || null,
+      });
+    }
+    if (rule.restricted_phosphorus && hasPhosphorus) {
+      blocks.push({
+        code: 'actual_phosphorus_blackout',
+        severity: 'block',
+        message: `${rule.jurisdiction_name} restricts phosphorus; actual completion products include phosphorus.`,
+        source: rule.source_name || null,
+      });
+    }
+  }
+  return blocks;
 }
 
 function normalizeTankCleanout(input) {
@@ -715,7 +777,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           blocks: calibrationBlocks,
         });
       }
-      const blackoutBlocks = blackoutLockoutBlocks(plan);
+      const blackoutBlocks = [
+        ...blackoutLockoutBlocks(plan),
+        ...await actualProductBlackoutBlocks(svc, products),
+      ];
       if (blackoutBlocks.length && (!normalizedOfficeApproval || req.techRole !== 'admin')) {
         const validationErr = new Error('WaveGuard fertilizer blackout lockout');
         await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);

@@ -80,6 +80,11 @@ function fmtDate(d) {
 }
 
 function fmtCurrency(v) { return '$' + parseFloat(v || 0).toFixed(2); }
+function fmtNumber(v, digits = 3) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '0';
+  return n.toFixed(digits).replace(/\.?0+$/, '');
+}
 
 const STAGE_LABELS = {
   new_lead: 'New Lead', contacted: 'Contacted', estimate_sent: 'Est. Sent',
@@ -419,6 +424,9 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
   const referral = data.referralInfo;
   const discounts = data.customerDiscounts || [];
   const compliance = data.complianceRecords || [];
+  const nutrientLedger = data.nutrientLedger || {};
+  const nutrientSummary = nutrientLedger.summary || {};
+  const nutrientRows = nutrientLedger.rows || [];
   const services = data.services || [];
   const payments = data.payments || [];
   const scheduled = data.scheduled || [];
@@ -1202,6 +1210,61 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
           {/* COMPLIANCE */}
           {activeTab === 'compliance' && (
             <div>
+              <SectionTitle>Nutrient Ledger YTD</SectionTitle>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+                <Card>
+                  <CardBody className="p-4">
+                    <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">Nitrogen</div>
+                    <div className="u-nums text-22 font-semibold text-zinc-900">{fmtNumber(nutrientSummary.nApplied)}</div>
+                    <div className="text-11 text-ink-secondary">lb N / 1k sqft</div>
+                  </CardBody>
+                </Card>
+                <Card>
+                  <CardBody className="p-4">
+                    <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">Phosphorus</div>
+                    <div className="u-nums text-22 font-semibold text-zinc-900">{fmtNumber(nutrientSummary.pApplied)}</div>
+                    <div className="text-11 text-ink-secondary">lb P / 1k sqft</div>
+                  </CardBody>
+                </Card>
+                <Card>
+                  <CardBody className="p-4">
+                    <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">Potassium</div>
+                    <div className="u-nums text-22 font-semibold text-zinc-900">{fmtNumber(nutrientSummary.kApplied)}</div>
+                    <div className="text-11 text-ink-secondary">lb K / 1k sqft</div>
+                  </CardBody>
+                </Card>
+                <Card>
+                  <CardBody className="p-4">
+                    <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">Entries</div>
+                    <div className="u-nums text-22 font-semibold text-zinc-900">{nutrientSummary.entries || 0}</div>
+                    <div className="text-11 text-ink-secondary">{nutrientLedger.year || new Date().getFullYear()}</div>
+                  </CardBody>
+                </Card>
+              </div>
+
+              {nutrientRows.length > 0 && (
+                <Table className="mb-5">
+                  <THead>
+                    <TR>
+                      <TH>Date</TH><TH>Product</TH><TH>Analysis</TH><TH>N/P/K per 1k</TH><TH>Blackout</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
+                    {nutrientRows.map((r) => (
+                      <TR key={r.id}>
+                        <TD>{fmtDate(r.application_date)}</TD>
+                        <TD className="text-zinc-900">{r.product_name}</TD>
+                        <TD className="u-nums">{r.analysis || '—'}</TD>
+                        <TD className="u-nums">
+                          {fmtNumber(r.n_applied_per_1000)} / {fmtNumber(r.p_applied_per_1000)} / {fmtNumber(r.k_applied_per_1000)}
+                        </TD>
+                        <TD>{r.blackout_status || '—'}</TD>
+                      </TR>
+                    ))}
+                  </TBody>
+                </Table>
+              )}
+
               <SectionTitle>Application History ({compliance.length})</SectionTitle>
               {compliance.length > 0 ? (
                 <Table className="mb-5">
@@ -1229,7 +1292,7 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
                   <SectionTitle>Product Limits</SectionTitle>
                   <div className="text-12 text-ink-secondary space-y-1">
                     <div>Celsius applications this year: <span className="u-nums text-zinc-900">{compliance.filter(r => (r.product_name || '').toLowerCase().includes('celsius')).length}</span></div>
-                    <div>Total nitrogen applied YTD: Check compliance records for detailed tracking</div>
+                    <div>Total nitrogen applied YTD: <span className="u-nums text-zinc-900">{fmtNumber(nutrientSummary.nApplied)}</span> lb N / 1k sqft</div>
                   </div>
                 </CardBody>
               </Card>

@@ -626,7 +626,8 @@ router.get('/:id', async (req, res, next) => {
     const c = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!c) return res.status(404).json({ error: 'Customer not found' });
 
-    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, smsLog, healthScore, invoices, cards, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts] = await Promise.all([
+    const currentYear = Number(etDateString().slice(0, 4));
+    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, smsLog, healthScore, invoices, cards, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary] = await Promise.all([
       db('customer_tags').where({ customer_id: c.id }).select('tag'),
       db('customer_interactions').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(30),
       db('property_preferences').where({ customer_id: c.id }).first(),
@@ -657,6 +658,21 @@ router.get('/:id', async (req, res, next) => {
       db('referral_promoters').where({ customer_id: c.id }).first().catch(e => { logger.warn(`[customers:${c.id}] referral_promoters: ${e.message}`); return null; }),
       db('property_application_history').where({ customer_id: c.id }).orderBy('applied_at', 'desc').limit(10).catch(e => { logger.warn(`[customers:${c.id}] property_application_history: ${e.message}`); return []; }),
       db('customer_discounts').where({ 'customer_discounts.customer_id': c.id }).leftJoin('discounts', 'customer_discounts.discount_id', 'discounts.id').select('customer_discounts.*', 'discounts.name as discount_name', 'discounts.discount_type', 'discounts.amount as discount_value').catch(e => { logger.warn(`[customers:${c.id}] customer_discounts: ${e.message}`); return []; }),
+      db('property_nutrient_ledger')
+        .where({ customer_id: c.id, application_year: currentYear })
+        .orderBy('application_date', 'desc')
+        .orderBy('created_at', 'desc')
+        .limit(25)
+        .catch(e => { logger.warn(`[customers:${c.id}] property_nutrient_ledger: ${e.message}`); return []; }),
+      db('property_nutrient_ledger')
+        .where({ customer_id: c.id, application_year: currentYear })
+        .first(
+          db.raw('COALESCE(SUM(n_applied_per_1000), 0)::float as "nApplied"'),
+          db.raw('COALESCE(SUM(p_applied_per_1000), 0)::float as "pApplied"'),
+          db.raw('COALESCE(SUM(k_applied_per_1000), 0)::float as "kApplied"'),
+          db.raw('COUNT(*)::int as entries')
+        )
+        .catch(e => { logger.warn(`[customers:${c.id}] property_nutrient_ledger_summary: ${e.message}`); return null; }),
     ]);
 
     // The invoices table stores the billed amount as `total`; the frontend reads
@@ -724,6 +740,21 @@ router.get('/:id', async (req, res, next) => {
       notificationPrefs: notificationPrefs || null,
       referralInfo: referralInfo || null,
       complianceRecords: complianceRecords || [],
+      nutrientLedger: {
+        year: currentYear,
+        summary: {
+          year: currentYear,
+          nApplied: Number(Number(nutrientLedgerSummary?.nApplied || 0).toFixed(3)),
+          pApplied: Number(Number(nutrientLedgerSummary?.pApplied || 0).toFixed(3)),
+          kApplied: Number(Number(nutrientLedgerSummary?.kApplied || 0).toFixed(3)),
+          totalN: Number(Number(nutrientLedgerSummary?.nApplied || 0).toFixed(3)),
+          totalP: Number(Number(nutrientLedgerSummary?.pApplied || 0).toFixed(3)),
+          totalK: Number(Number(nutrientLedgerSummary?.kApplied || 0).toFixed(3)),
+          entries: Number(nutrientLedgerSummary?.entries || 0),
+          source: 'property_nutrient_ledger',
+        },
+        rows: nutrientLedgerRows || [],
+      },
       customerDiscounts: customerDiscounts || [],
     });
   } catch (err) { next(err); }
