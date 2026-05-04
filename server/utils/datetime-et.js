@@ -73,6 +73,35 @@ function addETDays(date, days) {
   return new Date(Date.UTC(et.year, et.month - 1, et.day + days, 12, 0, 0));
 }
 
+// Returns a Date N ET-calendar-months away from `date`, preserving the
+// same ordinal weekday by default. Example: first Monday + 3 months lands
+// on the first Monday of the target month. If the target month does not
+// have that ordinal weekday, it falls back to the last matching weekday.
+function addETMonthsByWeekday(date, months, opts = {}) {
+  const et = etParts(date);
+  const nth = (opts.nth != null && opts.nth !== '' && !isNaN(parseInt(opts.nth)))
+    ? parseInt(opts.nth)
+    : Math.ceil(et.day / 7);
+  const weekday = (opts.weekday != null && opts.weekday !== '' && !isNaN(parseInt(opts.weekday)))
+    ? parseInt(opts.weekday)
+    : et.dayOfWeek;
+  return etNthWeekdayOfMonth(et.year, et.month + months, nth, weekday);
+}
+
+// Month is 1-based and may overflow. nth values beyond what a target
+// month contains fall back to the last matching weekday.
+function etNthWeekdayOfMonth(year, month, nth, weekday) {
+  const first = new Date(Date.UTC(year, month - 1, 1, 12, 0, 0));
+  const targetYear = first.getUTCFullYear();
+  const targetMonth = first.getUTCMonth();
+  const firstW = etParts(first).dayOfWeek;
+  const offset = (weekday - firstW + 7) % 7;
+  const lastDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+  let day = 1 + offset + (Math.max(1, nth) - 1) * 7;
+  if (day > lastDay) day -= 7;
+  return new Date(Date.UTC(targetYear, targetMonth, day, 12, 0, 0));
+}
+
 // Midnight ET on the first day of `date`'s ET month — use for month-to-date WHERE bounds.
 function startOfETMonth(date = new Date()) {
   const { year, month } = etParts(date);
@@ -122,6 +151,6 @@ function etWeekStart(date = new Date()) {
 
 module.exports = {
   TZ, parseETDateTime, formatETDay, formatETDate, formatETTime,
-  etParts, etDateString, addETDays, startOfETMonth,
+  etParts, etDateString, addETDays, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
   etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart,
 };

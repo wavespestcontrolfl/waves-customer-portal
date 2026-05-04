@@ -625,7 +625,7 @@ router.patch('/:serviceId/note', async (req, res, next) => {
 //   - activity_log INSERT (admin-side audit, distinct table).
 router.put('/:serviceId/status', async (req, res, next) => {
   try {
-    const { status: toStatus, notes, lat, lng, notifyCustomer } = req.body;
+    const { status: toStatus, notes, lat, lng, notifyCustomer, scope = 'this_only' } = req.body;
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
@@ -633,6 +633,75 @@ router.put('/:serviceId/status', async (req, res, next) => {
       .first();
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    if (toStatus === 'cancelled' && ['following', 'series'].includes(scope)) {
+      const parentId = svc.recurring_parent_id || svc.id;
+      const parent = await db('scheduled_services').where({ id: parentId }).first();
+      if (!parent || (!parent.is_recurring && !parent.recurring_pattern)) {
+        return res.status(400).json({ error: 'Service is not part of a recurring series' });
+      }
+
+      const cancellableStatuses = ['pending', 'confirmed'];
+      const baseQuery = db('scheduled_services')
+        .where(function () {
+          this.where('id', parentId).orWhere('recurring_parent_id', parentId);
+        })
+        .whereIn('status', cancellableStatuses);
+      if (scope === 'following') {
+        baseQuery.where('scheduled_date', '>=', svc.scheduled_date);
+      }
+
+      const targets = await baseQuery
+        .orderBy('scheduled_date', 'asc')
+        .select('id', 'status', 'customer_id', 'service_type');
+
+      if (!targets.length) return res.status(409).json({ error: 'No cancellable appointments found in this series' });
+
+      const { transitionJobStatus } = require('../services/job-status');
+      await db.transaction(async (trx) => {
+        for (const target of targets) {
+          await trx('service_status_log').insert({
+            scheduled_service_id: target.id,
+            status: toStatus,
+            changed_by: req.technicianId,
+            lat,
+            lng,
+            notes,
+          });
+
+          await transitionJobStatus({
+            jobId: target.id,
+            fromStatus: target.status,
+            toStatus,
+            transitionedBy: req.technicianId,
+            trx,
+          });
+        }
+      });
+
+      try {
+        const AppointmentReminders = require('../services/appointment-reminders');
+        await AppointmentReminders.handleCancellation(svc.id, {
+          sendNotification: notifyCustomer !== false,
+        });
+      } catch (e) { logger.error(`[admin-dispatch] series cancellation reminder handling failed: ${e.message}`); }
+
+      try {
+        await trackTransitions.cancel(svc.id, {
+          reason: notes || null,
+          actorId: req.technicianId,
+        });
+      } catch (e) { logger.error(`[admin-dispatch] series cancel track transition failed: ${e.message}`); }
+
+      await db('activity_log').insert({
+        admin_user_id: req.technicianId,
+        customer_id: svc.customer_id,
+        action: 'status_changed',
+        description: `${svc.tech_name} cancelled ${targets.length} ${scope === 'series' ? 'series' : 'future'} appointments for ${svc.first_name}`,
+      });
+
+      return res.json({ success: true, cancelledCount: targets.length, scope });
+    }
 
     const fromStatus = svc.status;
     const { transitionJobStatus } = require('../services/job-status');

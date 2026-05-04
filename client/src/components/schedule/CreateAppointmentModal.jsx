@@ -66,6 +66,8 @@ const CADENCE_OPTIONS = [
   { value: 'bimonthly', label: 'Every 2 months' },
   { value: 'quarterly', label: 'Quarterly' },
   { value: 'triannual', label: 'Every 4 months' },
+  { value: 'semiannual', label: 'Semiannual' },
+  { value: 'annual', label: 'Annual' },
   { value: 'monthly_nth_weekday', label: 'Monthly (Nth weekday)' },
   { value: 'custom', label: 'Custom (every N days)' },
 ];
@@ -73,6 +75,7 @@ const CADENCE_OPTIONS = [
 const NTH_OPTIONS = [
   { value: 1, label: '1st' }, { value: 2, label: '2nd' },
   { value: 3, label: '3rd' }, { value: 4, label: '4th' },
+  { value: 5, label: '5th / last' },
 ];
 const WEEKDAY_OPTIONS = [
   { value: 0, label: 'Sunday' }, { value: 1, label: 'Monday' },
@@ -95,6 +98,22 @@ const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, b
 const labelStyle = { fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 500, display: 'block', marginBottom: 4 };
 const sectionStyle = { background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}`, marginBottom: 12 };
 
+function nthWeekdayOfMonth(year, month, nth, weekday) {
+  const first = new Date(year, month, 1, 12, 0, 0);
+  const firstW = first.getDay();
+  const offset = (weekday - firstW + 7) % 7;
+  const lastDay = new Date(year, month + 1, 0).getDate();
+  let day = 1 + offset + (Math.max(1, nth) - 1) * 7;
+  if (day > lastDay) day -= 7;
+  return new Date(year, month, day, 12, 0, 0);
+}
+
+function addCalendarMonthsByWeekday(base, months) {
+  const d = new Date(base);
+  const nth = Math.ceil(d.getDate() / 7);
+  return nthWeekdayOfMonth(d.getFullYear(), d.getMonth() + months, nth, d.getDay());
+}
+
 // Client mirror of the server's recurring-date math. Returns a Date.
 function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   const { intervalDays, nth, weekday } = opts;
@@ -104,13 +123,14 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   const nthNum = (nth != null && nth !== '' && !isNaN(parseInt(nth))) ? parseInt(nth) : null;
   const wdayNum = (weekday != null && weekday !== '' && !isNaN(parseInt(weekday))) ? parseInt(weekday) : null;
   if (pattern === 'monthly_nth_weekday' && nthNum != null && wdayNum != null) {
-    const d = new Date(base.getFullYear(), base.getMonth() + i, 1, 12, 0, 0);
-    const firstW = d.getDay();
-    const offset = (wdayNum - firstW + 7) % 7;
-    d.setDate(1 + offset + (nthNum - 1) * 7);
+    const d = nthWeekdayOfMonth(base.getFullYear(), base.getMonth() + i, nthNum, wdayNum);
     return isNaN(d.getTime()) ? base : d;
   }
-  const intervals = { monthly: 30, bimonthly: 60, quarterly: 91, triannual: 122 };
+  const monthIntervals = { monthly: 1, bimonthly: 2, quarterly: 3, triannual: 4, semiannual: 6, biannual: 6, annual: 12, yearly: 12 };
+  if (monthIntervals[pattern]) {
+    return addCalendarMonthsByWeekday(base, monthIntervals[pattern] * i);
+  }
+  const intervals = { daily: 1, weekly: 7, biweekly: 14 };
   let gap;
   if (pattern === 'custom' && intervalDays) gap = Math.max(1, parseInt(intervalDays) || 30);
   else gap = intervals[pattern] || 91;
@@ -224,6 +244,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [discountPresets, setDiscountPresets] = useState([]);
   const [discountPresetId, setDiscountPresetId] = useState('');
   const [discountSearch, setDiscountSearch] = useState('');
+  const [lineDiscountQueries, setLineDiscountQueries] = useState({});
+  const [lineDiscountOpenIdx, setLineDiscountOpenIdx] = useState(null);
 
   const filteredDiscounts = useMemo(() => {
     const q = discountSearch.trim().toLowerCase();
@@ -241,6 +263,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       : `$${Number(d.amount).toFixed(2)}`;
     return `${d.name} — ${amt}`;
   }, [discountPresetId, discountPresets]);
+
+  const lineDiscountPresets = useMemo(() => {
+    return discountPresets.filter((d) => (
+      d.is_active
+      && d.show_in_invoices
+      && !d.is_waveguard_tier_discount
+    ));
+  }, [discountPresets]);
 
   // Notes & Confirm state
   const [customerNotes, setCustomerNotes] = useState('');
@@ -279,6 +309,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   };
   const removeServiceAt = (idx) => {
     setServices((arr) => arr.filter((_, i) => i !== idx));
+    setLineDiscountOpenIdx((current) => (current === idx ? null : current));
   };
   const addServiceFromCatalog = (svc) => {
     const defaultPrice = svc.priceMin || svc.base_price || '';
@@ -286,6 +317,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       ...arr,
       {
         ...svc,
+        lineId: `svc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         price: defaultPrice ? String(defaultPrice) : '',
         cadence: 'one_time',
         intervalDays: 30,
@@ -298,11 +330,81 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setServiceResults([]);
     setAddingService(false);
   };
+  const formatDiscountLabel = (d) => {
+    if (!d) return '';
+    if (d.discount_type === 'free_service') return 'Free';
+    if (d.discount_type === 'percentage' || d.discount_type === 'variable_percentage') {
+      return `${Number(d.amount || 0).toFixed(Number(d.amount || 0) % 1 ? 2 : 0)}%`;
+    }
+    return `$${Number(d.amount || 0).toFixed(2)}`;
+  };
+  const lineBaseAmount = (svc) => {
+    const n = parseFloat(svc?.price);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  };
+  const previewLineDiscount = (discount, baseAmount) => {
+    const amt = Number(discount?.amount) || 0;
+    let dollars = 0;
+    if (discount?.discount_type === 'percentage' || discount?.discount_type === 'variable_percentage') {
+      dollars = baseAmount * (amt / 100);
+      if (discount.max_discount_dollars) dollars = Math.min(dollars, Number(discount.max_discount_dollars));
+    } else if (discount?.discount_type === 'fixed_amount' || discount?.discount_type === 'variable_amount') {
+      dollars = amt;
+    } else if (discount?.discount_type === 'free_service') {
+      dollars = baseAmount;
+    }
+    return Math.min(baseAmount, Math.max(0, Math.round(dollars * 100) / 100));
+  };
+  const lineDiscountAmount = (svc) => previewLineDiscount(svc?.lineDiscount, lineBaseAmount(svc));
+  const lineNetAmount = (svc) => Math.max(0, Math.round((lineBaseAmount(svc) - lineDiscountAmount(svc)) * 100) / 100);
+  const matchingLineDiscounts = (idx) => {
+    const svc = services[idx];
+    const key = svc?.lineId || idx;
+    const q = (lineDiscountQueries[key] || '').trim().toLowerCase();
+    if (!q) return lineDiscountPresets.slice(0, 10);
+    return lineDiscountPresets
+      .filter((d) => `${d.name || ''} ${d.description || ''} ${formatDiscountLabel(d)}`.toLowerCase().includes(q))
+      .slice(0, 10);
+  };
+  const applyLineDiscount = (idx, discount) => {
+    const base = lineBaseAmount(services[idx]);
+    if (base <= 0) {
+      setToast('Enter a price before applying a line discount');
+      setTimeout(() => setToast(''), 2400);
+      return;
+    }
+    if (previewLineDiscount(discount, base) <= 0) {
+      setToast('Discount has no amount for this service line');
+      setTimeout(() => setToast(''), 2400);
+      return;
+    }
+    setServices((arr) => arr.map((s, i) => (i === idx ? {
+      ...s,
+      lineDiscount: {
+        id: discount.id,
+        name: discount.name,
+        discount_type: discount.discount_type,
+        amount: discount.amount,
+        max_discount_dollars: discount.max_discount_dollars,
+      },
+    } : s)));
+    const key = services[idx]?.lineId || idx;
+    setLineDiscountQueries((prev) => ({ ...prev, [key]: '' }));
+    setLineDiscountOpenIdx(null);
+  };
+  const clearLineDiscount = (idx) => {
+    setServices((arr) => arr.map((s, i) => (i === idx ? { ...s, lineDiscount: null } : s)));
+  };
   const subtotal = useMemo(() => {
     return services.reduce((sum, s) => {
-      const n = parseFloat(s.price);
-      return sum + (isNaN(n) ? 0 : n);
+      return sum + lineBaseAmount(s);
     }, 0);
+  }, [services]);
+  const lineDiscountTotal = useMemo(() => {
+    return services.reduce((sum, s) => sum + lineDiscountAmount(s), 0);
+  }, [services]);
+  const netSubtotal = useMemo(() => {
+    return services.reduce((sum, s) => sum + lineNetAmount(s), 0);
   }, [services]);
   const totalDuration = useMemo(() => {
     if (services.length === 0) return defaultDurationMinutes || 60;
@@ -571,18 +673,24 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       if (createdGroupKeysRef.current.has(key)) continue;
       try {
         const [primary, ...extras] = group.lines;
-        const groupSubtotal = group.lines.reduce((sum, s) => {
+        const groupSubtotal = group.lines.reduce((sum, s) => sum + lineNetAmount(s), 0);
+        const groupHasPrice = group.lines.some((s) => {
           const n = parseFloat(s.price);
-          return sum + (isNaN(n) ? 0 : n);
-        }, 0);
+          return Number.isFinite(n) && n >= 0 && s.price !== '' && s.price != null;
+        });
         const groupDuration = group.lines.reduce((sum, s) => sum + (s.duration || s.default_duration_minutes || 30), 0);
         const addons = extras.map((s) => {
-          const p = parseFloat(s.price);
+          const p = lineNetAmount(s);
           return {
             serviceId: s.id || null,
             serviceName: s.name,
             name: s.name,
-            price: isNaN(p) ? null : p,
+            price: p > 0 ? p : null,
+            discountId: s.lineDiscount?.id || null,
+            discountName: s.lineDiscount?.name || null,
+            discountType: s.lineDiscount?.discount_type || null,
+            discountAmount: s.lineDiscount?.amount != null ? Number(s.lineDiscount.amount) : null,
+            discountDollars: lineDiscountAmount(s) || null,
           };
         });
         const isRecurring = group.cadence !== 'one_time';
@@ -593,6 +701,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           scheduledDate: apptDate,
           serviceType: primary.name,
           serviceId: primary.id || null,
+          primaryLineDiscount: primary.lineDiscount ? {
+            discountId: primary.lineDiscount.id || null,
+            discountName: primary.lineDiscount.name || null,
+            discountType: primary.lineDiscount.discount_type || null,
+            discountAmount: primary.lineDiscount.amount != null ? Number(primary.lineDiscount.amount) : null,
+            discountDollars: lineDiscountAmount(primary) || null,
+          } : undefined,
           serviceAddons: addons,
           windowStart,
           windowEnd: computeWindowEnd(windowStart, groupDuration),
@@ -602,7 +717,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // triggered auto-invoicing (server/routes/admin-dispatch.js) charges
           // the full visit. Per-line prices stay on each addon row for
           // breakdown / analytics.
-          estimatedPrice: groupSubtotal > 0 ? groupSubtotal : null,
+          estimatedPrice: groupHasPrice ? groupSubtotal : null,
           // Send the summed group duration so the server's
           // estimated_duration_minutes matches the actual time window
           // (windowStart..windowEnd) instead of just the primary line's
@@ -860,7 +975,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             </div>
             {services.length > 0 && subtotal > 0 && (
               <div style={{ fontSize: 13, fontWeight: 600, color: '#18181B' }}>
-                Total: ${subtotal.toFixed(2)}
+                Total: ${netSubtotal.toFixed(2)}
               </div>
             )}
           </div>
@@ -920,6 +1035,68 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   </div>
                 )}
               </div>
+              <div style={{ marginTop: 8, position: 'relative' }}>
+                <label style={labelStyle}>Line Discount</label>
+                {svc.lineDiscount ? (
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, background: '#F4F4F5', border: `1px solid ${D.border}`, borderRadius: 6, padding: '9px 10px', minHeight: 42 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: D.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {svc.lineDiscount.name} — {formatDiscountLabel(svc.lineDiscount)}
+                      </div>
+                      {lineDiscountAmount(svc) > 0 && (
+                        <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+                          -${lineDiscountAmount(svc).toFixed(2)} on this service
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => clearLineDiscount(idx)}
+                      style={{ background: 'none', border: 'none', color: D.muted, cursor: 'pointer', fontSize: 13, minHeight: 34, minWidth: 52 }}
+                    >Remove</button>
+                  </div>
+                ) : (
+                  <>
+                    <input
+                      value={lineDiscountQueries[svc.lineId || idx] || ''}
+                      onChange={(e) => {
+                        setLineDiscountQueries((prev) => ({ ...prev, [svc.lineId || idx]: e.target.value }));
+                        if (lineDiscountPresets.length > 0) setLineDiscountOpenIdx(idx);
+                      }}
+                      onFocus={() => { if (lineDiscountPresets.length > 0) setLineDiscountOpenIdx(idx); }}
+                      onBlur={() => setTimeout(() => setLineDiscountOpenIdx((current) => (current === idx ? null : current)), 150)}
+                      placeholder={lineDiscountPresets.length === 0 ? 'No invoice discounts are available' : 'Search discounts for this service...'}
+                      disabled={lineDiscountPresets.length === 0}
+                      style={{ ...inputStyle, fontSize: 13, minHeight: 42, opacity: lineDiscountPresets.length === 0 ? 0.65 : 1 }}
+                    />
+                    {lineDiscountOpenIdx === idx && (
+                      <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, zIndex: 18, maxHeight: 220, overflow: 'auto', marginTop: 4, boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }}>
+                        {matchingLineDiscounts(idx).length === 0 ? (
+                          <div style={{ padding: '10px 12px', color: D.muted, fontSize: 12 }}>No discounts match.</div>
+                        ) : matchingLineDiscounts(idx).map((d) => (
+                          <div
+                            key={d.id}
+                            onMouseDown={(e) => { e.preventDefault(); applyLineDiscount(idx, d); }}
+                            style={{ padding: '10px 12px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 13, display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}
+                          >
+                            <span style={{ color: D.text, fontWeight: 600, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</span>
+                            <span style={{ color: D.muted, fontSize: 12, whiteSpace: 'nowrap' }}>{formatDiscountLabel(d)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+              {lineBaseAmount(svc) > 0 && lineDiscountAmount(svc) > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8, fontSize: 12, color: D.muted }}>
+                  <span>Line total</span>
+                  <span>
+                    <span style={{ textDecoration: 'line-through', marginRight: 6 }}>${lineBaseAmount(svc).toFixed(2)}</span>
+                    <strong style={{ color: D.text }}>${lineNetAmount(svc).toFixed(2)}</strong>
+                  </span>
+                </div>
+              )}
               {svc.cadence === 'monthly_nth_weekday' && (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
                   <div>

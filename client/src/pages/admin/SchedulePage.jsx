@@ -228,12 +228,15 @@ const EDIT_FREQUENCIES = [
   { value: 'bimonthly', label: 'Every 2 months' },
   { value: 'quarterly', label: 'Quarterly' },
   { value: 'triannual', label: 'Every 4 months' },
+  { value: 'semiannual', label: 'Semiannual' },
+  { value: 'annual', label: 'Annual' },
   { value: 'monthly_nth_weekday', label: 'Every month on the Nth weekday' },
   { value: 'custom', label: 'Custom (every N days)' },
 ];
 const EDIT_NTH_OPTIONS = [
   { value: 1, label: '1st' }, { value: 2, label: '2nd' },
   { value: 3, label: '3rd' }, { value: 4, label: '4th' },
+  { value: 5, label: '5th / last' },
 ];
 const EDIT_WEEKDAY_OPTIONS = [
   { value: 0, label: 'Sunday' }, { value: 1, label: 'Monday' },
@@ -241,6 +244,16 @@ const EDIT_WEEKDAY_OPTIONS = [
   { value: 4, label: 'Thursday' }, { value: 5, label: 'Friday' },
   { value: 6, label: 'Saturday' },
 ];
+
+function editNthWeekdayOfMonth(year, month, nth, weekday) {
+  const d = new Date(year, month, 1, 12, 0, 0);
+  const firstW = d.getDay();
+  const offset = (weekday - firstW + 7) % 7;
+  const lastDay = new Date(year, month + 1, 0).getDate();
+  let day = 1 + offset + (Math.max(1, nth) - 1) * 7;
+  if (day > lastDay) day -= 7;
+  return new Date(year, month, day, 12, 0, 0);
+}
 
 function editNextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   const { nth, weekday, intervalDays } = opts;
@@ -251,13 +264,20 @@ function editNextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   const wdayNum = (weekday != null && weekday !== '' && !isNaN(parseInt(weekday))) ? parseInt(weekday) : null;
   const intNum = (intervalDays != null && intervalDays !== '' && !isNaN(parseInt(intervalDays))) ? parseInt(intervalDays) : null;
   if (pattern === 'monthly_nth_weekday' && nthNum != null && wdayNum != null) {
-    const d = new Date(base.getFullYear(), base.getMonth() + i, 1, 12, 0, 0);
-    const firstW = d.getDay();
-    const offset = (wdayNum - firstW + 7) % 7;
-    d.setDate(1 + offset + (nthNum - 1) * 7);
+    const d = editNthWeekdayOfMonth(base.getFullYear(), base.getMonth() + i, nthNum, wdayNum);
     return isNaN(d.getTime()) ? base : d;
   }
-  const intervals = { daily: 1, weekly: 7, biweekly: 14, monthly: 30, bimonthly: 60, quarterly: 91, triannual: 122 };
+  const monthIntervals = {
+    monthly: 1, bimonthly: 2, quarterly: 3, triannual: 4,
+    semiannual: 6, biannual: 6, annual: 12, yearly: 12,
+  };
+  if (monthIntervals[pattern]) {
+    const d = new Date(base);
+    const nth = Math.ceil(d.getDate() / 7);
+    const target = editNthWeekdayOfMonth(d.getFullYear(), d.getMonth() + monthIntervals[pattern] * i, nth, d.getDay());
+    return isNaN(target.getTime()) ? base : target;
+  }
+  const intervals = { daily: 1, weekly: 7, biweekly: 14 };
   let gap;
   if (pattern === 'custom' && intNum) gap = Math.max(1, intNum);
   else gap = intervals[pattern] || 91;
