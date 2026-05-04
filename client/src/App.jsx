@@ -1,5 +1,5 @@
 import React, { Component } from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme';
 
@@ -25,6 +25,13 @@ class PageErrorBoundary extends Component {
     }
     return this.props.children;
   }
+}
+
+function ScheduleRedirect() {
+  const location = useLocation();
+  const params = new URLSearchParams(location.search);
+  params.set('tab', 'schedule');
+  return <Navigate to={`/admin/dispatch?${params.toString()}`} replace />;
 }
 import LoginPage from './pages/LoginPage';
 import PortalPage from './pages/PortalPage';
@@ -202,7 +209,7 @@ export default function App() {
                 to the Schedule tab) so existing bookmarks and internal
                 links aren't broken. */}
             <Route path="dispatch" element={<AdminDispatchPage />} />
-            <Route path="schedule" element={<Navigate to="/admin/dispatch?tab=schedule" replace />} />
+            <Route path="schedule" element={<ScheduleRedirect />} />
             <Route path="revenue" element={<Navigate to="/admin/dashboard" replace />} />
             <Route path="communications" element={<AdminCommunicationsPage />} />
             <Route path="reviews" element={<AdminReviewsPage />} />

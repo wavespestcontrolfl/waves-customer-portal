@@ -569,17 +569,21 @@ export default function MobileWeekGrid({ date, onEdit, onChange, onNavigate }) {
     const { svc, toDate, newWindow } = pending;
     setBusy(true);
     try {
-      await adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
+      const notifyCustomer = notificationType === 'sms';
+      const result = await adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
         method: 'POST',
         body: JSON.stringify({
           newDate: toDate,
           newWindow,
           reasonCode: 'dispatch_drag',
           reasonText: 'Rescheduled via drag-and-drop on mobile week grid',
-          notifyCustomer: notificationType === 'sms',
+          notifyCustomer,
           scope: scope || 'this_only',
         }),
       });
+      if (notifyCustomer && result?.notificationSent === false) {
+        alert(`Appointment moved, but SMS notification failed: ${result.notificationError || 'customer was not notified'}`);
+      }
       const j = await adminFetch(`/admin/schedule/week?start=${weekStart}`);
       setData(j);
       setOptimistic(null);

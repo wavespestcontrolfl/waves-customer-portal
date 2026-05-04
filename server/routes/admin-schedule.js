@@ -1026,8 +1026,12 @@ router.put('/:id/update-details', async (req, res, next) => {
 router.put('/:id/assign', async (req, res, next) => {
   try {
     const { technicianId } = req.body;
-    if (!technicianId) return res.status(400).json({ error: 'technicianId required' });
+    if (technicianId === undefined) return res.status(400).json({ error: 'technicianId required' });
     await db('scheduled_services').where({ id: req.params.id }).update({ technician_id: technicianId });
+    if (technicianId === null) {
+      logger.info(`[schedule] Unassigned service ${req.params.id}`);
+      return res.json({ success: true, technicianName: null });
+    }
     const tech = await db('technicians').where({ id: technicianId }).first();
     logger.info(`[schedule] Assigned service ${req.params.id} to ${tech?.name || technicianId}`);
     res.json({ success: true, technicianName: tech?.name });

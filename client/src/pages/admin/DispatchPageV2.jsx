@@ -33,6 +33,7 @@
 //   the same details / action set on both, no orphaned mobile-only state
 //   that desktop users can't reach.
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Plus } from 'lucide-react';
 import {
   CompletionPanel,
@@ -700,6 +701,7 @@ function MobileScheduleSheet({ children, serviceCount, completedCount }) {
 
 export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpenCreateHandler } = {}) {
   const isMobile = useIsMobile();
+  const [searchParams, setSearchParams] = useSearchParams();
   // Controlled mode: when AdminDispatchPage drives the active sub-tab via
   // the top-level pill, the internal tab strip + mobile pills + More sheet
   // are hidden and `setActiveTab` becomes a no-op.
@@ -811,6 +813,42 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
   }, []);
 
   useEffect(() => { fetchSchedule(date); }, [date, fetchSchedule]);
+
+  useEffect(() => {
+    const customerId = searchParams.get('customer');
+    if (!customerId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await adminFetch(`/admin/customers/${customerId}`);
+        if (cancelled) return;
+        const c = res.customer || {};
+        const address = c.address || {};
+        setNewApptDefaults({
+          customer: {
+            id: c.id,
+            firstName: c.firstName || '',
+            lastName: c.lastName || '',
+            phone: c.phone || '',
+            address: address.line1 || '',
+            city: address.city || '',
+            zip: address.zip || '',
+            tier: c.tier || null,
+          },
+        });
+        setShowNewAppt(true);
+      } catch (err) {
+        console.error('Failed to preload schedule customer:', err);
+      } finally {
+        if (!cancelled) {
+          const next = new URLSearchParams(searchParams);
+          next.delete('customer');
+          setSearchParams(next, { replace: true });
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [searchParams, setSearchParams]);
 
   // Mobile only exposes Day + Week. Snap back if user loaded with 5day/month.
   useEffect(() => {

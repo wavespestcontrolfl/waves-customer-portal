@@ -1033,7 +1033,6 @@ router.get('/products/catalog', async (req, res, next) => {
 // RESCHEDULE ENDPOINTS
 // =========================================================================
 const SmartRebooker = require('../services/rebooker');
-const RescheduleSMS = require('../services/reschedule-sms');
 const ForecastAnalyzer = require('../services/forecast-analyzer');
 
 // GET /api/admin/dispatch/:serviceId/reschedule-options
@@ -1056,12 +1055,41 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       return res.json(result);
     }
 
-    if (notifyCustomer !== false) {
-      const result = await RescheduleSMS.sendRescheduleRequest(req.params.serviceId, reasonCode || 'admin', reasonText);
-      return res.json(result);
-    }
-
     const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin');
+    if (notifyCustomer !== false) {
+      const svc = await db('scheduled_services')
+        .where('scheduled_services.id', req.params.serviceId)
+        .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+        .select('scheduled_services.*', 'customers.first_name', 'customers.phone', 'customers.id as customer_id')
+        .first();
+      let notificationSent = false;
+      let notificationError = null;
+      if (!svc?.phone) {
+        notificationError = 'Customer phone unavailable';
+      } else {
+        const displayDate = new Date(String(svc.scheduled_date).split('T')[0] + 'T12:00:00')
+          .toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
+        const windowText = svc.window_start && svc.window_end ? `, ${svc.window_start}-${svc.window_end}` : '';
+        try {
+          const msg = await sendCustomerMessage({
+            to: svc.phone,
+            body: `Hi ${svc.first_name || 'there'}, your Waves appointment has been rescheduled for ${displayDate}${windowText}. We'll remind you the day before. - Waves`,
+            channel: 'sms',
+            audience: 'customer',
+            purpose: 'appointment',
+            customerId: svc.customer_id,
+            identityTrustLevel: 'phone_matches_customer',
+            metadata: { original_message_type: 'reschedule_confirmation', reasonText },
+          });
+          notificationSent = !(msg?.blocked || msg?.sent === false);
+          if (!notificationSent) notificationError = msg?.code || msg?.reason || 'blocked';
+        } catch (err) {
+          notificationError = err.message;
+          logger.warn(`[dispatch] Reschedule committed for ${req.params.serviceId}, but SMS notification failed: ${err.message}`);
+        }
+      }
+      return res.json({ ...result, notificationSent, notificationError });
+    }
     res.json(result);
   } catch (err) { next(err); }
 });

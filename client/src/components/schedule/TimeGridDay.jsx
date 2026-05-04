@@ -871,6 +871,7 @@ export default function TimeGridDay({
         }));
       }
       if (fromMin !== toMin) {
+        const notifyCustomer = notificationType === 'sms';
         calls.push(adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
           method: 'POST',
           body: JSON.stringify({
@@ -878,9 +879,14 @@ export default function TimeGridDay({
             newWindow,
             reasonCode: 'dispatch_drag',
             reasonText: 'Rescheduled via drag-and-drop on Day grid',
-            notifyCustomer: notificationType === 'sms',
+            notifyCustomer,
             scope: scope || 'this_only',
           }),
+        }).then((result) => {
+          if (notifyCustomer && result?.notificationSent === false) {
+            alert(`Appointment moved, but SMS notification failed: ${result.notificationError || 'customer was not notified'}`);
+          }
+          return result;
         }));
       }
       await Promise.all(calls);

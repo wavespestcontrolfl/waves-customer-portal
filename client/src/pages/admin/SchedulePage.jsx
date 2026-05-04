@@ -838,10 +838,13 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   const handleReschedule = async (opt) => {
     setSending(true);
     try {
-      await adminFetch(`/admin/dispatch/${service.id}/reschedule`, {
+      const result = await adminFetch(`/admin/dispatch/${service.id}/reschedule`, {
         method: 'POST',
         body: JSON.stringify({ newDate: opt.date, newWindow: opt.suggestedWindow, reasonCode: reason, reasonText: notes, notifyCustomer: true }),
       });
+      if (result?.notificationSent === false) {
+        alert(`Appointment moved, but SMS notification failed: ${result.notificationError || 'customer was not notified'}`);
+      }
       onRescheduled?.();
       onClose();
     } catch (e) { console.error(e); }
@@ -855,10 +858,13 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     const endH = String(Math.min(23, parseInt(h) + 2)).padStart(2, '0');
     const window = { start: manualTime, end: `${endH}:${m}`, display: `${formatTimeDisplay(manualTime)} - ${formatTimeDisplay(`${endH}:${m}`)}` };
     try {
-      await adminFetch(`/admin/dispatch/${service.id}/reschedule`, {
+      const result = await adminFetch(`/admin/dispatch/${service.id}/reschedule`, {
         method: 'POST',
         body: JSON.stringify({ newDate: manualDate, newWindow: window, reasonCode: reason, reasonText: notes, notifyCustomer: true }),
       });
+      if (result?.notificationSent === false) {
+        alert(`Appointment moved, but SMS notification failed: ${result.notificationError || 'customer was not notified'}`);
+      }
       onRescheduled?.();
       onClose();
     } catch (e) { console.error(e); }
