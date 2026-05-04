@@ -13,11 +13,10 @@
  *     the entire body into UCS-2.
  *
  * This is the application-side counter we run BEFORE handing the body
- * to Twilio. We use it to:
- *   - reject customer/lead SMS that exceed the policy maxSegments
- *   - log segment count + encoding to message_audit_log
- *   - surface "your draft would send as N segments" feedback to operators
- *     when they manually compose in the Comms inbox
+ * to Twilio. We use it to log segment count + encoding to
+ * message_audit_log and surface "your draft would send as N segments"
+ * feedback to operators when they manually compose in the Comms inbox.
+ * It does not block sending.
  */
 
 // GSM 03.38 default alphabet — 128 codepoints addressable in 7 bits
@@ -134,7 +133,8 @@ function countSegments(body) {
 }
 
 /**
- * Validator entry — wraps countSegments with the policy maxSegments check.
+ * Legacy validator entry. Segment count is advisory only; outbound sends
+ * must not be blocked solely because they exceed policy.maxSegments.
  *
  * @param {import('../policy').SendCustomerMessageInput} input
  * @param {Object} policy
@@ -142,15 +142,6 @@ function countSegments(body) {
  */
 function validateSegmentCount(input, policy) {
   const { segmentCount, encoding } = countSegments(input.body);
-  if (segmentCount > policy.maxSegments) {
-    return {
-      ok: false,
-      code: 'SEGMENT_LIMIT_EXCEEDED',
-      reason: `Body would send as ${segmentCount} segments (encoding: ${encoding}); policy max is ${policy.maxSegments} for purpose "${input.purpose}"`,
-      segmentCount,
-      encoding,
-    };
-  }
   return { ok: true, segmentCount, encoding };
 }
 

@@ -16,7 +16,7 @@ const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { getServiceContact } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
-const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
+const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays } = require('../utils/datetime-et');
 
 /**
  * Render an SMS body from sms_templates, falling back to the provided default
@@ -145,7 +145,7 @@ async function isLandline(customerId, phone) {
 
 // ── Send SMS with landline guard ──
 
-async function safeSend(customerId, phone, body, messageType = 'appointment_reminder') {
+async function safeSend(customerId, phone, body, messageType = 'appointment_reminder', purpose = 'appointment') {
   if (!phone) {
     logger.warn(`[appt-remind] No phone for customer ${customerId}, skipping SMS`);
     return false;
@@ -160,7 +160,7 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     body,
     channel: 'sms',
     audience: 'customer',
-    purpose: 'appointment',
+    purpose,
     customerId,
     identityTrustLevel: 'phone_matches_customer',
     metadata: { original_message_type: messageType },
@@ -259,7 +259,7 @@ const AppointmentReminders = {
               `Hello ${firstName}! Your ${serviceLabel} appointment has been successfully scheduled for ${date} at ${time}.\n\nPlease reply to this message if you need any assistance.`,
             );
 
-            const sent = await safeSend(customerId, contact.phone, body, 'confirmation');
+            const sent = await safeSend(customerId, contact.phone, body, 'confirmation', 'appointment_confirmation');
 
             if (sent) {
               await db('appointment_reminders')
@@ -318,7 +318,11 @@ const AppointmentReminders = {
         const hoursFromBookingToAppt = (apptTime.getTime() - createdAt.getTime()) / 3600000;
 
         // ── 72-hour reminder ──
-        if (!r.reminder_72h_sent && hoursUntil >= 71.75 && hoursUntil <= 72.25) {
+        // The cron runs every 15 minutes, but deploy restarts or short outages
+        // can miss the exact 30-minute band. Treat any future appointment
+        // inside the upper bound as due, while leaving the 24h reminder to own
+        // the final day.
+        if (!r.reminder_72h_sent && hoursUntil > 24.25 && hoursUntil <= 72.25) {
           // Skip if booked less than 72h before appointment
           if (hoursFromBookingToAppt < 72) {
             logger.info(`[appt-remind] Skipping 72h reminder for ${r.scheduled_service_id} — booked < 72h before`);
@@ -362,7 +366,18 @@ const AppointmentReminders = {
         }
 
         // ── 24-hour reminder ──
-        if (!r.reminder_24h_sent && hoursUntil >= 23.75 && hoursUntil <= 24.25) {
+        if (!r.reminder_24h_sent && hoursUntil > 0 && hoursUntil <= 24.25) {
+          const apptDateET = etDateString(apptTime);
+          const tomorrowET = etDateString(addETDays(now, 1));
+          if (apptDateET !== tomorrowET) {
+            logger.info(`[appt-remind] Skipping 24h reminder for ${r.scheduled_service_id} — appointment is not tomorrow in ET`);
+            results.skipped++;
+            await db('appointment_reminders')
+              .where({ id: r.id })
+              .update({ reminder_24h_sent: true, reminder_24h_sent_at: new Date() });
+            continue;
+          }
+
           // Skip if booked less than 24h before appointment
           if (hoursFromBookingToAppt < 24) {
             logger.info(`[appt-remind] Skipping 24h reminder for ${r.scheduled_service_id} — booked < 24h before`);
