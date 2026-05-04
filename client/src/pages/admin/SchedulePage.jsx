@@ -1338,7 +1338,15 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   }
   function addProduct(product) {
     if (selectedProducts.find(p => p.productId === product.id)) return;
-    setSelectedProducts(prev => [...prev, { productId: product.id, name: product.name, rate: '', rateUnit: product.defaultUnit || 'oz' }]);
+    const defaultUnit = product.defaultUnit || product.default_unit || product.rateUnit || product.rate_unit || 'oz';
+    setSelectedProducts(prev => [...prev, {
+      productId: product.id,
+      name: product.name,
+      rate: '',
+      rateUnit: defaultUnit,
+      totalAmount: '',
+      amountUnit: defaultUnit,
+    }]);
     setProductSearch('');
   }
   function removeProduct(productId) {
@@ -1384,7 +1392,13 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         customerRecap,
         visitOutcome,
         reviewSuppression: reviewSuppressionReason,
-        products: selectedProducts.map(p => ({ productId: p.productId, rate: p.rate, rateUnit: p.rateUnit })),
+        products: selectedProducts.map(p => ({
+          productId: p.productId,
+          rate: p.rate,
+          rateUnit: p.rateUnit,
+          totalAmount: p.totalAmount,
+          amountUnit: p.amountUnit,
+        })),
         sendCompletionSms: isIncompleteVisit ? false : sendSms,
         requestReview: willReview,
         areasTreated: areasServiced,
@@ -1790,6 +1804,24 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
                         style={{ ...mInput, width: 78, height: 40, padding: '0 12px' }}
                       >
                         <option value="oz">oz</option>
+                        <option value="fl_oz">fl oz</option>
+                        <option value="ml">ml</option>
+                        <option value="g">g</option>
+                        <option value="lb">lb</option>
+                        <option value="gal">gal</option>
+                      </select>
+                      <input
+                        type="number" placeholder="Total" value={sp.totalAmount || ''}
+                        onChange={e => updateProduct(sp.productId, 'totalAmount', e.target.value)}
+                        style={{ ...mInput, width: 84, height: 40, padding: '0 12px' }}
+                      />
+                      <select
+                        value={sp.amountUnit || sp.rateUnit}
+                        onChange={e => updateProduct(sp.productId, 'amountUnit', e.target.value)}
+                        style={{ ...mInput, width: 78, height: 40, padding: '0 12px' }}
+                      >
+                        <option value="oz">oz</option>
+                        <option value="fl_oz">fl oz</option>
                         <option value="ml">ml</option>
                         <option value="g">g</option>
                         <option value="lb">lb</option>
@@ -2312,6 +2344,19 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
                   <select value={sp.rateUnit} onChange={e => updateProduct(sp.productId, 'rateUnit', e.target.value)}
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}>
                     <option value="oz">oz</option>
+                    <option value="fl_oz">fl oz</option>
+                    <option value="ml">ml</option>
+                    <option value="g">g</option>
+                    <option value="lb">lb</option>
+                    <option value="gal">gal</option>
+                  </select>
+                  <input type="number" placeholder="Total" value={sp.totalAmount || ''}
+                    onChange={e => updateProduct(sp.productId, 'totalAmount', e.target.value)}
+                    style={{ ...inputStyle, width: 70, marginBottom: 0 }} />
+                  <select value={sp.amountUnit || sp.rateUnit} onChange={e => updateProduct(sp.productId, 'amountUnit', e.target.value)}
+                    style={{ ...inputStyle, width: 70, marginBottom: 0 }}>
+                    <option value="oz">oz</option>
+                    <option value="fl_oz">fl oz</option>
                     <option value="ml">ml</option>
                     <option value="g">g</option>
                     <option value="lb">lb</option>

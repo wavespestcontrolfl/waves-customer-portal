@@ -11,8 +11,13 @@ const {
   matchCatalogProduct,
   parseProtocolLines,
   summarizeCalibration,
+  summarizeAnnualN,
   summarizeOrdinanceStatus,
 } = require('../services/waveguard-plan-engine');
+const {
+  calculateAppliedNutrients,
+  toDateOnly,
+} = require('../services/nutrient-ledger');
 
 describe('waveguard-plan-engine helpers', () => {
   test('isDateInWindow handles normal blackout windows', () => {
@@ -240,6 +245,40 @@ describe('waveguard-plan-engine helpers', () => {
 
     expect(ledger.totalN).toBe(2.4);
     expect(ledger.nApplied).toBe(0.24);
+  });
+
+  test('summarizeAnnualN reports remaining budget and exceeded status', () => {
+    const near = summarizeAnnualN({
+      currentN: 3.4,
+      projectedVisitN: 0.25,
+      annualNLimit: 4,
+    });
+    expect(near.status).toBe('near_limit');
+    expect(near.remainingAfterVisit).toBe(0.35);
+    expect(near.percentUsedAfterVisit).toBe(91.3);
+
+    const exceeded = summarizeAnnualN({
+      currentN: 3.9,
+      projectedVisitN: 0.25,
+      annualNLimit: 4,
+    });
+    expect(exceeded.status).toBe('exceeded');
+    expect(exceeded.remainingAfterVisit).toBe(0);
+  });
+
+  test('nutrient ledger helpers normalize pg DATE objects and completion amounts', () => {
+    expect(toDateOnly(new Date('2026-05-03T00:00:00.000Z'))).toBe('2026-05-03');
+    expect(toDateOnly(new Date('2026-05-03T04:00:00.000Z'))).toBe('2026-05-03');
+    expect(calculateAppliedNutrients({
+      product: { analysis_n: 24, analysis_p: 0, analysis_k: 11 },
+      amount: 10,
+      amountUnit: 'lb',
+      lawnSqft: 10000,
+    })).toEqual({
+      nAppliedPer1000: 0.24,
+      pAppliedPer1000: 0,
+      kAppliedPer1000: 0.11,
+    });
   });
 
   test('calculateNutrients reads analysis fields from plan items', () => {

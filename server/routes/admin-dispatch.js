@@ -12,6 +12,7 @@ const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const CompletionRecap = require('../services/completion-recap');
 const CompletionAttempts = require('../services/completion-attempts');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { recordServiceProductNutrients } = require('../services/nutrient-ledger');
 
 // Haversine ETA for the dispatch board tech cards. Returns a whole
 // number of minutes, or null when any input is missing or the tech is
@@ -467,10 +468,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           soil_ph: soilPh || null, soil_moisture: soilMoisture || null,
         }).returning('*');
 
+        const turfProfile = await trx('customer_turf_profiles')
+          .where({ customer_id: svc.customer_id, active: true })
+          .first()
+          .catch(() => null);
+
         // 2. service_products — children of the service_record.
         if (products?.length) {
           const seenProductIds = new Set();
-          const validRateUnits = new Set(['oz', 'ml', 'g', 'lb', 'gal', 'oz/gal', 'oz/1000sf', 'lb/1000sf', 'g/1000sf']);
+          const validRateUnits = new Set(['oz', 'fl_oz', 'ml', 'g', 'lb', 'gal', 'oz/gal', 'oz/1000sf', 'lb/1000sf', 'g/1000sf']);
           for (const p of products) {
             if (!p.productId) continue;
             if (seenProductIds.has(p.productId)) continue;
@@ -491,7 +497,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               err.isOperational = true; err.statusCode = 400;
               throw err;
             }
-            await trx('service_products').insert({
+            const appliedAmount = p.totalAmount != null && p.totalAmount !== ''
+              ? parseFloat(p.totalAmount)
+              : null;
+            const appliedAmountUnit = p.amountUnit || p.rateUnit || null;
+            const [serviceProduct] = await trx('service_products').insert({
               service_record_id: record.id,
               product_name: product.name,
               product_category: product.category || p.category || null,
@@ -499,8 +509,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               moa_group: product.moa_group || null,
               application_rate: p.rate ? parseFloat(p.rate) : null,
               rate_unit: p.rateUnit || null,
-              total_amount: p.totalAmount ? parseFloat(p.totalAmount) : null,
-              amount_unit: p.amountUnit || null,
+              total_amount: appliedAmount,
+              amount_unit: appliedAmountUnit,
+            }).returning('*');
+
+            await recordServiceProductNutrients(trx, {
+              customerId: svc.customer_id,
+              turfProfile,
+              serviceRecord: record,
+              serviceProduct,
+              product,
+              applicationDate: svc.scheduled_date,
+              blackoutStatus: p.blackoutStatus || null,
             });
           }
         }

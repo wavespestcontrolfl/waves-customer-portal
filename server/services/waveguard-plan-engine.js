@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const protocols = require('../config/protocols.json');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
+const { summarizeLedgerRows } = require('./nutrient-ledger');
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -496,14 +497,93 @@ function calculateNutrientLedgerFromRows(rows, products, lawnSqft, year) {
 
 async function calculateNutrientLedger(knex, customerId, products, lawnSqft, serviceDate = new Date()) {
   const year = etParts(serviceDate).year;
-  const rows = await knex('service_products as sp')
+  const ledgerRows = await knex('property_nutrient_ledger')
+    .where({ customer_id: customerId, application_year: year })
+    .select(
+      'application_date',
+      'product_name',
+      'analysis',
+      'amount_used',
+      'amount_unit',
+      'n_applied_per_1000',
+      'p_applied_per_1000',
+      'k_applied_per_1000',
+      'slow_release_n_pct',
+      'municipality',
+      'county',
+      'blackout_status',
+      'service_product_id',
+    )
+    .orderBy('application_date', 'asc')
+    .catch(() => null);
+
+  const ledgerSummary = Array.isArray(ledgerRows) && ledgerRows.length
+    ? summarizeLedgerRows(ledgerRows, year)
+    : null;
+
+  const serviceProductQuery = knex('service_products as sp')
     .join('service_records as sr', 'sp.service_record_id', 'sr.id')
     .where('sr.customer_id', customerId)
     .where('sr.service_date', '>=', `${year}-01-01`)
-    .select('sp.product_name', 'sp.total_amount', 'sp.amount_unit')
-    .catch(() => []);
+    .select('sp.id', 'sp.product_name', 'sp.total_amount', 'sp.amount_unit');
 
-  return calculateNutrientLedgerFromRows(rows, products, lawnSqft, year);
+  const ledgerServiceProductIds = (ledgerRows || [])
+    .map((row) => row.service_product_id)
+    .filter(Boolean);
+  if (ledgerServiceProductIds.length) {
+    serviceProductQuery.whereNotIn('sp.id', ledgerServiceProductIds);
+  }
+
+  const rows = await serviceProductQuery.catch(() => []);
+  const fallbackSummary = calculateNutrientLedgerFromRows(rows, products, lawnSqft, year);
+  if (ledgerSummary) {
+    return {
+      year,
+      nApplied: Number((ledgerSummary.nApplied + fallbackSummary.nApplied).toFixed(3)),
+      pApplied: Number((ledgerSummary.pApplied + fallbackSummary.pApplied).toFixed(3)),
+      kApplied: Number((ledgerSummary.kApplied + fallbackSummary.kApplied).toFixed(3)),
+      totalN: Number((ledgerSummary.totalN + fallbackSummary.totalN).toFixed(3)),
+      totalP: Number((ledgerSummary.totalP + fallbackSummary.totalP).toFixed(3)),
+      totalK: Number((ledgerSummary.totalK + fallbackSummary.totalK).toFixed(3)),
+      entries: ledgerSummary.entries + rows.length,
+      source: rows.length ? 'combined_ledger_and_service_products' : 'property_nutrient_ledger',
+    };
+  }
+
+  return {
+    ...fallbackSummary,
+    entries: rows.length,
+    source: 'service_products_fallback',
+  };
+}
+
+function summarizeAnnualN({ currentN, projectedVisitN, annualNLimit }) {
+  const used = Number(currentN || 0);
+  const visit = Number(projectedVisitN || 0);
+  const limit = Number(annualNLimit || 0);
+  const projected = Number((used + visit).toFixed(3));
+  const remainingBeforeVisit = limit ? Number(Math.max(limit - used, 0).toFixed(3)) : null;
+  const remainingAfterVisit = limit ? Number(Math.max(limit - projected, 0).toFixed(3)) : null;
+  const percentUsedAfterVisit = limit ? Number(((projected / limit) * 100).toFixed(1)) : null;
+  const status = !limit
+    ? 'unknown_limit'
+    : projected > limit
+      ? 'exceeded'
+      : projected >= limit * 0.9
+        ? 'near_limit'
+        : 'ok';
+
+  return {
+    used,
+    projected,
+    visit,
+    limit,
+    remainingBeforeVisit,
+    remainingAfterVisit,
+    percentUsedAfterVisit,
+    status,
+    unit: 'lb N / 1,000 sqft / year',
+  };
 }
 
 async function buildPlanForService(serviceId, options = {}) {
@@ -662,18 +742,22 @@ async function buildPlanForService(serviceId, options = {}) {
   }
 
   const annualNLimit = Number(profile?.annual_n_budget_target || ordinances.find((o) => o.annual_n_limit_per_1000)?.annual_n_limit_per_1000 || 4);
-  const projectedN = Number((Number(nutrientLedger.nApplied || 0) + nutrientProjection.nPer1000).toFixed(3));
-  if (projectedN >= annualNLimit * 0.9) {
+  const annualN = summarizeAnnualN({
+    currentN: nutrientLedger.nApplied,
+    projectedVisitN: nutrientProjection.nPer1000,
+    annualNLimit,
+  });
+  if (annualN.status === 'near_limit' || annualN.status === 'exceeded') {
     warnings.push({
       code: 'annual_n_budget_near_limit',
-      severity: projectedN > annualNLimit ? 'block' : 'warning',
-      message: `Projected annual N is ${projectedN}/${annualNLimit} lb per 1,000 sq ft.`,
+      severity: annualN.status === 'exceeded' ? 'block' : 'warning',
+      message: `Projected annual N is ${annualN.projected}/${annualN.limit} lb per 1,000 sq ft.`,
     });
-    if (projectedN > annualNLimit) {
+    if (annualN.status === 'exceeded') {
       blocks.push({
         code: 'annual_n_budget_exceeded',
         severity: 'block',
-        message: `This plan would exceed the annual N budget (${projectedN}/${annualNLimit}).`,
+        message: `This plan would exceed the annual N budget (${annualN.projected}/${annualN.limit}).`,
       });
     }
   }
@@ -698,10 +782,9 @@ async function buildPlanForService(serviceId, options = {}) {
       county: profile?.county || null,
       ordinanceStatus: ordinanceSummary.activeWindows.length ? 'restricted_window_active' : 'no_active_blackout',
       annualN: {
-        used: nutrientLedger.nApplied,
-        projected: projectedN,
-        limit: annualNLimit,
-        unit: 'lb N / 1,000 sqft / year',
+        ...annualN,
+        ledgerSource: nutrientLedger.source || null,
+        ledgerEntries: nutrientLedger.entries || 0,
       },
       latestAssessment: latestAssessment ? {
         id: latestAssessment.id,
@@ -744,6 +827,7 @@ module.exports = {
   calculateProductAmount,
   calculateNutrientLedgerFromRows,
   calculateNutrients,
+  summarizeAnnualN,
   buildMixOrder,
   findNutrientProductsMissingRates,
   findNutrientProductsMissingConversions,

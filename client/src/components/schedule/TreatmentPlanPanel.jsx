@@ -224,7 +224,9 @@ export default function TreatmentPlanPanel({ service, onClose }) {
                 <Field label="Municipality" value={plan.propertyGate?.municipality || plan.propertyGate?.county} />
                 <Field label="Ordinance" value={plan.propertyGate?.ordinanceStatus} />
                 <Field label="Annual N" value={`${fmtNumber(plan.propertyGate?.annualN?.used)} used / ${fmtNumber(plan.propertyGate?.annualN?.limit)} limit`} />
-                <Field label="Projected N" value={fmtNumber(plan.propertyGate?.annualN?.projected)} />
+                <Field label="Projected N" value={`${fmtNumber(plan.propertyGate?.annualN?.projected)} (${plan.propertyGate?.annualN?.status || '—'})`} />
+                <Field label="N Remaining" value={fmtNumber(plan.propertyGate?.annualN?.remainingAfterVisit)} />
+                <Field label="N Ledger" value={`${fmtNumber(plan.propertyGate?.annualN?.ledgerEntries)} entries`} />
                 <Field label="Assessment" value={plan.propertyGate?.latestAssessment?.overallScore ? `${plan.propertyGate.latestAssessment.overallScore}/100` : '—'} />
               </div>
               <div className="space-y-3">
