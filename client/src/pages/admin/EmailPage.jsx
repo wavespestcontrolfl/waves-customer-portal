@@ -2,10 +2,54 @@ import { useState, useEffect, useCallback } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 function adminFetch(path, options = {}) {
+  const headers = { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, ...options.headers };
+  if (!options.skipContentType) headers['Content-Type'] = 'application/json';
+  const { skipContentType, ...fetchOptions } = options;
   return fetch(`${API_BASE}${path.replace(/^\/api/, '')}`, {
-    headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json', ...options.headers },
-    ...options,
+    ...fetchOptions,
+    headers,
   });
+}
+
+function buildSandboxedEmailHtml(html) {
+  return `<!doctype html>
+<html>
+  <head>
+    <base target="_blank">
+    <meta charset="utf-8">
+    <style>
+      body { margin: 0; padding: 0; color: #27272A; font: 13px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow-wrap: anywhere; }
+      img { max-width: 100%; height: auto; }
+      table { max-width: 100%; }
+      a { color: #18181B; }
+    </style>
+  </head>
+  <body>${html || ''}</body>
+</html>`;
+}
+
+function EmailBody({ html, text }) {
+  if (html) {
+    return (
+      <iframe
+        title="Email body"
+        sandbox="allow-popups allow-popups-to-escape-sandbox"
+        srcDoc={buildSandboxedEmailHtml(html)}
+        style={{
+          width: '100%',
+          height: 360,
+          border: 'none',
+          background: 'transparent',
+        }}
+      />
+    );
+  }
+
+  return (
+    <div style={{ fontSize: 13, color: D.text, lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+      {text || ''}
+    </div>
+  );
 }
 
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -55,6 +99,9 @@ const AUTO_ACTION_LABELS = {
   complaint: 'Flagged urgent',
 };
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const DOMAIN_RE = /^(?!-)(?:[a-z0-9-]{1,63}\.)+[a-z]{2,63}$/i;
+
 function timeAgo(dateStr) {
   const d = new Date(dateStr);
   const now = new Date();
@@ -88,6 +135,7 @@ export default function EmailPage() {
   const [showCompose, setShowCompose] = useState(false);
   const [composeForm, setComposeForm] = useState({ to: '', subject: '', body: '' });
   const [composeSending, setComposeSending] = useState(false);
+  const [connecting, setConnecting] = useState(false);
 
   const loadStatus = useCallback(async () => {
     try {
@@ -139,6 +187,20 @@ export default function EmailPage() {
       setBlocked(d.blocked || []);
     } catch { /* ignore */ }
   }, []);
+
+  const handleConnectGmail = async () => {
+    setConnecting(true);
+    try {
+      const r = await adminFetch('/api/admin/email/oauth/auth-url');
+      const d = await r.json();
+      if (!r.ok || !d.url) throw new Error(d.error || `HTTP ${r.status}`);
+      window.location.assign(d.url);
+    } catch (err) {
+      window.alert('Failed to start Gmail connection: ' + err.message);
+    } finally {
+      setConnecting(false);
+    }
+  };
 
   useEffect(() => { loadStatus(); }, [loadStatus]);
   useEffect(() => {
@@ -202,7 +264,7 @@ export default function EmailPage() {
     if (!replyText.trim() || !selectedEmail) return;
     setSending(true);
     try {
-      await adminFetch('/api/admin/email/send', {
+      const r = await adminFetch('/api/admin/email/send', {
         method: 'POST',
         body: JSON.stringify({
           to: selectedEmail.from_address,
@@ -211,11 +273,14 @@ export default function EmailPage() {
           threadId: selectedEmail.gmail_thread_id,
         }),
       });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
       setReplyText('');
-      const r = await adminFetch(`/api/admin/email/thread/${selectedEmail.gmail_thread_id}`);
-      const d = await r.json();
+      const threadResponse = await adminFetch(`/api/admin/email/thread/${selectedEmail.gmail_thread_id}`);
+      const d = await threadResponse.json();
       setThread(d.thread || []);
-    } catch { /* ignore */ }
+    } catch (err) {
+      window.alert('Failed to send reply: ' + err.message);
+    }
     setSending(false);
   };
 
@@ -232,25 +297,6 @@ export default function EmailPage() {
       }
     } catch { /* ignore */ }
     setDrafting(false);
-  };
-
-  const handleReplyViaSms = async () => {
-    if (!selectedEmail) return;
-    const smsBody = prompt(`SMS to ${selectedEmail.from_name || selectedEmail.from_address}:`);
-    if (!smsBody) return;
-    try {
-      await adminFetch('/api/admin/email/send', {
-        method: 'POST',
-        body: JSON.stringify({
-          to: selectedEmail.from_address,
-          subject: `Re: ${selectedEmail.subject || ''}`,
-          body: `[Replied via SMS instead]`,
-          threadId: selectedEmail.gmail_thread_id,
-        }),
-      });
-    } catch { /* non-critical — the SMS is what matters */ }
-    // The actual SMS goes through the Intelligence Bar tool
-    // This button pre-fills a quick path for Virginia
   };
 
   const handleComposeSend = async () => {
@@ -277,14 +323,19 @@ export default function EmailPage() {
   };
 
   const handleBlock = async () => {
-    if (!blockInput.trim()) return;
+    const value = blockInput.trim().toLowerCase().replace(/^@/, '');
+    if (!value) return;
+    const isEmail = value.includes('@');
+    if ((isEmail && !EMAIL_RE.test(value)) || (!isEmail && !DOMAIN_RE.test(value))) {
+      window.alert('Enter a valid email address or domain, like bad@example.com or example.com.');
+      return;
+    }
     try {
-      const isEmail = blockInput.includes('@');
       await adminFetch('/api/admin/email/block', {
         method: 'POST',
         body: JSON.stringify({
-          email_address: isEmail ? blockInput.trim() : null,
-          domain: isEmail ? null : blockInput.trim(),
+          email_address: isEmail ? value : null,
+          domain: isEmail ? null : value,
           reason: 'Manual block from admin portal',
         }),
       });
@@ -298,6 +349,27 @@ export default function EmailPage() {
       await adminFetch(`/api/admin/email/blocked/${id}`, { method: 'DELETE' });
       setBlocked(prev => prev.filter(b => b.id !== id));
     } catch { /* ignore */ }
+  };
+
+  const handleDownloadAttachment = async (event, msg, att) => {
+    event.preventDefault();
+    try {
+      const r = await adminFetch(`/api/admin/email/message/${msg.id}/attachment/${att.gmail_attachment_id}`, {
+        skipContentType: true,
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = att.filename || 'attachment';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      window.alert('Failed to download attachment: ' + err.message);
+    }
   };
 
   // Not connected — show connect card
@@ -314,10 +386,11 @@ export default function EmailPage() {
           <div style={{ fontSize: 14, color: D.muted, marginBottom: 24, lineHeight: 1.5 }}>
             Connect your contact@wavespestcontrol.com inbox to view, reply, and manage emails directly from the portal.
           </div>
-          <a href="/api/admin/email/oauth/start" style={{
+          <button type="button" onClick={handleConnectGmail} disabled={connecting} style={{
             display: 'inline-block', padding: '12px 32px', background: D.teal, color: '#fff',
             borderRadius: 8, fontSize: 15, fontWeight: 600, textDecoration: 'none',
-          }}>Connect Gmail Account</a>
+            border: 'none', cursor: connecting ? 'default' : 'pointer', opacity: connecting ? 0.6 : 1,
+          }}>{connecting ? 'Connecting...' : 'Connect Gmail Account'}</button>
         </div>
       </div>
     );
@@ -504,9 +577,14 @@ export default function EmailPage() {
               <div style={{ padding: 40, textAlign: 'center', color: D.muted, fontSize: 14 }}>No emails found</div>
             ) : emails.map(email => {
               const isSelected = selectedEmail?.id === email.id;
-              const extractedData = email.extracted_data
-                ? (typeof email.extracted_data === 'string' ? JSON.parse(email.extracted_data) : email.extracted_data)
-                : null;
+              let extractedData = null;
+              try {
+                extractedData = email.extracted_data
+                  ? (typeof email.extracted_data === 'string' ? JSON.parse(email.extracted_data) : email.extracted_data)
+                  : null;
+              } catch {
+                extractedData = null;
+              }
               const category = email.classification;
               const categoryColor = CATEGORY_COLORS[category];
               const categoryLabel = CATEGORY_LABELS[category];
@@ -629,17 +707,14 @@ export default function EmailPage() {
                             </span>
                           </div>
                           {msg.to_address && <div style={{ fontSize: 11, color: D.muted, marginBottom: 8 }}>To: {msg.to_address}</div>}
-                          <div
-                            style={{ fontSize: 13, color: D.text, lineHeight: 1.6, wordBreak: 'break-word' }}
-                            dangerouslySetInnerHTML={{ __html: msg.body_html || (msg.body_text || '').replace(/\n/g, '<br>') }}
-                          />
+                          <EmailBody html={msg.body_html} text={msg.body_text} />
                           {msg.attachments?.length > 0 && (
                             <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                               {msg.attachments.map(att => (
                                 <a
                                   key={att.id}
                                   href={`/api/admin/email/message/${msg.id}/attachment/${att.gmail_attachment_id}`}
-                                  target="_blank" rel="noopener noreferrer"
+                                  onClick={(event) => handleDownloadAttachment(event, msg, att)}
                                   style={{
                                     padding: '6px 12px', background: D.card, border: `1px solid ${D.border}`, borderRadius: 6,
                                     fontSize: 12, color: D.teal, textDecoration: 'none',
@@ -678,10 +753,6 @@ export default function EmailPage() {
                             background: D.purple + '22', border: `1px solid ${D.purple}44`, color: D.purple,
                             opacity: drafting ? 0.5 : 1,
                           }}>{drafting ? 'Drafting...' : '\u2728 AI Draft'}</button>
-                          <button onClick={handleReplyViaSms} style={{
-                            padding: '8px 16px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
-                            background: 'transparent', border: `1px solid ${D.border}`, color: D.muted,
-                          }}>{'\uD83D\uDCAC'} Reply via SMS</button>
                           <button onClick={handleReply} disabled={sending || !replyText.trim()} style={{
                             padding: '8px 20px', borderRadius: 6, fontSize: 13, fontWeight: 600, border: 'none', cursor: 'pointer',
                             background: D.teal, color: '#fff', opacity: sending || !replyText.trim() ? 0.5 : 1,

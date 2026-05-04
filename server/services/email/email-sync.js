@@ -29,7 +29,10 @@ async function fullSync(state) {
   let lastHistoryId = null;
 
   try {
-    const messages = await gmailClient.listMessages('', 200);
+    const fullSyncLimit = process.env.GMAIL_FULL_SYNC_LIMIT
+      ? Number.parseInt(process.env.GMAIL_FULL_SYNC_LIMIT, 10)
+      : null;
+    const messages = await gmailClient.listMessages('', Number.isFinite(fullSyncLimit) ? fullSyncLimit : null);
     logger.info(`[email-sync] Full sync: fetching ${messages.length} messages`);
 
     for (const msg of messages) {
@@ -87,6 +90,11 @@ async function incrementalSync(state) {
           messageIds.add(m.message.id);
         }
       }
+      if (entry.messagesDeleted) {
+        for (const m of entry.messagesDeleted) {
+          if (m.message?.id) messageIds.add(m.message.id);
+        }
+      }
       // Also handle label changes (read/unread/starred)
       if (entry.labelsAdded || entry.labelsRemoved) {
         const msgs = [...(entry.labelsAdded || []), ...(entry.labelsRemoved || [])];
@@ -107,7 +115,14 @@ async function incrementalSync(state) {
           latestHistoryId = parsed.historyId;
         }
       } catch (err) {
-        logger.warn(`[email-sync] Failed to fetch message ${msgId}: ${err.message}`);
+        if (err.code === 404 || err.response?.status === 404) {
+          await db('emails').where('gmail_id', msgId).update({
+            is_archived: true,
+            updated_at: new Date(),
+          });
+        } else {
+          logger.warn(`[email-sync] Failed to fetch message ${msgId}: ${err.message}`);
+        }
       }
     }
 
@@ -188,11 +203,13 @@ async function upsertEmail(parsed) {
   };
 
   if (existing) {
-    // Update read/starred/label status
+    const labelIds = parsed.label_ids || [];
+    // Update read/starred/archive label status
     await db('emails').where('id', existing.id).update({
       is_read: parsed.is_read,
       is_starred: parsed.is_starred,
-      label_ids: JSON.stringify(parsed.label_ids),
+      is_archived: !labelIds.includes('INBOX') || labelIds.includes('TRASH'),
+      label_ids: JSON.stringify(labelIds),
       updated_at: new Date(),
     });
     return false; // not new
