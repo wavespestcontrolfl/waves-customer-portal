@@ -213,14 +213,6 @@ router.post('/sms', async (req, res) => {
           );
         } catch (e) { logger.error(`Domain lead alert failed: ${e.message}`); }
 
-        // Auto-reply from the location number (not the domain number)
-        try {
-          await TwilioService.sendSMS(From,
-            "Thanks for reaching out to Waves Pest Control! We'll get back to you shortly. For immediate help, call (941) 318-7612. 🌊",
-            { customerId: newCust.id, fromNumber: TWILIO_NUMBERS.getOutboundNumber(numberConfig.location || 'lakewood-ranch'), messageType: 'auto_reply' }
-          );
-        } catch (e) { logger.error(`Domain lead auto-reply failed: ${e.message}`); }
-
         await db('activity_log').insert({
           customer_id: newCust.id, action: 'customer_created',
           description: `New lead from ${numberConfig.domain || 'van wrap'}: ${From}`,
@@ -285,14 +277,6 @@ router.post('/sms', async (req, res) => {
 
     // Van wrap tracking — new lead flow
     if (numberConfig.type === 'tracking') {
-      // Auto-reply from the van wrap number
-      try {
-        await TwilioService.sendSMS(From,
-          "Thanks for reaching out to Waves Pest Control! We'll get back to you shortly. For immediate help, call (941) 318-7612. 🌊",
-          { fromNumber: To, messageType: 'auto_reply' }
-        );
-      } catch (e) { logger.error(`Van wrap auto-reply failed: ${e.message}`); }
-
       // Notify Adam
       try {
         await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
