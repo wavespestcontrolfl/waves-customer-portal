@@ -12,6 +12,7 @@ const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const CompletionRecap = require('../services/completion-recap');
 const CompletionAttempts = require('../services/completion-attempts');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { countSegments } = require('../services/messaging/segment-counter');
 const { recordServiceProductNutrients } = require('../services/nutrient-ledger');
 const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
@@ -436,6 +437,34 @@ function parseJsonObject(value) {
 
 function serializeJsonb(value) {
   return JSON.stringify(value ?? null);
+}
+
+function composeCompletionSmsBody({ recapText, body, suffix = '', maxSegments = 2 }) {
+  const tail = `${body || ''}${suffix || ''}`.trim();
+  if (!recapText) return { body: tail, truncated: false };
+
+  const full = `${recapText}\n\n${tail}`;
+  if (countSegments(full).segmentCount <= maxSegments) return { body: full, truncated: false };
+  if (countSegments(tail).segmentCount > maxSegments) return { body: tail, truncated: false };
+
+  const marker = '...';
+  const separator = '\n\n';
+  const chars = Array.from(recapText);
+  let low = 0;
+  let high = chars.length;
+  let best = tail;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const recap = `${chars.slice(0, mid).join('').trimEnd()}${marker}`;
+    const candidate = `${recap}${separator}${tail}`;
+    if (countSegments(candidate).segmentCount <= maxSegments) {
+      best = candidate;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return { body: best, truncated: true };
 }
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -1402,8 +1431,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       try {
         const displayServiceType = normalizeServiceTypeForTemplate(svc.service_type);
         const recapText = (customerRecap || '').trim();
-        const withRecap = (body) => recapText ? `${recapText}\n\n${body}` : body;
+        const withRecap = (body, conciseBody) => {
+          const suffix = countSegments(`${conciseBody}${reviewSuffix}`).segmentCount <= 2 ? reviewSuffix : '';
+          const tail = countSegments(`${body}${suffix}`).segmentCount <= 2 ? body : conciseBody;
+          return composeCompletionSmsBody({ recapText, body: tail, suffix });
+        };
         let sentSmsBody = null;
+        let completionSmsWasTruncated = false;
         let sentSmsType = null;
         if (invoiceCreated && payUrl) {
           const fallback = `Hello ${svc.first_name}! Your ${displayServiceType} service report is ready: ${portalUrl}\n\nInvoice for today's visit: ${payUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
@@ -1414,7 +1448,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             pay_url: payUrl,
           }, fallback);
           sentSmsType = 'service_complete_with_invoice';
-          sentSmsBody = withRecap(body + reviewSuffix);
+          const concise = `Hello ${svc.first_name}! Report: ${portalUrl}\nInvoice: ${payUrl}\nReply with questions.`;
+          ({ body: sentSmsBody, truncated: completionSmsWasTruncated } = withRecap(body, concise));
         } else if (prepaidCovered || alreadyPaid) {
           const fallback = `Hello ${svc.first_name}! Thanks for your payment today. Your ${displayServiceType} service report is ready: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = await renderTemplate('service_complete_prepaid', {
@@ -1423,12 +1458,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             portal_url: portalUrl,
           }, fallback);
           sentSmsType = 'service_complete_prepaid';
-          sentSmsBody = withRecap(body + reviewSuffix);
+          const concise = `Hello ${svc.first_name}! Report: ${portalUrl}\nReply with questions.`;
+          ({ body: sentSmsBody, truncated: completionSmsWasTruncated } = withRecap(body, concise));
         } else {
           const fallback = `Hello ${svc.first_name}! Your service report is ready. View it here: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = await renderTemplate('service_complete', { first_name: svc.first_name || '' }, fallback);
           sentSmsType = 'service_complete';
-          sentSmsBody = withRecap(body + reviewSuffix);
+          const concise = `Hello ${svc.first_name}! Report: ${portalUrl}\nReply with questions.`;
+          ({ body: sentSmsBody, truncated: completionSmsWasTruncated } = withRecap(body, concise));
         }
         if (sentSmsBody) {
           const sendingNotes = {
@@ -1436,6 +1473,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             completionSmsStatus: 'sending',
             completionSmsType: sentSmsType,
             completionSmsBody: sentSmsBody,
+            completionSmsTruncated: completionSmsWasTruncated,
             completionSmsAttemptedAt: new Date().toISOString(),
           };
           await db('service_records').where({ id: record.id }).update({
