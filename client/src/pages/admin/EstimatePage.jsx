@@ -1736,6 +1736,7 @@ function adminFetch(path, options = {}) {
 const STATUS_CONFIG = {
   draft: { label: 'Draft', color: C.gray, bg: `${C.gray}22` },
   sent: { label: 'Sent', color: C.teal, bg: `${C.teal}22` },
+  scheduled: { label: 'Scheduled', color: C.teal, bg: `${C.teal}22` },
   viewed: { label: 'Viewed', color: C.amber, bg: `${C.amber}22` },
   accepted: { label: 'Accepted', color: C.green, bg: `${C.green}22` },
   declined: { label: 'Declined', color: C.red, bg: `${C.red}22` },
@@ -1884,6 +1885,7 @@ const PIPELINE_FILTERS = [
   { key: 'all', label: 'All', color: C.heading },
   { key: 'needs_estimate', label: 'Needs Estimate', color: C.amber },
   { key: 'ready_to_send', label: 'Ready to Send', color: C.teal },
+  { key: 'scheduled', label: 'Scheduled', color: C.teal },
   { key: 'awaiting', label: 'Awaiting Response', color: C.blue },
   { key: 'follow_up', label: 'Follow Up Now', color: C.amber },
   { key: 'won', label: 'Won', color: C.green },
@@ -1900,6 +1902,7 @@ function classifyEstimate(e) {
   if (e.status === 'declined' || e.status === 'expired') return 'lost';
   if (e.status === 'draft' && (!e.monthlyTotal || e.monthlyTotal === 0)) return 'needs_estimate';
   if (e.status === 'draft' && e.monthlyTotal > 0) return 'ready_to_send';
+  if (e.status === 'scheduled') return 'scheduled';
   if (e.status === 'sent' && !e.viewedAt) return 'awaiting';
   if (e.status === 'viewed') return 'follow_up';
   if (e.status === 'sent' && e.viewedAt) return 'follow_up';

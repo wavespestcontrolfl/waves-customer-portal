@@ -53,6 +53,34 @@ function adminFetch(path, options = {}) {
   });
 }
 
+function summarizeEstimateSend(data) {
+  const parts = [];
+  if (data?.channels?.sms) {
+    parts.push(data.channels.sms.ok ? 'SMS sent' : `SMS failed: ${data.channels.sms.error || 'unknown error'}`);
+  }
+  if (data?.channels?.email) {
+    parts.push(data.channels.email.ok ? 'Email sent' : `Email failed: ${data.channels.email.error || 'unknown error'}`);
+  }
+  if (parts.length === 0) return data?.error || 'Estimate send failed';
+  return parts.join(' / ');
+}
+
+async function sendEstimateFromPipeline(id, sendMethod = 'both') {
+  const r = await fetch(`${API_BASE}/admin/estimates/${id}/send`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ sendMethod }),
+  });
+  const data = await r.json().catch(() => ({}));
+  const summary = summarizeEstimateSend(data);
+  if (!r.ok) throw new Error(summary || `HTTP ${r.status}`);
+  if (data.partialFailure) window.alert(`Send had issues: ${summary}`);
+  return data;
+}
+
 // Status badge. V2 collapses to neutral; alert tone only for declined/expired.
 function StatusBadgeV2({ status }) {
   const cfg = STATUS_CONFIG[status] || STATUS_CONFIG.draft;
@@ -95,6 +123,13 @@ function StatusPillV3({ status }) {
       return (
         <span className={cn(filled, 'bg-zinc-200 text-zinc-900')}>{label}</span>
       );
+    case 'scheduled':
+      return (
+        <span className={cn(filled, 'bg-zinc-200 text-zinc-900')}>
+          <CalendarCheck size={10} strokeWidth={2.5} aria-hidden />
+          {label}
+        </span>
+      );
     case 'declined':
       return (
         <span className="inline-flex items-center h-5 px-2 rounded-full text-11 font-normal whitespace-nowrap border-hairline border-zinc-300 text-ink-tertiary bg-white">
@@ -117,6 +152,7 @@ function StatusPillV3({ status }) {
 const V3_STATUS_RANK = {
   expired: 0,
   viewed: 1,
+  scheduled: 2,
   sent: 2,
   accepted: 3,
   declined: 3,
@@ -145,7 +181,7 @@ const V3_CHIPS = [
 function v3ChipMatches(e, chip) {
   if (chip === 'all') return true;
   if (chip === 'drafts') return e.status === 'draft';
-  if (chip === 'open') return e.status === 'sent' || e.status === 'viewed';
+  if (chip === 'open') return e.status === 'scheduled' || e.status === 'sent' || e.status === 'viewed';
   if (chip === 'closed') return e.status === 'accepted' || e.status === 'declined';
   if (chip === 'action') {
     if (e.status === 'expired') return true;
@@ -381,7 +417,7 @@ function EstimatePipelineViewV2() {
     // When the "Archived" filter is picked, ask the API for archived-only;
     // otherwise the default hides archived rows so closed/old work stops
     // cluttering the pipeline.
-    const qs = filter === 'archived' ? '?archived=only' : '';
+    const qs = filter === 'archived' ? '?archived=only&limit=all' : '?limit=all';
     adminFetch(`/admin/estimates${qs}`)
       .then((d) => {
         setEstimates(d.estimates || []);
@@ -748,6 +784,7 @@ function EstimatePipelineViewV2() {
                         onClick={(evt) => {
                           evt.stopPropagation();
                           const params = new URLSearchParams();
+                          params.set('customerId', e.customerId);
                           if (e.address) params.set('address', e.address);
                           if (e.customerName) params.set('customerName', e.customerName);
                           if (e.customerPhone) params.set('customerPhone', e.customerPhone);
@@ -768,11 +805,12 @@ function EstimatePipelineViewV2() {
                           evt.stopPropagation();
                           const action = e.status === 'draft' ? 'Send' : 'Resend';
                           if (!window.confirm(`${action} estimate to ${e.customerName || 'customer'} via SMS + email?`)) return;
-                          await adminFetch(`/admin/estimates/${e.id}/send`, {
-                            method: 'POST',
-                            body: JSON.stringify({ sendMethod: 'both' }),
-                          }).catch(() => {});
-                          refreshEstimates();
+                          try {
+                            await sendEstimateFromPipeline(e.id, 'both');
+                            refreshEstimates();
+                          } catch (err) {
+                            window.alert('Send failed: ' + err.message);
+                          }
                         }}
                         aria-label={`${e.status === 'draft' ? 'Send' : 'Resend'} estimate to ${e.customerName || 'customer'}`}
                         title={e.status === 'draft' ? 'Send estimate via SMS + email' : 'Resend estimate via SMS + email'}
@@ -804,6 +842,7 @@ function EstimatePipelineViewV2() {
                 {/* Timeline */}
                 <div className="text-right min-w-[110px] text-11 text-ink-secondary space-y-0.5">
                   <div>Created {fmtDate(e.createdAt)}</div>
+                  {e.scheduledAt && <div>Scheduled {fmtDate(e.scheduledAt)}</div>}
                   {e.sentAt && <div>Sent {timeAgo(e.sentAt)}</div>}
                   {e.viewedAt && (
                     <div>
@@ -885,10 +924,12 @@ function EstimatePipelineViewV2() {
                         variant="primary"
                         className="w-full sm:w-auto rounded-full whitespace-nowrap"
                         onClick={async () => {
-                          await adminFetch(`/admin/estimates/${e.id}/send`, {
-                            method: 'POST',
-                          }).catch(() => {});
-                          refreshEstimates();
+                          try {
+                            await sendEstimateFromPipeline(e.id, 'both');
+                            refreshEstimates();
+                          } catch (err) {
+                            window.alert('Send failed: ' + err.message);
+                          }
                         }}
                       >
                         Send
@@ -913,11 +954,12 @@ function EstimatePipelineViewV2() {
                         className="w-full sm:w-auto rounded-full whitespace-nowrap"
                         onClick={async () => {
                           if (!confirm(`Resend estimate to ${e.customerName || 'customer'} via SMS + email?`)) return;
-                          await adminFetch(`/admin/estimates/${e.id}/send`, {
-                            method: 'POST',
-                            body: JSON.stringify({ sendMethod: 'both' }),
-                          }).catch(() => {});
-                          refreshEstimates();
+                          try {
+                            await sendEstimateFromPipeline(e.id, 'both');
+                            refreshEstimates();
+                          } catch (err) {
+                            window.alert('Send failed: ' + err.message);
+                          }
                         }}
                       >
                         Resend
@@ -1158,7 +1200,7 @@ function MobileChipSheet({ label, value, options, onChange, title }) {
 function mobileStatusClass(status) {
   if (status === 'declined' || status === 'expired') return 'text-alert-fg';
   if (status === 'accepted') return 'text-zinc-900';
-  if (status === 'draft' || status === 'sent' || status === 'viewed') return 'text-waves-blue';
+  if (status === 'draft' || status === 'scheduled' || status === 'sent' || status === 'viewed') return 'text-waves-blue';
   return 'text-ink-tertiary';
 }
 
@@ -1305,6 +1347,7 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
           onClick={(e) => {
             e.stopPropagation();
             const params = new URLSearchParams();
+            params.set('customerId', estimate.customerId);
             if (estimate.address) params.set('address', estimate.address);
             if (estimate.customerName) params.set('customerName', estimate.customerName);
             if (estimate.customerPhone) params.set('customerPhone', estimate.customerPhone);
@@ -1325,11 +1368,12 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
             e.stopPropagation();
             const action = estimate.status === 'draft' ? 'Send' : 'Resend';
             if (!window.confirm(`${action} estimate to ${customerName} via SMS + email?`)) return;
-            await adminFetch(`/admin/estimates/${estimate.id}/send`, {
-              method: 'POST',
-              body: JSON.stringify({ sendMethod: 'both' }),
-            }).catch(() => {});
-            onSend?.();
+            try {
+              await sendEstimateFromPipeline(estimate.id, 'both');
+              onSend?.();
+            } catch (err) {
+              window.alert('Send failed: ' + err.message);
+            }
           }}
           aria-label={`${estimate.status === 'draft' ? 'Send' : 'Resend'} estimate`}
           title={estimate.status === 'draft' ? 'Send estimate via SMS + email' : 'Resend estimate via SMS + email'}
@@ -1338,25 +1382,48 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
           <Send size={16} strokeWidth={1.75} />
         </button>
       )}
-      <button
-        type="button"
-        onClick={async (e) => {
-          e.stopPropagation();
-          const ok = window.confirm(`Delete ${estimate.status} estimate for ${customerName}?\n\nThis is permanent. Any pay link sent to the customer will stop working.`);
-          if (!ok) return;
-          try {
-            await adminFetch(`/admin/estimates/${estimate.id}`, { method: 'DELETE' });
-            onDeleted?.(estimate.id);
-          } catch (err) {
-            alert('Delete failed: ' + err.message);
-          }
-        }}
-        aria-label={`Delete estimate for ${customerName}`}
-        title="Delete this estimate permanently"
-        className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-alert-fg/60 rounded-xs text-alert-fg bg-white hover:bg-alert-bg"
-      >
-        <Trash2 size={16} strokeWidth={1.75} />
-      </button>
+      {estimate.status === 'draft' && (
+        <button
+          type="button"
+          onClick={async (e) => {
+            e.stopPropagation();
+            const ok = window.confirm(`Delete draft estimate for ${customerName}?\n\nThis is permanent.`);
+            if (!ok) return;
+            try {
+              await adminFetch(`/admin/estimates/${estimate.id}`, { method: 'DELETE' });
+              onDeleted?.(estimate.id);
+            } catch (err) {
+              alert('Delete failed: ' + err.message);
+            }
+          }}
+          aria-label={`Delete draft estimate for ${customerName}`}
+          title="Delete this draft estimate"
+          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-alert-fg/60 rounded-xs text-alert-fg bg-white hover:bg-alert-bg"
+        >
+          <Trash2 size={16} strokeWidth={1.75} />
+        </button>
+      )}
+      {!estimate.archivedAt && ['declined', 'expired', 'accepted'].includes(estimate.status) && (
+        <button
+          type="button"
+          onClick={async (e) => {
+            e.stopPropagation();
+            const ok = window.confirm(`Archive this ${estimate.status} estimate for ${customerName}?`);
+            if (!ok) return;
+            try {
+              await adminFetch(`/admin/estimates/${estimate.id}/archive`, { method: 'POST' });
+              onDeleted?.(estimate.id);
+            } catch (err) {
+              alert('Archive failed: ' + err.message);
+            }
+          }}
+          aria-label={`Archive estimate for ${customerName}`}
+          title="Archive this estimate"
+          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-300 rounded-xs text-zinc-700 bg-white hover:bg-zinc-50"
+        >
+          <Trash2 size={16} strokeWidth={1.75} />
+        </button>
+      )}
     </div>
   );
 }
@@ -1377,13 +1444,13 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
   const [sort, setSort] = useState(v3Flag ? 'v3' : 'newest');
 
   const refreshEstimates = useCallback(() => {
-    adminFetch('/admin/estimates')
+    adminFetch('/admin/estimates?limit=all')
       .then((d) => setEstimates(d.estimates || []))
       .catch(() => {});
   }, []);
 
   useEffect(() => {
-    adminFetch('/admin/estimates')
+    adminFetch('/admin/estimates?limit=all')
       .then((d) => { setEstimates(d.estimates || []); setLoading(false); })
       .catch(() => setLoading(false));
   }, []);
@@ -1573,12 +1640,13 @@ export default function EstimatesPageV2() {
   // row's "+ Estimate" quick action. Stays in state so consuming the params
   // (clearing the URL) doesn't blow away the wizard the user just landed on.
   const [prefill, setPrefill] = useState(() => ({
+    customerId: searchParams.get('customerId') || '',
     address: searchParams.get('address') || '',
     customerName: searchParams.get('customerName') || '',
     customerPhone: searchParams.get('customerPhone') || '',
     customerEmail: searchParams.get('customerEmail') || '',
   }));
-  const hasPrefill = !!(prefill.address || prefill.customerName || prefill.customerPhone || prefill.customerEmail);
+  const hasPrefill = !!(prefill.customerId || prefill.address || prefill.customerName || prefill.customerPhone || prefill.customerEmail);
   const initialTab = TABS.some((t) => t.key === searchParams.get('tab')) ? searchParams.get('tab') : null;
 
   const [activeTab, setActiveTab] = useState(initialTab || (hasPrefill ? 'new' : 'leads'));
@@ -1594,12 +1662,13 @@ export default function EstimatesPageV2() {
   //      pull the values into prefill state, and switch into the create flow.
   useEffect(() => {
     const incoming = {
+      customerId: searchParams.get('customerId') || '',
       address: searchParams.get('address') || '',
       customerName: searchParams.get('customerName') || '',
       customerPhone: searchParams.get('customerPhone') || '',
       customerEmail: searchParams.get('customerEmail') || '',
     };
-    const hasIncoming = !!(incoming.address || incoming.customerName || incoming.customerPhone || incoming.customerEmail);
+    const hasIncoming = !!(incoming.customerId || incoming.address || incoming.customerName || incoming.customerPhone || incoming.customerEmail);
     const tabParam = searchParams.get('tab');
     const hasTabParam = TABS.some((t) => t.key === tabParam);
     if (!hasIncoming && !hasTabParam) return;
@@ -1612,12 +1681,12 @@ export default function EstimatesPageV2() {
       if (tabParam === 'new') setMobileView('new');
     }
     const stripped = new URLSearchParams(searchParams);
-    ['address', 'customerName', 'customerPhone', 'customerEmail', 'tab'].forEach((k) => stripped.delete(k));
+    ['customerId', 'address', 'customerName', 'customerPhone', 'customerEmail', 'tab'].forEach((k) => stripped.delete(k));
     setSearchParams(stripped, { replace: true });
   }, [searchParams, setSearchParams]);
 
   function clearPrefill() {
-    setPrefill({ address: '', customerName: '', customerPhone: '', customerEmail: '' });
+    setPrefill({ customerId: '', address: '', customerName: '', customerPhone: '', customerEmail: '' });
   }
 
   // Mobile: list (default) + create-estimate flow. Leads + Pricing Logic are
@@ -1636,6 +1705,7 @@ export default function EstimatesPageV2() {
             Back
           </button>
           <EstimateToolViewV2
+            initialCustomerId={prefill.customerId}
             initialAddress={prefill.address}
             initialCustomerName={prefill.customerName}
             initialCustomerPhone={prefill.customerPhone}
@@ -1648,7 +1718,7 @@ export default function EstimatesPageV2() {
       <EstimatesMobileListView
         onNew={() => { clearPrefill(); setMobileView('new'); }}
         onCreateFromAddress={(addr) => {
-          setPrefill({ address: addr || '', customerName: '', customerPhone: '', customerEmail: '' });
+          setPrefill({ customerId: '', address: addr || '', customerName: '', customerPhone: '', customerEmail: '' });
           setMobileView('new');
         }}
       />
@@ -1718,6 +1788,7 @@ export default function EstimatesPageV2() {
       {activeTab === 'estimates' && <EstimatePipelineViewV2 />}
       {activeTab === 'new' && (
         <EstimateToolViewV2
+          initialCustomerId={prefill.customerId}
           initialAddress={prefill.address}
           initialCustomerName={prefill.customerName}
           initialCustomerPhone={prefill.customerPhone}

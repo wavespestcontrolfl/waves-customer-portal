@@ -44,6 +44,18 @@ function adminFetch(path, options = {}) {
   });
 }
 
+function summarizeEstimateSend(data) {
+  const parts = [];
+  if (data?.channels?.sms) {
+    parts.push(data.channels.sms.ok ? 'SMS sent' : `SMS failed: ${data.channels.sms.error || 'unknown error'}`);
+  }
+  if (data?.channels?.email) {
+    parts.push(data.channels.email.ok ? 'Email sent' : `Email failed: ${data.channels.email.error || 'unknown error'}`);
+  }
+  if (parts.length === 0) return data?.error || 'Estimate send failed';
+  return parts.join(' / ');
+}
+
 // ── Error Boundary ──────────────────────────────────────────────
 class EstimateErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { error: null }; }
@@ -258,6 +270,7 @@ function SectionTitle({ children, className }) {
 // State, refs, effects, callbacks all copied verbatim from V1.
 // ═══════════════════════════════════════════════════════════════
 export default function EstimateToolViewV2({
+  initialCustomerId = '',
   initialAddress = '',
   initialCustomerName = '',
   initialCustomerPhone = '',
@@ -334,6 +347,7 @@ export default function EstimateToolViewV2({
 
   // ── form state (verbatim from V1) ─────────────────────────────
   const [form, setForm] = useState({
+    customerId: initialCustomerId || '',
     address: initialAddress || '',
     customerName: initialCustomerName || '',
     customerPhone: initialCustomerPhone || '',
@@ -550,6 +564,7 @@ export default function EstimateToolViewV2({
             const hasActivePlan = match.tier && match.tier !== 'null' && match.monthlyRate > 0;
             setForm((f) => ({
               ...f,
+              customerId: match.id || f.customerId || '',
               isRecurringCustomer: hasActivePlan ? 'YES' : 'NO',
               customerName: `${match.firstName || ''} ${match.lastName || ''}`.trim(),
               customerPhone: match.phone || f.customerPhone || '',
@@ -808,6 +823,7 @@ export default function EstimateToolViewV2({
           customerName: form.customerName || '',
           customerPhone: form.customerPhone || '',
           customerEmail: form.customerEmail || '',
+          customerId: form.customerId || existingCustomerMatch?.id || null,
           estimateData: { inputs: form, result: E },
           monthlyTotal: E.recurring?.grandTotal || 0,
           annualTotal: (E.recurring?.grandTotal || 0) * 12,
@@ -849,8 +865,8 @@ export default function EstimateToolViewV2({
         method: 'POST', headers: authHeaders,
         body: JSON.stringify({ sendMethod, scheduledAt: scheduled }),
       });
-      if (!r.ok) throw new Error('Send failed: ' + r.status);
-      const d = await r.json();
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(summarizeEstimateSend(d) || `HTTP ${r.status}`);
       const label = sendMethod === 'sms' ? 'SMS' : sendMethod === 'email' ? 'email' : 'SMS & email';
       if (d.scheduled) {
         const when = new Date(d.scheduledAt).toLocaleString();
@@ -877,6 +893,7 @@ export default function EstimateToolViewV2({
       urgency: 'ROUTINE', isAfterHours: 'NO', isRecurringCustomer: 'NO',
       bedArea: '', palmCount: '', treeCount: '',
       boracareSqft: '', preslabSqft: '',
+      customerId: '',
       customerName: '', customerPhone: '', customerEmail: '',
       _boracareAuto: false, _preslabAuto: false,
     }));
@@ -943,6 +960,7 @@ export default function EstimateToolViewV2({
                           const hasActivePlan = c.tier && c.tier !== 'null' && c.monthlyRate > 0;
                           setForm((f) => ({
                             ...f,
+                            customerId: c.id || '',
                             address: c.address || f.address,
                             customerName: name,
                             customerPhone: c.phone || f.customerPhone || '',

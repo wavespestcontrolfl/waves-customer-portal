@@ -317,8 +317,13 @@ function initScheduledJobs() {
       const { sendEstimateNow } = require('../routes/admin-estimates');
       for (const est of scheduled) {
         try {
-          await sendEstimateNow(est, est.send_method || 'both');
-          logger.info(`Scheduled estimate ${est.id} sent to ${est.customer_name}`);
+          const result = await sendEstimateNow(est, est.send_method || 'both');
+          if (result.sent) {
+            const suffix = result.partialFailure ? ` with channel issues (${result.failedChannels.join(', ')})` : '';
+            logger.info(`Scheduled estimate ${est.id} sent to ${est.customer_name}${suffix}`);
+          } else {
+            logger.warn(`Scheduled estimate ${est.id} was not sent on any channel`);
+          }
         } catch (e) {
           logger.error(`Scheduled estimate ${est.id} failed: ${e.message}`);
         }

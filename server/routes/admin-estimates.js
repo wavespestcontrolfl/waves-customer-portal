@@ -75,13 +75,30 @@ router.post('/:id/send', async (req, res, next) => {
     }
 
     // Send immediately
-    const channels = await sendEstimateNow(estimate, sendMethod);
-    res.json({ success: true, channels });
-  } catch (err) { next(err); }
+    const result = await sendEstimateNow(estimate, sendMethod);
+    if (!result.sent) {
+      return res.status(422).json({
+        success: false,
+        error: 'Estimate was not sent on any requested channel',
+        channels: result.channels,
+      });
+    }
+    res.json({ success: true, ...result });
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
 });
 
 // Shared send logic — used by both immediate send and scheduled cron
 async function sendEstimateNow(estimate, sendMethod) {
+  if (!['sms', 'email', 'both'].includes(sendMethod)) {
+    const err = new Error('Invalid sendMethod');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const requestedChannels = sendMethod === 'both' ? ['sms', 'email'] : [sendMethod];
   const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
   const viewUrl = await shortenOrPassthrough(longUrl, {
     kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
@@ -198,6 +215,19 @@ async function sendEstimateNow(estimate, sendMethod) {
     }
   }
 
+  const sentChannels = requestedChannels.filter((ch) => channels[ch]?.ok);
+  const failedChannels = requestedChannels.filter((ch) => !channels[ch]?.ok);
+  const sent = sentChannels.length > 0;
+
+  if (!sent) {
+    return {
+      sent: false,
+      channels,
+      sentChannels,
+      failedChannels,
+    };
+  }
+
   await db('estimates').where({ id: estimate.id }).update({ status: 'sent', sent_at: db.fn.now(), scheduled_at: null, send_method: null });
 
   // Fire-and-forget: enroll the customer in the estimate_sent follow-up
@@ -222,7 +252,13 @@ async function sendEstimateNow(estimate, sendMethod) {
     }
   }
 
-  return channels;
+  return {
+    sent: true,
+    partialFailure: failedChannels.length > 0,
+    channels,
+    sentChannels,
+    failedChannels,
+  };
 }
 
 // Export for cron usage
@@ -259,8 +295,15 @@ router.get('/', async (req, res, next) => {
     if (archived === 'only') query = query.whereNotNull('estimates.archived_at');
     else if (archived !== 'all') query = query.whereNull('estimates.archived_at');
 
-    const offset = (parseInt(page) - 1) * parseInt(limit);
-    const estimates = await query.limit(parseInt(limit)).offset(offset);
+    let estimates;
+    if (limit === 'all') {
+      estimates = await query;
+    } else {
+      const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 500);
+      const pg = Math.max(parseInt(page, 10) || 1, 1);
+      const offset = (pg - 1) * lim;
+      estimates = await query.limit(lim).offset(offset);
+    }
 
     // Aggregate shortlink click telemetry per estimate. One estimate can
     // accumulate multiple short_codes rows when /send is hit again (re-send
@@ -340,10 +383,13 @@ router.get('/', async (req, res, next) => {
           id: e.id, status: e.status, customerName: e.customer_name,
           customerId: e.customer_id,
           customerPhone: e.customer_phone, address: e.address,
+          customerEmail: e.customer_email,
           updatedAt: e.updated_at,
           monthlyTotal: parseFloat(e.monthly_total || 0),
           tier: e.waveguard_tier, createdBy: e.created_by_name,
           sentAt: e.sent_at, viewedAt: e.viewed_at, acceptedAt: e.accepted_at,
+          scheduledAt: e.scheduled_at,
+          sendMethod: e.send_method,
           declinedAt: e.declined_at,
           viewCount: e.view_count || 0,
           lastViewedAt: e.last_viewed_at,
@@ -480,11 +526,17 @@ router.patch('/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// DELETE /api/admin/estimates/:id — delete an estimate
+// DELETE /api/admin/estimates/:id — delete a draft estimate only.
+// Sent/customer-facing estimates must stay auditably available; use archive
+// for closed rows instead of breaking public links.
 router.delete('/:id', async (req, res, next) => {
   try {
-    const deleted = await db('estimates').where({ id: req.params.id }).del();
-    if (!deleted) return res.status(404).json({ error: 'Estimate not found' });
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    if (estimate.status !== 'draft') {
+      return res.status(400).json({ error: 'Only draft estimates can be deleted. Archive closed estimates instead.' });
+    }
+    await db('estimates').where({ id: req.params.id }).del();
     logger.info(`[estimates] Deleted estimate ${req.params.id}`);
     res.json({ success: true });
   } catch (err) { next(err); }

@@ -13,6 +13,7 @@ import CallBridgeLink from '../../components/admin/CallBridgeLink';
 
 const STATUS_TONES = {
   draft: 'muted',
+  scheduled: 'neutral',
   sent: 'neutral',
   viewed: 'neutral',
   accepted: 'strong',
@@ -22,6 +23,7 @@ const STATUS_TONES = {
 
 const STATUS_LABELS = {
   draft: 'Draft',
+  scheduled: 'Scheduled',
   sent: 'Sent',
   viewed: 'Viewed',
   accepted: 'Accepted',
@@ -305,28 +307,30 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                                 View →
                               </a>
                             )}
-                            <button
-                              type="button"
-                              aria-label="Delete estimate"
-                              title="Delete this estimate"
-                              onClick={async () => {
-                                const ok = window.confirm(`Delete this estimate?\n\nThis permanently removes it from the admin portal. Customers who were sent this link will no longer be able to view or accept it.`);
-                                if (!ok) return;
-                                try {
-                                  const r = await adminFetch(`/admin/estimates/${e.id}`, { method: 'DELETE' });
-                                  if (!r.ok) {
-                                    const err = await r.json().catch(() => ({}));
-                                    throw new Error(err.error || `HTTP ${r.status}`);
+                            {e.status === 'draft' && (
+                              <button
+                                type="button"
+                                aria-label="Delete draft estimate"
+                                title="Delete this draft estimate"
+                                onClick={async () => {
+                                  const ok = window.confirm('Delete this draft estimate?\n\nThis permanently removes it from the admin portal.');
+                                  if (!ok) return;
+                                  try {
+                                    const r = await adminFetch(`/admin/estimates/${e.id}`, { method: 'DELETE' });
+                                    if (!r.ok) {
+                                      const err = await r.json().catch(() => ({}));
+                                      throw new Error(err.error || `HTTP ${r.status}`);
+                                    }
+                                    load();
+                                  } catch (err) {
+                                    window.alert('Delete failed: ' + err.message);
                                   }
-                                  load();
-                                } catch (err) {
-                                  window.alert('Delete failed: ' + err.message);
-                                }
-                              }}
-                              className="inline-flex items-center justify-center h-7 w-7 rounded-sm text-alert-fg hover:bg-alert-bg u-focus-ring"
-                            >
-                              <Trash2 size={14} strokeWidth={1.75} />
-                            </button>
+                                }}
+                                className="inline-flex items-center justify-center h-7 w-7 rounded-sm text-alert-fg hover:bg-alert-bg u-focus-ring"
+                              >
+                                <Trash2 size={14} strokeWidth={1.75} />
+                              </button>
+                            )}
                           </div>
                         </div>
                       </div>
