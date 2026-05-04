@@ -7935,6 +7935,7 @@ export default function PortalPage() {
   const initials = `${customer.firstName?.[0] || ''}${customer.lastName?.[0] || ''}`;
   const portalProperties = Array.isArray(properties) ? properties : [];
   const canSwitchProperties = portalProperties.length > 1;
+  const propertyRenderKey = `${customer.id}:${requestRefreshKey}`;
   const selectProperty = async (propertyId) => {
     if (!propertyId || propertyId === customer.id || switchingPropertyId) return;
     setSwitchingPropertyId(propertyId);
@@ -8091,14 +8092,14 @@ export default function PortalPage() {
           (60px) stack so fixed UI doesn't hide the last section. */}
       <div style={{ padding: `16px 16px ${isMobileShell ? 150 : 32}px`, maxWidth: 700, margin: '0 auto' }}>
         {activeTab !== 'dashboard' && <h1 style={VISUALLY_HIDDEN}>{TAB_TITLES[activeTab] || 'Customer Portal'}</h1>}
-        {activeTab === 'dashboard' && <DashboardTab customer={customer} onSwitchTab={switchTab} />}
-        {activeTab === 'plan' && <MyPlanTab customer={customer} />}
-        {activeTab === 'visits' && <VisitsTab customer={customer} subTab={visitsSubTab} onSubTabChange={setVisitsSubTab} onRequestVisit={() => setShowReportIssue(true)} />}
-        {activeTab === 'billing' && <BillingTab customer={customer} />}
-        {activeTab === 'refer' && <ReferTab customer={customer} onSwitchTab={switchTab} />}
-        {activeTab === 'documents' && <DocumentsTab customer={customer} onSwitchTab={switchTab} />}
-        {activeTab === 'property' && <PropertyTab customer={customer} />}
-        {activeTab === 'learn' && <LearnTab customer={customer} />}
+        {activeTab === 'dashboard' && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
+        {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} />}
+        {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} subTab={visitsSubTab} onSubTabChange={setVisitsSubTab} onRequestVisit={() => setShowReportIssue(true)} />}
+        {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} />}
+        {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
+        {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
+        {activeTab === 'property' && <PropertyTab key={`property-${propertyRenderKey}`} customer={customer} />}
+        {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} />}
       </div>
 
       {/* Footer */}
