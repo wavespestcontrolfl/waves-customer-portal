@@ -1055,7 +1055,28 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       return res.json(result);
     }
 
-    const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin');
+    const rescheduleOptions = {};
+    const hasTechnicianId = Object.prototype.hasOwnProperty.call(req.body || {}, 'technicianId');
+    if (hasTechnicianId) {
+      if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+      const rawTechId = req.body.technicianId;
+      if (rawTechId !== null && typeof rawTechId !== 'string') {
+        return res.status(400).json({ error: 'technicianId must be a UUID string or null' });
+      }
+      const newTechId = rawTechId || null;
+      const job = await db('scheduled_services').where({ id: req.params.serviceId }).first();
+      if (!job) return res.status(404).json({ error: 'Service not found' });
+      if (['completed', 'cancelled', 'skipped'].includes(job.status)) {
+        return res.status(409).json({ error: `Cannot reassign a ${job.status} job` });
+      }
+      if (newTechId) {
+        const tech = await db('technicians').where({ id: newTechId }).first();
+        if (!tech) return res.status(400).json({ error: 'Unknown technician' });
+        if (!tech.active) return res.status(400).json({ error: 'Technician is inactive' });
+      }
+      rescheduleOptions.technicianId = newTechId;
+    }
+    const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', rescheduleOptions);
     if (notifyCustomer !== false) {
       const svc = await db('scheduled_services')
         .where('scheduled_services.id', req.params.serviceId)
@@ -1091,7 +1112,10 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       return res.json({ ...result, notificationSent, notificationError });
     }
     res.json(result);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err?.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
 });
 
 // GET /api/admin/dispatch/weather/tomorrow

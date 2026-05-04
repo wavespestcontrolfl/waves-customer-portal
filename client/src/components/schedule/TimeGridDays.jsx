@@ -28,6 +28,9 @@ const SLOT_MIN = 30;
 const SLOT_HEIGHT = 32;
 const SLOT_COUNT = ((DAY_END_HOUR - DAY_START_HOUR) * 60) / SLOT_MIN;
 const GRID_HEIGHT = SLOT_COUNT * SLOT_HEIGHT;
+const DAY_HEADER_HEIGHT = 36;
+const ANYTIME_HEADER_HEIGHT = 60;
+const COLUMN_HEADER_HEIGHT = DAY_HEADER_HEIGHT + ANYTIME_HEADER_HEIGHT;
 // Tightened from 160 → 130 so the full Mon→Sun Week fits more often
 // without horizontal scroll on a typical desktop viewport (sidebar +
 // content padding + collapsed unassigned rail leave ~870px for 7
@@ -236,11 +239,35 @@ function SlotDroppable({ date, slotIdx, onCreateStart }) {
   );
 }
 
-function DayColumn({ day, onEdit, onCreateSlot }) {
-  // Unassigned-with-time services render in the UnassignedRail, not here.
-  const services = (day.services || []).filter(
-    (s) => s.technicianId && parseHHMM(s.windowStart) != null,
+function AnytimeStrip({ services, dayLabel, onEdit }) {
+  return (
+    <div
+      className="px-2 py-1.5 bg-zinc-50 flex flex-col gap-1 overflow-y-auto"
+      style={{ height: ANYTIME_HEADER_HEIGHT, borderBottom: '1px solid #E4E4E7' }}
+    >
+      {services.length > 0 && (
+        <div className="text-10 uppercase tracking-label text-ink-tertiary">
+          Any time
+        </div>
+      )}
+      {services.map((svc) => (
+        <RailItem
+          key={svc.id}
+          service={svc}
+          dayLabel={dayLabel}
+          onEdit={onEdit}
+        />
+      ))}
+    </div>
   );
+}
+
+function DayColumn({ day, onEdit, onCreateSlot }) {
+  // Unassigned services render in the UnassignedRail; assigned flexible
+  // services render above the timed grid so they are still visible.
+  const assignedServices = (day.services || []).filter((s) => s.technicianId);
+  const services = assignedServices.filter((s) => parseHHMM(s.windowStart) != null);
+  const anytimeServices = assignedServices.filter((s) => parseHHMM(s.windowStart) == null);
   const gridRef = useRef(null);
   const [sel, setSel] = useState(null); // { startIdx, endIdx } during drag-to-select
   const selRef = useRef(sel);
@@ -291,13 +318,18 @@ function DayColumn({ day, onEdit, onCreateSlot }) {
     >
       <div
         className="sticky top-0 z-10 bg-white px-3 py-2 text-13 text-zinc-500 flex items-center justify-between"
-        style={{ borderBottom: '1px solid #E4E4E7' }}
+        style={{ height: DAY_HEADER_HEIGHT, borderBottom: '1px solid #E4E4E7' }}
       >
         <span className="truncate">
           {day.dayOfWeek} {formatMonthDay(day.date)}
         </span>
-        <span className="u-nums text-11 text-zinc-400">{services.length}</span>
+        <span className="u-nums text-11 text-zinc-400">{assignedServices.length}</span>
       </div>
+      <AnytimeStrip
+        services={anytimeServices}
+        dayLabel={`${day.dayOfWeek} ${day.dayNum}`}
+        onEdit={onEdit}
+      />
       <div ref={gridRef} className="relative" style={{ height: GRID_HEIGHT }}>
         {Array.from({ length: SLOT_COUNT }).map((_, idx) => (
           <SlotDroppable
@@ -383,7 +415,7 @@ function RailItem({ service, dayLabel, onEdit }) {
     ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` }
     : {};
   const startMin = parseHHMM(service.windowStart);
-  const timeLabel = startMin != null ? minutesToLabel(startMin) : '';
+  const timeLabel = startMin != null ? minutesToLabel(startMin) : 'Any time';
   return (
     <div
       ref={setNodeRef}
@@ -402,7 +434,7 @@ function RailItem({ service, dayLabel, onEdit }) {
       title={`${service.customerName || 'Unassigned'} · ${service.serviceType || ''} · ${dayLabel} ${timeLabel}`}
     >
       <div className="u-nums text-10 text-zinc-500 mb-0.5">
-        {dayLabel}{timeLabel && ` · ${timeLabel}`}
+        {dayLabel} · {timeLabel}
       </div>
       <div className="font-medium truncate text-zinc-900">{service.customerName || 'Unassigned'}</div>
       {service.serviceType && (
@@ -594,7 +626,7 @@ export default function TimeGridDays({
     const items = [];
     days.forEach((day) => {
       (day.services || []).forEach((s) => {
-        if (!s.technicianId && parseHHMM(s.windowStart) != null) {
+        if (!s.technicianId) {
           items.push({
             service: s,
             dayLabel: `${day.dayOfWeek} ${day.dayNum}`,
@@ -771,7 +803,7 @@ export default function TimeGridDays({
               scrollbar to reach Saturday/Sunday. */}
           <div className="overflow-auto flex-1 min-w-0">
             <div className="flex" style={{ minWidth: TIME_AXIS_WIDTH + days.length * COL_MIN_WIDTH }}>
-              <TimeAxis headerHeight={36} />
+              <TimeAxis headerHeight={COLUMN_HEADER_HEIGHT} />
               {days.map((day) => (
                 <DayColumn
                   key={day.date}
