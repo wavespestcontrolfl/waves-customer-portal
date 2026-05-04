@@ -381,6 +381,10 @@ function initScheduledJobs() {
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
         .whereNotNull('scheduled_services.completion_sms_scheduled_at')
         .whereNull('scheduled_services.completion_sms_sent_at')
+        .where(function () {
+          this.whereNull('scheduled_services.completion_sms_claimed_at')
+            .orWhere('scheduled_services.completion_sms_claimed_at', '<', new Date(Date.now() - 30 * 60000));
+        })
         .where('scheduled_services.completion_sms_scheduled_at', '<=', new Date())
         .select(
           'scheduled_services.id',
@@ -408,6 +412,10 @@ function initScheduledJobs() {
               .where({ 'scheduled_services.id': row.id })
               .whereNotNull('scheduled_services.completion_sms_scheduled_at')
               .whereNull('scheduled_services.completion_sms_sent_at')
+              .where(function () {
+                this.whereNull('scheduled_services.completion_sms_claimed_at')
+                  .orWhere('scheduled_services.completion_sms_claimed_at', '<', new Date(Date.now() - 30 * 60000));
+              })
               .where('scheduled_services.completion_sms_scheduled_at', '<=', new Date())
               .select(
                 'scheduled_services.id',
@@ -424,12 +432,13 @@ function initScheduledJobs() {
             if (!current.cust_phone || !current.completion_sms_body) {
               await trx('scheduled_services').where({ id: current.id }).update({
                 completion_sms_sent_at: new Date(),
+                completion_sms_claimed_at: null,
                 completion_sms_request_review: false,
               });
               return false;
             }
             await trx('scheduled_services').where({ id: current.id }).update({
-              completion_sms_sent_at: new Date(),
+              completion_sms_claimed_at: new Date(),
             });
             return {
               sent: true,
@@ -449,11 +458,13 @@ function initScheduledJobs() {
                 messageType: wasSent.messageType,
               });
               await db('scheduled_services').where({ id: wasSent.serviceId }).update({
+                completion_sms_sent_at: new Date(),
+                completion_sms_claimed_at: null,
                 completion_sms_request_review: false,
               });
             } catch (sendErr) {
               await db('scheduled_services').where({ id: wasSent.serviceId }).update({
-                completion_sms_sent_at: null,
+                completion_sms_claimed_at: null,
               }).catch(() => {});
               throw sendErr;
             }
