@@ -230,20 +230,19 @@ function PipelineColumnV2({ stage, customers, onDeleteCustomer, fullWidth = fals
 }
 
 // --- Quick Add Modal (V2) ---
-function QuickAddModalV2({ open, onClose, onCreated, onOpenExisting }) {
+function QuickAddModalV2({ open, onClose, onCreated }) {
   const [form, setForm] = useState({
     firstName: '', lastName: '', phone: '', email: '', address: '',
+    profileLabel: '',
     leadSource: 'referral', pipelineStage: 'new_lead', tags: '', notes: '',
   });
   const [submitting, setSubmitting] = useState(false);
-  const [existingMatch, setExistingMatch] = useState(null);
 
   const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!form.firstName.trim() || !form.lastName.trim()) return;
-    setExistingMatch(null);
+    if (!form.firstName.trim() || !form.lastName.trim() || !form.phone.trim()) return;
     setSubmitting(true);
     try {
       const body = {
@@ -258,15 +257,9 @@ function QuickAddModalV2({ open, onClose, onCreated, onOpenExisting }) {
         },
         body: JSON.stringify(body),
       });
-      if (r.status === 409) {
-        const data = await r.json().catch(() => ({}));
-        if (data.existingCustomerId) {
-          setExistingMatch({ id: data.existingCustomerId, name: data.existingCustomerName || 'existing customer' });
-          return;
-        }
-      }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      onCreated();
+      const data = await r.json().catch(() => ({}));
+      onCreated(data);
       onClose();
     } catch (err) {
       window.alert('Failed to create customer: ' + err.message);
@@ -299,8 +292,8 @@ function QuickAddModalV2({ open, onClose, onCreated, onOpenExisting }) {
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className={LABEL_CLS}>Phone</label>
-              <input value={form.phone} onChange={(e) => set('phone', e.target.value)} className={INPUT_CLS} placeholder="+1…" />
+              <label className={LABEL_CLS}>Phone *</label>
+              <input value={form.phone} onChange={(e) => set('phone', e.target.value)} className={INPUT_CLS} placeholder="+1…" required />
             </div>
             <div>
               <label className={LABEL_CLS}>Email</label>
@@ -310,6 +303,10 @@ function QuickAddModalV2({ open, onClose, onCreated, onOpenExisting }) {
           <div>
             <label className={LABEL_CLS}>Address</label>
             <input value={form.address} onChange={(e) => set('address', e.target.value)} className={INPUT_CLS} />
+          </div>
+          <div>
+            <label className={LABEL_CLS}>Property label</label>
+            <input value={form.profileLabel} onChange={(e) => set('profileLabel', e.target.value)} className={INPUT_CLS} placeholder="Primary, Rental - Cape Coral, Airbnb" />
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -337,25 +334,11 @@ function QuickAddModalV2({ open, onClose, onCreated, onOpenExisting }) {
             <label className={LABEL_CLS}>Notes</label>
             <textarea rows={3} value={form.notes} onChange={(e) => set('notes', e.target.value)} className={cn(INPUT_CLS, 'h-auto py-2 resize-y')} />
           </div>
-          {existingMatch && (
-            <div className="bg-alert-bg border-hairline border-alert-fg/30 rounded-sm p-3 flex items-center justify-between gap-3 flex-wrap">
-              <span className="text-13 text-alert-fg">
-                Phone already on file for <strong>{existingMatch.name}</strong>.
-              </span>
-              <Button
-                size="sm"
-                variant="primary"
-                onClick={() => { onOpenExisting?.(existingMatch.id); onClose(); }}
-              >
-                Open profile
-              </Button>
-            </div>
-          )}
         </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={onClose} type="button">Cancel</Button>
           <Button variant="primary" type="submit" disabled={submitting}>
-            {submitting ? 'Creating…' : 'Create customer'}
+            {submitting ? 'Creating…' : 'Create property profile'}
           </Button>
         </DialogFooter>
       </form>
@@ -514,7 +497,7 @@ export default function CustomersPageV2() {
   const [showFilters, setShowFilters] = useState(false);
   const [selected360Id, setSelected360Id] = useState(() => {
     const id = searchParams.get('customerId');
-    return id ? Number(id) : null;
+    return id || null;
   });
   const [page, setPage] = useState(1);
   const [totalCustomers, setTotalCustomers] = useState(0);
@@ -1043,6 +1026,9 @@ export default function CustomersPageV2() {
                     >
                       <div className="text-13 font-medium text-ink-primary text-center">
                         {c.firstName} {c.lastName}
+                        {c.profileLabel && c.profileLabel !== 'Primary' && (
+                          <span className="ml-1 text-11 font-normal text-ink-tertiary">· {c.profileLabel}</span>
+                        )}
                       </div>
                       <div className="text-12 text-ink-secondary truncate text-center">
                         {(() => {
@@ -1286,8 +1272,11 @@ export default function CustomersPageV2() {
         <QuickAddModalV2
           open={showAddModal}
           onClose={() => setShowAddModal(false)}
-          onCreated={() => { loadCustomers(); if (view === 'pipeline') loadPipeline(); }}
-          onOpenExisting={(id) => setSelected360Id(id)}
+          onCreated={(customer) => {
+            loadCustomers();
+            if (view === 'pipeline') loadPipeline();
+            if (customer?.id) setSelected360Id(customer.id);
+          }}
         />
       )}
       {isMobile && (
@@ -1307,6 +1296,7 @@ export default function CustomersPageV2() {
       {selected360Id && (
         <Customer360Profile
           customerId={selected360Id}
+          onSelectCustomer={(id) => setSelected360Id(id)}
           onClose={() => setSelected360Id(null)}
         />
       )}

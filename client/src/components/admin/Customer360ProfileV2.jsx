@@ -401,7 +401,7 @@ function AdminAutopayPanelV2({ customerId, monthlyRate, customerName }) {
 // ============================================================================
 // MAIN COMPONENT
 // ============================================================================
-export default function Customer360ProfileV2({ customerId, onClose, initialTab = 'overview', initialScheduledServiceId = null }) {
+export default function Customer360ProfileV2({ customerId, onClose, onSelectCustomer, initialTab = 'overview', initialScheduledServiceId = null }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState(initialTab);
@@ -526,6 +526,7 @@ export default function Customer360ProfileV2({ customerId, onClose, initialTab =
   const services = data.services || [];
   const payments = data.payments || [];
   const scheduled = data.scheduled || [];
+  const accountProperties = data.accountProperties || [];
 
   const balanceOwed = invoices.filter(i => i.status !== 'paid')
     .reduce((s, i) => s + parseFloat(i.amount_due || 0) - parseFloat(i.amount_paid || 0), 0);
@@ -633,6 +634,7 @@ export default function Customer360ProfileV2({ customerId, onClose, initialTab =
             <div className="flex justify-between items-start mb-2">
               <div className="flex items-center gap-3 flex-wrap">
                 <div className="text-22 font-medium tracking-tight text-zinc-900">{c.firstName} {c.lastName}</div>
+                {c.profileLabel && <Badge className="normal-case tracking-normal">{c.profileLabel}</Badge>}
                 <HealthCircle score={score} />
                 <TierBadgeV2 tier={c.tier} />
                 <StageBadgeV2 stage={c.pipelineStage} />
@@ -700,6 +702,7 @@ export default function Customer360ProfileV2({ customerId, onClose, initialTab =
                     lastName: c.lastName || '',
                     email: c.email || '',
                     phone: c.phone || '',
+                    profileLabel: c.profileLabel || '',
                     addressLine1: c.address?.line1 || '',
                     city: c.address?.city || '',
                     state: c.address?.state || '',
@@ -879,6 +882,45 @@ export default function Customer360ProfileV2({ customerId, onClose, initialTab =
           {/* OVERVIEW */}
           {activeTab === 'overview' && (
             <div>
+              {accountProperties.length > 0 && (
+                <div className="mb-4 pb-3 border-b border-hairline border-zinc-200">
+                  <SectionTitle>Other Properties For This Customer</SectionTitle>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {accountProperties.map((p) => {
+                      const addr = [p.address?.line1, p.address?.city, p.address?.state, p.address?.zip].filter(Boolean).join(', ');
+                      const className = 'text-left rounded-sm border-hairline border-zinc-200 bg-zinc-50 hover:bg-zinc-100 u-focus-ring p-2.5';
+                      const content = (
+                        <>
+                          <div className="text-13 font-medium text-zinc-900">{p.profileLabel || 'Service property'}</div>
+                          <div className="text-12 text-ink-secondary truncate">{addr || 'No address on file'}</div>
+                          <div className="text-11 text-ink-tertiary mt-1">{fmtCurrency(p.monthlyRate || 0)}/mo</div>
+                        </>
+                      );
+                      if (!onSelectCustomer) {
+                        return (
+                          <a
+                            key={p.id}
+                            href={`/admin/customers?customerId=${encodeURIComponent(p.id)}`}
+                            className={cn(className, 'block no-underline')}
+                          >
+                            {content}
+                          </a>
+                        );
+                      }
+                      return (
+                        <button
+                          key={p.id}
+                          type="button"
+                          onClick={() => onSelectCustomer?.(p.id)}
+                          className={className}
+                        >
+                          {content}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
               <div className="flex items-center justify-between mb-4 pb-3 border-b border-hairline border-zinc-200">
                 <div>
                   <div className="text-13 font-medium text-zinc-900">Already left a Google review</div>
@@ -1490,6 +1532,7 @@ export default function Customer360ProfileV2({ customerId, onClose, initialTab =
                 { key: 'lastName', label: 'Last name' },
                 { key: 'email', label: 'Email', type: 'email' },
                 { key: 'phone', label: 'Phone', type: 'tel' },
+                { key: 'profileLabel', label: 'Property label', full: true },
                 { key: 'addressLine1', label: 'Address', full: true },
                 { key: 'city', label: 'City' },
                 { key: 'state', label: 'State' },

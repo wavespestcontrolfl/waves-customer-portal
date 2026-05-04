@@ -7,10 +7,9 @@
 //   · "Address" section label then Country / Line 1 / Line 2 / City / State / ZIP
 //
 // Submits to the existing /admin/customers/quick-add endpoint. That endpoint
-// only accepts first/last name, phone, email, address (line 1), city, zip —
-// state is hardcoded to FL server-side. Line 2 is collected in the UI for
-// parity with the Square layout but not sent (no column exists yet; add a
-// migration if we start needing it).
+// accepts first/last name, phone, email, address (line 1), city, state, zip,
+// and profile label. Line 2 is collected in the UI for parity with the Square
+// layout but not sent (no column exists yet; add a migration if needed).
 
 import { useMemo, useState } from 'react';
 import { X } from 'lucide-react';
@@ -26,10 +25,10 @@ export default function MobileNewCustomerSheet({ open, onClose, onCreated }) {
   const [form, setForm] = useState({
     firstName: '', lastName: '', phone: '', email: '',
     addressLine1: '', addressLine2: '', city: '', state: 'FL', zip: '',
+    profileLabel: '',
   });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
-  const [existingMatch, setExistingMatch] = useState(null);
 
   const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
 
@@ -45,7 +44,6 @@ export default function MobileNewCustomerSheet({ open, onClose, onCreated }) {
     if (!canSave || submitting) return;
     setSubmitting(true);
     setError(null);
-    setExistingMatch(null);
     try {
       const r = await fetch(`${API_BASE}/admin/customers/quick-add`, {
         method: 'POST',
@@ -60,17 +58,11 @@ export default function MobileNewCustomerSheet({ open, onClose, onCreated }) {
           email: form.email.trim() || undefined,
           address: form.addressLine1.trim() || undefined,
           city: form.city.trim() || undefined,
+          state: form.state.trim() || undefined,
           zip: form.zip.trim() || undefined,
+          profileLabel: form.profileLabel.trim() || undefined,
         }),
       });
-      if (r.status === 409) {
-        const data = await r.json().catch(() => ({}));
-        setExistingMatch({
-          id: data.existingCustomerId,
-          name: data.existingCustomerName || 'existing customer',
-        });
-        return;
-      }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.json();
       onCreated?.(data.customer);
@@ -221,12 +213,19 @@ export default function MobileNewCustomerSheet({ open, onClose, onCreated }) {
           <input
             className={ringClass()}
             style={{ height: 56, fontSize: 15 }}
+            placeholder="Property label"
+            value={form.profileLabel}
+            onChange={(e) => set('profileLabel', e.target.value)}
+          />
+          <input
+            className={ringClass()}
+            style={{ height: 56, fontSize: 15 }}
             placeholder="City"
             value={form.city}
             onChange={(e) => set('city', e.target.value)}
             autoComplete="address-level2"
           />
-          {/* State dropdown — UI only; server hardcodes FL today. */}
+          {/* State */}
           <div
             className={ringClass() + ' flex items-center gap-2'}
             style={{ height: 56, paddingLeft: 14, paddingRight: 14 }}
@@ -252,14 +251,6 @@ export default function MobileNewCustomerSheet({ open, onClose, onCreated }) {
           />
         </div>
 
-        {existingMatch && (
-          <div
-            className="mt-5 rounded-md border-hairline border-alert-fg/30 bg-alert-bg p-3 text-alert-fg"
-            style={{ fontSize: 13 }}
-          >
-            Phone already on file for <strong>{existingMatch.name}</strong>.
-          </div>
-        )}
         {error && (
           <div
             className="mt-5 rounded-md border-hairline border-alert-fg/30 bg-alert-bg p-3 text-alert-fg"
