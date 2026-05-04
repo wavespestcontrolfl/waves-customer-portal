@@ -47,6 +47,7 @@ function activeCustomerByPhone(phone) {
   const last10 = digits.length >= 10 ? digits.slice(-10) : digits;
   return db('customers')
     .where({ active: true })
+    .whereNull('deleted_at')
     .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${last10}`])
     .orderBy('is_primary_profile', 'desc')
     .orderBy('created_at', 'asc')
