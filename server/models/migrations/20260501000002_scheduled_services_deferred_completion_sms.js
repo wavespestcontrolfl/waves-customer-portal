@@ -13,11 +13,17 @@ exports.up = async (knex) => {
     t.text('completion_sms_body').nullable();
     t.string('completion_sms_message_type').nullable();
     t.timestamp('completion_sms_sent_at').nullable();
+    t.boolean('completion_sms_request_review').notNullable().defaultTo(false);
+    t.uuid('completion_sms_review_service_record_id')
+      .nullable()
+      .references('id').inTable('service_records').onDelete('SET NULL');
   });
 };
 
 exports.down = async (knex) => {
   await knex.schema.alterTable('scheduled_services', (t) => {
+    t.dropColumn('completion_sms_review_service_record_id');
+    t.dropColumn('completion_sms_request_review');
     t.dropColumn('completion_sms_scheduled_at');
     t.dropColumn('completion_sms_body');
     t.dropColumn('completion_sms_message_type');

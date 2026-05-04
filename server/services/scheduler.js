@@ -367,6 +367,8 @@ function initScheduledJobs() {
           'scheduled_services.customer_id',
           'scheduled_services.completion_sms_body',
           'scheduled_services.completion_sms_message_type',
+          'scheduled_services.completion_sms_request_review',
+          'scheduled_services.completion_sms_review_service_record_id',
           'customers.phone as cust_phone',
         );
 
@@ -392,6 +394,8 @@ function initScheduledJobs() {
                 'scheduled_services.customer_id',
                 'scheduled_services.completion_sms_body',
                 'scheduled_services.completion_sms_message_type',
+                'scheduled_services.completion_sms_request_review',
+                'scheduled_services.completion_sms_review_service_record_id',
                 'customers.phone as cust_phone',
               )
               .first();
@@ -400,6 +404,7 @@ function initScheduledJobs() {
             if (!current.cust_phone || !current.completion_sms_body) {
               await trx('scheduled_services').where({ id: current.id }).update({
                 completion_sms_sent_at: new Date(),
+                completion_sms_request_review: false,
               });
               return false;
             }
@@ -409,10 +414,31 @@ function initScheduledJobs() {
             });
             await trx('scheduled_services').where({ id: current.id }).update({
               completion_sms_sent_at: new Date(),
+              completion_sms_request_review: false,
             });
-            return true;
+            return {
+              sent: true,
+              requestReview: !!current.completion_sms_request_review,
+              customerId: current.customer_id,
+              serviceRecordId: current.completion_sms_review_service_record_id || null,
+            };
           });
-          if (wasSent) sent += 1;
+          if (wasSent?.sent) {
+            sent += 1;
+            if (wasSent.requestReview) {
+              try {
+                const ReviewService = require('./review-request');
+                await ReviewService.create({
+                  customerId: wasSent.customerId,
+                  serviceRecordId: wasSent.serviceRecordId,
+                  triggeredBy: 'auto',
+                  delayMinutes: 120,
+                });
+              } catch (reviewErr) {
+                logger.error(`[dispatch] Deferred review request schedule failed after completion SMS for service ${row.id}: ${reviewErr.message}`);
+              }
+            }
+          }
         } catch (e) {
           logger.error(`Deferred completion SMS for service ${row.id} failed: ${e.message}`);
         }

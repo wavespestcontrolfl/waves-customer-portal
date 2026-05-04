@@ -8,6 +8,11 @@ const { etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+function normalizeSendMethod(sendMethod) {
+  const method = sendMethod || 'both';
+  return ['sms', 'email', 'both'].includes(method) ? method : null;
+}
+
 // GET /stats
 router.get('/stats', async (req, res, next) => {
   try {
@@ -309,11 +314,16 @@ router.put('/:id', async (req, res, next) => {
 // once one channel lands so the cron can stop picking it up.
 async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = false } = {}) {
   const { sendInvoiceEmail } = require('../services/invoice-email');
+  const normalizedSendMethod = normalizeSendMethod(sendMethod);
+  if (!normalizedSendMethod) {
+    const error = `Invalid sendMethod: ${sendMethod}`;
+    return { sms: { ok: false, error }, email: { ok: false, error } };
+  }
 
   const sms = { ok: false };
   const email = { ok: false };
 
-  if (sendMethod === 'sms' || sendMethod === 'both') {
+  if (normalizedSendMethod === 'sms' || normalizedSendMethod === 'both') {
     try {
       await InvoiceService.sendViaSMS(invoiceId);
       sms.ok = true;
@@ -322,7 +332,7 @@ async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = 
     }
   }
 
-  if (sendMethod === 'email' || sendMethod === 'both') {
+  if (normalizedSendMethod === 'email' || normalizedSendMethod === 'both') {
     try {
       const r = await sendInvoiceEmail(invoiceId);
       if (r?.ok) email.ok = true;
@@ -393,6 +403,8 @@ router.post('/:id/send', async (req, res, next) => {
   try {
     const { id } = req.params;
     const { requestReview, scheduledAt, sendMethod } = req.body || {};
+    const normalizedSendMethod = normalizeSendMethod(sendMethod);
+    if (!normalizedSendMethod) return res.status(400).json({ error: 'sendMethod must be one of: sms, email, both' });
 
     // ── SCHEDULED PATH ──
     // Persist the user's review-request intent on the row instead of
@@ -408,7 +420,7 @@ router.post('/:id/send', async (req, res, next) => {
       const updated = await db('invoices').where({ id }).update({
         status: 'scheduled',
         scheduled_at: when,
-        send_method: sendMethod || 'both',
+        send_method: normalizedSendMethod,
         request_review_after_send: !!requestReview,
         updated_at: new Date(),
       });
@@ -421,7 +433,7 @@ router.post('/:id/send', async (req, res, next) => {
     // sendInvoiceNow handles the review-request gating internally so the
     // immediate and cron-driven paths share one source of truth.
     const { sms, email } = await sendInvoiceNow(id, {
-      sendMethod: sendMethod || 'both',
+      sendMethod: normalizedSendMethod,
       requestReview: !!requestReview,
     });
 

@@ -603,6 +603,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const reviewSuffix = bundledReviewUrl
       ? `\n\nEnjoyed the service? A quick review means the world: ${bundledReviewUrl}`
       : '';
+    const completionSmsDeferred = !!(sendCompletionSms && svc.cust_phone && scheduledSendAt);
 
     if (sendCompletionSms && svc.cust_phone) {
       try {
@@ -639,6 +640,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             completion_sms_scheduled_at: scheduledSendAt,
             completion_sms_body: finalBody,
             completion_sms_message_type: messageType,
+            completion_sms_request_review: !!requestReview,
+            completion_sms_review_service_record_id: requestReview ? record.id : null,
           });
         } else {
           await TwilioService.sendSMS(svc.cust_phone, finalBody, { customerId: svc.customer_id, messageType });
@@ -646,21 +649,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (e) { logger.error(`Completion SMS ${scheduledSendAt ? 'queue' : 'send'} failed: ${e.message}`); }
     }
 
-    // Only schedule the delayed follow-up message when the review wasn't
-    // already bundled into the completion SMS above. When the tech scheduled
-    // the completion SMS for later, slide the review-request delay so it
-    // lands ~2h after the SMS itself, not 2h after the underlying completion.
-    if (requestReview && svc.cust_phone && !bundledReviewUrl) {
+    // Only schedule the delayed follow-up message here when the review wasn't
+    // already bundled or deferred with the completion SMS. Deferred completion
+    // SMS rows create their review request only after the cron send succeeds.
+    if (requestReview && svc.cust_phone && !bundledReviewUrl && !completionSmsDeferred) {
       try {
         const ReviewService = require('../services/review-request');
-        const delayMinutes = scheduledSendAt
-          ? Math.max(1, Math.ceil((scheduledSendAt.getTime() + 120 * 60000 - Date.now()) / 60000))
-          : 120;
         await ReviewService.create({
           customerId: svc.customer_id,
           serviceRecordId: record.id,
           triggeredBy: 'auto',
-          delayMinutes,
+          delayMinutes: 120,
         });
       } catch (e) { logger.error(`[dispatch] Review request schedule failed: ${e.message}`); }
     }
