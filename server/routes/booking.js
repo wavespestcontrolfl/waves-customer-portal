@@ -41,6 +41,73 @@ function proximityReason(detourMin) {
   return 'Available time slot';
 }
 
+function dateLabels(date) {
+  const [year, month, day] = String(date).split('-').map(Number);
+  const d = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+  return {
+    dayOfWeek: d.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' }),
+    dayNum: day,
+    month: d.toLocaleDateString('en-US', { month: 'short', timeZone: 'America/New_York' }),
+    fullDate: d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' }),
+  };
+}
+
+function compareRankedSlots(a, b) {
+  const scoreA = a.score ?? a.rank ?? 999999;
+  const scoreB = b.score ?? b.rank ?? 999999;
+  if (scoreA !== scoreB) return scoreA - scoreB;
+  const dateCmp = String(a.date).localeCompare(String(b.date));
+  if (dateCmp !== 0) return dateCmp;
+  return String(a.start_time).localeCompare(String(b.start_time));
+}
+
+function curateSlots(candidates, today) {
+  const sorted = [...candidates].sort(compareRankedSlots);
+  const picks = [];
+  const pickedDates = new Set();
+
+  for (const slot of sorted) {
+    if (pickedDates.has(slot.date)) continue;
+    picks.push(slot);
+    pickedDates.add(slot.date);
+    if (picks.length === 4) break;
+  }
+
+  const replaceWorstWith = (replacement) => {
+    if (!replacement || picks.length === 0) return;
+    let worstIndex = 0;
+    for (let i = 1; i < picks.length; i++) {
+      if (compareRankedSlots(picks[worstIndex], picks[i]) < 0) worstIndex = i;
+    }
+    const remainingDates = new Set(picks.map((s, i) => (i === worstIndex ? null : s.date)).filter(Boolean));
+    if (remainingDates.has(replacement.date)) return;
+    picks[worstIndex] = replacement;
+  };
+
+  if (picks.length === 4) {
+    const allAm = picks.every(s => timeToMin(s.start_time) < 12 * 60);
+    const allPm = picks.every(s => timeToMin(s.start_time) >= 13 * 60);
+    if (allAm || allPm) {
+      // Business wants a choice across the day, even if route score alone clusters the top picks.
+      const missingHalf = allAm
+        ? sorted.find(s => timeToMin(s.start_time) >= 13 * 60)
+        : sorted.find(s => timeToMin(s.start_time) < 12 * 60);
+      replaceWorstWith(missingHalf);
+    }
+  }
+
+  const soonStart = etDateString(today);
+  const soonEnd = etDateString(addETDays(today, 3));
+  const hasSoonCandidate = sorted.some(s => s.date >= soonStart && s.date <= soonEnd);
+  const hasSoonPick = picks.some(s => s.date >= soonStart && s.date <= soonEnd);
+  if (hasSoonCandidate && !hasSoonPick) {
+    const soonPick = sorted.find(s => s.date >= soonStart && s.date <= soonEnd);
+    replaceWorstWith(soonPick);
+  }
+
+  return picks.sort((a, b) => String(a.date).localeCompare(String(b.date)) || String(a.start_time).localeCompare(String(b.start_time)));
+}
+
 function fallbackZoneCenter(city) {
   // Used only when no address/coords provided. Resolves via service_zones table.
   return db('service_zones').first().then(async () => {
@@ -149,6 +216,8 @@ router.get('/availability', async (req, res, next) => {
     const today = new Date();
     const defaultFrom = etDateString(addETDays(today, config.advance_days_min ?? 1));
     const defaultTo = etDateString(addETDays(today, config.advance_days_max ?? 14));
+    const rangeFrom = date_from || defaultFrom;
+    const rangeTo = date_to || defaultTo;
 
     const duration = duration_minutes
       ? parseInt(duration_minutes)
@@ -158,8 +227,8 @@ router.get('/availability', async (req, res, next) => {
       lat: resolvedLat,
       lng: resolvedLng,
       durationMinutes: duration,
-      dateFrom: date_from || defaultFrom,
-      dateTo: date_to || defaultTo,
+      dateFrom: rangeFrom,
+      dateTo: rangeTo,
       dayStartHour: parseInt((config.day_start || '08:00').split(':')[0]),
       dayEndHour: parseInt((config.day_end || '17:00').split(':')[0]),
       topN: 200,
@@ -167,11 +236,13 @@ router.get('/availability', async (req, res, next) => {
 
     // Enforce max_self_books_per_day — filter out dates already at cap
     const maxPerDay = config.max_self_books_per_day ?? 3;
+    const lunchStart = timeToMin(config.lunch_start || '12:00');
+    const lunchEnd = timeToMin(config.lunch_end || '13:00');
     const bookingCounts = await db('self_booked_appointments')
       .whereNot('status', 'cancelled')
       .whereBetween('date', [
-        date_from || defaultFrom.toISOString().split('T')[0],
-        date_to || defaultTo.toISOString().split('T')[0],
+        rangeFrom,
+        rangeTo,
       ])
       .select('date')
       .count('* as count')
@@ -181,25 +252,52 @@ router.get('/availability', async (req, res, next) => {
         .map(r => (typeof r.date === 'string' ? r.date.split('T')[0] : r.date.toISOString().split('T')[0]))
     );
 
-    // Group slots by date, anonymize tech, add reason + best_fit flag, dedupe (one slot per day+start)
-    const byDate = new Map();
+    const candidateMap = new Map();
     for (const slot of (result.slots || [])) {
       if (fullDays.has(slot.date)) continue;
+      const startMin = timeToMin(slot.start_time);
+      const endMin = timeToMin(slot.end_time);
+      // Lunch windows are reserved for route health and should never be self-booked.
+      if (startMin < lunchEnd && endMin > lunchStart) continue;
+      const key = `${slot.date}|${slot.start_time}`;
+      if (candidateMap.has(key)) continue;
+      const labels = dateLabels(slot.date);
+      candidateMap.set(key, {
+        date: slot.date,
+        ...labels,
+        start_time: slot.start_time,
+        end_time: slot.end_time,
+        start_label: minToTime12(startMin),
+        end_label: minToTime12(endMin),
+        detour_minutes: slot.detour_minutes,
+        reason: proximityReason(slot.detour_minutes),
+        technician_id: slot.technician.id,
+        rank: slot.rank,
+        score: slot.score,
+        startTime24: slot.start_time,
+        endTime24: slot.end_time,
+        start: minToTime12(startMin),
+        end: minToTime12(timeToMin(slot.end_time)),
+      });
+    }
+    const candidates = [...candidateMap.values()].sort(compareRankedSlots);
+    const curatedSlots = curateSlots(candidates, today);
+
+    // Group slots by date, anonymize tech, add reason + best_fit flag, dedupe (one slot per day+start)
+    const byDate = new Map();
+    for (const slot of candidates) {
       const key = slot.date;
       if (!byDate.has(key)) byDate.set(key, []);
       const bucket = byDate.get(key);
-      // Deduplicate: if we already have a slot at this start_time with a better score, skip
-      const existing = bucket.find(s => s.start_time === slot.start_time);
-      if (existing) continue;
       bucket.push({
         start_time: slot.start_time,
         end_time: slot.end_time,
-        start_label: minToTime12(timeToMin(slot.start_time)),
-        end_label: minToTime12(timeToMin(slot.end_time)),
+        start_label: slot.start_label,
+        end_label: slot.end_label,
         detour_minutes: slot.detour_minutes,
         reason: proximityReason(slot.detour_minutes),
         // Opaque identifiers the confirm step will replay
-        technician_id: slot.technician.id,
+        technician_id: slot.technician_id,
         rank: slot.rank,
         // Legacy aliases (existing BookingPage reads these)
         startTime24: slot.start_time,
@@ -214,13 +312,10 @@ router.get('/availability', async (req, res, next) => {
     for (const [date, slots] of byDate.entries()) {
       slots.sort((a, b) => a.start_time.localeCompare(b.start_time));
       const best = slots.reduce((acc, s) => (acc == null || s.rank < acc.rank ? s : acc), null);
-      const d = new Date(date + 'T12:00:00');
+      const labels = dateLabels(date);
       days.push({
         date,
-        dayOfWeek: d.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' }),
-        dayNum: d.getDate(),
-        month: d.toLocaleDateString('en-US', { month: 'short', timeZone: 'America/New_York' }),
-        fullDate: d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' }),
+        ...labels,
         slots: slots.map(s => ({
           ...s,
           is_best_fit: s === best,
@@ -230,6 +325,7 @@ router.get('/availability', async (req, res, next) => {
     days.sort((a, b) => a.date.localeCompare(b.date));
 
     res.json({
+      slots: curatedSlots.map(({ score, startTime24, endTime24, start, end, ...slot }) => slot),
       days,
       lat: resolvedLat,
       lng: resolvedLng,

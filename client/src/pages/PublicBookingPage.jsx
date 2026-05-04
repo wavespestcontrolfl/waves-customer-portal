@@ -13,9 +13,19 @@ const SERVICES = [
   { id: 'lawn_care', label: 'Lawn Care', duration: 60, icon: 'sprout', desc: 'Fertilization + weed control program' },
   { id: 'mosquito', label: 'Mosquito Control', duration: 45, icon: 'bug', desc: 'WaveGuard barrier treatment' },
   { id: 'tree_shrub', label: 'Tree & Shrub', duration: 60, icon: 'tree', desc: 'Ornamental plant care' },
-  { id: 'termite', label: 'Termite Inspection', duration: 90, icon: '🪵', desc: 'WDO inspection + treatment plan' },
+  { id: 'termite', label: 'Termite Inspection', duration: 90, icon: 'shield', desc: 'WDO inspection + treatment plan' },
   { id: 'rodent', label: 'Rodent Control', duration: 60, icon: 'mouse', desc: 'Exclusion + monitoring stations' },
 ];
+
+function ServiceLabel({ service }) {
+  if (!service) return null;
+  return (
+    <strong style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+      <Icon name={service.icon} size={16} strokeWidth={2.5} />
+      {service.label}
+    </strong>
+  );
+}
 
 export default function PublicBookingPage() {
   const [searchParams] = useSearchParams();
@@ -42,6 +52,7 @@ export default function PublicBookingPage() {
   const [address, setAddress] = useState({ line1: '', city: '', state: 'FL', zip: '' });
   const [coords, setCoords] = useState(null);
   const [availability, setAvailability] = useState([]);
+  const [curatedSlots, setCuratedSlots] = useState([]);
   const [selectedDate, setSelectedDate] = useState(null);
   const [selectedSlot, setSelectedSlot] = useState(null);
   const [contact, setContact] = useState({ firstName: '', lastName: '', phone: '', email: '' });
@@ -50,6 +61,18 @@ export default function PublicBookingPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [confCode, setConfCode] = useState('');
+
+  const updateAddress = useCallback((updater) => {
+    setAddress((current) => {
+      const next = typeof updater === 'function' ? updater(current) : updater;
+      return next;
+    });
+    setAvailability([]);
+    setCuratedSlots([]);
+    setSelectedDate(null);
+    setSelectedSlot(null);
+    setError('');
+  }, []);
 
   // Step 2 → load availability whenever we enter it
   const loadAvailability = useCallback(async () => {
@@ -68,13 +91,15 @@ export default function PublicBookingPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Could not load availability');
       setAvailability(data.days || []);
+      setCuratedSlots(data.slots || []);
       if (data.lat && data.lng) setCoords({ lat: data.lat, lng: data.lng });
-      if (!data.days || data.days.length === 0) {
+      if ((!data.slots || data.slots.length === 0) && (!data.days || data.days.length === 0)) {
         setError('No times available in the next 2 weeks. Call (941) 297-5749 and we\'ll get you on the schedule.');
       }
     } catch (err) {
       setError(err.message);
       setAvailability([]);
+      setCuratedSlots([]);
     }
     setLoading(false);
   }, [service, address]);
@@ -159,6 +184,16 @@ export default function PublicBookingPage() {
     fontSize: 14, fontWeight: 500, color: COLORS.slate600,
     display: 'block', marginBottom: 6,
   };
+  const stepTwoSlots = curatedSlots.length > 0
+    ? curatedSlots
+    : availability.flatMap(day => (day.slots || []).map(slot => ({
+      ...slot,
+      date: day.date,
+      fullDate: day.fullDate,
+      dayOfWeek: day.dayOfWeek,
+      dayNum: day.dayNum,
+      month: day.month,
+    }))).slice(0, 4);
 
   return (
     <WavesShell variant="customer" topBar="solid">
@@ -189,7 +224,7 @@ export default function PublicBookingPage() {
               Find a date &amp; time that works for you
             </h2>
             <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 24, lineHeight: 1.5 }}>
-              {service ? <>Booking <strong>{service.icon} {service.label}</strong>. </> : null}
+              {service ? <>Booking <ServiceLabel service={service} />. </> : null}
               Drop your address and we'll show you the next available slots — see you soon!
             </p>
             <div style={{ display: 'grid', gap: 14, marginBottom: 24 }}>
@@ -198,9 +233,9 @@ export default function PublicBookingPage() {
                 <AddressAutocomplete
                   autoFocus
                   value={address.line1}
-                  onChange={(v) => setAddress(a => ({ ...a, line1: v }))}
+                  onChange={(v) => updateAddress(a => ({ ...a, line1: v }))}
                   onSelect={(parts) => {
-                    setAddress(a => ({
+                    updateAddress(a => ({
                       line1: parts.line1 || parts.formatted || a.line1,
                       city: parts.city || a.city,
                       state: parts.state || a.state,
@@ -219,7 +254,7 @@ export default function PublicBookingPage() {
                     type="text"
                     placeholder="Bradenton"
                     value={address.city}
-                    onChange={e => setAddress(a => ({ ...a, city: e.target.value }))}
+                    onChange={e => updateAddress(a => ({ ...a, city: e.target.value }))}
                     style={inputStyle}
                   />
                 </div>
@@ -228,7 +263,7 @@ export default function PublicBookingPage() {
                   <input
                     type="text"
                     value={address.state}
-                    onChange={e => setAddress(a => ({ ...a, state: e.target.value.toUpperCase() }))}
+                    onChange={e => updateAddress(a => ({ ...a, state: e.target.value.toUpperCase() }))}
                     style={inputStyle}
                     maxLength={2}
                   />
@@ -239,7 +274,7 @@ export default function PublicBookingPage() {
                     type="text"
                     placeholder="34203"
                     value={address.zip}
-                    onChange={e => setAddress(a => ({ ...a, zip: e.target.value.replace(/\D/g, '').slice(0, 5) }))}
+                    onChange={e => updateAddress(a => ({ ...a, zip: e.target.value.replace(/\D/g, '').slice(0, 5) }))}
                     style={inputStyle}
                   />
                 </div>
@@ -262,10 +297,10 @@ export default function PublicBookingPage() {
         {step === 2 && (
           <div style={{ animation: 'slideUp 0.4s ease-out' }}>
             <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
-              Pick a time
+              {stepTwoSlots.length > 0 && stepTwoSlots.length < 4 ? 'Your best times' : 'Your best 4 times'}
             </h2>
             <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
-              ⭐ Times marked "Best fit" are when we'll already be working near you.
+              These are the windows when we'll already be working in your neighborhood — pick whichever fits.
             </p>
 
             {loading && (
@@ -281,57 +316,47 @@ export default function PublicBookingPage() {
               }}>{error}</div>
             )}
 
-            {!loading && availability.length > 0 && (
-              <div style={{ display: 'grid', gap: 14 }}>
-                {availability.map(day => (
-                  <div key={day.date} style={{
-                    background: COLORS.white, border: `1px solid ${COLORS.slate200}`,
-                    borderRadius: 12, padding: 14,
-                  }}>
-                    <div style={{
-                      fontSize: 14, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 10,
-                      display: 'flex', alignItems: 'baseline', gap: 8,
-                    }}>
-                      <span>{day.fullDate}</span>
-                    </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
-                      {day.slots.map((slot, i) => {
-                        const isSelected = selectedDate === day.date && selectedSlot?.start_time === slot.start_time;
-                        return (
-                          <button
-                            key={i}
-                            onClick={() => { setSelectedDate(day.date); setSelectedSlot(slot); }}
-                            style={{
-                              padding: '10px 12px', borderRadius: 10, cursor: 'pointer',
-                              background: isSelected ? COLORS.wavesBlue : (slot.is_best_fit ? COLORS.greenLight : '#fff'),
-                              color: isSelected ? '#fff' : COLORS.blueDeeper,
-                              border: `1.5px solid ${isSelected ? COLORS.wavesBlue : (slot.is_best_fit ? COLORS.green : COLORS.slate200)}`,
-                              textAlign: 'left', transition: 'all 0.15s',
-                            }}
-                          >
-                            {slot.is_best_fit && (
-                              <div style={{
-                                fontSize: 10, fontWeight: 700, letterSpacing: '0.5px',
-                                color: isSelected ? '#fff' : COLORS.green,
-                                marginBottom: 2, textTransform: 'uppercase',
-                              }}>⭐ Best fit</div>
-                            )}
-                            <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 2 }}>
-                              {slot.start_label}
-                            </div>
-                            <div style={{
-                              fontSize: 12,
-                              color: isSelected ? 'rgba(255,255,255,0.85)' : COLORS.slate600,
-                              lineHeight: 1.3,
-                            }}>
-                              {slot.reason}
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
+            {!loading && stepTwoSlots.length > 0 && (
+              <div style={{ display: 'grid', gap: 10 }}>
+                {stepTwoSlots.map((slot, i) => {
+                  const isSelected = selectedDate === slot.date && selectedSlot?.start_time === slot.start_time;
+                  return (
+                    <button
+                      key={`${slot.date}-${slot.start_time}-${i}`}
+                      onClick={() => { setSelectedDate(slot.date); setSelectedSlot(slot); }}
+                      style={{
+                        width: '100%',
+                        padding: '14px 16px',
+                        borderRadius: 12,
+                        cursor: 'pointer',
+                        background: isSelected ? COLORS.wavesBlue : COLORS.white,
+                        color: isSelected ? '#fff' : COLORS.blueDeeper,
+                        border: `1.5px solid ${isSelected ? COLORS.wavesBlue : COLORS.slate200}`,
+                        textAlign: 'left',
+                        transition: 'background-color 0.15s, border-color 0.15s, color 0.15s',
+                      }}
+                    >
+                      <div style={{
+                        fontSize: 14,
+                        fontWeight: 600,
+                        color: isSelected ? 'rgba(255,255,255,0.82)' : COLORS.slate600,
+                        marginBottom: 5,
+                      }}>
+                        {slot.fullDate}
+                      </div>
+                      <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 4 }}>
+                        {slot.start_label}
+                      </div>
+                      <div style={{
+                        fontSize: 14,
+                        color: isSelected ? 'rgba(255,255,255,0.86)' : COLORS.slate600,
+                        lineHeight: 1.35,
+                      }}>
+                        {slot.reason}
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
             )}
 
