@@ -16,12 +16,7 @@ exports.up = async (knex) => {
   });
 };
 
-exports.down = async (knex) => {
-  const hasRequestReview = await knex.schema.hasColumn('scheduled_services', 'completion_sms_request_review');
-  const hasReviewServiceRecord = await knex.schema.hasColumn('scheduled_services', 'completion_sms_review_service_record_id');
-
-  await knex.schema.alterTable('scheduled_services', (t) => {
-    if (hasReviewServiceRecord) t.dropColumn('completion_sms_review_service_record_id');
-    if (hasRequestReview) t.dropColumn('completion_sms_request_review');
-  });
+exports.down = async () => {
+  // No-op: these columns are owned by 20260501000002 on fresh databases.
+  // This migration only backfills already-migrated environments.
 };

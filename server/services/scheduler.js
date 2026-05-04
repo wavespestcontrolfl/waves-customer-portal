@@ -320,6 +320,39 @@ function initScheduledJobs() {
         .update({ send_claim_at: new Date() })
         .returning(['id', 'invoice_number', 'send_method']);
 
+      const pendingReviewInvoices = await db('invoices')
+        .whereNull('scheduled_at')
+        .where({ request_review_after_send: true })
+        .whereNotIn('status', ['paid', 'void', 'refunded'])
+        .where(function () {
+          this.whereNull('send_claim_at')
+            .orWhere('send_claim_at', '<', new Date(Date.now() - claimTtlMs));
+        })
+        .update({ send_claim_at: new Date() })
+        .returning(['id', 'invoice_number', 'customer_id', 'service_record_id']);
+      for (const inv of pendingReviewInvoices) {
+        try {
+          const ReviewService = require('./review-request');
+          await ReviewService.create({
+            customerId: inv.customer_id,
+            serviceRecordId: inv.service_record_id || null,
+            triggeredBy: 'auto',
+            delayMinutes: 120,
+          });
+          await db('invoices').where({ id: inv.id }).update({
+            request_review_after_send: false,
+            send_claim_at: null,
+            updated_at: new Date(),
+          });
+        } catch (reviewErr) {
+          await db('invoices').where({ id: inv.id }).update({
+            send_claim_at: null,
+            updated_at: new Date(),
+          }).catch(() => {});
+          logger.error(`Scheduled invoice ${inv.invoice_number} review retry failed: ${reviewErr.name || 'Error'}`);
+        }
+      }
+
       if (claimed.length === 0) return;
 
       const { sendInvoiceNow } = require('../routes/admin-invoices');
