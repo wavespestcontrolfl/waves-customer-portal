@@ -160,28 +160,28 @@ function normalizeInventoryUnit(unit) {
   return String(unit || '').trim().toLowerCase().replace(/\s+/g, '_');
 }
 
-const INVENTORY_UNIT_TO_OZ = {
-  oz: 1,
-  fl_oz: 1,
-  floz: 1,
-  ounce: 1,
-  ounces: 1,
-  gal: 128,
-  gallon: 128,
-  gallons: 128,
-  qt: 32,
-  quart: 32,
-  pt: 16,
-  pint: 16,
-  ml: 0.033814,
-  l: 33.814,
-  liter: 33.814,
-  lb: 16,
-  lbs: 16,
-  pound: 16,
-  g: 0.035274,
-  gram: 0.035274,
-  kg: 35.274,
+const INVENTORY_UNITS = {
+  fl_oz: { dimension: 'volume', factor: 1 },
+  floz: { dimension: 'volume', factor: 1 },
+  gal: { dimension: 'volume', factor: 128 },
+  gallon: { dimension: 'volume', factor: 128 },
+  gallons: { dimension: 'volume', factor: 128 },
+  qt: { dimension: 'volume', factor: 32 },
+  quart: { dimension: 'volume', factor: 32 },
+  pt: { dimension: 'volume', factor: 16 },
+  pint: { dimension: 'volume', factor: 16 },
+  ml: { dimension: 'volume', factor: 0.033814 },
+  l: { dimension: 'volume', factor: 33.814 },
+  liter: { dimension: 'volume', factor: 33.814 },
+  oz: { dimension: 'ambiguous', factor: 1 },
+  ounce: { dimension: 'ambiguous', factor: 1 },
+  ounces: { dimension: 'ambiguous', factor: 1 },
+  lb: { dimension: 'weight', factor: 16 },
+  lbs: { dimension: 'weight', factor: 16 },
+  pound: { dimension: 'weight', factor: 16 },
+  g: { dimension: 'weight', factor: 0.035274 },
+  gram: { dimension: 'weight', factor: 0.035274 },
+  kg: { dimension: 'weight', factor: 35.274 },
 };
 
 function convertInventoryQuantity(amount, fromUnit, toUnit) {
@@ -190,10 +190,13 @@ function convertInventoryQuantity(amount, fromUnit, toUnit) {
   const from = normalizeInventoryUnit(fromUnit);
   const to = normalizeInventoryUnit(toUnit);
   if (!from || !to || from === to) return n;
-  const fromFactor = INVENTORY_UNIT_TO_OZ[from];
-  const toFactor = INVENTORY_UNIT_TO_OZ[to];
-  if (!fromFactor || !toFactor) return null;
-  return Number(((n * fromFactor) / toFactor).toFixed(4));
+  const fromDef = INVENTORY_UNITS[from];
+  const toDef = INVENTORY_UNITS[to];
+  if (!fromDef || !toDef) return null;
+  const fromDimension = fromDef.dimension === 'ambiguous' ? toDef.dimension : fromDef.dimension;
+  const toDimension = toDef.dimension === 'ambiguous' ? fromDef.dimension : toDef.dimension;
+  if (fromDimension !== toDimension) return null;
+  return Number(((n * fromDef.factor) / toDef.factor).toFixed(4));
 }
 
 function calculateInventoryCost({ product, deductedAmount, inventoryUnit, amount, amountUnit }) {
@@ -211,7 +214,9 @@ function calculateInventoryCost({ product, deductedAmount, inventoryUnit, amount
 
   const bestPrice = product?.best_price != null ? Number(product.best_price) : null;
   const unitSizeOz = product?.unit_size_oz != null ? Number(product.unit_size_oz) : null;
-  const usedOz = convertInventoryQuantity(amount, amountUnit, 'oz');
+  const amountUnitDef = INVENTORY_UNITS[normalizeInventoryUnit(amountUnit)];
+  const canonicalOzUnit = amountUnitDef?.dimension === 'volume' ? 'fl_oz' : 'oz';
+  const usedOz = convertInventoryQuantity(amount, amountUnit, canonicalOzUnit);
   if (
     bestPrice != null && Number.isFinite(bestPrice) && bestPrice >= 0
     && unitSizeOz != null && Number.isFinite(unitSizeOz) && unitSizeOz > 0
