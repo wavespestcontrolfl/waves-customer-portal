@@ -15,7 +15,7 @@ import {
   useDroppable,
   pointerWithin,
 } from '@dnd-kit/core';
-import { Leaf } from 'lucide-react';
+import { Leaf, ShieldCheck } from 'lucide-react';
 import { Badge, cn } from '../ui';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
 
@@ -274,7 +274,7 @@ function NowLine() {
   );
 }
 
-function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit, onResize, onTreatmentPlan, isSelected, onToggleSelect, routeOrder, accent }) {
+function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit, onResize, onTreatmentPlan, onViewAudit, isSelected, onToggleSelect, routeOrder, accent }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -282,6 +282,8 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
 
   const [resizeHeight, setResizeHeight] = useState(null);
   const effectiveHeight = resizeHeight != null ? resizeHeight : Math.max(height, SLOT_HEIGHT - 2);
+  const hasAuditAction = service.status === 'completed' && onViewAudit && (service.customerId || service.customer_id);
+  const hasPlanAction = isLawnService(service) && onTreatmentPlan;
 
   const dragStyle = transform
     ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` }
@@ -348,13 +350,31 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
     >
       {routeOrder != null && (
         <div
-          className={cn('absolute top-0.5 u-nums text-10 font-medium bg-white/85 text-zinc-700 px-1 rounded-xs', isLawnService(service) ? 'right-6' : 'right-0.5')}
+          className={cn(
+            'absolute top-0.5 u-nums text-10 font-medium bg-white/85 text-zinc-700 px-1 rounded-xs',
+            hasAuditAction && hasPlanAction ? 'right-11' : hasAuditAction || hasPlanAction ? 'right-6' : 'right-0.5'
+          )}
           style={{ minWidth: 14, textAlign: 'center', lineHeight: '14px' }}
         >
           {routeOrder}
         </div>
       )}
-      {isLawnService(service) && onTreatmentPlan && (
+      {hasAuditAction && (
+        <button
+          type="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onViewAudit(service);
+          }}
+          className="absolute top-0.5 right-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring"
+          title="View completion audit"
+          aria-label="View completion audit"
+        >
+          <ShieldCheck size={12} strokeWidth={1.75} />
+        </button>
+      )}
+      {hasPlanAction && (
         <button
           type="button"
           onPointerDown={(e) => e.stopPropagation()}
@@ -362,7 +382,10 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
             e.stopPropagation();
             onTreatmentPlan(service);
           }}
-          className="absolute top-0.5 right-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring"
+          className={cn(
+            'absolute top-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring',
+            hasAuditAction ? 'right-6' : 'right-0.5'
+          )}
           title="Treatment plan"
           aria-label="Open treatment plan"
         >
@@ -411,7 +434,7 @@ function SlotDroppable({ techId, slotIdx, onCreateStart }) {
   );
 }
 
-function TechColumn({ tech, services, onEdit, onTreatmentPlan, onCreateSlot, onResize, selection, onToggleSelect, accent, showNowLine }) {
+function TechColumn({ tech, services, onEdit, onTreatmentPlan, onViewAudit, onCreateSlot, onResize, selection, onToggleSelect, accent, showNowLine }) {
   const gridRef = useRef(null);
   const [sel, setSel] = useState(null); // { startIdx, endIdx }
   const selRef = useRef(sel);
@@ -511,6 +534,7 @@ function TechColumn({ tech, services, onEdit, onTreatmentPlan, onCreateSlot, onR
                 laneCount={lane.laneCount}
                 onEdit={onEdit}
                 onTreatmentPlan={onTreatmentPlan}
+                onViewAudit={onViewAudit}
                 onResize={onResize}
                 isSelected={selection?.has(svc.id)}
                 onToggleSelect={onToggleSelect}
@@ -557,7 +581,7 @@ function TimeAxis() {
   );
 }
 
-function AllDayStrip({ services, onEdit, onTreatmentPlan }) {
+function AllDayStrip({ services, onEdit, onTreatmentPlan, onViewAudit }) {
   if (services.length === 0) return null;
   return (
     <div
@@ -587,13 +611,25 @@ function AllDayStrip({ services, onEdit, onTreatmentPlan }) {
               <Leaf size={13} strokeWidth={1.75} />
             </button>
           )}
+          {svc.status === 'completed' && onViewAudit && (svc.customerId || svc.customer_id) && (
+            <button
+              type="button"
+              onClick={() => onViewAudit(svc)}
+              className="h-6 w-6 inline-flex items-center justify-center rounded-sm bg-white text-zinc-800 u-focus-ring"
+              style={{ border: '1px solid #D4D4D8' }}
+              title="View completion audit"
+              aria-label="View completion audit"
+            >
+              <ShieldCheck size={13} strokeWidth={1.75} />
+            </button>
+          )}
         </span>
       ))}
     </div>
   );
 }
 
-function RailItem({ service, onEdit, onTreatmentPlan, isSelected, onToggleSelect }) {
+function RailItem({ service, onEdit, onTreatmentPlan, onViewAudit, isSelected, onToggleSelect }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -644,11 +680,25 @@ function RailItem({ service, onEdit, onTreatmentPlan, isSelected, onToggleSelect
           Plan
         </button>
       )}
+      {service.status === 'completed' && onViewAudit && (service.customerId || service.customer_id) && (
+        <button
+          type="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onViewAudit(service);
+          }}
+          className="mt-1 h-7 w-full inline-flex items-center justify-center gap-1 rounded-xs bg-white border-hairline border-zinc-300 text-zinc-900 text-10 uppercase tracking-label u-focus-ring"
+        >
+          <ShieldCheck size={12} strokeWidth={1.75} />
+          Audit
+        </button>
+      )}
     </div>
   );
 }
 
-function UnassignedRail({ services, onEdit, onTreatmentPlan, selection, onToggleSelect }) {
+function UnassignedRail({ services, onEdit, onTreatmentPlan, onViewAudit, selection, onToggleSelect }) {
   const [open, setOpen] = useState(true);
   const { setNodeRef, isOver } = useDroppable({
     id: 'rail-unassigned',
@@ -706,6 +756,7 @@ function UnassignedRail({ services, onEdit, onTreatmentPlan, selection, onToggle
                 service={svc}
                 onEdit={onEdit}
                 onTreatmentPlan={onTreatmentPlan}
+                onViewAudit={onViewAudit}
                 isSelected={selection?.has(svc.id)}
                 onToggleSelect={onToggleSelect}
               />
@@ -775,6 +826,7 @@ export default function TimeGridDay({
   technicians,
   onEdit,
   onTreatmentPlan,
+  onViewAudit,
   onChange,
   onCreateSlot,
   onDateChange,
@@ -1078,7 +1130,7 @@ export default function TimeGridDay({
       style={{ border: '1px solid #E4E4E7' }}
     >
       {onDateChange && <WeekStrip date={date} onDateChange={onDateChange} />}
-      <AllDayStrip services={allDay} onEdit={onEdit} onTreatmentPlan={onTreatmentPlan} />
+      <AllDayStrip services={allDay} onEdit={onEdit} onTreatmentPlan={onTreatmentPlan} onViewAudit={onViewAudit} />
       {selection.size > 0 && (
         <BulkActionBar
           count={selection.size}
@@ -1096,6 +1148,7 @@ export default function TimeGridDay({
               services={unassignedInRail}
               onEdit={onEdit}
               onTreatmentPlan={onTreatmentPlan}
+              onViewAudit={onViewAudit}
               selection={selection}
               onToggleSelect={toggleSelection}
             />
@@ -1115,6 +1168,7 @@ export default function TimeGridDay({
                     services={byTech[tech.id] || []}
                     onEdit={onEdit}
                     onTreatmentPlan={onTreatmentPlan}
+                    onViewAudit={onViewAudit}
                     onCreateSlot={onCreateSlot ? handleCreateSlot : undefined}
                     onResize={handleResize}
                     selection={selection}

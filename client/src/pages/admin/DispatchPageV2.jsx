@@ -55,6 +55,7 @@ import TreatmentPlanPanel from '../../components/schedule/TreatmentPlanPanel';
 import MarkPrepaidModal from '../../components/schedule/MarkPrepaidModal';
 import RecurringAlertsBannerV2 from '../../components/schedule/RecurringAlertsBannerV2';
 import CreateAppointmentModal from '../../components/schedule/CreateAppointmentModal';
+import Customer360ProfileV2 from '../../components/admin/Customer360ProfileV2';
 import HorizontalScroll from '../../components/HorizontalScroll';
 import useIsMobile from '../../hooks/useIsMobile';
 import { Button, Badge, Card, CardBody, cn } from '../../components/ui';
@@ -190,7 +191,7 @@ function PropertyAlertsV2({ alerts }) {
   );
 }
 
-function ServiceCardV2({ service, zoneColors, onStatusChange, onComplete, onReschedule, onDelete, onProtocol, onTreatmentPlan, onEdit }) {
+function ServiceCardV2({ service, zoneColors, onStatusChange, onComplete, onReschedule, onDelete, onProtocol, onTreatmentPlan, onViewAudit, onEdit }) {
   const [updating, setUpdating] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editType, setEditType] = useState(service.serviceType || '');
@@ -496,6 +497,9 @@ function ServiceCardV2({ service, zoneColors, onStatusChange, onComplete, onResc
           </>
         )}
         {status === 'completed' && <Badge tone="strong">Completed</Badge>}
+        {status === 'completed' && service.customerId && (
+          <Button size="sm" variant="secondary" onClick={() => onViewAudit?.(service)}>View Audit</Button>
+        )}
         <Button size="sm" variant="secondary" onClick={() => onProtocol?.(service)}>Protocol</Button>
         {isLawn && <Button size="sm" variant="secondary" onClick={() => onTreatmentPlan?.(service)}>Treatment Plan</Button>}
         {isLawn && !lawnDone && (
@@ -519,7 +523,7 @@ function ServiceCardV2({ service, zoneColors, onStatusChange, onComplete, onResc
   );
 }
 
-function TechSectionV2({ tech, zoneColors, zoneLabels, onStatusChange, onComplete, onReschedule, onDelete, onProtocol, onTreatmentPlan, onEdit }) {
+function TechSectionV2({ tech, zoneColors, zoneLabels, onStatusChange, onComplete, onReschedule, onDelete, onProtocol, onTreatmentPlan, onViewAudit, onEdit }) {
   const [collapsed, setCollapsed] = useState(false);
   const completedCount = tech.completedServices || tech.services.filter((s) => s.status === 'completed').length;
   const totalHrs = Math.round(((tech.estimatedServiceMinutes || 0) + (tech.estimatedDriveMinutes || 0)) / 60 * 10) / 10;
@@ -590,6 +594,7 @@ function TechSectionV2({ tech, zoneColors, zoneLabels, onStatusChange, onComplet
                 onDelete={onDelete}
                 onProtocol={onProtocol}
                 onTreatmentPlan={onTreatmentPlan}
+                onViewAudit={onViewAudit}
                 onEdit={onEdit}
               />
             </div>
@@ -760,6 +765,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
   const [prepaidService, setPrepaidService] = useState(null);
   const [protocolService, setProtocolService] = useState(null);
   const [treatmentPlanService, setTreatmentPlanService] = useState(null);
+  const [auditContext, setAuditContext] = useState(null);
   const [showNewAppt, setShowNewAppt] = useState(false);
   const [newApptDefaults, setNewApptDefaults] = useState(null);
   const [scheduleRefreshKey, setScheduleRefreshKey] = useState(0);
@@ -1429,6 +1435,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
               technicians={technicians}
               onEdit={(svc) => setEditingService(svc)}
               onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
+              onViewAudit={(svc) => setAuditContext({ customerId: svc.customerId || svc.customer_id, scheduledServiceId: svc.id })}
               onChange={() => fetchSchedule(date)}
               onDateChange={setDate}
               onCreateSlot={({ date: slotDate, windowStart, techId }) => {
@@ -1447,6 +1454,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
               onEdit={(svc) => setDetailService(svc)}
               onEnRoute={handleEnRoute}
               onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
+              onViewAudit={(svc) => setAuditContext({ customerId: svc.customerId || svc.customer_id, scheduledServiceId: svc.id })}
             />
           </div>
         </>
@@ -1589,6 +1597,14 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
         <TreatmentPlanPanel
           service={treatmentPlanService}
           onClose={() => setTreatmentPlanService(null)}
+        />
+      )}
+      {auditContext?.customerId && (
+        <Customer360ProfileV2
+          customerId={auditContext.customerId}
+          initialTab="services"
+          initialScheduledServiceId={auditContext.scheduledServiceId}
+          onClose={() => setAuditContext(null)}
         />
       )}
     </div>

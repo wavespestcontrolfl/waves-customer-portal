@@ -213,8 +213,8 @@ function StatCardV2({ label, value, alert }) {
 }
 
 // ─── Service row (collapsible) ───────────────────────────────────
-function ServiceRowV2({ service: s }) {
-  const [expanded, setExpanded] = useState(false);
+function ServiceRowV2({ service: s, initiallyExpanded = false }) {
+  const [expanded, setExpanded] = useState(initiallyExpanded);
   const structuredNotes = parseStructuredNotes(s.structured_notes);
   const managerApproval = structuredNotes.waveguardManagerApproval;
   const tankCleanout = structuredNotes.waveguardTankCleanout;
@@ -401,10 +401,10 @@ function AdminAutopayPanelV2({ customerId, monthlyRate, customerName }) {
 // ============================================================================
 // MAIN COMPONENT
 // ============================================================================
-export default function Customer360ProfileV2({ customerId, onClose }) {
+export default function Customer360ProfileV2({ customerId, onClose, initialTab = 'overview', initialScheduledServiceId = null }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState('overview');
+  const [activeTab, setActiveTab] = useState(initialTab);
   const [timelineFilter, setTimelineFilter] = useState('all');
   const [timeline, setTimeline] = useState([]);
   const [comms, setComms] = useState([]);
@@ -992,7 +992,13 @@ export default function Customer360ProfileV2({ customerId, onClose }) {
               <SectionTitle>Service History ({services.length})</SectionTitle>
               {services.length === 0 ? <div className="text-13 text-ink-secondary">No service records</div> : (
                 <div className="flex flex-col">
-                  {services.map((s, i) => <ServiceRowV2 key={i} service={s} />)}
+                  {services.map((s, i) => (
+                    <ServiceRowV2
+                      key={i}
+                      service={s}
+                      initiallyExpanded={!!initialScheduledServiceId && String(s.scheduled_service_id || '') === String(initialScheduledServiceId)}
+                    />
+                  ))}
                 </div>
               )}
               {scheduled.length > 0 && (
