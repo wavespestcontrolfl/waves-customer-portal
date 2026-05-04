@@ -34,6 +34,17 @@ function minToTime12(min) {
   return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${ampm}`;
 }
 
+function ceilToGrid(min, gridMinutes = 15) {
+  return Math.ceil(min / gridMinutes) * gridMinutes;
+}
+
+function cleanBookingStart(rawStartMin, slot, dayStartMin, gridMinutes = 15) {
+  if (!slot?.insertion?.after_stop_id && rawStartMin < dayStartMin + gridMinutes) {
+    return dayStartMin;
+  }
+  return ceilToGrid(rawStartMin, gridMinutes);
+}
+
 function proximityReason(detourMin) {
   if (detourMin <= 2) return 'We have a tech right around the corner';
   if (detourMin <= 7) return 'A tech will be working nearby';
@@ -120,20 +131,51 @@ function fallbackZoneCenter(city) {
   });
 }
 
-// GET /api/booking/customer-lookup?phone=9415551234 — returns existing customer if phone matches
+// GET /api/booking/customer-lookup?phone=9415551234 OR ?address=...&city=...&zip=...
 router.get('/customer-lookup', async (req, res, next) => {
   try {
-    const { phone } = req.query;
-    if (!phone) return res.json({ customer: null });
-    const digits = String(phone).replace(/\D/g, '');
-    if (digits.length !== 10) return res.json({ customer: null });
+    const { phone, address, city, zip } = req.query;
+    const customerFields = ['id', 'first_name', 'last_name', 'email', 'address_line1', 'city', 'state', 'zip'];
+    const phoneCustomerFields = [...customerFields, 'phone'];
+    let customer = null;
 
-    const customer = await db('customers')
-      .whereRaw("regexp_replace(phone, '[^0-9]', '', 'g') = ?", [digits])
-      .select('id', 'first_name', 'last_name', 'email', 'address_line1', 'city', 'state', 'zip')
-      .first();
+    if (phone) {
+      const digits = String(phone).replace(/\D/g, '');
+      if (digits.length !== 10) return res.json({ customer: null });
 
-    res.json({ customer: customer || null });
+      const query = db('customers')
+        .whereRaw("regexp_replace(phone, '[^0-9]', '', 'g') = ?", [digits]);
+
+      if (address) {
+        const line1 = String(address).split(',')[0].trim().toLowerCase();
+        const normalizedAddress = line1.replace(/[^a-z0-9]/g, '');
+        if (normalizedAddress) {
+          query.andWhereRaw("lower(regexp_replace(coalesce(address_line1, ''), '[^a-zA-Z0-9]', '', 'g')) = ?", [normalizedAddress]);
+        }
+      }
+      if (city) query.andWhereRaw('lower(city) = ?', [String(city).trim().toLowerCase()]);
+      if (zip) query.andWhere('zip', String(zip).replace(/\D/g, '').slice(0, 5));
+
+      customer = await query.select(phoneCustomerFields).first();
+      return res.json({ customer: customer || null });
+    }
+
+    if (address) {
+      const line1 = String(address).split(',')[0].trim().toLowerCase();
+      if (line1) {
+        const normalizedAddress = line1.replace(/[^a-z0-9]/g, '');
+        const query = db('customers')
+          .whereRaw("lower(regexp_replace(coalesce(address_line1, ''), '[^a-zA-Z0-9]', '', 'g')) = ?", [normalizedAddress]);
+
+        if (city) query.andWhereRaw('lower(city) = ?', [String(city).trim().toLowerCase()]);
+        if (zip) query.andWhere('zip', String(zip).replace(/\D/g, '').slice(0, 5));
+
+        customer = await query.select(customerFields).first();
+      }
+      return res.json({ customer: null, possible_match: !!customer });
+    }
+
+    res.json({ customer: null });
   } catch (err) { next(err); }
 });
 
@@ -236,6 +278,9 @@ router.get('/availability', async (req, res, next) => {
 
     // Enforce max_self_books_per_day — filter out dates already at cap
     const maxPerDay = config.max_self_books_per_day ?? 3;
+    const slotGridMinutes = config.slot_grid_minutes || 15;
+    const dayStartMin = timeToMin(config.day_start || '08:00');
+    const dayEndMin = timeToMin(config.day_end || '17:00');
     const lunchStart = timeToMin(config.lunch_start || '12:00');
     const lunchEnd = timeToMin(config.lunch_end || '13:00');
     const bookingCounts = await db('self_booked_appointments')
@@ -255,18 +300,23 @@ router.get('/availability', async (req, res, next) => {
     const candidateMap = new Map();
     for (const slot of (result.slots || [])) {
       if (fullDays.has(slot.date)) continue;
-      const startMin = timeToMin(slot.start_time);
-      const endMin = timeToMin(slot.end_time);
+      const rawStartMin = timeToMin(slot.start_time);
+      // Route scoring returns minute-level travel offsets; customers should see clean booking windows.
+      const startMin = cleanBookingStart(rawStartMin, slot, dayStartMin, slotGridMinutes);
+      const endMin = startMin + duration;
+      if (endMin > dayEndMin) continue;
       // Lunch windows are reserved for route health and should never be self-booked.
       if (startMin < lunchEnd && endMin > lunchStart) continue;
-      const key = `${slot.date}|${slot.start_time}`;
+      const startTime = `${String(Math.floor(startMin / 60)).padStart(2, '0')}:${String(startMin % 60).padStart(2, '0')}`;
+      const endTime = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+      const key = `${slot.date}|${startTime}`;
       if (candidateMap.has(key)) continue;
       const labels = dateLabels(slot.date);
       candidateMap.set(key, {
         date: slot.date,
         ...labels,
-        start_time: slot.start_time,
-        end_time: slot.end_time,
+        start_time: startTime,
+        end_time: endTime,
         start_label: minToTime12(startMin),
         end_label: minToTime12(endMin),
         detour_minutes: slot.detour_minutes,
@@ -274,10 +324,10 @@ router.get('/availability', async (req, res, next) => {
         technician_id: slot.technician.id,
         rank: slot.rank,
         score: slot.score,
-        startTime24: slot.start_time,
-        endTime24: slot.end_time,
+        startTime24: startTime,
+        endTime24: endTime,
         start: minToTime12(startMin),
-        end: minToTime12(timeToMin(slot.end_time)),
+        end: minToTime12(endMin),
       });
     }
     const candidates = [...candidateMap.values()].sort(compareRankedSlots);
@@ -364,41 +414,52 @@ router.post('/confirm', async (req, res, next) => {
     }
 
     // Resolve customer
-    let custId = customer_id;
+    let custId = null;
     let estimate = null;
     if (estimate_id) {
       estimate = await db('estimates').where('id', estimate_id).first();
       if (!custId) custId = estimate?.customer_id;
     }
 
-    // Create customer from new_customer payload if none resolved
-    if (!custId && new_customer && new_customer.phone && new_customer.first_name) {
-      const phoneDigits = String(new_customer.phone).replace(/\D/g, '');
-      // Double-check no existing match (race-safe)
+    const phoneDigits = new_customer?.phone ? String(new_customer.phone).replace(/\D/g, '') : '';
+    if (!custId && phoneDigits) {
       const existing = await db('customers')
         .whereRaw("regexp_replace(phone, '[^0-9]', '', 'g') = ?", [phoneDigits])
         .first();
       if (existing) {
+        if (!customer_id) {
+          return res.status(409).json({ error: 'This phone number is already on file. Please verify the customer profile before booking.' });
+        }
+        if (String(existing.id) !== String(customer_id)) {
+          return res.status(400).json({ error: 'Customer lookup mismatch' });
+        }
         custId = existing.id;
-      } else {
-        const [created] = await db('customers').insert({
-          first_name: new_customer.first_name,
-          last_name: new_customer.last_name || '',
-          phone: phoneDigits,
-          email: new_customer.email || null,
-          address_line1: new_customer.address_line1 || null,
-          city: new_customer.city || null,
-          state: new_customer.state || 'FL',
-          zip: new_customer.zip || null,
-          latitude: new_customer.lat || null,
-          longitude: new_customer.lng || null,
-        }).returning('id');
-        custId = created.id || created;
-        await db('notification_prefs')
-          .insert({ customer_id: custId })
-          .onConflict('customer_id')
-          .ignore();
       }
+    }
+
+    if (customer_id && !custId && !phoneDigits && !estimate_id) {
+      return res.status(400).json({ error: 'Phone verification required for existing customer booking' });
+    }
+
+    // Create customer from new_customer payload if none resolved
+    if (!custId && new_customer && phoneDigits && new_customer.first_name) {
+      const [created] = await db('customers').insert({
+        first_name: new_customer.first_name,
+        last_name: new_customer.last_name || '',
+        phone: phoneDigits,
+        email: new_customer.email || null,
+        address_line1: new_customer.address_line1 || null,
+        city: new_customer.city || null,
+        state: new_customer.state || 'FL',
+        zip: new_customer.zip || null,
+        latitude: new_customer.lat || null,
+        longitude: new_customer.lng || null,
+      }).returning('id');
+      custId = created.id || created;
+      await db('notification_prefs')
+        .insert({ customer_id: custId })
+        .onConflict('customer_id')
+        .ignore();
     }
 
     if (!custId) return res.status(400).json({ error: 'customer_id, estimate_id, or new_customer required' });
