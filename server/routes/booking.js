@@ -45,6 +45,10 @@ function cleanBookingStart(rawStartMin, slot, dayStartMin, gridMinutes = 15) {
   return ceilToGrid(rawStartMin, gridMinutes);
 }
 
+function isWholeHour(min) {
+  return min % 60 === 0;
+}
+
 function proximityReason(detourMin) {
   if (detourMin <= 2) return 'We have a tech right around the corner';
   if (detourMin <= 7) return 'A tech will be working nearby';
@@ -165,6 +169,10 @@ function normalizeZip(value) {
   return String(value || '').replace(/\D/g, '').slice(0, 5);
 }
 
+function streetNumber(value) {
+  return String(value || '').split(',')[0].trim().match(/^\d+/)?.[0] || '';
+}
+
 function addressMatchesCustomer(customer, address, zip) {
   const lookupAddress = normalizeAddress(address);
   const customerAddress = normalizeAddress(customer?.address_line1);
@@ -177,6 +185,7 @@ function addressMatchesCustomer(customer, address, zip) {
 async function findUniqueCustomerByAddress(address, city, zip) {
   const normalizedAddress = normalizeAddress(address);
   if (!normalizedAddress) return null;
+  const number = streetNumber(address);
 
   const query = db('customers');
 
@@ -188,22 +197,25 @@ async function findUniqueCustomerByAddress(address, city, zip) {
     this.whereNull('active').orWhere('active', true);
   });
 
-  const normalizedZip = normalizeZip(zip);
-  if (normalizedZip) query.andWhere(function () {
-    this.whereNull('zip').orWhere('zip', '').orWhere('zip', normalizedZip);
-  });
-
-  const cityValue = String(city || '').trim().toLowerCase();
-  if (cityValue) query.andWhere(function () {
-    this.whereNull('city').orWhere('city', '').orWhereRaw('lower(city) = ?', [cityValue]);
-  });
+  if (number) {
+    query.andWhereRaw("split_part(trim(split_part(coalesce(address_line1, ''), ',', 1)), ' ', 1) = ?", [number]);
+  }
 
   const candidates = await query
     .select('id', 'first_name', 'last_name', 'email', 'address_line1', 'city', 'state', 'zip', 'phone')
     .limit(500);
 
   const matches = candidates.filter(customer => normalizeAddress(customer.address_line1) === normalizedAddress);
-  return matches.length === 1 ? matches[0] : null;
+  if (matches.length === 1) return matches[0];
+
+  const normalizedZip = normalizeZip(zip);
+  const cityValue = String(city || '').trim().toLowerCase();
+  const strongMatches = matches.filter(customer => {
+    const zipMatches = !normalizedZip || !normalizeZip(customer.zip) || normalizeZip(customer.zip) === normalizedZip;
+    const cityMatches = !cityValue || !String(customer.city || '').trim() || String(customer.city).trim().toLowerCase() === cityValue;
+    return zipMatches && cityMatches;
+  });
+  return strongMatches.length === 1 ? strongMatches[0] : null;
 }
 
 // GET /api/booking/customer-lookup?phone=9415551234 OR ?address=...&city=...&zip=...
@@ -356,7 +368,7 @@ router.get('/availability', async (req, res, next) => {
 
     // Enforce max_self_books_per_day — filter out dates already at cap
     const maxPerDay = config.max_self_books_per_day ?? 3;
-    const slotGridMinutes = config.slot_grid_minutes || 15;
+    const slotGridMinutes = 60;
     const dayStartMin = timeToMin(config.day_start || '08:00');
     const dayEndMin = timeToMin(config.day_end || '17:00');
     const lunchStart = timeToMin(config.lunch_start || '12:00');
@@ -382,6 +394,7 @@ router.get('/availability', async (req, res, next) => {
       // Route scoring returns minute-level travel offsets; customers should see clean booking windows.
       const startMin = cleanBookingStart(rawStartMin, slot, dayStartMin, slotGridMinutes);
       const endMin = startMin + duration;
+      if (!isWholeHour(startMin)) continue;
       if (endMin > dayEndMin) continue;
       // Lunch windows are reserved for route health and should never be self-booked.
       if (startMin < lunchEnd && endMin > lunchStart) continue;
