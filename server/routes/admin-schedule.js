@@ -384,7 +384,8 @@ router.get('/week', async (req, res, next) => {
         .whereNotIn('status', ['cancelled', 'rescheduled'])
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
         .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
-        .select('scheduled_services.id', 'scheduled_services.service_type', 'scheduled_services.status',
+        .select('scheduled_services.id', 'scheduled_services.customer_id',
+          'scheduled_services.service_type', 'scheduled_services.status',
           'scheduled_services.window_start', 'scheduled_services.window_end',
           'scheduled_services.estimated_duration_minutes',
           'scheduled_services.estimated_price',
@@ -406,6 +407,7 @@ router.get('/week', async (req, res, next) => {
           const svcType = normalizeServiceType(s.service_type);
           return {
             id: s.id,
+            customerId: s.customer_id,
             customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
             serviceType: svcType,
             serviceCategory: detectServiceCategory(svcType),
@@ -460,7 +462,8 @@ router.get('/month', async (req, res, next) => {
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
       .select(
-        'scheduled_services.id', 'scheduled_services.scheduled_date',
+        'scheduled_services.id', 'scheduled_services.customer_id',
+        'scheduled_services.scheduled_date',
         'scheduled_services.service_type', 'scheduled_services.status',
         'scheduled_services.window_start', 'scheduled_services.zone',
         'scheduled_services.technician_id', 'scheduled_services.estimated_duration_minutes',
@@ -483,6 +486,7 @@ router.get('/month', async (req, res, next) => {
       const category = detectServiceCategory(svcType);
       byDate[d].push({
         id: s.id,
+        customerId: s.customer_id,
         customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim(),
         serviceType: svcType,
         serviceCategory: category,

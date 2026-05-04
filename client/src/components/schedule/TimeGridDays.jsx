@@ -172,7 +172,7 @@ function computeLanes(services) {
   return result;
 }
 
-function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit, onTreatmentPlan }) {
+function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit, onTreatmentPlan, onViewCustomer }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -213,7 +213,22 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
           return min == null ? '' : minutesToLabel(min);
         })()}
       </div>
-      <div className="font-bold truncate">{service.customerName || 'Unassigned'}</div>
+      <button
+        type="button"
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          const customerId = service.customerId || service.customer_id;
+          if (customerId) onViewCustomer?.(service);
+        }}
+        className={cn(
+          'block w-full text-left font-bold truncate u-focus-ring rounded-xs',
+          (service.customerId || service.customer_id) && onViewCustomer && 'hover:underline cursor-pointer'
+        )}
+        title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
+      >
+        {service.customerName || 'Unassigned'}
+      </button>
       {isLawnService(service) && onTreatmentPlan && (
         <button
           type="button"
@@ -258,7 +273,7 @@ function SlotDroppable({ date, slotIdx, onCreateStart }) {
   );
 }
 
-function AnytimeStrip({ services, dayLabel, onEdit, onTreatmentPlan }) {
+function AnytimeStrip({ services, dayLabel, scheduledDate, onEdit, onTreatmentPlan, onViewCustomer }) {
   return (
     <div
       className="px-2 py-1.5 bg-zinc-50 flex flex-col gap-1 overflow-y-auto"
@@ -272,17 +287,18 @@ function AnytimeStrip({ services, dayLabel, onEdit, onTreatmentPlan }) {
       {services.map((svc) => (
         <RailItem
           key={svc.id}
-          service={svc}
+          service={{ ...svc, scheduledDate }}
           dayLabel={dayLabel}
           onEdit={onEdit}
           onTreatmentPlan={onTreatmentPlan}
+          onViewCustomer={onViewCustomer}
         />
       ))}
     </div>
   );
 }
 
-function DayColumn({ day, onEdit, onTreatmentPlan, onCreateSlot }) {
+function DayColumn({ day, onEdit, onTreatmentPlan, onViewCustomer, onCreateSlot }) {
   // Unassigned services render in the UnassignedRail; assigned flexible
   // services render above the timed grid so they are still visible.
   const assignedServices = (day.services || []).filter((s) => s.technicianId);
@@ -348,8 +364,10 @@ function DayColumn({ day, onEdit, onTreatmentPlan, onCreateSlot }) {
       <AnytimeStrip
         services={anytimeServices}
         dayLabel={`${day.dayOfWeek} ${day.dayNum}`}
+        scheduledDate={day.date}
         onEdit={onEdit}
         onTreatmentPlan={onTreatmentPlan}
+        onViewCustomer={onViewCustomer}
       />
       <div ref={gridRef} className="relative" style={{ height: GRID_HEIGHT }}>
         {Array.from({ length: SLOT_COUNT }).map((_, idx) => (
@@ -383,13 +401,14 @@ function DayColumn({ day, onEdit, onTreatmentPlan, onCreateSlot }) {
             return (
               <AppointmentBlock
                 key={svc.id}
-                service={svc}
+                service={{ ...svc, scheduledDate: day.date }}
                 top={top}
                 height={height}
                 laneIdx={lane.laneIdx}
                 laneCount={lane.laneCount}
                 onEdit={onEdit}
                 onTreatmentPlan={onTreatmentPlan}
+                onViewCustomer={onViewCustomer}
               />
             );
           });
@@ -428,7 +447,7 @@ function TimeAxis({ headerHeight }) {
   );
 }
 
-function RailItem({ service, dayLabel, onEdit, onTreatmentPlan }) {
+function RailItem({ service, dayLabel, onEdit, onTreatmentPlan, onViewCustomer }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -458,7 +477,22 @@ function RailItem({ service, dayLabel, onEdit, onTreatmentPlan }) {
       <div className="u-nums text-10 text-zinc-500 mb-0.5">
         {dayLabel} · {timeLabel}
       </div>
-      <div className="font-medium truncate text-zinc-900">{service.customerName || 'Unassigned'}</div>
+      <button
+        type="button"
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          const customerId = service.customerId || service.customer_id;
+          if (customerId) onViewCustomer?.(service);
+        }}
+        className={cn(
+          'block w-full text-left font-medium truncate text-zinc-900 u-focus-ring rounded-xs',
+          (service.customerId || service.customer_id) && onViewCustomer && 'hover:underline cursor-pointer'
+        )}
+        title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
+      >
+        {service.customerName || 'Unassigned'}
+      </button>
       {service.serviceType && (
         <div className="truncate text-zinc-700">{service.serviceType}</div>
       )}
@@ -480,7 +514,7 @@ function RailItem({ service, dayLabel, onEdit, onTreatmentPlan }) {
   );
 }
 
-function UnassignedRail({ items, onEdit, onTreatmentPlan, collapsed, onToggleCollapsed }) {
+function UnassignedRail({ items, onEdit, onTreatmentPlan, onViewCustomer, collapsed, onToggleCollapsed }) {
   const { setNodeRef, isOver } = useDroppable({
     id: 'rail-unassigned',
     data: { target: 'rail' },
@@ -546,6 +580,7 @@ function UnassignedRail({ items, onEdit, onTreatmentPlan, collapsed, onToggleCol
                 dayLabel={dayLabel}
                 onEdit={onEdit}
                 onTreatmentPlan={onTreatmentPlan}
+                onViewCustomer={onViewCustomer}
               />
             ))}
           </div>
@@ -564,6 +599,7 @@ export default function TimeGridDays({
   selectedDate,   // optional — highlight this day
   onEdit,
   onTreatmentPlan,
+  onViewCustomer,
   onChange,
   onDateClick,
   onCreateSlot,
@@ -666,7 +702,7 @@ export default function TimeGridDays({
       (day.services || []).forEach((s) => {
         if (!s.technicianId) {
           items.push({
-            service: s,
+            service: { ...s, scheduledDate: day.date },
             dayLabel: `${day.dayOfWeek} ${day.dayNum}`,
           });
         }
@@ -831,6 +867,7 @@ export default function TimeGridDays({
               items={unassignedList}
               onEdit={onEdit}
               onTreatmentPlan={onTreatmentPlan}
+              onViewCustomer={onViewCustomer}
               collapsed={unassignedCollapsed}
               onToggleCollapsed={() => setUnassignedCollapsed((v) => !v)}
             />
@@ -849,6 +886,7 @@ export default function TimeGridDays({
                   day={day}
                   onEdit={onEdit}
                   onTreatmentPlan={onTreatmentPlan}
+                  onViewCustomer={onViewCustomer}
                   onCreateSlot={onCreateSlot}
                 />
               ))}

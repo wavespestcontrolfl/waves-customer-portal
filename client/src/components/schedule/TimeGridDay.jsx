@@ -274,7 +274,7 @@ function NowLine() {
   );
 }
 
-function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit, onResize, onTreatmentPlan, onViewAudit, isSelected, onToggleSelect, routeOrder, accent }) {
+function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit, onResize, onTreatmentPlan, onViewAudit, onViewCustomer, isSelected, onToggleSelect, routeOrder, accent }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -395,7 +395,22 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
       <div className="opacity-90 truncate text-10">
         {service.windowDisplay || minutesToHHMM(parseHHMM(service.windowStart) || 0)}
       </div>
-      <div className="font-medium truncate">{service.customerName || 'Unassigned'}</div>
+      <button
+        type="button"
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          const customerId = service.customerId || service.customer_id;
+          if (customerId) onViewCustomer?.(service);
+        }}
+        className={cn(
+          'block w-full text-left font-medium truncate u-focus-ring rounded-xs',
+          (service.customerId || service.customer_id) && onViewCustomer && 'hover:underline cursor-pointer'
+        )}
+        title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
+      >
+        {service.customerName || 'Unassigned'}
+      </button>
       {effectiveHeight > SLOT_HEIGHT && (
         <div className="opacity-80 truncate">{service.serviceType || ''}</div>
       )}
@@ -434,7 +449,7 @@ function SlotDroppable({ techId, slotIdx, onCreateStart }) {
   );
 }
 
-function TechColumn({ tech, services, onEdit, onTreatmentPlan, onViewAudit, onCreateSlot, onResize, selection, onToggleSelect, accent, showNowLine }) {
+function TechColumn({ tech, services, onEdit, onTreatmentPlan, onViewAudit, onViewCustomer, onCreateSlot, onResize, selection, onToggleSelect, accent, showNowLine }) {
   const gridRef = useRef(null);
   const [sel, setSel] = useState(null); // { startIdx, endIdx }
   const selRef = useRef(sel);
@@ -535,6 +550,7 @@ function TechColumn({ tech, services, onEdit, onTreatmentPlan, onViewAudit, onCr
                 onEdit={onEdit}
                 onTreatmentPlan={onTreatmentPlan}
                 onViewAudit={onViewAudit}
+                onViewCustomer={onViewCustomer}
                 onResize={onResize}
                 isSelected={selection?.has(svc.id)}
                 onToggleSelect={onToggleSelect}
@@ -581,7 +597,7 @@ function TimeAxis() {
   );
 }
 
-function AllDayStrip({ services, onEdit, onTreatmentPlan, onViewAudit }) {
+function AllDayStrip({ services, onEdit, onTreatmentPlan, onViewAudit, onViewCustomer }) {
   if (services.length === 0) return null;
   return (
     <div
@@ -593,9 +609,16 @@ function AllDayStrip({ services, onEdit, onTreatmentPlan, onViewAudit }) {
         <span key={svc.id} className="inline-flex items-center gap-1">
           <button
             type="button"
-            onClick={() => onEdit?.(svc)}
+            onClick={() => {
+              if ((svc.customerId || svc.customer_id) && onViewCustomer) {
+                onViewCustomer(svc);
+                return;
+              }
+              onEdit?.(svc);
+            }}
             className="px-2 py-1 rounded-sm bg-white text-11 text-zinc-900 truncate max-w-[200px]"
             style={{ border: '1px solid #D4D4D8' }}
+            title={(svc.customerId || svc.customer_id) && onViewCustomer ? 'Open customer profile' : undefined}
           >
             {svc.customerName || 'Unassigned'} · {svc.serviceType || ''}
           </button>
@@ -629,7 +652,7 @@ function AllDayStrip({ services, onEdit, onTreatmentPlan, onViewAudit }) {
   );
 }
 
-function RailItem({ service, onEdit, onTreatmentPlan, onViewAudit, isSelected, onToggleSelect }) {
+function RailItem({ service, onEdit, onTreatmentPlan, onViewAudit, onViewCustomer, isSelected, onToggleSelect }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -662,7 +685,22 @@ function RailItem({ service, onEdit, onTreatmentPlan, onViewAudit, isSelected, o
       title={`${service.customerName || 'Unassigned'} · ${service.serviceType || ''} · ${service.windowDisplay || timeLabel}\nShift+click to select for bulk actions`}
     >
       <div className="u-nums text-10 text-zinc-500 mb-0.5">{timeLabel}</div>
-      <div className="font-medium truncate text-zinc-900">{service.customerName || 'Unassigned'}</div>
+      <button
+        type="button"
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          const customerId = service.customerId || service.customer_id;
+          if (customerId) onViewCustomer?.(service);
+        }}
+        className={cn(
+          'block w-full text-left font-medium truncate text-zinc-900 u-focus-ring rounded-xs',
+          (service.customerId || service.customer_id) && onViewCustomer && 'hover:underline cursor-pointer'
+        )}
+        title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
+      >
+        {service.customerName || 'Unassigned'}
+      </button>
       {service.serviceType && (
         <div className="truncate text-zinc-700">{service.serviceType}</div>
       )}
@@ -698,7 +736,7 @@ function RailItem({ service, onEdit, onTreatmentPlan, onViewAudit, isSelected, o
   );
 }
 
-function UnassignedRail({ services, onEdit, onTreatmentPlan, onViewAudit, selection, onToggleSelect }) {
+function UnassignedRail({ services, onEdit, onTreatmentPlan, onViewAudit, onViewCustomer, selection, onToggleSelect }) {
   const [open, setOpen] = useState(true);
   const { setNodeRef, isOver } = useDroppable({
     id: 'rail-unassigned',
@@ -757,6 +795,7 @@ function UnassignedRail({ services, onEdit, onTreatmentPlan, onViewAudit, select
                 onEdit={onEdit}
                 onTreatmentPlan={onTreatmentPlan}
                 onViewAudit={onViewAudit}
+                onViewCustomer={onViewCustomer}
                 isSelected={selection?.has(svc.id)}
                 onToggleSelect={onToggleSelect}
               />
@@ -827,6 +866,7 @@ export default function TimeGridDay({
   onEdit,
   onTreatmentPlan,
   onViewAudit,
+  onViewCustomer,
   onChange,
   onCreateSlot,
   onDateChange,
@@ -1130,7 +1170,7 @@ export default function TimeGridDay({
       style={{ border: '1px solid #E4E4E7' }}
     >
       {onDateChange && <WeekStrip date={date} onDateChange={onDateChange} />}
-      <AllDayStrip services={allDay} onEdit={onEdit} onTreatmentPlan={onTreatmentPlan} onViewAudit={onViewAudit} />
+      <AllDayStrip services={allDay} onEdit={onEdit} onTreatmentPlan={onTreatmentPlan} onViewAudit={onViewAudit} onViewCustomer={onViewCustomer} />
       {selection.size > 0 && (
         <BulkActionBar
           count={selection.size}
@@ -1149,6 +1189,7 @@ export default function TimeGridDay({
               onEdit={onEdit}
               onTreatmentPlan={onTreatmentPlan}
               onViewAudit={onViewAudit}
+              onViewCustomer={onViewCustomer}
               selection={selection}
               onToggleSelect={toggleSelection}
             />
@@ -1169,6 +1210,7 @@ export default function TimeGridDay({
                     onEdit={onEdit}
                     onTreatmentPlan={onTreatmentPlan}
                     onViewAudit={onViewAudit}
+                    onViewCustomer={onViewCustomer}
                     onCreateSlot={onCreateSlot ? handleCreateSlot : undefined}
                     onResize={handleResize}
                     selection={selection}

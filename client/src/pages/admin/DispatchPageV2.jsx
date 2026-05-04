@@ -55,6 +55,7 @@ import TreatmentPlanPanel from '../../components/schedule/TreatmentPlanPanel';
 import MarkPrepaidModal from '../../components/schedule/MarkPrepaidModal';
 import RecurringAlertsBannerV2 from '../../components/schedule/RecurringAlertsBannerV2';
 import CreateAppointmentModal from '../../components/schedule/CreateAppointmentModal';
+import ScheduleCustomerSidebar from '../../components/schedule/ScheduleCustomerSidebar';
 import Customer360ProfileV2 from '../../components/admin/Customer360ProfileV2';
 import HorizontalScroll from '../../components/HorizontalScroll';
 import useIsMobile from '../../hooks/useIsMobile';
@@ -766,6 +767,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
   const [protocolService, setProtocolService] = useState(null);
   const [treatmentPlanService, setTreatmentPlanService] = useState(null);
   const [auditContext, setAuditContext] = useState(null);
+  const [selectedScheduleService, setSelectedScheduleService] = useState(null);
   const [showNewAppt, setShowNewAppt] = useState(false);
   const [newApptDefaults, setNewApptDefaults] = useState(null);
   const [scheduleRefreshKey, setScheduleRefreshKey] = useState(0);
@@ -779,6 +781,12 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
   const [gridStats, setGridStats] = useState(null);
   const handleGridStatsChange = useCallback((stats) => {
     setGridStats(stats);
+  }, []);
+
+  const openCustomerSidebar = useCallback((svc) => {
+    const customerId = svc?.customerId || svc?.customer_id;
+    if (!customerId) return;
+    setSelectedScheduleService({ ...svc, customerId });
   }, []);
 
   // Reset gridStats whenever the visible range changes (different date or
@@ -1257,6 +1265,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
           refreshKey={scheduleRefreshKey}
           onEdit={(svc) => setEditingService(svc)}
           onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
+          onViewCustomer={openCustomerSidebar}
           onChange={() => fetchSchedule(date)}
           onStatsChange={handleGridStatsChange}
           onCreateSlot={({ date: slotDate, windowStart, windowEnd }) => {
@@ -1274,6 +1283,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
           refreshKey={scheduleRefreshKey}
           onEdit={(svc) => setEditingService(svc)}
           onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
+          onViewCustomer={openCustomerSidebar}
           onChange={() => fetchSchedule(date)}
           onStatsChange={handleGridStatsChange}
           onCreateSlot={({ date: slotDate, windowStart, windowEnd }) => {
@@ -1282,7 +1292,13 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
           }}
         />
       )}
-      {viewMode === 'month' && <MonthViewV2 date={date} onDateClick={(d) => { setDate(d); setViewMode('day'); }} />}
+      {viewMode === 'month' && (
+        <MonthViewV2
+          date={date}
+          onDateClick={(d) => { setDate(d); setViewMode('day'); }}
+          onViewCustomer={openCustomerSidebar}
+        />
+      )}
 
       {/* Tabs bar — day view only, and only when this page owns its own
           activeTab state. In controlled mode AdminDispatchPage's top-level
@@ -1435,6 +1451,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
               technicians={technicians}
               onEdit={(svc) => setEditingService(svc)}
               onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
+              onViewCustomer={openCustomerSidebar}
               onViewAudit={(svc) => setAuditContext({ customerId: svc.customerId || svc.customer_id, scheduledServiceId: svc.id })}
               onChange={() => fetchSchedule(date)}
               onDateChange={setDate}
@@ -1605,6 +1622,37 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
           initialTab="services"
           initialScheduledServiceId={auditContext.scheduledServiceId}
           onClose={() => setAuditContext(null)}
+        />
+      )}
+      {selectedScheduleService && (
+        <ScheduleCustomerSidebar
+          service={selectedScheduleService}
+          onClose={() => setSelectedScheduleService(null)}
+          onEdit={(svc) => {
+            setSelectedScheduleService(null);
+            setEditingService(svc);
+          }}
+          onSavedNote={(svc, notes) => {
+            setSelectedScheduleService((prev) => (
+              prev && prev.id === svc.id ? { ...prev, notes } : prev
+            ));
+            fetchSchedule(date);
+          }}
+          onBookNext={(svc) => {
+            setSelectedScheduleService(null);
+            setNewApptDefaults({
+              customer: {
+                id: svc.customerId,
+                firstName: (svc.customerName || '').split(' ')[0] || '',
+                lastName: (svc.customerName || '').split(' ').slice(1).join(' '),
+                phone: svc.customerPhone || '',
+                address: svc.address || '',
+                city: svc.city || '',
+                tier: svc.waveguardTier || svc.tier || null,
+              },
+            });
+            setShowNewAppt(true);
+          }}
         />
       )}
     </div>

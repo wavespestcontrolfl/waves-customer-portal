@@ -250,7 +250,7 @@ export function WeekViewV2({ startDate, onDateClick }) {
 // Flat-blue month-cell chip: solid pill with "time · customer" stacked
 // across the row. Mirrors the appointment-block palette in
 // TimeGridDay/TimeGridDays so the calendar reads as one visual system.
-function MonthServiceChip({ service }) {
+function MonthServiceChip({ service, onViewCustomer }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `msvc-${service.id}`,
     data: { service },
@@ -286,7 +286,11 @@ function MonthServiceChip({ service }) {
         zIndex: isDragging ? 50 : undefined,
       }}
       title={`${service.customerName} · ${service.serviceType || ''} · ${service.windowStart || ''}${service.techName ? ' · ' + service.techName : ''}`}
-      onClick={(e) => e.stopPropagation()}
+      onClick={(e) => {
+        e.stopPropagation();
+        const customerId = service.customerId || service.customer_id;
+        if (customerId) onViewCustomer?.(service);
+      }}
     >
       {time && <span className="font-medium mr-1">{time}</span>}
       <span>{service.customerName || '—'}</span>
@@ -294,7 +298,7 @@ function MonthServiceChip({ service }) {
   );
 }
 
-function MonthDayCell({ day, di, onDateClick }) {
+function MonthDayCell({ day, di, onDateClick, onViewCustomer }) {
   const { setNodeRef, isOver } = useDroppable({
     id: `mday-${day.date}`,
     data: { date: day.date },
@@ -340,7 +344,7 @@ function MonthDayCell({ day, di, onDateClick }) {
           blue pill, mirroring the swimlane block palette. */}
       <div className="hidden md:block space-y-1">
         {day.services.slice(0, 6).map((s) => (
-          <MonthServiceChip key={s.id} service={s} />
+          <MonthServiceChip key={s.id} service={{ ...s, scheduledDate: day.date }} onViewCustomer={onViewCustomer} />
         ))}
       </div>
       {day.count > 6 && (
@@ -352,7 +356,7 @@ function MonthDayCell({ day, di, onDateClick }) {
   );
 }
 
-export function MonthViewV2({ date, onDateClick }) {
+export function MonthViewV2({ date, onDateClick, onViewCustomer }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [optimistic, setOptimistic] = useState(null);
@@ -534,7 +538,7 @@ export function MonthViewV2({ date, onDateClick }) {
               style={wi < viewData.weeks.length - 1 ? { borderBottom: '1px solid #E4E4E7' } : undefined}
             >
               {week.map((day, di) => (
-                <MonthDayCell key={day.date} day={day} di={di} onDateClick={onDateClick} />
+                <MonthDayCell key={day.date} day={day} di={di} onDateClick={onDateClick} onViewCustomer={onViewCustomer} />
               ))}
             </div>
           ))}
