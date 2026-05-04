@@ -1,4 +1,3 @@
-import Icon from '../components/Icon';
 import { useState, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import AddressAutocomplete from '../components/AddressAutocomplete';
@@ -16,16 +15,6 @@ const SERVICES = [
   { id: 'termite', label: 'Termite Inspection', duration: 90, icon: 'shield', desc: 'WDO inspection + treatment plan' },
   { id: 'rodent', label: 'Rodent Control', duration: 60, icon: 'mouse', desc: 'Exclusion + monitoring stations' },
 ];
-
-function ServiceLabel({ service }) {
-  if (!service) return null;
-  return (
-    <strong style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-      <Icon name={service.icon} size={16} strokeWidth={2.5} />
-      {service.label}
-    </strong>
-  );
-}
 
 export default function PublicBookingPage() {
   const [searchParams] = useSearchParams();
@@ -49,7 +38,7 @@ export default function PublicBookingPage() {
 
   const [step, setStep] = useState(1);
   const [service, setService] = useState(initialService);
-  const [address, setAddress] = useState({ line1: '', city: '', state: 'FL', zip: '' });
+  const [address, setAddress] = useState({ line1: '', formatted: '', city: '', state: 'FL', zip: '' });
   const [coords, setCoords] = useState(null);
   const [availability, setAvailability] = useState([]);
   const [curatedSlots, setCuratedSlots] = useState([]);
@@ -58,6 +47,7 @@ export default function PublicBookingPage() {
   const [contact, setContact] = useState({ firstName: '', lastName: '', phone: '', email: '' });
   const [notes, setNotes] = useState('');
   const [existingCustomerId, setExistingCustomerId] = useState(null);
+  const [addressMayMatchCustomer, setAddressMayMatchCustomer] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [confCode, setConfCode] = useState('');
@@ -71,6 +61,8 @@ export default function PublicBookingPage() {
     setCuratedSlots([]);
     setSelectedDate(null);
     setSelectedSlot(null);
+    setExistingCustomerId(null);
+    setAddressMayMatchCustomer(false);
     setError('');
   }, []);
 
@@ -80,13 +72,16 @@ export default function PublicBookingPage() {
     setLoading(true);
     setError('');
     try {
-      const fullAddress = `${address.line1}, ${address.city}, ${address.state} ${address.zip}`;
+      const fullAddress = address.formatted || address.line1;
       const params = new URLSearchParams({
         address: fullAddress,
-        city: address.city,
         service_type: service.id,
         duration_minutes: String(service.duration),
       });
+      if (coords?.lat && coords?.lng) {
+        params.set('lat', String(coords.lat));
+        params.set('lng', String(coords.lng));
+      }
       const res = await fetch(`${API_BASE}/booking/availability?${params}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Could not load availability');
@@ -102,7 +97,32 @@ export default function PublicBookingPage() {
       setCuratedSlots([]);
     }
     setLoading(false);
-  }, [service, address]);
+  }, [service, address, coords]);
+
+  const applyCustomer = useCallback((customer) => {
+    setExistingCustomerId(customer.id);
+    setContact(c => ({
+      ...c,
+      firstName: c.firstName || customer.first_name || '',
+      lastName: c.lastName || customer.last_name || '',
+      phone: c.phone || customer.phone || '',
+      email: c.email || customer.email || '',
+    }));
+  }, []);
+
+  const checkExistingCustomerByAddress = useCallback(async (nextAddress) => {
+    const lookupAddress = nextAddress.formatted || nextAddress.line1;
+    if (!lookupAddress) return;
+    try {
+      const params = new URLSearchParams({ address: lookupAddress });
+      if (nextAddress.city) params.set('city', nextAddress.city);
+      if (nextAddress.zip) params.set('zip', nextAddress.zip);
+      const res = await fetch(`${API_BASE}/booking/customer-lookup?${params}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setAddressMayMatchCustomer(!!data.possible_match);
+    } catch { /* best-effort */ }
+  }, []);
 
   useEffect(() => {
     if (step === 2) loadAvailability();
@@ -113,21 +133,20 @@ export default function PublicBookingPage() {
     const digits = phone.replace(/\D/g, '');
     if (digits.length !== 10) return;
     try {
-      const res = await fetch(`${API_BASE}/booking/customer-lookup?phone=${digits}`);
+      const params = new URLSearchParams({ phone: digits });
+      const lookupAddress = address.formatted || address.line1;
+      if (lookupAddress) params.set('address', lookupAddress);
+      if (address.city) params.set('city', address.city);
+      if (address.zip) params.set('zip', address.zip);
+      const res = await fetch(`${API_BASE}/booking/customer-lookup?${params}`);
       if (res.ok) {
         const data = await res.json();
         if (data.customer) {
-          setExistingCustomerId(data.customer.id);
-          setContact(c => ({
-            ...c,
-            firstName: c.firstName || data.customer.first_name || '',
-            lastName: c.lastName || data.customer.last_name || '',
-            email: c.email || data.customer.email || '',
-          }));
+          applyCustomer(data.customer);
         }
       }
     } catch { /* best-effort */ }
-  }, []);
+  }, [address, applyCustomer]);
 
   const handleConfirm = async () => {
     setLoading(true);
@@ -148,7 +167,7 @@ export default function PublicBookingPage() {
           source,
           referrer_url: document.referrer || null,
           // New-customer payload — server will create if no customer_id
-          new_customer: existingCustomerId ? null : {
+          new_customer: contact.phone ? {
             first_name: contact.firstName,
             last_name: contact.lastName,
             phone: contact.phone.replace(/\D/g, ''),
@@ -159,7 +178,7 @@ export default function PublicBookingPage() {
             zip: address.zip,
             lat: coords?.lat,
             lng: coords?.lng,
-          },
+          } : null,
         }),
       });
       const data = await res.json();
@@ -223,68 +242,38 @@ export default function PublicBookingPage() {
             <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
               Find a date &amp; time that works for you
             </h2>
-            <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 24, lineHeight: 1.5 }}>
-              {service ? <>Booking <ServiceLabel service={service} />. </> : null}
-              Drop your address and we'll show you the next available slots — see you soon!
-            </p>
-            <div style={{ display: 'grid', gap: 14, marginBottom: 24 }}>
+            <div style={{ display: 'grid', gap: 14, marginBottom: 24, marginTop: 18 }}>
               <div>
-                <label style={labelStyle}>Street address</label>
+                <label style={labelStyle}>Start typing your address</label>
                 <AddressAutocomplete
                   autoFocus
                   value={address.line1}
-                  onChange={(v) => updateAddress(a => ({ ...a, line1: v }))}
+                  onChange={(v) => updateAddress(a => ({ ...a, line1: v, formatted: '' }))}
                   onSelect={(parts) => {
+                    const nextAddress = {
+                      line1: parts.formatted || parts.line1 || address.line1,
+                      formatted: parts.formatted || parts.line1 || address.formatted,
+                      city: parts.city || address.city,
+                      state: parts.state || address.state,
+                      zip: parts.zip || address.zip,
+                    };
                     updateAddress(a => ({
-                      line1: parts.line1 || parts.formatted || a.line1,
-                      city: parts.city || a.city,
-                      state: parts.state || a.state,
-                      zip: parts.zip || a.zip,
+                      ...a,
+                      ...nextAddress,
                     }));
                     if (parts.lat && parts.lng) setCoords({ lat: parts.lat, lng: parts.lng });
+                    checkExistingCustomerByAddress(nextAddress);
                   }}
-                  placeholder="Start typing your address…"
+                  placeholder="Start typing your address"
                   style={inputStyle}
                 />
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 10 }}>
-                <div>
-                  <label style={labelStyle}>City</label>
-                  <input
-                    type="text"
-                    placeholder="Bradenton"
-                    value={address.city}
-                    onChange={e => updateAddress(a => ({ ...a, city: e.target.value }))}
-                    style={inputStyle}
-                  />
-                </div>
-                <div>
-                  <label style={labelStyle}>State</label>
-                  <input
-                    type="text"
-                    value={address.state}
-                    onChange={e => updateAddress(a => ({ ...a, state: e.target.value.toUpperCase() }))}
-                    style={inputStyle}
-                    maxLength={2}
-                  />
-                </div>
-                <div>
-                  <label style={labelStyle}>Zip</label>
-                  <input
-                    type="text"
-                    placeholder="34203"
-                    value={address.zip}
-                    onChange={e => updateAddress(a => ({ ...a, zip: e.target.value.replace(/\D/g, '').slice(0, 5) }))}
-                    style={inputStyle}
-                  />
-                </div>
               </div>
             </div>
             <div style={{ display: 'flex', gap: 10 }}>
               <Button
                 variant="primary"
                 onClick={() => setStep(2)}
-                disabled={!address.line1 || !address.city || !address.zip}
+                disabled={!address.line1}
                 style={{ width: '100%' }}
               >
                 Find my best times →
@@ -393,12 +382,40 @@ export default function PublicBookingPage() {
                 Your selected time
               </div>
               <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.blueDeeper }}>
-                {availability.find(d => d.date === selectedDate)?.fullDate} · {selectedSlot?.start_label}
+                {selectedSlot?.fullDate || availability.find(d => d.date === selectedDate)?.fullDate} · {selectedSlot?.start_label}
               </div>
               <div style={{ fontSize: 12, color: COLORS.slate600, marginTop: 2 }}>
                 {service?.label}
               </div>
             </div>
+
+            {addressMayMatchCustomer && !existingCustomerId && (
+              <div style={{
+                background: COLORS.blueLight,
+                border: `1px solid ${COLORS.wavesBlue}`,
+                borderRadius: 10,
+                padding: 12,
+                fontSize: 14,
+                color: COLORS.blueDark,
+                marginBottom: 14,
+              }}>
+                This address may already be on file. Enter your phone number and we'll link the appointment to that customer profile.
+              </div>
+            )}
+
+            {existingCustomerId && (
+              <div style={{
+                background: COLORS.greenLight,
+                border: `1px solid ${COLORS.green}`,
+                borderRadius: 10,
+                padding: 12,
+                fontSize: 14,
+                color: COLORS.green,
+                marginBottom: 14,
+              }}>
+                We found your customer profile. We'll send the confirmation to the phone number on file.
+              </div>
+            )}
 
             <div style={{ display: 'grid', gap: 14, marginBottom: 20 }}>
               <div>
@@ -410,14 +427,10 @@ export default function PublicBookingPage() {
                   onChange={e => setContact(c => ({ ...c, phone: e.target.value }))}
                   onBlur={() => checkExistingCustomer(contact.phone)}
                   style={inputStyle}
+                  disabled={!!existingCustomerId}
                 />
-                {existingCustomerId && (
-                  <div style={{ fontSize: 12, color: COLORS.green, marginTop: 6 }}>
-                     Welcome back! We have your info on file.
-                  </div>
-                )}
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              {!existingCustomerId && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <div>
                   <label style={labelStyle}>First name</label>
                   <input
@@ -436,8 +449,8 @@ export default function PublicBookingPage() {
                     style={inputStyle}
                   />
                 </div>
-              </div>
-              <div>
+              </div>}
+              {!existingCustomerId && <div>
                 <label style={labelStyle}>Email (optional)</label>
                 <input
                   type="email"
@@ -445,7 +458,7 @@ export default function PublicBookingPage() {
                   onChange={e => setContact(c => ({ ...c, email: e.target.value }))}
                   style={inputStyle}
                 />
-              </div>
+              </div>}
               <div>
                 <label style={labelStyle}>Notes for the tech (optional)</label>
                 <textarea
@@ -470,7 +483,7 @@ export default function PublicBookingPage() {
               <Button
                 variant="primary"
                 onClick={handleConfirm}
-                disabled={loading || !contact.firstName || !contact.lastName || !contact.phone}
+                disabled={loading || (!existingCustomerId && (!contact.firstName || !contact.lastName || !contact.phone))}
                 style={{ flex: 1 }}
               >
                 {loading ? 'Booking…' : 'Confirm booking'}
@@ -495,7 +508,7 @@ export default function PublicBookingPage() {
               You're booked!
             </h2>
             <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 24, lineHeight: 1.5 }}>
-              We just texted a confirmation to {contact.phone}.
+              We just texted a confirmation to {contact.phone || 'the phone number on file'}.
             </p>
             <div style={{
               background: COLORS.white, border: `1px solid ${COLORS.slate200}`,
@@ -509,7 +522,7 @@ export default function PublicBookingPage() {
               </div>
               <div style={{ fontSize: 16, color: COLORS.slate600, lineHeight: 1.6 }}>
                 <div><strong style={{ color: COLORS.blueDeeper }}>{service?.label}</strong></div>
-                <div>{availability.find(d => d.date === selectedDate)?.fullDate}</div>
+                <div>{selectedSlot?.fullDate || availability.find(d => d.date === selectedDate)?.fullDate}</div>
                 <div>{selectedSlot?.start_label} – {selectedSlot?.end_label}</div>
                 <div style={{ marginTop: 6 }}>{address.line1}, {address.city} {address.zip}</div>
               </div>
