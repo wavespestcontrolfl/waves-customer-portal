@@ -173,6 +173,17 @@ function streetNumber(value) {
   return String(value || '').split(',')[0].trim().match(/^\d+/)?.[0] || '';
 }
 
+function streetNameToken(value) {
+  return String(value || '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .find((part, index) => index > 0 && /[a-z]/.test(part)) || '';
+}
+
 function addressMatchesCustomer(customer, address, zip) {
   const lookupAddress = normalizeAddress(address);
   const customerAddress = normalizeAddress(customer?.address_line1);
@@ -187,6 +198,8 @@ async function findUniqueCustomerByAddress(address, city, zip) {
   if (!normalizedAddress) return null;
   const number = streetNumber(address);
   if (!number) return null;
+  const streetToken = streetNameToken(address);
+  if (!streetToken) return null;
 
   const query = db('customers');
 
@@ -199,6 +212,7 @@ async function findUniqueCustomerByAddress(address, city, zip) {
   });
 
   query.andWhereRaw("split_part(trim(split_part(coalesce(address_line1, ''), ',', 1)), ' ', 1) = ?", [number]);
+  query.andWhereRaw("lower(split_part(coalesce(address_line1, ''), ',', 1)) LIKE ?", [`%${streetToken}%`]);
 
   const candidates = await query
     .select('id', 'first_name', 'last_name', 'email', 'address_line1', 'city', 'state', 'zip', 'phone')
