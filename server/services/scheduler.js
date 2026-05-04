@@ -4,6 +4,11 @@ const TwilioService = require('./twilio');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
+async function claimAdvisoryXactLock(trx, lockKey) {
+  const lock = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?)) AS acquired', [lockKey]);
+  return !!(lock.rows && lock.rows[0] && lock.rows[0].acquired);
+}
+
 function initScheduledJobs() {
   const { isEnabled, logGateStatus } = require('../config/feature-gates');
   logGateStatus();
@@ -315,21 +320,26 @@ function initScheduledJobs() {
       let sent = 0;
       for (const inv of scheduled) {
         const lockKey = `invoice-send:${inv.id}`;
-        let claimed = false;
         try {
-          const lock = await db.raw('SELECT pg_try_advisory_lock(hashtext(?)) AS acquired', [lockKey]);
-          claimed = !!(lock.rows && lock.rows[0] && lock.rows[0].acquired);
-          if (!claimed) continue;
+          const channels = await db.transaction(async (trx) => {
+            const claimed = await claimAdvisoryXactLock(trx, lockKey);
+            if (!claimed) return null;
 
-          const channels = await sendInvoiceNow(inv.id, { sendMethod: inv.send_method || 'both' });
+            const current = await trx('invoices')
+              .where({ id: inv.id, status: 'scheduled' })
+              .where('scheduled_at', '<=', new Date())
+              .whereNotNull('scheduled_at')
+              .select('send_method')
+              .first();
+            if (!current) return null;
+
+            return sendInvoiceNow(inv.id, { sendMethod: current.send_method || 'both' });
+          });
+          if (!channels) continue;
           if (channels.sms.ok || channels.email.ok) sent += 1;
           else logger.error(`Scheduled invoice ${inv.invoice_number} both channels failed: sms=${channels.sms.error} email=${channels.email.error}`);
         } catch (e) {
           logger.error(`Scheduled invoice ${inv.invoice_number} failed: ${e.message}`);
-        } finally {
-          if (claimed) {
-            await db.raw('SELECT pg_advisory_unlock(hashtext(?))', [lockKey]).catch(() => {});
-          }
         }
       }
       logger.info(`Scheduled invoices: ${sent}/${scheduled.length} sent`);
@@ -366,32 +376,45 @@ function initScheduledJobs() {
       let sent = 0;
       for (const row of due) {
         const lockKey = `completion-sms:${row.id}`;
-        let claimed = false;
         try {
-          const lock = await db.raw('SELECT pg_try_advisory_lock(hashtext(?)) AS acquired', [lockKey]);
-          claimed = !!(lock.rows && lock.rows[0] && lock.rows[0].acquired);
-          if (!claimed) continue;
+          const wasSent = await db.transaction(async (trx) => {
+            const claimed = await claimAdvisoryXactLock(trx, lockKey);
+            if (!claimed) return false;
 
-          if (!row.cust_phone || !row.completion_sms_body) {
-            await db('scheduled_services').where({ id: row.id }).update({
+            const current = await trx('scheduled_services')
+              .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+              .where({ 'scheduled_services.id': row.id })
+              .whereNotNull('scheduled_services.completion_sms_scheduled_at')
+              .whereNull('scheduled_services.completion_sms_sent_at')
+              .where('scheduled_services.completion_sms_scheduled_at', '<=', new Date())
+              .select(
+                'scheduled_services.id',
+                'scheduled_services.customer_id',
+                'scheduled_services.completion_sms_body',
+                'scheduled_services.completion_sms_message_type',
+                'customers.phone as cust_phone',
+              )
+              .first();
+            if (!current) return false;
+
+            if (!current.cust_phone || !current.completion_sms_body) {
+              await trx('scheduled_services').where({ id: current.id }).update({
+                completion_sms_sent_at: new Date(),
+              });
+              return false;
+            }
+            await TwilioService.sendSMS(current.cust_phone, current.completion_sms_body, {
+              customerId: current.customer_id,
+              messageType: current.completion_sms_message_type || 'service_complete',
+            });
+            await trx('scheduled_services').where({ id: current.id }).update({
               completion_sms_sent_at: new Date(),
             });
-            continue;
-          }
-          await TwilioService.sendSMS(row.cust_phone, row.completion_sms_body, {
-            customerId: row.customer_id,
-            messageType: row.completion_sms_message_type || 'service_complete',
+            return true;
           });
-          await db('scheduled_services').where({ id: row.id }).update({
-            completion_sms_sent_at: new Date(),
-          });
-          sent += 1;
+          if (wasSent) sent += 1;
         } catch (e) {
           logger.error(`Deferred completion SMS for service ${row.id} failed: ${e.message}`);
-        } finally {
-          if (claimed) {
-            await db.raw('SELECT pg_advisory_unlock(hashtext(?))', [lockKey]).catch(() => {});
-          }
         }
       }
       logger.info(`Deferred completion SMS: ${sent}/${due.length} sent`);
