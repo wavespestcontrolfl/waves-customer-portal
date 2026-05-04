@@ -377,8 +377,12 @@ function initScheduledJobs() {
       const pendingReviewRows = await db('scheduled_services')
         .whereNotNull('completion_sms_sent_at')
         .where({ completion_sms_request_review: true })
-        .select('id', 'customer_id', 'completion_sms_review_service_record_id')
-        .limit(20);
+        .where(function () {
+          this.whereNull('completion_sms_review_claim_at')
+            .orWhere('completion_sms_review_claim_at', '<', new Date(Date.now() - claimTtlMs));
+        })
+        .update({ completion_sms_review_claim_at: new Date() })
+        .returning(['id', 'customer_id', 'completion_sms_review_service_record_id']);
       for (const reviewRow of pendingReviewRows) {
         try {
           const ReviewService = require('./review-request');
@@ -390,8 +394,12 @@ function initScheduledJobs() {
           });
           await db('scheduled_services').where({ id: reviewRow.id }).update({
             completion_sms_request_review: false,
+            completion_sms_review_claim_at: null,
           });
         } catch (reviewErr) {
+          await db('scheduled_services').where({ id: reviewRow.id }).update({
+            completion_sms_review_claim_at: null,
+          }).catch(() => {});
           logger.error(`[dispatch] Deferred review request retry failed after completion SMS for service ${reviewRow.id}: ${reviewErr.name || 'Error'}`);
         }
       }
@@ -440,22 +448,6 @@ function initScheduledJobs() {
             completion_sms_message_type: null,
           });
           sent += 1;
-          if (row.completion_sms_request_review) {
-            try {
-              const ReviewService = require('./review-request');
-              await ReviewService.create({
-                customerId: row.customer_id,
-                serviceRecordId: row.completion_sms_review_service_record_id || null,
-                triggeredBy: 'auto',
-                delayMinutes: 120,
-              });
-              await db('scheduled_services').where({ id: row.id }).update({
-                completion_sms_request_review: false,
-              });
-            } catch (reviewErr) {
-              logger.error(`[dispatch] Deferred review request schedule failed after completion SMS for service ${row.id}: ${reviewErr.name || 'Error'}`);
-            }
-          }
         } catch (e) {
           await db('scheduled_services').where({ id: row.id }).update({ completion_sms_claim_at: null }).catch(() => {});
           logger.error(`Deferred completion SMS for service ${row.id} failed: ${e.name || 'Error'}`);
