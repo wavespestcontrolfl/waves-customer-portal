@@ -67,6 +67,11 @@ const VISIT_OUTCOME_OPTIONS = [
   { value: 'customer_concern', label: 'Customer concern' },
   { value: 'incomplete', label: 'Incomplete' },
 ];
+const OFFICE_APPROVAL_REASONS = [
+  { value: 'office_approved_blackout_exception', label: 'Office approved exception' },
+  { value: 'soil_test_supported_phosphorus', label: 'Soil test supports phosphorus' },
+  { value: 'non_fertilizer_application_only', label: 'No N/P fertilizer applied' },
+];
 const AREAS_BY_SERVICE = {
   pest: ['Perimeter', 'Garage', 'Kitchen', 'Bathrooms', 'Entry points', 'Yard', 'Fence line', 'Trash area'],
   lawn: ['Front yard', 'Back yard', 'Side yard', 'Landscape beds', 'Shrubs', 'Palms', 'Problem area', 'Irrigation zone'],
@@ -1067,6 +1072,10 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   const [calibrationId, setCalibrationId] = useState('');
   const [equipmentCalibrations, setEquipmentCalibrations] = useState([]);
   const [equipmentCalibrationError, setEquipmentCalibrationError] = useState('');
+  const [treatmentPlanBlocks, setTreatmentPlanBlocks] = useState([]);
+  const [treatmentPlanError, setTreatmentPlanError] = useState('');
+  const [officeApprovalReasonCode, setOfficeApprovalReasonCode] = useState('');
+  const [officeApprovalNote, setOfficeApprovalNote] = useState('');
   const [savedDraft, setSavedDraft] = useState(null);
   const [showDraftPrompt, setShowDraftPrompt] = useState(false);
   const photoInputRef = useRef(null);
@@ -1077,6 +1086,10 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
 
   const isLawn = detectServiceCategory(service.serviceType) === 'lawn';
   const calibrationRequired = isLawn && !!service.waveguardTier;
+  const currentAdminUser = (() => {
+    try { return JSON.parse(localStorage.getItem('waves_admin_user') || 'null'); } catch { return null; }
+  })();
+  const canApproveOfficeExceptions = currentAdminUser?.role === 'admin';
   const serviceCategory = detectServiceCategory(service.serviceType);
   const areaOptions = [
     ...(AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest),
@@ -1124,10 +1137,20 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
           : recapSource && recapSource !== 'template'
             ? `Draft: ${recapSource}`
             : '';
+  const blackoutBlocks = treatmentPlanBlocks.filter(block =>
+    block?.code === 'nitrogen_blackout' || block?.code === 'phosphorus_blackout'
+  );
+  const blackoutApprovalRequired = calibrationRequired && !isIncompleteVisit && blackoutBlocks.length > 0;
+  const blackoutCompletionBlocked = blackoutApprovalRequired && (!canApproveOfficeExceptions || !officeApprovalReasonCode);
+  const blackoutHelpText = treatmentPlanError
+    || blackoutBlocks.map(block => block.message).filter(Boolean).join(' ')
+    || 'Nitrogen or phosphorus fertilizer is restricted for this municipality window.';
   const completionCtaLabel = submitting
     ? 'Completing...'
     : calibrationRequired && !isIncompleteVisit && !equipmentSystemId
       ? 'Select Equipment Calibration'
+    : blackoutCompletionBlocked
+      ? canApproveOfficeExceptions ? 'Office Approval Required' : 'Admin Approval Required'
     : isIncompleteVisit
       ? 'Mark Visit Incomplete'
       : !sendSms
@@ -1168,6 +1191,26 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
       });
     return () => { cancelled = true; };
   }, [calibrationRequired]);
+
+  useEffect(() => {
+    if (!calibrationRequired) return;
+    let cancelled = false;
+    setTreatmentPlanError('');
+    const params = new URLSearchParams();
+    if (equipmentSystemId) params.set('equipmentSystemId', equipmentSystemId);
+    if (calibrationId) params.set('calibrationId', calibrationId);
+    const suffix = params.toString() ? `?${params.toString()}` : '';
+    adminFetch(`/admin/treatment-plans/${service.id}${suffix}`)
+      .then((data) => {
+        if (cancelled) return;
+        const blocks = data?.plan?.propertyGate?.blocks || data?.plan?.protocol?.blocked || [];
+        setTreatmentPlanBlocks(Array.isArray(blocks) ? blocks : []);
+      })
+      .catch((err) => {
+        if (!cancelled) setTreatmentPlanError(err.message || 'Could not load WaveGuard plan');
+      });
+    return () => { cancelled = true; };
+  }, [calibrationRequired, service.id, equipmentSystemId, calibrationId]);
 
   useEffect(() => {
     draftReadyRef.current = false;
@@ -1223,6 +1266,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         showNextVisitNote,
         equipmentSystemId,
         calibrationId,
+        officeApprovalReasonCode,
+        officeApprovalNote,
       };
       localStorage.setItem(completionDraftKey(service.id), JSON.stringify(draft));
     }, 700);
@@ -1232,6 +1277,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
     soilPh, soilMoisture, sendSms, requestReview, visitOutcome, customerRecap, recapSource,
     areasServiced, customerInteraction, customerConcern, nextVisitNote, showNextVisitNote,
     equipmentSystemId, calibrationId,
+    officeApprovalReasonCode, officeApprovalNote,
   ]);
 
   function restoreDraft() {
@@ -1256,6 +1302,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
     setShowNextVisitNote(!!savedDraft.showNextVisitNote);
     setEquipmentSystemId(savedDraft.equipmentSystemId || '');
     setCalibrationId(savedDraft.calibrationId || '');
+    setOfficeApprovalReasonCode(savedDraft.officeApprovalReasonCode || '');
+    setOfficeApprovalNote(savedDraft.officeApprovalNote || '');
     setShowDraftPrompt(false);
   }
 
@@ -1422,6 +1470,12 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
       alert(calibrationHelpText || 'Select calibrated equipment before completing this WaveGuard lawn visit.');
       return;
     }
+    if (blackoutCompletionBlocked) {
+      alert(canApproveOfficeExceptions
+        ? 'Office approval is required before completing this WaveGuard lawn visit during an N/P blackout.'
+        : 'Admin approval is required before completing this WaveGuard lawn visit during an N/P blackout.');
+      return;
+    }
     setSubmitting(true);
     try {
       if (!completionIdempotencyKeyRef.current) {
@@ -1435,6 +1489,12 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         reviewSuppression: reviewSuppressionReason,
         equipmentSystemId: equipmentSystemId || null,
         calibrationId: calibrationId || null,
+        officeApproval: blackoutApprovalRequired && canApproveOfficeExceptions
+          ? {
+              reasonCode: officeApprovalReasonCode,
+              note: officeApprovalNote,
+            }
+          : null,
         products: selectedProducts.map(p => ({
           productId: p.productId,
           rate: p.rate,
@@ -1491,7 +1551,6 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
       : calibrationRequired
         ? 'WaveGuard lawn visits require current calibrated spray equipment before completion.'
         : '');
-
   const chipGroupStyle = { marginBottom: 8 };
   const chipLabelStyle = { fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 4, display: 'block' };
 
@@ -1711,6 +1770,38 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
                 }}>
                   {isIncompleteVisit ? 'Calibration is not required when marking a visit incomplete.' : calibrationHelpText}
                 </div>
+              </Field>
+            )}
+
+            {blackoutApprovalRequired && (
+              <Field label="Office approval">
+                <div style={{
+                  marginBottom: 10, fontFamily: font, fontSize: 12,
+                  color: M.err, lineHeight: 1.35,
+                }}>
+                  {blackoutHelpText} {!canApproveOfficeExceptions ? 'An admin must approve this exception before completion.' : ''}
+                </div>
+                {canApproveOfficeExceptions && (
+                  <>
+                    <select
+                      value={officeApprovalReasonCode}
+                      onChange={e => setOfficeApprovalReasonCode(e.target.value)}
+                      style={mInput}
+                    >
+                      <option value="">Select approval reason</option>
+                      {OFFICE_APPROVAL_REASONS.map(reason => (
+                        <option key={reason.value} value={reason.value}>{reason.label}</option>
+                      ))}
+                    </select>
+                    <textarea
+                      value={officeApprovalNote}
+                      onChange={e => setOfficeApprovalNote(e.target.value)}
+                      rows={2}
+                      placeholder="Approval note"
+                      style={{ ...mTextarea, minHeight: 72, marginTop: 8 }}
+                    />
+                  </>
+                )}
               </Field>
             )}
 
@@ -2132,8 +2223,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
             <button
               type="button"
               onClick={() => handleSubmit()}
-              disabled={submitting || calibrationCompletionBlocked}
-              style={{ ...primaryPill, opacity: submitting || calibrationCompletionBlocked ? 0.5 : 1 }}
+              disabled={submitting || calibrationCompletionBlocked || blackoutCompletionBlocked}
+              style={{ ...primaryPill, opacity: submitting || calibrationCompletionBlocked || blackoutCompletionBlocked ? 0.5 : 1 }}
             >
               {completionCtaLabel.replace('...', '…')}
             </button>
@@ -2268,6 +2359,40 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
               }}>
                 {isIncompleteVisit ? 'Calibration is not required when marking a visit incomplete.' : calibrationHelpText}
               </div>
+            </div>
+          )}
+
+          {blackoutApprovalRequired && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={labelStyle}>Office Approval</label>
+              <div style={{ fontSize: 12, color: D.red, lineHeight: 1.4, marginBottom: 8 }}>
+                {blackoutHelpText} {!canApproveOfficeExceptions ? 'An admin must approve this exception before completion.' : ''}
+              </div>
+              {canApproveOfficeExceptions && (
+                <>
+                  <select
+                    value={officeApprovalReasonCode}
+                    onChange={e => setOfficeApprovalReasonCode(e.target.value)}
+                    style={inputStyle}
+                  >
+                    <option value="">Select approval reason</option>
+                    {OFFICE_APPROVAL_REASONS.map(reason => (
+                      <option key={reason.value} value={reason.value}>{reason.label}</option>
+                    ))}
+                  </select>
+                  <textarea
+                    value={officeApprovalNote}
+                    onChange={e => setOfficeApprovalNote(e.target.value)}
+                    rows={2}
+                    placeholder="Approval note"
+                    style={{
+                      width: '100%', background: D.input, color: D.text, border: `1px solid ${D.border}`,
+                      borderRadius: 10, padding: 12, fontSize: 14, resize: 'vertical',
+                      fontFamily: "'Nunito Sans', sans-serif", boxSizing: 'border-box', marginTop: 8,
+                    }}
+                  />
+                </>
+              )}
             </div>
           )}
 
@@ -2635,9 +2760,9 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
 
         {/* Footer */}
         <div style={{ padding: '16px 24px', borderTop: `1px solid ${D.border}`, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <button onClick={() => handleSubmit()} disabled={submitting || calibrationCompletionBlocked} style={{
+          <button onClick={() => handleSubmit()} disabled={submitting || calibrationCompletionBlocked || blackoutCompletionBlocked} style={{
             ...btnBase, width: '100%', background: D.green, color: '#fff', fontSize: 14, height: 52,
-            opacity: submitting || calibrationCompletionBlocked ? 0.6 : 1, flexDirection: 'column', lineHeight: 1.3,
+            opacity: submitting || calibrationCompletionBlocked || blackoutCompletionBlocked ? 0.6 : 1, flexDirection: 'column', lineHeight: 1.3,
           }}>
             {submitting ? completionCtaLabel : (
               <>

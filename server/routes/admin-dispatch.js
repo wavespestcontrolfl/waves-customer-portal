@@ -83,6 +83,23 @@ function calibrationLockoutBlocks(plan) {
     .filter((block) => lockoutCodes.has(block.code));
 }
 
+function blackoutLockoutBlocks(plan) {
+  const lockoutCodes = new Set([
+    'nitrogen_blackout',
+    'phosphorus_blackout',
+  ]);
+  return (plan?.propertyGate?.blocks || [])
+    .filter((block) => lockoutCodes.has(block.code));
+}
+
+function normalizeOfficeApproval(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const reasonCode = String(input.reasonCode || input.reason_code || '').trim().slice(0, 80);
+  const note = String(input.note || input.reason || '').trim().slice(0, 500);
+  if (!reasonCode) return null;
+  return { reasonCode, note };
+}
+
 function parseJsonObject(value) {
   if (!value) return {};
   if (typeof value === 'object' && !Array.isArray(value)) return value;
@@ -391,6 +408,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       areasTreated,
       areasServiced,
       customerInteraction,
+      officeApproval,
       formResponses,
       formStartedAt,
     } = req.body;
@@ -402,6 +420,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const isIncompleteVisit = visitOutcome === 'incomplete';
     const completionAreas = Array.isArray(areasTreated) ? areasTreated : (Array.isArray(areasServiced) ? areasServiced : []);
     const concernText = typeof customerConcernText === 'string' ? customerConcernText.trim() : '';
+    const normalizedOfficeApproval = normalizeOfficeApproval(officeApproval);
+    let waveguardBlackoutApproval = null;
     let waveguardEquipmentSystemId = equipmentSystemId || null;
     let waveguardCalibrationId = calibrationId || null;
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
@@ -440,6 +460,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           details: calibrationBlocks.map((block) => block.message),
           blocks: calibrationBlocks,
         });
+      }
+      const blackoutBlocks = blackoutLockoutBlocks(plan);
+      if (blackoutBlocks.length && (!normalizedOfficeApproval || req.techRole !== 'admin')) {
+        const validationErr = new Error('WaveGuard fertilizer blackout lockout');
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
+        return res.status(400).json({
+          error: 'Office approval required for fertilizer blackout',
+          code: 'waveguard_fertilizer_blackout_lockout',
+          details: blackoutBlocks.map((block) => block.message),
+          blocks: blackoutBlocks,
+        });
+      }
+      if (blackoutBlocks.length) {
+        waveguardBlackoutApproval = {
+          ...normalizedOfficeApproval,
+          approvedByTechnicianId: req.technicianId,
+          approvedByRole: req.techRole || null,
+          approvedAt: new Date().toISOString(),
+          blocks: blackoutBlocks.map((block) => ({
+            code: block.code,
+            message: block.message,
+            source: block.source || null,
+          })),
+        };
       }
       const selectedCalibration = plan?.equipmentCalibration?.selected;
       if (selectedCalibration) {
@@ -506,6 +550,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             areasTreated: completionAreas,
             waveguardEquipmentSystemId,
             waveguardCalibrationId,
+            waveguardBlackoutApproval,
           },
           areas_serviced: completionAreas,
           customer_interaction: customerInteraction || null,
