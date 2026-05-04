@@ -92,6 +92,11 @@ function blackoutLockoutBlocks(plan) {
     .filter((block) => lockoutCodes.has(block.code));
 }
 
+function annualNLockoutBlocks(plan) {
+  return (plan?.propertyGate?.blocks || [])
+    .filter((block) => block.code === 'annual_n_budget_exceeded');
+}
+
 function normalizeOfficeApproval(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
   const reasonCode = String(input.reasonCode || input.reason_code || '').trim().slice(0, 80);
@@ -409,6 +414,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       areasServiced,
       customerInteraction,
       officeApproval,
+      nLimitApproval,
       formResponses,
       formStartedAt,
     } = req.body;
@@ -421,7 +427,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const completionAreas = Array.isArray(areasTreated) ? areasTreated : (Array.isArray(areasServiced) ? areasServiced : []);
     const concernText = typeof customerConcernText === 'string' ? customerConcernText.trim() : '';
     const normalizedOfficeApproval = normalizeOfficeApproval(officeApproval);
+    const normalizedNLimitApproval = normalizeOfficeApproval(nLimitApproval);
     let waveguardBlackoutApproval = null;
+    let waveguardNLimitApproval = null;
     let waveguardEquipmentSystemId = equipmentSystemId || null;
     let waveguardCalibrationId = calibrationId || null;
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
@@ -482,6 +490,31 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             code: block.code,
             message: block.message,
             source: block.source || null,
+          })),
+        };
+      }
+      const annualNBlocks = annualNLockoutBlocks(plan);
+      if (annualNBlocks.length && (!normalizedNLimitApproval || req.techRole !== 'admin')) {
+        const validationErr = new Error('WaveGuard annual N budget lockout');
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
+        return res.status(400).json({
+          error: 'Admin approval required for annual N budget limit',
+          code: 'waveguard_annual_n_budget_lockout',
+          details: annualNBlocks.map((block) => block.message),
+          blocks: annualNBlocks,
+          annualN: plan?.propertyGate?.annualN || null,
+        });
+      }
+      if (annualNBlocks.length) {
+        waveguardNLimitApproval = {
+          ...normalizedNLimitApproval,
+          approvedByTechnicianId: req.technicianId,
+          approvedByRole: req.techRole || null,
+          approvedAt: new Date().toISOString(),
+          annualN: plan?.propertyGate?.annualN || null,
+          blocks: annualNBlocks.map((block) => ({
+            code: block.code,
+            message: block.message,
           })),
         };
       }
@@ -551,6 +584,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             waveguardEquipmentSystemId,
             waveguardCalibrationId,
             waveguardBlackoutApproval,
+            waveguardNLimitApproval,
           },
           areas_serviced: completionAreas,
           customer_interaction: customerInteraction || null,

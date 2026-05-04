@@ -72,6 +72,11 @@ const OFFICE_APPROVAL_REASONS = [
   { value: 'soil_test_supported_phosphorus', label: 'Soil test supports phosphorus' },
   { value: 'non_fertilizer_application_only', label: 'No N/P fertilizer applied' },
 ];
+const N_LIMIT_APPROVAL_REASONS = [
+  { value: 'admin_approved_n_budget_exception', label: 'Admin approved exception' },
+  { value: 'ledger_adjustment_pending', label: 'Ledger adjustment pending' },
+  { value: 'site_specific_agronomic_need', label: 'Site-specific agronomic need' },
+];
 const AREAS_BY_SERVICE = {
   pest: ['Perimeter', 'Garage', 'Kitchen', 'Bathrooms', 'Entry points', 'Yard', 'Fence line', 'Trash area'],
   lawn: ['Front yard', 'Back yard', 'Side yard', 'Landscape beds', 'Shrubs', 'Palms', 'Problem area', 'Irrigation zone'],
@@ -1073,9 +1078,12 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   const [equipmentCalibrations, setEquipmentCalibrations] = useState([]);
   const [equipmentCalibrationError, setEquipmentCalibrationError] = useState('');
   const [treatmentPlanBlocks, setTreatmentPlanBlocks] = useState([]);
+  const [treatmentPlanAnnualN, setTreatmentPlanAnnualN] = useState(null);
   const [treatmentPlanError, setTreatmentPlanError] = useState('');
   const [officeApprovalReasonCode, setOfficeApprovalReasonCode] = useState('');
   const [officeApprovalNote, setOfficeApprovalNote] = useState('');
+  const [nLimitApprovalReasonCode, setNLimitApprovalReasonCode] = useState('');
+  const [nLimitApprovalNote, setNLimitApprovalNote] = useState('');
   const [savedDraft, setSavedDraft] = useState(null);
   const [showDraftPrompt, setShowDraftPrompt] = useState(false);
   const photoInputRef = useRef(null);
@@ -1145,12 +1153,23 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   const blackoutHelpText = treatmentPlanError
     || blackoutBlocks.map(block => block.message).filter(Boolean).join(' ')
     || 'Nitrogen or phosphorus fertilizer is restricted for this municipality window.';
+  const annualNBlocks = treatmentPlanBlocks.filter(block => block?.code === 'annual_n_budget_exceeded');
+  const nLimitApprovalRequired = calibrationRequired && !isIncompleteVisit && annualNBlocks.length > 0;
+  const nLimitCompletionBlocked = nLimitApprovalRequired && (!canApproveOfficeExceptions || !nLimitApprovalReasonCode);
+  const nLimitHelpText = treatmentPlanError
+    || annualNBlocks.map(block => block.message).filter(Boolean).join(' ')
+    || 'This visit would exceed the annual nitrogen budget.';
+  const nLimitSummaryText = treatmentPlanAnnualN
+    ? `Used ${treatmentPlanAnnualN.used ?? 0}, visit ${treatmentPlanAnnualN.visit ?? 0}, projected ${treatmentPlanAnnualN.projected ?? 0} / ${treatmentPlanAnnualN.limit ?? 0} ${treatmentPlanAnnualN.unit || 'lb N / 1,000 sqft / year'}.`
+    : '';
   const completionCtaLabel = submitting
     ? 'Completing...'
     : calibrationRequired && !isIncompleteVisit && !equipmentSystemId
       ? 'Select Equipment Calibration'
     : blackoutCompletionBlocked
       ? canApproveOfficeExceptions ? 'Office Approval Required' : 'Admin Approval Required'
+    : nLimitCompletionBlocked
+      ? canApproveOfficeExceptions ? 'N Approval Required' : 'Admin Approval Required'
     : isIncompleteVisit
       ? 'Mark Visit Incomplete'
       : !sendSms
@@ -1205,6 +1224,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         if (cancelled) return;
         const blocks = data?.plan?.propertyGate?.blocks || data?.plan?.protocol?.blocked || [];
         setTreatmentPlanBlocks(Array.isArray(blocks) ? blocks : []);
+        setTreatmentPlanAnnualN(data?.plan?.propertyGate?.annualN || null);
       })
       .catch((err) => {
         if (!cancelled) setTreatmentPlanError(err.message || 'Could not load WaveGuard plan');
@@ -1268,6 +1288,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         calibrationId,
         officeApprovalReasonCode,
         officeApprovalNote,
+        nLimitApprovalReasonCode,
+        nLimitApprovalNote,
       };
       localStorage.setItem(completionDraftKey(service.id), JSON.stringify(draft));
     }, 700);
@@ -1278,6 +1300,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
     areasServiced, customerInteraction, customerConcern, nextVisitNote, showNextVisitNote,
     equipmentSystemId, calibrationId,
     officeApprovalReasonCode, officeApprovalNote,
+    nLimitApprovalReasonCode, nLimitApprovalNote,
   ]);
 
   function restoreDraft() {
@@ -1304,6 +1327,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
     setCalibrationId(savedDraft.calibrationId || '');
     setOfficeApprovalReasonCode(savedDraft.officeApprovalReasonCode || '');
     setOfficeApprovalNote(savedDraft.officeApprovalNote || '');
+    setNLimitApprovalReasonCode(savedDraft.nLimitApprovalReasonCode || '');
+    setNLimitApprovalNote(savedDraft.nLimitApprovalNote || '');
     setShowDraftPrompt(false);
   }
 
@@ -1476,6 +1501,10 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         : 'Admin approval is required before completing this WaveGuard lawn visit during an N/P blackout.');
       return;
     }
+    if (nLimitCompletionBlocked) {
+      alert('Admin approval is required before completing this WaveGuard lawn visit over the annual N budget.');
+      return;
+    }
     setSubmitting(true);
     try {
       if (!completionIdempotencyKeyRef.current) {
@@ -1493,6 +1522,12 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
           ? {
               reasonCode: officeApprovalReasonCode,
               note: officeApprovalNote,
+            }
+          : null,
+        nLimitApproval: nLimitApprovalRequired && canApproveOfficeExceptions
+          ? {
+              reasonCode: nLimitApprovalReasonCode,
+              note: nLimitApprovalNote,
             }
           : null,
         products: selectedProducts.map(p => ({
@@ -1796,6 +1831,38 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
                     <textarea
                       value={officeApprovalNote}
                       onChange={e => setOfficeApprovalNote(e.target.value)}
+                      rows={2}
+                      placeholder="Approval note"
+                      style={{ ...mTextarea, minHeight: 72, marginTop: 8 }}
+                    />
+                  </>
+                )}
+              </Field>
+            )}
+
+            {nLimitApprovalRequired && (
+              <Field label="Annual N budget">
+                <div style={{
+                  marginBottom: 10, fontFamily: font, fontSize: 12,
+                  color: M.err, lineHeight: 1.35,
+                }}>
+                  {nLimitHelpText} {nLimitSummaryText} {!canApproveOfficeExceptions ? 'An admin must approve this exception before completion.' : ''}
+                </div>
+                {canApproveOfficeExceptions && (
+                  <>
+                    <select
+                      value={nLimitApprovalReasonCode}
+                      onChange={e => setNLimitApprovalReasonCode(e.target.value)}
+                      style={mInput}
+                    >
+                      <option value="">Select approval reason</option>
+                      {N_LIMIT_APPROVAL_REASONS.map(reason => (
+                        <option key={reason.value} value={reason.value}>{reason.label}</option>
+                      ))}
+                    </select>
+                    <textarea
+                      value={nLimitApprovalNote}
+                      onChange={e => setNLimitApprovalNote(e.target.value)}
                       rows={2}
                       placeholder="Approval note"
                       style={{ ...mTextarea, minHeight: 72, marginTop: 8 }}
@@ -2223,8 +2290,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
             <button
               type="button"
               onClick={() => handleSubmit()}
-              disabled={submitting || calibrationCompletionBlocked || blackoutCompletionBlocked}
-              style={{ ...primaryPill, opacity: submitting || calibrationCompletionBlocked || blackoutCompletionBlocked ? 0.5 : 1 }}
+              disabled={submitting || calibrationCompletionBlocked || blackoutCompletionBlocked || nLimitCompletionBlocked}
+              style={{ ...primaryPill, opacity: submitting || calibrationCompletionBlocked || blackoutCompletionBlocked || nLimitCompletionBlocked ? 0.5 : 1 }}
             >
               {completionCtaLabel.replace('...', '…')}
             </button>
@@ -2383,6 +2450,40 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
                   <textarea
                     value={officeApprovalNote}
                     onChange={e => setOfficeApprovalNote(e.target.value)}
+                    rows={2}
+                    placeholder="Approval note"
+                    style={{
+                      width: '100%', background: D.input, color: D.text, border: `1px solid ${D.border}`,
+                      borderRadius: 10, padding: 12, fontSize: 14, resize: 'vertical',
+                      fontFamily: "'Nunito Sans', sans-serif", boxSizing: 'border-box', marginTop: 8,
+                    }}
+                  />
+                </>
+              )}
+            </div>
+          )}
+
+          {nLimitApprovalRequired && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={labelStyle}>Annual N Budget</label>
+              <div style={{ fontSize: 12, color: D.red, lineHeight: 1.4, marginBottom: 8 }}>
+                {nLimitHelpText} {nLimitSummaryText} {!canApproveOfficeExceptions ? 'An admin must approve this exception before completion.' : ''}
+              </div>
+              {canApproveOfficeExceptions && (
+                <>
+                  <select
+                    value={nLimitApprovalReasonCode}
+                    onChange={e => setNLimitApprovalReasonCode(e.target.value)}
+                    style={inputStyle}
+                  >
+                    <option value="">Select approval reason</option>
+                    {N_LIMIT_APPROVAL_REASONS.map(reason => (
+                      <option key={reason.value} value={reason.value}>{reason.label}</option>
+                    ))}
+                  </select>
+                  <textarea
+                    value={nLimitApprovalNote}
+                    onChange={e => setNLimitApprovalNote(e.target.value)}
                     rows={2}
                     placeholder="Approval note"
                     style={{
@@ -2760,9 +2861,9 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
 
         {/* Footer */}
         <div style={{ padding: '16px 24px', borderTop: `1px solid ${D.border}`, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <button onClick={() => handleSubmit()} disabled={submitting || calibrationCompletionBlocked || blackoutCompletionBlocked} style={{
+          <button onClick={() => handleSubmit()} disabled={submitting || calibrationCompletionBlocked || blackoutCompletionBlocked || nLimitCompletionBlocked} style={{
             ...btnBase, width: '100%', background: D.green, color: '#fff', fontSize: 14, height: 52,
-            opacity: submitting || calibrationCompletionBlocked || blackoutCompletionBlocked ? 0.6 : 1, flexDirection: 'column', lineHeight: 1.3,
+            opacity: submitting || calibrationCompletionBlocked || blackoutCompletionBlocked || nLimitCompletionBlocked ? 0.6 : 1, flexDirection: 'column', lineHeight: 1.3,
           }}>
             {submitting ? completionCtaLabel : (
               <>
