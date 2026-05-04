@@ -77,6 +77,40 @@ const N_LIMIT_APPROVAL_REASONS = [
   { value: 'ledger_adjustment_pending', label: 'Ledger adjustment pending' },
   { value: 'site_specific_agronomic_need', label: 'Site-specific agronomic need' },
 ];
+const MANAGER_APPROVAL_REASONS = [
+  { value: 'manager_approved_protocol_exception', label: 'Manager approved protocol exception' },
+  { value: 'field_conditions_documented', label: 'Field conditions documented' },
+  { value: 'label_review_completed', label: 'Label / rotation reviewed' },
+];
+const MANAGER_APPROVAL_CODES = new Set([
+  'off_protocol_product',
+  'high_rate_application',
+  'fungicide_frac_rotation_approval',
+  'repeat_moa_group',
+  'repeat_frac_group',
+  'repeat_irac_group',
+  'repeat_hrac_group',
+  'pgr_on_stressed_turf',
+  'st_augustine_dethatching',
+]);
+function normalizeRateUnit(value) {
+  const normalized = String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  const aliases = {
+    floz: 'fl_oz',
+    fl_oz: 'fl_oz',
+    fluid_ounce: 'fl_oz',
+    fluid_ounces: 'fl_oz',
+    lbs: 'lb',
+    pounds: 'lb',
+    ounces: 'oz',
+  };
+  return aliases[normalized] || normalized;
+}
+function rateUnitsMatch(a, b) {
+  const left = normalizeRateUnit(a);
+  const right = normalizeRateUnit(b);
+  return !!left && !!right && left === right;
+}
 const TANK_CLEANOUT_METHODS = [
   'Triple rinse',
   'Clean water flush',
@@ -1090,6 +1124,10 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   const [officeApprovalNote, setOfficeApprovalNote] = useState('');
   const [nLimitApprovalReasonCode, setNLimitApprovalReasonCode] = useState('');
   const [nLimitApprovalNote, setNLimitApprovalNote] = useState('');
+  const [managerApprovalReasonCode, setManagerApprovalReasonCode] = useState('');
+  const [managerApprovalNote, setManagerApprovalNote] = useState('');
+  const [treatmentPlanProductIds, setTreatmentPlanProductIds] = useState([]);
+  const [treatmentPlanPlannedProductIds, setTreatmentPlanPlannedProductIds] = useState([]);
   const [tankLastProduct, setTankLastProduct] = useState('');
   const [tankLastProductCategory, setTankLastProductCategory] = useState('');
   const [tankCleanoutCompleted, setTankCleanoutCompleted] = useState('');
@@ -1173,6 +1211,61 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   const nLimitSummaryText = treatmentPlanAnnualN
     ? `Used ${treatmentPlanAnnualN.used ?? 0}, visit ${treatmentPlanAnnualN.visit ?? 0}, projected ${treatmentPlanAnnualN.projected ?? 0} / ${treatmentPlanAnnualN.limit ?? 0} ${treatmentPlanAnnualN.unit || 'lb N / 1,000 sqft / year'}.`
     : '';
+  const offProtocolSelectedProducts = treatmentPlanProductIds.length
+    ? selectedProducts.filter(p => !treatmentPlanProductIds.includes(String(p.productId)))
+    : [];
+  const selectedProductIds = new Set(selectedProducts.map(product => String(product.productId)));
+  const conditionalProtocolSelectedProducts = treatmentPlanProductIds.length
+    ? selectedProducts.filter(p => {
+        const id = String(p.productId);
+        return treatmentPlanProductIds.includes(id) && !treatmentPlanPlannedProductIds.includes(id);
+      })
+    : [];
+  const highRateSelectedProducts = selectedProducts.filter(product => {
+    const enteredRate = Number(product.rate);
+    const maxRate = Number(product.maxLabelRatePer1000);
+    return Number.isFinite(enteredRate)
+      && Number.isFinite(maxRate)
+      && maxRate > 0
+      && enteredRate > maxRate
+      && rateUnitsMatch(product.rateUnit, product.catalogRateUnit);
+  });
+  const labelUnitReviewProducts = selectedProducts.filter(product => {
+    const enteredRate = Number(product.rate);
+    const maxRate = Number(product.maxLabelRatePer1000);
+    return Number.isFinite(enteredRate)
+      && Number.isFinite(maxRate)
+      && enteredRate > 0
+      && maxRate > 0
+      && !rateUnitsMatch(product.rateUnit, product.catalogRateUnit);
+  });
+  const managerPlanBlocks = treatmentPlanBlocks.filter(block => {
+    if (!MANAGER_APPROVAL_CODES.has(block?.code)) return false;
+    if (!block?.productId) return block?.code === 'st_augustine_dethatching';
+    return selectedProductIds.has(String(block.productId));
+  });
+  const managerApprovalBlocks = [
+    ...managerPlanBlocks,
+    ...offProtocolSelectedProducts.map(product => ({
+      code: 'off_protocol_product',
+      message: `${product.name || 'Selected product'} is not part of the current WaveGuard protocol card.`,
+    })),
+    ...conditionalProtocolSelectedProducts.map(product => ({
+      code: 'conditional_protocol_product_review',
+      message: `${product.name || 'Selected product'} is conditional on the WaveGuard protocol card and was not in the generated mix; manager review is required before applying it.`,
+    })),
+    ...highRateSelectedProducts.map(product => ({
+      code: 'high_rate_application',
+      message: `${product.name || 'Selected product'} rate ${product.rate} ${product.rateUnit || ''}/1k exceeds label max ${product.maxLabelRatePer1000} ${product.catalogRateUnit || ''}/1k.`,
+    })),
+    ...labelUnitReviewProducts.map(product => ({
+      code: 'label_rate_unit_review',
+      message: `${product.name || 'Selected product'} rate unit ${product.rateUnit || 'unknown'} does not match label unit ${product.catalogRateUnit || 'unknown'}; manager review is required before applying it.`,
+    })),
+  ];
+  const managerApprovalRequired = calibrationRequired && !isIncompleteVisit && managerApprovalBlocks.length > 0;
+  const managerApprovalCompletionBlocked = managerApprovalRequired && (!canApproveOfficeExceptions || !managerApprovalReasonCode);
+  const managerApprovalHelpText = managerApprovalBlocks.map(block => block.message).filter(Boolean).join(' ');
   const tankCleanoutRequired = calibrationRequired && !isIncompleteVisit && !!equipmentSystemId;
   const tankCleanoutCompletionBlocked = tankCleanoutRequired
     && (!tankLastProduct.trim() || tankCleanoutCompleted !== 'yes' || !tankCleanoutMethod.trim());
@@ -1187,6 +1280,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
       ? canApproveOfficeExceptions ? 'Office Approval Required' : 'Admin Approval Required'
     : nLimitCompletionBlocked
       ? canApproveOfficeExceptions ? 'N Approval Required' : 'Admin Approval Required'
+    : managerApprovalCompletionBlocked
+      ? canApproveOfficeExceptions ? 'Manager Approval Required' : 'Admin Approval Required'
     : isIncompleteVisit
       ? 'Mark Visit Incomplete'
       : !sendSms
@@ -1242,6 +1337,12 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         const blocks = data?.plan?.propertyGate?.blocks || data?.plan?.protocol?.blocked || [];
         setTreatmentPlanBlocks(Array.isArray(blocks) ? blocks : []);
         setTreatmentPlanAnnualN(data?.plan?.propertyGate?.annualN || null);
+        const baseItems = data?.plan?.protocol?.base || [];
+        const conditionalItems = data?.plan?.protocol?.conditional || [];
+        const mixItems = data?.plan?.mixCalculator?.items || [];
+        const productIdsFor = (items) => items.map(item => item?.product?.id || item?.productId).filter(Boolean).map(String);
+        setTreatmentPlanProductIds([...new Set(productIdsFor([...baseItems, ...conditionalItems, ...mixItems]))]);
+        setTreatmentPlanPlannedProductIds([...new Set(productIdsFor([...baseItems, ...mixItems]))]);
       })
       .catch((err) => {
         if (!cancelled) setTreatmentPlanError(err.message || 'Could not load WaveGuard plan');
@@ -1311,6 +1412,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         officeApprovalNote,
         nLimitApprovalReasonCode,
         nLimitApprovalNote,
+        managerApprovalReasonCode,
+        managerApprovalNote,
         tankLastProduct,
         tankLastProductCategory,
         tankCleanoutCompleted,
@@ -1327,6 +1430,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
     equipmentSystemId, calibrationId,
     officeApprovalReasonCode, officeApprovalNote,
     nLimitApprovalReasonCode, nLimitApprovalNote,
+    managerApprovalReasonCode, managerApprovalNote,
     tankLastProduct, tankLastProductCategory, tankCleanoutCompleted, tankCleanoutMethod, tankCleanoutNote,
   ]);
 
@@ -1356,6 +1460,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
     setOfficeApprovalNote(savedDraft.officeApprovalNote || '');
     setNLimitApprovalReasonCode(savedDraft.nLimitApprovalReasonCode || '');
     setNLimitApprovalNote(savedDraft.nLimitApprovalNote || '');
+    setManagerApprovalReasonCode(savedDraft.managerApprovalReasonCode || '');
+    setManagerApprovalNote(savedDraft.managerApprovalNote || '');
     setTankLastProduct(savedDraft.tankLastProduct || '');
     setTankLastProductCategory(savedDraft.tankLastProductCategory || '');
     setTankCleanoutCompleted(savedDraft.tankCleanoutCompleted || '');
@@ -1481,6 +1587,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
       name: product.name,
       rate: '',
       rateUnit: defaultUnit,
+      catalogRateUnit: product.rateUnit || product.rate_unit || defaultUnit,
+      maxLabelRatePer1000: product.maxLabelRatePer1000 ?? product.max_label_rate_per_1000 ?? null,
       totalAmount: '',
       amountUnit: defaultUnit,
     }]);
@@ -1541,6 +1649,12 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
       alert('Admin approval is required before completing this WaveGuard lawn visit over the annual N budget.');
       return;
     }
+    if (managerApprovalCompletionBlocked) {
+      alert(canApproveOfficeExceptions
+        ? 'Manager approval is required before completing this WaveGuard protocol exception.'
+        : 'An admin must approve this WaveGuard protocol exception before completion.');
+      return;
+    }
     setSubmitting(true);
     try {
       if (!completionIdempotencyKeyRef.current) {
@@ -1564,6 +1678,12 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
           ? {
               reasonCode: nLimitApprovalReasonCode,
               note: nLimitApprovalNote,
+            }
+          : null,
+        managerApproval: managerApprovalRequired && canApproveOfficeExceptions
+          ? {
+              reasonCode: managerApprovalReasonCode,
+              note: managerApprovalNote,
             }
           : null,
         tankCleanout: tankCleanoutRequired
@@ -1964,6 +2084,38 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
                     <textarea
                       value={nLimitApprovalNote}
                       onChange={e => setNLimitApprovalNote(e.target.value)}
+                      rows={2}
+                      placeholder="Approval note"
+                      style={{ ...mTextarea, minHeight: 72, marginTop: 8 }}
+                    />
+                  </>
+                )}
+              </Field>
+            )}
+
+            {managerApprovalRequired && (
+              <Field label="Manager approval">
+                <div style={{
+                  marginBottom: 10, fontFamily: font, fontSize: 12,
+                  color: M.err, lineHeight: 1.35,
+                }}>
+                  {managerApprovalHelpText} {!canApproveOfficeExceptions ? 'An admin must approve this exception before completion.' : ''}
+                </div>
+                {canApproveOfficeExceptions && (
+                  <>
+                    <select
+                      value={managerApprovalReasonCode}
+                      onChange={e => setManagerApprovalReasonCode(e.target.value)}
+                      style={mInput}
+                    >
+                      <option value="">Select approval reason</option>
+                      {MANAGER_APPROVAL_REASONS.map(reason => (
+                        <option key={reason.value} value={reason.value}>{reason.label}</option>
+                      ))}
+                    </select>
+                    <textarea
+                      value={managerApprovalNote}
+                      onChange={e => setManagerApprovalNote(e.target.value)}
                       rows={2}
                       placeholder="Approval note"
                       style={{ ...mTextarea, minHeight: 72, marginTop: 8 }}
@@ -2391,8 +2543,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
             <button
               type="button"
               onClick={() => handleSubmit()}
-              disabled={submitting || calibrationCompletionBlocked || tankCleanoutCompletionBlocked || blackoutCompletionBlocked || nLimitCompletionBlocked}
-              style={{ ...primaryPill, opacity: submitting || calibrationCompletionBlocked || tankCleanoutCompletionBlocked || blackoutCompletionBlocked || nLimitCompletionBlocked ? 0.5 : 1 }}
+              disabled={submitting || calibrationCompletionBlocked || tankCleanoutCompletionBlocked || blackoutCompletionBlocked || nLimitCompletionBlocked || managerApprovalCompletionBlocked}
+              style={{ ...primaryPill, opacity: submitting || calibrationCompletionBlocked || tankCleanoutCompletionBlocked || blackoutCompletionBlocked || nLimitCompletionBlocked || managerApprovalCompletionBlocked ? 0.5 : 1 }}
             >
               {completionCtaLabel.replace('...', '…')}
             </button>
@@ -2643,6 +2795,40 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
                   <textarea
                     value={nLimitApprovalNote}
                     onChange={e => setNLimitApprovalNote(e.target.value)}
+                    rows={2}
+                    placeholder="Approval note"
+                    style={{
+                      width: '100%', background: D.input, color: D.text, border: `1px solid ${D.border}`,
+                      borderRadius: 10, padding: 12, fontSize: 14, resize: 'vertical',
+                      fontFamily: "'Nunito Sans', sans-serif", boxSizing: 'border-box', marginTop: 8,
+                    }}
+                  />
+                </>
+              )}
+            </div>
+          )}
+
+          {managerApprovalRequired && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={labelStyle}>Manager Approval</label>
+              <div style={{ fontSize: 12, color: D.red, lineHeight: 1.4, marginBottom: 8 }}>
+                {managerApprovalHelpText} {!canApproveOfficeExceptions ? 'An admin must approve this exception before completion.' : ''}
+              </div>
+              {canApproveOfficeExceptions && (
+                <>
+                  <select
+                    value={managerApprovalReasonCode}
+                    onChange={e => setManagerApprovalReasonCode(e.target.value)}
+                    style={inputStyle}
+                  >
+                    <option value="">Select approval reason</option>
+                    {MANAGER_APPROVAL_REASONS.map(reason => (
+                      <option key={reason.value} value={reason.value}>{reason.label}</option>
+                    ))}
+                  </select>
+                  <textarea
+                    value={managerApprovalNote}
+                    onChange={e => setManagerApprovalNote(e.target.value)}
                     rows={2}
                     placeholder="Approval note"
                     style={{
@@ -3020,9 +3206,9 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
 
         {/* Footer */}
         <div style={{ padding: '16px 24px', borderTop: `1px solid ${D.border}`, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <button onClick={() => handleSubmit()} disabled={submitting || calibrationCompletionBlocked || tankCleanoutCompletionBlocked || blackoutCompletionBlocked || nLimitCompletionBlocked} style={{
+          <button onClick={() => handleSubmit()} disabled={submitting || calibrationCompletionBlocked || tankCleanoutCompletionBlocked || blackoutCompletionBlocked || nLimitCompletionBlocked || managerApprovalCompletionBlocked} style={{
             ...btnBase, width: '100%', background: D.green, color: '#fff', fontSize: 14, height: 52,
-            opacity: submitting || calibrationCompletionBlocked || tankCleanoutCompletionBlocked || blackoutCompletionBlocked || nLimitCompletionBlocked ? 0.6 : 1, flexDirection: 'column', lineHeight: 1.3,
+            opacity: submitting || calibrationCompletionBlocked || tankCleanoutCompletionBlocked || blackoutCompletionBlocked || nLimitCompletionBlocked || managerApprovalCompletionBlocked ? 0.6 : 1, flexDirection: 'column', lineHeight: 1.3,
           }}>
             {submitting ? completionCtaLabel : (
               <>

@@ -14,6 +14,7 @@ const CompletionAttempts = require('../services/completion-attempts');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { recordServiceProductNutrients } = require('../services/nutrient-ledger');
 const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
+const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 
 // Haversine ETA for the dispatch board tech cards. Returns a whole
 // number of minutes, or null when any input is missing or the tech is
@@ -103,6 +104,10 @@ function toETNoonServiceDate(value) {
     : etDateString();
   const parsed = parseETDateTime(`${dateOnly}T12:00`);
   return Number.isNaN(parsed.getTime()) ? parseETDateTime(`${etDateString()}T12:00`) : parsed;
+}
+
+function serviceDateOnly(value) {
+  return value ? String(value instanceof Date ? value.toISOString() : value).slice(0, 10) : etDateString();
 }
 
 async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
@@ -725,6 +730,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       customerInteraction,
       officeApproval,
       nLimitApproval,
+      managerApproval,
       tankCleanout,
       formResponses,
       formStartedAt,
@@ -739,9 +745,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const concernText = typeof customerConcernText === 'string' ? customerConcernText.trim() : '';
     const normalizedOfficeApproval = normalizeOfficeApproval(officeApproval);
     const normalizedNLimitApproval = normalizeOfficeApproval(nLimitApproval);
+    const normalizedManagerApproval = normalizeOfficeApproval(managerApproval);
     const normalizedTankCleanout = normalizeTankCleanout(tankCleanout);
     let waveguardBlackoutApproval = null;
     let waveguardNLimitApproval = null;
+    let waveguardManagerApproval = null;
     let waveguardTankCleanout = null;
     let inventoryDeductions = [];
     let waveguardEquipmentSystemId = equipmentSystemId || null;
@@ -835,6 +843,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           })),
         };
       }
+      const managerApprovalCheck = await evaluateWaveGuardManagerApprovals(db, {
+        customerId: svc.customer_id,
+        service: svc,
+        plan,
+        products: products || [],
+        serviceDate: serviceDateOnly(svc.scheduled_date),
+      });
+      const managerBlocks = managerApprovalCheck.blocks || [];
+      if (managerBlocks.length && (!normalizedManagerApproval || req.techRole !== 'admin')) {
+        const validationErr = new Error('WaveGuard manager approval lockout');
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
+        return res.status(400).json({
+          error: 'Admin approval required for WaveGuard protocol exception',
+          code: 'waveguard_manager_approval_lockout',
+          details: managerBlocks.map((block) => block.message),
+          blocks: managerBlocks,
+        });
+      }
+      if (managerBlocks.length) {
+        waveguardManagerApproval = managerApprovalSummary(normalizedManagerApproval, managerBlocks, {
+          technicianId: req.technicianId,
+          role: req.techRole || null,
+        });
+      }
       const selectedCalibration = plan?.equipmentCalibration?.selected;
       if (selectedCalibration) {
         waveguardEquipmentSystemId = selectedCalibration.equipment_system_id || waveguardEquipmentSystemId;
@@ -923,6 +955,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             waveguardCalibrationId,
             waveguardBlackoutApproval,
             waveguardNLimitApproval,
+            waveguardManagerApproval,
             waveguardTankCleanout,
             inventoryDeductions,
           },

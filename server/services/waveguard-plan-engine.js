@@ -2,6 +2,7 @@ const db = require('../models/db');
 const protocols = require('../config/protocols.json');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { summarizeLedgerRows } = require('./nutrient-ledger');
+const { evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -762,6 +763,27 @@ async function buildPlanForService(serviceId, options = {}) {
     }
   }
 
+  const managerApprovals = await evaluateWaveGuardManagerApprovals(knex, {
+    customerId: service.customer_id,
+    service,
+    plan: {
+      protocol: { base: planItems.filter((item) => item.role === 'base'), conditional: planItems.filter((item) => item.role === 'conditional') },
+      mixCalculator: { items: plannedItems },
+      propertyGate: { latestAssessment: latestAssessment ? { stressFlags } : null, trackKey, trackName: track?.name || null },
+    },
+    products: plannedItems
+      .filter((item) => item.product)
+      .map((item) => ({
+        productId: item.product.id,
+        name: item.product.name,
+        rate: item.mix?.ratePer1000,
+        rateUnit: item.mix?.rateUnit,
+      })),
+    serviceDate: etDateString(serviceDate),
+  });
+  for (const block of managerApprovals.blocks) blocks.push(block);
+  for (const warning of managerApprovals.warnings) warnings.push(warning);
+
   const status = blocks.length ? 'blocked' : warnings.length ? 'warning' : 'approved';
 
   return {
@@ -794,6 +816,7 @@ async function buildPlanForService(serviceId, options = {}) {
       } : null,
       warnings,
       blocks,
+      managerApprovals,
     },
     protocol: {
       objective: visit?.notes || null,
