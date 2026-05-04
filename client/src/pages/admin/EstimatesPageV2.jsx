@@ -505,9 +505,9 @@ function EstimatePipelineViewV2() {
     );
   }
 
-  // Classify + sort chronologically so estimates read in created order.
+  // Classify + sort newest-first so the most recent estimates stay at the top.
   const classified = estimates.map((e) => ({ ...e, _class: classifyEstimate(e) }));
-  const sorted = [...classified].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+  const sorted = [...classified].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
   // Stats — preserved 1:1 from V1
   const total = estimates.length;
@@ -1419,7 +1419,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
   const [filter, setFilter] = useState('all');
   const [dateFilter, setDateFilter] = useState('all');
   const [customerPanelId, setCustomerPanelId] = useState(null);
-  const [sort, setSort] = useState('oldest');
+  const [sort, setSort] = useState('newest');
 
   const refreshEstimates = useCallback(() => {
     adminFetch('/admin/estimates?limit=all')
