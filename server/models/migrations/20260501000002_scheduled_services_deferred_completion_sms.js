@@ -12,7 +12,6 @@ exports.up = async (knex) => {
     t.timestamp('completion_sms_scheduled_at').nullable();
     t.text('completion_sms_body').nullable();
     t.string('completion_sms_message_type').nullable();
-    t.timestamp('completion_sms_claimed_at').nullable();
     t.timestamp('completion_sms_sent_at').nullable();
     t.boolean('completion_sms_request_review').notNullable().defaultTo(false);
     t.uuid('completion_sms_review_service_record_id')
@@ -28,7 +27,6 @@ exports.down = async (knex) => {
     t.dropColumn('completion_sms_scheduled_at');
     t.dropColumn('completion_sms_body');
     t.dropColumn('completion_sms_message_type');
-    t.dropColumn('completion_sms_claimed_at');
     t.dropColumn('completion_sms_sent_at');
   });
 };

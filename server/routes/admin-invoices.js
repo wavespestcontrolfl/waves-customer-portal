@@ -4,7 +4,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const InvoiceService = require('../services/invoice');
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { etDateString, parseETDateTime } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime, bumpPastQuietHours } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -352,19 +352,40 @@ async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = 
   if (sms.ok || email.ok) {
     try {
       const inv = await db('invoices').where({ id: invoiceId })
-        .select('status', 'request_review_after_send', 'customer_id', 'service_record_id')
+        .select('status', 'sent_at', 'scheduled_at', 'request_review_after_send', 'customer_id', 'service_record_id')
         .first();
 
       if (inv) {
         const queuedReview = !!inv.request_review_after_send;
-        const wasScheduled = inv.status === 'scheduled' || inv.status === 'sending';
+        // Was this dispatch driven by a scheduled-send row? `scheduled_at`
+        // (rather than status) is the queue marker — preserves prior
+        // lifecycle state (viewed / overdue / sent) on resend. Cleared
+        // here so the cron stops re-picking up the row.
+        const wasScheduled = !!inv.scheduled_at;
+        // sendViaSMS already flips draft → sent itself, but sendInvoiceEmail
+        // doesn't touch status. So an email-only successful send leaves the
+        // row at 'draft'. Catch that here so timeline / follow-ups / list
+        // filters reflect the actual delivery state.
+        const wasDraft = inv.status === 'draft';
 
-        if (wasScheduled || queuedReview) {
+        // Status / scheduling cleanup happens unconditionally on success.
+        // The deferred-review flag stays set across this update — we only
+        // clear it AFTER ReviewService.create lands, so a transient throw
+        // there doesn't permanently drop the follow-up. If it does throw,
+        // the flag remains true and is at least queryable / replayable.
+        if (wasScheduled || wasDraft) {
           const updates = { updated_at: new Date() };
           if (wasScheduled) {
-            updates.status = 'sent';
             updates.scheduled_at = null;
             updates.send_method = null;
+            updates.send_claim_at = null;
+            // sent_at is bumped only when this is the FIRST send (i.e.
+            // status was draft going in). For a scheduled resend of a
+            // viewed / overdue invoice, the original sent_at stays.
+          }
+          if (wasDraft) {
+            updates.status = 'sent';
+            updates.sent_at = new Date();
           }
           await db('invoices').where({ id: invoiceId }).update(updates);
         }
@@ -399,17 +420,19 @@ async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = 
 
 // POST /:id/send — send invoice via SMS + email, immediately or scheduled.
 // Body: { requestReview?: boolean, scheduledAt?: ISO string, sendMethod?: 'sms'|'email'|'both' }
-// When `scheduledAt` is set to a future ET wall-clock time, the row is flipped to
-// status='scheduled' and the scheduler.js 5-minute cron picks it up; the
-// review request (if requested) is queued at scheduledAt + 2h via the
-// existing ReviewService.scheduled_for path. Either channel failing alone
+// When `scheduledAt` is set to a future ET wall-clock time the row's `scheduled_at`
+// column is stamped (status is left alone so a resend of an existing
+// 'overdue' / 'viewed' invoice keeps its lifecycle state); the
+// scheduler.js 5-minute cron picks it up. The review request (if
+// requested) is queued at scheduledAt + 2h via the existing
+// ReviewService.scheduled_for path. Either channel failing alone
 // doesn't abort the other on the immediate path.
 router.post('/:id/send', async (req, res, next) => {
   try {
     const { id } = req.params;
     const { requestReview, scheduledAt, sendMethod } = req.body || {};
-    const normalizedSendMethod = normalizeSendMethod(sendMethod);
-    if (!normalizedSendMethod) return res.status(400).json({ error: 'sendMethod must be one of: sms, email, both' });
+    const finalSendMethod = normalizeSendMethod(sendMethod);
+    if (!finalSendMethod) return res.status(400).json({ error: 'sendMethod must be one of: sms, email, both' });
 
     // ── SCHEDULED PATH ──
     // Persist the user's review-request intent on the row instead of
@@ -422,28 +445,48 @@ router.post('/:id/send', async (req, res, next) => {
       if (isNaN(when.getTime())) return res.status(400).json({ error: 'Invalid scheduledAt' });
       if (when <= new Date()) return res.status(400).json({ error: 'scheduledAt must be in the future' });
 
-      const safeToSchedule = ['draft', 'sent', 'viewed', 'overdue'];
-      const updated = await db('invoices').where({ id }).whereIn('status', safeToSchedule).update({
-        status: 'scheduled',
-        scheduled_at: when,
-        send_method: normalizedSendMethod,
+      // Quiet-hours bump: any picked time at or after 8 PM ET slides to
+      // 10 AM ET the next day. Matches the evening cutoff that
+      // calculateReviewSendTime() already enforces for review-request
+      // SMS so customers never get late-night invoice prods.
+      const sendAt = bumpPastQuietHours(when);
+
+      // Refuse to schedule terminal/settled states — paid/void/refunded
+      // invoices have no valid resend semantics, and downgrading them
+      // breaks invariants the void / refund / receipt-resend flows
+      // protect. Non-terminal lifecycle states (draft / sent / viewed /
+      // overdue) are kept AS-IS — we use `scheduled_at` as the queue
+      // marker, not the status column, so an overdue invoice that gets a
+      // scheduled resend stays in 'overdue' filters until the customer
+      // actually pays.
+      const current = await db('invoices').where({ id }).select('status').first();
+      if (!current) return res.status(404).json({ error: 'Invoice not found' });
+      if (['paid', 'void', 'refunded'].includes(current.status)) {
+        return res.status(409).json({ error: `Cannot schedule a ${current.status} invoice` });
+      }
+
+      const updated = await db('invoices').where({ id }).update({
+        scheduled_at: sendAt,
+        send_method: finalSendMethod,
         request_review_after_send: !!requestReview,
         updated_at: new Date(),
       });
-      if (!updated) {
-        const existing = await db('invoices').where({ id }).select('status').first();
-        if (!existing) return res.status(404).json({ error: 'Invoice not found' });
-        return res.status(409).json({ error: `Cannot schedule invoice while status is ${existing.status}` });
-      }
-
-      return res.json({ ok: true, scheduled: true, scheduledAt: when.toISOString() });
+      // Surface both the picked time and the actual landing time so the UI
+      // can confirm "scheduled for tomorrow at 10 AM" if the bump fired.
+      return res.json({
+        ok: true,
+        scheduled: true,
+        scheduledAt: sendAt.toISOString(),
+        requestedAt: when.toISOString(),
+        bumped: sendAt.getTime() !== when.getTime(),
+      });
     }
 
     // ── IMMEDIATE PATH ──
     // sendInvoiceNow handles the review-request gating internally so the
     // immediate and cron-driven paths share one source of truth.
     const { sms, email } = await sendInvoiceNow(id, {
-      sendMethod: normalizedSendMethod,
+      sendMethod: finalSendMethod,
       requestReview: !!requestReview,
     });
 

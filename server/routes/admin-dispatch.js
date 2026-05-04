@@ -6,7 +6,7 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const { resolveLocation } = require('../config/locations');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
-const { etDateString, parseETDateTime } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime, bumpPastQuietHours } = require('../utils/datetime-et');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 
@@ -311,12 +311,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Validate optional scheduled-send timestamp. When provided, the customer
     // SMS + review request are deferred to that moment; the actual completion
     // (status flip, service_record, products, audit log) still happens now.
+    // Quiet-hours bump: if the picked time falls at or after 8 PM ET, slide
+    // to 10 AM ET the next day. Mirrors the review-request evening cutoff
+    // (services/review-request.js#calculateReviewSendTime) so deferred
+    // completion texts don't hit phones late at night.
     let scheduledSendAt = null;
     if (scheduledAt) {
       const when = parseETDateTime(scheduledAt);
       if (isNaN(when.getTime())) return res.status(400).json({ error: 'Invalid scheduledAt' });
       if (when <= new Date()) return res.status(400).json({ error: 'scheduledAt must be in the future' });
-      scheduledSendAt = when;
+      scheduledSendAt = bumpPastQuietHours(when);
     }
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -590,6 +594,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // mint the review row now and bundle its short URL into the one completion
     // SMS instead of firing a second message 90-180 min later. Single message
     // lands higher read-rates than two.
+    //
+    // SKIP this bundling when the completion SMS is deferred (`scheduledSendAt`):
+    // ReviewService.createInline marks `review_requests.sms_sent_at` immediately,
+    // so for a long deferral the review-request follow-up cadence (which keys
+    // off sms_sent_at) would tick before the customer ever sees the underlying
+    // SMS. For deferred sends we fall through to the regular delayed
+    // `ReviewService.create({ delayMinutes })` path below — that scheduler-side
+    // ask fires at scheduledSendAt + 2h, after the actual completion SMS lands.
     let bundledReviewUrl = null;
     if (sendCompletionSms && requestReview && svc.cust_phone && !scheduledSendAt) {
       try {
@@ -652,14 +664,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Only schedule the delayed follow-up message here when the review wasn't
     // already bundled or deferred with the completion SMS. Deferred completion
     // SMS rows create their review request only after the cron send succeeds.
+    // If a scheduledAt is present but no completion SMS was queued, honor the
+    // same quiet-hours bump before deriving the review delay.
     if (requestReview && svc.cust_phone && !bundledReviewUrl && !completionSmsDeferred) {
       try {
         const ReviewService = require('../services/review-request');
+        const reviewAt = scheduledSendAt
+          ? bumpPastQuietHours(new Date(scheduledSendAt.getTime() + 120 * 60000))
+          : null;
+        const delayMinutes = reviewAt
+          ? Math.max(1, Math.ceil((reviewAt.getTime() - Date.now()) / 60000))
+          : 120;
         await ReviewService.create({
           customerId: svc.customer_id,
           serviceRecordId: record.id,
           triggeredBy: 'auto',
-          delayMinutes: 120,
+          delayMinutes,
         });
       } catch (e) { logger.error(`[dispatch] Review request schedule failed: ${e.message}`); }
     }

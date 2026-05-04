@@ -4,11 +4,6 @@ const TwilioService = require('./twilio');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
-async function claimAdvisoryXactLock(trx, lockKey) {
-  const lock = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?)) AS acquired', [lockKey]);
-  return !!(lock.rows && lock.rows[0] && lock.rows[0].acquired);
-}
-
 function initScheduledJobs() {
   const { isEnabled, logGateStatus } = require('../config/feature-gates');
   logGateStatus();
@@ -302,73 +297,47 @@ function initScheduledJobs() {
 
   // =========================================================================
   // EVERY 5 MINUTES — Send scheduled invoices whose time has arrived
-  // The cron first claims each row by moving it out of status='scheduled';
-  // sendInvoiceNow flips the claim to 'sent' after one channel lands. Channel
-  // failures are logged per-invoice and the row is reset for a later retry.
+  // Queue marker is `scheduled_at` (not the status column) so a scheduled
+  // resend on an existing 'overdue' / 'viewed' invoice keeps its lifecycle
+  // state. Atomic UPDATE…RETURNING stamps send_claim_at on each due row
+  // only when it's NULL or older than the 10-minute TTL — two concurrent
+  // workers can't both win the same row, and a crash mid-send leaves the
+  // row reclaimable on the next tick. Terminal states (paid / void /
+  // refunded) are explicitly skipped here as defense-in-depth in case
+  // the row settled between scheduling and dispatch.
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
     try {
-      const scheduled = await db('invoices')
-        .where(function () {
-          this.where({ status: 'scheduled' })
-            .orWhere(function () {
-              this.where({ status: 'sending' })
-                .where('updated_at', '<', new Date(Date.now() - 30 * 60000));
-            });
-        })
-        .where('scheduled_at', '<=', new Date())
+      const claimTtlMs = 10 * 60 * 1000;
+      const claimed = await db('invoices')
         .whereNotNull('scheduled_at')
-        .select('id', 'invoice_number', 'send_method');
+        .where('scheduled_at', '<=', new Date())
+        .whereNotIn('status', ['paid', 'void', 'refunded'])
+        .where(function () {
+          this.whereNull('send_claim_at')
+            .orWhere('send_claim_at', '<', new Date(Date.now() - claimTtlMs));
+        })
+        .update({ send_claim_at: new Date() })
+        .returning(['id', 'invoice_number', 'send_method']);
 
-      if (scheduled.length === 0) return;
+      if (claimed.length === 0) return;
 
       const { sendInvoiceNow } = require('../routes/admin-invoices');
       let sent = 0;
-      for (const inv of scheduled) {
-        const lockKey = `invoice-send:${inv.id}`;
-        let claimedInvoice = false;
+      for (const inv of claimed) {
         try {
-          const current = await db.transaction(async (trx) => {
-            const claimed = await claimAdvisoryXactLock(trx, lockKey);
-            if (!claimed) return null;
-
-            const [claimedRow] = await trx('invoices')
-              .where({ id: inv.id })
-              .where(function () {
-                this.where({ status: 'scheduled' })
-                  .orWhere(function () {
-                    this.where({ status: 'sending' })
-                      .where('updated_at', '<', new Date(Date.now() - 30 * 60000));
-                  });
-              })
-              .where('scheduled_at', '<=', new Date())
-              .whereNotNull('scheduled_at')
-              .update({ status: 'sending', updated_at: new Date() }, ['send_method']);
-            return claimedRow || null;
-          });
-          if (!current) continue;
-          claimedInvoice = true;
-
-          const channels = await sendInvoiceNow(inv.id, { sendMethod: current.send_method || 'both' });
+          const channels = await sendInvoiceNow(inv.id, { sendMethod: inv.send_method || 'both' });
           if (channels.sms.ok || channels.email.ok) sent += 1;
           else {
-            await db('invoices').where({ id: inv.id, status: 'sending' }).update({
-              status: 'scheduled',
-              updated_at: new Date(),
-            });
+            await db('invoices').where({ id: inv.id }).update({ send_claim_at: null });
             logger.error(`Scheduled invoice ${inv.invoice_number} both channels failed: smsOk=${!!channels.sms.ok} emailOk=${!!channels.email.ok}`);
           }
         } catch (e) {
-          if (claimedInvoice) {
-            await db('invoices').where({ id: inv.id, status: 'sending' }).update({
-              status: 'scheduled',
-              updated_at: new Date(),
-            }).catch(() => {});
-          }
-          logger.error(`Scheduled invoice ${inv.invoice_number} failed: ${e.message}`);
+          await db('invoices').where({ id: inv.id }).update({ send_claim_at: null }).catch(() => {});
+          logger.error(`Scheduled invoice ${inv.invoice_number} failed: ${e.name || 'Error'}`);
         }
       }
-      logger.info(`Scheduled invoices: ${sent}/${scheduled.length} sent`);
+      logger.info(`Scheduled invoices: ${sent}/${claimed.length} sent`);
     } catch (err) {
       logger.error(`Scheduled invoice cron failed: ${err.message}`);
     }
@@ -377,124 +346,95 @@ function initScheduledJobs() {
   // =========================================================================
   // EVERY 5 MINUTES — Send deferred completion-SMS rows whose time has arrived
   // Body was fully rendered at completion time (template choice depends on
-  // invoice / prepaid state) and stashed on scheduled_services. We just send
-  // it via Twilio and stamp completion_sms_sent_at so it falls out of the
-  // query on the next tick.
+  // invoice / prepaid state) and stashed on scheduled_services. We claim
+  // each row atomically by stamping completion_sms_claim_at — only NULL or
+  // expired (>10min) rows match, so concurrent workers can't both win the
+  // same row. After Twilio confirms, completion_sms_sent_at is set and the
+  // row drops out of the query on the next tick. A crash mid-send leaves
+  // the claim to expire and the row gets retried.
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
     try {
-      const due = await db('scheduled_services')
-        .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-        .whereNotNull('scheduled_services.completion_sms_scheduled_at')
-        .whereNull('scheduled_services.completion_sms_sent_at')
+      const claimTtlMs = 10 * 60 * 1000;
+      const claimed = await db('scheduled_services')
+        .whereNotNull('completion_sms_scheduled_at')
+        .whereNull('completion_sms_sent_at')
+        .where('completion_sms_scheduled_at', '<=', new Date())
         .where(function () {
-          this.whereNull('scheduled_services.completion_sms_claimed_at')
-            .orWhere('scheduled_services.completion_sms_claimed_at', '<', new Date(Date.now() - 30 * 60000));
+          this.whereNull('completion_sms_claim_at')
+            .orWhere('completion_sms_claim_at', '<', new Date(Date.now() - claimTtlMs));
         })
-        .where('scheduled_services.completion_sms_scheduled_at', '<=', new Date())
-        .select(
-          'scheduled_services.id',
-          'scheduled_services.customer_id',
-          'scheduled_services.completion_sms_body',
-          'scheduled_services.completion_sms_message_type',
-          'scheduled_services.completion_sms_request_review',
-          'scheduled_services.completion_sms_review_service_record_id',
-          'customers.phone as cust_phone',
-        );
+        .update({ completion_sms_claim_at: new Date() })
+        .returning([
+          'id',
+          'customer_id',
+          'completion_sms_body',
+          'completion_sms_message_type',
+          'completion_sms_request_review',
+          'completion_sms_review_service_record_id',
+        ]);
 
-      if (due.length === 0) return;
+      if (claimed.length === 0) return;
+
+      // Resolve customer phones for the claimed rows in one query.
+      const customerIds = [...new Set(claimed.map(r => r.customer_id).filter(Boolean))];
+      const customers = customerIds.length
+        ? await db('customers').whereIn('id', customerIds).select('id', 'phone')
+        : [];
+      const phoneByCustomerId = new Map(customers.map(c => [c.id, c.phone]));
+      const due = claimed.map(r => ({ ...r, cust_phone: phoneByCustomerId.get(r.customer_id) || null }));
 
       const TwilioService = require('./twilio');
       let sent = 0;
       for (const row of due) {
-        const lockKey = `completion-sms:${row.id}`;
         try {
-          const wasSent = await db.transaction(async (trx) => {
-            const claimed = await claimAdvisoryXactLock(trx, lockKey);
-            if (!claimed) return false;
-
-            const current = await trx('scheduled_services')
-              .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-              .where({ 'scheduled_services.id': row.id })
-              .whereNotNull('scheduled_services.completion_sms_scheduled_at')
-              .whereNull('scheduled_services.completion_sms_sent_at')
-              .where(function () {
-                this.whereNull('scheduled_services.completion_sms_claimed_at')
-                  .orWhere('scheduled_services.completion_sms_claimed_at', '<', new Date(Date.now() - 30 * 60000));
-              })
-              .where('scheduled_services.completion_sms_scheduled_at', '<=', new Date())
-              .select(
-                'scheduled_services.id',
-                'scheduled_services.customer_id',
-                'scheduled_services.completion_sms_body',
-                'scheduled_services.completion_sms_message_type',
-                'scheduled_services.completion_sms_request_review',
-                'scheduled_services.completion_sms_review_service_record_id',
-                'customers.phone as cust_phone',
-              )
-              .first();
-            if (!current) return false;
-
-            if (!current.cust_phone || !current.completion_sms_body) {
-              await trx('scheduled_services').where({ id: current.id }).update({
-                completion_sms_sent_at: new Date(),
-                completion_sms_claimed_at: null,
-                completion_sms_body: null,
-                completion_sms_message_type: null,
-                completion_sms_request_review: false,
-              });
-              return false;
-            }
-            await trx('scheduled_services').where({ id: current.id }).update({
-              completion_sms_claimed_at: new Date(),
+          if (!row.cust_phone || !row.completion_sms_body) {
+            await db('scheduled_services').where({ id: row.id }).update({
+              completion_sms_sent_at: new Date(),
+              completion_sms_claim_at: null,
+              completion_sms_body: null,
+              completion_sms_message_type: null,
+              completion_sms_request_review: false,
             });
-            return {
-              sent: true,
-              serviceId: current.id,
-              phone: current.cust_phone,
-              body: current.completion_sms_body,
-              messageType: current.completion_sms_message_type || 'service_complete',
-              requestReview: !!current.completion_sms_request_review,
-              customerId: current.customer_id,
-              serviceRecordId: current.completion_sms_review_service_record_id || null,
-            };
+            continue;
+          }
+          // TwilioService.sendSMS can return a non-throwing { success: false }
+          // for soft failures (guard block, missing config). Treat that as
+          // "not delivered" — leave completion_sms_sent_at NULL so the next
+          // tick re-claims and retries; only stamp on a true success.
+          const result = await TwilioService.sendSMS(row.cust_phone, row.completion_sms_body, {
+            customerId: row.customer_id,
+            messageType: row.completion_sms_message_type || 'service_complete',
           });
-          if (wasSent?.sent) {
+          if (result && result.success === false) {
+            await db('scheduled_services').where({ id: row.id }).update({ completion_sms_claim_at: null });
+            logger.error(`Deferred completion SMS for service ${row.id} soft-failed`);
+            continue;
+          }
+          await db('scheduled_services').where({ id: row.id }).update({
+            completion_sms_sent_at: new Date(),
+            completion_sms_claim_at: null,
+            completion_sms_body: null,
+            completion_sms_message_type: null,
+            completion_sms_request_review: false,
+          });
+          sent += 1;
+          if (row.completion_sms_request_review) {
             try {
-              await TwilioService.sendSMS(wasSent.phone, wasSent.body, {
-                customerId: wasSent.customerId,
-                messageType: wasSent.messageType,
+              const ReviewService = require('./review-request');
+              await ReviewService.create({
+                customerId: row.customer_id,
+                serviceRecordId: row.completion_sms_review_service_record_id || null,
+                triggeredBy: 'auto',
+                delayMinutes: 120,
               });
-              await db('scheduled_services').where({ id: wasSent.serviceId }).update({
-                completion_sms_sent_at: new Date(),
-                completion_sms_claimed_at: null,
-                completion_sms_body: null,
-                completion_sms_message_type: null,
-                completion_sms_request_review: false,
-              });
-            } catch (sendErr) {
-              await db('scheduled_services').where({ id: wasSent.serviceId }).update({
-                completion_sms_claimed_at: null,
-              }).catch(() => {});
-              throw sendErr;
-            }
-            sent += 1;
-            if (wasSent.requestReview) {
-              try {
-                const ReviewService = require('./review-request');
-                await ReviewService.create({
-                  customerId: wasSent.customerId,
-                  serviceRecordId: wasSent.serviceRecordId,
-                  triggeredBy: 'auto',
-                  delayMinutes: 120,
-                });
-              } catch (reviewErr) {
-                logger.error(`[dispatch] Deferred review request schedule failed after completion SMS for service ${row.id}: ${reviewErr.message}`);
-              }
+            } catch (reviewErr) {
+              logger.error(`[dispatch] Deferred review request schedule failed after completion SMS for service ${row.id}: ${reviewErr.name || 'Error'}`);
             }
           }
         } catch (e) {
-          logger.error(`Deferred completion SMS for service ${row.id} failed: ${e.message}`);
+          await db('scheduled_services').where({ id: row.id }).update({ completion_sms_claim_at: null }).catch(() => {});
+          logger.error(`Deferred completion SMS for service ${row.id} failed: ${e.name || 'Error'}`);
         }
       }
       logger.info(`Deferred completion SMS: ${sent}/${due.length} sent`);
