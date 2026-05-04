@@ -1,7 +1,32 @@
 const db = require('../models/db');
 const RULES = require('../config/reschedule-rules');
 const logger = require('./logger');
-const { parseETDateTime, etParts, etDateString, addETDays } = require('../utils/datetime-et');
+const {
+  parseETDateTime, etParts, etDateString, addETDays,
+  addETMonthsByWeekday, etNthWeekdayOfMonth,
+} = require('../utils/datetime-et');
+
+const MONTH_RECURRENCE_INTERVALS = {
+  monthly: 1, bimonthly: 2, quarterly: 3, triannual: 4,
+  semiannual: 6, biannual: 6, annual: 12, yearly: 12,
+};
+
+function recurrenceOrdinalOptions(baseDateStr, opts = {}) {
+  const safe = baseDateStr ? String(baseDateStr).split('T')[0] : null;
+  if (!safe) return opts;
+  const base = parseETDateTime(safe + 'T12:00');
+  if (isNaN(base.getTime())) return opts;
+  const et = etParts(base);
+  return {
+    ...opts,
+    nth: (opts.nth != null && opts.nth !== '' && !isNaN(parseInt(opts.nth)))
+      ? parseInt(opts.nth)
+      : Math.ceil(et.day / 7),
+    weekday: (opts.weekday != null && opts.weekday !== '' && !isNaN(parseInt(opts.weekday)))
+      ? parseInt(opts.weekday)
+      : et.dayOfWeek,
+  };
+}
 
 // ET-safe duplicate of nextRecurringDate (the original lives in
 // server/routes/admin-schedule.js). Schedule dates are ET wall-clock
@@ -23,17 +48,14 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     const totalMonths = (baseEt.month - 1) + i;
     const targetYear = baseEt.year + Math.floor(totalMonths / 12);
     const targetMonth1 = ((totalMonths % 12) + 12) % 12 + 1; // 1-12
-    const firstDay = parseETDateTime(`${targetYear}-${String(targetMonth1).padStart(2, '0')}-01T12:00`);
-    const firstW = etParts(firstDay).dayOfWeek;
-    const offset = (wdayNum - firstW + 7) % 7;
-    const dayOfMonth = 1 + offset + (nthNum - 1) * 7;
-    return etDateString(addETDays(firstDay, dayOfMonth - 1));
+    return etDateString(etNthWeekdayOfMonth(targetYear, targetMonth1, nthNum, wdayNum));
   }
 
-  const intervals = {
-    daily: 1, weekly: 7, biweekly: 14, monthly: 30, bimonthly: 60,
-    quarterly: 91, triannual: 122,
-  };
+  if (MONTH_RECURRENCE_INTERVALS[pattern]) {
+    return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
+  }
+
+  const intervals = { daily: 1, weekly: 7, biweekly: 14 };
   let gap;
   if (pattern === 'custom' && intNum) gap = Math.max(1, intNum);
   else gap = intervals[pattern] || 91;
@@ -198,8 +220,10 @@ class SmartRebooker {
 
     const win = parseWindow(newWindow);
     const opts = {
-      nth: parent.recurring_nth,
-      weekday: parent.recurring_weekday,
+      ...recurrenceOrdinalOptions(parent.scheduled_date, {
+        nth: parent.recurring_nth,
+        weekday: parent.recurring_weekday,
+      }),
       intervalDays: parent.recurring_interval_days,
     };
 

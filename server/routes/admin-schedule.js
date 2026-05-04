@@ -10,7 +10,10 @@ const {
   normalizeServiceType, detectServiceCategory, serviceIcon, serviceColor,
   isNewCustomer, safeDate,
 } = require('../utils/service-normalizer');
-const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
+const {
+  etDateString, etParts, addETDays, addETMonthsByWeekday,
+  etNthWeekdayOfMonth, parseETDateTime,
+} = require('../utils/datetime-et');
 
 // ─── Destructive maintenance endpoints ──────────────────────────────────────
 // Defined BEFORE the router-level auth chain so `devOnly` runs first and
@@ -81,37 +84,59 @@ function sanitizeServiceType(serviceType) {
   return normalizeServiceType(serviceType);
 }
 
+const MONTH_RECURRENCE_INTERVALS = {
+  monthly: 1, bimonthly: 2, quarterly: 3, triannual: 4,
+  semiannual: 6, biannual: 6, annual: 12, yearly: 12,
+};
+
+function recurrenceOrdinalOptions(baseDateStr, opts = {}) {
+  const safe = baseDateStr ? String(baseDateStr).split('T')[0] : etDateString();
+  const base = parseETDateTime(safe + 'T12:00');
+  if (isNaN(base.getTime())) return opts;
+  const et = etParts(base);
+  return {
+    ...opts,
+    nth: (opts.nth != null && opts.nth !== '' && !isNaN(parseInt(opts.nth)))
+      ? parseInt(opts.nth)
+      : Math.ceil(et.day / 7),
+    weekday: (opts.weekday != null && opts.weekday !== '' && !isNaN(parseInt(opts.weekday)))
+      ? parseInt(opts.weekday)
+      : et.dayOfWeek,
+  };
+}
+
 // Generate the Nth recurring occurrence date given a base date + pattern config.
 // Supports: daily, weekly, biweekly, monthly, bimonthly, quarterly, triannual,
-// monthly_nth_weekday (needs nth 1-4 + weekday 0-6 where 0=Sun), custom (needs intervalDays).
+// semiannual, annual,
+// monthly_nth_weekday (needs nth 1-5 + weekday 0-6 where 0=Sun), custom (needs intervalDays).
 // Returns a YYYY-MM-DD string.
 function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   const { nth, weekday, intervalDays } = opts;
   const safeBaseStr = baseDateStr ? String(baseDateStr).split('T')[0] : etDateString();
-  const base = new Date(safeBaseStr + 'T12:00:00');
+  const base = parseETDateTime(safeBaseStr + 'T12:00');
   if (isNaN(base.getTime())) return etDateString();
   const nthNum = (nth != null && nth !== '' && !isNaN(parseInt(nth))) ? parseInt(nth) : null;
   const wdayNum = (weekday != null && weekday !== '' && !isNaN(parseInt(weekday))) ? parseInt(weekday) : null;
   const intNum = (intervalDays != null && intervalDays !== '' && !isNaN(parseInt(intervalDays))) ? parseInt(intervalDays) : null;
   if (pattern === 'monthly_nth_weekday' && nthNum != null && wdayNum != null) {
-    const d = new Date(base.getFullYear(), base.getMonth() + i, 1, 12, 0, 0);
-    const firstW = d.getDay();
-    const offset = (wdayNum - firstW + 7) % 7;
-    d.setDate(1 + offset + (nthNum - 1) * 7);
-    if (isNaN(d.getTime())) return safeBaseStr;
-    return d.toISOString().split('T')[0];
+    const baseEt = etParts(base);
+    const totalMonths = (baseEt.month - 1) + i;
+    const targetYear = baseEt.year + Math.floor(totalMonths / 12);
+    const targetMonth1 = ((totalMonths % 12) + 12) % 12 + 1;
+    return etDateString(etNthWeekdayOfMonth(targetYear, targetMonth1, nthNum, wdayNum));
+  }
+  if (MONTH_RECURRENCE_INTERVALS[pattern]) {
+    return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
   const intervals = {
-    daily: 1, weekly: 7, biweekly: 14, monthly: 30, bimonthly: 60,
-    quarterly: 91, triannual: 122,
+    daily: 1, weekly: 7, biweekly: 14,
   };
   let gap;
   if (pattern === 'custom' && intNum) gap = Math.max(1, intNum);
   else gap = intervals[pattern] || 91;
-  const d = new Date(base);
-  d.setDate(d.getDate() + gap * i);
+  const d = addETDays(base, gap * i);
   if (isNaN(d.getTime())) return safeBaseStr;
-  return d.toISOString().split('T')[0];
+  return etDateString(d);
 }
 
 // Shift a YYYY-MM-DD off Saturday/Sunday when a customer doesn't want
@@ -171,6 +196,24 @@ function applyDiscount(price, type, amount) {
   if (type === 'percentage') return Math.max(0, +(p * (1 - a / 100)).toFixed(2));
   if (type === 'fixed_amount') return Math.max(0, +(p - a).toFixed(2));
   return price;
+}
+
+function copyLineDiscountFields(target, source, cols) {
+  if (!target || !source || !cols) return;
+  if (cols.line_discount_id && source.line_discount_id) target.line_discount_id = source.line_discount_id;
+  if (cols.line_discount_name && source.line_discount_name) target.line_discount_name = source.line_discount_name;
+  if (cols.line_discount_type && source.line_discount_type) target.line_discount_type = source.line_discount_type;
+  if (cols.line_discount_amount && source.line_discount_amount != null) target.line_discount_amount = source.line_discount_amount;
+  if (cols.line_discount_dollars && source.line_discount_dollars != null) target.line_discount_dollars = source.line_discount_dollars;
+}
+
+function copyAddonDiscountFields(target, source, cols) {
+  if (!target || !source || !cols) return;
+  if (cols.discount_id && source.discount_id) target.discount_id = source.discount_id;
+  if (cols.discount_name && source.discount_name) target.discount_name = source.discount_name;
+  if (cols.discount_type && source.discount_type) target.discount_type = source.discount_type;
+  if (cols.discount_amount && source.discount_amount != null) target.discount_amount = source.discount_amount;
+  if (cols.discount_dollars && source.discount_dollars != null) target.discount_dollars = source.discount_dollars;
 }
 
 function getZone(city, zip) {
@@ -582,7 +625,7 @@ router.post('/', async (req, res, next) => {
       boosterMonths,
       discountType, discountAmount,
       createInvoice,
-      sendConfirmation, serviceId, serviceAddons, assignmentMode,
+      sendConfirmation, serviceId, serviceAddons, assignmentMode, primaryLineDiscount,
       estimatedPrice, estimatedDuration, urgency, internalNotes, customerNotes, isCallback,
       parentServiceId, sendConfirmationSms, sendTechNotification,
     } = req.body;
@@ -642,6 +685,9 @@ router.post('/', async (req, res, next) => {
 
     // Merge notes
     const combinedNotes = [notes, customerNotes].filter(Boolean).join('\n') || null;
+    const monthAnchorOpts = (isRecurring && MONTH_RECURRENCE_INTERVALS[recurringPattern])
+      ? recurrenceOrdinalOptions(scheduledDate, { nth: recurringNth, weekday: recurringWeekday })
+      : { nth: recurringNth, weekday: recurringWeekday };
 
     const insertData = {
       customer_id: customerId, technician_id: resolvedTechId,
@@ -662,8 +708,8 @@ router.post('/', async (req, res, next) => {
       if (cols.parent_service_id && parentServiceId) insertData.parent_service_id = parentServiceId;
       if (cols.recurring_ongoing && isRecurring) insertData.recurring_ongoing = !!recurringOngoing;
       if (isRecurring) {
-        if (cols.recurring_nth && recurringNth != null && recurringNth !== '' && !isNaN(parseInt(recurringNth))) insertData.recurring_nth = parseInt(recurringNth);
-        if (cols.recurring_weekday && recurringWeekday != null && recurringWeekday !== '' && !isNaN(parseInt(recurringWeekday))) insertData.recurring_weekday = parseInt(recurringWeekday);
+        if (cols.recurring_nth && monthAnchorOpts.nth != null && monthAnchorOpts.nth !== '' && !isNaN(parseInt(monthAnchorOpts.nth))) insertData.recurring_nth = parseInt(monthAnchorOpts.nth);
+        if (cols.recurring_weekday && monthAnchorOpts.weekday != null && monthAnchorOpts.weekday !== '' && !isNaN(parseInt(monthAnchorOpts.weekday))) insertData.recurring_weekday = parseInt(monthAnchorOpts.weekday);
         if (cols.recurring_interval_days && recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) insertData.recurring_interval_days = parseInt(recurringIntervalDays);
         if (cols.skip_weekends) insertData.skip_weekends = !!skipWeekends;
         if (cols.weekend_shift && skipWeekends) insertData.weekend_shift = weekendShift === 'back' ? 'back' : 'forward';
@@ -674,6 +720,11 @@ router.post('/', async (req, res, next) => {
       }
       if (cols.discount_type && discountType) insertData.discount_type = discountType;
       if (cols.discount_amount && discountAmount != null && discountAmount !== '') insertData.discount_amount = Number(discountAmount);
+      if (primaryLineDiscount && cols.line_discount_id && primaryLineDiscount.discountId) insertData.line_discount_id = primaryLineDiscount.discountId;
+      if (primaryLineDiscount && cols.line_discount_name && primaryLineDiscount.discountName) insertData.line_discount_name = String(primaryLineDiscount.discountName).slice(0, 200);
+      if (primaryLineDiscount && cols.line_discount_type && primaryLineDiscount.discountType) insertData.line_discount_type = String(primaryLineDiscount.discountType).slice(0, 30);
+      if (primaryLineDiscount && cols.line_discount_amount && primaryLineDiscount.discountAmount != null) insertData.line_discount_amount = Number(primaryLineDiscount.discountAmount);
+      if (primaryLineDiscount && cols.line_discount_dollars && primaryLineDiscount.discountDollars != null) insertData.line_discount_dollars = Number(primaryLineDiscount.discountDollars);
       if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = !!createInvoice;
     } catch (e) { logger.warn(`[schedule] Column check failed (non-blocking): ${e.message}`); }
 
@@ -682,13 +733,20 @@ router.post('/', async (req, res, next) => {
     // Create addon entries
     if (serviceAddons && serviceAddons.length > 0) {
       try {
+        const addonCols = await db('scheduled_service_addons').columnInfo();
         for (const addon of serviceAddons) {
-          await db('scheduled_service_addons').insert({
+          const addonData = {
             scheduled_service_id: svc.id,
             service_id: addon.serviceId || null,
             service_name: addon.name || addon.serviceName,
             estimated_price: addon.price || null,
-          });
+          };
+          if (addonCols.discount_id && addon.discountId) addonData.discount_id = addon.discountId;
+          if (addonCols.discount_name && addon.discountName) addonData.discount_name = String(addon.discountName).slice(0, 200);
+          if (addonCols.discount_type && addon.discountType) addonData.discount_type = String(addon.discountType).slice(0, 30);
+          if (addonCols.discount_amount && addon.discountAmount != null) addonData.discount_amount = Number(addon.discountAmount);
+          if (addonCols.discount_dollars && addon.discountDollars != null) addonData.discount_dollars = Number(addon.discountDollars);
+          await db('scheduled_service_addons').insert(addonData);
         }
       } catch (e) { logger.warn(`[schedule] Addon insert failed (non-blocking): ${e.message}`); }
     }
@@ -706,7 +764,7 @@ router.post('/', async (req, res, next) => {
     if (isRecurring && recurringPattern && plannedCount > 1) {
      try {
       const cols = await db('scheduled_services').columnInfo();
-      const rOpts = { nth: recurringNth, weekday: recurringWeekday, intervalDays: recurringIntervalDays };
+      const rOpts = { ...monthAnchorOpts, intervalDays: recurringIntervalDays };
       const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
       // Iterate by inserts, not by attempts: when skip-weekends collapses
       // consecutive recurrences onto the same shifted weekday (e.g. custom
@@ -732,14 +790,19 @@ router.post('/', async (req, res, next) => {
           recurring_parent_id: svc.id,
         };
         if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
-        if (cols.recurring_nth && recurringNth != null && recurringNth !== '' && !isNaN(parseInt(recurringNth))) childData.recurring_nth = parseInt(recurringNth);
-        if (cols.recurring_weekday && recurringWeekday != null && recurringWeekday !== '' && !isNaN(parseInt(recurringWeekday))) childData.recurring_weekday = parseInt(recurringWeekday);
+        if (cols.recurring_nth && rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) childData.recurring_nth = parseInt(rOpts.nth);
+        if (cols.recurring_weekday && rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) childData.recurring_weekday = parseInt(rOpts.weekday);
         if (cols.recurring_interval_days && recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) childData.recurring_interval_days = parseInt(recurringIntervalDays);
         if (cols.skip_weekends) childData.skip_weekends = !!skipWeekends;
         if (cols.weekend_shift && skipWeekends) childData.weekend_shift = shiftDir;
         if (cols.estimated_price && finalPrice != null) childData.estimated_price = finalPrice;
         if (cols.discount_type && discountType) childData.discount_type = discountType;
         if (cols.discount_amount && discountAmount != null && discountAmount !== '') childData.discount_amount = Number(discountAmount);
+        if (primaryLineDiscount && cols.line_discount_id && primaryLineDiscount.discountId) childData.line_discount_id = primaryLineDiscount.discountId;
+        if (primaryLineDiscount && cols.line_discount_name && primaryLineDiscount.discountName) childData.line_discount_name = String(primaryLineDiscount.discountName).slice(0, 200);
+        if (primaryLineDiscount && cols.line_discount_type && primaryLineDiscount.discountType) childData.line_discount_type = String(primaryLineDiscount.discountType).slice(0, 30);
+        if (primaryLineDiscount && cols.line_discount_amount && primaryLineDiscount.discountAmount != null) childData.line_discount_amount = Number(primaryLineDiscount.discountAmount);
+        if (primaryLineDiscount && cols.line_discount_dollars && primaryLineDiscount.discountDollars != null) childData.line_discount_dollars = Number(primaryLineDiscount.discountDollars);
         if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = !!createInvoice;
         const [childRow] = await db('scheduled_services').insert(childData).returning('*');
         // Mirror the parent's add-on lines onto each recurring child so a
@@ -748,13 +811,20 @@ router.post('/', async (req, res, next) => {
         // exists and dispatch can re-add the line manually.
         if (Array.isArray(serviceAddons) && serviceAddons.length > 0 && childRow?.id) {
           try {
+            const addonCols = await db('scheduled_service_addons').columnInfo();
             for (const addon of serviceAddons) {
-              await db('scheduled_service_addons').insert({
+              const addonData = {
                 scheduled_service_id: childRow.id,
                 service_id: addon.serviceId || null,
                 service_name: addon.name || addon.serviceName,
                 estimated_price: addon.price || null,
-              });
+              };
+              if (addonCols.discount_id && addon.discountId) addonData.discount_id = addon.discountId;
+              if (addonCols.discount_name && addon.discountName) addonData.discount_name = String(addon.discountName).slice(0, 200);
+              if (addonCols.discount_type && addon.discountType) addonData.discount_type = String(addon.discountType).slice(0, 30);
+              if (addonCols.discount_amount && addon.discountAmount != null) addonData.discount_amount = Number(addon.discountAmount);
+              if (addonCols.discount_dollars && addon.discountDollars != null) addonData.discount_dollars = Number(addon.discountDollars);
+              await db('scheduled_service_addons').insert(addonData);
             }
           } catch (e) { logger.warn(`[schedule] Recurring child addon insert failed (non-blocking): ${e.message}`); }
         }
@@ -800,6 +870,11 @@ router.post('/', async (req, res, next) => {
           if (cols.weekend_shift && skipWeekends) boosterData.weekend_shift = shiftDir;
           if (cols.discount_type && discountType) boosterData.discount_type = discountType;
           if (cols.discount_amount && discountAmount != null && discountAmount !== '') boosterData.discount_amount = Number(discountAmount);
+          if (primaryLineDiscount && cols.line_discount_id && primaryLineDiscount.discountId) boosterData.line_discount_id = primaryLineDiscount.discountId;
+          if (primaryLineDiscount && cols.line_discount_name && primaryLineDiscount.discountName) boosterData.line_discount_name = String(primaryLineDiscount.discountName).slice(0, 200);
+          if (primaryLineDiscount && cols.line_discount_type && primaryLineDiscount.discountType) boosterData.line_discount_type = String(primaryLineDiscount.discountType).slice(0, 30);
+          if (primaryLineDiscount && cols.line_discount_amount && primaryLineDiscount.discountAmount != null) boosterData.line_discount_amount = Number(primaryLineDiscount.discountAmount);
+          if (primaryLineDiscount && cols.line_discount_dollars && primaryLineDiscount.discountDollars != null) boosterData.line_discount_dollars = Number(primaryLineDiscount.discountDollars);
           if (cols.create_invoice_on_complete) boosterData.create_invoice_on_complete = !!createInvoice;
           const [boosterRow] = await db('scheduled_services').insert(boosterData).returning('*');
 
@@ -808,13 +883,20 @@ router.post('/', async (req, res, next) => {
           // line. Non-blocking — if it fails the booster still exists.
           if (Array.isArray(serviceAddons) && serviceAddons.length > 0 && boosterRow?.id) {
             try {
+              const addonCols = await db('scheduled_service_addons').columnInfo();
               for (const addon of serviceAddons) {
-                await db('scheduled_service_addons').insert({
+                const addonData = {
                   scheduled_service_id: boosterRow.id,
                   service_id: addon.serviceId || null,
                   service_name: addon.name || addon.serviceName,
                   estimated_price: addon.price || null,
-                });
+                };
+                if (addonCols.discount_id && addon.discountId) addonData.discount_id = addon.discountId;
+                if (addonCols.discount_name && addon.discountName) addonData.discount_name = String(addon.discountName).slice(0, 200);
+                if (addonCols.discount_type && addon.discountType) addonData.discount_type = String(addon.discountType).slice(0, 30);
+                if (addonCols.discount_amount && addon.discountAmount != null) addonData.discount_amount = Number(addon.discountAmount);
+                if (addonCols.discount_dollars && addon.discountDollars != null) addonData.discount_dollars = Number(addon.discountDollars);
+                await db('scheduled_service_addons').insert(addonData);
               }
             } catch (e) { logger.warn(`[schedule] Booster addon insert failed (non-blocking): ${e.message}`); }
           }
@@ -884,14 +966,26 @@ router.put('/:id/update-details', async (req, res, next) => {
     if (notes !== undefined) updates.notes = notes;
     if (routeOrder !== undefined && routeOrder !== '') updates.route_order = parseInt(routeOrder);
     if (zone !== undefined) updates.zone = zone;
+    let editAnchorDate = scheduledDate;
+    if (isRecurring && MONTH_RECURRENCE_INTERVALS[recurringPattern] && !editAnchorDate) {
+      const existingService = await db('scheduled_services')
+        .where({ id: req.params.id })
+        .first('scheduled_date');
+      editAnchorDate = existingService?.scheduled_date
+        ? String(existingService.scheduled_date).split('T')[0]
+        : undefined;
+    }
+    const editMonthAnchorOpts = (isRecurring && MONTH_RECURRENCE_INTERVALS[recurringPattern])
+      ? recurrenceOrdinalOptions(editAnchorDate, { nth: recurringNth, weekday: recurringWeekday })
+      : { nth: recurringNth, weekday: recurringWeekday };
     if (isRecurring) {
       updates.is_recurring = true;
       if (recurringPattern) updates.recurring_pattern = recurringPattern;
       try {
         const cols = await db('scheduled_services').columnInfo();
         if (cols.recurring_ongoing) updates.recurring_ongoing = !!recurringOngoing;
-        if (cols.recurring_nth) updates.recurring_nth = (recurringNth != null && recurringNth !== '' && !isNaN(parseInt(recurringNth))) ? parseInt(recurringNth) : null;
-        if (cols.recurring_weekday) updates.recurring_weekday = (recurringWeekday != null && recurringWeekday !== '' && !isNaN(parseInt(recurringWeekday))) ? parseInt(recurringWeekday) : null;
+        if (cols.recurring_nth) updates.recurring_nth = (editMonthAnchorOpts.nth != null && editMonthAnchorOpts.nth !== '' && !isNaN(parseInt(editMonthAnchorOpts.nth))) ? parseInt(editMonthAnchorOpts.nth) : null;
+        if (cols.recurring_weekday) updates.recurring_weekday = (editMonthAnchorOpts.weekday != null && editMonthAnchorOpts.weekday !== '' && !isNaN(parseInt(editMonthAnchorOpts.weekday))) ? parseInt(editMonthAnchorOpts.weekday) : null;
         if (cols.recurring_interval_days) updates.recurring_interval_days = (recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) ? parseInt(recurringIntervalDays) : null;
         if (cols.skip_weekends && skipWeekends !== undefined) updates.skip_weekends = !!skipWeekends;
         if (cols.weekend_shift && weekendShift !== undefined) updates.weekend_shift = weekendShift === 'back' ? 'back' : 'forward';
@@ -939,8 +1033,8 @@ router.put('/:id/update-details', async (req, res, next) => {
           ? String(parent.scheduled_date).split('T')[0]
           : etDateString();
         const rOpts = {
-          nth: recurringNth != null ? recurringNth : parent.recurring_nth,
-          weekday: recurringWeekday != null ? recurringWeekday : parent.recurring_weekday,
+          nth: editMonthAnchorOpts.nth != null ? editMonthAnchorOpts.nth : parent.recurring_nth,
+          weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
           intervalDays: recurringIntervalDays != null ? recurringIntervalDays : parent.recurring_interval_days,
         };
         const skipParent = parent.skip_weekends != null ? !!parent.skip_weekends : false;
@@ -998,6 +1092,7 @@ router.put('/:id/update-details', async (req, res, next) => {
             const dAmt = discountAmount !== undefined ? discountAmount : parent.discount_amount;
             // parent.estimated_price is already discounted at save time — copy as-is to children
             if (cols.estimated_price && parent.estimated_price != null) childData.estimated_price = parent.estimated_price;
+            copyLineDiscountFields(childData, parent, cols);
             if (cols.discount_type && dType) childData.discount_type = dType;
             if (cols.discount_amount && dAmt != null && dAmt !== '') childData.discount_amount = Number(dAmt);
             const inv = createInvoice !== undefined ? !!createInvoice : !!parent.create_invoice_on_complete;
@@ -1006,13 +1101,16 @@ router.put('/:id/update-details', async (req, res, next) => {
           const [childRow] = await db('scheduled_services').insert(childData).returning('*');
           if (parentAddons.length > 0 && childRow?.id) {
             try {
+              const addonCols = await db('scheduled_service_addons').columnInfo();
               for (const addon of parentAddons) {
-                await db('scheduled_service_addons').insert({
+                const addonData = {
                   scheduled_service_id: childRow.id,
                   service_id: addon.service_id || null,
                   service_name: addon.service_name,
                   estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
-                });
+                };
+                copyAddonDiscountFields(addonData, addon, addonCols);
+                await db('scheduled_service_addons').insert(addonData);
               }
             } catch (e) { logger.warn(`[schedule] PUT recurring child addon insert failed (non-blocking): ${e.message}`); }
           }
@@ -1422,7 +1520,13 @@ router.put('/:id/status', async (req, res, next) => {
               .orderBy('scheduled_date', 'desc').first();
             if (latest) {
               const latestStr = String(latest.scheduled_date).split('T')[0];
-              const rOpts = { nth: parent.recurring_nth, weekday: parent.recurring_weekday, intervalDays: parent.recurring_interval_days };
+              const rOpts = {
+                ...recurrenceOrdinalOptions(parent.scheduled_date, {
+                  nth: parent.recurring_nth,
+                  weekday: parent.recurring_weekday,
+                }),
+                intervalDays: parent.recurring_interval_days,
+              };
               const skipParent = cols.skip_weekends ? !!parent.skip_weekends : false;
               const dirParent = cols.weekend_shift ? (parent.weekend_shift === 'back' ? 'back' : 'forward') : 'forward';
               // Pre-load every active date on this series (base + boosters,
@@ -1470,6 +1574,7 @@ router.put('/:id/status', async (req, res, next) => {
                 if (cols.weekend_shift && skipParent) nextData.weekend_shift = dirParent;
                 if (cols.service_id && parent.service_id) nextData.service_id = parent.service_id;
                 if (cols.estimated_price && parent.estimated_price != null) nextData.estimated_price = parent.estimated_price;
+                copyLineDiscountFields(nextData, parent, cols);
                 const [autoExtRow] = await db('scheduled_services').insert(nextData).returning('*');
                 // Mirror parent's add-on lines onto the auto-extended visit
                 // so a multi-service ongoing series keeps its full scope
@@ -1478,13 +1583,16 @@ router.put('/:id/status', async (req, res, next) => {
                   const parentAddons = await db('scheduled_service_addons')
                     .where({ scheduled_service_id: parentId });
                   if (parentAddons.length > 0 && autoExtRow?.id) {
+                    const addonCols = await db('scheduled_service_addons').columnInfo();
                     for (const addon of parentAddons) {
-                      await db('scheduled_service_addons').insert({
+                      const addonData = {
                         scheduled_service_id: autoExtRow.id,
                         service_id: addon.service_id || null,
                         service_name: addon.service_name,
                         estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
-                      });
+                      };
+                      copyAddonDiscountFields(addonData, addon, addonCols);
+                      await db('scheduled_service_addons').insert(addonData);
                     }
                   }
                 } catch (e) { logger.warn(`[recurring] Auto-extend addon mirror failed (non-blocking): ${e.message}`); }
@@ -2290,7 +2398,13 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
     if (!parent) return res.status(404).json({ error: 'parent service not found' });
 
     const cols = await db('scheduled_services').columnInfo();
-    const rOpts = { nth: parent.recurring_nth, weekday: parent.recurring_weekday, intervalDays: parent.recurring_interval_days };
+    const rOpts = {
+      ...recurrenceOrdinalOptions(parent.scheduled_date, {
+        nth: parent.recurring_nth,
+        weekday: parent.recurring_weekday,
+      }),
+      intervalDays: parent.recurring_interval_days,
+    };
 
     // Honor skip-weekends preference set on the parent (POST + PUT + auto-
     // extend already do; the alert action endpoint must too or weekend
@@ -2321,13 +2435,16 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
     const mirrorAddons = async (childId) => {
       if (!Array.isArray(parentAddons) || parentAddons.length === 0 || !childId) return;
       try {
+        const addonCols = await db('scheduled_service_addons').columnInfo();
         for (const addon of parentAddons) {
-          await db('scheduled_service_addons').insert({
+          const addonData = {
             scheduled_service_id: childId,
             service_id: addon.service_id || null,
             service_name: addon.service_name,
             estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
-          });
+          };
+          copyAddonDiscountFields(addonData, addon, addonCols);
+          await db('scheduled_service_addons').insert(addonData);
         }
       } catch (e) { logger.warn(`[recurring-alerts] addon mirror failed (non-blocking): ${e.message}`); }
     };
@@ -2380,6 +2497,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         };
         if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
         if (cols.estimated_price && parent.estimated_price != null) data.estimated_price = parent.estimated_price;
+        copyLineDiscountFields(data, parent, cols);
         if (cols.skip_weekends) data.skip_weekends = skipParent;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await db('scheduled_services').insert(data).returning('*');
@@ -2426,6 +2544,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         if (cols.recurring_ongoing) data.recurring_ongoing = true;
         if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
         if (cols.estimated_price && parent.estimated_price != null) data.estimated_price = parent.estimated_price;
+        copyLineDiscountFields(data, parent, cols);
         if (cols.skip_weekends) data.skip_weekends = skipParent;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await db('scheduled_services').insert(data).returning('*');
