@@ -1380,7 +1380,8 @@ router.put('/:token/accept', async (req, res, next) => {
     // explicitly asked for a single visit instead of a recurring plan.
     // Gates post-commit behavior: no onboarding session, no customer tier
     // upgrade, no EstimateConverter recurring schedule creation.
-    const serviceMode = req.body?.serviceMode === 'one_time' ? 'one_time' : 'recurring';
+    const requestedOneTime = req.body?.serviceMode === 'one_time';
+    const serviceMode = requestedOneTime ? 'one_time' : 'recurring';
     // Invoice-mode: admin opted the estimate into auto-invoicing. Skips
     // onboarding/SetupIntent; after commit we generate an invoice (due
     // immediately) for the first visit's amount and send SMS + email
@@ -1421,6 +1422,12 @@ router.put('/:token/accept', async (req, res, next) => {
     // Structural "one-time only" — the estimate was built with no
     // recurring services, only one-time items. Older concept.
     const isOneTimeOnly = recurringSvcList.length === 0 && oneTimeList.length > 0;
+    const pricingBundle = requestedOneTime ? await buildPricingBundle(estimate) : null;
+    const oneTimeChoicePrice = Number(pricingBundle?.anchorOneTimePrice || estimate.onetime_total || 0);
+    const canChooseOneTime = !!estimate.show_one_time_option && oneTimeChoicePrice > 0;
+    if (requestedOneTime && !isOneTimeOnly && !canChooseOneTime) {
+      return res.status(400).json({ error: 'one-time option is not available for this estimate' });
+    }
     // Customer-choice "treat as one-time" — either the estimate is
     // structurally one-time-only, OR the customer picked the one-time
     // toggle on the v2 view (serviceMode='one_time'). Gates the same
@@ -2514,6 +2521,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         notes: estimate.notes || null,
         licenseNumber: process.env.WAVES_FDACS_LICENSE || null,
         showOneTimeOption: !!estimate.show_one_time_option,
+        billByInvoice: !!estimate.bill_by_invoice,
       },
       pricing: pricingBundle,
       cta: {
