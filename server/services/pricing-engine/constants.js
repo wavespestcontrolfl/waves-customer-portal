@@ -284,25 +284,27 @@ const PALM = {
 };
 
 // ============================================================
-// MOSQUITO (WaveGuard Tiers)
+// MOSQUITO (Seasonal / Monthly Programs)
 // ============================================================
 const MOSQUITO = {
   lotCategories: [
-    { key: 'SMALL',   maxSqFt: 10889,  label: '< ¼ acre' },
-    { key: 'QUARTER', maxSqFt: 14519,  label: '¼ acre' },
-    { key: 'THIRD',   maxSqFt: 21779,  label: '⅓ acre' },
-    { key: 'HALF',    maxSqFt: 43559,  label: '½ acre' },
-    { key: 'ACRE',    maxSqFt: Infinity, label: '1+ acre' },
+    { key: 'SMALL',   maxSqFt: 7999,   label: '< 8k treatable sf' },
+    { key: 'QUARTER', maxSqFt: 11999,  label: '8k-12k treatable sf' },
+    { key: 'THIRD',   maxSqFt: 17999,  label: '12k-18k treatable sf' },
+    { key: 'HALF',    maxSqFt: 34999,  label: '18k-35k treatable sf' },
+    { key: 'ACRE',    maxSqFt: Infinity, label: '35k+ treatable sf' },
   ],
+  grossLotGuardrailMaxDrop: 1,
+  programs: ['seasonal', 'monthly'],
   basePrices: {
-    //           Bronze  Silver  Gold    Platinum
-    SMALL:   [r(80),  r(90),  r(100), r(110)],
-    QUARTER: [r(90),  r(100), r(115), r(125)],
-    THIRD:   [r(100), r(110), r(125), r(135)],
-    HALF:    [r(110), r(125), r(145), r(155)],
-    ACRE:    [r(140), r(155), r(180), r(200)],
+    //           Seasonal  Monthly
+    SMALL:   [r(90),  r(90)],
+    QUARTER: [r(100), r(100)],
+    THIRD:   [r(110), r(110)],
+    HALF:    [r(125), r(125)],
+    ACRE:    [r(155), r(155)],
   },
-  tierVisits: { bronze: 12, silver: 12, gold: 15, platinum: 17 },  // Aligned to v2. Was 18 per prior comment, but v2 (Virginia's primary flow) has always used 17.
+  tierVisits: { seasonal: 9, monthly: 12 },
   pressureFactors: {
     trees_heavy: 0.15, trees_moderate: 0.05,
     complexity_complex: 0.10, complexity_moderate: 0.05,

@@ -18,7 +18,7 @@
  *       lawn:       { track, tier, shadeClassification },
  *       treeShrub:  { tier, access, treeCount },
  *       palm:       { palmCount, treatmentType },
- *       mosquito:   { tier },
+ *       mosquito:   { tier: 'seasonal' | 'monthly' },
  *       termite:    { system, monitoringTier },
  *       rodentBait: true,
  *       // one-time + specialty flags...

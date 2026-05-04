@@ -42,6 +42,16 @@ for (const zone of ['A', 'B', 'C', 'D', 'UNKNOWN']) {
   }
 }
 
+function normalizeMosquitoProgram(value) {
+  const raw = String(value || 'monthly').toLowerCase();
+  if (raw === 'seasonal' || raw === 'monthly') return raw;
+  // Migration shim only: older saved estimate inputs may still contain the
+  // retired mosquito tier names. Do not expose these as product options.
+  if (raw === 'bronze') return 'seasonal';
+  if (raw === 'silver' || raw === 'gold' || raw === 'platinum') return 'monthly';
+  return raw;
+}
+
 // ── Generate Complete Estimate ────────────────────────────────
 function generateEstimate(input) {
   // ── 1. Calculate property profile ──────────────────────────
@@ -168,7 +178,7 @@ function generateEstimate(input) {
   // Mosquito
   if (services.mosquito) {
     const result = priceMosquito(property, {
-      tier: services.mosquito.tier || 'silver',
+      tier: normalizeMosquitoProgram(services.mosquito.tier || services.mosquito.program),
       modifiers,
     });
     result.annual = Math.round(result.annual * zoneMult);

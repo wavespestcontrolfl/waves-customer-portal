@@ -266,30 +266,43 @@ async function syncConstantsFromDB(dbInstance) {
     }
 
     // ── Mosquito ─────────────────────────────────────────────
-    // Replaces whole-cloth — admin edits in the Pricing Logic Mosquito tab are
-    // authoritative. Schema mirrors the migration seed in
-    // 20260414000026_pricing_config_jsonb.js (4 rows: base_prices, lot_sizes,
-    // visits, pressure). lot_sizes is read but not yet applied to the engine —
-    // bucket thresholds still live in property-calculator.getLotCategory.
+    // Admin edits in the Pricing Logic Mosquito tab are authoritative. The
+    // current engine exposes only Seasonal/Monthly programs; until the DB row
+    // is migrated, legacy Silver per-visit pricing is the closest equivalent
+    // for both cadence-based programs.
     if (config.mosquito_base_prices) {
       const next = { ...constants.MOSQUITO.basePrices };
       for (const [lot, tierMap] of Object.entries(config.mosquito_base_prices)) {
         if (tierMap && typeof tierMap === 'object' && constants.MOSQUITO.basePrices[lot]) {
+          const legacyProgramPrice = tierMap.silver ?? tierMap.monthly ?? tierMap.bronze;
           next[lot] = [
-            r(Number(tierMap.bronze ?? constants.MOSQUITO.basePrices[lot][0])),
-            r(Number(tierMap.silver ?? constants.MOSQUITO.basePrices[lot][1])),
-            r(Number(tierMap.gold   ?? constants.MOSQUITO.basePrices[lot][2])),
-            r(Number(tierMap.platinum ?? constants.MOSQUITO.basePrices[lot][3])),
+            r(Number(tierMap.seasonal ?? legacyProgramPrice ?? constants.MOSQUITO.basePrices[lot][0])),
+            r(Number(tierMap.monthly ?? legacyProgramPrice ?? constants.MOSQUITO.basePrices[lot][1])),
           ];
         }
       }
       constants.MOSQUITO.basePrices = next;
     }
     if (config.mosquito_visits) {
-      for (const tier of ['bronze', 'silver', 'gold', 'platinum']) {
-        if (config.mosquito_visits[tier] != null) {
-          constants.MOSQUITO.tierVisits[tier] = Number(config.mosquito_visits[tier]);
+      if (config.mosquito_visits.seasonal != null) {
+        constants.MOSQUITO.tierVisits.seasonal = Number(config.mosquito_visits.seasonal);
+      }
+      if (config.mosquito_visits.monthly != null) {
+        constants.MOSQUITO.tierVisits.monthly = Number(config.mosquito_visits.monthly);
+      }
+    }
+    if (config.mosquito_lot_sizes) {
+      const smallMax = Number(config.mosquito_lot_sizes.SMALL?.maxSqFt ?? config.mosquito_lot_sizes.SMALL?.max_sqft);
+      const halfMax = Number(config.mosquito_lot_sizes.HALF?.maxSqFt ?? config.mosquito_lot_sizes.HALF?.max_sqft);
+      const isLegacyGrossLotSeed = smallMax === 10889 && halfMax === 43559;
+      if (!isLegacyGrossLotSeed) {
+        const next = constants.MOSQUITO.lotCategories.map(c => ({ ...c }));
+        for (const c of next) {
+          const cfg = config.mosquito_lot_sizes[c.key];
+          const maxSqFt = cfg?.maxSqFt ?? cfg?.max_sqft;
+          if (maxSqFt != null) c.maxSqFt = Number(maxSqFt) >= 999999 ? Infinity : Number(maxSqFt);
         }
+        constants.MOSQUITO.lotCategories = next;
       }
     }
     if (config.mosquito_pressure) {

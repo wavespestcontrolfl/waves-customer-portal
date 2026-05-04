@@ -3,10 +3,12 @@
 // ============================================================
 const {
   HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, BED_AREA_CAP, TURF_FACTORS,
+  MOSQUITO,
 } = require('./constants');
 
 function calculateFootprint(homeSqFt, stories) {
-  return Math.round(homeSqFt / Math.max(1, stories));
+  const sqft = Number(homeSqFt) || 0;
+  return Math.round(sqft / Math.max(1, Number(stories) || 1));
 }
 
 function estimateHardscape(lotSqFt, propertyType, features = {}) {
@@ -67,6 +69,18 @@ function getLotCategory(lotSqFt) {
   return 'ACRE';
 }
 
+function getMosquitoTreatableCategory(mosquitoTreatableSqFt, grossLotCategory) {
+  const categories = MOSQUITO.lotCategories;
+  const rawIndex = categories.findIndex(c => mosquitoTreatableSqFt <= c.maxSqFt);
+  const treatableIndex = rawIndex >= 0 ? rawIndex : categories.length - 1;
+  const grossIndex = Math.max(0, categories.findIndex(c => c.key === grossLotCategory));
+  const guardedIndex = Math.max(
+    treatableIndex,
+    grossIndex - (MOSQUITO.grossLotGuardrailMaxDrop || 1)
+  );
+  return categories[Math.min(guardedIndex, categories.length - 1)].key;
+}
+
 function calculatePropertyProfile(input) {
   const footprint = calculateFootprint(input.homeSqFt, input.stories || 1);
   const hardscape = estimateHardscape(input.lotSqFt, input.propertyType, input.features || {});
@@ -76,9 +90,12 @@ function calculatePropertyProfile(input) {
   const bedArea = input.bedArea || estimateBedArea(input.lotSqFt, (input.features || {}).shrubs, (input.features || {}).complexity);
   const perimeter = calculatePerimeter(footprint, (input.features || {}).complexity);
   const lotCategory = getLotCategory(input.lotSqFt);
+  const mosquitoTreatableSqFt = Math.max(0, input.lotSqFt - footprint - hardscape);
+  const mosquitoLotCategory = getMosquitoTreatableCategory(mosquitoTreatableSqFt, lotCategory);
 
   return {
     footprint, hardscape, lawnSqFt, bedArea, perimeter, lotCategory,
+    mosquitoTreatableSqFt, mosquitoLotCategory,
     complexityScore: calculateComplexityScore(features),
     homeSqFt: input.homeSqFt,
     lotSqFt: input.lotSqFt,
@@ -106,5 +123,5 @@ function calculatePropertyProfile(input) {
 module.exports = {
   calculateFootprint, estimateHardscape, calculateComplexityScore,
   estimateLawnSqFt, estimateBedArea, calculatePerimeter,
-  getLotCategory, calculatePropertyProfile,
+  getLotCategory, getMosquitoTreatableCategory, calculatePropertyProfile,
 };

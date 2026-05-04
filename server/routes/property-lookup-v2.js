@@ -1242,7 +1242,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       treatmentType: 'combo',
     };
   }
-  if (sel.has('MOSQUITO')) services.mosquito = { tier: 'silver' };
+  if (sel.has('MOSQUITO')) services.mosquito = { tier: 'monthly' };
   if (sel.has('TERMITE_BAIT')) services.termite = { system: 'advance', monitoringTier: 'basic' };
   if (sel.has('RODENT_BAIT')) services.rodentBait = {};
 
