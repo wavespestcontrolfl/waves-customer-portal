@@ -23,6 +23,7 @@ const MODELS = require('../config/models');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { PROJECT_TYPES, PROJECT_TYPE_KEYS, isValidProjectType, getProjectType } = require('../services/project-types');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { wrapEmail, formatDate, plainText } = require('../services/email-template');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -34,6 +35,15 @@ const s3 = new S3Client({
     : undefined,
 });
 const PHOTO_PREFIX = 'project-photos/';
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, customer, tech }) {
   const labelMap = Object.fromEntries((typeCfg.findingsFields || []).map(f => [f.key, f.label]));
@@ -414,16 +424,51 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
           channels.email = { ok: false, error: 'SendGrid not configured' };
         } else {
           const serviceGid = parseInt(process.env.SENDGRID_ASM_GROUP_SERVICE) || null;
-          const html = `<div style="font-family:-apple-system,Segoe UI,Arial,sans-serif;max-width:600px;margin:0 auto;color:#18181b;line-height:1.55;">
-  <h2 style="margin:0 0 12px;">Your Waves ${typeLabel} report is ready</h2>
-  <p>Hi ${firstName},</p>
-  <p>Your technician's report from today's visit is posted. Tap below to review photos, findings, and our recommendations.</p>
-  <p style="margin:22px 0;"><a href="${reportUrl}" style="display:inline-block;padding:12px 24px;background:#18181b;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">View Your Report</a></p>
-  <p style="color:#52525b;font-size:14px;">Questions? Reply to this email or call <a href="tel:+19412101983" style="color:#18181b;">(941) 210-1983</a>.</p>
-  <hr style="border:none;border-top:1px solid #e4e4e7;margin:24px 0;" />
-  <p style="color:#a1a1aa;font-size:12px;">Waves Pest Control, LLC · Bradenton, FL</p>
-</div>`;
-          const text = `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}\n\nQuestions? Reply to this email or call (941) 210-1983.\n\n— Waves Pest Control`;
+          const safeTypeLabel = escapeHtml(typeLabel);
+          const safeFirstName = escapeHtml(firstName);
+          const safeTitle = project.title ? escapeHtml(project.title) : '';
+          const clientName = `${customer?.first_name || ''} ${customer?.last_name || ''}`.trim();
+          const fullAddress = [
+            customer?.address_line1,
+            [customer?.city, customer?.state].filter(Boolean).join(', '),
+            customer?.zip,
+          ].filter(Boolean).join(' ');
+          const heading = `Your ${safeTypeLabel} report is ready`;
+          const intro = `Hi ${safeFirstName}, your technician's report is posted. You can review the visit summary, photos, findings, and recommendations online.`;
+          const lines = [
+            ['Report', safeTypeLabel],
+            safeTitle ? ['Title', safeTitle] : null,
+            clientName ? ['Client', escapeHtml(clientName)] : null,
+            customer?.email ? ['Email', escapeHtml(customer.email)] : null,
+            customer?.phone ? ['Phone', escapeHtml(customer.phone)] : null,
+            fullAddress ? ['Property', escapeHtml(fullAddress)] : null,
+            ['Prepared', formatDate(project.sent_at || new Date())],
+          ].filter(Boolean);
+          const html = wrapEmail({
+            preheader: `Your Waves ${typeLabel} report is ready.`,
+            heading,
+            intro,
+            lines,
+            ctaHref: reportUrl,
+            ctaLabel: 'View report',
+            footerNote: 'Questions? Reply to this email or call (941) 297-5749.',
+          });
+          const text = plainText([
+            `Hi ${firstName},`,
+            '',
+            intro,
+            '',
+            `Report: ${typeLabel}`,
+            project.title ? `Title: ${project.title}` : null,
+            clientName ? `Client: ${clientName}` : null,
+            customer?.email ? `Email: ${customer.email}` : null,
+            customer?.phone ? `Phone: ${customer.phone}` : null,
+            fullAddress ? `Property: ${fullAddress}` : null,
+            `View report: ${reportUrl}`,
+            '',
+            'Questions? Reply to this email or call (941) 297-5749.',
+            '— Waves Pest Control',
+          ]);
           const result = await sendgrid.sendOne({
             to: customer.email,
             fromEmail: 'reports@wavespestcontrol.com',
