@@ -193,7 +193,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
         onEdit?.(service);
       }}
       className={cn(
-        'absolute px-1.5 py-0.5 rounded-sm cursor-grab active:cursor-grabbing select-none overflow-hidden text-11 leading-tight u-focus-ring',
+        'absolute px-1.5 py-0.5 rounded-[3px] cursor-grab active:cursor-grabbing select-none overflow-hidden text-11 leading-tight u-focus-ring',
         statusBlockClasses(service.status),
         isDragging && 'opacity-90 z-50 shadow-2xl ring-2 ring-zinc-900',
       )}
@@ -222,8 +222,8 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
           if (customerId) onViewCustomer?.(service);
         }}
         className={cn(
-          'block w-full text-left font-bold truncate u-focus-ring rounded-xs',
-          (service.customerId || service.customer_id) && onViewCustomer && 'hover:underline cursor-pointer'
+          'block w-full text-left text-11 leading-tight font-semibold truncate u-focus-ring rounded-[3px]',
+          'text-inherit bg-transparent border-0 p-0 cursor-pointer'
         )}
         title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
       >
@@ -468,13 +468,14 @@ function RailItem({ service, dayLabel, onEdit, onTreatmentPlan, onViewCustomer }
         onEdit?.(service);
       }}
       className={cn(
-        'px-2 py-2 rounded-sm bg-white cursor-grab active:cursor-grabbing select-none text-11 leading-tight u-focus-ring',
+        'px-2 py-2 rounded-[3px] cursor-grab active:cursor-grabbing select-none text-11 leading-tight u-focus-ring',
+        statusBlockClasses(service.status),
         isDragging && 'opacity-90 z-50 shadow-2xl ring-2 ring-zinc-900',
       )}
-      style={{ border: '1px solid #D4D4D8', ...dragStyle }}
+      style={{ background: statusBlockFill(service.status) || undefined, border: `1px solid ${statusBlockFill(service.status) || '#E4E4E7'}`, ...dragStyle }}
       title={`${service.customerName || 'Unassigned'} · ${service.serviceType || ''} · ${dayLabel} ${timeLabel}`}
     >
-      <div className="u-nums text-10 text-zinc-500 mb-0.5">
+      <div className="u-nums text-10 opacity-90 mb-0.5">
         {dayLabel} · {timeLabel}
       </div>
       <button
@@ -486,15 +487,15 @@ function RailItem({ service, dayLabel, onEdit, onTreatmentPlan, onViewCustomer }
           if (customerId) onViewCustomer?.(service);
         }}
         className={cn(
-          'block w-full text-left font-medium truncate text-zinc-900 u-focus-ring rounded-xs',
-          (service.customerId || service.customer_id) && onViewCustomer && 'hover:underline cursor-pointer'
+          'block w-full text-left text-11 leading-tight font-semibold truncate u-focus-ring rounded-[3px]',
+          'text-inherit bg-transparent border-0 p-0 cursor-pointer'
         )}
         title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
       >
         {service.customerName || 'Unassigned'}
       </button>
       {service.serviceType && (
-        <div className="truncate text-zinc-700">{service.serviceType}</div>
+        <div className="truncate opacity-90">{service.serviceType}</div>
       )}
       {isLawnService(service) && onTreatmentPlan && (
         <button

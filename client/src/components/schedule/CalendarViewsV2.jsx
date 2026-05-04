@@ -189,16 +189,17 @@ export function WeekViewV2({ startDate, onDateClick }) {
               </div>
 
               {/* Service list (compact) */}
-              <div className="space-y-0.5">
+              <div className="space-y-1">
                 {day.services.slice(0, 5).map((s) => (
                   <div
                     key={s.id}
                     className={cn(
-                      'text-11 truncate',
-                      s.status === 'completed' ? 'line-through text-ink-tertiary' : 'text-ink-primary'
+                      'text-11 truncate rounded-[3px] px-1.5 py-0.5 font-semibold',
+                      s.status === 'completed' ? 'line-through bg-zinc-200 text-zinc-500' : 'text-white'
                     )}
+                    style={s.status === 'completed' ? undefined : { background: s.status === 'en_route' ? '#1E40AF' : s.status === 'on_site' ? '#18181B' : '#3B82F6' }}
                   >
-                    {s.customerName?.split(' ')[0] || '—'}
+                    {s.windowStart ? `${minutesToLabelMonth(parseHHMM(s.windowStart) || 0)} ` : ''}{s.customerName?.split(' ')[0] || '—'}
                   </div>
                 ))}
               </div>
@@ -274,7 +275,7 @@ function MonthServiceChip({ service, onViewCustomer }) {
       {...attributes}
       {...listeners}
       className={cn(
-        'text-11 truncate leading-tight cursor-grab active:cursor-grabbing select-none px-1.5 py-0.5 rounded-xs',
+        'text-11 truncate leading-tight cursor-grab active:cursor-grabbing select-none px-1.5 py-0.5 rounded-[3px] font-semibold',
         completed && 'bg-zinc-200 text-zinc-500 line-through',
         service.status === 'skipped' && 'bg-alert-bg text-alert-fg',
         !completed && service.status !== 'skipped' && 'text-white',

@@ -332,7 +332,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
         onEdit?.(service);
       }}
       className={cn(
-        'absolute px-2 py-1 rounded-sm cursor-grab active:cursor-grabbing select-none overflow-hidden text-11 leading-tight u-focus-ring',
+        'absolute px-2 py-1 rounded-[3px] cursor-grab active:cursor-grabbing select-none overflow-hidden text-11 leading-tight u-focus-ring',
         statusBlockClasses(service.status),
         isDragging && 'opacity-90 z-50 shadow-2xl ring-2 ring-zinc-900',
         isSelected && !isDragging && 'ring-2 ring-zinc-900 ring-offset-1 ring-offset-white z-30',
@@ -404,8 +404,8 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
           if (customerId) onViewCustomer?.(service);
         }}
         className={cn(
-          'block w-full text-left font-medium truncate u-focus-ring rounded-xs',
-          (service.customerId || service.customer_id) && onViewCustomer && 'hover:underline cursor-pointer'
+          'block w-full text-left text-11 leading-tight font-semibold truncate u-focus-ring rounded-[3px]',
+          'text-inherit bg-transparent border-0 p-0 cursor-pointer'
         )}
         title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
       >
@@ -616,8 +616,8 @@ function AllDayStrip({ services, onEdit, onTreatmentPlan, onViewAudit, onViewCus
               }
               onEdit?.(svc);
             }}
-            className="px-2 py-1 rounded-sm bg-white text-11 text-zinc-900 truncate max-w-[200px]"
-            style={{ border: '1px solid #D4D4D8' }}
+            className="px-2 py-1 rounded-[3px] text-11 font-semibold text-white truncate max-w-[220px] u-focus-ring"
+            style={{ background: svc.status === 'completed' ? '#E4E4E7' : '#3B82F6', color: svc.status === 'completed' ? '#71717A' : '#FFFFFF', border: `1px solid ${svc.status === 'completed' ? '#E4E4E7' : '#3B82F6'}` }}
             title={(svc.customerId || svc.customer_id) && onViewCustomer ? 'Open customer profile' : undefined}
           >
             {svc.customerName || 'Unassigned'} · {svc.serviceType || ''}
@@ -677,14 +677,15 @@ function RailItem({ service, onEdit, onTreatmentPlan, onViewAudit, onViewCustome
         onEdit?.(service);
       }}
       className={cn(
-        'px-2 py-2 rounded-sm bg-white cursor-grab active:cursor-grabbing select-none text-11 leading-tight u-focus-ring',
+        'px-2 py-2 rounded-[3px] cursor-grab active:cursor-grabbing select-none text-11 leading-tight u-focus-ring',
+        statusBlockClasses(service.status),
         isDragging && 'opacity-90 z-50 shadow-2xl ring-2 ring-zinc-900',
         isSelected && !isDragging && 'ring-2 ring-zinc-900',
       )}
-      style={{ border: '1px solid #D4D4D8', ...dragStyle }}
+      style={{ background: statusBlockFill(service.status) || undefined, border: `1px solid ${statusBlockFill(service.status) || '#E4E4E7'}`, ...dragStyle }}
       title={`${service.customerName || 'Unassigned'} · ${service.serviceType || ''} · ${service.windowDisplay || timeLabel}\nShift+click to select for bulk actions`}
     >
-      <div className="u-nums text-10 text-zinc-500 mb-0.5">{timeLabel}</div>
+      <div className="u-nums text-10 opacity-90 mb-0.5">{timeLabel}</div>
       <button
         type="button"
         onPointerDown={(e) => e.stopPropagation()}
@@ -694,15 +695,15 @@ function RailItem({ service, onEdit, onTreatmentPlan, onViewAudit, onViewCustome
           if (customerId) onViewCustomer?.(service);
         }}
         className={cn(
-          'block w-full text-left font-medium truncate text-zinc-900 u-focus-ring rounded-xs',
-          (service.customerId || service.customer_id) && onViewCustomer && 'hover:underline cursor-pointer'
+          'block w-full text-left text-11 leading-tight font-semibold truncate u-focus-ring rounded-[3px]',
+          'text-inherit bg-transparent border-0 p-0 cursor-pointer'
         )}
         title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
       >
         {service.customerName || 'Unassigned'}
       </button>
       {service.serviceType && (
-        <div className="truncate text-zinc-700">{service.serviceType}</div>
+        <div className="truncate opacity-90">{service.serviceType}</div>
       )}
       {isLawnService(service) && onTreatmentPlan && (
         <button
