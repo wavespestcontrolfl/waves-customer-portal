@@ -1,5 +1,12 @@
 import { useEffect, useRef } from 'react';
 
+const SWFL_BOUNDS = {
+  north: 27.95,
+  south: 26.75,
+  east: -81.75,
+  west: -83.05,
+};
+
 /**
  * Google Places address autocomplete input.
  *
@@ -24,6 +31,7 @@ export default function AddressAutocomplete({
 }) {
   const inputRef = useRef(null);
   const acRef = useRef(null);
+  const lastSelectedRef = useRef('');
 
   useEffect(() => {
     const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || 'AIzaSyCvzQ84QWUKMby5YcbM8MhDBlEZ2oF7Bsk';
@@ -51,6 +59,8 @@ export default function AddressAutocomplete({
       const ac = new window.google.maps.places.Autocomplete(inputRef.current, {
         types: ['address'],
         componentRestrictions: { country },
+        bounds: SWFL_BOUNDS,
+        strictBounds: false,
         fields: ['formatted_address', 'address_components', 'geometry'],
       });
       ac.addListener('place_changed', () => {
@@ -76,6 +86,8 @@ export default function AddressAutocomplete({
           lat: p.geometry?.location?.lat?.() ?? null,
           lng: p.geometry?.location?.lng?.() ?? null,
         };
+        if (parts.state && parts.state !== 'FL') return;
+        lastSelectedRef.current = parts.formatted || parts.line1 || '';
         onSelect?.(parts);
       });
       acRef.current = ac;
@@ -110,6 +122,40 @@ export default function AddressAutocomplete({
       placeholder={placeholder}
       value={value}
       onChange={(e) => onChange?.(e.target.value)}
+      onBlur={() => {
+        const typed = (inputRef.current?.value || '').trim();
+        if (!typed || typed === lastSelectedRef.current || !window.google?.maps?.Geocoder) return;
+        const geocoder = new window.google.maps.Geocoder();
+        geocoder.geocode({
+          address: typed,
+          bounds: SWFL_BOUNDS,
+          componentRestrictions: { country, administrativeArea: 'FL' },
+        }, (results, status) => {
+          if (status !== 'OK' || !results?.[0]) return;
+          const p = results[0];
+          const get = (type) => {
+            const c = p.address_components?.find(c => c.types.includes(type));
+            return c ? c.long_name : '';
+          };
+          const getShort = (type) => {
+            const c = p.address_components?.find(c => c.types.includes(type));
+            return c ? c.short_name : '';
+          };
+          const line1 = [get('street_number'), get('route')].filter(Boolean).join(' ');
+          const parts = {
+            formatted: p.formatted_address || typed,
+            line1,
+            city: get('locality') || get('sublocality') || get('postal_town'),
+            state: getShort('administrative_area_level_1'),
+            zip: get('postal_code'),
+            lat: p.geometry?.location?.lat?.() ?? null,
+            lng: p.geometry?.location?.lng?.() ?? null,
+          };
+          if (parts.state && parts.state !== 'FL') return;
+          lastSelectedRef.current = parts.formatted || parts.line1 || typed;
+          onSelect?.(parts);
+        });
+      }}
       style={style}
     />
   );

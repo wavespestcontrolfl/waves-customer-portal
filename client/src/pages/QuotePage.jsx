@@ -202,6 +202,12 @@ const NEXT_STEPS = [
 ];
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const SWFL_GEOCODE_BOUNDS = {
+  north: 27.95,
+  south: 26.75,
+  east: -81.75,
+  west: -83.05,
+};
 
 function captureAttribution() {
   if (typeof window === 'undefined') return null;
@@ -229,6 +235,22 @@ function splitName(full) {
   const parts = (full || '').trim().split(/\s+/);
   if (parts.length < 2) return { firstName: parts[0] || '', lastName: '' };
   return { firstName: parts[0], lastName: parts.slice(1).join(' ') };
+}
+
+function addressPartsFromGoogleResult(result, fallback = '') {
+  const components = result?.address_components || [];
+  const get = (type) => components.find(c => c.types.includes(type))?.long_name || '';
+  const getShort = (type) => components.find(c => c.types.includes(type))?.short_name || '';
+  const line1 = [get('street_number'), get('route')].filter(Boolean).join(' ');
+  return {
+    formatted: result?.formatted_address || fallback,
+    line1,
+    city: get('locality') || get('sublocality') || get('postal_town'),
+    state: getShort('administrative_area_level_1') || 'FL',
+    zip: get('postal_code'),
+    lat: result?.geometry?.location?.lat?.() ?? null,
+    lng: result?.geometry?.location?.lng?.() ?? null,
+  };
 }
 
 function formatPhoneDigits(d) {
@@ -295,6 +317,7 @@ export default function QuotePage({ serviceSlug = '' }) {
   });
 
   const inputRef = useRef(null);
+  const submitInFlightRef = useRef(false);
 
   useEffect(() => {
     setStage('intake');
@@ -335,6 +358,54 @@ export default function QuotePage({ serviceSlug = '' }) {
 
   function setIntakeField(key, value) {
     setIntake(prev => ({ ...prev, [key]: value }));
+  }
+
+  function applyAddressParts(parts) {
+    const formatted = parts.formatted || parts.line1 || intake.address;
+    setIntakeField('address', formatted);
+    setAddress({
+      formatted,
+      line1: parts.line1 || formatted,
+      city: parts.city || '',
+      state: parts.state || 'FL',
+      zip: parts.zip || '',
+    });
+  }
+
+  async function resolveAddressForSubmit() {
+    const typed = (address.formatted || intake.address || '').trim();
+    if (!typed) return address;
+    if ((address.city || address.zip) && address.formatted) return address;
+    if (!window.google?.maps?.Geocoder) {
+      return { ...address, formatted: typed, line1: address.line1 || typed };
+    }
+
+    try {
+      const geocoder = new window.google.maps.Geocoder();
+      const results = await new Promise((resolve, reject) => {
+        geocoder.geocode({
+          address: typed,
+          bounds: SWFL_GEOCODE_BOUNDS,
+          componentRestrictions: { country: 'US', administrativeArea: 'FL' },
+        }, (geocodeResults, status) => {
+          if (status === 'OK' && geocodeResults?.[0]) resolve(geocodeResults);
+          else reject(new Error(status || 'Geocode failed'));
+        });
+      });
+      const parts = addressPartsFromGoogleResult(results[0], typed);
+      const next = {
+        formatted: parts.formatted || typed,
+        line1: parts.line1 || typed,
+        city: parts.city || '',
+        state: parts.state || 'FL',
+        zip: parts.zip || '',
+      };
+      setIntakeField('address', next.formatted);
+      setAddress(next);
+      return next;
+    } catch {
+      return { ...address, formatted: typed, line1: address.line1 || typed };
+    }
   }
 
   function validateCurrent() {
@@ -387,13 +458,17 @@ export default function QuotePage({ serviceSlug = '' }) {
     // /api/leads — one-time needs site-visit triage, not-sure needs a
     // consultation. lead-webhook handles business-hours call / after-hours SMS.
     if (intake.frequency !== 'ongoing') { return submitOneTime(); }
+    if (submitInFlightRef.current) return;
+    submitInFlightRef.current = true;
+    setLoading(true);
     const { firstName, lastName } = splitName(intake.name);
     const phoneDigits = intake.phone.replace(/\D/g, '');
-
-    setStage('lookup');
-    setLookupStatus('Measuring your property');
-    setLookupSub('Checking lot size, landscape, and complexity...');
     try {
+      const resolvedAddress = await resolveAddressForSubmit();
+
+      setStage('lookup');
+      setLookupStatus('Measuring your property');
+      setLookupSub('Checking lot size, landscape, and complexity...');
       const r = await fetch(`${API_BASE}/public/estimator/property-lookup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -402,7 +477,7 @@ export default function QuotePage({ serviceSlug = '' }) {
           lastName,
           email: intake.email.trim(),
           phone: phoneDigits,
-          address: address.formatted || intake.address,
+          address: resolvedAddress.formatted || intake.address,
           attribution: attribution || undefined,
         }),
       });
@@ -427,18 +502,24 @@ export default function QuotePage({ serviceSlug = '' }) {
       setError(e.message || 'Lookup failed.');
       setStage('intake');
       setIntakeIdx(INTAKE_STEPS.length - 1);
+    } finally {
+      submitInFlightRef.current = false;
+      setLoading(false);
     }
   }
 
   // Termite/Mosquito/Rodent skip the public pricing engine (it doesn't price
   // them) and route to lead capture so a Waves specialist can quote by hand.
   async function submitOther() {
+    if (submitInFlightRef.current) return;
+    submitInFlightRef.current = true;
     setError('');
     setLoading(true);
     try {
       const { firstName, lastName } = splitName(intake.name);
       const phoneDigits = intake.phone.replace(/\D/g, '');
       const otherLabel = OTHER_OPTIONS.find(o => o.value === intake.otherService)?.label || intake.otherService;
+      const resolvedAddress = await resolveAddressForSubmit();
       const res = await fetch(`${API_BASE}/leads`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -448,7 +529,7 @@ export default function QuotePage({ serviceSlug = '' }) {
           lastName,
           email: intake.email.trim(),
           phone: phoneDigits,
-          address: address.formatted || intake.address,
+          address: resolvedAddress.formatted || intake.address,
           interest: 'other',
           otherService: intake.otherService,
           service_interest: otherLabel,
@@ -461,6 +542,7 @@ export default function QuotePage({ serviceSlug = '' }) {
     } catch (e) {
       setError(e?.message || 'Could not send your request. Please call us.');
     } finally {
+      submitInFlightRef.current = false;
       setLoading(false);
     }
   }
@@ -469,11 +551,14 @@ export default function QuotePage({ serviceSlug = '' }) {
   // and route to /api/leads so lead-webhook handles the business-hours admin
   // call / after-hours SMS. Reuses the result-other success stage.
   async function submitOneTime() {
+    if (submitInFlightRef.current) return;
+    submitInFlightRef.current = true;
     setError('');
     setLoading(true);
     try {
       const { firstName, lastName } = splitName(intake.name);
       const phoneDigits = intake.phone.replace(/\D/g, '');
+      const resolvedAddress = await resolveAddressForSubmit();
       const interestLabel = intake.interest === 'pest' ? 'Pest Control'
         : intake.interest === 'lawn' ? 'Lawn Care'
         : 'Pest Control & Lawn Care';
@@ -487,7 +572,7 @@ export default function QuotePage({ serviceSlug = '' }) {
           lastName,
           email: intake.email.trim(),
           phone: phoneDigits,
-          address: address.formatted || intake.address,
+          address: resolvedAddress.formatted || intake.address,
           interest: intake.interest,
           frequency: intake.frequency,
           service_interest: `${interestLabel} (${freqSuffix})`,
@@ -500,6 +585,7 @@ export default function QuotePage({ serviceSlug = '' }) {
     } catch (e) {
       setError(e?.message || 'Could not send your request. Please call us.');
     } finally {
+      submitInFlightRef.current = false;
       setLoading(false);
     }
   }
@@ -863,11 +949,11 @@ export default function QuotePage({ serviceSlug = '' }) {
                     <label style={sLabel}>Service address</label>
                     <AddressAutocomplete
                       value={intake.address}
-                      onChange={(v) => { setIntakeField('address', v); setAddress(a => ({ ...a, formatted: v })); }}
-                      onSelect={(p) => {
-                        setIntakeField('address', p.formatted);
-                        setAddress({ formatted: p.formatted, line1: p.line1, city: p.city, state: p.state, zip: p.zip });
+                      onChange={(v) => {
+                        setIntakeField('address', v);
+                        setAddress({ formatted: v, line1: v, city: '', state: 'FL', zip: '' });
                       }}
+                      onSelect={applyAddressParts}
                       placeholder="Start typing your address..."
                       style={sInput}
                     />
