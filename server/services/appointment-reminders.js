@@ -417,8 +417,9 @@ const AppointmentReminders = {
   /**
    * Handle appointment reschedule — reset reminder flags and notify customer.
    */
-  async handleReschedule(scheduledServiceId, newTime) {
+  async handleReschedule(scheduledServiceId, newTime, options = {}) {
     try {
+      const sendNotification = options.sendNotification !== false;
       const record = await db('appointment_reminders')
         .where({ scheduled_service_id: scheduledServiceId })
         .first();
@@ -446,6 +447,11 @@ const AppointmentReminders = {
           updated_at: new Date(),
         });
 
+      if (!sendNotification) {
+        logger.info(`[appt-remind] Reschedule notice suppressed for ${scheduledServiceId}`);
+        return record;
+      }
+
       // Send reschedule notice
       const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
       const contact = getServiceContact(customer);
@@ -460,8 +466,8 @@ const AppointmentReminders = {
           'appointment_rescheduled',
           { first_name: firstName, service_type: serviceLabel, day, date, time },
           `Hello ${firstName}! Your ${serviceLabel} with Waves has been rescheduled to ${day}, ${date} at ${time}.\n\n` +
-            `Please ensure gates are unlocked and pets are secured before we arrive.\n\n` +
-            `Questions? Reply to this message.\nThank you for choosing Waves!`,
+            `Need to change it again? Log into your Waves Customer Portal at portal.wavespestcontrol.com.\n\n` +
+            `Questions or requests? Reply to this message.`,
         );
 
         await safeSend(record.customer_id, contact.phone, body);
@@ -513,7 +519,7 @@ const AppointmentReminders = {
           'appointment_cancelled',
           { first_name: firstName, service_type: serviceLabel, day, date },
           `Hello ${firstName}! Your ${serviceLabel} with Waves scheduled for ${day}, ${date} has been cancelled.\n\n` +
-            `Need to rebook? Reply to this message and we'll get you scheduled.\nThank you for choosing Waves!`,
+            `Want to reschedule? Reply to this message and we'll get you back on the calendar.`,
         );
 
         await safeSend(record.customer_id, contact.phone, body);
@@ -574,7 +580,7 @@ const AppointmentReminders = {
           'appointment_series_cancelled',
           { first_name: firstName, service_type: serviceLabel, scope: scopeText },
           `Hello ${firstName}! Your Waves ${scopeText} for ${serviceLabel} has been cancelled.\n\n` +
-            `Need to rebook? Reply to this message and we'll get you scheduled.`,
+            `Want to reschedule? Reply to this message and we'll get you back on the calendar.`,
         );
 
         await safeSend(record.customer_id, contact.phone, body, 'appointment_series_cancelled');

@@ -116,6 +116,9 @@ export default function RescheduleConfirmModal({
             <div className="text-13 font-medium text-ink-primary mb-2">
               Client booking notifications
             </div>
+            <p className="text-12 text-ink-secondary mb-2">
+              This controls the immediate reschedule text. Automated reminders will follow the new appointment time.
+            </p>
             <div
               className="flex items-center gap-3 px-3 py-2 rounded-sm"
               style={{ border: '1px solid #E4E4E7' }}

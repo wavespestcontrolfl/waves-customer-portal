@@ -82,8 +82,8 @@ exports.up = async function (knex) {
       category: 'service',
       body:
         'Hello {first_name}! Your {service_type} with Waves has been rescheduled to {day}, {date} at {time}.\n\n' +
-        'Need to change it again? Log into your portal at portal.wavespestcontrol.com or reply here.\n\n' +
-        'Thank you for choosing Waves!',
+        'Need to change it again? Log into your Waves Customer Portal at portal.wavespestcontrol.com.\n\n' +
+        'Questions or requests? Reply to this message.',
       variables: JSON.stringify(['first_name', 'service_type', 'day', 'date', 'time']),
       sort_order: 6,
     },
@@ -93,7 +93,7 @@ exports.up = async function (knex) {
       category: 'service',
       body:
         'Hello {first_name}! Your {service_type} with Waves scheduled for {day}, {date} has been cancelled.\n\n' +
-        "Want to reschedule? Reply here or call (941) 318-7612 and we'll get you back on the calendar.",
+        "Want to reschedule? Reply to this message and we'll get you back on the calendar.",
       variables: JSON.stringify(['first_name', 'service_type', 'day', 'date']),
       sort_order: 7,
     },
