@@ -11,7 +11,7 @@
 // against America/New_York — the business is in SW Florida. No UTC.
 
 import { useEffect, useMemo, useState } from 'react';
-import { Leaf, ShieldCheck, Truck } from 'lucide-react';
+import { BookOpen, Leaf, ShieldCheck, Truck } from 'lucide-react';
 import { Badge } from '../ui';
 import { serviceColor } from '../../lib/service-colors';
 import { TIMEZONE, etDateString, etParts, isETToday, addETDays } from '../../lib/timezone';
@@ -98,7 +98,7 @@ function headerLabel(dateStr) {
   });
 }
 
-function AppointmentRow({ service, onEdit, onEnRoute, onTreatmentPlan, onViewAudit }) {
+function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit }) {
   const name = String(service.customerName || '').trim();
   const customerMissing = !name;
   const needsAttention =
@@ -178,6 +178,17 @@ function AppointmentRow({ service, onEdit, onEnRoute, onTreatmentPlan, onViewAud
           <Leaf size={18} strokeWidth={1.75} />
         </button>
       )}
+      {onProtocol && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onProtocol(service); }}
+          className="inline-flex items-center justify-center h-11 w-11 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 shrink-0 self-center"
+          title="Protocol"
+          aria-label="Protocol"
+        >
+          <BookOpen size={18} strokeWidth={1.75} />
+        </button>
+      )}
       {service.status === 'completed' && onViewAudit && (service.customerId || service.customer_id) && (
         <button
           type="button"
@@ -204,7 +215,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onTreatmentPlan, onViewAud
   );
 }
 
-function DaySegment({ dateStr, services, onEdit, onEnRoute, onTreatmentPlan, onViewAudit }) {
+function DaySegment({ dateStr, services, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit }) {
   const sorted = useMemo(() => sortByWindow(services || []), [services]);
   const today = isETToday(dateStr);
   return (
@@ -240,6 +251,7 @@ function DaySegment({ dateStr, services, onEdit, onEnRoute, onTreatmentPlan, onV
             service={svc}
             onEdit={onEdit}
             onEnRoute={onEnRoute}
+            onProtocol={onProtocol}
             onTreatmentPlan={onTreatmentPlan}
             onViewAudit={onViewAudit}
           />
@@ -249,7 +261,7 @@ function DaySegment({ dateStr, services, onEdit, onEnRoute, onTreatmentPlan, onV
   );
 }
 
-export default function MobileDispatchList({ mode, date, services, onEdit, onEnRoute, onTreatmentPlan, onViewAudit }) {
+export default function MobileDispatchList({ mode, date, services, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit }) {
   const [weekData, setWeekData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -282,6 +294,7 @@ export default function MobileDispatchList({ mode, date, services, onEdit, onEnR
           services={services || []}
           onEdit={onEdit}
           onEnRoute={onEnRoute}
+          onProtocol={onProtocol}
           onTreatmentPlan={onTreatmentPlan}
           onViewAudit={onViewAudit}
         />
@@ -312,6 +325,7 @@ export default function MobileDispatchList({ mode, date, services, onEdit, onEnR
           services={d.services || []}
           onEdit={onEdit}
           onEnRoute={onEnRoute}
+          onProtocol={onProtocol}
           onTreatmentPlan={onTreatmentPlan}
           onViewAudit={onViewAudit}
         />
