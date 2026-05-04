@@ -171,6 +171,11 @@ function PostEditor({ post, onBack, onUpdate }) {
   const serviceAreaTags = toArray(editing.service_areas_tag);
   const relatedServices = toArray(editing.related_services);
   const targetSites = toArray(editing.target_sites);
+  const dateInputValue = (v) => {
+    if (!v) return '';
+    const d = new Date(v);
+    return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
+  };
 
   const toggleServiceArea = (city) => {
     const next = serviceAreaTags.includes(city)
@@ -223,7 +228,7 @@ function PostEditor({ post, onBack, onUpdate }) {
     setOptimizing(false);
   };
 
-  const handleSave = async () => {
+  const handleSave = async ({ notify = true } = {}) => {
     const updated = await adminPut(`/admin/content/blog/${post.id}`, {
       title: editing.title,
       content: editing.content,
@@ -233,7 +238,9 @@ function PostEditor({ post, onBack, onUpdate }) {
       status: editing.status,
       author_slug: editing.author_slug || null,
       reviewer_slug: editing.reviewer_slug || null,
+      technically_reviewed_at: editing.technically_reviewed_at || null,
       fact_checked_by: editing.fact_checked_by || null,
+      fact_checked_at: editing.fact_checked_at || null,
       category: editing.category || null,
       post_type: editing.post_type || null,
       service_areas_tag: serviceAreaTags,
@@ -241,22 +248,23 @@ function PostEditor({ post, onBack, onUpdate }) {
       target_sites: targetSites,
       hero_image_alt: editing.hero_image_alt || null,
     });
-    if (onUpdate) onUpdate(updated.post);
+    if (notify && onUpdate) onUpdate(updated.post);
     if (updated.post) setEditing(prev => ({ ...prev, ...updated.post }));
+    return updated;
   };
 
   const applyOptimization = () => {
     if (!optimization) return;
     setEditing(prev => ({
       ...prev,
-      meta_description: optimization.suggestedMeta || prev.meta_description,
-      keyword: optimization.suggestedKeyword || prev.keyword,
+      meta_description: optimization.suggested_meta || optimization.suggestedMeta || prev.meta_description,
+      keyword: optimization.suggested_keyword || optimization.suggestedKeyword || prev.keyword,
     }));
     alert('Applied suggested meta + keyword. Review the SEO improvements and apply them to the content manually.');
   };
 
   const handlePublishAstro = async () => {
-    await handleSave();
+    await handleSave({ notify: false });
     setAstroPublishing(true);
     try {
       const result = await adminPost(`/admin/content/blog/${post.id}/publish-astro`, {});
@@ -428,8 +436,22 @@ function PostEditor({ post, onBack, onUpdate }) {
             </select>
           </div>
           <div>
+            <label style={{ fontSize: 11, color: D.muted, display: 'block', marginBottom: 4 }}>Technical Review Date</label>
+            <input type="date" value={dateInputValue(editing.technically_reviewed_at)} onChange={e => setEditing(prev => ({ ...prev, technically_reviewed_at: e.target.value || null }))} style={{
+              width: '100%', padding: '6px 10px', borderRadius: 6, border: `1px solid ${D.border}`,
+              background: D.bg, color: D.text, fontSize: 12,
+            }} />
+          </div>
+          <div>
             <label style={{ fontSize: 11, color: D.muted, display: 'block', marginBottom: 4 }}>Fact-Checked By</label>
             <input value={editing.fact_checked_by || ''} onChange={e => setEditing(prev => ({ ...prev, fact_checked_by: e.target.value }))} placeholder="e.g. Virginia Gelser" style={{
+              width: '100%', padding: '6px 10px', borderRadius: 6, border: `1px solid ${D.border}`,
+              background: D.bg, color: D.text, fontSize: 12,
+            }} />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: D.muted, display: 'block', marginBottom: 4 }}>Fact-Check Date</label>
+            <input type="date" value={dateInputValue(editing.fact_checked_at)} onChange={e => setEditing(prev => ({ ...prev, fact_checked_at: e.target.value || null }))} style={{
               width: '100%', padding: '6px 10px', borderRadius: 6, border: `1px solid ${D.border}`,
               background: D.bg, color: D.text, fontSize: 12,
             }} />
