@@ -424,8 +424,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
 
   const formatHistoryDate = (value, time) => {
     if (!value) return '';
-    const d = new Date(`${String(value).split('T')[0]}T12:00:00`);
-    const dateText = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+    const [year, month, day] = String(value).split('T')[0].split('-').map(Number);
+    const d = new Date(Date.UTC(year, month - 1, day, 12));
+    const dateText = d.toLocaleDateString('en-US', {
+      timeZone: 'UTC',
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
     const timeMatch = String(time || '').match(/^(\d{1,2}):(\d{2})/);
     const timeText = timeMatch
       ? `${parseInt(timeMatch[1], 10) % 12 || 12}:${timeMatch[2]} ${parseInt(timeMatch[1], 10) >= 12 ? 'PM' : 'AM'}`
