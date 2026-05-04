@@ -1479,6 +1479,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
               services={services}
               technicians={technicians}
               onEdit={(svc) => setEditingService(svc)}
+              onProtocol={(svc) => setProtocolService(svc)}
               onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
               onViewCustomer={openCustomerSidebar}
               onViewAudit={(svc) => setAuditContext({ customerId: svc.customerId || svc.customer_id, scheduledServiceId: svc.id })}
@@ -1499,6 +1500,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
               services={services}
               onEdit={(svc) => setDetailService(svc)}
               onEnRoute={handleEnRoute}
+              onProtocol={(svc) => setProtocolService(svc)}
               onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
               onViewAudit={(svc) => setAuditContext({ customerId: svc.customerId || svc.customer_id, scheduledServiceId: svc.id })}
             />

@@ -188,6 +188,43 @@ function detectServiceCategory(serviceType) {
   return 'pest';
 }
 
+function fmtProtocolNumber(value, suffix = '') {
+  if (value == null || value === '') return '—';
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value);
+  return `${n.toLocaleString(undefined, { maximumFractionDigits: 3 })}${suffix}`;
+}
+
+function protocolTrackForLawnType(lawnType) {
+  const value = String(lawnType || '').trim().toLowerCase();
+  const legacyTrackMap = {
+    a_st_aug_sun: 'st_augustine',
+    b_st_aug_shade: 'st_augustine',
+    c1_bermuda: 'bermuda',
+    c2_zoysia: 'zoysia',
+    d_bahia: 'bahia',
+  };
+  if (legacyTrackMap[value]) return legacyTrackMap[value];
+  if (['st_augustine', 'bermuda', 'zoysia', 'bahia'].includes(value)) return value;
+  if (value.includes('bermuda')) return 'bermuda';
+  if (value.includes('zoysia')) return 'zoysia';
+  if (value.includes('bahia')) return 'bahia';
+  if (value.includes('st. augustine') || value.includes('st augustine') || value.includes('st_augustine')) return 'st_augustine';
+  return null;
+}
+
+function lawnAreaForProtocol(service) {
+  const candidates = [
+    service.lawnSqft,
+    service.lawn_sqft,
+  ];
+  for (const value of candidates) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
 function createCompletionIdempotencyKey(serviceId) {
   const randomPart = window.crypto?.randomUUID?.()
     || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -865,30 +902,76 @@ export function ProtocolPanel({ service, onClose }) {
   const [seasonal, setSeasonal] = useState([]);
   const [scripts, setScripts] = useState([]);
   const [equipment, setEquipment] = useState([]);
+  const [lawnProtocol, setLawnProtocol] = useState(null);
+  const [lawnMix, setLawnMix] = useState(null);
+  const [lawnContext, setLawnContext] = useState({ trackKey: null, lawnSqft: null });
   const [productLabels, setProductLabels] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [activeSection, setActiveSection] = useState('overview');
+  const isLawn = detectServiceCategory(service.serviceType) === 'lawn';
+  const [activeSection, setActiveSection] = useState(isLawn ? 'lawn_protocol' : 'overview');
 
   useEffect(() => {
+    setActiveSection(isLawn ? 'lawn_protocol' : 'overview');
+  }, [service?.id, isLawn]);
+
+  useEffect(() => {
+    let cancelled = false;
     const svcType = (service.serviceType || '').toLowerCase();
     const line = svcType.includes('lawn') ? 'lawn' : svcType.includes('tree') || svcType.includes('shrub') ? 'tree_shrub' : svcType.includes('mosquito') ? 'mosquito' : 'pest';
     const month = new Date().getMonth() + 1;
 
-    Promise.all([
-      adminFetch(`/admin/protocols/photos/relevant?serviceType=${encodeURIComponent(service.serviceType)}&month=${month}`),
-      adminFetch(`/admin/protocols/seasonal-index?month=${month}&service_line=${line}`),
-      adminFetch(`/admin/protocols/scripts?service_line=${line}`),
-      adminFetch(`/admin/protocols/equipment?service_line=${line}`),
-    ]).then(([p, s, sc, eq]) => {
+    setLoading(true);
+    setLawnProtocol(null);
+    setLawnMix(null);
+    setLawnContext({ trackKey: null, lawnSqft: null });
+
+    (async () => {
+      const profileResponse = isLawn && service.customerId
+        ? await adminFetch(`/admin/customers/${service.customerId}/turf-profile`).catch(() => null)
+        : null;
+      const profile = profileResponse?.profile || null;
+      const trackKey = isLawn
+        ? [
+            profile?.track_key,
+            profile?.grass_type,
+            service.lawnType,
+            service.lawn_type,
+          ].map(protocolTrackForLawnType).find(Boolean) || null
+        : null;
+      const lawnSqft = isLawn
+        ? lawnAreaForProtocol({
+            lawnSqft: profile?.lawn_sqft ?? service.lawnSqft,
+            lawn_sqft: profile?.lawn_sqft ?? service.lawn_sqft,
+          })
+        : null;
+
+      const [p, s, sc, eq, lp, lm] = await Promise.all([
+        adminFetch(`/admin/protocols/photos/relevant?serviceType=${encodeURIComponent(service.serviceType)}&month=${month}`),
+        adminFetch(`/admin/protocols/seasonal-index?month=${month}&service_line=${line}`),
+        adminFetch(`/admin/protocols/scripts?service_line=${line}`),
+        adminFetch(`/admin/protocols/equipment?service_line=${line}`),
+        isLawn && trackKey ? adminFetch(`/admin/protocols/programs?track=${trackKey}`) : Promise.resolve(null),
+        isLawn && trackKey && lawnSqft ? adminFetch(`/admin/protocols/lawn-mix?track=${trackKey}&month=${month}&lawnSqft=${encodeURIComponent(lawnSqft)}`) : Promise.resolve(null),
+      ]);
+
+      if (cancelled) return;
       setPhotos(p.photos || []);
       setSeasonal(s.pests || []);
       setScripts(sc.scripts || []);
       setEquipment(eq.checklists || []);
+      setLawnProtocol(lp?.track || null);
+      setLawnMix(lm || null);
+      setLawnContext({ trackKey, lawnSqft });
       setLoading(false);
-    }).catch(() => setLoading(false));
-  }, [service]);
+    })().catch(() => {
+      if (!cancelled) setLoading(false);
+    });
+
+    return () => { cancelled = true; };
+  }, [service, isLawn]);
 
   const SECTIONS = [
+    ...(isLawn ? [{ id: 'lawn_protocol', label: '🌱 Lawn Protocol', count: lawnProtocol?.visits?.length || null }] : []),
     { id: 'overview', label: '📊 Overview', count: null },
     { id: 'seasonal', label: '🌡️ Pest Pressure', count: seasonal.length },
     { id: 'photos', label: '📸 ID Guide', count: photos.length },
@@ -932,6 +1015,108 @@ export function ProtocolPanel({ service, onClose }) {
           <div style={{ padding: 40, textAlign: 'center', color: D.muted }}>Loading protocol...</div>
         ) : (
           <>
+            {/* LAWN PROTOCOL */}
+            {activeSection === 'lawn_protocol' && isLawn && (
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 4 }}>{lawnProtocol?.name || 'Lawn Protocol'}</div>
+                <div style={{ fontSize: 11, color: D.muted, marginBottom: 12 }}>Current month products, mix math, tank calibration, and full annual calendar</div>
+
+                {!lawnContext.trackKey ? (
+                  <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>
+                    Set the customer turf type to St. Augustine, Bermuda, Zoysia, or Bahia to show the correct protocol.
+                  </div>
+                ) : !lawnProtocol ? (
+                  <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>Lawn protocol unavailable</div>
+                ) : (
+                  <>
+                    <div style={{ background: D.bg, borderRadius: 10, padding: 14, border: `1px solid ${D.border}`, marginBottom: 12 }}>
+                      <div style={{ fontSize: 13, fontWeight: 800, color: D.heading, marginBottom: 6 }}>{lawnProtocol.name}</div>
+                      {(lawnProtocol.notes || []).slice(0, 5).map((note, i) => (
+                        <div key={i} style={{ fontSize: 11, color: note.startsWith('⚠') ? D.red : D.text, lineHeight: 1.45, marginBottom: 4 }}>
+                          {note}
+                        </div>
+                      ))}
+                    </div>
+
+                    {!lawnContext.lawnSqft && (
+                      <div style={{ background: '#FEF3C7', borderRadius: 10, padding: 12, border: '1px solid #F59E0B55', color: D.amber, fontSize: 12, lineHeight: 1.45, marginBottom: 12 }}>
+                        Mix quantities are withheld because this customer does not have measured lawn sqft in the turf profile. Set lawn sqft before using product amounts.
+                      </div>
+                    )}
+
+                    {lawnMix && (
+                      <div style={{ background: D.bg, borderRadius: 10, padding: 14, border: `1px solid ${D.border}`, marginBottom: 12 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'flex-start', marginBottom: 10 }}>
+                          <div>
+                            <div style={{ fontSize: 12, fontWeight: 800, color: D.teal, textTransform: 'uppercase', letterSpacing: 0.6 }}>
+                              Visit {lawnMix.visit?.visit} — {lawnMix.month}
+                            </div>
+                            <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+                              {lawnMix.equipment?.systemName || 'No calibrated rig'} · {fmtProtocolNumber(lawnMix.equipment?.carrierGalPer1000, ' gal/1K')} carrier
+                            </div>
+                          </div>
+                          <div style={{ textAlign: 'right', fontSize: 11, color: D.muted }}>
+                            <div>{fmtProtocolNumber(lawnMix.areaSqft, ' sq ft')}</div>
+                            <div>{fmtProtocolNumber(lawnMix.equipment?.tankCoverageSqft, ' sq ft/tank')}</div>
+                          </div>
+                        </div>
+
+                        {(lawnMix.warnings || []).map((w) => (
+                          <div key={w.code} style={{ fontSize: 11, color: D.red, marginBottom: 6 }}>
+                            <strong>{w.code.replace(/_/g, ' ')}:</strong> {w.message}
+                          </div>
+                        ))}
+
+                        {(lawnMix.items || []).map((item, i) => (
+                          <div key={`${i}-${item.raw}`} style={{ padding: '9px 0', borderTop: i === 0 ? 'none' : `1px solid ${D.border}` }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+                              <div style={{ minWidth: 0 }}>
+                                <div style={{ fontSize: 12, fontWeight: 700, color: D.heading }}>{item.product?.name || item.raw}</div>
+                                <div style={{ fontSize: 10, color: D.muted, lineHeight: 1.4 }}>{item.raw}</div>
+                              </div>
+                              <div style={{ fontSize: 11, color: D.text, textAlign: 'right', flexShrink: 0 }}>
+                                <div>{fmtProtocolNumber(item.jobMix?.amount)} {item.jobMix?.amountUnit || ''}</div>
+                                <div style={{ color: D.muted }}>{fmtProtocolNumber(item.fullTankMix?.amount)} {item.fullTankMix?.amountUnit || ''}/tank</div>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+
+                        {lawnMix.mixingOrder?.length > 0 && (
+                          <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${D.border}` }}>
+                            <div style={{ fontSize: 11, fontWeight: 800, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 6 }}>Mixing Order</div>
+                            {lawnMix.mixingOrder.map((step) => (
+                              <div key={`${step.step}-${step.productId}`} style={{ fontSize: 11, color: D.text, marginBottom: 3 }}>
+                                <strong>{step.step}. {step.productName}</strong>
+                                {step.instruction && <div style={{ color: D.muted, marginLeft: 14 }}>{step.instruction}</div>}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    <div style={{ fontSize: 12, fontWeight: 800, color: D.heading, marginBottom: 8 }}>Annual Protocol Calendar</div>
+                    {(lawnProtocol.visits || []).map((v) => (
+                      <div key={v.visit} style={{ background: D.bg, borderRadius: 10, padding: 12, border: `1px solid ${D.border}`, marginBottom: 8 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, marginBottom: 6 }}>
+                          <div style={{ fontSize: 12, fontWeight: 800, color: D.heading }}>Visit {v.visit} · {v.month}</div>
+                          <div style={{ fontSize: 11, color: D.muted }}>${v.material_cost || '—'} mat</div>
+                        </div>
+                        <div style={{ fontSize: 11, color: D.text, whiteSpace: 'pre-wrap', lineHeight: 1.45 }}>{v.primary}</div>
+                        {v.secondary && <div style={{ fontSize: 11, color: D.muted, whiteSpace: 'pre-wrap', lineHeight: 1.45, marginTop: 6 }}>{v.secondary}</div>}
+                        {stripLegacyBoilerplate(v.notes) && (
+                          <div style={{ fontSize: 10, color: D.muted, lineHeight: 1.4, marginTop: 6, paddingTop: 6, borderTop: `1px solid ${D.border}` }}>
+                            {stripLegacyBoilerplate(v.notes)}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </>
+                )}
+              </div>
+            )}
+
             {/* OVERVIEW */}
             {activeSection === 'overview' && (
               <div>

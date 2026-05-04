@@ -15,7 +15,7 @@ import {
   useDroppable,
   pointerWithin,
 } from '@dnd-kit/core';
-import { Leaf, ShieldCheck } from 'lucide-react';
+import { BookOpen, Leaf, ShieldCheck } from 'lucide-react';
 import { Badge, cn } from '../ui';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
 
@@ -274,7 +274,7 @@ function NowLine() {
   );
 }
 
-function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit, onResize, onTreatmentPlan, onViewAudit, onViewCustomer, isSelected, onToggleSelect, routeOrder, accent }) {
+function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit, onResize, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, isSelected, onToggleSelect, routeOrder, accent }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -283,7 +283,9 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
   const [resizeHeight, setResizeHeight] = useState(null);
   const effectiveHeight = resizeHeight != null ? resizeHeight : Math.max(height, SLOT_HEIGHT - 2);
   const hasAuditAction = service.status === 'completed' && onViewAudit && (service.customerId || service.customer_id);
+  const hasProtocolAction = !!onProtocol;
   const hasPlanAction = isLawnService(service) && onTreatmentPlan;
+  const actionCount = (hasAuditAction ? 1 : 0) + (hasProtocolAction ? 1 : 0) + (hasPlanAction ? 1 : 0);
 
   const dragStyle = transform
     ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` }
@@ -352,7 +354,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
         <div
           className={cn(
             'absolute top-0.5 u-nums text-10 font-medium bg-white/85 text-zinc-700 px-1 rounded-xs',
-            hasAuditAction && hasPlanAction ? 'right-11' : hasAuditAction || hasPlanAction ? 'right-6' : 'right-0.5'
+            actionCount >= 3 ? 'right-16' : actionCount === 2 ? 'right-11' : actionCount === 1 ? 'right-6' : 'right-0.5'
           )}
           style={{ minWidth: 14, textAlign: 'center', lineHeight: '14px' }}
         >
@@ -374,6 +376,24 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
           <ShieldCheck size={12} strokeWidth={1.75} />
         </button>
       )}
+      {hasProtocolAction && (
+        <button
+          type="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onProtocol(service);
+          }}
+          className={cn(
+            'absolute top-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring',
+            hasAuditAction ? 'right-6' : 'right-0.5'
+          )}
+          title="Protocol"
+          aria-label="Open protocol"
+        >
+          <BookOpen size={12} strokeWidth={1.75} />
+        </button>
+      )}
       {hasPlanAction && (
         <button
           type="button"
@@ -384,7 +404,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
           }}
           className={cn(
             'absolute top-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring',
-            hasAuditAction ? 'right-6' : 'right-0.5'
+            hasAuditAction && hasProtocolAction ? 'right-11' : hasAuditAction || hasProtocolAction ? 'right-6' : 'right-0.5'
           )}
           title="Treatment plan"
           aria-label="Open treatment plan"
@@ -449,7 +469,7 @@ function SlotDroppable({ techId, slotIdx, onCreateStart }) {
   );
 }
 
-function TechColumn({ tech, services, onEdit, onTreatmentPlan, onViewAudit, onViewCustomer, onCreateSlot, onResize, selection, onToggleSelect, accent, showNowLine }) {
+function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, onCreateSlot, onResize, selection, onToggleSelect, accent, showNowLine }) {
   const gridRef = useRef(null);
   const [sel, setSel] = useState(null); // { startIdx, endIdx }
   const selRef = useRef(sel);
@@ -548,6 +568,7 @@ function TechColumn({ tech, services, onEdit, onTreatmentPlan, onViewAudit, onVi
                 laneIdx={lane.laneIdx}
                 laneCount={lane.laneCount}
                 onEdit={onEdit}
+                onProtocol={onProtocol}
                 onTreatmentPlan={onTreatmentPlan}
                 onViewAudit={onViewAudit}
                 onViewCustomer={onViewCustomer}
@@ -597,7 +618,7 @@ function TimeAxis() {
   );
 }
 
-function AllDayStrip({ services, onEdit, onTreatmentPlan, onViewAudit, onViewCustomer }) {
+function AllDayStrip({ services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer }) {
   if (services.length === 0) return null;
   return (
     <div
@@ -634,6 +655,18 @@ function AllDayStrip({ services, onEdit, onTreatmentPlan, onViewAudit, onViewCus
               <Leaf size={13} strokeWidth={1.75} />
             </button>
           )}
+          {onProtocol && (
+            <button
+              type="button"
+              onClick={() => onProtocol(svc)}
+              className="h-6 w-6 inline-flex items-center justify-center rounded-sm bg-white text-zinc-800 u-focus-ring"
+              style={{ border: '1px solid #D4D4D8' }}
+              title="Protocol"
+              aria-label="Open protocol"
+            >
+              <BookOpen size={13} strokeWidth={1.75} />
+            </button>
+          )}
           {svc.status === 'completed' && onViewAudit && (svc.customerId || svc.customer_id) && (
             <button
               type="button"
@@ -652,7 +685,7 @@ function AllDayStrip({ services, onEdit, onTreatmentPlan, onViewAudit, onViewCus
   );
 }
 
-function RailItem({ service, onEdit, onTreatmentPlan, onViewAudit, onViewCustomer, isSelected, onToggleSelect }) {
+function RailItem({ service, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, isSelected, onToggleSelect }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -719,6 +752,20 @@ function RailItem({ service, onEdit, onTreatmentPlan, onViewAudit, onViewCustome
           Plan
         </button>
       )}
+      {onProtocol && (
+        <button
+          type="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onProtocol(service);
+          }}
+          className="mt-1 h-7 w-full inline-flex items-center justify-center gap-1 rounded-xs bg-white border-hairline border-zinc-300 text-zinc-900 text-10 uppercase tracking-label u-focus-ring"
+        >
+          <BookOpen size={12} strokeWidth={1.75} />
+          Protocol
+        </button>
+      )}
       {service.status === 'completed' && onViewAudit && (service.customerId || service.customer_id) && (
         <button
           type="button"
@@ -737,7 +784,7 @@ function RailItem({ service, onEdit, onTreatmentPlan, onViewAudit, onViewCustome
   );
 }
 
-function UnassignedRail({ services, onEdit, onTreatmentPlan, onViewAudit, onViewCustomer, selection, onToggleSelect }) {
+function UnassignedRail({ services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, selection, onToggleSelect }) {
   const [open, setOpen] = useState(true);
   const { setNodeRef, isOver } = useDroppable({
     id: 'rail-unassigned',
@@ -794,6 +841,7 @@ function UnassignedRail({ services, onEdit, onTreatmentPlan, onViewAudit, onView
                 key={svc.id}
                 service={svc}
                 onEdit={onEdit}
+                onProtocol={onProtocol}
                 onTreatmentPlan={onTreatmentPlan}
                 onViewAudit={onViewAudit}
                 onViewCustomer={onViewCustomer}
@@ -865,6 +913,7 @@ export default function TimeGridDay({
   services,
   technicians,
   onEdit,
+  onProtocol,
   onTreatmentPlan,
   onViewAudit,
   onViewCustomer,
@@ -1171,7 +1220,7 @@ export default function TimeGridDay({
       style={{ border: '1px solid #E4E4E7' }}
     >
       {onDateChange && <WeekStrip date={date} onDateChange={onDateChange} />}
-      <AllDayStrip services={allDay} onEdit={onEdit} onTreatmentPlan={onTreatmentPlan} onViewAudit={onViewAudit} onViewCustomer={onViewCustomer} />
+      <AllDayStrip services={allDay} onEdit={onEdit} onProtocol={onProtocol} onTreatmentPlan={onTreatmentPlan} onViewAudit={onViewAudit} onViewCustomer={onViewCustomer} />
       {selection.size > 0 && (
         <BulkActionBar
           count={selection.size}
@@ -1188,6 +1237,7 @@ export default function TimeGridDay({
             <UnassignedRail
               services={unassignedInRail}
               onEdit={onEdit}
+              onProtocol={onProtocol}
               onTreatmentPlan={onTreatmentPlan}
               onViewAudit={onViewAudit}
               onViewCustomer={onViewCustomer}
@@ -1209,6 +1259,7 @@ export default function TimeGridDay({
                     tech={tech}
                     services={byTech[tech.id] || []}
                     onEdit={onEdit}
+                    onProtocol={onProtocol}
                     onTreatmentPlan={onTreatmentPlan}
                     onViewAudit={onViewAudit}
                     onViewCustomer={onViewCustomer}
