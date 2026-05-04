@@ -233,15 +233,21 @@ async function findUniqueCustomerByAddress(address, city, zip) {
   const normalizedZip = normalizeZip(zip);
   const cityValue = String(city || '').trim().toLowerCase();
   if (normalizedZip || cityValue) {
-    const strongMatches = matches.filter(customer => {
+    const zipAndCityMatches = matches.filter(customer => {
       const customerCity = String(customer.city || '').trim().toLowerCase();
       const zipMatches = !normalizedZip || !normalizeZip(customer.zip) || normalizeZip(customer.zip) === normalizedZip;
       const cityMatches = !cityValue || !customerCity || customerCity === cityValue;
-      // Google/user ZIPs drift on a few LWR/Bradenton edges; exact street + exact city is still unique enough.
-      const exactCityMatch = cityValue && customerCity === cityValue;
-      return cityMatches && (zipMatches || exactCityMatch);
+      return zipMatches && cityMatches;
     });
-    return strongMatches.length === 1 ? strongMatches[0] : null;
+    if (zipAndCityMatches.length === 1) return zipAndCityMatches[0];
+
+    const cityOnlyMatches = matches.filter(customer => {
+      const customerCity = String(customer.city || '').trim().toLowerCase();
+      // Google/user ZIPs drift on a few LWR/Bradenton edges; only fall back after ZIP-exact matching fails.
+      const exactCityMatch = cityValue && customerCity === cityValue;
+      return exactCityMatch;
+    });
+    return cityOnlyMatches.length === 1 ? cityOnlyMatches[0] : null;
   }
 
   return matches.length === 1 ? matches[0] : null;
