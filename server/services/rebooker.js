@@ -11,6 +11,8 @@ const MONTH_RECURRENCE_INTERVALS = {
   semiannual: 6, biannual: 6, annual: 12, yearly: 12,
 };
 
+const RESCHEDULABLE_STATUSES = new Set(['pending', 'confirmed', 'rescheduled']);
+
 function recurrenceOrdinalOptions(baseDateStr, opts = {}) {
   const safe = baseDateStr ? String(baseDateStr).split('T')[0] : null;
   if (!safe) return opts;
@@ -142,6 +144,11 @@ class SmartRebooker {
   async reschedule(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
+    if (!RESCHEDULABLE_STATUSES.has(service.status)) {
+      throw Object.assign(new Error(`Cannot reschedule a ${service.status} job`), {
+        statusCode: 409,
+      });
+    }
 
     const originalDate = service.scheduled_date;
     const win = parseWindow(newWindow);
@@ -155,26 +162,36 @@ class SmartRebooker {
       updates.technician_id = options.technicianId;
     }
 
-    let updateQuery = db('scheduled_services').where({ id: serviceId });
-    if (Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
-      updateQuery = updateQuery.whereNotIn('status', ['completed', 'cancelled', 'skipped']);
-    }
-    const updated = await updateQuery.update(updates);
-    if (updated === 0) {
-      throw Object.assign(new Error('Cannot reassign — job transitioned to a terminal state concurrently'), {
-        statusCode: 409,
-      });
-    }
+    await db.transaction(async (trx) => {
+      const updated = await trx('scheduled_services')
+        .where({ id: serviceId, status: service.status })
+        .whereIn('status', Array.from(RESCHEDULABLE_STATUSES))
+        .update(updates);
+      if (updated === 0) {
+        throw Object.assign(new Error('Cannot reschedule — job transitioned to a non-reschedulable state concurrently'), {
+          statusCode: 409,
+        });
+      }
 
-    await db('reschedule_log').insert({
-      scheduled_service_id: serviceId,
-      customer_id: service.customer_id,
-      original_date: originalDate,
-      new_date: newDate,
-      reason_code: reason,
-      initiated_by: initiatedBy,
-      original_window: service.window_start ? `${service.window_start}-${service.window_end}` : null,
-      new_window: win.start ? `${win.start}-${win.end}` : null,
+      if (service.status !== 'confirmed') {
+        await trx('job_status_history').insert({
+          job_id: serviceId,
+          from_status: service.status,
+          to_status: 'confirmed',
+          transitioned_by: null,
+        });
+      }
+
+      await trx('reschedule_log').insert({
+        scheduled_service_id: serviceId,
+        customer_id: service.customer_id,
+        original_date: originalDate,
+        new_date: newDate,
+        reason_code: reason,
+        initiated_by: initiatedBy,
+        original_window: service.window_start ? `${service.window_start}-${service.window_end}` : null,
+        new_window: win.start ? `${win.start}-${win.end}` : null,
+      });
     });
 
     // Check escalation
@@ -197,7 +214,7 @@ class SmartRebooker {
   // later occurrence is recomputed from it via nextRecurringDate(),
   // so a quarterly series anchored on May 1 dragged to Apr 29 will
   // re-anchor at Apr 29 and shift the next occurrences accordingly.
-  // Past + completed/cancelled/rescheduled rows are left untouched.
+  // Past + completed/cancelled rows are left untouched.
   //
   // All sibling updates + per-row job_status_history inserts + the
   // reschedule_log row run inside a single trx — either every row
@@ -211,6 +228,11 @@ class SmartRebooker {
   async rescheduleSeries(serviceId, newDate, newWindow, reason, initiatedBy) {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
+    if (!RESCHEDULABLE_STATUSES.has(service.status)) {
+      throw Object.assign(new Error(`Cannot reschedule a ${service.status} job`), {
+        statusCode: 409,
+      });
+    }
 
     const parentId = service.recurring_parent_id || service.id;
     const parent = await db('scheduled_services').where({ id: parentId }).first();
@@ -219,11 +241,15 @@ class SmartRebooker {
     }
 
     const win = parseWindow(newWindow);
+    const pattern = parent.recurring_pattern;
+    const isMonthBasedPattern = pattern === 'monthly_nth_weekday' || !!MONTH_RECURRENCE_INTERVALS[pattern];
     const opts = {
-      ...recurrenceOrdinalOptions(parent.scheduled_date, {
-        nth: parent.recurring_nth,
-        weekday: parent.recurring_weekday,
-      }),
+      ...(isMonthBasedPattern
+        ? recurrenceOrdinalOptions(newDate)
+        : {
+            nth: parent.recurring_nth,
+            weekday: parent.recurring_weekday,
+          }),
       intervalDays: parent.recurring_interval_days,
     };
 
@@ -236,10 +262,18 @@ class SmartRebooker {
     // recomputed date collides with the skipped one. So we fetch ALL
     // non-terminal siblings, index by their position in the ordered
     // list, and only UPDATE/audit the reschedulable ones.
-    const TERMINAL = ['completed', 'cancelled', 'rescheduled'];
-    const RESCHEDULABLE = new Set(['pending', 'confirmed']);
+    const TERMINAL = ['completed', 'cancelled'];
+    const RESCHEDULABLE = RESCHEDULABLE_STATUSES;
 
     const occurrencesRescheduled = await db.transaction(async (trx) => {
+      if (isMonthBasedPattern) {
+        await trx('scheduled_services').where({ id: parentId }).update({
+          recurring_nth: opts.nth,
+          recurring_weekday: opts.weekday,
+          updated_at: trx.fn.now(),
+        });
+      }
+
       const siblings = await trx('scheduled_services')
         .where(function () {
           this.where('id', parentId).orWhere('recurring_parent_id', parentId);
@@ -254,7 +288,7 @@ class SmartRebooker {
       const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
       const startIdx = droppedIdx === -1 ? 0 : droppedIdx;
 
-      let touched = 0;
+      const touched = [];
       for (let i = startIdx; i < siblings.length; i++) {
         const sib = siblings[i];
         if (!RESCHEDULABLE.has(sib.status)) continue; // skip live + skipped rows
@@ -264,13 +298,19 @@ class SmartRebooker {
           ? newDate
           : nextRecurringDate(newDate, parent.recurring_pattern, occurrenceIndex, opts);
 
-        await trx('scheduled_services').where({ id: sib.id }).update({
+        const updateData = {
           scheduled_date: date,
           window_start: win.start || sib.window_start,
           window_end: win.end || sib.window_end,
           status: 'confirmed',
           updated_at: trx.fn.now(),
-        });
+        };
+        if (isMonthBasedPattern) {
+          updateData.recurring_nth = opts.nth;
+          updateData.recurring_weekday = opts.weekday;
+        }
+
+        await trx('scheduled_services').where({ id: sib.id }).update(updateData);
 
         if (sib.status !== 'confirmed') {
           // transitioned_by is a UUID FK to technicians; the route
@@ -286,7 +326,12 @@ class SmartRebooker {
             transitioned_by: null,
           });
         }
-        touched++;
+        touched.push({
+          id: sib.id,
+          date,
+          windowStart: win.start || sib.window_start,
+          windowEnd: win.end || sib.window_end,
+        });
       }
 
       await trx('reschedule_log').insert({
@@ -307,7 +352,8 @@ class SmartRebooker {
       success: true,
       originalDate: service.scheduled_date,
       newDate,
-      occurrencesRescheduled,
+      occurrencesRescheduled: occurrencesRescheduled.length,
+      rescheduledOccurrences: occurrencesRescheduled,
     };
   }
 }

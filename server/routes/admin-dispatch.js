@@ -6,7 +6,7 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const { resolveLocation } = require('../config/locations');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
-const { etDateString, parseETDateTime } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const CompletionRecap = require('../services/completion-recap');
@@ -109,6 +109,19 @@ function toETNoonServiceDate(value) {
 
 function serviceDateOnly(value) {
   return value ? String(value instanceof Date ? value.toISOString() : value).slice(0, 10) : etDateString();
+}
+
+function formatRescheduleTemplateVars(svc) {
+  const dateOnly = serviceDateOnly(svc?.scheduled_date);
+  const start = svc?.window_start || '08:00';
+  const apptTime = parseETDateTime(`${dateOnly}T${start}`);
+  return {
+    first_name: svc?.first_name || 'there',
+    service_type: svc?.service_type || 'service',
+    day: formatETDay(apptTime),
+    date: formatETDate(apptTime),
+    time: formatETTime(apptTime),
+  };
 }
 
 async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
@@ -547,6 +560,7 @@ router.get('/:date?', async (req, res, next) => {
         estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
         createInvoiceOnComplete: !!s.create_invoice_on_complete,
+        isRecurring: !!s.is_recurring,
         lawnType: s.lawn_type,
         propertyAlerts: alerts,
         lastServiceDate: lastService?.service_date || null,
@@ -641,12 +655,18 @@ router.put('/:serviceId/status', async (req, res, next) => {
         return res.status(400).json({ error: 'Service is not part of a recurring series' });
       }
 
-      const cancellableStatuses = ['pending', 'confirmed'];
+      const cancellableStatuses = ['pending', 'confirmed', 'rescheduled'];
+      const terminalStatuses = ['completed', 'skipped', 'cancelled'];
       const baseQuery = db('scheduled_services')
         .where(function () {
           this.where('id', parentId).orWhere('recurring_parent_id', parentId);
         })
-        .whereIn('status', cancellableStatuses);
+        .where(function () {
+          this.whereIn('status', cancellableStatuses)
+            .orWhere(function () {
+              this.where('id', svc.id).whereNotIn('status', terminalStatuses);
+            });
+        });
       if (scope === 'following') {
         baseQuery.where('scheduled_date', '>=', svc.scheduled_date);
       }
@@ -681,13 +701,11 @@ router.put('/:serviceId/status', async (req, res, next) => {
 
       try {
         const AppointmentReminders = require('../services/appointment-reminders');
-        const targetIds = targets.map((target) => target.id);
-        await db('appointment_reminders')
-          .whereIn('scheduled_service_id', targetIds)
-          .update({ cancelled: true, updated_at: new Date() });
-        await AppointmentReminders.handleCancellation(svc.id, {
-          sendNotification: notifyCustomer !== false,
-        });
+        for (const target of targets) {
+          await AppointmentReminders.handleCancellation(target.id, {
+            sendNotification: notifyCustomer !== false && String(target.id) === String(svc.id),
+          });
+        }
       } catch (e) { logger.error(`[admin-dispatch] series cancellation reminder handling failed: ${e.message}`); }
 
       for (const target of targets) {
@@ -1731,6 +1749,38 @@ router.get('/products/catalog', async (req, res, next) => {
 const SmartRebooker = require('../services/rebooker');
 const ForecastAnalyzer = require('../services/forecast-analyzer');
 
+function parseRescheduleWindow(w) {
+  if (!w) return { start: null, end: null };
+  if (typeof w === 'object') return { start: w.start || null, end: w.end || null };
+  const m = String(w).match(/^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/);
+  if (!m) return { start: null, end: null };
+  return { start: m[1], end: m[2] };
+}
+
+function normalizeHHMM(value) {
+  const m = String(value || '').match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  return `${String(parseInt(m[1], 10)).padStart(2, '0')}:${m[2]}`;
+}
+
+function rescheduleReminderTime(date, window) {
+  const win = parseRescheduleWindow(window);
+  return `${String(date).split('T')[0]}T${normalizeHHMM(win.start) || '08:00'}`;
+}
+
+async function syncRescheduleReminder(serviceId, date, window) {
+  try {
+    const AppointmentReminders = require('../services/appointment-reminders');
+    await AppointmentReminders.handleReschedule(
+      serviceId,
+      rescheduleReminderTime(date, window),
+      { sendNotification: false },
+    );
+  } catch (err) {
+    logger.warn(`[dispatch] Reschedule committed for ${serviceId}, but reminder sync failed: ${err.message}`);
+  }
+}
+
 // GET /api/admin/dispatch/:serviceId/reschedule-options
 router.get('/:serviceId/reschedule-options', async (req, res, next) => {
   try {
@@ -1748,7 +1798,52 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // SMS path (which only handles a single appt) and commit directly.
     if (scope === 'series') {
       const result = await SmartRebooker.rescheduleSeries(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin');
-      return res.json(result);
+      const occurrences = Array.isArray(result.rescheduledOccurrences) ? result.rescheduledOccurrences : [];
+      for (const occurrence of occurrences) {
+        await syncRescheduleReminder(
+          occurrence.id,
+          occurrence.date,
+          { start: occurrence.windowStart, end: occurrence.windowEnd },
+        );
+      }
+
+      let notificationSent = false;
+      let notificationError = null;
+      if (notifyCustomer !== false) {
+        const svc = await db('scheduled_services')
+          .where('scheduled_services.id', req.params.serviceId)
+          .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+          .select('scheduled_services.*', 'customers.first_name', 'customers.phone', 'customers.id as customer_id')
+          .first();
+        if (!svc?.phone) {
+          notificationError = 'Customer phone unavailable';
+        } else {
+          const displayDate = new Date(String(newDate).split('T')[0] + 'T12:00:00')
+            .toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
+          const win = parseRescheduleWindow(newWindow);
+          const windowText = win.start && win.end ? `, ${win.start}-${win.end}` : '';
+          try {
+            const msg = await sendCustomerMessage({
+              to: svc.phone,
+              body: `Hi ${svc.first_name || 'there'}, your recurring Waves appointments have been rescheduled starting ${displayDate}${windowText}. We'll remind you before each visit. - Waves`,
+              channel: 'sms',
+              audience: 'customer',
+              purpose: 'appointment',
+              customerId: svc.customer_id,
+              identityTrustLevel: 'phone_matches_customer',
+              metadata: { original_message_type: 'reschedule_series_confirmation', reasonText },
+            });
+            notificationSent = !(msg?.blocked || msg?.sent === false);
+            if (!notificationSent) notificationError = msg?.code || msg?.reason || 'blocked';
+          } catch (err) {
+            notificationError = err.message;
+            logger.warn(`[dispatch] Series reschedule committed for ${req.params.serviceId}, but SMS notification failed: ${err.message}`);
+          }
+        }
+      }
+
+      const { rescheduledOccurrences, ...response } = result;
+      return res.json({ ...response, notificationSent, notificationError });
     }
 
     const rescheduleOptions = {};
@@ -1773,6 +1868,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       rescheduleOptions.technicianId = newTechId;
     }
     const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', rescheduleOptions);
+    await syncRescheduleReminder(req.params.serviceId, newDate, newWindow);
     if (notifyCustomer !== false) {
       const svc = await db('scheduled_services')
         .where('scheduled_services.id', req.params.serviceId)
@@ -1784,13 +1880,18 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       if (!svc?.phone) {
         notificationError = 'Customer phone unavailable';
       } else {
-        const displayDate = new Date(String(svc.scheduled_date).split('T')[0] + 'T12:00:00')
-          .toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
-        const windowText = svc.window_start && svc.window_end ? `, ${svc.window_start}-${svc.window_end}` : '';
         try {
+          const vars = formatRescheduleTemplateVars(svc);
+          const body = await renderTemplate(
+            'appointment_rescheduled',
+            vars,
+            `Hello ${vars.first_name}! Your ${vars.service_type} with Waves has been rescheduled to ${vars.day}, ${vars.date} at ${vars.time}.\n\n` +
+              'Need to change it again? Log into your Waves Customer Portal at portal.wavespestcontrol.com.\n\n' +
+              'Questions or requests? Reply to this message.',
+          );
           const msg = await sendCustomerMessage({
             to: svc.phone,
-            body: `Hi ${svc.first_name || 'there'}, your Waves appointment has been rescheduled for ${displayDate}${windowText}. We'll remind you the day before. - Waves`,
+            body,
             channel: 'sms',
             audience: 'customer',
             purpose: 'appointment',
