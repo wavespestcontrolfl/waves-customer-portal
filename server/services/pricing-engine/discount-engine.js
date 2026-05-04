@@ -129,7 +129,9 @@ function validateEstimateDiscounts(lineItems, waveGuardTier) {
   const warnings = [];
   for (const item of lineItems) {
     if (item.discount && item.discount.effectiveDiscount > 0 && item.costs && item.costs.total) {
-      const discountedPrice = item.price * (1 - item.discount.effectiveDiscount);
+      const basePrice = item.price ?? item.annual;
+      if (!Number.isFinite(basePrice) || basePrice <= 0) continue;
+      const discountedPrice = basePrice * (1 - item.discount.effectiveDiscount);
       const margin = (discountedPrice - item.costs.total) / discountedPrice;
       if (margin < GLOBAL.MARGIN_FLOOR) {
         warnings.push({

@@ -1181,6 +1181,23 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   const p = profile || {};
   const o = options || {};
   const sel = new Set(selectedServices || []);
+  const homeSqFt = Number(p.homeSqFt || p.squareFootage) || 0;
+  const lotSqFt = Number(p.lotSqFt) || 0;
+  const stories = Number(p.stories) || 1;
+  const normalizePropertyType = (value) => {
+    const raw = String(value || '').toLowerCase();
+    if (raw.includes('commercial')) return 'commercial';
+    if (raw.includes('duplex')) return 'duplex';
+    if (raw.includes('town')) {
+      return raw.includes('interior') || raw.includes('inner') ? 'townhome_interior' : 'townhome_end';
+    }
+    if (raw.includes('condo')) {
+      return raw.includes('upper') || raw.includes('2nd') || raw.includes('3rd')
+        ? 'condo_upper'
+        : 'condo_ground';
+    }
+    return 'single_family';
+  };
 
   // Grass track — v2 accepts old A/B/C1/C2/D letters AND new keys.
   const TRACK_MAP = { A: 'st_augustine', B: 'st_augustine', C1: 'bermuda', C2: 'zoysia', D: 'bahia' };
@@ -1215,6 +1232,16 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   if (sel.has('PEST')) services.pest = { frequency: pestFreq, roachType };
   if (sel.has('LAWN')) services.lawn = { track, tier: lawnTier };
   if (sel.has('TREE_SHRUB')) services.treeShrub = { tier: 'standard' };
+  if (sel.has('PALM_INJECTION')) {
+    const totalPalmCount = Math.max(1, Number(p.estimatedPalmCount || p.palmCount) || 3);
+    const injectablePalmCount = Number(p.injectablePalms) > 0
+      ? Number(p.injectablePalms)
+      : Math.max(1, Math.round(totalPalmCount * 0.30));
+    services.palm = {
+      palmCount: injectablePalmCount,
+      treatmentType: 'combo',
+    };
+  }
   if (sel.has('MOSQUITO')) services.mosquito = { tier: 'silver' };
   if (sel.has('TERMITE_BAIT')) services.termite = { system: 'advance', monitoringTier: 'basic' };
   if (sel.has('RODENT_BAIT')) services.rodentBait = {};
@@ -1223,8 +1250,15 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   // applied inside priceOneTimePest/priceOneTimeLawn via top-level override.
   if (sel.has('OT_PEST')) services.oneTimePest = { urgency, afterHours };
   if (sel.has('OT_LAWN')) {
+    const LAWN_TREATMENT_MAP = {
+      FERT: 'fertilization',
+      WEED: 'weed',
+      PEST: 'pest',
+      FUNGICIDE: 'fungicide',
+    };
+    const treatmentType = LAWN_TREATMENT_MAP[String(o.onetimeLawnType || 'FERT').toUpperCase()] || 'fertilization';
     services.oneTimeLawn = {
-      treatmentType: o.onetimeLawnType === 'FERT' ? 'fert' : 'weed',
+      treatmentType,
       urgency, afterHours,
     };
   }
@@ -1310,17 +1344,17 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     nearWater: p.nearWater === 'YES',
     irrigation: !!p.irrigation,
     largeDriveway: !!p.hasLargeDriveway,
-    treeCount: p.treeCount || 0,
+    treeCount: Number(p.treeCount || p.estimatedTreeCount) || 0,
   };
 
   return {
-    homeSqFt: p.homeSqFt,
-    stories: p.stories || 1,
-    lotSqFt: p.lotSqFt,
-    propertyType: p.propertyType || 'Single Family',
+    homeSqFt,
+    stories,
+    lotSqFt,
+    propertyType: normalizePropertyType(p.propertyType),
     serviceZone: p.serviceZone,
-    lawnSqFt: p.estimatedTurfSf,
-    bedArea: p.estimatedBedAreaSf,
+    lawnSqFt: Number(p.estimatedTurfSf) || 0,
+    bedArea: Number(p.estimatedBedAreaSf) || 0,
     features,
     yearBuilt: p.yearBuilt,
     constructionMaterial: p.constructionMaterial,
@@ -1348,10 +1382,13 @@ router.post('/calculate-estimate', async (req, res) => {
     const { profile, selectedServices, options } = req.body;
     if (!profile) return res.status(400).json({ error: 'Profile required' });
 
-    const { generateEstimate } = require('../services/pricing-engine');
+    const pricingEngine = require('../services/pricing-engine');
     const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+    if (pricingEngine.needsSync && pricingEngine.needsSync()) {
+      await pricingEngine.syncConstantsFromDB();
+    }
     const v1Input = translateV2CallToV1Input(profile, selectedServices || [], options || {});
-    const v1 = generateEstimate(v1Input);
+    const v1 = pricingEngine.generateEstimate(v1Input);
     const mapped = mapV1ToLegacyShape(v1);
     res.json(mapped);
   } catch (err) {

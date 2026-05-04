@@ -942,7 +942,7 @@ export function calculateEstimate(inputs) {
       total: totalOT,
       otSubtotal: ot,
     },
-    totals: { year1: y1, year2: y2, year2mo },
+    totals: { year1: y1, year2: y2, year2mo: y2mo },
     results: R,
     specItems, // full array including onProg items for display
     fieldVerify,
