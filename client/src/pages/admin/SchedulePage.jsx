@@ -320,6 +320,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
   const [discountPresets, setDiscountPresets] = useState([]);
   const [discountPresetId, setDiscountPresetId] = useState('');
   const [createInvoice, setCreateInvoice] = useState(!!(service.createInvoiceOnComplete ?? service.create_invoice_on_complete));
+  const [customerData, setCustomerData] = useState(null);
+  const [customerLoading, setCustomerLoading] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -338,6 +340,18 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
       } catch { /* discounts optional */ }
     })();
   }, []);
+
+  useEffect(() => {
+    const customerId = service.customerId || service.customer_id;
+    if (!customerId) return;
+    let cancelled = false;
+    setCustomerLoading(true);
+    adminFetch(`/admin/customers/${customerId}`)
+      .then((json) => { if (!cancelled) setCustomerData(json); })
+      .catch(() => { if (!cancelled) setCustomerData(null); })
+      .finally(() => { if (!cancelled) setCustomerLoading(false); });
+    return () => { cancelled = true; };
+  }, [service.customerId, service.customer_id]);
 
   const applyDiscountPreset = (id) => {
     setDiscountPresetId(id);
@@ -363,7 +377,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
     return dates;
   };
 
-  const handleSave = async () => {
+  const handleSave = async ({ takePayment = false } = {}) => {
     setSaving(true);
     try {
       await adminFetch(`/admin/schedule/${service.id}/update-details`, {
@@ -380,7 +394,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
           discountType: discountType || undefined,
           discountAmount: discountType && discountAmount !== '' ? Number(discountAmount) : undefined,
           estimatedPrice: form.price !== '' && !isNaN(parseFloat(form.price)) ? parseFloat(form.price) : undefined,
-          createInvoice,
+          createInvoice: takePayment || createInvoice,
         }),
       });
       onSaved?.();
@@ -390,258 +404,424 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
     setSaving(false);
   };
 
-  const labelStyle = { fontSize: 12, color: '#000', marginBottom: 4, display: 'block' };
+  const customer = customerData?.customer || {};
+  const customerName = service.customerName
+    || `${customer.firstName || ''} ${customer.lastName || ''}`.trim()
+    || 'Customer';
+  const customerPhone = service.customerPhone || customer.phone || '';
+  const customerEmail = customer.email || '';
+  const servicePrice = form.price !== '' && !isNaN(parseFloat(form.price)) ? parseFloat(form.price) : 0;
+  const manualDiscount = discountType && discountAmount !== ''
+    ? (discountType === 'percentage' ? servicePrice * (Number(discountAmount) / 100) : Number(discountAmount))
+    : 0;
+  const appointmentTotal = Math.max(0, servicePrice - manualDiscount);
+  const appointmentHistory = Array.isArray(customerData?.scheduled)
+    ? [...customerData.scheduled]
+      .sort((a, b) => String(b.scheduled_date).localeCompare(String(a.scheduled_date)))
+      .slice(0, 6)
+    : [];
+  const cards = Array.isArray(customerData?.cards) ? customerData.cards : [];
+
+  const formatHistoryDate = (value, time) => {
+    if (!value) return '';
+    const d = new Date(`${String(value).split('T')[0]}T12:00:00`);
+    const dateText = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+    const timeMatch = String(time || '').match(/^(\d{1,2}):(\d{2})/);
+    const timeText = timeMatch
+      ? `${parseInt(timeMatch[1], 10) % 12 || 12}:${timeMatch[2]} ${parseInt(timeMatch[1], 10) >= 12 ? 'PM' : 'AM'}`
+      : '';
+    return [dateText, timeText].filter(Boolean).join(', ');
+  };
+
+  const labelStyle = {
+    fontSize: 12,
+    color: '#374151',
+    marginBottom: 6,
+    display: 'block',
+    fontWeight: 700,
+  };
   const inputStyle = {
-    width: '100%', padding: '10px 12px', borderRadius: 8, background: D.input,
-    color: '#000', border: `1px solid ${D.inputBorder}`, fontSize: 14, outline: 'none', boxSizing: 'border-box',
+    width: '100%',
+    padding: '11px 12px',
+    borderRadius: 4,
+    background: D.input,
+    color: '#111827',
+    border: `1px solid ${D.inputBorder}`,
+    fontSize: 14,
+    outline: 'none',
+    boxSizing: 'border-box',
+  };
+  const sectionStyle = {
+    background: '#fff',
+    border: `1px solid ${D.border}`,
+    borderRadius: 6,
+    padding: 18,
+    marginBottom: 16,
+  };
+  const sectionTitleStyle = {
+    fontSize: 18,
+    fontWeight: 700,
+    color: '#111827',
+    margin: '0 0 14px',
   };
 
   return (
-    <div onClick={onClose} style={{
-      position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.55)', zIndex: 1000,
-      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
+    <div style={{
+      position: 'fixed', inset: 0, background: '#F6F7F8', zIndex: 1000,
+      display: 'flex', flexDirection: 'column', color: '#111827',
+      fontFamily: 'Inter, Roboto, system-ui, sans-serif',
     }}>
       <div
         onClick={e => e.stopPropagation()}
         className="font-bold"
         style={{
-          background: D.card, borderRadius: 14, border: `1px solid ${D.border}`,
-          width: '100%', maxWidth: 560, maxHeight: '90vh', overflow: 'auto', padding: 24,
-          color: '#000', fontFamily: 'Roboto, system-ui, sans-serif',
+          height: '100%', overflow: 'auto',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-end', gap: 12, marginBottom: 4 }}>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            style={{
-              flexShrink: 0, width: 32, height: 32, borderRadius: 8,
-              border: `1px solid ${D.border}`, background: D.card, color: D.muted,
-              fontSize: 18, lineHeight: 1, cursor: 'pointer',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-            }}
-          >
-            ×
-          </button>
-        </div>
-        <div style={{ fontSize: 13, color: '#000', marginBottom: 18 }}>
-          {service.customerName} — {service.address || ''}
-        </div>
-
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+        <div style={{
+          position: 'sticky', top: 0, zIndex: 3, background: '#fff',
+          borderBottom: `1px solid ${D.border}`, padding: '14px 24px',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16,
+        }}>
           <div>
-            <label style={labelStyle}>Date</label>
-            <input type="date" value={form.scheduledDate} onChange={e => update('scheduledDate', e.target.value)} className="font-bold" style={inputStyle} />
-          </div>
-          <div>
-            <label style={labelStyle}>Duration (min)</label>
-            <input type="number" value={form.estimatedDuration} onChange={e => update('estimatedDuration', e.target.value)} className="font-bold" style={inputStyle} />
-          </div>
-          <div>
-            <label style={labelStyle}>Window Start</label>
-            <input type="time" value={form.windowStart} onChange={e => update('windowStart', e.target.value)} className="font-bold" style={inputStyle} />
-          </div>
-          <div>
-            <label style={labelStyle}>Window End</label>
-            <input type="time" value={form.windowEnd} onChange={e => update('windowEnd', e.target.value)} className="font-bold" style={inputStyle} />
-          </div>
-        </div>
-
-        <div style={{ marginBottom: 12 }}>
-          <label style={labelStyle}>Service Type</label>
-          {!editingServiceType ? (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, background: '#F8FAFC', borderRadius: 8, padding: '10px 12px', border: `1px solid ${D.inputBorder}` }}>
-              <div style={{ flex: 1, fontSize: 14, color: '#000' }}>
-                {form.serviceType || <span style={{ color: '#000' }}>— Select service —</span>}
-              </div>
-              <button type="button" onClick={() => setEditingServiceType(true)} className="font-bold" style={{
-                padding: '6px 12px', borderRadius: 6, background: `${D.teal}15`, color: '#000',
-                border: `1px solid ${D.teal}55`, fontSize: 12, cursor: 'pointer',
-              }}>Change</button>
+            <div style={{ fontSize: 22, fontWeight: 800, color: '#111827' }}>Edit appointment</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 5 }}>
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', height: 22, padding: '0 8px',
+                borderRadius: 999, background: '#ECFDF3', color: '#027A48', fontSize: 12, fontWeight: 800,
+              }}>{service.status || 'Accepted'}</span>
+              <span style={{ color: D.muted, fontSize: 13 }}>{customerName}</span>
             </div>
-          ) : (
-            <div style={{ maxHeight: 260, overflowY: 'auto', border: `1px solid ${D.inputBorder}`, borderRadius: 8, padding: 6, background: '#F8FAFC' }}>
-              {serviceGroups.map((group) => {
-                const isOpen = expandedCategory === group.category;
-                return (
-                  <div key={group.category} style={{ marginBottom: 4 }}>
-                    <button type="button" onClick={() => setExpandedCategory(isOpen ? null : group.category)} className="font-bold" style={{
-                      width: '100%', textAlign: 'left', padding: '8px 10px', borderRadius: 6,
-                      background: isOpen ? `${D.teal}15` : D.card, border: `1px solid ${D.border}`,
-                      color: '#000', fontSize: 13, cursor: 'pointer',
-                      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                    }}>
-                      <span>{EDIT_CATEGORY_EMOJI[group.category] || '📦'} {EDIT_CATEGORY_LABELS[group.category] || group.category} <span style={{ color: '#000', marginLeft: 4 }}>({group.items.length})</span></span>
-                      <span style={{ color: D.muted, fontSize: 11 }}>{isOpen ? '▾' : '▸'}</span>
-                    </button>
-                    {isOpen && (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 3, padding: 6 }}>
-                        {group.items.map((svc, si) => (
-                          <button key={si} type="button" onClick={() => {
-                            update('serviceType', svc.name);
-                            if (svc.duration || svc.default_duration_minutes) {
-                              update('estimatedDuration', svc.duration || svc.default_duration_minutes);
-                            }
-                            setEditingServiceType(false);
-                            setExpandedCategory(null);
-                          }} className="font-bold" style={{
-                            padding: '8px 10px', background: D.card, border: `1px solid ${D.border}`,
-                            borderRadius: 6, color: '#000', fontSize: 13, cursor: 'pointer', textAlign: 'left',
-                          }}>{svc.name}</button>
-                        ))}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <button onClick={() => handleSave({ takePayment: true })} disabled={saving} className="font-bold" style={{
+              padding: '11px 16px', borderRadius: 4, background: '#111827', color: '#fff',
+              border: 'none', fontSize: 13, cursor: saving ? 'wait' : 'pointer', opacity: saving ? 0.6 : 1,
+            }}>{saving ? 'Saving...' : 'Save and take payment'}</button>
+            <button onClick={() => handleSave()} disabled={saving} className="font-bold" style={{
+              padding: '11px 16px', borderRadius: 4, background: '#fff', color: '#111827',
+              border: `1px solid ${D.inputBorder}`, fontSize: 13, cursor: saving ? 'wait' : 'pointer', opacity: saving ? 0.6 : 1,
+            }}>{saving ? 'Saving...' : 'Save'}</button>
+            <button onClick={onClose} disabled={saving} className="font-bold" style={{
+              width: 38, height: 38, borderRadius: 4, background: '#fff',
+              color: D.muted, border: `1px solid ${D.inputBorder}`, fontSize: 22,
+              lineHeight: 1, cursor: 'pointer',
+            }} aria-label="Close">×</button>
+          </div>
+        </div>
+
+        <div style={{
+          width: '100%', maxWidth: 1180, margin: '0 auto', padding: '22px 20px 36px',
+          display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 340px), 1fr))', gap: 20,
+        }}>
+          <aside style={{ ...sectionStyle, alignSelf: 'start', position: 'sticky', top: 88 }}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: D.muted, marginBottom: 12 }}>Customer</div>
+            <div style={{ fontSize: 22, fontWeight: 800, color: '#111827', marginBottom: 10 }}>{customerName}</div>
+            <div style={{ display: 'grid', gap: 4, marginBottom: 14, fontSize: 14, color: '#374151' }}>
+              {customerPhone && <a href={`tel:${customerPhone}`} style={{ color: '#111827', textDecoration: 'none' }}>{customerPhone}</a>}
+              {customerEmail && <a href={`mailto:${customerEmail}`} style={{ color: '#111827', textDecoration: 'none', wordBreak: 'break-word' }}>{customerEmail}</a>}
+              {!customerPhone && !customerEmail && <span style={{ color: D.muted }}>No contact details</span>}
+            </div>
+            <button type="button" style={{
+              width: '100%', padding: '10px 12px', borderRadius: 4,
+              border: `1px solid ${D.inputBorder}`, background: '#fff',
+              color: '#111827', fontSize: 13, fontWeight: 800, cursor: 'pointer',
+              marginBottom: 18,
+            }}>Customer details</button>
+
+            <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 16, marginBottom: 16 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, marginBottom: 8 }}>
+                <div style={{ fontSize: 15, fontWeight: 800 }}>Customer notes</div>
+                <button type="button" style={{ border: 0, background: 'transparent', color: D.teal, fontSize: 12, fontWeight: 800, cursor: 'pointer' }}>Add note</button>
+              </div>
+              <div style={{ fontSize: 13, color: D.muted }}>
+                {customer.notes || customer.customerNotes || 'No customer notes'}
+              </div>
+            </div>
+
+            <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 16, marginBottom: 16 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, marginBottom: 10 }}>
+                <div style={{ fontSize: 15, fontWeight: 800 }}>Cards on file</div>
+                <button type="button" style={{ border: 0, background: 'transparent', color: D.teal, fontSize: 12, fontWeight: 800, cursor: 'pointer' }}>Add card</button>
+              </div>
+              {cards.length ? cards.slice(0, 2).map((card, i) => (
+                <div key={card.id || i} style={{ fontSize: 13, color: '#374151', marginBottom: 6 }}>
+                  Card ending in {card.last4 || card.card_last4 || '----'}
+                </div>
+              )) : <div style={{ fontSize: 13, color: D.muted }}>No cards on file</div>}
+            </div>
+
+            <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 16 }}>
+              <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 10 }}>Appointment history</div>
+              {customerLoading && <div style={{ fontSize: 13, color: D.muted }}>Loading history...</div>}
+              {!customerLoading && appointmentHistory.length === 0 && (
+                <div style={{ fontSize: 13, color: D.muted }}>No appointment history</div>
+              )}
+              <div style={{ display: 'grid', gap: 12 }}>
+                {appointmentHistory.map((item) => (
+                  <div key={item.id} style={{ borderLeft: `2px solid ${item.id === service.id ? D.teal : D.border}`, paddingLeft: 10 }}>
+                    <div style={{ fontSize: 13, fontWeight: 800, color: '#111827' }}>{item.service_type || item.serviceType || 'Service'}</div>
+                    <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{formatHistoryDate(item.scheduled_date, item.window_start)}</div>
+                    {item.status && <div style={{ fontSize: 12, color: '#027A48', marginTop: 2 }}>{item.status}</div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </aside>
+
+          <main>
+            <section style={sectionStyle}>
+              <h2 style={sectionTitleStyle}>Location</h2>
+              <label style={labelStyle}>Appointment location</label>
+              <div style={{
+                display: 'inline-flex', alignItems: 'center', gap: 8, height: 36,
+                padding: '0 12px', borderRadius: 999, background: '#EEF6FF',
+                color: D.teal, fontSize: 13, fontWeight: 800, marginBottom: 14,
+              }}>Customer location</div>
+              <div style={{ display: 'grid', gap: 12 }}>
+                <div>
+                  <label style={labelStyle}>Street address</label>
+                  <input value={service.address || customer.address?.line1 || ''} readOnly className="font-bold" style={{ ...inputStyle, background: '#F9FAFB' }} />
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+                  <div>
+                    <label style={labelStyle}>City</label>
+                    <input value={service.city || customer.address?.city || ''} readOnly className="font-bold" style={{ ...inputStyle, background: '#F9FAFB' }} />
+                  </div>
+                  <div>
+                    <label style={labelStyle}>State</label>
+                    <input value={customer.address?.state || 'Florida'} readOnly className="font-bold" style={{ ...inputStyle, background: '#F9FAFB' }} />
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section style={sectionStyle}>
+              <h2 style={sectionTitleStyle}>Services and items</h2>
+              <div style={{ border: `1px solid ${D.border}`, borderRadius: 6, overflow: 'hidden', marginBottom: 12 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12, alignItems: 'center', padding: 14, background: '#F9FAFB' }}>
+                  <div>
+                    <label style={labelStyle}>Service</label>
+                    {!editingServiceType ? (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <div style={{ flex: 1, fontSize: 14, color: '#111827' }}>
+                          {form.serviceType || 'Select service'}
+                        </div>
+                        <button type="button" onClick={() => setEditingServiceType(true)} className="font-bold" style={{
+                          padding: '8px 10px', borderRadius: 4, background: '#fff', color: '#111827',
+                          border: `1px solid ${D.inputBorder}`, fontSize: 12, cursor: 'pointer',
+                        }}>Change</button>
+                      </div>
+                    ) : (
+                      <div style={{ maxHeight: 260, overflowY: 'auto', border: `1px solid ${D.inputBorder}`, borderRadius: 4, padding: 6, background: '#fff' }}>
+                        {serviceGroups.map((group) => {
+                          const isOpen = expandedCategory === group.category;
+                          return (
+                            <div key={group.category} style={{ marginBottom: 4 }}>
+                              <button type="button" onClick={() => setExpandedCategory(isOpen ? null : group.category)} className="font-bold" style={{
+                                width: '100%', textAlign: 'left', padding: '8px 10px', borderRadius: 4,
+                                background: isOpen ? '#EEF6FF' : '#fff', border: `1px solid ${D.border}`,
+                                color: '#111827', fontSize: 13, cursor: 'pointer',
+                                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                              }}>
+                                <span>{EDIT_CATEGORY_LABELS[group.category] || group.category} <span style={{ color: D.muted }}>({group.items.length})</span></span>
+                                <span style={{ color: D.muted, fontSize: 11 }}>{isOpen ? 'v' : '>'}</span>
+                              </button>
+                              {isOpen && (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 3, padding: 6 }}>
+                                  {group.items.map((svc, si) => (
+                                    <button key={si} type="button" onClick={() => {
+                                      update('serviceType', svc.name);
+                                      if (svc.duration || svc.default_duration_minutes) {
+                                        update('estimatedDuration', svc.duration || svc.default_duration_minutes);
+                                      }
+                                      setEditingServiceType(false);
+                                      setExpandedCategory(null);
+                                    }} className="font-bold" style={{
+                                      padding: '8px 10px', background: '#fff', border: `1px solid ${D.border}`,
+                                      borderRadius: 4, color: '#111827', fontSize: 13, cursor: 'pointer', textAlign: 'left',
+                                    }}>{svc.name}</button>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        <div style={{ marginBottom: 12 }}>
-          <label style={labelStyle}>Technician</label>
-          <select value={form.technicianId} onChange={e => update('technicianId', e.target.value)} className="font-bold" style={inputStyle}>
-            <option value="">— Unassigned —</option>
-            {(technicians || []).map(t => (
-              <option key={t.id} value={t.id}>{t.name}</option>
-            ))}
-          </select>
-        </div>
-
-        <div style={{ marginBottom: 12 }}>
-          <label style={labelStyle}>Price ($)</label>
-          <input type="number" min={0} step={0.01} value={form.price} onChange={e => update('price', e.target.value)} placeholder="0.00" className="font-bold" style={inputStyle} />
-          {discountType && discountAmount !== '' && form.price !== '' && !isNaN(parseFloat(form.price)) && (
-            <div style={{ fontSize: 11, color: '#000', marginTop: 4 }}>
-              After discount: <span style={{ color: D.green }}>${Math.max(0, discountType === 'percentage' ? parseFloat(form.price) * (1 - Number(discountAmount) / 100) : parseFloat(form.price) - Number(discountAmount)).toFixed(2)}</span>
-            </div>
-          )}
-        </div>
-
-        {/* Recurring toggle (same pattern as New Appointment) */}
-        <div style={{ marginBottom: 12, padding: 12, background: '#F8FAFC', border: `1px solid ${D.border}`, borderRadius: 8 }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: isRecurring ? 10 : 0 }}>
-            <input type="checkbox" checked={isRecurring} onChange={e => setIsRecurring(e.target.checked)} style={{ width: 16, height: 16, accentColor: D.teal }} />
-            <span style={{ fontSize: 13, color: '#000' }}>Make Recurring</span>
-            <span style={{ fontSize: 11, color: '#000' }}>— creates future appointments from this date</span>
-          </label>
-          {isRecurring && (
-            <div>
-              <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
-                <button type="button" onClick={() => setRecurringOngoing(true)} className="font-bold" style={{
-                  flex: 1, padding: '8px 10px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
-                  background: recurringOngoing ? D.teal : 'transparent',
-                  color: recurringOngoing ? '#fff' : '#000',
-                  border: `1px solid ${recurringOngoing ? D.teal : D.border}`,
-                }}>Ongoing (auto-extend)</button>
-                <button type="button" onClick={() => setRecurringOngoing(false)} className="font-bold" style={{
-                  flex: 1, padding: '8px 10px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
-                  background: !recurringOngoing ? D.teal : 'transparent',
-                  color: !recurringOngoing ? '#fff' : '#000',
-                  border: `1px solid ${!recurringOngoing ? D.teal : D.border}`,
-                }}>Fixed count</button>
+                  <div>
+                    <label style={labelStyle}>Staff</label>
+                    <select value={form.technicianId} onChange={e => update('technicianId', e.target.value)} className="font-bold" style={inputStyle}>
+                      <option value="">Unassigned</option>
+                      {(technicians || []).map(t => (
+                        <option key={t.id} value={t.id}>{t.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label style={labelStyle}>Duration</label>
+                    <input type="number" value={form.estimatedDuration} onChange={e => update('estimatedDuration', e.target.value)} className="font-bold" style={inputStyle} />
+                  </div>
+                  <div>
+                    <label style={labelStyle}>Price</label>
+                    <input type="number" min={0} step={0.01} value={form.price} onChange={e => update('price', e.target.value)} placeholder="0.00" className="font-bold" style={inputStyle} />
+                  </div>
+                </div>
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: recurringOngoing ? '1fr' : '2fr 1fr', gap: 8, marginBottom: 8 }}>
+
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+                <button type="button" style={{ padding: '9px 12px', borderRadius: 4, border: `1px solid ${D.inputBorder}`, background: '#fff', fontSize: 13, fontWeight: 800 }}>Add services</button>
+                <button type="button" style={{ padding: '9px 12px', borderRadius: 4, border: `1px solid ${D.inputBorder}`, background: '#fff', fontSize: 13, fontWeight: 800 }}>Add item</button>
+                <button type="button" onClick={() => setDiscountPresetId(discountPresetId || 'custom')} style={{ padding: '9px 12px', borderRadius: 4, border: `1px solid ${D.inputBorder}`, background: '#fff', fontSize: 13, fontWeight: 800 }}>Add discount</button>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginBottom: 14 }}>
                 <div>
-                  <label style={labelStyle}>Frequency</label>
-                  <select value={recurringFreq} onChange={e => setRecurringFreq(e.target.value)} className="font-bold" style={inputStyle}>
-                    {EDIT_FREQUENCIES.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
+                  <label style={labelStyle}>Discount</label>
+                  <select value={discountPresetId} onChange={e => applyDiscountPreset(e.target.value)} className="font-bold" style={inputStyle}>
+                    <option value="">None</option>
+                    {discountPresets.map(d => (
+                      <option key={d.id} value={d.id}>
+                        {d.name} - {d.discount_type === 'percentage' ? `${Number(d.amount).toFixed(d.amount % 1 ? 2 : 0)}%` : `$${Number(d.amount).toFixed(2)}`}
+                      </option>
+                    ))}
+                    <option value="custom">Custom</option>
                   </select>
                 </div>
-                {!recurringOngoing && (
-                  <div>
-                    <label style={labelStyle}>Count</label>
-                    <input type="number" min={2} max={24} value={recurringCount} onChange={e => setRecurringCount(parseInt(e.target.value) || 4)} className="font-bold" style={inputStyle} />
-                  </div>
+                {discountPresetId === 'custom' && (
+                  <>
+                    <div>
+                      <label style={labelStyle}>Discount type</label>
+                      <select value={discountType} onChange={e => setDiscountType(e.target.value)} className="font-bold" style={inputStyle}>
+                        <option value="">Select</option>
+                        <option value="percentage">Percentage (%)</option>
+                        <option value="fixed_amount">Amount ($)</option>
+                      </select>
+                    </div>
+                    {discountType && (
+                      <div>
+                        <label style={labelStyle}>{discountType === 'percentage' ? 'Amount (%)' : 'Amount ($)'}</label>
+                        <input type="number" min={0} step={discountType === 'percentage' ? 1 : 0.01} value={discountAmount} onChange={e => setDiscountAmount(e.target.value)} className="font-bold" style={inputStyle} />
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
-              {recurringFreq === 'monthly_nth_weekday' && (
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
-                  <div>
-                    <label style={labelStyle}>Nth</label>
-                    <select value={recurringNth} onChange={e => setRecurringNth(parseInt(e.target.value))} className="font-bold" style={inputStyle}>
-                      {EDIT_NTH_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label style={labelStyle}>Weekday</label>
-                    <select value={recurringWeekday} onChange={e => setRecurringWeekday(parseInt(e.target.value))} className="font-bold" style={inputStyle}>
-                      {EDIT_WEEKDAY_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                    </select>
-                  </div>
+
+              <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12, display: 'grid', gap: 6, justifyContent: 'end' }}>
+                <div style={{ minWidth: 220, display: 'flex', justifyContent: 'space-between', gap: 40, fontSize: 14 }}>
+                  <span>Subtotal</span><strong>${servicePrice.toFixed(2)}</strong>
                 </div>
-              )}
-              {recurringFreq === 'custom' && (
-                <div style={{ marginBottom: 8 }}>
-                  <label style={labelStyle}>Every N days</label>
-                  <input type="number" min={1} max={365} value={recurringIntervalDays} onChange={e => setRecurringIntervalDays(parseInt(e.target.value) || 30)} className="font-bold" style={inputStyle} />
+                {manualDiscount > 0 && (
+                  <div style={{ minWidth: 220, display: 'flex', justifyContent: 'space-between', gap: 40, fontSize: 14, color: '#B42318' }}>
+                    <span>Custom Discount</span><strong>(${manualDiscount.toFixed(2)})</strong>
+                  </div>
+                )}
+                <div style={{ minWidth: 220, display: 'flex', justifyContent: 'space-between', gap: 40, fontSize: 16, borderTop: `1px solid ${D.border}`, paddingTop: 8 }}>
+                  <span>Total</span><strong>${appointmentTotal.toFixed(2)}</strong>
                 </div>
-              )}
-              <div style={{ marginBottom: 8 }}>
-                <label style={labelStyle}>Manual Discount (optional)</label>
-                <select value={discountPresetId} onChange={e => applyDiscountPreset(e.target.value)} className="font-bold" style={inputStyle}>
-                  <option value="">None</option>
-                  {discountPresets.map(d => (
-                    <option key={d.id} value={d.id}>
-                      {d.name} — {d.discount_type === 'percentage' ? `${Number(d.amount).toFixed(d.amount % 1 ? 2 : 0)}%` : `$${Number(d.amount).toFixed(2)}`}
-                    </option>
-                  ))}
-                  <option value="custom">Custom…</option>
-                </select>
               </div>
-              {discountPresetId === 'custom' && (
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
-                  <div>
-                    <label style={labelStyle}>Type</label>
-                    <select value={discountType} onChange={e => setDiscountType(e.target.value)} className="font-bold" style={inputStyle}>
-                      <option value="">—</option>
-                      <option value="percentage">Percentage (%)</option>
-                      <option value="fixed_amount">Amount ($)</option>
-                    </select>
-                  </div>
-                  {discountType && (
+            </section>
+
+            <section style={sectionStyle}>
+              <h2 style={sectionTitleStyle}>Date and time</h2>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12, marginBottom: 14 }}>
+                <div>
+                  <label style={labelStyle}>Date</label>
+                  <input type="date" value={form.scheduledDate} onChange={e => update('scheduledDate', e.target.value)} className="font-bold" style={inputStyle} />
+                </div>
+                <div>
+                  <label style={labelStyle}>Time</label>
+                  <input type="time" value={form.windowStart} onChange={e => update('windowStart', e.target.value)} className="font-bold" style={inputStyle} />
+                </div>
+                <div>
+                  <label style={labelStyle}>End time</label>
+                  <input type="time" value={form.windowEnd} onChange={e => update('windowEnd', e.target.value)} className="font-bold" style={inputStyle} />
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: isRecurring ? 14 : 0 }}>
+                <input type="checkbox" checked={isRecurring} onChange={e => setIsRecurring(e.target.checked)} style={{ width: 17, height: 17, accentColor: D.teal }} />
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 800 }}>Repeat</div>
+                  <div style={{ fontSize: 12, color: D.muted }}>Create future appointments from this date</div>
+                </div>
+              </div>
+              {isRecurring && (
+                <div style={{ border: `1px solid ${D.border}`, borderRadius: 6, padding: 14, background: '#F9FAFB' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10, marginBottom: 10 }}>
                     <div>
-                      <label style={labelStyle}>{discountType === 'percentage' ? 'Amount (%)' : 'Amount ($)'}</label>
-                      <input type="number" min={0} step={discountType === 'percentage' ? 1 : 0.01} value={discountAmount} onChange={e => setDiscountAmount(e.target.value)} className="font-bold" style={inputStyle} />
+                      <label style={labelStyle}>Repeats</label>
+                      <select value={recurringFreq} onChange={e => setRecurringFreq(e.target.value)} className="font-bold" style={inputStyle}>
+                        {EDIT_FREQUENCIES.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label style={labelStyle}>End repeating</label>
+                      <select value={recurringOngoing ? 'never' : 'count'} onChange={e => setRecurringOngoing(e.target.value === 'never')} className="font-bold" style={inputStyle}>
+                        <option value="never">Never</option>
+                        <option value="count">After count</option>
+                      </select>
+                    </div>
+                    {!recurringOngoing && (
+                      <div>
+                        <label style={labelStyle}>Count</label>
+                        <input type="number" min={2} max={24} value={recurringCount} onChange={e => setRecurringCount(parseInt(e.target.value) || 4)} className="font-bold" style={inputStyle} />
+                      </div>
+                    )}
+                  </div>
+                  {recurringFreq === 'monthly_nth_weekday' && (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10, marginBottom: 10 }}>
+                      <div>
+                        <label style={labelStyle}>Repeat every</label>
+                        <select value={recurringNth} onChange={e => setRecurringNth(parseInt(e.target.value))} className="font-bold" style={inputStyle}>
+                          {EDIT_NTH_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label style={labelStyle}>Day of month</label>
+                        <select value={recurringWeekday} onChange={e => setRecurringWeekday(parseInt(e.target.value))} className="font-bold" style={inputStyle}>
+                          {EDIT_WEEKDAY_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                  )}
+                  {recurringFreq === 'custom' && (
+                    <div style={{ marginBottom: 10 }}>
+                      <label style={labelStyle}>Frequency</label>
+                      <input type="number" min={1} max={365} value={recurringIntervalDays} onChange={e => setRecurringIntervalDays(parseInt(e.target.value) || 30)} className="font-bold" style={inputStyle} />
+                    </div>
+                  )}
+                  {recurringPreview() && (
+                    <div style={{ fontSize: 12, color: D.muted, display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                      {recurringPreview().map((d, i) => (
+                        <span key={i} style={{ padding: '3px 7px', background: '#EEF6FF', borderRadius: 999, color: D.teal, fontWeight: 800 }}>{d}</span>
+                      ))}
+                      {recurringOngoing
+                        ? <span style={{ padding: '3px 7px' }}>then auto-extends</span>
+                        : (recurringCount > 6 && <span style={{ padding: '3px 7px' }}>+{recurringCount - 6} more</span>)}
                     </div>
                   )}
                 </div>
               )}
-              {recurringPreview() && (
-                <div style={{ fontSize: 11, color: '#000', display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                  {recurringPreview().map((d, i) => (
-                    <span key={i} style={{ padding: '2px 6px', background: `${D.teal}15`, borderRadius: 4, color: '#000' }}>{d}</span>
-                  ))}
-                  {recurringOngoing
-                    ? <span style={{ padding: '2px 6px', color: '#000' }}>… then auto-extends</span>
-                    : (recurringCount > 6 && <span style={{ padding: '2px 6px', color: '#000' }}>+{recurringCount - 6} more</span>)}
+            </section>
+
+            <section style={sectionStyle}>
+              <h2 style={sectionTitleStyle}>Notes</h2>
+              <label style={labelStyle}>Appointment notes</label>
+              <textarea value={form.notes} onChange={e => update('notes', e.target.value)} rows={5} className="font-bold" style={{ ...inputStyle, resize: 'vertical' }} />
+              <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', marginTop: 14, padding: '11px 12px', background: '#F9FAFB', border: `1px solid ${D.border}`, borderRadius: 4 }}>
+                <input type="checkbox" checked={createInvoice} onChange={e => setCreateInvoice(e.target.checked)} style={{ width: 16, height: 16, accentColor: D.green }} />
+                <span style={{ fontSize: 13, color: '#111827', fontWeight: 800 }}>Create invoice on completion</span>
+              </label>
+              {service.createdAt && (
+                <div style={{ fontSize: 12, color: D.muted, marginTop: 14 }}>
+                  Booked on {new Date(service.createdAt).toLocaleString()}
                 </div>
               )}
-            </div>
-          )}
-        </div>
-
-        <div style={{ marginBottom: 18 }}>
-          <label style={labelStyle}>Notes</label>
-          <textarea value={form.notes} onChange={e => update('notes', e.target.value)} rows={3} className="font-bold" style={{ ...inputStyle, resize: 'vertical' }} />
-        </div>
-
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 16, padding: '10px 12px', background: '#F8FAFC', border: `1px solid ${D.border}`, borderRadius: 8 }}>
-          <input type="checkbox" checked={createInvoice} onChange={e => setCreateInvoice(e.target.checked)} style={{ width: 16, height: 16, accentColor: D.green }} />
-          <span style={{ fontSize: 13, color: '#000' }}>Create invoice on completion</span>
-          <span style={{ fontSize: 11, color: '#000' }}>— invoice + pay link sent in the service-complete SMS</span>
-        </label>
-
-        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-          <button onClick={onClose} disabled={saving} className="font-bold" style={{
-            padding: '10px 18px', borderRadius: 8, background: 'transparent',
-            color: '#000', border: `1px solid ${D.border}`, fontSize: 13, cursor: 'pointer',
-          }}>Cancel</button>
-          <button onClick={handleSave} disabled={saving} className="font-bold" style={{
-            padding: '10px 20px', borderRadius: 8, background: '#000', color: '#fff',
-            border: 'none', fontSize: 13, cursor: saving ? 'wait' : 'pointer', opacity: saving ? 0.6 : 1,
-          }}>{saving ? 'Saving…' : 'Save Changes'}</button>
+            </section>
+          </main>
         </div>
       </div>
     </div>
