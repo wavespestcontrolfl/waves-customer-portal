@@ -231,7 +231,7 @@ export default function MobilePaymentSheet({
 
       {showCash && (
         <MobileCashTenderSheet
-          service={service}
+          invoiceId={invoiceId}
           amount={amount}
           onClose={() => setShowCash(false)}
           onRecorded={(r) => {
@@ -243,7 +243,7 @@ export default function MobilePaymentSheet({
 
       {showCheck && (
         <MobileCheckTenderSheet
-          service={service}
+          invoiceId={invoiceId}
           amount={amount}
           onClose={() => setShowCheck(false)}
           onRecorded={(r) => {

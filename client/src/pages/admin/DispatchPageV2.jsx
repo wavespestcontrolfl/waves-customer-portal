@@ -1602,7 +1602,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
             // customer's hands. Mirror the cash/check tender flow and
             // punch straight to the completion sheet so the tech can
             // wrap the visit without a second step.
-            const svc = paymentData.service;
+            const svc = { ...paymentData.service, completionInvoiceAlreadySent: true };
             setPaymentData(null);
             setCheckoutService(null);
             setDetailService(null);
@@ -1615,16 +1615,21 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
             setDetailService(null);
             fetchSchedule(date);
           }}
-          onPrepaidRecorded={() => {
-            // Cash / Check tender already wrote the prepayment row server-side;
-            // punch straight to the completion sheet so the tech can wrap the
-            // visit without a second step.
-            const svc = paymentData.service;
+          onPrepaidRecorded={async ({ invoice } = {}) => {
+            // Cash / Check tender marked the pre-minted invoice paid server-side;
+            // punch straight to completion with fresh enough payment state for
+            // the completion SMS to use the paid branch.
+            const svc = {
+              ...paymentData.service,
+              checkoutInvoiceId: invoice?.id || paymentData.invoiceId,
+              checkoutInvoiceStatus: invoice?.status || 'paid',
+            };
             setPaymentData(null);
             setCheckoutService(null);
             setDetailService(null);
-            setCompletingService(svc);
-            fetchSchedule(date);
+            const fresh = await fetchSchedule(date);
+            const updated = fresh?.services?.find((s) => s.id === svc.id);
+            setCompletingService(updated ? { ...updated, ...svc } : svc);
           }}
         />
       )}

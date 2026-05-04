@@ -1291,6 +1291,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
   const [submitting, setSubmitting] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [completionResult, setCompletionResult] = useState(null);
   const [elapsed, setElapsed] = useState('0:00');
   const [quickComplete, setQuickComplete] = useState(false);
   const [servicePhotos, setServicePhotos] = useState([]);
@@ -1910,10 +1911,15 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
         if (soilPh) body.soilPh = parseFloat(soilPh);
         if (soilMoisture) body.soilMoisture = parseFloat(soilMoisture);
       }
-      await onSubmit(service.id, body);
+      if (service?.completionInvoiceAlreadySent) {
+        body.invoiceAlreadySent = true;
+      }
+      const result = await onSubmit(service.id, body);
       localStorage.removeItem(completionDraftKey(service.id));
+      setCompletionResult(result || null);
       setSuccess(true);
-      setTimeout(() => onClose(true), 1200);
+      const smsNeedsAttention = ['blocked', 'failed'].includes(result?.completionSmsStatus);
+      setTimeout(() => onClose(true), smsNeedsAttention ? 3200 : 1200);
     } catch (e) {
       if (e?.status >= 400 && e.status < 500 && e.status !== 409) {
         completionIdempotencyKeyRef.current = null;
@@ -2025,7 +2031,15 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
                 Service completed
               </div>
               <div style={{ fontFamily: font, fontSize: 13, color: M.ink3, marginTop: 6, textAlign: 'center' }}>
-                {sendSms ? 'SMS + report sent' : 'Report saved'} for {service.customerName}
+                {completionResult?.completionSmsStatus === 'sent'
+                  ? 'SMS + report sent'
+                  : completionResult?.completionSmsStatus === 'blocked'
+                    ? `Report saved. SMS blocked${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ''}`
+                    : completionResult?.completionSmsStatus === 'failed'
+                      ? `Report saved. SMS failed${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ''}`
+                      : sendSms
+                        ? 'Report saved'
+                        : 'Report saved'} for {service.customerName}
               </div>
             </div>
           )}
