@@ -366,7 +366,7 @@ router.post('/quick-add', async (req, res, next) => {
       return { ...created, _attachedToExistingAccount: !!account.existingCustomer, _propertyCount: Number(siblingCount?.count || 0) + 1 };
     });
 
-    logger.info(`[customers] Quick-add: ${customer.first_name} ${customer.last_name} (${customer.phone})`);
+    logger.info(`[customers] Quick-add created customer_id=${customer.id} account_id=${customer.account_id || customer.id}`);
 
     res.status(201).json({
       customer: {

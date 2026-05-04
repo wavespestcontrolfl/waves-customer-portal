@@ -1,5 +1,5 @@
-// Mobile-only Square-style "New customer" sheet (IMG_3735 / IMG_3736).
-// Full-screen sheet over the Customers page. Matches the Square layout:
+// Mobile-only "New customer" sheet (IMG_3735 / IMG_3736).
+// Full-screen sheet over the Customers page. Matches the compact mobile layout:
 //   · round X top-left, round "Save" pill top-right (dims when invalid)
 //   · big "New customer" heading
 //   · grey "Import from contacts" pill (stub — needs iOS bridge)
@@ -8,7 +8,7 @@
 //
 // Submits to the existing /admin/customers/quick-add endpoint. That endpoint
 // accepts first/last name, phone, email, address (line 1), city, state, zip,
-// and profile label. Line 2 is collected in the UI for parity with the Square
+// and profile label. Line 2 is collected in the UI for parity with the mobile
 // layout but not sent (no column exists yet; add a migration if needed).
 
 import { useMemo, useState } from 'react';
