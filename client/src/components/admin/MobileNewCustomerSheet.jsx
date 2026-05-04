@@ -32,7 +32,7 @@ export default function MobileNewCustomerSheet({ open, onClose, onCreated }) {
 
   const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
 
-  // Square requires first + last + phone at minimum (matches server quick-add).
+  // Server quick-add requires first + last + phone at minimum.
   const canSave = useMemo(
     () => form.firstName.trim() && form.lastName.trim() && form.phone.trim(),
     [form.firstName, form.lastName, form.phone],
