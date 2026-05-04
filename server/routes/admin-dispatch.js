@@ -681,17 +681,23 @@ router.put('/:serviceId/status', async (req, res, next) => {
 
       try {
         const AppointmentReminders = require('../services/appointment-reminders');
+        const targetIds = targets.map((target) => target.id);
+        await db('appointment_reminders')
+          .whereIn('scheduled_service_id', targetIds)
+          .update({ cancelled: true, updated_at: new Date() });
         await AppointmentReminders.handleCancellation(svc.id, {
           sendNotification: notifyCustomer !== false,
         });
       } catch (e) { logger.error(`[admin-dispatch] series cancellation reminder handling failed: ${e.message}`); }
 
-      try {
-        await trackTransitions.cancel(svc.id, {
-          reason: notes || null,
-          actorId: req.technicianId,
-        });
-      } catch (e) { logger.error(`[admin-dispatch] series cancel track transition failed: ${e.message}`); }
+      for (const target of targets) {
+        try {
+          await trackTransitions.cancel(target.id, {
+            reason: notes || null,
+            actorId: req.technicianId,
+          });
+        } catch (e) { logger.error(`[admin-dispatch] series cancel track transition failed for ${target.id}: ${e.message}`); }
+      }
 
       await db('activity_log').insert({
         admin_user_id: req.technicianId,
