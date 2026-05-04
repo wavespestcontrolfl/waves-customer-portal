@@ -20,9 +20,9 @@ const W = {
   green: '#16A34A', greenDark: '#15803D',
 };
 
-export default function PaymentPreferenceButtons({ onSelect, disabled, serviceMode, setupFee }) {
+export default function PaymentPreferenceButtons({ onSelect, disabled, serviceMode, setupFee, invoiceMode = false }) {
   const isOneTime = serviceMode === 'one_time';
-  const offerPrepay = !isOneTime && setupFee && setupFee.waivedWithPrepay;
+  const offerPrepay = !invoiceMode && !isOneTime && setupFee && setupFee.waivedWithPrepay;
 
   const btnBase = {
     padding: '16px 20px', borderRadius: 12,
@@ -32,11 +32,69 @@ export default function PaymentPreferenceButtons({ onSelect, disabled, serviceMo
     opacity: disabled ? 0.65 : 1,
   };
 
-  const depositLabel = isOneTime ? 'Book + save card on file' : 'Reserve + save card on file';
+  const depositLabel = isOneTime ? 'Book visit' : 'Reserve + save card on file';
   const payAtVisitLabel = isOneTime ? 'Book + pay on service day' : 'Reserve + pay at visit';
   const fineprint = offerPrepay
     ? 'Saving a card on file locks your slot — we still charge on the visit day. Pick "pay the year upfront" to settle the year now.'
-    : 'Saving a card on file locks your slot. Either way, we charge on the visit day, not now.';
+    : invoiceMode
+      ? 'No card setup here. Once you accept, we send an invoice due immediately by text and email.'
+      : isOneTime
+        ? 'This books a single visit. We do not charge you now.'
+      : 'Saving a card on file locks your slot. Either way, we charge on the visit day, not now.';
+
+  if (invoiceMode) {
+    return (
+      <div style={{
+        background: W.white, borderRadius: 16, padding: 24,
+        border: `1px solid ${W.border}`, marginBottom: 16,
+      }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
+          textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 14 }}>
+          {isOneTime ? 'Book your visit' : 'Accept your estimate'}
+        </div>
+
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => onSelect('pay_at_visit')}
+          style={{ ...btnBase, background: W.blueBright, color: W.white }}
+        >
+          {isOneTime ? 'Book + send invoice' : 'Accept + send invoice'}
+        </button>
+
+        <div style={{ fontSize: 12, color: W.textCaption, marginTop: 12, lineHeight: 1.5 }}>
+          {fineprint}
+        </div>
+      </div>
+    );
+  }
+
+  if (isOneTime) {
+    return (
+      <div style={{
+        background: W.white, borderRadius: 16, padding: 24,
+        border: `1px solid ${W.border}`, marginBottom: 16,
+      }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
+          textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 14 }}>
+          Book your visit
+        </div>
+
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => onSelect('pay_at_visit')}
+          style={{ ...btnBase, background: W.yellow, color: W.navy }}
+        >
+          Book + pay on service day
+        </button>
+
+        <div style={{ fontSize: 12, color: W.textCaption, marginTop: 12, lineHeight: 1.5 }}>
+          {fineprint}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{

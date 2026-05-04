@@ -182,7 +182,7 @@ function CountdownLine({ secondsRemaining }) {
   );
 }
 
-function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, onCancel }) {
+function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode }) {
   return (
     <div style={{
       background: COLORS.white, borderRadius: 16, padding: 24,
@@ -194,7 +194,8 @@ function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, o
       </div>
       <div style={{ fontSize: 18, color: COLORS.navy, marginTop: 10, lineHeight: 1.5 }}>
         Pay option: <strong>{
-          paymentPreference === 'deposit_now' ? 'Deposit now'
+          invoiceMode ? 'Invoice due now'
+          : paymentPreference === 'deposit_now' ? 'Deposit now'
           : paymentPreference === 'prepay_annual' ? 'Pay the year upfront'
           : 'At the visit'
         }</strong>
@@ -234,11 +235,11 @@ function SuccessCard({ onboardingToken, invoiceMode }) {
         marginBottom: 16,
       }}>
         <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
-          Thanks — we'll send your invoice shortly.
+          Thanks — your invoice is on the way.
         </div>
         <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
-          Check your phone and email for the pay link. Once it's paid
-          we'll get you on the schedule.
+          Check your phone and email for the pay link. Your service request
+          has been received and our team will confirm the schedule.
         </div>
       </div>
     );
@@ -513,6 +514,7 @@ export default function EstimateViewPage() {
           secondsRemaining={countdownSeconds}
           onConfirm={handleConfirm}
           onCancel={handleReviewCancel}
+          invoiceMode={!!estimate.billByInvoice}
         />
       ) : (
         <>
@@ -595,6 +597,7 @@ export default function EstimateViewPage() {
               disabled={ctaPhase === 'submitting'}
               serviceMode={serviceMode}
               setupFee={pricing.setupFee || null}
+              invoiceMode={!!estimate.billByInvoice}
             />
           ) : null}
 
