@@ -1267,12 +1267,16 @@ async function handleEstimateView(req, res, next) {
       );
     }
 
-    // V2 gate — when this estimate's row has use_v2_view=true, skip the
+    // V2 gate — when this estimate's row has use_v2_view=true, or when it
+    // uses customer options only implemented in the React view, skip the
     // server-HTML pipeline entirely and let the request fall through to
     // the SPA static-index fallback at server/index.js's app.get('*',...).
     // The React page owns view tracking + first-view side effects via
     // GET /:token/data; do NOT double-count them here.
-    if (estimate.use_v2_view === true) {
+    const shouldUseReactEstimateView = estimate.use_v2_view === true
+      || estimate.show_one_time_option === true
+      || estimate.bill_by_invoice === true;
+    if (shouldUseReactEstimateView && req.path.startsWith('/estimate/')) {
       return next();
     }
 
