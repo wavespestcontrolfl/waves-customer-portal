@@ -6,7 +6,7 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const { resolveLocation } = require('../config/locations');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const CompletionRecap = require('../services/completion-recap');
@@ -97,6 +97,14 @@ function annualNLockoutBlocks(plan) {
     .filter((block) => block.code === 'annual_n_budget_exceeded');
 }
 
+function toETNoonServiceDate(value) {
+  const dateOnly = value
+    ? String(value instanceof Date ? value.toISOString() : value).slice(0, 10)
+    : etDateString();
+  const parsed = parseETDateTime(`${dateOnly}T12:00`);
+  return Number.isNaN(parsed.getTime()) ? parseETDateTime(`${etDateString()}T12:00`) : parsed;
+}
+
 async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
   const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
   if (!productIds.length) return [];
@@ -134,9 +142,7 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
   const hasPhosphorus = productIds.some((id) => Number(productById.get(String(id))?.analysis_p || 0) > 0);
   if (!hasNitrogen && !hasPhosphorus) return [];
 
-  const serviceDate = svc.scheduled_date instanceof Date
-    ? svc.scheduled_date
-    : new Date(`${String(svc.scheduled_date).slice(0, 10)}T12:00:00`);
+  const serviceDate = toETNoonServiceDate(svc.scheduled_date);
   const blocks = [];
   for (const rule of ordinances.filter((row) => isDateInWindow(serviceDate, row))) {
     if (rule.restricted_nitrogen && hasNitrogen) {
