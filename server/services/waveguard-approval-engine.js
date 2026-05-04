@@ -49,7 +49,7 @@ function productGroups(product) {
   });
 }
 
-async function latestComparableGroupApplication(knex, customerId, product, groupType, serviceDate) {
+async function latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate) {
   const groupColumn = `${groupType}_group`;
   const rows = await knex('service_products as sp')
     .join('service_records as sr', 'sp.service_record_id', 'sr.id')
@@ -60,9 +60,9 @@ async function latestComparableGroupApplication(knex, customerId, product, group
     .where('sr.status', 'completed')
     .where('sr.service_date', '<', serviceDate)
     .where(function () {
-      this.whereNotNull(`pc.${groupColumn}`);
-      if (groupType === 'hrac') this.orWhereNotNull('pc.hrac_group_secondary');
-      if (groupType === 'moa') this.orWhereNotNull('sp.moa_group');
+      this.where(`pc.${groupColumn}`, groupValue);
+      if (groupType === 'hrac') this.orWhere('pc.hrac_group_secondary', groupValue);
+      if (groupType === 'moa') this.orWhere('sp.moa_group', groupValue);
     })
     .modify((query) => {
       if (product?.category) query.where('sp.product_category', product.category);
@@ -177,7 +177,7 @@ async function evaluateWaveGuardManagerApprovals(knex, {
     }
 
     for (const [groupType, groupValue] of productGroups(product)) {
-      const last = await latestComparableGroupApplication(knex, customerId, product, groupType, serviceDate);
+      const last = await latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate);
       const lastGroups = groupType === 'moa'
         ? [last?.catalog_group, last?.moa_group]
         : groupType === 'hrac'
