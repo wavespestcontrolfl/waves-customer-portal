@@ -310,7 +310,7 @@ router.put('/:id', async (req, res, next) => {
 // Shared dispatch — used by the route's immediate path AND the scheduled-send
 // cron tick. Either channel failing alone doesn't abort the other; missing
 // phone / email is treated as channel-skipped, not an error. Idempotent
-// cleanup at the bottom transitions a status='scheduled' row back to 'sent'
+// cleanup at the bottom transitions a scheduled cron claim back to 'sent'
 // once one channel lands so the cron can stop picking it up.
 async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = false } = {}) {
   const { sendInvoiceEmail } = require('../services/invoice-email');
@@ -343,7 +343,7 @@ async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = 
   }
 
   // InvoiceService.sendViaSMS only flips draft → sent. A scheduled-send row
-  // therefore stays status='scheduled' after dispatch; clear it explicitly
+  // therefore stays status='sending' after dispatch; clear it explicitly
   // so the cron tick stops re-picking it up. We also fire any deferred
   // review-request the user opted into at scheduling time — only now that
   // we know at least one channel landed, mirroring the immediate-path
@@ -357,7 +357,7 @@ async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = 
 
       if (inv) {
         const queuedReview = !!inv.request_review_after_send;
-        const wasScheduled = inv.status === 'scheduled';
+        const wasScheduled = inv.status === 'scheduled' || inv.status === 'sending';
 
         if (wasScheduled || queuedReview) {
           const updates = { updated_at: new Date() };
@@ -417,14 +417,19 @@ router.post('/:id/send', async (req, res, next) => {
       if (isNaN(when.getTime())) return res.status(400).json({ error: 'Invalid scheduledAt' });
       if (when <= new Date()) return res.status(400).json({ error: 'scheduledAt must be in the future' });
 
-      const updated = await db('invoices').where({ id }).update({
+      const safeToSchedule = ['draft', 'sent', 'viewed', 'overdue'];
+      const updated = await db('invoices').where({ id }).whereIn('status', safeToSchedule).update({
         status: 'scheduled',
         scheduled_at: when,
         send_method: normalizedSendMethod,
         request_review_after_send: !!requestReview,
         updated_at: new Date(),
       });
-      if (!updated) return res.status(404).json({ error: 'Invoice not found' });
+      if (!updated) {
+        const existing = await db('invoices').where({ id }).select('status').first();
+        if (!existing) return res.status(404).json({ error: 'Invoice not found' });
+        return res.status(409).json({ error: `Cannot schedule invoice while status is ${existing.status}` });
+      }
 
       return res.json({ ok: true, scheduled: true, scheduledAt: when.toISOString() });
     }

@@ -302,14 +302,20 @@ function initScheduledJobs() {
 
   // =========================================================================
   // EVERY 5 MINUTES — Send scheduled invoices whose time has arrived
-  // sendInvoiceNow flips status='scheduled' → 'sent' on success, so the row
-  // drops out of this query on the next tick. Channel failures are logged
-  // per-invoice but don't abort the batch.
+  // The cron first claims each row by moving it out of status='scheduled';
+  // sendInvoiceNow flips the claim to 'sent' after one channel lands. Channel
+  // failures are logged per-invoice and the row is reset for a later retry.
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
     try {
       const scheduled = await db('invoices')
-        .where({ status: 'scheduled' })
+        .where(function () {
+          this.where({ status: 'scheduled' })
+            .orWhere(function () {
+              this.where({ status: 'sending' })
+                .where('updated_at', '<', new Date(Date.now() - 30 * 60000));
+            });
+        })
         .where('scheduled_at', '<=', new Date())
         .whereNotNull('scheduled_at')
         .select('id', 'invoice_number', 'send_method');
@@ -320,25 +326,39 @@ function initScheduledJobs() {
       let sent = 0;
       for (const inv of scheduled) {
         const lockKey = `invoice-send:${inv.id}`;
+        let claimedInvoice = false;
         try {
-          const channels = await db.transaction(async (trx) => {
+          const current = await db.transaction(async (trx) => {
             const claimed = await claimAdvisoryXactLock(trx, lockKey);
             if (!claimed) return null;
 
-            const current = await trx('invoices')
-              .where({ id: inv.id, status: 'scheduled' })
+            const [claimedRow] = await trx('invoices')
+              .where({ id: inv.id })
+              .whereIn('status', ['scheduled', 'sending'])
               .where('scheduled_at', '<=', new Date())
               .whereNotNull('scheduled_at')
-              .select('send_method')
-              .first();
-            if (!current) return null;
-
-            return sendInvoiceNow(inv.id, { sendMethod: current.send_method || 'both' });
+              .update({ status: 'sending', updated_at: new Date() }, ['send_method']);
+            return claimedRow || null;
           });
-          if (!channels) continue;
+          if (!current) continue;
+          claimedInvoice = true;
+
+          const channels = await sendInvoiceNow(inv.id, { sendMethod: current.send_method || 'both' });
           if (channels.sms.ok || channels.email.ok) sent += 1;
-          else logger.error(`Scheduled invoice ${inv.invoice_number} both channels failed: sms=${channels.sms.error} email=${channels.email.error}`);
+          else {
+            await db('invoices').where({ id: inv.id, status: 'sending' }).update({
+              status: 'scheduled',
+              updated_at: new Date(),
+            });
+            logger.error(`Scheduled invoice ${inv.invoice_number} both channels failed: sms=${channels.sms.error} email=${channels.email.error}`);
+          }
         } catch (e) {
+          if (claimedInvoice) {
+            await db('invoices').where({ id: inv.id, status: 'sending' }).update({
+              status: 'scheduled',
+              updated_at: new Date(),
+            }).catch(() => {});
+          }
           logger.error(`Scheduled invoice ${inv.invoice_number} failed: ${e.message}`);
         }
       }
@@ -408,22 +428,35 @@ function initScheduledJobs() {
               });
               return false;
             }
-            await TwilioService.sendSMS(current.cust_phone, current.completion_sms_body, {
-              customerId: current.customer_id,
-              messageType: current.completion_sms_message_type || 'service_complete',
-            });
             await trx('scheduled_services').where({ id: current.id }).update({
               completion_sms_sent_at: new Date(),
-              completion_sms_request_review: false,
             });
             return {
               sent: true,
+              serviceId: current.id,
+              phone: current.cust_phone,
+              body: current.completion_sms_body,
+              messageType: current.completion_sms_message_type || 'service_complete',
               requestReview: !!current.completion_sms_request_review,
               customerId: current.customer_id,
               serviceRecordId: current.completion_sms_review_service_record_id || null,
             };
           });
           if (wasSent?.sent) {
+            try {
+              await TwilioService.sendSMS(wasSent.phone, wasSent.body, {
+                customerId: wasSent.customerId,
+                messageType: wasSent.messageType,
+              });
+              await db('scheduled_services').where({ id: wasSent.serviceId }).update({
+                completion_sms_request_review: false,
+              });
+            } catch (sendErr) {
+              await db('scheduled_services').where({ id: wasSent.serviceId }).update({
+                completion_sms_sent_at: null,
+              }).catch(() => {});
+              throw sendErr;
+            }
             sent += 1;
             if (wasSent.requestReview) {
               try {
