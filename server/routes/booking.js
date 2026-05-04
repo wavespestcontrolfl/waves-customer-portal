@@ -132,7 +132,33 @@ function fallbackZoneCenter(city) {
 }
 
 function normalizeAddress(value) {
-  return String(value || '').split(',')[0].trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  const suffixes = {
+    avenue: 'ave',
+    boulevard: 'blvd',
+    circle: 'cir',
+    court: 'ct',
+    cove: 'cv',
+    drive: 'dr',
+    lane: 'ln',
+    parkway: 'pkwy',
+    place: 'pl',
+    road: 'rd',
+    street: 'st',
+    terrace: 'ter',
+    terr: 'ter',
+    trail: 'trl',
+    way: 'wy',
+  };
+  return String(value || '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase()
+    .replace(/[.#]/g, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(part => suffixes[part] || part)
+    .join('');
 }
 
 function normalizeZip(value) {
@@ -152,8 +178,15 @@ async function findUniqueCustomerByAddress(address, city, zip) {
   const normalizedAddress = normalizeAddress(address);
   if (!normalizedAddress) return null;
 
-  const query = db('customers')
-    .whereRaw("lower(regexp_replace(split_part(coalesce(address_line1, ''), ',', 1), '[^a-zA-Z0-9]', '', 'g')) = ?", [normalizedAddress]);
+  const query = db('customers');
+
+  query.where(function () {
+    this.whereNull('deleted_at');
+  });
+
+  query.andWhere(function () {
+    this.whereNull('active').orWhere('active', true);
+  });
 
   const normalizedZip = normalizeZip(zip);
   if (normalizedZip) query.andWhere(function () {
@@ -165,10 +198,11 @@ async function findUniqueCustomerByAddress(address, city, zip) {
     this.whereNull('city').orWhere('city', '').orWhereRaw('lower(city) = ?', [cityValue]);
   });
 
-  const matches = await query
+  const candidates = await query
     .select('id', 'first_name', 'last_name', 'email', 'address_line1', 'city', 'state', 'zip', 'phone')
-    .limit(2);
+    .limit(500);
 
+  const matches = candidates.filter(customer => normalizeAddress(customer.address_line1) === normalizedAddress);
   return matches.length === 1 ? matches[0] : null;
 }
 
@@ -185,19 +219,18 @@ router.get('/customer-lookup', async (req, res, next) => {
       if (digits.length !== 10) return res.json({ customer: null });
 
       const query = db('customers')
-        .whereRaw("regexp_replace(phone, '[^0-9]', '', 'g') = ?", [digits]);
-
-      if (address) {
-        const line1 = String(address).split(',')[0].trim().toLowerCase();
-        const normalizedAddress = line1.replace(/[^a-z0-9]/g, '');
-        if (normalizedAddress) {
-          query.andWhereRaw("lower(regexp_replace(coalesce(address_line1, ''), '[^a-zA-Z0-9]', '', 'g')) = ?", [normalizedAddress]);
-        }
-      }
-      if (city) query.andWhereRaw('lower(city) = ?', [String(city).trim().toLowerCase()]);
-      if (zip) query.andWhere('zip', String(zip).replace(/\D/g, '').slice(0, 5));
+        .whereRaw("regexp_replace(phone, '[^0-9]', '', 'g') = ?", [digits])
+        .where(function () {
+          this.whereNull('deleted_at');
+        })
+        .andWhere(function () {
+          this.whereNull('active').orWhere('active', true);
+        });
 
       customer = await query.select(phoneCustomerFields).first();
+      if (customer && address && !addressMatchesCustomer(customer, address, zip)) {
+        customer = null;
+      }
       return res.json({ customer: customer || null });
     }
 
@@ -470,6 +503,12 @@ router.post('/confirm', async (req, res, next) => {
     if (!custId && phoneDigits) {
       const existing = await db('customers')
         .whereRaw("regexp_replace(phone, '[^0-9]', '', 'g') = ?", [phoneDigits])
+        .where(function () {
+          this.whereNull('deleted_at');
+        })
+        .andWhere(function () {
+          this.whereNull('active').orWhere('active', true);
+        })
         .first();
       if (existing) {
         if (!customer_id) {
@@ -483,7 +522,13 @@ router.post('/confirm', async (req, res, next) => {
     }
 
     if (customer_id && !custId && !phoneDigits && !estimate_id) {
-      const addressVerifiedCustomer = await db('customers').where('id', customer_id).first();
+      const addressVerifiedCustomer = await db('customers')
+        .where('id', customer_id)
+        .whereNull('deleted_at')
+        .andWhere(function () {
+          this.whereNull('active').orWhere('active', true);
+        })
+        .first();
       if (
         !addressVerifiedCustomer
         || !new_customer
