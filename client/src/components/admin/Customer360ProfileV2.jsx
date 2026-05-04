@@ -47,7 +47,7 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
-import { ChevronLeft, MoreHorizontal, Trash2 } from 'lucide-react';
+import { ChevronLeft, Droplets, MoreHorizontal, ShieldCheck, Trash2 } from 'lucide-react';
 import { CustomerActionBar } from './StickyActionBar';
 import { Card, CardBody, Badge, Button, Switch, Table, THead, TBody, TR, TH, TD, cn } from '../ui';
 import CallBridgeLink, { callViaBridge } from './CallBridgeLink';
@@ -84,6 +84,31 @@ function fmtNumber(v, digits = 3) {
   const n = Number(v);
   if (!Number.isFinite(n)) return '0';
   return n.toFixed(digits).replace(/\.?0+$/, '');
+}
+
+function parseStructuredNotes(value) {
+  if (!value) return {};
+  if (typeof value === 'object') return value;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function approvalCodeLabel(code) {
+  return String(code || '')
+    .replace(/^repeat_/, 'repeat ')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function inventoryAuditAmount(item) {
+  const deducted = String(item.status || '').startsWith('deducted');
+  if (!deducted) return 'No deduction';
+  const amount = item.deductedAmount ?? item.deducted_amount;
+  return `${fmtNumber(amount, 4)} ${item.inventoryUnit || item.inventory_unit || item.unit || ''}`.trim();
 }
 
 const STAGE_LABELS = {
@@ -190,6 +215,13 @@ function StatCardV2({ label, value, alert }) {
 // ─── Service row (collapsible) ───────────────────────────────────
 function ServiceRowV2({ service: s }) {
   const [expanded, setExpanded] = useState(false);
+  const structuredNotes = parseStructuredNotes(s.structured_notes);
+  const managerApproval = structuredNotes.waveguardManagerApproval;
+  const tankCleanout = structuredNotes.waveguardTankCleanout;
+  const inventoryDeductions = Array.isArray(structuredNotes.inventoryDeductions)
+    ? structuredNotes.inventoryDeductions
+    : [];
+  const hasWaveGuardAudit = !!managerApproval || !!tankCleanout || inventoryDeductions.length > 0;
   return (
     <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm overflow-hidden mb-1.5">
       <button
@@ -213,7 +245,71 @@ function ServiceRowV2({ service: s }) {
           {s.products_used && <div className="text-ink-secondary">Products: {s.products_used}</div>}
           {s.areas_treated && <div className="text-ink-secondary">Areas: {s.areas_treated}</div>}
           {s.technician_name && <div className="text-ink-secondary">Tech: {s.technician_name}</div>}
-          {!s.notes && !s.products_used && !s.areas_treated && (
+          {managerApproval && (
+            <div className="mt-2 rounded-sm border-hairline border-zinc-200 bg-white p-2.5">
+              <div className="flex items-center gap-2 text-zinc-900 font-medium mb-1">
+                <ShieldCheck size={14} strokeWidth={1.75} />
+                <span>Manager Approval</span>
+              </div>
+              <div className="text-ink-secondary">
+                {approvalCodeLabel(managerApproval.reasonCode)}
+                {managerApproval.approvedByRole ? ` by ${managerApproval.approvedByRole}` : ''}
+                {managerApproval.approvedAt ? ` on ${fmtDate(managerApproval.approvedAt)}` : ''}
+              </div>
+              {managerApproval.note && <div className="text-zinc-900 mt-1">{managerApproval.note}</div>}
+              {Array.isArray(managerApproval.blocks) && managerApproval.blocks.length > 0 && (
+                <div className="mt-2 space-y-1">
+                  {managerApproval.blocks.map((block, idx) => (
+                    <div key={idx} className="text-ink-secondary">
+                      <span className="font-medium text-zinc-900">{approvalCodeLabel(block.code)}</span>
+                      {block.productName ? ` · ${block.productName}` : ''}
+                      {block.message ? ` — ${block.message}` : ''}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {tankCleanout && (
+            <div className="mt-2 rounded-sm border-hairline border-zinc-200 bg-white p-2.5">
+              <div className="flex items-center gap-2 text-zinc-900 font-medium mb-1">
+                <Droplets size={14} strokeWidth={1.75} />
+                <span>Tank Cleanout Audit</span>
+              </div>
+              <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-ink-secondary">
+                <div>Last product: <span className="text-zinc-900">{tankCleanout.lastProductInTank || 'None recorded'}</span></div>
+                <div>Cleanout: <span className="text-zinc-900">{tankCleanout.cleanoutCompleted ? 'Completed' : 'Not completed'}</span></div>
+                <div>Method: <span className="text-zinc-900">{tankCleanout.cleanoutMethod || '—'}</span></div>
+                <div>Recorded: <span className="text-zinc-900">{tankCleanout.recordedAt ? fmtDate(tankCleanout.recordedAt) : '—'}</span></div>
+              </div>
+              {tankCleanout.note && <div className="text-zinc-900 mt-1">{tankCleanout.note}</div>}
+              {Array.isArray(tankCleanout.warnings) && tankCleanout.warnings.length > 0 && (
+                <div className="text-ink-secondary mt-1">
+                  Warnings: {tankCleanout.warnings.map((warning) => warning.message).filter(Boolean).join('; ')}
+                </div>
+              )}
+            </div>
+          )}
+          {inventoryDeductions.length > 0 && (
+            <div className="mt-2 rounded-sm border-hairline border-zinc-200 bg-white p-2.5">
+              <div className="font-medium text-zinc-900 mb-1">Inventory Audit</div>
+              <div className="space-y-1">
+                {inventoryDeductions.map((item, idx) => (
+                  <div key={idx} className="text-ink-secondary">
+                    <div className="flex justify-between gap-3">
+                      <span className="text-zinc-900">{item.productName || item.product_name || 'Product'}</span>
+                      <span className="u-nums">
+                        {inventoryAuditAmount(item)}
+                        {item.costUsed != null || item.cost_used != null ? ` · ${fmtCurrency(item.costUsed ?? item.cost_used)}` : ''}
+                      </span>
+                    </div>
+                    {item.warning && <div className="mt-0.5">{item.warning}</div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {!s.notes && !s.products_used && !s.areas_treated && !hasWaveGuardAudit && (
             <div className="text-ink-secondary">No additional details</div>
           )}
         </div>

@@ -631,7 +631,12 @@ router.get('/:id', async (req, res, next) => {
       db('customer_tags').where({ customer_id: c.id }).select('tag'),
       db('customer_interactions').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(30),
       db('property_preferences').where({ customer_id: c.id }).first(),
-      db('service_records').where({ customer_id: c.id }).orderBy('service_date', 'desc').limit(20),
+      db('service_records')
+        .where({ 'service_records.customer_id': c.id })
+        .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
+        .select('service_records.*', 'technicians.name as technician_name')
+        .orderBy('service_records.service_date', 'desc')
+        .limit(20),
       db('estimates').where({ customer_id: c.id }).orderBy('created_at', 'desc'),
       db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', 'payment_methods.card_brand', 'payment_methods.last_four').orderBy('payment_date', 'desc').limit(20),
       db('payments').where({ customer_id: c.id, status: 'paid' }).first(db.raw('COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0)::float as net')).catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
