@@ -4,7 +4,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const InvoiceService = require('../services/invoice');
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -366,7 +366,6 @@ async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = 
             updates.scheduled_at = null;
             updates.send_method = null;
           }
-          if (queuedReview) updates.request_review_after_send = false;
           await db('invoices').where({ id: invoiceId }).update(updates);
         }
 
@@ -379,6 +378,12 @@ async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = 
               triggeredBy: 'auto',
               delayMinutes: 120,
             });
+            if (queuedReview) {
+              await db('invoices').where({ id: invoiceId }).update({
+                request_review_after_send: false,
+                updated_at: new Date(),
+              });
+            }
           } catch (err) {
             logger.error(`[admin-invoices] Review request schedule failed: ${err.message}`);
           }
@@ -394,7 +399,7 @@ async function sendInvoiceNow(invoiceId, { sendMethod = 'both', requestReview = 
 
 // POST /:id/send — send invoice via SMS + email, immediately or scheduled.
 // Body: { requestReview?: boolean, scheduledAt?: ISO string, sendMethod?: 'sms'|'email'|'both' }
-// When `scheduledAt` is set to a future instant, the row is flipped to
+// When `scheduledAt` is set to a future ET wall-clock time, the row is flipped to
 // status='scheduled' and the scheduler.js 5-minute cron picks it up; the
 // review request (if requested) is queued at scheduledAt + 2h via the
 // existing ReviewService.scheduled_for path. Either channel failing alone
@@ -413,7 +418,7 @@ router.post('/:id/send', async (req, res, next) => {
     // a cron-time delivery failure doesn't leave the customer with a
     // review prompt for an invoice they never received.
     if (scheduledAt) {
-      const when = new Date(scheduledAt);
+      const when = parseETDateTime(scheduledAt);
       if (isNaN(when.getTime())) return res.status(400).json({ error: 'Invalid scheduledAt' });
       if (when <= new Date()) return res.status(400).json({ error: 'scheduledAt must be in the future' });
 

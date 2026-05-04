@@ -6,7 +6,7 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const { resolveLocation } = require('../config/locations');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 
@@ -313,7 +313,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // (status flip, service_record, products, audit log) still happens now.
     let scheduledSendAt = null;
     if (scheduledAt) {
-      const when = new Date(scheduledAt);
+      const when = parseETDateTime(scheduledAt);
       if (isNaN(when.getTime())) return res.status(400).json({ error: 'Invalid scheduledAt' });
       if (when <= new Date()) return res.status(400).json({ error: 'scheduledAt must be in the future' });
       scheduledSendAt = when;
