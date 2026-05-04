@@ -950,6 +950,24 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
     } catch (err) { alert('Failed to delete service: ' + err.message); }
   }, []);
 
+  const handleSidebarCancel = useCallback((service) => {
+    setSelectedScheduleService(null);
+    setData((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        services: prev.services.filter((s) => s.id !== service.id),
+        techSummary: prev.techSummary.map((tech) => ({
+          ...tech,
+          services: tech.services.filter((s) => s.id !== service.id),
+          totalServices: tech.services.filter((s) => s.id !== service.id).length,
+        })),
+      };
+    });
+    setScheduleRefreshKey((k) => k + 1);
+    fetchSchedule(date);
+  }, [date, fetchSchedule]);
+
   function shiftDate(dir) {
     const d = new Date(date + 'T12:00:00');
     if (viewMode === 'day') d.setDate(d.getDate() + dir);
@@ -1638,6 +1656,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
             ));
             fetchSchedule(date);
           }}
+          onCancel={handleSidebarCancel}
           onBookNext={(svc) => {
             setSelectedScheduleService(null);
             setNewApptDefaults({

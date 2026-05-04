@@ -592,7 +592,7 @@ router.patch('/:serviceId/note', async (req, res, next) => {
 //   - activity_log INSERT (admin-side audit, distinct table).
 router.put('/:serviceId/status', async (req, res, next) => {
   try {
-    const { status: toStatus, notes, lat, lng } = req.body;
+    const { status: toStatus, notes, lat, lng, notifyCustomer } = req.body;
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
@@ -684,6 +684,13 @@ router.put('/:serviceId/status', async (req, res, next) => {
         });
       } catch (e) { logger.error(`[admin-dispatch] markComplete failed: ${e.message}`); }
     } else if (toStatus === 'cancelled') {
+      try {
+        const AppointmentReminders = require('../services/appointment-reminders');
+        await AppointmentReminders.handleCancellation(svc.id, {
+          sendNotification: notifyCustomer !== false,
+        });
+      } catch (e) { logger.error(`[admin-dispatch] cancellation reminder handling failed: ${e.message}`); }
+
       try {
         await trackTransitions.cancel(svc.id, {
           reason: notes || null,

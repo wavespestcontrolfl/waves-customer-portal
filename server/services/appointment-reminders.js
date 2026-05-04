@@ -478,8 +478,9 @@ const AppointmentReminders = {
   /**
    * Handle appointment cancellation — mark cancelled and notify customer.
    */
-  async handleCancellation(scheduledServiceId) {
+  async handleCancellation(scheduledServiceId, options = {}) {
     try {
+      const sendNotification = options.sendNotification !== false;
       const record = await db('appointment_reminders')
         .where({ scheduled_service_id: scheduledServiceId })
         .first();
@@ -492,6 +493,11 @@ const AppointmentReminders = {
       await db('appointment_reminders')
         .where({ id: record.id })
         .update({ cancelled: true, updated_at: new Date() });
+
+      if (!sendNotification) {
+        logger.info(`[appt-remind] Cancellation notice suppressed for ${scheduledServiceId}`);
+        return record;
+      }
 
       // Send cancellation notice
       const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
