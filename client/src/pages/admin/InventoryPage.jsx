@@ -68,6 +68,7 @@ export default function InventoryPage() {
             { label: 'Products', value: stats.products?.total, color: D.heading, filter: 'all' },
             { label: 'Priced', value: stats.products?.priced, color: D.green, filter: 'priced' },
             { label: 'Needs Price', value: stats.products?.needsPrice, color: D.amber, filter: 'needs_price' },
+            { label: 'Low Stock', value: stats.products?.lowStock, color: stats.products?.lowStock > 0 ? D.red : D.green, filter: 'low_stock' },
             { label: 'Vendors', value: stats.vendors?.total, color: D.teal, action: () => setTab('vendors') },
             { label: 'Pending Approvals', value: stats.approvals?.pending, color: stats.approvals?.pending > 0 ? D.amber : D.green, action: () => setTab('approvals') },
             { label: 'Scrape Jobs', value: stats.scrapeJobs?.completed, color: D.purple, action: () => setTab('scrape') },
@@ -122,7 +123,7 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange, showAddForm, s
   const [editing, setEditing] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [vendors, setVendors] = useState([]);
-  const [newProduct, setNewProduct] = useState({ name: '', category: '', activeIngredient: '', moaGroup: '', defaultUnit: 'oz' });
+  const [newProduct, setNewProduct] = useState({ name: '', category: '', activeIngredient: '', moaGroup: '', defaultUnit: 'oz', inventoryOnHand: '', inventoryUnit: '', lowStockThreshold: '' });
   const [deleting, setDeleting] = useState(null);
   const [page, setPage] = useState(1);
   const [totalProducts, setTotalProducts] = useState(0);
@@ -130,8 +131,9 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange, showAddForm, s
 
   const load = useCallback(async () => {
     const needsPricingParam = filter === 'needs_price' ? '&needsPricing=true' : filter === 'priced' ? '&needsPricing=false' : '';
+    const stockParam = filter === 'low_stock' ? '&stock=low' : '';
     const [pData, vData] = await Promise.all([
-      adminFetch(`/admin/inventory?search=${encodeURIComponent(search)}&category=${encodeURIComponent(catFilter)}&limit=${PER_PAGE}&page=${page}${needsPricingParam}`),
+      adminFetch(`/admin/inventory?search=${encodeURIComponent(search)}&category=${encodeURIComponent(catFilter)}&limit=${PER_PAGE}&page=${page}${needsPricingParam}${stockParam}`),
       adminFetch('/admin/inventory/vendors'),
     ]);
     setProducts(pData.products || []);
@@ -153,7 +155,18 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange, showAddForm, s
   const startEdit = (p, e) => {
     e && e.stopPropagation();
     setEditing(p.id);
-    setEditForm({ name: p.name || '', category: p.category || '', activeIngredient: p.activeIngredient || '', moaGroup: p.moaGroup || '', containerSize: p.containerSize || '', formulation: p.formulation || '', sku: p.sku || '' });
+    setEditForm({
+      name: p.name || '',
+      category: p.category || '',
+      activeIngredient: p.activeIngredient || '',
+      moaGroup: p.moaGroup || '',
+      containerSize: p.containerSize || '',
+      formulation: p.formulation || '',
+      sku: p.sku || '',
+      inventoryOnHand: p.inventoryOnHand ?? '',
+      inventoryUnit: p.inventoryUnit || '',
+      lowStockThreshold: p.lowStockThreshold ?? '',
+    });
   };
 
   const saveEdit = async (id) => {
@@ -168,7 +181,7 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange, showAddForm, s
   return (
     <div>
       <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
-        {[{ key: 'all', label: 'All Products' }, { key: 'priced', label: 'Priced' }, { key: 'needs_price', label: 'Needs Price' }].map(f => (
+        {[{ key: 'all', label: 'All Products' }, { key: 'priced', label: 'Priced' }, { key: 'needs_price', label: 'Needs Price' }, { key: 'low_stock', label: 'Low Stock' }].map(f => (
           <button key={f.key} onClick={() => { onFilterChange?.(f.key); setPage(1); }} style={{ padding: '6px 14px', borderRadius: 20, border: 'none', fontSize: 12, fontWeight: 600, cursor: 'pointer', background: filter === f.key ? D.teal : D.card, color: filter === f.key ? D.white : D.muted }}>{f.label}</button>
         ))}
       </div>
@@ -195,12 +208,23 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange, showAddForm, s
               <option value="oz">oz</option><option value="ml">ml</option><option value="gal">gal</option><option value="lb">lb</option><option value="g">g</option><option value="each">each</option>
             </select>
             <div style={{ display: 'flex', gap: 6 }}>
-              <button onClick={async () => {
-                if (!newProduct.name.trim()) { showToast('Product name required'); return; }
-                try { await adminFetch('/admin/inventory', { method: 'POST', body: JSON.stringify(newProduct) }); showToast('Product added'); setNewProduct({ name: '', category: '', activeIngredient: '', moaGroup: '', defaultUnit: 'oz' }); setShowAddForm(false); load(); } catch (e) { showToast('Failed: ' + e.message); }
-              }} style={{ flex: 1, padding: '10px', borderRadius: 8, border: 'none', background: D.green, color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Save</button>
-              <button onClick={() => setShowAddForm(false)} style={{ padding: '10px 14px', borderRadius: 8, border: `1px solid ${D.border}`, background: 'none', color: D.muted, fontSize: 13, cursor: 'pointer' }}>Cancel</button>
+              <input value={newProduct.inventoryOnHand} onChange={e => setNewProduct(p => ({ ...p, inventoryOnHand: e.target.value }))} type="number" step="0.0001" placeholder="Stock" style={{ ...sInput, width: '100%' }} />
+              <input value={newProduct.inventoryUnit} onChange={e => setNewProduct(p => ({ ...p, inventoryUnit: e.target.value }))} placeholder="unit" style={{ ...sInput, width: 70 }} />
+              <input value={newProduct.lowStockThreshold} onChange={e => setNewProduct(p => ({ ...p, lowStockThreshold: e.target.value }))} type="number" step="0.0001" placeholder="low" style={{ ...sInput, width: 70 }} />
             </div>
+          </div>
+          <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+            <button onClick={async () => {
+              if (!newProduct.name.trim()) { showToast('Product name required'); return; }
+              try {
+                await adminFetch('/admin/inventory', { method: 'POST', body: JSON.stringify(newProduct) });
+                showToast('Product added');
+                setNewProduct({ name: '', category: '', activeIngredient: '', moaGroup: '', defaultUnit: 'oz', inventoryOnHand: '', inventoryUnit: '', lowStockThreshold: '' });
+                setShowAddForm(false);
+                load();
+              } catch (e) { showToast('Failed: ' + e.message); }
+            }} style={{ flex: 1, padding: '10px', borderRadius: 8, border: 'none', background: D.green, color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Save</button>
+            <button onClick={() => setShowAddForm(false)} style={{ padding: '10px 14px', borderRadius: 8, border: `1px solid ${D.border}`, background: 'none', color: D.muted, fontSize: 13, cursor: 'pointer' }}>Cancel</button>
           </div>
         </div>
       )}
@@ -208,7 +232,7 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange, showAddForm, s
       <div style={{ overflowX: 'auto' }}>
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
         <thead><tr>
-          {['Product', 'Category', 'Active Ingredient', 'MOA', 'Size', 'Best Price', 'Vendor', 'Status', ''].map(h => <th key={h} style={thS}>{h}</th>)}
+          {['Product', 'Category', 'Active Ingredient', 'MOA', 'Size', 'Stock', 'Best Price', 'Vendor', 'Status', ''].map(h => <th key={h} style={thS}>{h}</th>)}
         </tr></thead>
         <tbody>
           {products.map(p => {
@@ -221,6 +245,20 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange, showAddForm, s
                 <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>{isEditing ? <input value={editForm.activeIngredient} onChange={e => setEditForm(f => ({ ...f, activeIngredient: e.target.value }))} style={{ ...sInput, width: '100%' }} onClick={e => e.stopPropagation()} /> : (p.activeIngredient || '—')}</td>
                 <td style={{ ...tdS, color: D.muted, fontSize: 11 }}>{isEditing ? <input value={editForm.moaGroup} onChange={e => setEditForm(f => ({ ...f, moaGroup: e.target.value }))} style={{ ...sInput, width: 80 }} onClick={e => e.stopPropagation()} /> : (p.moaGroup || '—')}</td>
                 <td style={{ ...tdS, fontSize: 12 }}>{isEditing ? <input value={editForm.containerSize} onChange={e => setEditForm(f => ({ ...f, containerSize: e.target.value }))} style={{ ...sInput, width: 80 }} onClick={e => e.stopPropagation()} /> : (p.containerSize || '—')}</td>
+                <td style={{ ...tdS, fontSize: 12 }}>
+                  {isEditing ? (
+                    <div style={{ display: 'flex', gap: 4 }} onClick={e => e.stopPropagation()}>
+                      <input value={editForm.inventoryOnHand} onChange={e => setEditForm(f => ({ ...f, inventoryOnHand: e.target.value }))} type="number" step="0.0001" placeholder="Stock" style={{ ...sInput, width: 76 }} />
+                      <input value={editForm.inventoryUnit} onChange={e => setEditForm(f => ({ ...f, inventoryUnit: e.target.value }))} placeholder="unit" style={{ ...sInput, width: 56 }} />
+                      <input value={editForm.lowStockThreshold} onChange={e => setEditForm(f => ({ ...f, lowStockThreshold: e.target.value }))} type="number" step="0.0001" placeholder="low" style={{ ...sInput, width: 66 }} />
+                    </div>
+                  ) : (
+                    <span style={{ color: p.lowStock ? D.red : D.text, fontFamily: "'JetBrains Mono', monospace" }}>
+                      {p.inventoryOnHand != null ? `${p.inventoryOnHand} ${p.inventoryUnit || ''}` : '—'}
+                      {p.lowStock && <span style={{ ...sBadge(`${D.red}22`, D.red), marginLeft: 6 }}>Low</span>}
+                    </span>
+                  )}
+                </td>
                 <td style={{ ...tdS, fontFamily: "'JetBrains Mono', monospace", color: p.bestPrice ? D.green : D.muted }}>{p.bestPrice ? `$${p.bestPrice.toFixed(2)}` : '—'}</td>
                 <td style={{ ...tdS, fontSize: 12 }}>{p.bestVendor || '—'}</td>
                 <td style={tdS}>{p.needsPricing ? <span style={sBadge(`${D.amber}22`, D.amber)}>Needs Price</span> : <span style={sBadge(`${D.green}22`, D.green)}>Priced</span>}</td>
@@ -248,8 +286,8 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange, showAddForm, s
                 </td>
               </tr>,
               isExpanded && (
-                <tr key={`${p.id}-exp`}><td colSpan={9} style={{ padding: '0 10px 16px', background: `${D.teal}05` }}>
-                  <ExpandedProduct product={p} vendors={vendors} onSave={savePrice} />
+                <tr key={`${p.id}-exp`}><td colSpan={10} style={{ padding: '0 10px 16px', background: `${D.teal}05` }}>
+                  <ExpandedProduct product={p} vendors={vendors} onSave={savePrice} onInventoryChanged={load} showToast={showToast} />
                 </td></tr>
               ),
             ];
@@ -274,10 +312,59 @@ function ProductsTab({ showToast, filter = 'all', onFilterChange, showAddForm, s
   );
 }
 
-function ExpandedProduct({ product, vendors, onSave }) {
+function ExpandedProduct({ product, vendors, onSave, onInventoryChanged, showToast }) {
   const [vendorId, setVendorId] = useState(vendors[0]?.id || '');
   const [price, setPrice] = useState('');
   const [qty, setQty] = useState('');
+  const [movements, setMovements] = useState([]);
+  const [movementLoading, setMovementLoading] = useState(true);
+  const [adjustForm, setAdjustForm] = useState({
+    movementType: 'restock',
+    quantity: '',
+    unit: product.inventoryUnit || 'oz',
+    lotNumber: '',
+    reason: '',
+    note: '',
+  });
+
+  const loadMovements = useCallback(async () => {
+    setMovementLoading(true);
+    try {
+      const data = await adminFetch(`/admin/inventory/${product.id}/movements`);
+      setMovements(data.movements || []);
+    } catch {
+      setMovements([]);
+    } finally {
+      setMovementLoading(false);
+    }
+  }, [product.id]);
+
+  useEffect(() => {
+    loadMovements();
+    setAdjustForm(f => ({ ...f, unit: product.inventoryUnit || f.unit || 'oz' }));
+  }, [loadMovements, product.inventoryUnit]);
+
+  const submitAdjustment = async () => {
+    if (!adjustForm.quantity || !adjustForm.unit) {
+      showToast?.('Amount and unit required');
+      return;
+    }
+    try {
+      await adminFetch(`/admin/inventory/${product.id}/adjust`, {
+        method: 'POST',
+        body: JSON.stringify({
+          ...adjustForm,
+          quantity: Number(adjustForm.quantity),
+        }),
+      });
+      showToast?.('Inventory adjusted');
+      setAdjustForm(f => ({ ...f, quantity: '', lotNumber: '', reason: '', note: '' }));
+      await loadMovements();
+      onInventoryChanged?.();
+    } catch (e) {
+      showToast?.(`Failed: ${e.message}`);
+    }
+  };
 
   return (
     <div style={{ padding: 12 }}>
@@ -285,6 +372,8 @@ function ExpandedProduct({ product, vendors, onSave }) {
         {product.formulation && <span style={{ color: D.muted }}>Formulation: <span style={{ color: D.text }}>{product.formulation}</span></span>}
         {product.unitSizeOz && <span style={{ color: D.muted }}>Size (oz): <span style={{ color: D.text }}>{product.unitSizeOz}</span></span>}
         {product.sku && <span style={{ color: D.muted }}>SKU: <span style={{ color: D.text }}>{product.sku}</span></span>}
+        <span style={{ color: D.muted }}>Stock: <span style={{ color: product.lowStock ? D.red : D.text }}>{product.inventoryOnHand != null ? `${product.inventoryOnHand} ${product.inventoryUnit || ''}` : 'not set'}</span></span>
+        {product.lowStockThreshold != null && <span style={{ color: D.muted }}>Low at: <span style={{ color: D.text }}>{product.lowStockThreshold} {product.inventoryUnit || ''}</span></span>}
       </div>
       {product.vendorPricing.length > 0 && (
         <div style={{ marginBottom: 12 }}>
@@ -312,6 +401,49 @@ function ExpandedProduct({ product, vendors, onSave }) {
         <div><label style={{ fontSize: 10, color: D.muted, display: 'block', marginBottom: 2 }}>Quantity</label>
           <input value={qty} onChange={e => setQty(e.target.value)} placeholder="e.g. 32 oz" style={{ ...sInput, width: 120 }} /></div>
         <button onClick={() => { if (price) { onSave(product.id, vendorId, price, qty); setPrice(''); setQty(''); } }} style={sBtn(D.teal, D.white)}>Add Price</button>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(260px, 380px) 1fr', gap: 12, marginTop: 14 }}>
+        <div style={{ background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12 }}>
+          <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Manual Adjustment</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            <select value={adjustForm.movementType} onChange={e => setAdjustForm(f => ({ ...f, movementType: e.target.value }))} style={sInput}>
+              <option value="restock">Restock</option>
+              <option value="correction">Correction</option>
+              <option value="damaged_lost">Damaged/Lost</option>
+            </select>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <input value={adjustForm.quantity} onChange={e => setAdjustForm(f => ({ ...f, quantity: e.target.value }))} type="number" step="0.0001" placeholder="Amount" style={{ ...sInput, width: '100%' }} />
+              <input value={adjustForm.unit} onChange={e => setAdjustForm(f => ({ ...f, unit: e.target.value }))} placeholder="unit" style={{ ...sInput, width: 70 }} />
+            </div>
+            <input value={adjustForm.lotNumber} onChange={e => setAdjustForm(f => ({ ...f, lotNumber: e.target.value }))} placeholder="Lot number" style={sInput} />
+            <input value={adjustForm.reason} onChange={e => setAdjustForm(f => ({ ...f, reason: e.target.value }))} placeholder="Reason" style={sInput} />
+            <input value={adjustForm.note} onChange={e => setAdjustForm(f => ({ ...f, note: e.target.value }))} placeholder="Note" style={{ ...sInput, gridColumn: '1 / -1' }} />
+          </div>
+          <button onClick={submitAdjustment} style={{ ...sBtn(D.green, D.white), marginTop: 8, width: '100%' }}>Apply Adjustment</button>
+        </div>
+        <div style={{ background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, minWidth: 0 }}>
+          <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Movement History</div>
+          {movementLoading ? (
+            <div style={{ color: D.muted, fontSize: 12 }}>Loading movements...</div>
+          ) : movements.length === 0 ? (
+            <div style={{ color: D.muted, fontSize: 12 }}>No inventory movements yet.</div>
+          ) : (
+            <div style={{ maxHeight: 220, overflow: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead><tr>{['Date', 'Type', 'Amount', 'Stock', 'Job/Reason'].map(h => <th key={h} style={thS}>{h}</th>)}</tr></thead>
+                <tbody>{movements.map(m => (
+                  <tr key={m.id}>
+                    <td style={{ ...tdS, fontSize: 11, color: D.muted }}>{m.createdAt ? new Date(m.createdAt).toLocaleDateString() : '—'}</td>
+                    <td style={tdS}><span style={sBadge(m.movementType === 'usage' ? `${D.teal}22` : m.movementType === 'damaged_lost' ? `${D.red}22` : `${D.green}22`, m.movementType === 'damaged_lost' ? D.red : m.movementType === 'usage' ? D.teal : D.green)}>{m.movementType}</span></td>
+                    <td style={{ ...tdS, fontFamily: "'JetBrains Mono', monospace" }}>{m.quantity ?? '—'} {m.unit || ''}</td>
+                    <td style={{ ...tdS, fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>{m.stockBefore ?? '—'} → {m.stockAfter ?? '—'}</td>
+                    <td style={{ ...tdS, fontSize: 11, color: D.muted }}>{m.customerName || m.metadata?.reason || m.metadata?.note || '—'}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

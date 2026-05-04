@@ -40,12 +40,52 @@ function calcLandedCost(price, shipping, taxRate) {
   return Math.round((p + s) * (1 + t) * 100) / 100;
 }
 
+function numberOrNull(value) {
+  if (value === '' || value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function normalizeInventoryUnit(unit) {
+  return String(unit || '').trim().toLowerCase().replace(/\s+/g, '_');
+}
+
+function mapProduct(product, vendorPricing = []) {
+  const inventoryOnHand = numberOrNull(product.inventory_on_hand);
+  const lowStockThreshold = numberOrNull(product.low_stock_threshold);
+  const lowStock = inventoryOnHand != null
+    && lowStockThreshold != null
+    && inventoryOnHand <= lowStockThreshold;
+  return {
+    id: product.id,
+    name: product.name,
+    category: product.category,
+    subcategory: product.subcategory || null,
+    activeIngredient: product.active_ingredient,
+    moaGroup: product.moa_group,
+    containerSize: product.container_size,
+    formulation: product.formulation,
+    sku: product.sku,
+    bestPrice: product.best_price ? parseFloat(product.best_price) : null,
+    bestVendor: product.best_vendor,
+    needsPricing: product.needs_pricing,
+    unitSizeOz: product.unit_size_oz || null,
+    unitType: product.unit_type || null,
+    monthlyCost: product.monthly_cost_estimate || null,
+    inventoryOnHand,
+    inventoryUnit: product.inventory_unit || null,
+    lowStockThreshold,
+    lowStock,
+    vendorPricing,
+  };
+}
+
 // =========================================================================
 // GET / — Dashboard: all products with pricing
 // =========================================================================
 router.get('/', async (req, res, next) => {
   try {
-    const { search, category, needsPricing, sort = 'name', page = 1, limit = 50 } = req.query;
+    const { search, category, needsPricing, stock, sort = 'name', page = 1, limit = 50 } = req.query;
 
     let query = db('products_catalog').orderBy(sort === 'price' ? 'best_price' : 'name');
     if (search) query = query.where(function () {
@@ -54,6 +94,12 @@ router.get('/', async (req, res, next) => {
     if (category) query = query.where('category', category);
     if (needsPricing === 'true') query = query.where('needs_pricing', true);
     if (needsPricing === 'false') query = query.where(function () { this.where('needs_pricing', false).orWhere('best_price', '>', 0); });
+    if (stock === 'low') {
+      query = query
+        .whereNotNull('inventory_on_hand')
+        .whereNotNull('low_stock_threshold')
+        .whereRaw('inventory_on_hand <= low_stock_threshold');
+    }
 
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const countQuery = query.clone().clearOrder().clearSelect().count('* as count');
@@ -100,16 +146,7 @@ router.get('/', async (req, res, next) => {
     } catch { /* table not created yet */ }
 
     res.json({
-      products: products.map(p => ({
-        id: p.id, name: p.name, category: p.category, subcategory: p.subcategory || null,
-        activeIngredient: p.active_ingredient, moaGroup: p.moa_group,
-        containerSize: p.container_size, formulation: p.formulation, sku: p.sku,
-        bestPrice: p.best_price ? parseFloat(p.best_price) : null,
-        bestVendor: p.best_vendor, needsPricing: p.needs_pricing,
-        unitSizeOz: p.unit_size_oz || null, unitType: p.unit_type || null,
-        monthlyCost: p.monthly_cost_estimate || null,
-        vendorPricing: pricingMap[p.id] || [],
-      })),
+      products: products.map(p => mapProduct(p, pricingMap[p.id] || [])),
       stats: {
         total: parseInt(stats?.total || 0),
         priced: parseInt(stats?.priced || 0),
@@ -354,6 +391,144 @@ router.get('/price-history/:productId', async (req, res, next) => {
 });
 
 // =========================================================================
+// GET /:productId/movements — inventory movement history for a product
+// =========================================================================
+router.get('/:productId/movements', async (req, res, next) => {
+  try {
+    const product = await db('products_catalog').where({ id: req.params.productId }).first();
+    if (!product) return res.status(404).json({ error: 'Product not found' });
+
+    const rows = await db('product_inventory_movements as pim')
+      .leftJoin('service_records as sr', 'pim.service_record_id', 'sr.id')
+      .leftJoin('scheduled_services as ss', 'pim.scheduled_service_id', 'ss.id')
+      .leftJoin('customers as c', 'pim.customer_id', 'c.id')
+      .leftJoin('technicians as t', 'pim.technician_id', 't.id')
+      .where('pim.product_id', req.params.productId)
+      .select(
+        'pim.*',
+        'sr.service_date',
+        'sr.service_type',
+        'ss.scheduled_date',
+        'c.first_name',
+        'c.last_name',
+        't.name as technician_name'
+      )
+      .orderBy('pim.created_at', 'desc')
+      .limit(Math.min(parseInt(req.query.limit || '100'), 250));
+
+    res.json({
+      movements: rows.map(r => ({
+        id: r.id,
+        productId: r.product_id,
+        serviceRecordId: r.service_record_id,
+        serviceProductId: r.service_product_id,
+        scheduledServiceId: r.scheduled_service_id,
+        customerId: r.customer_id,
+        customerName: `${r.first_name || ''} ${r.last_name || ''}`.trim() || null,
+        technicianId: r.technician_id,
+        technicianName: r.technician_name || null,
+        movementType: r.movement_type,
+        quantity: numberOrNull(r.quantity),
+        unit: r.unit,
+        unitCost: numberOrNull(r.unit_cost),
+        costUsed: numberOrNull(r.cost_used),
+        stockBefore: numberOrNull(r.stock_before),
+        stockAfter: numberOrNull(r.stock_after),
+        lotNumber: r.lot_number || null,
+        metadata: r.metadata || null,
+        serviceDate: r.service_date || r.scheduled_date || null,
+        serviceType: r.service_type || null,
+        createdAt: r.created_at,
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
+// POST /:productId/adjust — manual inventory stock adjustment
+// =========================================================================
+router.post('/:productId/adjust', async (req, res, next) => {
+  try {
+    const { movementType = 'correction', quantity, unit, lotNumber, reason, note } = req.body || {};
+    const allowedTypes = new Set(['restock', 'correction', 'damaged_lost']);
+    if (!allowedTypes.has(movementType)) return res.status(400).json({ error: 'Invalid movementType' });
+
+    const amount = numberOrNull(quantity);
+    if (amount == null || amount === 0) return res.status(400).json({ error: 'quantity is required' });
+    if ((movementType === 'restock' || movementType === 'damaged_lost') && amount <= 0) {
+      return res.status(400).json({ error: 'quantity must be positive' });
+    }
+
+    const result = await db.transaction(async (trx) => {
+      const product = await trx('products_catalog')
+        .where({ id: req.params.productId })
+        .forUpdate()
+        .first();
+      if (!product) {
+        const err = new Error('Product not found');
+        err.statusCode = 404;
+        throw err;
+      }
+
+      const inventoryUnit = unit || product.inventory_unit;
+      if (!inventoryUnit) {
+        const err = new Error('Inventory unit is required');
+        err.statusCode = 400;
+        throw err;
+      }
+
+      if (
+        product.inventory_unit
+        && normalizeInventoryUnit(inventoryUnit) !== normalizeInventoryUnit(product.inventory_unit)
+      ) {
+        const err = new Error(`Adjustment unit must match current inventory unit (${product.inventory_unit})`);
+        err.statusCode = 400;
+        throw err;
+      }
+
+      const stockBefore = numberOrNull(product.inventory_on_hand) || 0;
+      const delta = movementType === 'damaged_lost' ? -Math.abs(amount) : amount;
+      const stockAfter = Number((stockBefore + delta).toFixed(4));
+
+      await trx('products_catalog').where({ id: product.id }).update({
+        inventory_on_hand: stockAfter,
+        inventory_unit: inventoryUnit,
+        updated_at: new Date(),
+      });
+
+      const [movement] = await trx('product_inventory_movements').insert({
+        product_id: product.id,
+        movement_type: movementType,
+        quantity: amount,
+        unit: inventoryUnit,
+        stock_before: stockBefore,
+        stock_after: stockAfter,
+        lot_number: lotNumber || null,
+        metadata: {
+          source: 'admin_manual_adjustment',
+          reason: reason || null,
+          note: note || null,
+          delta,
+          adjustedBy: req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || null,
+        },
+      }).returning('*');
+
+      const updated = await trx('products_catalog').where({ id: product.id }).first();
+      return { product: updated, movement };
+    });
+
+    res.json({
+      success: true,
+      product: mapProduct(result.product),
+      movement: result.movement,
+    });
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
+});
+
+// =========================================================================
 // GET /service-usage — COGS mappings by service type
 // =========================================================================
 router.get('/service-usage', async (req, res, next) => {
@@ -493,6 +668,7 @@ router.get('/stats', async (req, res, next) => {
       db.raw('COUNT(*) as total_products'),
       db.raw("COUNT(*) FILTER (WHERE needs_pricing = false) as priced"),
       db.raw("COUNT(*) FILTER (WHERE needs_pricing = true) as needs_price"),
+      db.raw('COUNT(*) FILTER (WHERE inventory_on_hand IS NOT NULL AND low_stock_threshold IS NOT NULL AND inventory_on_hand <= low_stock_threshold) as low_stock'),
       db.raw("AVG(best_price) FILTER (WHERE best_price > 0) as avg_price"),
     );
     const [vendorStats] = await db('vendors').select(
@@ -521,7 +697,13 @@ router.get('/stats', async (req, res, next) => {
     } catch { /* table not created yet */ }
 
     res.json({
-      products: { total: parseInt(productStats.total_products), priced: parseInt(productStats.priced), needsPrice: parseInt(productStats.needs_price), avgPrice: productStats.avg_price },
+      products: {
+        total: parseInt(productStats.total_products),
+        priced: parseInt(productStats.priced),
+        needsPrice: parseInt(productStats.needs_price),
+        lowStock: parseInt(productStats.low_stock || 0),
+        avgPrice: productStats.avg_price,
+      },
       vendors: { total: parseInt(vendorStats.total_vendors), scrapingEnabled: parseInt(vendorStats.scraping_enabled) },
       approvals: { pending: parseInt(approvalStats.pending || 0), approved: parseInt(approvalStats.approved || 0), rejected: parseInt(approvalStats.rejected || 0) },
       scrapeJobs: { total: parseInt(scrapeStats.total_jobs || 0), completed: parseInt(scrapeStats.completed || 0), failed: parseInt(scrapeStats.failed || 0) },
@@ -549,16 +731,55 @@ async function recalcBestPrice(productId) {
 // POST / — create a new product
 router.post('/', async (req, res, next) => {
   try {
-    const { name, category, subcategory, activeIngredient, moaGroup, defaultUnit, unitSize, epaRegNumber } = req.body;
+    const {
+      name,
+      category,
+      subcategory,
+      activeIngredient,
+      moaGroup,
+      defaultUnit,
+      unitSize,
+      inventoryOnHand,
+      inventoryUnit,
+      lowStockThreshold,
+    } = req.body;
     if (!name) return res.status(400).json({ error: 'Product name is required' });
+    const initialStock = numberOrNull(inventoryOnHand);
+    const lowStock = numberOrNull(lowStockThreshold);
+    if ((initialStock != null || lowStock != null) && !inventoryUnit) {
+      return res.status(400).json({ error: 'Inventory unit is required when stock values are set' });
+    }
 
-    const [product] = await db('products_catalog').insert({
-      name, category: category || null, subcategory: subcategory || null,
-      active_ingredient: activeIngredient || null, moa_group: moaGroup || null,
-      default_unit: defaultUnit || 'oz',
-      container_size: unitSize || null,
-      formulation: req.body.formulation || null,
-    }).returning('*');
+    const product = await db.transaction(async (trx) => {
+      const [inserted] = await trx('products_catalog').insert({
+        name, category: category || null, subcategory: subcategory || null,
+        active_ingredient: activeIngredient || null, moa_group: moaGroup || null,
+        default_unit: defaultUnit || 'oz',
+        container_size: unitSize || null,
+        formulation: req.body.formulation || null,
+        inventory_on_hand: initialStock,
+        inventory_unit: inventoryUnit || null,
+        low_stock_threshold: lowStock,
+      }).returning('*');
+
+      if (initialStock != null) {
+        await trx('product_inventory_movements').insert({
+          product_id: inserted.id,
+          movement_type: 'correction',
+          quantity: initialStock,
+          unit: inventoryUnit,
+          stock_before: 0,
+          stock_after: initialStock,
+          metadata: {
+            source: 'admin_product_create',
+            reason: 'Initial stock',
+            delta: initialStock,
+            adjustedBy: req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || null,
+          },
+        });
+      }
+      return inserted;
+    });
 
     res.status(201).json(product);
   } catch (err) { next(err); }
@@ -626,11 +847,75 @@ router.put('/:id', async (req, res, next) => {
     for (const [camel, snake] of Object.entries(allowed)) {
       if (req.body[camel] !== undefined) upd[snake] = req.body[camel];
     }
+    const nextStock = req.body.inventoryOnHand !== undefined
+      ? numberOrNull(req.body.inventoryOnHand)
+      : numberOrNull(product.inventory_on_hand);
+    const nextThreshold = req.body.lowStockThreshold !== undefined
+      ? numberOrNull(req.body.lowStockThreshold)
+      : numberOrNull(product.low_stock_threshold);
+    const nextUnit = req.body.inventoryUnit !== undefined
+      ? req.body.inventoryUnit || null
+      : product.inventory_unit || null;
+    if ((nextStock != null || nextThreshold != null) && !nextUnit) {
+      return res.status(400).json({ error: 'Inventory unit is required when stock values are set' });
+    }
 
-    await db('products_catalog').where({ id: req.params.id }).update(upd);
-    const updated = await db('products_catalog').where({ id: req.params.id }).first();
+    if (req.body.inventoryUnit !== undefined) upd.inventory_unit = nextUnit;
+    if (req.body.lowStockThreshold !== undefined) upd.low_stock_threshold = nextThreshold;
+
+    const updated = await db.transaction(async (trx) => {
+      const locked = await trx('products_catalog').where({ id: req.params.id }).forUpdate().first();
+      if (!locked) {
+        const err = new Error('Product not found');
+        err.statusCode = 404;
+        throw err;
+      }
+      const stockBefore = numberOrNull(locked.inventory_on_hand);
+      const stockChanged = req.body.inventoryOnHand !== undefined && stockBefore !== nextStock;
+      const currentUnit = locked.inventory_unit || null;
+      if (nextStock != null && currentUnit && nextUnit && normalizeInventoryUnit(currentUnit) !== normalizeInventoryUnit(nextUnit)) {
+        const err = new Error(`Inventory unit must stay ${currentUnit} when editing stock; use a manual adjustment after normalizing units`);
+        err.statusCode = 400;
+        throw err;
+      }
+      const movementUnit = nextUnit || currentUnit;
+      if (stockChanged && !movementUnit) {
+        const err = new Error('Inventory unit is required when stock changes');
+        err.statusCode = 400;
+        throw err;
+      }
+
+      if (stockChanged) {
+        upd.inventory_on_hand = nextStock;
+        upd.inventory_unit = nextUnit;
+      }
+
+      await trx('products_catalog').where({ id: req.params.id }).update(upd);
+      if (stockChanged) {
+        const before = stockBefore || 0;
+        const after = nextStock || 0;
+        await trx('product_inventory_movements').insert({
+          product_id: req.params.id,
+          movement_type: 'correction',
+          quantity: Number((after - before).toFixed(4)),
+          unit: movementUnit,
+          stock_before: before,
+          stock_after: after,
+          metadata: {
+            source: 'admin_inline_stock_edit',
+            reason: 'Inline product stock edit',
+            delta: Number((after - before).toFixed(4)),
+            adjustedBy: req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || null,
+          },
+        });
+      }
+      return trx('products_catalog').where({ id: req.params.id }).first();
+    });
     res.json({ success: true, product: updated });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
 });
 
 // =========================================================================
