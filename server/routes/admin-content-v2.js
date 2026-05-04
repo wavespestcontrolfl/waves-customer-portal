@@ -1,14 +1,42 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const BlogWriter = require('../services/content/blog-writer');
 const BlogAuditor = require('../services/content/blog-auditor');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
+
+const BLOG_UPDATE_FIELDS = new Set([
+  'title',
+  'content',
+  'meta_description',
+  'keyword',
+  'tag',
+  'status',
+  'author_slug',
+  'reviewer_slug',
+  'technically_reviewed_at',
+  'fact_checked_by',
+  'fact_checked_at',
+  'category',
+  'post_type',
+  'service_areas_tag',
+  'related_services',
+  'target_sites',
+  'hero_image_alt',
+]);
+
+function pickAllowedBlogUpdates(body) {
+  const updates = {};
+  for (const [key, value] of Object.entries(body || {})) {
+    if (BLOG_UPDATE_FIELDS.has(key)) updates[key] = value;
+  }
+  return updates;
+}
 
 // ── Gemini hero-image generator ─────────────────────────────────────
 //
@@ -226,7 +254,7 @@ router.get('/blog/:id', async (req, res, next) => {
 // PUT /api/admin/content/blog/:id
 router.put('/blog/:id', async (req, res, next) => {
   try {
-    const updates = { ...req.body, updated_at: new Date() };
+    const updates = { ...pickAllowedBlogUpdates(req.body), updated_at: new Date() };
     if (updates.content) {
       updates.word_count = updates.content.split(/\s+/).filter(Boolean).length;
     }
@@ -330,12 +358,9 @@ router.post('/blog/ideas', async (req, res, next) => {
 
 // POST /api/admin/content/blog/:id/publish — publish to wavespestcontrol.com
 router.post('/blog/:id/publish', async (req, res, next) => {
-  try {
-    const post = await db('blog_posts').where('id', req.params.id).first();
-    if (!post) return res.status(404).json({ error: 'Post not found' });
-    await db('blog_posts').where('id', req.params.id).update({ status: 'published', publish_date: new Date() });
-    res.json({ success: true, link: `https://www.wavespestcontrol.com/${post.slug}` });
-  } catch (err) { next(err); }
+  res.status(410).json({
+    error: 'Legacy direct blog publish is retired. Use /blog/:id/publish-astro to open an Astro PR, then merge after preview review.',
+  });
 });
 
 // POST /api/admin/content/blog/:id/publish-astro — create branch + PR

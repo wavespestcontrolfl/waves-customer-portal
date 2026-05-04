@@ -43,8 +43,12 @@ class BlogAuditor {
 
       // ISSUE 7: No internal links
       noInternalLinks: published.filter(p => {
-        const html = p.content_html || '';
-        return (html.match(/href="https?:\/\/wavespestcontrol\.com/g) || []).length === 0;
+        const body = `${p.content || ''}\n${p.content_html || ''}`;
+        return (
+          (body.match(/href=["']https?:\/\/(www\.)?wavespestcontrol\.com/g) || []).length +
+          (body.match(/\]\(https?:\/\/(www\.)?wavespestcontrol\.com/g) || []).length +
+          (body.match(/\]\(\/[a-z0-9][^)]+\/\)/gi) || []).length
+        ) === 0;
       }).map(p => ({ id: p.id, title: p.title })),
 
       // ISSUE 8: City distribution

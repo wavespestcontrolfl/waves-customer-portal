@@ -8,6 +8,42 @@
 const db = require('../models/db');
 const logger = require('./logger');
 
+async function sharePublishedBlog(blog) {
+  if (!blog.auto_share_social || blog.shared_to_social) return true;
+
+  try {
+    const SocialMediaService = require('./social-media');
+    const link = blog.astro_live_url || blog.url || `https://www.wavespestcontrol.com/${blog.slug}`;
+    const result = await SocialMediaService.publishToAll({
+      title: blog.title,
+      description: blog.meta_description || (blog.content || '').replace(/[#*_\[\]]/g, '').substring(0, 300),
+      link,
+      guid: `blog_${blog.id}`,
+      source: 'blog_scheduled',
+    });
+    const platforms = Array.isArray(result?.platforms) ? result.platforms : [];
+    const shared = result?.success || platforms.some((platform) => platform.success);
+
+    if (!shared) {
+      const failures = platforms
+        .filter((platform) => !platform.success)
+        .map((platform) => `${platform.platform || 'unknown'}:${platform.error || 'failed'}`)
+        .join('; ');
+      logger.warn(`[content-scheduler] Social share produced no successful platforms for blog ${blog.id}${failures ? `: ${failures}` : ''}`);
+      return false;
+    }
+
+    await db('blog_posts').where('id', blog.id).update({
+      shared_to_social: true,
+      shared_at: new Date(),
+    });
+    return true;
+  } catch (err) {
+    logger.warn(`[content-scheduler] Social share failed for blog ${blog.id}: ${err.message}`);
+    return false;
+  }
+}
+
 const ContentScheduler = {
 
   /**
@@ -116,7 +152,18 @@ const ContentScheduler = {
 
     // ── Process blog posts ──────────────────────────────────────
     const pendingBlogs = await db('blog_posts')
-      .where('publish_status', 'pending')
+      .where(function () {
+        this.where(function () {
+          this.where('publish_status', 'pending')
+            .where(function () {
+              this.whereNull('astro_status')
+                .orWhereNotIn('astro_status', ['pr_open', 'build_failed', 'publish_failed', 'merged', 'live', 'unpublish_pending']);
+            });
+        }).orWhere(function () {
+          this.where('publish_status', 'pending_review')
+            .whereIn('astro_status', ['merged', 'live']);
+        });
+      })
       .whereNotNull('scheduled_publish_at')
       .where('scheduled_publish_at', '<=', now);
 
@@ -124,34 +171,48 @@ const ContentScheduler = {
       try {
         await db('blog_posts').where('id', blog.id).update({ publish_status: 'publishing' });
 
-        // Auto-share to social if enabled
-        if (blog.auto_share_social) {
-          try {
-            const SocialMediaService = require('./social-media');
-            const link = blog.url || `https://www.wavespestcontrol.com/${blog.slug}`;
-            await SocialMediaService.publishToAll({
-              title: blog.title,
-              description: blog.meta_description || (blog.content || '').replace(/[#*_\[\]]/g, '').substring(0, 300),
-              link,
-              guid: `blog_${blog.id}`,
-              source: 'blog_scheduled',
-            });
-          } catch (socialErr) {
-            logger.warn(`[content-scheduler] Social share failed for blog "${blog.title}": ${socialErr.message}`);
-          }
+        if (!blog.content) {
+          throw new Error('Scheduled blog has no content; cannot open Astro publish PR');
         }
 
-        await db('blog_posts').where('id', blog.id).update({
-          publish_status: 'published',
-          status: 'published',
-          updated_at: new Date(),
-        });
+        if (['pr_open', 'build_failed'].includes(blog.astro_status)) {
+          await db('blog_posts').where('id', blog.id).update({
+            publish_status: 'pending_review',
+            updated_at: new Date(),
+          });
+        } else if (['merged', 'live'].includes(blog.astro_status)) {
+          const socialShared = await sharePublishedBlog(blog);
+          if (!socialShared) {
+            await db('blog_posts').where('id', blog.id).update({
+              publish_status: 'pending_review',
+              updated_at: new Date(),
+            });
+            continue;
+          }
+          await db('blog_posts').where('id', blog.id).update({
+            publish_status: 'published',
+            status: 'published',
+            updated_at: new Date(),
+          });
+        } else {
+          const AstroPublisher = require('./content-astro/astro-publisher');
+          await AstroPublisher.publishAstro(blog.id);
+          await db('blog_posts').where('id', blog.id).update({
+            publish_status: 'pending_review',
+            updated_at: new Date(),
+          });
+        }
+
         blogCount++;
-        logger.info(`[content-scheduler] Published blog: "${blog.title}"`);
+        logger.info(`[content-scheduler] Opened/synchronized Astro publish review for blog ${blog.id}`);
       } catch (err) {
         errors++;
-        await db('blog_posts').where('id', blog.id).update({ publish_status: 'failed' });
-        logger.error(`[content-scheduler] Failed to publish blog "${blog.title}": ${err.message}`);
+        const terminalFailure = err.message === 'Scheduled blog has no content; cannot open Astro publish PR';
+        await db('blog_posts').where('id', blog.id).update({
+          publish_status: terminalFailure ? 'failed' : 'pending_review',
+          updated_at: new Date(),
+        });
+        logger.error(`[content-scheduler] Failed to publish blog ${blog.id}: ${err.message}`);
       }
     }
 

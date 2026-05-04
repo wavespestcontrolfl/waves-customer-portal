@@ -16,10 +16,10 @@
  * worker (not this service).
  *
  * Image handling: admin UI uploads/generates `featured_image_url`. If it
- * points at a portal-hosted or remote image, we download the bytes, convert
- * to webp if needed, and commit to `public/images/blog/<slug>/hero.webp`
- * in the same feature branch as the markdown file. Referenced in the
- * frontmatter as `/images/blog/<slug>/hero.webp`.
+ * points at a portal-hosted or remote image, we download the bytes and commit
+ * a hero image using the detected source format in the same feature branch as
+ * the markdown file. Referenced in the frontmatter as
+ * `/images/blog/<slug>/hero.<ext>`.
  */
 
 const gh = require('./github-client');
@@ -59,8 +59,10 @@ async function buildFrontmatter(post) {
   const heroRef = post.featured_image_url
     ? (post.featured_image_url.startsWith('/images/blog/')
         ? post.featured_image_url
-        : `/images/blog/${slug}/hero.webp`)
+        : `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.${post.hero_image_ext || imageExtFromSource(post.featured_image_url)}`)
     : null;
+  const technicallyReviewedDate = dateOnly(post.technically_reviewed_at);
+  const factCheckedDate = dateOnly(post.fact_checked_at);
 
   const data = {
     schemaVersion: 2,
@@ -103,8 +105,8 @@ async function buildFrontmatter(post) {
     fact_checked_by: post.fact_checked_by || undefined,
     published: today,
     updated: today,
-    technically_reviewed: reviewer ? today : undefined,
-    fact_checked: post.fact_checked_by ? today : undefined,
+    technically_reviewed: reviewer && technicallyReviewedDate ? technicallyReviewedDate : undefined,
+    fact_checked: post.fact_checked_by && factCheckedDate ? factCheckedDate : undefined,
     review_cadence: 'quarterly',
     reading_time_min: post.reading_time_min || estimateReadingTime(post.content),
     hero_image: heroRef ? {
@@ -135,17 +137,54 @@ function estimateReadingTime(text) {
   return Math.max(1, Math.round(words / 220));
 }
 
+const ASTRO_HERO_PUBLIC_BASE = '/images/blog';
+
+function dateOnly(value) {
+  if (!value) return null;
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
+}
+
+function imageExtFromMime(mime) {
+  if (mime === 'image/png') return 'png';
+  if (mime === 'image/jpeg' || mime === 'image/jpg') return 'jpg';
+  if (mime === 'image/webp') return 'webp';
+  return null;
+}
+
+function imageExtFromSource(url) {
+  if (!url) return 'webp';
+  const dataMatch = String(url).match(/^data:(image\/[a-z0-9.+-]+);base64,/i);
+  if (dataMatch) return imageExtFromMime(dataMatch[1].toLowerCase()) || 'webp';
+  try {
+    const path = new URL(url, 'https://www.wavespestcontrol.com').pathname.toLowerCase();
+    if (path.endsWith('.png')) return 'png';
+    if (path.endsWith('.jpg') || path.endsWith('.jpeg')) return 'jpg';
+    if (path.endsWith('.webp')) return 'webp';
+  } catch { /* fall through */ }
+  return 'webp';
+}
+
 // ── Image fetch (optional) ─────────────────────────────────────────
 
 async function fetchImageBuffer(url) {
   if (!url) return null;
   // In-repo path — nothing to fetch, already committed.
   if (url.startsWith('/images/blog/')) return null;
+  const dataMatch = String(url).match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
+  if (dataMatch) {
+    return {
+      buffer: Buffer.from(dataMatch[2], 'base64'),
+      ext: imageExtFromMime(dataMatch[1].toLowerCase()),
+    };
+  }
   try {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const buf = Buffer.from(await res.arrayBuffer());
-    return buf;
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const ext = imageExtFromMime((res.headers.get('content-type') || '').split(';')[0].toLowerCase()) || imageExtFromSource(url);
+    return { buffer, ext };
   } catch (err) {
     logger.warn(`[astro-publisher] image fetch failed (${url}): ${err.message}`);
     return null;
@@ -166,12 +205,14 @@ async function publishAstro(postId) {
     await gh.createBranch(branch);
 
     // 1. Hero image (optional) — only commit when the source isn't already in-repo.
+    let heroImageExt = imageExtFromSource(post.featured_image_url);
     if (post.featured_image_url && !post.featured_image_url.startsWith('/images/blog/')) {
-      const buf = await fetchImageBuffer(post.featured_image_url);
-      if (buf) {
+      const image = await fetchImageBuffer(post.featured_image_url);
+      if (image?.buffer) {
+        heroImageExt = image.ext || heroImageExt;
         await gh.putBinary({
-          path: `${ASTRO_HERO_DIR}/${slug}/hero.webp`,
-          buffer: buf,
+          path: `${ASTRO_HERO_DIR}/${slug}/hero.${heroImageExt}`,
+          buffer: image.buffer,
           message: `chore(blog): add hero image for ${slug}`,
           branch,
         });
@@ -179,7 +220,7 @@ async function publishAstro(postId) {
     }
 
     // 2. Markdown file
-    const data = await buildFrontmatter({ ...post, slug });
+    const data = await buildFrontmatter({ ...post, slug, hero_image_ext: heroImageExt });
     const body = (post.content || '').trim();
     const markdown = fm.stringify(data, body + '\n');
     const filePath = `${ASTRO_BLOG_DIR}/${slug}.md`;
@@ -325,21 +366,28 @@ async function unpublishAstro(postId) {
       sha: mdFile.sha,
     });
 
-    const heroPath = `${ASTRO_HERO_DIR}/${slug}/hero.webp`;
-    const heroFile = await gh.getFile(heroPath);
+    const heroCandidates = ['webp', 'png', 'jpg'].map((ext) => `${ASTRO_HERO_DIR}/${slug}/hero.${ext}`);
+    const heroFiles = [];
+    for (const path of heroCandidates) {
+      const file = await gh.getFile(path);
+      if (file) heroFiles.push({ path, file });
+    }
+    const heroFile = heroFiles[0]?.file || null;
     if (heroFile) {
-      await gh.deleteFile({
-        path: heroPath,
-        message: `chore(blog): remove hero for ${slug}`,
-        branch,
-        sha: heroFile.sha,
-      });
+      for (const found of heroFiles) {
+        await gh.deleteFile({
+          path: found.path,
+          message: `chore(blog): remove hero for ${slug}`,
+          branch,
+          sha: found.file.sha,
+        });
+      }
     }
 
     const prBody = [
       `**Unpublish from admin portal**`,
       ``,
-      `Removes \`${mdPath}\`${heroFile ? ` and \`${heroPath}\`` : ''} from main.`,
+      `Removes \`${mdPath}\`${heroFile ? ' and committed hero image assets' : ''} from main.`,
       ``,
       `Merge to take the post offline. After merge the post returns to \`draft\` state in the portal and can be republished later.`,
       ``,
