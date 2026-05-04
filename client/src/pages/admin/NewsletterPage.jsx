@@ -19,7 +19,18 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Badge, Button, Card, CardBody } from '../../components/ui';
-import { Users, Zap, Calendar, FileText, TrendingUp, Sparkles, Upload, MapPin } from 'lucide-react';
+import {
+  Users,
+  Zap,
+  Calendar,
+  FileText,
+  TrendingUp,
+  Sparkles,
+  Upload,
+  MapPin,
+  MailPlus,
+  Send,
+} from 'lucide-react';
 import { ComposeView, HistoryView, SubscribersView } from './NewsletterTabs';
 import EmailAutomationsPanelV2 from './EmailAutomationsPanelV2';
 
@@ -41,11 +52,11 @@ function adminFetch(path, options = {}) {
 }
 
 const TABS = [
-  { key: 'dashboard', label: 'Dashboard' },
-  { key: 'compose', label: 'Compose' },
-  { key: 'history', label: 'History' },
-  { key: 'subscribers', label: 'Subscribers' },
-  { key: 'automations', label: 'Automations' },
+  { key: 'dashboard', label: 'Dashboard', desc: 'Overview' },
+  { key: 'compose', label: 'Compose', desc: 'Draft + send' },
+  { key: 'history', label: 'History', desc: 'Performance' },
+  { key: 'subscribers', label: 'Subscribers', desc: 'Audience' },
+  { key: 'automations', label: 'Automations', desc: 'Drips' },
 ];
 
 function StatTile({ icon: Icon, label, value, sub }) {
@@ -65,12 +76,82 @@ function StatTile({ icon: Icon, label, value, sub }) {
 
 function SectionHeader({ title, hint, action }) {
   return (
-    <div className="flex items-baseline justify-between mb-3">
-      <div>
+    <div className="flex items-start justify-between gap-3 mb-3">
+      <div className="min-w-0">
         <h2 className="text-14 font-medium text-ink-primary">{title}</h2>
         {hint && <div className="text-12 text-ink-tertiary mt-0.5">{hint}</div>}
       </div>
       {action}
+    </div>
+  );
+}
+
+function PageHeader({ onCompose, subscribersActive, sendsData }) {
+  const sentCount = sendsData ? (sendsData.counts?.sent ?? 0) : null;
+  const scheduledCount = sendsData ? (sendsData.counts?.scheduled ?? 0) : null;
+  return (
+    <div className="bg-white border-hairline border-zinc-200 rounded-sm p-4 sm:p-5 mb-4">
+      <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 mb-2">
+            <div className="h-8 w-8 rounded-sm bg-zinc-900 text-white inline-flex items-center justify-center">
+              <MailPlus size={16} strokeWidth={1.75} aria-hidden />
+            </div>
+            <div>
+              <h1 className="text-24 sm:text-28 font-medium text-ink-primary leading-tight m-0">Newsletter</h1>
+              <p className="text-12 text-ink-tertiary mt-0.5">
+                Plan, write, send, and track the Waves neighborhood email list.
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2 mt-3">
+            <Badge tone="muted">{subscribersActive != null ? subscribersActive.toLocaleString() : '—'} active subscribers</Badge>
+            <Badge tone="muted">{sentCount != null ? sentCount.toLocaleString() : '—'} sent campaigns</Badge>
+            <Badge tone={scheduledCount ? 'neutral' : 'muted'}>{scheduledCount ?? '—'} scheduled</Badge>
+          </div>
+        </div>
+        <div className="flex flex-col sm:flex-row gap-2 lg:justify-end">
+          <Button onClick={onCompose}>
+            <MailPlus size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
+            New Campaign
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TabBar({ tab, tabs, tabCounts, onSelect }) {
+  return (
+    <div className="tab-pill-scroll mb-5">
+      <div className="tab-pill-scroll-inner inline-flex min-w-full sm:min-w-0 items-stretch gap-1 bg-zinc-100 border-hairline border-zinc-200 rounded-sm p-1">
+        {tabs.map((t) => {
+          const active = tab === t.key;
+          return (
+            <button
+              key={t.key}
+              type="button"
+              onClick={() => onSelect(t.key)}
+              className={[
+                'min-h-[44px] sm:min-h-0 sm:h-12 px-3 sm:px-4 rounded-xs text-left transition-colors u-focus-ring flex-1 sm:flex-none',
+                active ? 'bg-zinc-900 text-white' : 'bg-transparent text-ink-secondary hover:bg-white hover:text-ink-primary',
+              ].join(' ')}
+            >
+              <span className="block text-12 font-medium uppercase tracking-label whitespace-nowrap">
+                {t.label}
+                {tabCounts[t.key] != null && (
+                  <span className={active ? 'text-zinc-300 ml-1.5' : 'text-ink-tertiary ml-1.5'}>
+                    ({tabCounts[t.key].toLocaleString()})
+                  </span>
+                )}
+              </span>
+              <span className={active ? 'block text-10 text-zinc-300 mt-0.5' : 'block text-10 text-ink-tertiary mt-0.5'}>
+                {t.desc}
+              </span>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -220,6 +301,24 @@ function QuickActions({ onSelectTab }) {
   );
 }
 
+function ManageTile({ icon: Icon, title, body, onClick }) {
+  return (
+    <Card className="cursor-pointer hover:bg-zinc-50 transition-colors" onClick={onClick}>
+      <CardBody>
+        <div className="flex items-start gap-3">
+          <div className="h-9 w-9 rounded-sm bg-zinc-100 text-zinc-900 inline-flex items-center justify-center flex-shrink-0">
+            <Icon size={17} strokeWidth={1.75} aria-hidden />
+          </div>
+          <div className="min-w-0">
+            <div className="text-14 font-medium text-ink-primary">{title}</div>
+            <div className="text-12 text-ink-tertiary mt-1 leading-snug">{body}</div>
+          </div>
+        </div>
+      </CardBody>
+    </Card>
+  );
+}
+
 function PostStatusBadge({ status }) {
   if (status === 'sent') return <Badge tone="strong">Sent</Badge>;
   if (status === 'sending') return <Badge tone="neutral">Sending…</Badge>;
@@ -311,7 +410,7 @@ function DashboardView({ onSelectTab, onDraftFromEvent, sendsData, sendsLoading,
   return (
     <div>
       {/* Stats strip */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-6">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
         <StatTile
           icon={Users}
           label="Subscribers"
@@ -361,7 +460,7 @@ function DashboardView({ onSelectTab, onDraftFromEvent, sendsData, sendsLoading,
             </CardBody>
           </Card>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
             {events.map((e) => (
               <EventCard key={e.id} event={e} onDraft={onDraftFromEvent ? () => onDraftFromEvent(e) : null} />
             ))}
@@ -389,20 +488,26 @@ function DashboardView({ onSelectTab, onDraftFromEvent, sendsData, sendsLoading,
       {/* Sub-page tile — Automations */}
       <div className="mb-6">
         <SectionHeader title="Manage" hint="Jump straight to a section" />
-        <Card
-          className="cursor-pointer hover:bg-zinc-50 transition-colors"
-          onClick={() => onSelectTab('automations')}
-        >
-          <CardBody>
-            <div className="flex items-center gap-2 mb-2">
-              <Zap size={18} strokeWidth={1.75} className="text-zinc-900" />
-              <span className="text-14 font-medium text-ink-primary">Automations</span>
-            </div>
-            <div className="text-12 text-ink-tertiary">
-              Automated flows like Referral Nudge, Payment Failed, New Appointment Booked.
-            </div>
-          </CardBody>
-        </Card>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <ManageTile
+            icon={Send}
+            title="Past sends"
+            body="Review delivered counts, bounces, unsubscribes, and A/B subject performance."
+            onClick={() => onSelectTab('history')}
+          />
+          <ManageTile
+            icon={Users}
+            title="Audience"
+            body="Search, export, add, and unsubscribe newsletter contacts."
+            onClick={() => onSelectTab('subscribers')}
+          />
+          <ManageTile
+            icon={Zap}
+            title="Automations"
+            body="Manage referral nudges, payment failed flows, booking triggers, and drips."
+            onClick={() => onSelectTab('automations')}
+          />
+        </div>
       </div>
     </div>
   );
@@ -488,51 +593,14 @@ export default function NewsletterPage() {
   const clearPendingDraftEvent = () => setPendingDraftEvent(null);
 
   return (
-    <div>
-      {/* Title + Create */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
-        <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: '#18181B', margin: 0 }}>
-          <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Newsletter</span>
-          <span className="hidden md:inline">Newsletter</span>
-        </h1>
-        <button
-          type="button"
-          onClick={() => setTab('compose')}
-          style={{
-            padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
-            background: '#18181B', color: '#fff', border: 'none', cursor: 'pointer',
-            whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
-            fontFamily: "'DM Sans', sans-serif",
-          }}
-        >
-          + Add Newsletter
-        </button>
-      </div>
+    <div className="space-y-0">
+      <PageHeader
+        onCompose={() => setTab('compose')}
+        subscribersActive={subscribersActive}
+        sendsData={sendsData}
+      />
 
-      {/* Tabs — pill group, matches Blog/Generate page tab style */}
-      <div className="tab-pill-scroll" style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
-        <div className="tab-pill-scroll-inner" style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
-          {TABS.map((t) => (
-            <button
-              key={t.key}
-              type="button"
-              onClick={() => setTab(t.key)}
-              style={{
-                padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
-                background: tab === t.key ? '#18181B' : 'transparent',
-                color: tab === t.key ? '#FFFFFF' : '#A1A1AA',
-                fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
-                fontFamily: "'DM Sans', sans-serif",
-              }}
-            >
-              {t.label}
-              {tabCounts[t.key] != null && (
-                <span style={{ marginLeft: 6, fontSize: 11, opacity: 0.7 }}>({tabCounts[t.key]})</span>
-              )}
-            </button>
-          ))}
-        </div>
-      </div>
+      <TabBar tab={tab} tabs={TABS} tabCounts={tabCounts} onSelect={setTab} />
 
       {/* Tab content */}
       {tab === 'dashboard' && (

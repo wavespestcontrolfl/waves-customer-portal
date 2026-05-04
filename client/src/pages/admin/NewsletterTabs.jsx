@@ -9,9 +9,39 @@
 import React, {
   useState, useEffect, useCallback, useMemo,
 } from 'react';
+import {
+  CalendarClock,
+  Download,
+  Eye,
+  MailCheck,
+  Save,
+  Search,
+  Send,
+  UserPlus,
+  Wand2,
+} from 'lucide-react';
 import { Badge, Button, Card, cn } from '../../components/ui';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const INPUT_CLS = 'w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900';
+const TEXTAREA_CLS = `${INPUT_CLS} font-mono leading-relaxed`;
+const PANEL_CLS = 'bg-white border-hairline border-zinc-200 rounded-sm';
+
+function FieldLabel({ children }) {
+  return <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">{children}</label>;
+}
+
+function PanelHeader({ title, hint, action }) {
+  return (
+    <div className="flex items-start justify-between gap-3 p-4 border-b border-hairline border-zinc-200">
+      <div className="min-w-0">
+        <h3 className="text-14 font-medium text-zinc-900">{title}</h3>
+        {hint && <p className="text-12 text-ink-tertiary mt-0.5">{hint}</p>}
+      </div>
+      {action}
+    </div>
+  );
+}
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -405,28 +435,32 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComple
     setStatus('AI draft inserted. Review before saving.');
   };
 
-  return (
-    <Card className="p-5">
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <h3 className="text-16 font-medium text-zinc-900">New campaign</h3>
-          <p className="text-12 text-ink-secondary mt-0.5">
-            {segmentCount !== null && segmentFilter
-              ? `${segmentCount} of ${activeCount ?? '?'} subscribers match segment`
-              : activeCount !== null
-                ? `${activeCount} active subscriber${activeCount === 1 ? '' : 's'}`
-                : 'Loading subscribers…'}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button onClick={() => setAiOpen(true)} variant="secondary">Draft with AI</Button>
-          {draftId && <Badge tone="neutral">Draft saved</Badge>}
-        </div>
-      </div>
+  const audienceLabel = segmentCount !== null && segmentFilter
+    ? `${segmentCount} of ${activeCount ?? '?'} subscribers match segment`
+    : activeCount !== null
+      ? `${activeCount} active subscriber${activeCount === 1 ? '' : 's'}`
+      : 'Loading subscribers…';
 
-      <div className="space-y-3">
-        <div>
-          <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">Template</label>
+  return (
+    <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-4">
+      <div className={PANEL_CLS}>
+        <PanelHeader
+          title="Campaign Content"
+          hint="Write the message body, subject, preview text, and sender details."
+          action={(
+            <div className="flex items-center gap-2">
+              {draftId && <Badge tone="neutral">Draft saved</Badge>}
+              <Button onClick={() => setAiOpen(true)} variant="secondary">
+                <Wand2 size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
+                Draft With AI
+              </Button>
+            </div>
+          )}
+        />
+
+        <div className="p-4 space-y-4">
+          <div>
+            <FieldLabel>Template</FieldLabel>
           <div className="flex flex-wrap gap-1.5">
             {TEMPLATES.map((t) => (
               <button
@@ -440,14 +474,14 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComple
         </div>
 
         <div>
-          <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+          <FieldLabel>
             Subject {abEnabled && <span className="text-ink-tertiary normal-case">(A)</span>}
-          </label>
+          </FieldLabel>
           <input
             type="text"
             value={subject}
             onChange={(e) => setSubject(e.target.value)}
-            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
+            className={INPUT_CLS}
             placeholder="e.g. Florida spring pest alert — what to watch for"
           />
           <label className="mt-2 inline-flex items-center gap-2 text-12 text-ink-secondary">
@@ -458,31 +492,83 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComple
 
         {abEnabled && (
           <div>
-            <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">Subject (B)</label>
+            <FieldLabel>Subject (B)</FieldLabel>
             <input
               type="text"
               value={subjectB}
               onChange={(e) => setSubjectB(e.target.value)}
-              className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
+              className={INPUT_CLS}
               placeholder="Alternative subject line"
             />
           </div>
         )}
 
         <div>
-          <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">Preview text</label>
+          <FieldLabel>Preview text</FieldLabel>
           <input
             type="text"
             value={previewText}
             onChange={(e) => setPreviewText(e.target.value)}
-            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
+            className={INPUT_CLS}
             placeholder="One-line preview that renders after the subject in Gmail/Apple Mail."
           />
         </div>
 
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <FieldLabel>From name</FieldLabel>
+            <input
+              type="text"
+              value={fromName}
+              onChange={(e) => setFromName(e.target.value)}
+              className={INPUT_CLS}
+            />
+          </div>
+          <div>
+            <FieldLabel>From email</FieldLabel>
+            <input
+              type="text"
+              value={fromEmail}
+              onChange={(e) => setFromEmail(e.target.value)}
+              className={`${INPUT_CLS} font-mono`}
+            />
+          </div>
+        </div>
+
         <div>
-          <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">Audience</label>
-          <div className="flex flex-wrap gap-1.5 mb-2">
+          <FieldLabel>HTML body</FieldLabel>
+          <textarea
+            value={htmlBody}
+            onChange={(e) => setHtmlBody(e.target.value)}
+            rows={16}
+            className={TEXTAREA_CLS}
+            placeholder="<h1>Subject line</h1><p>Your newsletter content here. The unsubscribe footer is appended automatically.</p>"
+          />
+          <p className="text-11 text-ink-tertiary mt-1">
+            The unsubscribe footer + List-Unsubscribe header are added automatically — do not include your own.
+          </p>
+        </div>
+
+        <div>
+          <FieldLabel>
+            Plain-text fallback <span className="text-ink-tertiary normal-case">(optional — improves deliverability)</span>
+          </FieldLabel>
+          <textarea
+            value={textBody}
+            onChange={(e) => setTextBody(e.target.value)}
+            rows={5}
+            className={INPUT_CLS}
+            placeholder="Same content in plain text for mail clients that don't render HTML."
+          />
+        </div>
+      </div>
+      </div>
+
+      <aside className="space-y-4">
+        <div className={PANEL_CLS}>
+          <PanelHeader title="Audience" hint={audienceLabel} />
+          <div className="p-4 space-y-3">
+            <div className="flex flex-wrap gap-1.5">
             {[
               { key: 'all', label: 'All active' },
               { key: 'customers', label: 'Customers only' },
@@ -524,9 +610,9 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComple
           )}
 
           <div className="mt-3">
-            <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+            <FieldLabel>
               Tags <span className="normal-case tracking-normal text-ink-tertiary">(optional, additive)</span>
-            </label>
+            </FieldLabel>
             <div className="flex flex-wrap items-center gap-1.5">
               {segmentTags.map((t) => (
                 <button
@@ -566,101 +652,69 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComple
             </div>
           </div>
         </div>
-
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">From name</label>
-            <input
-              type="text"
-              value={fromName}
-              onChange={(e) => setFromName(e.target.value)}
-              className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
-            />
-          </div>
-          <div>
-            <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">From email</label>
-            <input
-              type="text"
-              value={fromEmail}
-              onChange={(e) => setFromEmail(e.target.value)}
-              className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 font-mono focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
-            />
-          </div>
         </div>
 
-        <div>
-          <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">HTML body</label>
-          <textarea
-            value={htmlBody}
-            onChange={(e) => setHtmlBody(e.target.value)}
-            rows={12}
-            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 font-mono focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
-            placeholder="<h1>Subject line</h1><p>Your newsletter content here. The unsubscribe footer is appended automatically.</p>"
-          />
-          <p className="text-11 text-ink-tertiary mt-1">
-            The unsubscribe footer + List-Unsubscribe header are added automatically — do not include your own.
-          </p>
-        </div>
-
-        <div>
-          <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
-            Plain-text fallback <span className="text-ink-tertiary normal-case">(optional — improves deliverability)</span>
-          </label>
-          <textarea
-            value={textBody}
-            onChange={(e) => setTextBody(e.target.value)}
-            rows={4}
-            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
-            placeholder="Same content in plain text for mail clients that don't render HTML."
-          />
-        </div>
-
-        <div className="flex items-center gap-3 pt-2 border-t border-hairline border-zinc-200">
-          <Button onClick={saveDraft} variant="secondary" disabled={!subject}>
+        <div className={PANEL_CLS}>
+          <PanelHeader title="Review + Send" hint="Save before test sends, live sends, or scheduling." />
+          <div className="p-4 space-y-3">
+          <Button onClick={saveDraft} variant="secondary" disabled={!subject} className="w-full">
+            <Save size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
             {draftId ? 'Update draft' : 'Save draft'}
           </Button>
-          <Button onClick={openPreview} variant="secondary" disabled={!htmlBody}>Preview</Button>
-          <div className="flex items-center gap-2 ml-auto">
+          <Button onClick={openPreview} variant="secondary" disabled={!htmlBody} className="w-full">
+            <Eye size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
+            Preview
+          </Button>
+          <div>
+            <FieldLabel>Test recipient</FieldLabel>
             <input
               type="text"
               value={testEmail}
               onChange={(e) => setTestEmail(e.target.value)}
-              className="bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-12 text-zinc-900 font-mono w-56"
+              className={`${INPUT_CLS} font-mono`}
               placeholder="test@wavespestcontrol.com"
             />
-            <Button onClick={sendTest} variant="secondary" disabled={!draftId || !testEmail}>Send test</Button>
-            <Button onClick={sendNow} disabled={!draftId || !htmlBody || segmentCount === 0}>Send to all</Button>
+          </div>
+          <Button onClick={sendTest} variant="secondary" disabled={!draftId || !testEmail} className="w-full">
+            <MailCheck size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
+            Send Test
+          </Button>
+          <Button onClick={sendNow} disabled={!draftId || !htmlBody || segmentCount === 0} className="w-full">
+            <Send size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
+            Send To Audience
+          </Button>
           </div>
         </div>
 
-        <div className="flex items-center gap-2 pt-2">
-          <label className="text-11 uppercase tracking-label text-ink-secondary">Schedule</label>
-          <input
-            type="datetime-local"
-            value={scheduleAt}
-            onChange={(e) => setScheduleAt(e.target.value)}
-            className="bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-12 text-zinc-900 font-mono"
-          />
-          <Button onClick={schedule} variant="secondary" disabled={!draftId || !scheduleAt || !htmlBody}>Schedule send</Button>
-          {/* The datetime-local input is parsed in the browser's local
-              timezone — show the resolved ET equivalent so an operator
-              on PT/CT can verify it lands on the wall-clock minute they
-              meant before clicking Schedule. */}
-          <span className="text-11 text-ink-tertiary ml-auto">
-            {scheduleAt
-              ? `Fires ${new Date(scheduleAt).toLocaleString('en-US', {
-                  timeZone: 'America/New_York',
-                  month: 'short', day: 'numeric',
-                  hour: 'numeric', minute: '2-digit',
-                })} ET (within 1 min)`
-              : 'America/New_York · fires within 1 min of target'}
-          </span>
+        <div className={PANEL_CLS}>
+          <PanelHeader title="Schedule" hint="Queued sends fire within one minute of the target time." />
+          <div className="p-4 space-y-3">
+            <input
+              type="datetime-local"
+              value={scheduleAt}
+              onChange={(e) => setScheduleAt(e.target.value)}
+              className={`${INPUT_CLS} font-mono`}
+            />
+            <Button onClick={schedule} variant="secondary" disabled={!draftId || !scheduleAt || !htmlBody} className="w-full">
+              <CalendarClock size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
+              Schedule Send
+            </Button>
+            <div className="text-11 text-ink-tertiary">
+              {scheduleAt
+                ? `Fires ${new Date(scheduleAt).toLocaleString('en-US', {
+                    timeZone: 'America/New_York',
+                    month: 'short', day: 'numeric',
+                    hour: 'numeric', minute: '2-digit',
+                  })} ET`
+                : 'America/New_York timezone'}
+            </div>
+          </div>
         </div>
 
         {status && (
-          <div className="text-12 text-ink-secondary pt-2">{status}</div>
+          <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-3 text-12 text-ink-secondary">{status}</div>
         )}
-      </div>
+      </aside>
 
       {aiOpen && (
         <AiDraftModal
@@ -694,7 +748,7 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComple
           onConfirm={confirmSend}
         />
       )}
-    </Card>
+    </div>
   );
 }
 
@@ -989,9 +1043,12 @@ export function HistoryView() {
   };
 
   return (
-    <Card className="p-5">
-      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-        <h3 className="text-16 font-medium text-zinc-900">Past sends</h3>
+    <Card className="p-0 overflow-hidden">
+      <div className="flex items-center justify-between p-4 border-b border-hairline border-zinc-200 flex-wrap gap-2">
+        <div>
+          <h3 className="text-16 font-medium text-zinc-900">Past sends</h3>
+          <p className="text-12 text-ink-tertiary mt-0.5">Delivery health, scheduling, and subject-line results.</p>
+        </div>
         <span className="text-11 text-ink-tertiary u-nums">{sends.length} campaign{sends.length === 1 ? '' : 's'}</span>
       </div>
 
@@ -1000,14 +1057,14 @@ export function HistoryView() {
       ) : sends.length === 0 ? (
         <div className="text-13 text-ink-secondary p-8 text-center">No campaigns yet. Compose your first newsletter in the Compose tab.</div>
       ) : (
-        <div className="space-y-0 -mx-5">
+        <div className="space-y-0">
           {sends.map((s) => {
             const pct = s.recipient_count ? Math.round((s.delivered_count / s.recipient_count) * 100) : 0;
             const isAb = !!s.subject_b;
             const isOpen = expandedId === s.id;
             return (
               <div key={s.id} className="border-b border-hairline border-zinc-200">
-                <div className="px-5 py-3 flex items-start gap-4">
+                <div className="px-4 py-3 flex flex-col lg:flex-row lg:items-start gap-3 lg:gap-4">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-1 flex-wrap">
                       <span className="text-14 font-medium text-zinc-900 truncate">{s.subject}</span>
@@ -1035,7 +1092,7 @@ export function HistoryView() {
                       <div className="text-11 text-ink-tertiary mt-0.5 truncate">B: {s.subject_b}</div>
                     )}
                   </div>
-                  <div className="flex items-center gap-5 text-12 flex-shrink-0">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 lg:flex lg:items-center gap-3 lg:gap-5 text-12 flex-shrink-0">
                     {s.status === 'scheduled' ? (
                       <button
                         type="button"
@@ -1259,16 +1316,25 @@ export function SubscribersView() {
   };
 
   return (
-    <Card className="p-5">
-      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-        <h3 className="text-16 font-medium text-zinc-900">Subscribers</h3>
-        <div className="flex items-center gap-2">
-          <Button onClick={exportCsv} variant="secondary">Export CSV</Button>
-          <Button onClick={addSubscriber} variant="secondary">+ Add subscriber</Button>
+    <Card className="p-0 overflow-hidden">
+      <div className="flex items-start justify-between p-4 border-b border-hairline border-zinc-200 flex-wrap gap-3">
+        <div>
+          <h3 className="text-16 font-medium text-zinc-900">Subscribers</h3>
+          <p className="text-12 text-ink-tertiary mt-0.5">Search the list, export filtered contacts, and manage opt-outs.</p>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <Button onClick={exportCsv} variant="secondary">
+            <Download size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
+            Export CSV
+          </Button>
+          <Button onClick={addSubscriber} variant="secondary">
+            <UserPlus size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
+            Add Subscriber
+          </Button>
         </div>
       </div>
 
-      <div className="flex items-center gap-2 mb-3 flex-wrap">
+      <div className="p-4 border-b border-hairline border-zinc-100 flex items-center gap-2 flex-wrap">
         {['active', 'unsubscribed', 'bounced', 'all'].map((f) => {
           const active = filter === f;
           const count = f === 'all'
@@ -1291,25 +1357,28 @@ export function SubscribersView() {
             </button>
           );
         })}
-        <input
-          type="text"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Search email…"
-          className="ml-auto bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-12 text-zinc-900 w-64"
-        />
+        <div className="relative w-full sm:w-72 sm:ml-auto">
+          <Search size={14} strokeWidth={1.75} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-tertiary" aria-hidden />
+          <input
+            type="text"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search email…"
+            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 pl-8 pr-2 text-12 text-zinc-900"
+          />
+        </div>
       </div>
 
-      {status && <div className="text-12 text-ink-secondary mb-2">{status}</div>}
+      {status && <div className="mx-4 mt-3 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-3 text-12 text-ink-secondary">{status}</div>}
 
       {loading ? (
         <div className="text-13 text-ink-secondary p-6 text-center">Loading…</div>
       ) : subs.length === 0 ? (
         <div className="text-13 text-ink-secondary p-8 text-center">No subscribers in this filter.</div>
       ) : (
-        <div className="-mx-5">
+        <div>
           {subs.map((s) => (
-            <div key={s.id} className="px-5 py-2.5 border-b border-hairline border-zinc-200 flex items-center gap-4">
+            <div key={s.id} className="px-4 py-3 border-b border-hairline border-zinc-200 flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4">
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
                   <span className="text-13 text-zinc-900 font-mono truncate">{s.email}</span>
@@ -1327,7 +1396,7 @@ export function SubscribersView() {
                 <button
                   type="button"
                   onClick={() => removeSubscriber(s.id, s.email)}
-                  className="text-11 px-2 py-1 border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-zinc-900 hover:border-zinc-900 u-focus-ring"
+                  className="text-11 px-2 py-1 border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-zinc-900 hover:border-zinc-900 u-focus-ring self-start sm:self-center"
                 >Unsubscribe</button>
               )}
             </div>
