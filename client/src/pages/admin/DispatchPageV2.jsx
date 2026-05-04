@@ -1543,6 +1543,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
           onEdit={(svc) => { setDetailService(null); setEditingService(svc); }}
           onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
           onReviewCheckout={(svc) => setCheckoutService(svc)}
+          onCompleteService={(svc) => { setDetailService(null); setCompletingService(svc); }}
           onBookNext={(svc) => {
             setDetailService(null);
             setNewApptDefaults({
