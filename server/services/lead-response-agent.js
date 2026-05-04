@@ -333,8 +333,9 @@ const LeadResponseAgent = {
           }]);
         }
 
-        if (event === 'done' || event === 'session_complete' || data?.stop_reason === 'end_turn') break;
-        if (event === 'error') {
+        const stopReason = typeof data?.stop_reason === 'string' ? data.stop_reason : data?.stop_reason?.type;
+        if (event === 'done' || event === 'session_complete' || event === 'session.status_idle' || stopReason === 'end_turn') break;
+        if (event === 'error' || event === 'session.error') {
           logger.error(`[lead-agent] Agent error: ${JSON.stringify(data)}`);
           break;
         }
