@@ -13,6 +13,7 @@
  *   3. Call `triggerNotification('your_key', { ... })` from the route that fires it
  */
 const db = require('../models/db');
+const crypto = require('crypto');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const PushService = require('./push-notifications');
@@ -191,6 +192,14 @@ const PRIORITY_VIBRATE = {
   low:    [100],
 };
 
+function pushTagFor(triggerKey, payload = {}) {
+  if (triggerKey === 'sms_reply') {
+    const thread = payload.threadId || 'unknown-thread';
+    return `waves-sms_reply-${thread}-${crypto.randomUUID()}`;
+  }
+  return `waves-${triggerKey}`;
+}
+
 /**
  * Fire a notification event. Non-blocking — never throws.
  *
@@ -272,10 +281,11 @@ async function triggerNotification(triggerKey, payload = {}) {
               title: built.title,
               body: built.body,
               url: built.link || '/admin',
-              tag: `waves-${triggerKey}`,
+              tag: pushTagFor(triggerKey, payload),
               priority: trigger.priority,
               vibrate: wantsSound ? PRIORITY_VIBRATE[trigger.priority] : [0],
               silent: !wantsSound,
+              renotify: triggerKey === 'sms_reply',
             };
           }
         );
@@ -296,4 +306,4 @@ function listTriggers() {
   }));
 }
 
-module.exports = { triggerNotification, listTriggers, TRIGGER_REGISTRY };
+module.exports = { triggerNotification, listTriggers, TRIGGER_REGISTRY, __private: { pushTagFor } };

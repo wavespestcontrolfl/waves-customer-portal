@@ -68,6 +68,10 @@ function authCustomerPayload(customer) {
   };
 }
 
+function accountIdForCustomer(customer) {
+  return customer?.account_id || customer?.id || null;
+}
+
 function propertyPayload(customer) {
   return {
     id: customer.id,
@@ -181,8 +185,9 @@ router.post('/verify-code', verifyCodeLimiter, async (req, res, next) => {
       return res.status(401).json(invalidResponse);
     }
 
-    const token = generateToken(customer.id);
-    const refreshToken = generateRefreshToken(customer.id);
+    const accountId = accountIdForCustomer(customer);
+    const token = generateToken(customer.id, accountId);
+    const refreshToken = generateRefreshToken(customer.id, accountId);
 
     logger.info(`[auth] customer login success: id=${customer.id}`);
 
@@ -222,9 +227,19 @@ router.post('/refresh', refreshLimiter, async (req, res, next) => {
     const customer = await db('customers').where({ id: decoded.customerId, active: true }).whereNull('deleted_at').first();
     if (!customer) return res.status(401).json({ error: 'Invalid refresh token' });
 
-    // Rotate: issue a new access AND refresh token tied to the same customer.
-    const newToken = generateToken(customer.id);
-    const newRefreshToken = generateRefreshToken(customer.id);
+    const accountId = decoded.accountId || accountIdForCustomer(customer);
+
+    if (decoded.accountId) {
+      const customerAccountId = accountIdForCustomer(customer);
+      if (String(decoded.accountId) !== String(customerAccountId)) {
+        return res.status(401).json({ error: 'Invalid refresh token' });
+      }
+    }
+
+    // Rotate: issue a new access AND refresh token tied to the same account
+    // and currently selected service property.
+    const newToken = generateToken(customer.id, accountId);
+    const newRefreshToken = generateRefreshToken(customer.id, accountId);
     res.json({ token: newToken, refreshToken: newRefreshToken });
   } catch (err) {
     return res.status(401).json({ error: 'Invalid refresh token' });
@@ -308,14 +323,14 @@ router.post('/select-property', authenticate, async (req, res, next) => {
 
     if (!target) return res.status(404).json({ error: 'Property not found' });
 
-    const currentAccountId = req.customer.account_id || req.customer.id;
-    const targetAccountId = target.account_id || target.id;
-    if (String(currentAccountId) !== String(targetAccountId)) {
+    const currentAccountId = req.accountId || accountIdForCustomer(req.customer);
+    const targetAccountId = accountIdForCustomer(target);
+    if (!currentAccountId || String(currentAccountId) !== String(targetAccountId)) {
       return res.status(403).json({ error: 'Property is not available for this account' });
     }
 
-    const token = generateToken(target.id);
-    const refreshToken = generateRefreshToken(target.id);
+    const token = generateToken(target.id, currentAccountId);
+    const refreshToken = generateRefreshToken(target.id, currentAccountId);
 
     res.json({
       token,

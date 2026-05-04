@@ -125,6 +125,37 @@ async function createDefaultCustomerRows(trx, customerId) {
     .ignore();
 }
 
+async function attachMatchedCustomerToAccount(trx, customer) {
+  if (!customer) return null;
+  if (customer.account_id) return customer.account_id;
+
+  const accountId = customer.id;
+  await trx('customer_accounts')
+    .insert({
+      id: accountId,
+      first_name: customer.first_name,
+      last_name: customer.last_name,
+      phone: customer.phone || null,
+      email: customer.email ? String(customer.email).trim().toLowerCase() : null,
+      company_name: customer.company_name || null,
+      created_at: customer.created_at || new Date(),
+      updated_at: new Date(),
+    })
+    .onConflict('id')
+    .ignore();
+
+  await trx('customers')
+    .where({ id: customer.id })
+    .update({
+      account_id: accountId,
+      is_primary_profile: customer.is_primary_profile === false ? false : true,
+      profile_label: customer.profile_label || 'Primary',
+      updated_at: new Date(),
+    });
+
+  return accountId;
+}
+
 async function findAccountByContact(trx, { phone }) {
   const digits = phoneLast10(phone);
   if (digits) {
@@ -135,7 +166,8 @@ async function findAccountByContact(trx, { phone }) {
       .orderBy('created_at', 'asc')
       .first();
     if (byCustomerPhone) {
-      return { accountId: byCustomerPhone.account_id, existingCustomer: byCustomerPhone, matchType: 'phone' };
+      const accountId = await attachMatchedCustomerToAccount(trx, byCustomerPhone);
+      return { accountId, existingCustomer: { ...byCustomerPhone, account_id: accountId }, matchType: 'phone' };
     }
   }
 
@@ -154,22 +186,7 @@ async function ensureCustomerAccount(trx, input) {
     company_name: input.companyName || null,
   }).returning('*');
 
-  if (existing?.existingCustomer) {
-    await trx('customers')
-      .where({ id: existing.existingCustomer.id })
-      .update({
-        account_id: account.id,
-        is_primary_profile: true,
-        profile_label: existing.existingCustomer.profile_label || 'Primary',
-      });
-    return {
-      accountId: account.id,
-      existingCustomer: { ...existing.existingCustomer, account_id: account.id },
-      matchType: existing.matchType,
-    };
-  }
-
-  return { accountId: account.id, existingCustomer: null, matchType: 'new' };
+  return { accountId: account.id, existingCustomer: null, matchType: null };
 }
 
 async function accountPropertySummary(accountId, excludeCustomerId = null) {
@@ -182,6 +199,39 @@ async function accountPropertySummary(accountId, excludeCustomerId = null) {
     .orderBy('created_at', 'asc');
   if (excludeCustomerId) query = query.whereNot({ id: excludeCustomerId });
   return query;
+}
+
+async function findCrossAccountContactConflict(customerId, accountId, updates) {
+  const normalizedAccountId = accountId ? String(accountId) : null;
+  const conflicts = [];
+
+  if (updates.phone !== undefined) {
+    const digits = phoneLast10(updates.phone);
+    if (digits) {
+      const rows = await db('customers')
+        .whereNull('deleted_at')
+        .whereNot({ id: customerId })
+        .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}`])
+        .select('id', 'account_id', 'first_name', 'last_name', 'phone');
+      const conflict = rows.find((row) => String(row.account_id || row.id) !== normalizedAccountId);
+      if (conflict) conflicts.push({ field: 'phone', customer: conflict });
+    }
+  }
+
+  if (updates.email !== undefined) {
+    const email = cleanEmail(updates.email);
+    if (email) {
+      const rows = await db('customers')
+        .whereNull('deleted_at')
+        .whereNot({ id: customerId })
+        .whereRaw('LOWER(email) = ?', [email])
+        .select('id', 'account_id', 'first_name', 'last_name', 'email');
+      const conflict = rows.find((row) => String(row.account_id || row.id) !== normalizedAccountId);
+      if (conflict) conflicts.push({ field: 'email', customer: conflict });
+    }
+  }
+
+  return conflicts[0] || null;
 }
 
 // --- Static POST routes (must be registered before /:id handlers to avoid route shadowing) ---
@@ -302,7 +352,7 @@ router.post('/quick-add', async (req, res, next) => {
       return { ...created, _attachedToExistingAccount: !!account.existingCustomer, _propertyCount: Number(siblingCount?.count || 0) + 1 };
     });
 
-    logger.info(`[customers] Quick-add created customer=${customer.id} account=${customer.account_id || 'none'}`);
+    logger.info(`[customers] Quick-add created customer_id=${customer.id} account_id=${customer.account_id || customer.id}`);
 
     res.status(201).json({
       customer: {
@@ -988,6 +1038,9 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         if (v === 'monthly_rate') { updates[v] = req.body[k] === '' ? 0 : parseFloat(req.body[k]) || 0; }
         else if (v === 'next_follow_up_date') { updates[v] = req.body[k] || null; }
         else if (v === 'has_left_google_review') { updates[v] = !!req.body[k]; }
+        else if (v === 'email') { updates[v] = cleanEmail(req.body[k]); }
+        else if (v === 'phone') { updates[v] = cleanText(req.body[k]); }
+        else if (v === 'state') { updates[v] = cleanState(req.body[k]); }
         else { updates[v] = req.body[k]; }
       }
     }
@@ -998,6 +1051,23 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     let before = null;
     if (Object.keys(updates).length) {
       before = await db('customers').where({ id: req.params.id }).first();
+      if (!before) return res.status(404).json({ error: 'Customer not found' });
+
+      const contactConflict = await findCrossAccountContactConflict(
+        req.params.id,
+        before.account_id || before.id,
+        updates
+      );
+      if (contactConflict) {
+        const c = contactConflict.customer;
+        return res.status(409).json({
+          error: 'contact_exists_on_another_account',
+          field: contactConflict.field,
+          message: `That ${contactConflict.field} is already used by ${c.first_name || ''} ${c.last_name || ''}`.trim(),
+          existingCustomerId: c.id,
+        });
+      }
+
       await db('customers').where({ id: req.params.id }).update(updates);
       const sensitiveFields = ['email', 'phone', 'secondary_phone', 'address_line1', 'city', 'state', 'zip', 'monthly_rate', 'active', 'pipeline_stage', 'service_contact_name', 'service_contact_phone', 'service_contact_email'];
       const changed = Object.keys(updates).filter(field => before && before[field] !== updates[field]);

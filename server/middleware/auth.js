@@ -25,8 +25,14 @@ async function authenticate(req, res, next) {
       return res.status(401).json({ error: 'Customer not found or inactive' });
     }
 
+    const customerAccountId = customer.account_id || customer.id;
+    if (decoded.accountId && String(decoded.accountId) !== String(customerAccountId)) {
+      return res.status(401).json({ error: 'Invalid token account' });
+    }
+
     req.customer = customer;
     req.customerId = customer.id;
+    req.accountId = decoded.accountId || customerAccountId;
     next();
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
@@ -39,17 +45,17 @@ async function authenticate(req, res, next) {
 /**
  * Generate JWT for a customer
  */
-function generateToken(customerId) {
+function generateToken(customerId, accountId = null) {
   return jwt.sign(
-    { customerId },
+    { customerId, accountId: accountId || undefined },
     config.jwt.secret,
     { expiresIn: config.jwt.expiry }
   );
 }
 
-function generateRefreshToken(customerId) {
+function generateRefreshToken(customerId, accountId = null) {
   return jwt.sign(
-    { customerId, type: 'refresh' },
+    { customerId, accountId: accountId || undefined, type: 'refresh' },
     config.jwt.secret,
     { expiresIn: config.jwt.refreshExpiry }
   );
