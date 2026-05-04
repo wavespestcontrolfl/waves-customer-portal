@@ -7,8 +7,9 @@
  * Data sources:
  *   revenue      — service_records.revenue, else customers.monthly_rate
  *   labor_cost   — time_entries.duration_minutes × company_financials.loaded_labor_rate
- *   products_cost — property_application_history × products_catalog.cost_per_unit
- *                   (falls back to cheapest vendor_pricing.price)
+ *   products_cost — product_inventory_movements.cost_used, plus
+ *                   property_application_history fallback costs for
+ *                   products without costed inventory movements
  *   expenses     — expenses WHERE scheduled_service_id=?
  *
  * Idempotent: re-running replaces prior row for the same scheduled_service_id.
@@ -55,6 +56,40 @@ async function calcLaborCost(scheduledServiceId, technicianId, startTime, endTim
 async function calcProductsCost(serviceRecordId) {
   let total = 0;
   const breakdown = [];
+  const costedInventoryProductIds = new Set();
+  try {
+    const movementRows = await db('product_inventory_movements as pim')
+      .leftJoin('products_catalog as pc', 'pim.product_id', 'pc.id')
+      .where({ service_record_id: serviceRecordId, movement_type: 'usage' })
+      .select(
+        'pim.product_id',
+        'pim.quantity',
+        'pim.unit',
+        'pim.unit_cost',
+        'pim.cost_used',
+        'pim.stock_after',
+        'pc.name as product_name',
+      );
+    for (const r of movementRows) {
+      const line = Number(r.cost_used);
+      if (!Number.isFinite(line)) continue;
+      total += line;
+      if (r.product_id) costedInventoryProductIds.add(r.product_id);
+      breakdown.push({
+        product_id: r.product_id,
+        product_name: r.product_name,
+        qty: Number(r.quantity) || 0,
+        unit: r.unit,
+        unit_cost: r.unit_cost != null ? Number(r.unit_cost) : null,
+        line,
+        stock_after: r.stock_after != null ? Number(r.stock_after) : null,
+        source: 'inventory_movement',
+      });
+    }
+  } catch (err) {
+    logger.debug(`[job-costing] inventory movement cost error: ${err.message}`);
+  }
+
   try {
     const rows = await db('property_application_history')
       .where({ service_record_id: serviceRecordId })
@@ -63,6 +98,7 @@ async function calcProductsCost(serviceRecordId) {
     for (const r of rows) {
       const qty = Number(r.quantity_applied) || 0;
       if (!qty || !r.product_id) continue;
+      if (costedInventoryProductIds.has(r.product_id)) continue;
 
       let unitCost = null;
       const prod = await db('products_catalog').where({ id: r.product_id }).first();

@@ -156,6 +156,184 @@ function tankCleanoutWarnings(cleanout, selectedCalibration) {
   return [];
 }
 
+function normalizeInventoryUnit(unit) {
+  return String(unit || '').trim().toLowerCase().replace(/\s+/g, '_');
+}
+
+const INVENTORY_UNIT_TO_OZ = {
+  oz: 1,
+  fl_oz: 1,
+  floz: 1,
+  ounce: 1,
+  ounces: 1,
+  gal: 128,
+  gallon: 128,
+  gallons: 128,
+  qt: 32,
+  quart: 32,
+  pt: 16,
+  pint: 16,
+  ml: 0.033814,
+  l: 33.814,
+  liter: 33.814,
+  lb: 16,
+  lbs: 16,
+  pound: 16,
+  g: 0.035274,
+  gram: 0.035274,
+  kg: 35.274,
+};
+
+function convertInventoryQuantity(amount, fromUnit, toUnit) {
+  const n = Number(amount);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const from = normalizeInventoryUnit(fromUnit);
+  const to = normalizeInventoryUnit(toUnit);
+  if (!from || !to || from === to) return n;
+  const fromFactor = INVENTORY_UNIT_TO_OZ[from];
+  const toFactor = INVENTORY_UNIT_TO_OZ[to];
+  if (!fromFactor || !toFactor) return null;
+  return Number(((n * fromFactor) / toFactor).toFixed(4));
+}
+
+function calculateInventoryCost({ product, deductedAmount, inventoryUnit, amount, amountUnit }) {
+  const costPerUnit = product?.cost_per_unit != null ? Number(product.cost_per_unit) : null;
+  if (costPerUnit != null && Number.isFinite(costPerUnit) && costPerUnit >= 0) {
+    const costUnit = product.cost_unit || inventoryUnit;
+    const costQuantity = convertInventoryQuantity(deductedAmount, inventoryUnit, costUnit);
+    if (costQuantity != null) {
+      return {
+        unitCost: costPerUnit,
+        costUsed: Number((costQuantity * costPerUnit).toFixed(4)),
+      };
+    }
+  }
+
+  const bestPrice = product?.best_price != null ? Number(product.best_price) : null;
+  const unitSizeOz = product?.unit_size_oz != null ? Number(product.unit_size_oz) : null;
+  const usedOz = convertInventoryQuantity(amount, amountUnit, 'oz');
+  if (
+    bestPrice != null && Number.isFinite(bestPrice) && bestPrice >= 0
+    && unitSizeOz != null && Number.isFinite(unitSizeOz) && unitSizeOz > 0
+    && usedOz != null
+  ) {
+    return {
+      unitCost: Number((bestPrice / unitSizeOz).toFixed(4)),
+      costUsed: Number(((usedOz / unitSizeOz) * bestPrice).toFixed(4)),
+    };
+  }
+
+  return { unitCost: null, costUsed: null };
+}
+
+async function deductProductInventory(trx, {
+  product,
+  productInput,
+  serviceProduct,
+  serviceRecord,
+  scheduledService,
+}) {
+  const lockedProduct = await trx('products_catalog')
+    .where({ id: product.id })
+    .forUpdate()
+    .first();
+  const inventoryProduct = lockedProduct || product;
+  const amount = productInput.totalAmount != null && productInput.totalAmount !== ''
+    ? Number(productInput.totalAmount)
+    : null;
+  const amountUnit = productInput.amountUnit || productInput.rateUnit || null;
+  const snapshot = {
+    productId: inventoryProduct.id,
+    productName: inventoryProduct.name,
+    amount,
+    amountUnit,
+    status: 'not_deducted',
+    warning: null,
+  };
+
+  if (!amount || !Number.isFinite(amount) || amount <= 0 || !amountUnit) {
+    return {
+      ...snapshot,
+      warning: 'No confirmed product amount was provided, so inventory was not deducted.',
+    };
+  }
+
+  if (inventoryProduct.inventory_on_hand == null || inventoryProduct.inventory_on_hand === '') {
+    return {
+      ...snapshot,
+      warning: 'Product has no inventory_on_hand value, so inventory was not deducted.',
+    };
+  }
+
+  const inventoryUnit = inventoryProduct.inventory_unit || amountUnit;
+  const deductedAmount = convertInventoryQuantity(amount, amountUnit, inventoryUnit);
+  if (deductedAmount == null) {
+    return {
+      ...snapshot,
+      inventoryUnit,
+      warning: `Cannot convert ${amountUnit} to ${inventoryUnit}; inventory was not deducted.`,
+    };
+  }
+
+  const stockBefore = Number(inventoryProduct.inventory_on_hand);
+  if (!Number.isFinite(stockBefore)) {
+    return {
+      ...snapshot,
+      inventoryUnit,
+      warning: 'Product inventory_on_hand is not numeric, so inventory was not deducted.',
+    };
+  }
+  const stockAfter = Number((stockBefore - deductedAmount).toFixed(4));
+  const insufficient = stockAfter < 0;
+  const { unitCost, costUsed } = calculateInventoryCost({
+    product: inventoryProduct,
+    deductedAmount,
+    inventoryUnit,
+    amount,
+    amountUnit,
+  });
+
+  await trx('products_catalog')
+    .where({ id: inventoryProduct.id })
+    .update({ inventory_on_hand: stockAfter, updated_at: new Date() });
+
+  const [movement] = await trx('product_inventory_movements').insert({
+    product_id: inventoryProduct.id,
+    service_record_id: serviceRecord.id,
+    service_product_id: serviceProduct.id,
+    scheduled_service_id: scheduledService.id,
+    customer_id: scheduledService.customer_id,
+    technician_id: scheduledService.technician_id,
+    movement_type: 'usage',
+    quantity: deductedAmount,
+    unit: inventoryUnit,
+    unit_cost: unitCost,
+    cost_used: costUsed,
+    stock_before: stockBefore,
+    stock_after: stockAfter,
+    lot_number: productInput.lotNumber || productInput.lot_number || null,
+    metadata: {
+      enteredAmount: amount,
+      enteredUnit: amountUnit,
+      insufficientStock: insufficient,
+    },
+  }).returning('*');
+
+  return {
+    ...snapshot,
+    status: insufficient ? 'deducted_insufficient_stock' : 'deducted',
+    movementId: movement.id,
+    deductedAmount,
+    inventoryUnit,
+    unitCost,
+    costUsed,
+    stockBefore,
+    stockAfter,
+    remainingStock: stockAfter,
+    warning: insufficient ? 'Inventory went below zero after deduction.' : null,
+  };
+}
+
 function normalizeOfficeApproval(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
   const reasonCode = String(input.reasonCode || input.reason_code || '').trim().slice(0, 80);
@@ -492,6 +670,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let waveguardBlackoutApproval = null;
     let waveguardNLimitApproval = null;
     let waveguardTankCleanout = null;
+    let inventoryDeductions = [];
     let waveguardEquipmentSystemId = equipmentSystemId || null;
     let waveguardCalibrationId = calibrationId || null;
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
@@ -669,6 +848,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             waveguardBlackoutApproval,
             waveguardNLimitApproval,
             waveguardTankCleanout,
+            inventoryDeductions,
           },
           areas_serviced: completionAreas,
           customer_interaction: customerInteraction || null,
@@ -740,7 +920,26 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               applicationDate: svc.scheduled_date,
               blackoutStatus: p.blackoutStatus || null,
             });
+
+            const deduction = await deductProductInventory(trx, {
+              product,
+              productInput: p,
+              serviceProduct,
+              serviceRecord: record,
+              scheduledService: svc,
+            });
+            inventoryDeductions.push(deduction);
           }
+        }
+
+        if (inventoryDeductions.length) {
+          record.structured_notes = {
+            ...(record.structured_notes || {}),
+            inventoryDeductions,
+          };
+          await trx('service_records')
+            .where({ id: record.id })
+            .update({ structured_notes: record.structured_notes });
         }
 
         // 3. Legacy audit row INSIDE the trx — race rejection rolls it

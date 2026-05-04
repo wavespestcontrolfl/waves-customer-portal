@@ -233,13 +233,14 @@ async function findUniqueCustomerByAddress(address, city, zip) {
   const normalizedZip = normalizeZip(zip);
   const cityValue = String(city || '').trim().toLowerCase();
   if (normalizedZip || cityValue) {
-    const zipAndCityMatches = matches.filter(customer => {
+    const zipMatches = normalizedZip ? matches.filter(customer => {
       const customerCity = String(customer.city || '').trim().toLowerCase();
-      const zipMatches = !normalizedZip || !normalizeZip(customer.zip) || normalizeZip(customer.zip) === normalizedZip;
+      const customerZip = normalizeZip(customer.zip);
+      if (customerZip !== normalizedZip) return false;
       const cityMatches = !cityValue || !customerCity || customerCity === cityValue;
-      return zipMatches && cityMatches;
-    });
-    if (zipAndCityMatches.length === 1) return zipAndCityMatches[0];
+      return cityMatches;
+    }) : [];
+    if (zipMatches.length === 1) return zipMatches[0];
 
     const cityOnlyMatches = matches.filter(customer => {
       const customerCity = String(customer.city || '').trim().toLowerCase();
