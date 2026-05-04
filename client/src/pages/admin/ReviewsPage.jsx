@@ -11,9 +11,11 @@ function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
     ...options,
-  }).then(r => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.json();
+  }).then(async r => {
+    const text = await r.text();
+    const data = text ? JSON.parse(text) : {};
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    return data;
   });
 }
 
@@ -197,6 +199,21 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
 
       {/* Reply section */}
       <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12, marginTop: 8 }}>
+        {review.draftReply && !review.reply && !editing && (
+          <div style={{ padding: 10, border: `1px solid ${D.border}`, borderRadius: 8, background: D.bg, marginBottom: 10 }}>
+            <div style={{ fontSize: 12, color: D.muted, fontFamily: 'DM Sans, sans-serif', marginBottom: 4 }}>
+              Saved draft
+            </div>
+            <div style={{ fontSize: 13, color: D.text, fontFamily: 'DM Sans, sans-serif', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+              {review.draftReply}
+            </div>
+            <button onClick={() => { setReplyText(review.draftReply); setEditing(true); }} style={{
+              marginTop: 8, padding: '6px 12px', background: 'transparent', border: `1px solid ${D.teal}`, color: D.teal,
+              borderRadius: 6, fontSize: 12, fontFamily: 'DM Sans, sans-serif', cursor: 'pointer',
+            }}>Use Draft</button>
+          </div>
+        )}
+
         {success && (
           <div style={{ color: D.green, fontSize: 13, fontFamily: 'DM Sans, sans-serif', marginBottom: 8 }}>
             Reply posted successfully
@@ -1174,16 +1191,36 @@ export default function ReviewsPage() {
   // the filter dropdown when they need the full archive.
   const [filterResponded, setFilterResponded] = useState('needs-reply');
   const [search, setSearch] = useState('');
+  const loadSeqRef = useRef(0);
 
-  const loadData = () => {
+  const loadData = useCallback(() => {
+    const loadSeq = loadSeqRef.current + 1;
+    loadSeqRef.current = loadSeq;
     setLoading(true);
     setError(null);
-    adminFetch('/admin/reviews')
-      .then(d => { setData(d); setLoading(false); })
-      .catch(e => { setError(e.message); setLoading(false); });
-  };
+    const params = new URLSearchParams({ limit: '200' });
+    if (filterLocation !== 'all') params.set('location', filterLocation);
+    if (filterRating !== 'all') params.set('rating', filterRating);
+    if (filterResponded === 'responded') params.set('responded', 'true');
+    if (filterResponded === 'needs-reply') params.set('responded', 'false');
+    if (search.trim()) params.set('search', search.trim());
+    adminFetch(`/admin/reviews?${params.toString()}`)
+      .then(d => {
+        if (loadSeq !== loadSeqRef.current) return;
+        setData(d);
+        setLoading(false);
+      })
+      .catch(e => {
+        if (loadSeq !== loadSeqRef.current) return;
+        setError(e.message);
+        setLoading(false);
+      });
+  }, [filterLocation, filterRating, filterResponded, search]);
 
-  useEffect(() => { loadData(); }, []);
+  useEffect(() => {
+    const t = setTimeout(loadData, search.trim() ? 250 : 0);
+    return () => clearTimeout(t);
+  }, [loadData, search]);
 
   const handleReply = async (reviewId, replyText) => {
     await adminFetch(`/admin/reviews/${reviewId}/reply`, {
@@ -1221,21 +1258,20 @@ export default function ReviewsPage() {
   const reviews = data?.reviews || [];
   const stats = data?.stats || {};
   const locations = data?.locations || [];
-  const { totalReviews = 0, avgRating = 0, unresponded = 0, unrespondedInRated = 0, responded = 0, newThisMonth = 0, breakdown = {}, perLocation = [] } = stats;
+  const { totalReviews = 0, avgRating = 0, unresponded = 0, responded = 0, newThisMonth = 0, breakdown = {}, locationBreakdown = {}, perLocation = [] } = stats;
 
-  // Denominator = real Google `user_ratings_total` summed across all
-  // locations that have a Places `_stats` row. The server scopes
-  // `unrespondedInRated` to that same location set so the subtraction
-  // numerator and denominator share a population (a location with
-  // reviews-but-no-_stats can't inflate unresponded without
-  // contributing to total). Fall back to responded+unresponded only
-  // when no Google totals are available at all.
-  const ratedTotal = totalReviews > 0 ? totalReviews : (responded + unresponded);
-  const respondedCount = totalReviews > 0 ? Math.max(0, ratedTotal - unrespondedInRated) : responded;
+  // Response rate must use locally synced review rows only. Google's
+  // user_ratings_total includes older reviews that Places does not return in
+  // the review list, so mixing that total with local reply rows overstates
+  // replies.
+  const ratedTotal = responded + unresponded;
+  const respondedCount = responded;
   const responseRate = ratedTotal > 0 ? Math.round((respondedCount / ratedTotal) * 100) : 0;
 
   // --- Filtering ---
   const filtered = reviews.filter(r => {
+    // Server-side filters load the matching result set. Keep this light client
+    // pass as a guard against stale in-flight responses during fast filter edits.
     if (filterLocation !== 'all' && r.locationId !== filterLocation) return false;
     if (filterRating !== 'all' && r.starRating !== Number(filterRating)) return false;
     if (filterResponded === 'responded' && !r.reply) return false;
@@ -1258,13 +1294,6 @@ export default function ReviewsPage() {
       locLookup[p.locationId].count = p.count;
       locLookup[p.locationId].avgRating = p.avgRating;
     }
-  });
-
-  // Per-location breakdowns from reviews
-  const locBreakdowns = {};
-  reviews.forEach(r => {
-    if (!locBreakdowns[r.locationId]) locBreakdowns[r.locationId] = { '5': 0, '4': 0, '3': 0, '2': 0, '1': 0 };
-    locBreakdowns[r.locationId][String(r.starRating)] = (locBreakdowns[r.locationId][String(r.starRating)] || 0) + 1;
   });
 
   const locationOptions = [
@@ -1382,7 +1411,7 @@ export default function ReviewsPage() {
                   <LocationCard
                     key={loc.id}
                     loc={loc}
-                    breakdown={locBreakdowns[loc.id] || breakdown}
+                    breakdown={locationBreakdown[loc.id] || breakdown}
                     onRequestReview={handleRequestReview}
                   />
                 ))}
