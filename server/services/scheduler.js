@@ -332,6 +332,19 @@ function initScheduledJobs() {
         .returning(['id', 'invoice_number', 'customer_id', 'service_record_id']);
       for (const inv of pendingReviewInvoices) {
         try {
+          if (inv.service_record_id) {
+            const existing = await db('review_requests')
+              .where({ service_record_id: inv.service_record_id })
+              .first();
+            if (existing) {
+              await db('invoices').where({ id: inv.id }).update({
+                request_review_after_send: false,
+                send_claim_at: null,
+                updated_at: new Date(),
+              });
+              continue;
+            }
+          }
           const ReviewService = require('./review-request');
           await ReviewService.create({
             customerId: inv.customer_id,
@@ -409,6 +422,7 @@ function initScheduledJobs() {
 
       const pendingReviewRows = await db('scheduled_services')
         .whereNotNull('completion_sms_sent_at')
+        .where('completion_sms_sent_at', '<=', new Date(Date.now() - 120 * 60000))
         .where({ completion_sms_request_review: true })
         .where(function () {
           this.whereNull('completion_sms_review_claim_at')
@@ -423,7 +437,7 @@ function initScheduledJobs() {
             customerId: reviewRow.customer_id,
             serviceRecordId: reviewRow.completion_sms_review_service_record_id || null,
             triggeredBy: 'auto',
-            delayMinutes: 120,
+            delayMinutes: 0,
           });
           await db('scheduled_services').where({ id: reviewRow.id }).update({
             completion_sms_request_review: false,

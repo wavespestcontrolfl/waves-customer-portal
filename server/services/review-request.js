@@ -152,7 +152,7 @@ const ReviewService = {
     // Smart timing: pick the moment the customer is most likely to leave a review
     let scheduledFor = null;
     if (triggeredBy === 'auto') {
-      if (delayMinutes) {
+      if (delayMinutes != null) {
         scheduledFor = new Date(Date.now() + delayMinutes * 60000);
       } else {
         scheduledFor = calculateReviewSendTime(new Date(), serviceType);
