@@ -39,10 +39,16 @@ function hasNutrients(product) {
 
 function toDateOnly(value) {
   if (!value) return etDateString();
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  if (value instanceof Date) {
+    const isPgDateOnly = value.getUTCHours() === 0
+      && value.getUTCMinutes() === 0
+      && value.getUTCSeconds() === 0
+      && value.getUTCMilliseconds() === 0;
+    return isPgDateOnly ? value.toISOString().slice(0, 10) : etDateString(value);
+  }
   const text = String(value);
-  if (/^\d{4}-\d{2}-\d{2}/.test(text)) return text.slice(0, 10);
-  const parsed = new Date(text);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  const parsed = parseETDateTime(text);
   return Number.isNaN(parsed.getTime()) ? etDateString() : etDateString(parsed);
 }
 

@@ -501,6 +501,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               ? parseFloat(p.totalAmount)
               : null;
             const appliedAmountUnit = p.amountUnit || p.rateUnit || null;
+            if (appliedAmount != null && (!Number.isFinite(appliedAmount) || appliedAmount <= 0)) {
+              const err = new Error(`Invalid product total amount for ${product.name}`);
+              err.isOperational = true; err.statusCode = 400;
+              throw err;
+            }
+            if (appliedAmountUnit && !validRateUnits.has(String(appliedAmountUnit).toLowerCase())) {
+              const err = new Error(`Invalid product amount unit for ${product.name}`);
+              err.isOperational = true; err.statusCode = 400;
+              throw err;
+            }
             const [serviceProduct] = await trx('service_products').insert({
               service_record_id: record.id,
               product_name: product.name,

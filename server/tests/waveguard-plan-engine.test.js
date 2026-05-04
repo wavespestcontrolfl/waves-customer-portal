@@ -269,6 +269,8 @@ describe('waveguard-plan-engine helpers', () => {
   test('nutrient ledger helpers normalize pg DATE objects and completion amounts', () => {
     expect(toDateOnly(new Date('2026-05-03T00:00:00.000Z'))).toBe('2026-05-03');
     expect(toDateOnly(new Date('2026-05-03T04:00:00.000Z'))).toBe('2026-05-03');
+    expect(toDateOnly(new Date('2026-05-03T02:30:00.000Z'))).toBe('2026-05-02');
+    expect(toDateOnly('2026-05-03T02:30:00.000Z')).toBe('2026-05-02');
     expect(calculateAppliedNutrients({
       product: { analysis_n: 24, analysis_p: 0, analysis_k: 11 },
       amount: 10,
