@@ -439,6 +439,8 @@ function initScheduledJobs() {
               await trx('scheduled_services').where({ id: current.id }).update({
                 completion_sms_sent_at: new Date(),
                 completion_sms_claimed_at: null,
+                completion_sms_body: null,
+                completion_sms_message_type: null,
                 completion_sms_request_review: false,
               });
               return false;
@@ -466,6 +468,8 @@ function initScheduledJobs() {
               await db('scheduled_services').where({ id: wasSent.serviceId }).update({
                 completion_sms_sent_at: new Date(),
                 completion_sms_claimed_at: null,
+                completion_sms_body: null,
+                completion_sms_message_type: null,
                 completion_sms_request_review: false,
               });
             } catch (sendErr) {
