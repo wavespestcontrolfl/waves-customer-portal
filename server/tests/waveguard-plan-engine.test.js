@@ -28,6 +28,18 @@ describe('waveguard-plan-engine helpers', () => {
     expect(isDateInWindow(new Date('2026-10-01T12:00:00'), rule)).toBe(false);
   });
 
+  test('isDateInWindow evaluates month/day in Eastern Time', () => {
+    const rule = {
+      restricted_start_month: 6,
+      restricted_start_day: 1,
+      restricted_end_month: 9,
+      restricted_end_day: 30,
+    };
+
+    expect(isDateInWindow(new Date('2026-06-01T02:00:00Z'), rule)).toBe(false);
+    expect(isDateInWindow(new Date('2026-06-01T16:00:00Z'), rule)).toBe(true);
+  });
+
   test('isDateInWindow handles wraparound windows', () => {
     const rule = {
       restricted_start_month: 11,

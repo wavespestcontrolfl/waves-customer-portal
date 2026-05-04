@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const protocols = require('../config/protocols.json');
+const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -10,10 +11,11 @@ const TRACK_BY_GRASS = {
   bahia: 'bahia',
 };
 
-function toDate(value, fallback = new Date()) {
-  if (!value) return fallback;
-  if (value instanceof Date) return value;
-  const parsed = new Date(`${String(value).slice(0, 10)}T12:00:00`);
+function toServiceDate(value, fallback = new Date()) {
+  const dateOnly = value
+    ? String(value instanceof Date ? value.toISOString() : value).slice(0, 10)
+    : etDateString(fallback);
+  const parsed = parseETDateTime(`${dateOnly}T12:00`);
   return Number.isNaN(parsed.getTime()) ? fallback : parsed;
 }
 
@@ -23,7 +25,8 @@ function monthDayValue(month, day) {
 }
 
 function dateMonthDayValue(date) {
-  return (date.getMonth() + 1) * 100 + date.getDate();
+  const et = etParts(date);
+  return et.month * 100 + et.day;
 }
 
 function isDateInWindow(date, rule) {
@@ -387,7 +390,7 @@ function selectProtocolVisit(profile, serviceDate) {
     ? profile.track_key
     : TRACK_BY_GRASS[profile?.grass_type] || null;
   const track = trackKey ? protocols.lawn?.[trackKey] : null;
-  const month = MONTH_ABBR[serviceDate.getMonth()];
+  const month = MONTH_ABBR[etParts(serviceDate).month - 1];
   const visit = track?.visits?.find((v) => v.month === month) || null;
   return { trackKey, track, month, visit };
 }
@@ -492,7 +495,7 @@ function calculateNutrientLedgerFromRows(rows, products, lawnSqft, year) {
 }
 
 async function calculateNutrientLedger(knex, customerId, products, lawnSqft, serviceDate = new Date()) {
-  const year = serviceDate.getFullYear();
+  const year = etParts(serviceDate).year;
   const rows = await knex('service_products as sp')
     .join('service_records as sr', 'sp.service_record_id', 'sr.id')
     .where('sr.customer_id', customerId)
@@ -526,7 +529,7 @@ async function buildPlanForService(serviceId, options = {}) {
     throw err;
   }
 
-  const serviceDate = toDate(service.scheduled_date, now);
+  const serviceDate = toServiceDate(service.scheduled_date, now);
   const profile = await knex('customer_turf_profiles')
     .where({ customer_id: service.customer_id, active: true })
     .first()
