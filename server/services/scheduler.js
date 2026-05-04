@@ -320,7 +320,7 @@ function initScheduledJobs() {
           const result = await sendEstimateNow(est, est.send_method || 'both');
           if (result.sent) {
             const suffix = result.partialFailure ? ` with channel issues (${result.failedChannels.join(', ')})` : '';
-            logger.info(`Scheduled estimate ${est.id} sent to ${est.customer_name}${suffix}`);
+            logger.info(`Scheduled estimate ${est.id} sent${suffix}`);
           } else {
             logger.warn(`Scheduled estimate ${est.id} was not sent on any channel`);
           }
