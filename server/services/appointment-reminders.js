@@ -526,6 +526,67 @@ const AppointmentReminders = {
       return null;
     }
   },
+
+  /**
+   * Handle recurring appointment cancellation — mark all reminder records
+   * cancelled, then send one series-level notice through the same guarded
+   * contact path as single-appointment cancellation.
+   */
+  async handleSeriesCancellation(scheduledServiceIds, representativeScheduledServiceId, options = {}) {
+    try {
+      const ids = [...new Set((scheduledServiceIds || []).filter(Boolean))];
+      if (!ids.length) return null;
+
+      await db('appointment_reminders')
+        .whereIn('scheduled_service_id', ids)
+        .update({ cancelled: true, updated_at: new Date() });
+
+      const sendNotification = options.sendNotification !== false;
+      if (!sendNotification) {
+        logger.info(`[appt-remind] Series cancellation notices suppressed for ${ids.length} appointment(s)`);
+        return { cancelledCount: ids.length };
+      }
+
+      let record = null;
+      if (representativeScheduledServiceId) {
+        record = await db('appointment_reminders')
+          .where({ scheduled_service_id: representativeScheduledServiceId })
+          .first();
+      }
+      if (!record) {
+        record = await db('appointment_reminders')
+          .whereIn('scheduled_service_id', ids)
+          .orderBy('appointment_time', 'asc')
+          .first();
+      }
+      if (!record) {
+        logger.info(`[appt-remind] Series cancellation: no reminder records for ${ids.length} appointment(s)`);
+        return { cancelledCount: ids.length };
+      }
+
+      const { customer } = await getCustomerAndTech(record.customer_id, representativeScheduledServiceId || record.scheduled_service_id);
+      const contact = getServiceContact(customer);
+      if (contact.phone) {
+        const firstName = contact.name || customer?.first_name || 'there';
+        const scopeText = options.scope === 'series' ? 'recurring series' : 'future recurring appointments';
+        const serviceLabel = smsServiceLabelStored(options.serviceType || record.service_type);
+        const body = await renderTemplate(
+          'appointment_series_cancelled',
+          { first_name: firstName, service_type: serviceLabel, scope: scopeText },
+          `Hello ${firstName}! Your Waves ${scopeText} for ${serviceLabel} has been cancelled.\n\n` +
+            `Need to rebook? Reply to this message and we'll get you scheduled.`,
+        );
+
+        await safeSend(record.customer_id, contact.phone, body, 'appointment_series_cancelled');
+        logger.info(`[appt-remind] Series cancellation notice sent for customer ${record.customer_id} - ${ids.length} appointment(s)`);
+      }
+
+      return { ...record, cancelledCount: ids.length };
+    } catch (err) {
+      logger.error(`[appt-remind] handleSeriesCancellation failed: ${err.message}`);
+      return null;
+    }
+  },
 };
 
 module.exports = AppointmentReminders;

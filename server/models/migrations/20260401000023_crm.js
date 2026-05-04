@@ -67,7 +67,7 @@ exports.up = async function (knex) {
     ]);
 
     await knex('customer_interactions').insert([
-      { customer_id: customer.id, interaction_type: 'note', subject: 'Initial assessment', body: 'Full property assessment completed. St. Augustine Full Sun. Moderate thatch. Dollar weed in beds. Starting premium program.', admin_user_id: adam?.id, created_at: new Date('2026-01-28') },
+      { customer_id: customer.id, interaction_type: 'note', subject: 'Initial assessment', body: 'Full property assessment completed. St. Augustine. Moderate thatch. Dollar weed in beds. Starting premium program.', admin_user_id: adam?.id, created_at: new Date('2026-01-28') },
       { customer_id: customer.id, interaction_type: 'service_completed', subject: 'Lawn Care Visit #1', body: 'Winterizer applied. Pre-emergent spot treatment.', admin_user_id: adam?.id, created_at: new Date('2026-01-28') },
       { customer_id: customer.id, interaction_type: 'sms_outbound', subject: 'Service reminder', body: 'Reminder for tomorrow\'s lawn care visit', created_at: new Date('2026-02-23') },
       { customer_id: customer.id, interaction_type: 'service_completed', subject: 'Lawn Care Visit #2', body: 'Fertilizer + fungicide. Thatch improving.', admin_user_id: adam?.id, created_at: new Date('2026-02-24') },

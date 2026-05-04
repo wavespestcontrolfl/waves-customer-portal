@@ -682,11 +682,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
       try {
         const AppointmentReminders = require('../services/appointment-reminders');
         const targetIds = targets.map((target) => target.id);
-        await db('appointment_reminders')
-          .whereIn('scheduled_service_id', targetIds)
-          .update({ cancelled: true, updated_at: new Date() });
-        await AppointmentReminders.handleCancellation(svc.id, {
+        await AppointmentReminders.handleSeriesCancellation(targetIds, svc.id, {
           sendNotification: notifyCustomer !== false,
+          scope,
         });
       } catch (e) { logger.error(`[admin-dispatch] series cancellation reminder handling failed: ${e.message}`); }
 

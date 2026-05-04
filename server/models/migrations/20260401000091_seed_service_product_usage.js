@@ -40,8 +40,8 @@ exports.up = async function (knex) {
     { service_type: 'Mosquito Treatment', product: 'Cyzmic CS', usage_amount: 3.0, usage_unit: 'oz', usage_per_1000sf: 0.5, is_primary: true, notes: 'Barrier spray — foliage, fence, lanai perimeter' },
     { service_type: 'Mosquito Treatment', product: 'Tekko Pro', usage_amount: 1.0, usage_unit: 'oz', usage_per_1000sf: null, is_primary: true, notes: 'IGR — standing water, planters, drains' },
 
-    // ── LAWN CARE — Track A: St. Augustine Full Sun (core products across year) ──
-    { service_type: 'Lawn Care', product: 'Celsius WG', usage_amount: 0.057, usage_unit: 'oz', usage_per_1000sf: 0.057, is_primary: true, notes: 'Post-emergent herbicide (max 3x/year) — Tracks A/B' },
+    // ── LAWN CARE — unified St. Augustine core products across year ──
+    { service_type: 'Lawn Care', product: 'Celsius WG', usage_amount: 0.057, usage_unit: 'oz', usage_per_1000sf: 0.057, is_primary: true, notes: 'Post-emergent herbicide (max 3x/year) — unified St. Augustine protocol' },
     { service_type: 'Lawn Care', product: 'Prodiamine', usage_amount: 3.0, usage_unit: 'oz', usage_per_1000sf: 0.75, is_primary: true, notes: 'Pre-emergent — fall/winter application' },
     { service_type: 'Lawn Care', product: 'Acelepryn', usage_amount: 0.46, usage_unit: 'oz', usage_per_1000sf: 0.046, is_primary: true, notes: 'Preventive insecticide — chinch, grubs — V4 (Apr)' },
     { service_type: 'Lawn Care', product: 'SpeedZone Southern', usage_amount: 1.5, usage_unit: 'oz', usage_per_1000sf: 0.375, is_primary: false, notes: 'Broadleaf weed killer — weather gate >90°F' },

@@ -37,8 +37,8 @@ exports.up = async function (knex) {
 
     // Agronomic identity.
     // grass_type:    'st_augustine' | 'bermuda' | 'zoysia' | 'bahia' | 'mixed' | 'unknown'
-    // track_key:     WaveGuard v4 protocol track id (e.g. 'st_aug_full_sun', 'st_aug_shade').
-    // sun_exposure:  'full_sun' | 'partial_shade' | 'shade'
+    // track_key:     WaveGuard v4 protocol track id (e.g. 'st_augustine').
+    // sun_exposure:  site observation only; not a St. Augustine protocol split.
     t.string('grass_type', 30).nullable();
     t.string('track_key', 40).nullable();
     t.string('cultivar', 60).nullable();
