@@ -127,8 +127,9 @@ export default function PublicBookingPage() {
       if (!res.ok) return;
       const data = await res.json();
       setAddressMayMatchCustomer(!!data.possible_match);
+      if (data.customer) applyCustomer(data.customer);
     } catch { /* best-effort */ }
-  }, []);
+  }, [applyCustomer]);
 
   useEffect(() => {
     if (step === 2) loadAvailability();
@@ -172,8 +173,8 @@ export default function PublicBookingPage() {
           customer_notes: notes,
           source,
           referrer_url: document.referrer || null,
-          // New-customer payload — server will create if no customer_id
-          new_customer: contact.phone ? {
+          // Server creates only when phone/name are present; address is also used to re-verify matched customers.
+          new_customer: {
             first_name: contact.firstName,
             last_name: contact.lastName,
             phone: contact.phone.replace(/\D/g, ''),
@@ -184,7 +185,7 @@ export default function PublicBookingPage() {
             zip: address.zip,
             lat: coords?.lat,
             lng: coords?.lng,
-          } : null,
+          },
         }),
       });
       const data = await res.json();
@@ -372,10 +373,12 @@ export default function PublicBookingPage() {
         {step === 3 && (
           <div style={{ animation: 'slideUp 0.4s ease-out' }}>
             <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
-              Your info
+              {existingCustomerId ? 'Confirm your booking' : 'Your info'}
             </h2>
             <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
-              We'll text you a confirmation right after you book.
+              {existingCustomerId
+                ? 'We found the customer for this address. Confirm the details below.'
+                : "We'll text you a confirmation right after you book."}
             </p>
 
             {/* Selected time summary */}
@@ -413,17 +416,24 @@ export default function PublicBookingPage() {
                 background: COLORS.greenLight,
                 border: `1px solid ${COLORS.green}`,
                 borderRadius: 10,
-                padding: 12,
-                fontSize: 14,
+                padding: 14,
                 color: COLORS.green,
                 marginBottom: 14,
               }}>
-                We found your customer profile. We'll send the confirmation to the phone number on file.
+                <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 5 }}>
+                  Customer found
+                </div>
+                <div style={{ fontSize: 17, fontWeight: 700, color: COLORS.blueDeeper }}>
+                  {[contact.firstName, contact.lastName].filter(Boolean).join(' ') || 'Customer on file'}
+                </div>
+                <div style={{ fontSize: 14, color: COLORS.slate600, marginTop: 4, lineHeight: 1.35 }}>
+                  {address.line1}
+                </div>
               </div>
             )}
 
             <div style={{ display: 'grid', gap: 14, marginBottom: 20 }}>
-              <div>
+              {!existingCustomerId && <div>
                 <label style={labelStyle}>Phone number</label>
                 <input
                   type="tel" autoFocus
@@ -434,7 +444,7 @@ export default function PublicBookingPage() {
                   style={inputStyle}
                   disabled={!!existingCustomerId}
                 />
-              </div>
+              </div>}
               {!existingCustomerId && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <div>
                   <label style={labelStyle}>First name</label>

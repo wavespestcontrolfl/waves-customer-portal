@@ -131,6 +131,47 @@ function fallbackZoneCenter(city) {
   });
 }
 
+function normalizeAddress(value) {
+  return String(value || '').split(',')[0].trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function normalizeZip(value) {
+  return String(value || '').replace(/\D/g, '').slice(0, 5);
+}
+
+function addressMatchesCustomer(customer, address, zip) {
+  const lookupAddress = normalizeAddress(address);
+  const customerAddress = normalizeAddress(customer?.address_line1);
+  if (!lookupAddress || !customerAddress || lookupAddress !== customerAddress) return false;
+  const lookupZip = normalizeZip(zip);
+  const customerZip = normalizeZip(customer?.zip);
+  return !lookupZip || !customerZip || lookupZip === customerZip;
+}
+
+async function findUniqueCustomerByAddress(address, city, zip) {
+  const normalizedAddress = normalizeAddress(address);
+  if (!normalizedAddress) return null;
+
+  const query = db('customers')
+    .whereRaw("lower(regexp_replace(split_part(coalesce(address_line1, ''), ',', 1), '[^a-zA-Z0-9]', '', 'g')) = ?", [normalizedAddress]);
+
+  const normalizedZip = normalizeZip(zip);
+  if (normalizedZip) query.andWhere(function () {
+    this.whereNull('zip').orWhere('zip', '').orWhere('zip', normalizedZip);
+  });
+
+  const cityValue = String(city || '').trim().toLowerCase();
+  if (cityValue) query.andWhere(function () {
+    this.whereNull('city').orWhere('city', '').orWhereRaw('lower(city) = ?', [cityValue]);
+  });
+
+  const matches = await query
+    .select('id', 'first_name', 'last_name', 'email', 'address_line1', 'city', 'state', 'zip', 'phone')
+    .limit(2);
+
+  return matches.length === 1 ? matches[0] : null;
+}
+
 // GET /api/booking/customer-lookup?phone=9415551234 OR ?address=...&city=...&zip=...
 router.get('/customer-lookup', async (req, res, next) => {
   try {
@@ -161,18 +202,22 @@ router.get('/customer-lookup', async (req, res, next) => {
     }
 
     if (address) {
-      const line1 = String(address).split(',')[0].trim().toLowerCase();
-      if (line1) {
-        const normalizedAddress = line1.replace(/[^a-z0-9]/g, '');
-        const query = db('customers')
-          .whereRaw("lower(regexp_replace(coalesce(address_line1, ''), '[^a-zA-Z0-9]', '', 'g')) = ?", [normalizedAddress]);
-
-        if (city) query.andWhereRaw('lower(city) = ?', [String(city).trim().toLowerCase()]);
-        if (zip) query.andWhere('zip', String(zip).replace(/\D/g, '').slice(0, 5));
-
-        customer = await query.select(customerFields).first();
+      customer = await findUniqueCustomerByAddress(address, city, zip);
+      if (customer) {
+        return res.json({
+          customer: {
+            id: customer.id,
+            first_name: customer.first_name,
+            last_name: customer.last_name,
+            address_line1: customer.address_line1,
+            city: customer.city,
+            state: customer.state,
+            zip: customer.zip,
+          },
+          possible_match: true,
+        });
       }
-      return res.json({ customer: null, possible_match: !!customer });
+      return res.json({ customer: null, possible_match: false });
     }
 
     res.json({ customer: null });
@@ -438,7 +483,15 @@ router.post('/confirm', async (req, res, next) => {
     }
 
     if (customer_id && !custId && !phoneDigits && !estimate_id) {
-      return res.status(400).json({ error: 'Phone verification required for existing customer booking' });
+      const addressVerifiedCustomer = await db('customers').where('id', customer_id).first();
+      if (
+        !addressVerifiedCustomer
+        || !new_customer
+        || !addressMatchesCustomer(addressVerifiedCustomer, new_customer.address_line1, new_customer.zip)
+      ) {
+        return res.status(400).json({ error: 'Address verification required for existing customer booking' });
+      }
+      custId = addressVerifiedCustomer.id;
     }
 
     // Create customer from new_customer payload if none resolved
