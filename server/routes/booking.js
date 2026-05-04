@@ -202,20 +202,21 @@ async function findUniqueCustomerByAddress(address, city, zip) {
   }
 
   const candidates = await query
-    .select('id', 'first_name', 'last_name', 'email', 'address_line1', 'city', 'state', 'zip', 'phone')
-    .limit(500);
+    .select('id', 'first_name', 'last_name', 'email', 'address_line1', 'city', 'state', 'zip', 'phone');
 
   const matches = candidates.filter(customer => normalizeAddress(customer.address_line1) === normalizedAddress);
-  if (matches.length === 1) return matches[0];
-
   const normalizedZip = normalizeZip(zip);
   const cityValue = String(city || '').trim().toLowerCase();
-  const strongMatches = matches.filter(customer => {
-    const zipMatches = !normalizedZip || !normalizeZip(customer.zip) || normalizeZip(customer.zip) === normalizedZip;
-    const cityMatches = !cityValue || !String(customer.city || '').trim() || String(customer.city).trim().toLowerCase() === cityValue;
-    return zipMatches && cityMatches;
-  });
-  return strongMatches.length === 1 ? strongMatches[0] : null;
+  if (normalizedZip || cityValue) {
+    const strongMatches = matches.filter(customer => {
+      const zipMatches = !normalizedZip || !normalizeZip(customer.zip) || normalizeZip(customer.zip) === normalizedZip;
+      const cityMatches = !cityValue || !String(customer.city || '').trim() || String(customer.city).trim().toLowerCase() === cityValue;
+      return zipMatches && cityMatches;
+    });
+    return strongMatches.length === 1 ? strongMatches[0] : null;
+  }
+
+  return matches.length === 1 ? matches[0] : null;
 }
 
 // GET /api/booking/customer-lookup?phone=9415551234 OR ?address=...&city=...&zip=...
