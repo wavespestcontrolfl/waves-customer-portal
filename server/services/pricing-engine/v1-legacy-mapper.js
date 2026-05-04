@@ -241,16 +241,20 @@ function mapV1ToLegacyShape(v1Result) {
   const oneTimeTotal = oneTimeItemsMoney + specialtyMoney + membershipFee;
 
   const waveGuardTier = CAP(wg.tier || 'bronze');
-  const recurringMonthly = summary.recurringMonthlyAfterDiscount || 0;
-  const recurringAnnual = summary.recurringAnnualAfterDiscount || 0;
   const rodentBaitMonthly = rbLI ? (rbLI.monthly || 0) : 0;
   const rodentBaitAnnual = rodentBaitMonthly * 12;
+  const palmInjectionMonthly = palmLI ? (palmLI.monthly || 0) : 0;
+  const palmInjectionAnnual = palmLI ? (palmLI.annual || 0) : 0;
+  const recurringAnnualBefore = Math.max(0, Math.round(((summary.recurringAnnualBeforeDiscount || 0) - rodentBaitAnnual - palmInjectionAnnual) * 100) / 100);
+  const recurringAnnual = Math.max(0, Math.round(((summary.recurringAnnualAfterDiscount || 0) - rodentBaitAnnual - palmInjectionAnnual) * 100) / 100);
+  const recurringMonthly = Math.round((recurringAnnual / 12) * 100) / 100;
 
   // year1: recurring year + one-time items + specialty + membership.
   // v1's summary.year1Total doesn't include membership — we fix it here
   // to match v2's year1 convention.
-  const year1 = Math.round((recurringAnnual + oneTimeTotal) * 100) / 100;
-  const year2 = Math.round(recurringAnnual * 100) / 100;
+  const year1 = Math.round((recurringAnnual + rodentBaitAnnual + palmInjectionAnnual + oneTimeTotal) * 100) / 100;
+  const year2 = Math.round((recurringAnnual + rodentBaitAnnual + palmInjectionAnnual) * 100) / 100;
+  const year2Monthly = Math.round((year2 / 12) * 100) / 100;
 
   // Project v1 features back onto flat v2-shape keys so EstimatePage's
   // client-side modifiers fallback (which predates Session 11a and reads
@@ -276,19 +280,21 @@ function mapV1ToLegacyShape(v1Result) {
     urgency: { mult: 1, label: '' },
     recurringCustomer: false,
     isRecurringCustomer: false,
-    hasRecurring: services.length > 0,
+    hasRecurring: services.length > 0 || palmInjectionMonthly > 0 || rodentBaitMonthly > 0,
     hasOneTime: v1OtItems.length > 0,
     recurring: {
       serviceCount: wg.qualifyingCount || 0,
       tier: waveGuardTier,
       waveGuardTier,
       discount: wg.discount || 0,
-      annualBeforeDiscount: summary.recurringAnnualBeforeDiscount || 0,
-      grandTotal: recurringMonthly,
+      annualBeforeDiscount: recurringAnnualBefore,
+      grandTotal: year2Monthly,
       monthlyTotal: recurringMonthly,
       annualAfterDiscount: recurringAnnual,
       savings: Math.round((summary.waveGuardSavings || 0) * 100) / 100,
       rodentBaitMo: rodentBaitMonthly,
+      palmInjectionMo: palmInjectionMonthly,
+      palmInjectionAnn: palmInjectionAnnual,
       services,
     },
     oneTime: {
@@ -307,7 +313,7 @@ function mapV1ToLegacyShape(v1Result) {
     totals: {
       year1,
       year2,
-      year2mo: summary.year2Monthly || recurringMonthly,
+      year2mo: year2Monthly,
       manualDiscount: summary.manualDiscount || null,
     },
     manualDiscount: summary.manualDiscount || null,

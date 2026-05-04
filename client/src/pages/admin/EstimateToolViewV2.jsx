@@ -28,7 +28,7 @@
 import React, {
   useState, useEffect, useRef, useCallback, useMemo, createContext, useContext, Component,
 } from 'react';
-import { calculateEstimate, fmt, fmtInt } from '../../lib/estimateEngine';
+import { fmt, fmtInt } from '../../lib/estimateEngine';
 import { Button, Badge, Card, cn } from '../../components/ui';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -681,156 +681,156 @@ export default function EstimateToolViewV2({
   }
 
   async function doGenerate(overrides = {}) {
-    if (enrichedProfile) {
-      try {
-        const selectedServices = [];
-        if (form.svcLawn) selectedServices.push('LAWN');
-        if (form.svcPest) selectedServices.push('PEST');
-        if (form.svcTs) selectedServices.push('TREE_SHRUB');
-        if (form.svcInjection) selectedServices.push('PALM_INJECTION');
-        if (form.svcMosquito) selectedServices.push('MOSQUITO');
-        if (form.svcTermiteBait) selectedServices.push('TERMITE_BAIT');
-        if (form.svcRodentBait) selectedServices.push('RODENT_BAIT');
-        if (form.svcOnetimePest) selectedServices.push('OT_PEST');
-        if (form.svcOnetimeLawn) selectedServices.push('OT_LAWN');
-        if (form.svcOnetimeMosquito) selectedServices.push('OT_MOSQUITO');
-        if (form.svcPlugging) selectedServices.push('PLUGGING');
-        if (form.svcTopdress) selectedServices.push('TOPDRESS');
-        if (form.svcDethatch) selectedServices.push('DETHATCH');
-        if (form.svcTrenching) selectedServices.push('TRENCHING');
-        if (form.svcBoracare) selectedServices.push('BORACARE');
-        if (form.svcPreslab) selectedServices.push('PRESLAB');
-        if (form.svcFoam) selectedServices.push('FOAM');
-        if (form.svcRodentTrap) selectedServices.push('RODENT_TRAP');
-        if (form.svcFlea) selectedServices.push('FLEA');
-        if (form.svcWasp) selectedServices.push('STING');
-        if (form.svcRoach) selectedServices.push('ROACH');
-        if (form.svcBedbug) selectedServices.push('BEDBUG');
-        if (form.svcExclusion) selectedServices.push('EXCLUSION');
+    try {
+      const selectedServices = [];
+      if (form.svcLawn) selectedServices.push('LAWN');
+      if (form.svcPest) selectedServices.push('PEST');
+      if (form.svcTs) selectedServices.push('TREE_SHRUB');
+      if (form.svcInjection) selectedServices.push('PALM_INJECTION');
+      if (form.svcMosquito) selectedServices.push('MOSQUITO');
+      if (form.svcTermiteBait) selectedServices.push('TERMITE_BAIT');
+      if (form.svcRodentBait) selectedServices.push('RODENT_BAIT');
+      if (form.svcOnetimePest) selectedServices.push('OT_PEST');
+      if (form.svcOnetimeLawn) selectedServices.push('OT_LAWN');
+      if (form.svcOnetimeMosquito) selectedServices.push('OT_MOSQUITO');
+      if (form.svcPlugging) selectedServices.push('PLUGGING');
+      if (form.svcTopdress) selectedServices.push('TOPDRESS');
+      if (form.svcDethatch) selectedServices.push('DETHATCH');
+      if (form.svcTrenching) selectedServices.push('TRENCHING');
+      if (form.svcBoracare) selectedServices.push('BORACARE');
+      if (form.svcPreslab) selectedServices.push('PRESLAB');
+      if (form.svcFoam) selectedServices.push('FOAM');
+      if (form.svcRodentTrap) selectedServices.push('RODENT_TRAP');
+      if (form.svcFlea) selectedServices.push('FLEA');
+      if (form.svcWasp) selectedServices.push('STING');
+      if (form.svcRoach) selectedServices.push('ROACH');
+      if (form.svcBedbug) selectedServices.push('BEDBUG');
+      if (form.svcExclusion) selectedServices.push('EXCLUSION');
 
-        const manualDiscountType = overrides.manualDiscountType ?? form.manualDiscountType;
-        const manualDiscountValue = Number(overrides.manualDiscountValue ?? form.manualDiscountValue) || 0;
-        const manualDiscount = (manualDiscountType && manualDiscountType !== 'NONE' && manualDiscountValue > 0)
-          ? { type: manualDiscountType, value: manualDiscountValue, label: form.manualDiscountLabel || '' }
-          : null;
+      const manualDiscountType = overrides.manualDiscountType ?? form.manualDiscountType;
+      const manualDiscountValue = Number(overrides.manualDiscountValue ?? form.manualDiscountValue) || 0;
+      const manualDiscount = (manualDiscountType && manualDiscountType !== 'NONE' && manualDiscountValue > 0)
+        ? { type: manualDiscountType, value: manualDiscountValue, label: form.manualDiscountLabel || '' }
+        : null;
 
-        const options = {
-          grassType: form.grassType || 'st_augustine',
-          lawnFreq: parseInt(overrides.lawnFreq ?? form.lawnFreq) || 9,
-          pestFreq: parseInt(overrides.pestFreq ?? form.pestFreq) || 4,
-          manualDiscount,
-          roachModifier: form.roachModifier || 'NONE',
-          urgency: form.urgency || 'ROUTINE',
-          afterHours: form.isAfterHours === 'YES',
-          recurringCustomer: form.isRecurringCustomer === 'YES',
-          plugArea: parseInt(form.plugArea) || 0,
-          plugSpacing: parseInt(form.plugSpacing) || 12,
-          boracareSqft: parseInt(form.boracareSqft) || 0,
-          preslabSqft: parseInt(form.preslabSqft) || 0,
-          preslabWarranty: form.preslabWarranty || 'BASIC',
-          preslabVolume: form.preslabVolume || 'NONE',
-          foamPoints: parseInt(form.foamPoints) || 5,
-          bedbugRooms: parseInt(form.bedbugRooms) || 1,
-          bedbugMethod: form.bedbugMethod || 'BOTH',
-          exclSimple: parseInt(form.exclSimple) || 0,
-          exclModerate: parseInt(form.exclModerate) || 0,
-          exclAdvanced: parseInt(form.exclAdvanced) || 0,
-          exclWaiveInspection: form.exclWaive === 'YES',
-          roachType: form.roachType || 'REGULAR',
-          onetimeLawnType: form.otLawnType || 'FERT',
-        };
+      const options = {
+        grassType: form.grassType || 'st_augustine',
+        lawnFreq: parseInt(overrides.lawnFreq ?? form.lawnFreq, 10) || 9,
+        pestFreq: parseInt(overrides.pestFreq ?? form.pestFreq, 10) || 4,
+        manualDiscount,
+        roachModifier: form.roachModifier || 'NONE',
+        urgency: form.urgency || 'ROUTINE',
+        afterHours: form.isAfterHours === 'YES',
+        recurringCustomer: form.isRecurringCustomer === 'YES',
+        plugArea: parseInt(form.plugArea, 10) || 0,
+        plugSpacing: parseInt(form.plugSpacing, 10) || 12,
+        boracareSqft: parseInt(form.boracareSqft, 10) || 0,
+        preslabSqft: parseInt(form.preslabSqft, 10) || 0,
+        preslabWarranty: form.preslabWarranty || 'BASIC',
+        preslabVolume: form.preslabVolume || 'NONE',
+        foamPoints: parseInt(form.foamPoints, 10) || 5,
+        bedbugRooms: parseInt(form.bedbugRooms, 10) || 1,
+        bedbugMethod: form.bedbugMethod || 'BOTH',
+        exclSimple: parseInt(form.exclSimple, 10) || 0,
+        exclModerate: parseInt(form.exclModerate, 10) || 0,
+        exclAdvanced: parseInt(form.exclAdvanced, 10) || 0,
+        exclWaiveInspection: form.exclWaive === 'YES',
+        roachType: form.roachType || 'REGULAR',
+        onetimeLawnType: form.otLawnType || 'FERT',
+      };
 
-        const profile = { ...enrichedProfile };
-        if (form.homeSqFt) profile.homeSqFt = parseInt(form.homeSqFt);
-        if (form.lotSqFt) profile.lotSqFt = parseInt(form.lotSqFt);
-        if (form.stories) profile.stories = parseInt(form.stories);
-        if (form.bedArea) profile.estimatedBedAreaSf = parseInt(form.bedArea);
-        if (form.palmCount) profile.estimatedPalmCount = parseInt(form.palmCount);
-        if (form.treeCount) profile.estimatedTreeCount = parseInt(form.treeCount);
-        profile.footprint = Math.round(profile.homeSqFt / (profile.stories || 1));
-        profile.pool = form.hasPool === 'YES' ? 'YES' : 'NO';
-        profile.poolCage = form.hasPoolCage === 'YES' ? 'YES' : 'NO';
-        profile.hasLargeDriveway = form.hasLargeDriveway === 'YES';
-        profile.shrubDensity = form.shrubDensity || profile.shrubDensity;
-        profile.treeDensity = form.treeDensity || profile.treeDensity;
-        profile.landscapeComplexity = form.landscapeComplexity || profile.landscapeComplexity;
-        profile.nearWater = form.nearWater === 'YES' ? 'YES' : 'NO';
-        profile.propertyType = form.propertyType || profile.propertyType;
+      const manualNumber = (value, fallback = 0) => {
+        const n = parseInt(value, 10);
+        return Number.isFinite(n) ? n : fallback;
+      };
+      const baseProfile = enrichedProfile || {};
+      const treeCount = manualNumber(form.treeCount, Number(baseProfile.treeCount || baseProfile.estimatedTreeCount) || 0);
+      const profile = {
+        ...baseProfile,
+        homeSqFt: manualNumber(form.homeSqFt, Number(baseProfile.homeSqFt || baseProfile.squareFootage) || 0),
+        lotSqFt: manualNumber(form.lotSqFt, Number(baseProfile.lotSqFt) || 0),
+        stories: manualNumber(form.stories, Number(baseProfile.stories) || 1),
+        estimatedBedAreaSf: manualNumber(form.bedArea, Number(baseProfile.estimatedBedAreaSf) || 0),
+        estimatedPalmCount: manualNumber(form.palmCount, Number(baseProfile.estimatedPalmCount || baseProfile.palmCount) || 0),
+        estimatedTreeCount: treeCount,
+        treeCount,
+      };
+      if (profile.homeSqFt) profile.footprint = Math.round(profile.homeSqFt / (profile.stories || 1));
+      profile.pool = form.hasPool === 'YES' ? 'YES' : 'NO';
+      profile.poolCage = form.hasPoolCage === 'YES' ? 'YES' : 'NO';
+      profile.hasLargeDriveway = form.hasLargeDriveway === 'YES';
+      profile.shrubDensity = form.shrubDensity || profile.shrubDensity;
+      profile.treeDensity = form.treeDensity || profile.treeDensity;
+      profile.landscapeComplexity = form.landscapeComplexity || profile.landscapeComplexity;
+      profile.nearWater = form.nearWater === 'YES' ? 'YES' : 'NO';
+      profile.propertyType = form.propertyType || profile.propertyType;
 
-        const r = await fetch('/api/admin/estimator/calculate-estimate', {
-          method: 'POST', headers: authHeaders,
-          body: JSON.stringify({ profile, selectedServices, options }),
-        });
-        const result = await r.json();
-        if (result.error) { alert(result.error); setLookupStatus((s) => ({ ...s, type: 'err', msg: result.error })); return; }
-
-        if (!result.modifiers) {
-          const p = result.property || profile || {};
-          const mods = [];
-          const add = (svc, label, impact, type) => mods.push({ service: svc, label, impact, type });
-          const interp = (v, b) => {
-            if (v <= b[0].at) return b[0].adj;
-            if (v >= b[b.length - 1].at) return b[b.length - 1].adj;
-            for (let i = 1; i < b.length; i++) {
-              if (v <= b[i].at) return b[i - 1].adj;
-            }
-            return 0;
-          };
-          const homeSf = p.homeSqFt || p.squareFootage || 0;
-          const stories = p.stories || 1;
-          const fp = p.footprint || Math.round(homeSf / stories);
-          const fpAdj = interp(fp, [{ at: 800, adj: -20 }, { at: 1200, adj: -12 }, { at: 1500, adj: -6 }, { at: 2000, adj: 0 }, { at: 2500, adj: 6 }, { at: 3000, adj: 12 }, { at: 4000, adj: 20 }, { at: 5500, adj: 28 }]);
-          add('property', `Home: ${homeSf.toLocaleString()} sq ft · ${stories} story`, 0, 'info');
-          add('pest', `Footprint: ${fp.toLocaleString()} sq ft → ${fpAdj >= 0 ? '+' : ''}$${fpAdj}/visit`, fpAdj, fpAdj > 0 ? 'up' : fpAdj < 0 ? 'down' : 'info');
-          if (p.poolCage === 'YES') add('pest', 'Pool cage: +$10/visit', 10, 'up');
-          else if (p.pool === 'YES') add('pest', 'Pool (no cage): +$5/visit', 5, 'up');
-          else add('pest', 'No pool: $0/visit', 0, 'info');
-          const sd = p.shrubDensity || p.shrubs;
-          if (sd === 'HEAVY') add('pest', 'Heavy shrubs: +$10/visit', 10, 'up');
-          else if (sd === 'MODERATE') add('pest', 'Moderate shrubs: +$5/visit', 5, 'up');
-          else if (sd === 'LIGHT') add('pest', 'Light shrubs: -$5/visit', -5, 'down');
-          else add('pest', 'Shrubs: not specified', 0, 'info');
-          const td = p.treeDensity || p.trees;
-          if (td === 'HEAVY') add('pest', 'Heavy trees: +$10/visit', 10, 'up');
-          else if (td === 'MODERATE') add('pest', 'Moderate trees: +$5/visit', 5, 'up');
-          else if (td === 'LIGHT') add('pest', 'Light trees: -$5/visit', -5, 'down');
-          else add('pest', 'Trees: not specified', 0, 'info');
-          const lc = p.landscapeComplexity || p.complexity;
-          if (lc === 'COMPLEX') add('pest', 'Complex landscape: +$5/visit', 5, 'up');
-          else add('pest', `${lc || 'Simple'} landscape: $0/visit`, 0, 'info');
-          const nw = p.nearWater || p.waterProximity;
-          if (nw && nw !== 'NONE' && nw !== 'NO' && nw !== false) add('pest', 'Near water: +$5/visit', 5, 'up');
-          else add('pest', 'No water nearby: $0/visit', 0, 'info');
-          if (p.hasLargeDriveway) add('pest', 'Large driveway: +$5/visit', 5, 'up');
-          if (p.yearBuilt) add('property', `Built: ${p.yearBuilt} · ${p.constructionMaterial || 'CBS'} · ${p.foundationType || 'Slab'} · ${p.roofType || 'Shingle'}`, 0, 'info');
-          result.modifiers = mods;
-        }
-
-        setEstimate(result);
-        setSavedId(null);
-        setLookupStatus((s) => ({ ...s, type: 'ok' }));
-      } catch (e) {
-        alert('Estimate calculation failed: ' + e.message);
+      if (!profile.homeSqFt) profile.homeSqFt = 0;
+      if (!profile.lotSqFt) profile.lotSqFt = 0;
+      if (profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
+        alert('Enter home sq ft or lot size.');
+        return;
       }
-      return;
-    }
+      if ((form.svcLawn || form.svcOnetimeLawn) && profile.lotSqFt <= 0 && !profile.estimatedTurfSf) {
+        alert('Enter lot size or run Property Lookup for lawn pricing.');
+        return;
+      }
 
-    const yesNo = (v) => v === 'YES' || v === true;
-    const inputs = {
-      ...form,
-      hasPool: yesNo(form.hasPool),
-      hasPoolCage: yesNo(form.hasPoolCage),
-      hasLargeDriveway: yesNo(form.hasLargeDriveway),
-      nearWater: yesNo(form.nearWater),
-      isAfterHours: yesNo(form.isAfterHours),
-      isRecurringCustomer: yesNo(form.isRecurringCustomer),
-      exclWaive: yesNo(form.exclWaive),
-      boracareSqftAuto: form._boracareAuto || false,
-    };
-    const result = calculateEstimate(inputs);
-    if (result.error) { alert(result.error); return; }
-    setEstimate(result);
-    setSavedId(null);
+      const r = await fetch('/api/admin/estimator/calculate-estimate', {
+        method: 'POST', headers: authHeaders,
+        body: JSON.stringify({ profile, selectedServices, options }),
+      });
+      const result = await r.json();
+      if (result.error) { alert(result.error); setLookupStatus((s) => ({ ...s, type: 'err', msg: result.error })); return; }
+
+      if (!result.modifiers) {
+        const p = result.property || profile || {};
+        const mods = [];
+        const add = (svc, label, impact, type) => mods.push({ service: svc, label, impact, type });
+        const interp = (v, b) => {
+          if (v <= b[0].at) return b[0].adj;
+          if (v >= b[b.length - 1].at) return b[b.length - 1].adj;
+          for (let i = 1; i < b.length; i++) {
+            if (v <= b[i].at) return b[i - 1].adj;
+          }
+          return 0;
+        };
+        const homeSf = p.homeSqFt || p.squareFootage || 0;
+        const stories = p.stories || 1;
+        const fp = p.footprint || Math.round(homeSf / stories);
+        const fpAdj = interp(fp, [{ at: 800, adj: -20 }, { at: 1200, adj: -12 }, { at: 1500, adj: -6 }, { at: 2000, adj: 0 }, { at: 2500, adj: 6 }, { at: 3000, adj: 12 }, { at: 4000, adj: 20 }, { at: 5500, adj: 28 }]);
+        add('property', `Home: ${homeSf.toLocaleString()} sq ft · ${stories} story`, 0, 'info');
+        add('pest', `Footprint: ${fp.toLocaleString()} sq ft → ${fpAdj >= 0 ? '+' : ''}$${fpAdj}/visit`, fpAdj, fpAdj > 0 ? 'up' : fpAdj < 0 ? 'down' : 'info');
+        if (p.poolCage === 'YES') add('pest', 'Pool cage: +$10/visit', 10, 'up');
+        else if (p.pool === 'YES') add('pest', 'Pool (no cage): +$5/visit', 5, 'up');
+        else add('pest', 'No pool: $0/visit', 0, 'info');
+        const sd = p.shrubDensity || p.shrubs;
+        if (sd === 'HEAVY') add('pest', 'Heavy shrubs: +$10/visit', 10, 'up');
+        else if (sd === 'MODERATE') add('pest', 'Moderate shrubs: +$5/visit', 5, 'up');
+        else if (sd === 'LIGHT') add('pest', 'Light shrubs: -$5/visit', -5, 'down');
+        else add('pest', 'Shrubs: not specified', 0, 'info');
+        const td = p.treeDensity || p.trees;
+        if (td === 'HEAVY') add('pest', 'Heavy trees: +$10/visit', 10, 'up');
+        else if (td === 'MODERATE') add('pest', 'Moderate trees: +$5/visit', 5, 'up');
+        else if (td === 'LIGHT') add('pest', 'Light trees: -$5/visit', -5, 'down');
+        else add('pest', 'Trees: not specified', 0, 'info');
+        const lc = p.landscapeComplexity || p.complexity;
+        if (lc === 'COMPLEX') add('pest', 'Complex landscape: +$5/visit', 5, 'up');
+        else add('pest', `${lc || 'Simple'} landscape: $0/visit`, 0, 'info');
+        const nw = p.nearWater || p.waterProximity;
+        if (nw && nw !== 'NONE' && nw !== 'NO' && nw !== false) add('pest', 'Near water: +$5/visit', 5, 'up');
+        else add('pest', 'No water nearby: $0/visit', 0, 'info');
+        if (p.hasLargeDriveway) add('pest', 'Large driveway: +$5/visit', 5, 'up');
+        if (p.yearBuilt) add('property', `Built: ${p.yearBuilt} · ${p.constructionMaterial || 'CBS'} · ${p.foundationType || 'Slab'} · ${p.roofType || 'Shingle'}`, 0, 'info');
+        result.modifiers = mods;
+      }
+
+      setEstimate(result);
+      setSavedId(null);
+      setLookupStatus((s) => ({ ...s, type: 'ok' }));
+    } catch (e) {
+      alert('Estimate calculation failed: ' + e.message);
+    }
   }
 
   async function doSave() {
@@ -1123,10 +1123,10 @@ export default function EstimateToolViewV2({
                 <SelectV2 k="propertyType" options={[
                   { value: 'Single Family', label: 'Single Family ($0)' },
                   { value: 'Townhome', label: 'Townhome — End Unit (-$8)' },
-                  { value: 'Townhome Interior', label: 'Townhome — Interior Unit (-$15)' },
+                  { value: 'Townhome Interior', label: 'Townhome — Interior Unit (-$12)' },
                   { value: 'Duplex', label: 'Duplex (-$10)' },
-                  { value: 'Condo', label: 'Condo — Ground Floor (-$20)' },
-                  { value: 'Condo Upper', label: 'Condo — Upper Floor (-$25)' },
+                  { value: 'Condo', label: 'Condo — Ground Floor (-$18)' },
+                  { value: 'Condo Upper', label: 'Condo — Upper Floor (-$22)' },
                   { value: 'Commercial', label: 'Commercial' },
                 ]} />
               </FieldV2>
@@ -1224,7 +1224,7 @@ export default function EstimateToolViewV2({
               {form.svcOnetimeLawn && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   <FieldV2 label="Type" className="mb-0">
-                    <SelectV2 k="otLawnType" options={[{ value: 'FERT', label: 'Fertilization (base)' }, { value: 'WEED', label: 'Weed Control (+12%)' }, { value: 'PEST', label: 'Lawn Pest (+30%)' }, { value: 'FUNGICIDE', label: 'Fungicide (+38%)' }]} />
+                    <SelectV2 k="otLawnType" options={[{ value: 'FERT', label: 'Fertilization (base)' }, { value: 'WEED', label: 'Weed Control (+15%)' }, { value: 'PEST', label: 'Lawn Pest (+30%)' }, { value: 'FUNGICIDE', label: 'Fungicide (+45%)' }]} />
                   </FieldV2>
                 </div>
               )}
@@ -1761,7 +1761,7 @@ export default function EstimateToolViewV2({
                               Palm Injection <Tag>{R.injection.palms} palms</Tag>
                             </SectionTitle>
                             <TierGridV2>
-                              <TierRowV2 name="Arborjet" detail={`${R.injection.palms} palms x $35 x 3/yr`} price={`${fmt(R.injection.mo)}/mo`} recommended />
+                              <TierRowV2 name="Arborjet" detail={`${R.injection.palms} palms x $55 x 2/yr`} price={`${fmt(R.injection.mo)}/mo`} recommended />
                             </TierGridV2>
                           </div>
                         )}

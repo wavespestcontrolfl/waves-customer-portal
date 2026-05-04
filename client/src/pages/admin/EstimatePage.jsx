@@ -944,10 +944,10 @@ function EstimateToolView() {
               <Select k="propertyType" options={[
                 { value: 'Single Family', label: 'Single Family ($0)' },
                 { value: 'Townhome', label: 'Townhome — End Unit (-$8)' },
-                { value: 'Townhome Interior', label: 'Townhome — Interior Unit (-$15)' },
+                { value: 'Townhome Interior', label: 'Townhome — Interior Unit (-$12)' },
                 { value: 'Duplex', label: 'Duplex (-$10)' },
-                { value: 'Condo', label: 'Condo — Ground Floor (-$20)' },
-                { value: 'Condo Upper', label: 'Condo — Upper Floor (-$25)' },
+                { value: 'Condo', label: 'Condo — Ground Floor (-$18)' },
+                { value: 'Condo Upper', label: 'Condo — Upper Floor (-$22)' },
                 { value: 'Commercial', label: 'Commercial' },
               ]} />
             </Field>
@@ -1044,7 +1044,7 @@ function EstimateToolView() {
             {form.svcOnetimeLawn && (
               <div style={sSubOpts}>
                 <Field label="Type" style={{ marginBottom: 0 }}>
-                  <Select k="otLawnType" options={[{ value: 'FERT', label: 'Fertilization (base)' }, { value: 'WEED', label: 'Weed Control (+12%)' }, { value: 'PEST', label: 'Lawn Pest (+30%)' }, { value: 'FUNGICIDE', label: 'Fungicide (+38%)' }]} />
+                  <Select k="otLawnType" options={[{ value: 'FERT', label: 'Fertilization (base)' }, { value: 'WEED', label: 'Weed Control (+15%)' }, { value: 'PEST', label: 'Lawn Pest (+30%)' }, { value: 'FUNGICIDE', label: 'Fungicide (+45%)' }]} />
                 </Field>
               </div>
             )}
@@ -1456,7 +1456,7 @@ function EstimateToolView() {
                       <div style={{ marginBottom: 24 }}>
                         <div style={sSectionTitle}>Palm Injection <span style={sTag('blue')}>{R.injection.palms} palms</span></div>
                         <TierGrid>
-                          <TierRow name="Arborjet" detail={`${R.injection.palms} palms x $35 x 3/yr`} price={`${fmt(R.injection.mo)}/mo`} recommended />
+                          <TierRow name="Arborjet" detail={`${R.injection.palms} palms x $55 x 2/yr`} price={`${fmt(R.injection.mo)}/mo`} recommended />
                         </TierGrid>
                       </div>
                     )}
