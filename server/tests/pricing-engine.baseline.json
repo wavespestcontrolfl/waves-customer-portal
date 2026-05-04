@@ -111,9 +111,9 @@
   },
   "edge_large_footprint_5500sf_platinum_bundle": {
     "summary": {
-      "recurringAnnualAfterDiscount": 8583.52,
-      "recurringMonthlyAfterDiscount": 715.29,
-      "year1Total": 8584
+      "recurringAnnualAfterDiscount": 7611.52,
+      "recurringMonthlyAfterDiscount": 634.29,
+      "year1Total": 7612
     },
     "waveGuard": {
       "tier": "platinum",
@@ -134,16 +134,16 @@
         "monthly": 341.42
       },
       "mosquito": {
-        "annual": 3915,
-        "monthly": 326.25
+        "annual": 2700,
+        "monthly": 225
       }
     }
   },
   "mosquito_acre_waterfront_max_pressure": {
     "summary": {
-      "recurringAnnualAfterDiscount": 6426,
-      "recurringMonthlyAfterDiscount": 535.5,
-      "year1Total": 6426
+      "recurringAnnualAfterDiscount": 3516,
+      "recurringMonthlyAfterDiscount": 293,
+      "year1Total": 3516
     },
     "waveGuard": {
       "tier": "bronze",
@@ -152,8 +152,8 @@
     },
     "lineItems": {
       "mosquito": {
-        "annual": 6426,
-        "monthly": 535.5
+        "annual": 3516,
+        "monthly": 293
       }
     }
   },

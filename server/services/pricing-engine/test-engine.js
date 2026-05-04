@@ -81,7 +81,7 @@ for (const tt of ['nutrition', 'insecticide', 'combo', 'fungal', 'lethalBronzing
 console.log('\n' + '─'.repeat(70));
 console.log('MOSQUITO (Small lot, pool+mod trees)');
 console.log('─'.repeat(70));
-for (const tier of ['bronze', 'silver', 'gold', 'platinum']) {
+for (const tier of ['seasonal', 'monthly']) {
   const r = priceMosquito(refProperty, { tier });
   console.log(`  ${tier.padEnd(10)} | Visit: ${fmt(r.perVisit).padStart(6)} × ${r.visits} = Annual: ${fmt(r.annual).padStart(7)} | Margin: ${pct(r.margin)}`);
 }
@@ -200,7 +200,7 @@ const estimate = generateEstimate({
     pest: { frequency: 'quarterly', version: 'v1' },
     lawn: { track: 'st_augustine', tier: 'enhanced' },
     treeShrub: { tier: 'enhanced', treeCount: 5 },
-    mosquito: { tier: 'silver' },
+    mosquito: { tier: 'monthly' },
   },
 });
 
@@ -245,7 +245,7 @@ const achEstimate = generateEstimate({
       pest: { frequency: 'quarterly', version: 'v1' },
       lawn: { track: 'st_augustine', tier: 'enhanced' },
       treeShrub: { tier: 'enhanced', treeCount: 5 },
-      mosquito: { tier: 'silver' },
+      mosquito: { tier: 'monthly' },
     },
   },
   paymentMethod: 'us_bank_account',

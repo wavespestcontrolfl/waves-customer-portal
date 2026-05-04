@@ -46,8 +46,9 @@ async function ensureTable() {
       { config_key: 'palm_pricing', name: 'Palm Injection Tiered Pricing', category: 'palm', sort_order: 1, data: JSON.stringify({ nutrition: 35, preventive_insecticide: 45, combo: 55, fungal: 40, lethal_bronzing_floor: 125, tree_age_floor: 65, min_per_visit: 75, apps_per_year: 2, tier_qualifier: false, flat_credit_per_palm: 10, flat_credit_min_tier: 'gold' }) },
 
       // Mosquito
-      { config_key: 'mosquito_lot_sizes', name: 'Mosquito Lot Size Categories', category: 'mosquito', sort_order: 1, data: JSON.stringify({ SMALL: { max_sqft: 10889 }, QUARTER: { max_sqft: 14519 }, THIRD: { max_sqft: 21779 }, HALF: { max_sqft: 43559 }, ACRE: { max_sqft: 999999 } }) },
-      { config_key: 'mosquito_tiers', name: 'Mosquito Tier Visits & Pressure', category: 'mosquito', sort_order: 2, data: JSON.stringify({ visits: { bronze: 12, silver: 12, gold: 15, platinum: 18 }, pressure_cap: 1.80 }) },
+      { config_key: 'mosquito_lot_sizes', name: 'Mosquito Treatable Area Categories', category: 'mosquito', sort_order: 1, data: JSON.stringify({ SMALL: { max_sqft: 7999 }, QUARTER: { max_sqft: 11999 }, THIRD: { max_sqft: 17999 }, HALF: { max_sqft: 34999 }, ACRE: { max_sqft: 999999 } }) },
+      { config_key: 'mosquito_visits', name: 'Mosquito Program Visits', category: 'mosquito', sort_order: 2, data: JSON.stringify({ seasonal: 9, monthly: 12 }) },
+      { config_key: 'mosquito_pressure', name: 'Mosquito Pressure Factors', category: 'mosquito', sort_order: 3, data: JSON.stringify({ trees_heavy: 0.15, trees_moderate: 0.05, complexity_complex: 0.10, complexity_moderate: 0.05, pool: 0.05, near_water: 0.10, irrigation: 0.08, lot_acre: 0.15, lot_half: 0.05, cap: 2.0 }) },
 
       // Termite
       { config_key: 'termite_install', name: 'Termite Install Multiplier', category: 'termite', sort_order: 1, data: JSON.stringify({ multiplier: 1.45, hexpro_bait: 8.69, advance_bait: 13.16, trelona_bait: 22.05, labor_per_station: 5.25, misc_per_station: 0.75 }) },
@@ -218,7 +219,7 @@ router.post('/margin-check', async (req, res) => {
         pest: { frequency: 'quarterly' },
         lawn: { track: 'st_augustine', tier: 'enhanced' },
         treeShrub: { tier: 'enhanced' },
-        mosquito: { tier: waveguardTier },
+        mosquito: { tier: 'monthly' },
       },
     });
 
@@ -227,7 +228,7 @@ router.post('/margin-check', async (req, res) => {
       pest_control: { laborMin: 20, materialPerVisit: 6.67, visitsPerYear: 4 },
       lawn_care: { laborMin: 30, materialPerVisit: 25, visitsPerYear: 9 },
       tree_shrub: { laborMin: 25, materialPerVisit: 20, visitsPerYear: 9 },
-      mosquito: { laborMin: 15, materialPerVisit: 8, visitsPerYear: 15 },
+      mosquito: { laborMin: 15, materialPerVisit: 8, visitsPerYear: 12 },
     };
 
     const services = [];
@@ -236,7 +237,7 @@ router.post('/margin-check', async (req, res) => {
       const ce = costEstimates[item.service] || { laborMin: 20, materialPerVisit: 10, visitsPerYear: 6 };
       const laborPerVisit = laborRate * ce.laborMin / 60;
       const costPerVisit = laborPerVisit + ce.materialPerVisit + driveCost;
-      const annualCost = costPerVisit * ce.visitsPerYear;
+      const annualCost = costPerVisit * (item.visits || item.visitsPerYear || ce.visitsPerYear);
       const afterDiscount = item.annualAfterDiscount || item.annual;
       const margin = afterDiscount > 0 ? (afterDiscount - annualCost) / afterDiscount : 0;
 

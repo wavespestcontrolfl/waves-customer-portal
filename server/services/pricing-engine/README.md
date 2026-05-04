@@ -52,7 +52,7 @@ Single source of truth for what this engine prices, how, and with what constants
 | Lawn Care | ✅ basic/standard/enhanced/premium | ✅ per-treatment | ✅ |
 | Tree & Shrub | ✅ standard/enhanced/premium | — | ✅ |
 | Palm Injection | ✅ (4 treatment types) | — | ❌ flat credit only |
-| Mosquito | ✅ Bronze/Silver/Gold/Platinum | ✅ flat by lot | ✅ |
+| Mosquito | ✅ Seasonal/Monthly | ✅ treatable area | ✅ |
 | Termite Bait | ✅ monthly subscription | install only | ✅ |
 | Rodent | ✅ bait subscription + trapping | — | ❌ excluded from % |
 | WDO Inspection | — | ✅ (bracketed) | — |
@@ -124,21 +124,23 @@ Single source of truth for what this engine prices, how, and with what constants
 
 ---
 
-## 7. Mosquito (WaveGuard tiered)
+## 7. Mosquito
 
-**Formula:** `basePrices[lotCategory][tierIndex] × (1 + pressureFactors) × urgency`, pressure capped at 2.0x.
+**Area basis:** `mosquitoTreatableSqFt = lotSqFt - footprint - hardscape`. This is separate from lawn square footage because mosquito treatment includes beds, shrubs, fence lines, trees, shaded areas, and outdoor living edges. The bucket guardrail prevents moving more than one category below the gross-lot bucket until revenue impact is backtested.
 
-**Base prices by lot × tier (Bronze/Silver/Gold/Platinum):**
+**Formula:** `basePrices[mosquitoLotCategory][programIndex] × pressureMultiplier`, pressure capped at 2.0x.
 
-| Lot | Bronze | Silver | Gold | Platinum |
-|---|---|---|---|---|
-| SMALL (<¼ ac) | $80 | $90 | $100 | $110 |
-| QUARTER (¼ ac) | $90 | $100 | $115 | $125 |
-| THIRD (⅓ ac) | $100 | $110 | $125 | $135 |
-| HALF (½ ac) | $110 | $125 | $145 | $155 |
-| ACRE (1+ ac) | $140 | $155 | $180 | $200 |
+**Base prices by treatable area × program:**
 
-**Tier visits/yr:** bronze 12 · silver 12 · gold 15 · platinum 17
+| Treatable bucket | Seasonal | Monthly |
+|---|---|---|
+| SMALL (<8k sf) | $90 | $90 |
+| QUARTER (8k-12k sf) | $100 | $100 |
+| THIRD (12k-18k sf) | $110 | $110 |
+| HALF (18k-35k sf) | $125 | $125 |
+| ACRE (35k+ sf) | $155 | $155 |
+
+**Visits/yr:** seasonal 9 · monthly 12
 
 **Pressure factors (add % to base):** trees heavy +15%, trees moderate +5%, complexity complex +10%, complexity moderate +5%, pool +5%, nearWater +10%, irrigation +8%, lot acre +15%, lot half +5%.
 

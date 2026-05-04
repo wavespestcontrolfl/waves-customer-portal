@@ -150,6 +150,28 @@ export function calculateEstimate(inputs) {
   const LABOR = 35, DRIVE = 20;
   const footprint = homeSqFt > 0 ? Math.round(homeSqFt / stories) : 0;
   const treeNum = treeDensity === 'HEAVY' ? 2 : treeDensity === 'MODERATE' ? 1 : 0;
+  const estimateHardscape = () => {
+    const pt = (propertyType || '').toLowerCase();
+    let hardscape = 0;
+    if (pt.includes('commercial')) {
+      hardscape = Math.round(lotSqFt * 0.15);
+    } else {
+      let base = 800;
+      if (pt.includes('town') || pt.includes('duplex')) {
+        hardscape = 400 + Math.max(0, Math.round((lotSqFt - 7500) * 0.02));
+      } else if (pt.includes('condo')) {
+        hardscape = 200 + Math.max(0, Math.round((lotSqFt - 7500) * 0.05));
+      } else {
+        const tier1 = Math.max(0, Math.min(lotSqFt, 15000) - 7500) * 0.03;
+        const tier2 = Math.max(0, lotSqFt - 15000) * 0.05;
+        hardscape = base + Math.round(tier1 + tier2);
+      }
+    }
+    if (hasPoolCage) hardscape += 600;
+    else if (hasPool) hardscape += 450;
+    if (hasLargeDriveway) hardscape += 300;
+    return hardscape;
+  };
 
   if (homeSqFt <= 0 && lotSqFt <= 0) {
     return { error: 'Enter home sq ft or lot size.' };
@@ -262,29 +284,7 @@ export function calculateEstimate(inputs) {
   if (svcLawn && lotSqFt > 0) {
     hasRec = true;
 
-    // ── Hardscape: fixed base + marginal % of excess lot beyond 7,500 sf ──
-    const pt = (propertyType || '').toLowerCase();
-    let hardscape = 0;
-    if (pt.includes('commercial')) {
-      hardscape = Math.round(lotSqFt * 0.15);
-    } else {
-      let base = 800;
-      if (pt.includes('town') || pt.includes('duplex')) {
-        hardscape = 400 + Math.max(0, Math.round((lotSqFt - 7500) * 0.02));
-      } else if (pt.includes('condo')) {
-        hardscape = 200 + Math.max(0, Math.round((lotSqFt - 7500) * 0.05));
-      } else {
-        // Tiered marginal: 3% up to 15k, 5% above — tracks better on larger LWR estate lots
-        const tier1 = Math.max(0, Math.min(lotSqFt, 15000) - 7500) * 0.03;
-        const tier2 = Math.max(0, lotSqFt - 15000) * 0.05;
-        hardscape = base + Math.round(tier1 + tier2);
-      }
-    }
-    // Fixed deductions for features (not percentage-based)
-    if (hasPoolCage) hardscape += 600;
-    else if (hasPool) hardscape += 450;
-    if (hasLargeDriveway) hardscape += 300;
-
+    const hardscape = estimateHardscape();
     const oa = Math.max(0, Math.round(lotSqFt - footprint - hardscape));
 
     // ── Complexity score ──
@@ -452,11 +452,22 @@ export function calculateEstimate(inputs) {
   /* ── MOSQUITO ────────────────────────────────────────────── */
   if (svcMosquito && lotSqFt > 0) {
     hasRec = true;
-    let sz = 'SMALL';
-    if (lotSqFt >= 43560) sz = 'ACRE';
-    else if (lotSqFt >= 21780) sz = 'HALF';
-    else if (lotSqFt >= 14520) sz = 'THIRD';
-    else if (lotSqFt >= 10890) sz = 'QUARTER';
+    const categoryOrder = ['SMALL', 'QUARTER', 'THIRD', 'HALF', 'ACRE'];
+    const grossLotCategory = lotSqFt >= 43560 ? 'ACRE'
+      : lotSqFt >= 21780 ? 'HALF'
+        : lotSqFt >= 14520 ? 'THIRD'
+          : lotSqFt >= 10890 ? 'QUARTER'
+            : 'SMALL';
+    const treatableSqFt = Math.max(0, Math.round(lotSqFt - footprint - estimateHardscape()));
+    const treatableCategory = treatableSqFt >= 35000 ? 'ACRE'
+      : treatableSqFt >= 18000 ? 'HALF'
+        : treatableSqFt >= 12000 ? 'THIRD'
+          : treatableSqFt >= 8000 ? 'QUARTER'
+            : 'SMALL';
+    const sz = categoryOrder[Math.max(
+      categoryOrder.indexOf(treatableCategory),
+      categoryOrder.indexOf(grossLotCategory) - 1
+    )];
     let pr = 1.0;
     if (treeDensity === 'HEAVY') pr += 0.15;
     else if (treeDensity === 'MODERATE') pr += 0.05;
@@ -468,30 +479,22 @@ export function calculateEstimate(inputs) {
     if (hasIrrigation) pr += 0.08;
     if (sz === 'ACRE') pr += 0.15;
     else if (sz === 'HALF') pr += 0.05;
-    // v1.7: pressure cap 1.80 (was 1.60 then 2.00; 2× doubles base price, too high)
-    pr = Math.min(1.80, Math.round(pr * 100) / 100);
+    pr = Math.min(2.0, Math.round(pr * 100) / 100);
     const bp = {
-      SMALL:   { b: 80, s: 90, g: 100, p: 110 },
-      QUARTER: { b: 90, s: 100, g: 115, p: 125 },
-      THIRD:   { b: 100, s: 110, g: 125, p: 135 },
-      HALF:    { b: 110, s: 125, g: 145, p: 155 },
-      ACRE:    { b: 140, s: 155, g: 180, p: 200 },
+      SMALL: 90,
+      QUARTER: 100,
+      THIRD: 110,
+      HALF: 125,
+      ACRE: 155,
     };
     const b = bp[sz] || bp.SMALL;
-    // Visit counts mirror server constants.MOSQUITO.tierVisits — Platinum
-    // is 17 (not 18) since Session 11a alignment. Source of truth:
-    // server/services/pricing-engine/constants.js.
     const mt = [
-      { n: 'Bronze',   pv: Math.round(b.b * pr), v: 12 },
-      { n: 'Silver',   pv: Math.round(b.s * pr), v: 12 },
-      { n: 'Gold',     pv: Math.round(b.g * pr), v: 15 },
-      { n: 'Platinum', pv: Math.round(b.p * pr), v: 17 },
+      { n: 'Seasonal', pv: Math.round(b * pr), v: 9 },
+      { n: 'Monthly', pv: Math.round(b * pr), v: 12 },
     ];
-    let ri = 1;
-    if (treeDensity === 'HEAVY') ri = 2;
-    if (nearWater && ri < 2) ri++;
+    const ri = 1;
     R.mq = [];
-    R.mqMeta = { pr, sz, ri };
+    R.mqMeta = { pr, sz, ri, treatableSqFt, grossLotCategory };
     mt.forEach((t, i) => {
       const ann = t.pv * t.v;
       const mo = Math.round(ann / 12 * 100) / 100;
@@ -845,7 +848,7 @@ export function calculateEstimate(inputs) {
   // Palm Injection intentionally excluded from WaveGuard tier count + discounted total —
   // not a qualifying service, not eligible for percent bundle discount.
   if (R.mq) {
-    const ri = treeDensity === 'HEAVY' ? 2 : 1;
+    const ri = R.mqMeta?.ri ?? 1;
     if (R.mq[ri]) { ac++; ra += R.mq[ri].ann; lineItems.push({ name: 'Mosquito', ann: R.mq[ri].ann }); }
   }
   if (R.tmBait) { ac++; ra += 35 * 12; lineItems.push({ name: 'Termite Bait', ann: 420 }); }

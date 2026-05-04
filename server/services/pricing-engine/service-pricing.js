@@ -382,13 +382,14 @@ function pricePalmInjection(property, options = {}) {
 // ============================================================
 function priceMosquito(property, options = {}) {
   const {
-    tier = 'silver', // bronze, silver, gold, platinum
+    tier = 'monthly',
     modifiers = {},
   } = options;
 
-  const lotCategory = property.lotCategory;
-  const tierIndex = { bronze: 0, silver: 1, gold: 2, platinum: 3 }[tier];
-  if (tierIndex === undefined) throw new Error(`Unknown mosquito tier: ${tier}`);
+  const selectedProgram = tier;
+  const lotCategory = property.mosquitoLotCategory || property.lotCategory;
+  const tierIndex = MOSQUITO.programs.indexOf(selectedProgram);
+  if (tierIndex < 0) throw new Error(`Unknown mosquito program: ${tier}`);
 
   const basePrices = MOSQUITO.basePrices[lotCategory];
   if (!basePrices) throw new Error(`Unknown lot category: ${lotCategory}`);
@@ -413,7 +414,7 @@ function priceMosquito(property, options = {}) {
   pressure = Math.min(pressure, MOSQUITO.pressureCap);
 
   const perVisit = Math.round(basePrice * pressure);
-  const visits = MOSQUITO.tierVisits[tier];
+  const visits = MOSQUITO.tierVisits[selectedProgram];
   const annual = perVisit * visits;
   const monthly = Math.round(annual / 12 * 100) / 100;
 
@@ -423,9 +424,8 @@ function priceMosquito(property, options = {}) {
   const annualCost = (materialPerVisit + laborPerVisitCost) * visits + GLOBAL.ADMIN_ANNUAL;
   const margin = annual > 0 ? (annual - annualCost) / annual : 0;
 
-  // ── Tier array: bronze / silver / gold / platinum pre-priced ──
-  const TIER_NAMES = ['bronze', 'silver', 'gold', 'platinum'];
-  const recommendedTier = f.nearWater && pressure >= 1.60 ? 'platinum' : f.trees === 'heavy' ? 'gold' : 'silver';
+  const TIER_NAMES = MOSQUITO.programs;
+  const recommendedTier = selectedProgram;
   const tiers = TIER_NAMES.map((name, idx) => {
     const bp = basePrices[idx];
     const pv = Math.round(bp * pressure);
@@ -444,7 +444,11 @@ function priceMosquito(property, options = {}) {
 
   return {
     service: 'mosquito',
-    tier, lotCategory, basePrice, pressureMultiplier: pressure,
+    tier: selectedProgram,
+    lotCategory,
+    grossLotCategory: property.lotCategory,
+    mosquitoTreatableSqFt: property.mosquitoTreatableSqFt || 0,
+    basePrice, pressureMultiplier: pressure,
     perVisit, visits, annual, monthly,
     tiers,
     costs: { materialPerVisit, laborPerVisit: Math.round(laborPerVisitCost * 100) / 100, annualCost: Math.round(annualCost) },
@@ -861,7 +865,7 @@ function priceOneTimeLawn(property, options = {}) {
 // ONE-TIME MOSQUITO
 // ============================================================
 function priceOneTimeMosquito(property) {
-  const lotCategory = property.lotCategory;
+  const lotCategory = property.mosquitoLotCategory || property.lotCategory;
   const price = ONE_TIME.mosquito[lotCategory] || ONE_TIME.mosquito.SMALL;
   return { service: 'one_time_mosquito', price, lotCategory };
 }

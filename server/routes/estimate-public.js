@@ -1947,7 +1947,7 @@ router.post('/:token/bundle-inquiry', async (req, res, next) => {
         } else if (addPest && !updatedInputs.services.pest) {
           updatedInputs.services.pest = { frequency: 'quarterly', version: 'v1', roachType: 'none' };
         } else if (addMosquito && !updatedInputs.services.mosquito) {
-          updatedInputs.services.mosquito = { tier: 'silver' };
+          updatedInputs.services.mosquito = { tier: 'monthly' };
         }
 
         // Only re-price if we actually added a service this round.
