@@ -111,6 +111,7 @@ export default function MobileAppointmentDetailSheet({
   onEdit,
   onTreatmentPlan,
   onReviewCheckout,
+  onCompleteService,
   onBookNext,
   onCancelled,
   onNoShow,
@@ -143,6 +144,7 @@ export default function MobileAppointmentDetailSheet({
 
   const noteDirty = (service?.notes || '') !== note;
   const isLawn = String(service?.serviceType || '').toLowerCase().includes('lawn');
+  const canCompleteService = service.status === 'en_route' || service.status === 'on_site';
 
   const saveNote = async () => {
     if (!noteDirty) return true;
@@ -194,6 +196,12 @@ export default function MobileAppointmentDetailSheet({
     } finally { setActionBusy(''); }
   };
 
+  const completeService = async () => {
+    const saved = await saveNote();
+    if (!saved) return;
+    onCompleteService?.({ ...service, notes: note });
+  };
+
   return (
     <div
       className="fixed inset-0 z-[100] bg-white overflow-y-auto"
@@ -228,14 +236,26 @@ export default function MobileAppointmentDetailSheet({
       </div>
 
       <div className="px-4 pt-4 pb-10 mx-auto" style={{ maxWidth: 560 }}>
+        {canCompleteService && (
+          <button
+            type="button"
+            onClick={completeService}
+            disabled={savingNote}
+            className="w-full rounded-sm bg-zinc-900 text-white u-focus-ring"
+            style={{ padding: '14px 20px', fontSize: 16, opacity: savingNote ? 0.6 : 1 }}
+          >
+            {savingNote ? 'Saving note...' : 'Complete service'}
+          </button>
+        )}
+
         {/* Review & checkout */}
         <button
           type="button"
           onClick={() => onReviewCheckout?.(service)}
-          className="w-full rounded-sm bg-zinc-900 text-white u-focus-ring"
+          className={`w-full rounded-sm u-focus-ring ${canCompleteService ? 'bg-white text-zinc-900 border border-hairline border-zinc-300 mt-3' : 'bg-zinc-900 text-white'}`}
           style={{ padding: '14px 20px', fontSize: 16 }}
         >
-          {coveredByMembership || isPrepaid ? 'Complete visit' : 'Review & checkout'}
+          {coveredByMembership || isPrepaid ? 'Review visit details' : 'Review & checkout'}
         </button>
         {coveredByMembership && !isPrepaid && (
           <div className="text-ink-secondary text-center mt-2" style={{ fontSize: 12 }}>
