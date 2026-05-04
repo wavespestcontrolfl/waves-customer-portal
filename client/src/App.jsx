@@ -1,5 +1,5 @@
 import React, { Component } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme';
 
@@ -33,6 +33,19 @@ function ScheduleRedirect() {
   params.set('tab', 'schedule');
   return <Navigate to={`/admin/dispatch?${params.toString()}`} replace />;
 }
+
+const SERVICE_ESTIMATE_SLUGS = new Set([
+  'mosquito',
+  'termite',
+  'lawn',
+  'flea',
+  'cockroach',
+  'bed-bug',
+  'dethatching',
+  'dehatching',
+  'top-dressing',
+  'overseeding',
+]);
 import LoginPage from './pages/LoginPage';
 import PortalPage from './pages/PortalPage';
 import OnboardingPage from './pages/OnboardingPage';
@@ -134,6 +147,15 @@ const NewsletterLandingPage = lazyWithRetry(() => import('./pages/NewsletterLand
 const NewsletterArchivePage = lazyWithRetry(() => import('./pages/NewsletterArchivePage'));
 const ButtonExamples = lazyWithRetry(() => import('./pages/ButtonExamples'));
 
+function EstimatePublicGateway() {
+  const { token } = useParams();
+  const slug = String(token || '').toLowerCase();
+  if (SERVICE_ESTIMATE_SLUGS.has(slug)) {
+    return <QuotePage serviceSlug={slug} />;
+  }
+  return <EstimateViewPage />;
+}
+
 function ProtectedRoute({ children }) {
   const { isAuthenticated, loading } = useAuth();
 
@@ -183,7 +205,7 @@ export default function App() {
           <Route path="/receipt/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReceiptPage /></Suspense>} />
           <Route path="/track/:token" element={<Suspense fallback={<div style={{background:'#F1F5F9',minHeight:'100vh'}}/>}><TrackPage /></Suspense>} />
           <Route path="/track-preview" element={<Suspense fallback={<div style={{background:'#FEF7E0',minHeight:'100vh'}}/>}><TrackPreviewPage /></Suspense>} />
-          <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#F1F5F9',minHeight:'100vh'}}/>}><EstimateViewPage /></Suspense>} />
+          <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#F1F5F9',minHeight:'100vh'}}/>}><EstimatePublicGateway /></Suspense>} />
           <Route path="/review/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReviewPage /></Suspense>} />
           <Route path="/book" element={<Suspense fallback={<div style={{background:'#F5F1EB',minHeight:'100vh'}}/>}><PublicBookingPage /></Suspense>} />
           <Route path="/estimate" element={<Suspense fallback={<div style={{background:'#F1F5F9',minHeight:'100vh'}}/>}><QuotePage /></Suspense>} />
