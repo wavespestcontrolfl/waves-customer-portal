@@ -8,8 +8,15 @@ import {
   stripLegacyBoilerplate,
 } from './SchedulePage';
 
+const FALLBACK_LAWN_TRACKS = [
+  { key: 'st_augustine', name: 'St. Augustine', visits: 12 },
+  { key: 'bermuda', name: 'Bermuda', visits: 12 },
+  { key: 'zoysia', name: 'Zoysia', visits: 12 },
+  { key: 'bahia', name: 'Bahia', visits: 12 },
+];
+
 function adminFetch(path, options = {}) {
-  const token = localStorage.getItem('adminToken');
+  const token = localStorage.getItem('waves_admin_token') || localStorage.getItem('adminToken');
   return fetch(`/api${path}`, {
     ...options,
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(options.headers || {}) },
@@ -366,6 +373,8 @@ export default function ProtocolReferenceTabV2() {
   const [mixLoading, setMixLoading] = useState(false);
   const [selectedConditionalIds, setSelectedConditionalIds] = useState([]);
 
+  const lawnTracks = programs?.lawn?.tracks?.length ? programs.lawn.tracks : FALLBACK_LAWN_TRACKS;
+
   const loadTrack = async (key) => {
     setSelectedTrack(key);
     setTrackData(null);
@@ -382,7 +391,8 @@ export default function ProtocolReferenceTabV2() {
       .then(async (d) => {
         if (cancelled) return;
         setPrograms(d);
-        const defaultTrack = d?.lawn?.tracks?.find((t) => t.key === 'st_augustine')?.key || d?.lawn?.tracks?.[0]?.key;
+        const tracks = d?.lawn?.tracks?.length ? d.lawn.tracks : FALLBACK_LAWN_TRACKS;
+        const defaultTrack = tracks.find((t) => t.key === 'st_augustine')?.key || tracks[0]?.key;
         if (defaultTrack) {
           try {
             const param = defaultTrack === 'tree_shrub' ? 'program=tree_shrub' : `track=${defaultTrack}`;
@@ -458,7 +468,7 @@ export default function ProtocolReferenceTabV2() {
       </div>
 
       <div className="flex gap-2 flex-wrap overflow-x-auto">
-        {programs?.lawn?.tracks?.map((t) => {
+        {lawnTracks.map((t) => {
           const active = selectedTrack === t.key;
           return (
             <button
