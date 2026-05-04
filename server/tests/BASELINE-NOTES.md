@@ -349,3 +349,48 @@ No customer communication required on reconciliation grounds. Documented per sta
 Session 8 shipped rationale comments + TODO(v4.4) markers assuming `constants.js` was the single source of truth. Session 9 scoping surfaced `pricing_config` had drifted from code on 8 keys — 6 of them from commit `9ddbd01` "Pricing overhaul" updating code values without a matching DB UPDATE. Regression baselines captured against this drifted state (Sessions 1-8) were validating the drift, not the intended behavior. Session 8.5 is the cleanup: reconcile DB to code, re-capture baselines against reconciled state, document in changelog id=9. Session 9's approval-queue work resumes against a trustworthy baseline.
 
 See `pricing_changelog` id=9 for the reconciliation SQL + rationale.
+
+---
+
+## 2026-05-04 — Synced pricing baseline refresh + v1 adapter totals fix
+
+Regression baselines were stale against the current DB-synced pricing engine and the v1 adapter totals behavior from commit `8a2c38b` ("Fix estimate pricing engine totals"). Both pricing suites were recaptured in `LOCAL=1` mode after `syncConstantsFromDB()` successfully loaded 57 `pricing_config` rows.
+
+Harness fix: the v1 adapter regression suite now runs the same DB-sync guard as the core pricing regression suite. This prevents adapter local mode from silently validating in-memory constants while the production route uses synced DB pricing. The core suite also now fails loud if `syncConstantsFromDB()` returns `false`.
+
+### Core v1 regression changes
+
+Affected cases:
+
+| Case | Previous | Current | Direction |
+|---|---:|---:|---|
+| `zone_b_monthly_pest_bermuda_premium` recurring annual | $2,239.87 | $2,168.42 | down |
+| `zone_c_bimonthly_pest_zoysia_standard_treeshrub` recurring annual | $3,662.63 | $3,657.78 | down |
+| `zone_d_quarterly_pest_bahia_basic` recurring annual | $820.80 | $777.60 | down |
+| `edge_large_footprint_5500sf_platinum_bundle` recurring annual | $8,660.80 | $8,583.52 | down |
+| `termite_basic_standard_perimeter` year 1 | $1,628 | $1,355 | down |
+| `german_roach_modifier_pest_quarterly` recurring annual | $584.20 | $508.00 | down |
+
+Observed causes:
+
+- Pest recurring cases moved with the current DB-synced pest feature/footprint/frequency values.
+- Termite basic standard perimeter now captures Advance install at $695 plus $420 annual monitoring, producing $1,355 year 1.
+- German roach recurring captures the lower synced roach modifier on pest recurring and includes the initial roach line in year 1.
+
+### v1 adapter regression changes
+
+Affected cases:
+
+| Case | Previous | Current | Direction |
+|---|---:|---:|---|
+| `v1adapter_platinum_bundle_4_services_zone_a` recurring annual after discount | $3,143.20 | $3,120.80 | down |
+| `v1adapter_onetime_pest_urgent_afterhours` one-time total | $330 | $444 | up |
+| `v1adapter_onetime_pest_recurring_customer` one-time total | $150 | $199 | up |
+| `v1adapter_termite_bait_three_systems` year 1 | $1,733 | $1,115 | down |
+| `v1adapter_rodent_bait_large_footprint` recurring annual | $828 | $0 | down in `recurring`, still exposed via `results.rodBaitMo` |
+
+Observed causes:
+
+- `8a2c38b` changed adapter recurring totals to exclude rodent bait and palm injection from the WaveGuard-discounted recurring bucket, while still including them in year 1/year 2 totals.
+- Adapter one-time pest now follows the translated v1 engine path with synced pest pricing instead of the stale v2 envelope values.
+- `TERMITE_BAIT` adapter translation currently selects Advance, so the legacy envelope captures `tmBait.ai = 695` and `tmBait.ti = 0`.
