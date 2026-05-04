@@ -287,3 +287,13 @@ The four documented render sites — `/pay/:token` overdue header band + Amount 
 **Revisit if:** Three or more SWFL competitor invoices come in at $375–$500 for ~20-sta installs (drop multiplier to 1.35× and consider rebalancing the buildup at the same time). Also revisit if the Corteva or BASF wholesale lines change by >10% — the cost basis is hard-coded and `db-bridge.js` only overrides if the DB row has the matching key. Also revisit if Waves decides Trelona's RFID + always-active bait is a meaningful enough differentiator to lead with again, in which case the default flip is one line back.
 
 ---
+
+## 2026-05-03 — Public booking confirms customers from address match and stabilizes curated availability
+
+**Decision:** Ship the address-based public-booking flow in two mainline commits: `c064afa` (`Fix public booking availability loop`) and `db23154` (`Confirm booking customer from address match`). The public booking page now avoids reloading availability when the geocoded coordinates are unchanged, hides redundant address-label copy, and switches the step-3 copy to a confirmation state when an existing customer is uniquely matched by address.
+
+**Context:** The touched surface is `client/src/pages/PublicBookingPage.jsx`; the backend touchpoint is `server/routes/booking.js` (`GET /api/booking/customer-lookup` and `POST /api/booking/confirm`). Customer lookup can now resolve a single customer by normalized address with optional city/ZIP guards, and confirmation re-verifies that address before accepting an existing-customer booking without phone verification.
+
+**Reasoning:** The booking-curation rules remain aimed at presenting the 3-4 best times instead of a raw slot dump: prefer different days, balance AM/PM choices, and weight soonness so customers see useful near-term options without every refresh reshuffling the list. The address-match confirmation path reduces friction for known customers booking from their service address while avoiding ambiguous address collisions by requiring a unique match.
+
+**Revisit if:** Multiple customers legitimately share the same service address (multi-unit, property manager, duplex) and the unique-match rule blocks good bookings. In that case, add unit-aware matching before loosening the existing address verification.
