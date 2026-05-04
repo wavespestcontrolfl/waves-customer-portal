@@ -109,6 +109,7 @@ export default function MobileAppointmentDetailSheet({
   service,
   onClose,
   onEdit,
+  onTreatmentPlan,
   onReviewCheckout,
   onBookNext,
   onCancelled,
@@ -141,6 +142,7 @@ export default function MobileAppointmentDetailSheet({
   const isPrepaid = prepaidAmt != null && prepaidAmt > 0;
 
   const noteDirty = (service?.notes || '') !== note;
+  const isLawn = String(service?.serviceType || '').toLowerCase().includes('lawn');
 
   const saveNote = async () => {
     if (!noteDirty) return true;
@@ -245,6 +247,16 @@ export default function MobileAppointmentDetailSheet({
             Prepaid ${prepaidAmt.toFixed(2)}
             {service.prepaidMethod ? ` via ${service.prepaidMethod.replace(/_/g, ' ')}` : ''} — no charge needed
           </div>
+        )}
+        {isLawn && (
+          <button
+            type="button"
+            onClick={() => onTreatmentPlan?.(service)}
+            className="w-full rounded-sm bg-white text-zinc-900 border border-hairline border-zinc-300 u-focus-ring mt-3"
+            style={{ padding: '13px 20px', fontSize: 15 }}
+          >
+            Treatment plan
+          </button>
         )}
 
         {/* Customer */}

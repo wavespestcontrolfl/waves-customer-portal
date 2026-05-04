@@ -11,7 +11,7 @@
 // against America/New_York — the business is in SW Florida. No UTC.
 
 import { useEffect, useMemo, useState } from 'react';
-import { Truck } from 'lucide-react';
+import { Leaf, Truck } from 'lucide-react';
 import { Badge } from '../ui';
 import { serviceColor } from '../../lib/service-colors';
 import { TIMEZONE, etDateString, etParts, isETToday, addETDays } from '../../lib/timezone';
@@ -79,6 +79,10 @@ function canMarkEnRoute(service) {
   return ['pending', 'confirmed', 'rescheduled'].includes(service?.status);
 }
 
+function isLawnService(service) {
+  return String(service?.serviceType || '').toLowerCase().includes('lawn');
+}
+
 // Human section header for each day segment.
 // Today / Tomorrow / else weekday + month-day.
 function headerLabel(dateStr) {
@@ -94,7 +98,7 @@ function headerLabel(dateStr) {
   });
 }
 
-function AppointmentRow({ service, onEdit, onEnRoute }) {
+function AppointmentRow({ service, onEdit, onEnRoute, onTreatmentPlan }) {
   const name = String(service.customerName || '').trim();
   const customerMissing = !name;
   const needsAttention =
@@ -163,6 +167,17 @@ function AppointmentRow({ service, onEdit, onEnRoute }) {
           {techInitial}
         </button>
       )}
+      {isLawnService(service) && onTreatmentPlan && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onTreatmentPlan(service); }}
+          className="inline-flex items-center justify-center h-11 w-11 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 shrink-0 self-center"
+          title="Treatment plan"
+          aria-label="Treatment plan"
+        >
+          <Leaf size={18} strokeWidth={1.75} />
+        </button>
+      )}
       {onEnRoute && canMarkEnRoute(service) && (
         <button
           type="button"
@@ -178,7 +193,7 @@ function AppointmentRow({ service, onEdit, onEnRoute }) {
   );
 }
 
-function DaySegment({ dateStr, services, onEdit, onEnRoute }) {
+function DaySegment({ dateStr, services, onEdit, onEnRoute, onTreatmentPlan }) {
   const sorted = useMemo(() => sortByWindow(services || []), [services]);
   const today = isETToday(dateStr);
   return (
@@ -214,6 +229,7 @@ function DaySegment({ dateStr, services, onEdit, onEnRoute }) {
             service={svc}
             onEdit={onEdit}
             onEnRoute={onEnRoute}
+            onTreatmentPlan={onTreatmentPlan}
           />
         ))
       )}
@@ -221,7 +237,7 @@ function DaySegment({ dateStr, services, onEdit, onEnRoute }) {
   );
 }
 
-export default function MobileDispatchList({ mode, date, services, onEdit, onEnRoute }) {
+export default function MobileDispatchList({ mode, date, services, onEdit, onEnRoute, onTreatmentPlan }) {
   const [weekData, setWeekData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -254,6 +270,7 @@ export default function MobileDispatchList({ mode, date, services, onEdit, onEnR
           services={services || []}
           onEdit={onEdit}
           onEnRoute={onEnRoute}
+          onTreatmentPlan={onTreatmentPlan}
         />
       </div>
     );
@@ -282,6 +299,7 @@ export default function MobileDispatchList({ mode, date, services, onEdit, onEnR
           services={d.services || []}
           onEdit={onEdit}
           onEnRoute={onEnRoute}
+          onTreatmentPlan={onTreatmentPlan}
         />
       ))}
     </div>
