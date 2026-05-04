@@ -89,6 +89,101 @@ async function auditCustomerMutation(req, action, customerId, metadata = {}, cri
   });
 }
 
+function phoneLast10(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : '';
+}
+
+function cleanText(value) {
+  if (value === undefined || value === null) return '';
+  return String(value).trim();
+}
+
+function cleanOptionalText(value) {
+  const cleaned = cleanText(value);
+  return cleaned || null;
+}
+
+function cleanEmail(value) {
+  const cleaned = cleanText(value).toLowerCase();
+  return cleaned || null;
+}
+
+function cleanState(value) {
+  const cleaned = cleanText(value).toUpperCase();
+  return cleaned ? cleaned.slice(0, 2) : 'FL';
+}
+
+async function createDefaultCustomerRows(trx, customerId) {
+  await trx('property_preferences')
+    .insert({ customer_id: customerId })
+    .onConflict('customer_id')
+    .ignore();
+  await trx('notification_prefs')
+    .insert({ customer_id: customerId })
+    .onConflict('customer_id')
+    .ignore();
+}
+
+async function findAccountByContact(trx, { phone }) {
+  const digits = phoneLast10(phone);
+  if (digits) {
+    const byCustomerPhone = await trx('customers')
+      .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}`])
+      .whereNull('deleted_at')
+      .orderBy('is_primary_profile', 'desc')
+      .orderBy('created_at', 'asc')
+      .first();
+    if (byCustomerPhone) {
+      return { accountId: byCustomerPhone.account_id, existingCustomer: byCustomerPhone, matchType: 'phone' };
+    }
+  }
+
+  return null;
+}
+
+async function ensureCustomerAccount(trx, input) {
+  const existing = await findAccountByContact(trx, input);
+  if (existing?.accountId) return existing;
+
+  const [account] = await trx('customer_accounts').insert({
+    first_name: input.firstName,
+    last_name: input.lastName,
+    phone: input.phone || null,
+    email: input.email ? String(input.email).trim().toLowerCase() : null,
+    company_name: input.companyName || null,
+  }).returning('*');
+
+  if (existing?.existingCustomer) {
+    await trx('customers')
+      .where({ id: existing.existingCustomer.id })
+      .update({
+        account_id: account.id,
+        is_primary_profile: true,
+        profile_label: existing.existingCustomer.profile_label || 'Primary',
+      });
+    return {
+      accountId: account.id,
+      existingCustomer: { ...existing.existingCustomer, account_id: account.id },
+      matchType: existing.matchType,
+    };
+  }
+
+  return { accountId: account.id, existingCustomer: null, matchType: 'new' };
+}
+
+async function accountPropertySummary(accountId, excludeCustomerId = null) {
+  if (!accountId) return [];
+  let query = db('customers')
+    .where({ account_id: accountId })
+    .whereNull('deleted_at')
+    .select('id', 'profile_label', 'address_line1', 'city', 'state', 'zip', 'pipeline_stage', 'monthly_rate', 'is_primary_profile')
+    .orderBy('is_primary_profile', 'desc')
+    .orderBy('created_at', 'asc');
+  if (excludeCustomerId) query = query.whereNot({ id: excludeCustomerId });
+  return query;
+}
+
 // --- Static POST routes (must be registered before /:id handlers to avoid route shadowing) ---
 
 // POST /api/admin/customers/fix-tiers — Recalculate tiers from service count
@@ -165,41 +260,49 @@ router.post('/backfill-review-status', requireAdmin, async (req, res, next) => {
 // POST /api/admin/customers/quick-add — minimal customer creation from appointment modal
 router.post('/quick-add', async (req, res, next) => {
   try {
-    const { firstName, lastName, phone, email, address, city, zip } = req.body;
+    const { firstName, lastName, phone, email, address, city, state, zip, profileLabel } = req.body;
     if (!firstName || !lastName || !phone) {
       return res.status(400).json({ error: 'firstName, lastName, phone required' });
     }
-
-    const phoneDigits = String(phone).replace(/\D/g, '');
-    if (phoneDigits.length >= 10) {
-      const existing = await db('customers')
-        .whereRaw("regexp_replace(phone, '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits.slice(-10)}`])
-        .first();
-      if (existing) {
-        return res.status(409).json({
-          error: 'phone_exists',
-          message: `This phone is already on file for ${existing.first_name} ${existing.last_name}`,
-          existingCustomerId: existing.id,
-          existingCustomerName: `${existing.first_name} ${existing.last_name}`,
-        });
-      }
+    const normalized = {
+      firstName: cleanText(firstName),
+      lastName: cleanText(lastName),
+      phone: cleanText(phone),
+      email: cleanEmail(email),
+      address: cleanText(address),
+      city: cleanText(city),
+      state: cleanState(state),
+      zip: cleanText(zip),
+      profileLabel: cleanOptionalText(profileLabel),
+    };
+    if (!normalized.firstName || !normalized.lastName || !normalized.phone) {
+      return res.status(400).json({ error: 'firstName, lastName, phone required' });
     }
 
-    const [customer] = await db('customers').insert({
-      first_name: firstName,
-      last_name: lastName,
-      phone,
-      email: email ? String(email).trim().toLowerCase() : null,
-      address_line1: address || null,
-      city: city || null,
-      state: 'FL',
-      zip: zip || null,
-      pipeline_stage: 'new_lead',
-      lead_source: 'admin_manual',
-      active: true,
-    }).returning('*');
+    const customer = await db.transaction(async (trx) => {
+      const account = await ensureCustomerAccount(trx, normalized);
+      const siblingCount = await trx('customers').where({ account_id: account.accountId }).whereNull('deleted_at').count('* as count').first();
+      const [created] = await trx('customers').insert({
+        account_id: account.accountId,
+        is_primary_profile: !account.existingCustomer,
+        profile_label: normalized.profileLabel || (account.existingCustomer ? 'Rental property' : 'Primary'),
+        first_name: normalized.firstName,
+        last_name: normalized.lastName,
+        phone: normalized.phone,
+        email: normalized.email,
+        address_line1: normalized.address,
+        city: normalized.city,
+        state: normalized.state,
+        zip: normalized.zip,
+        pipeline_stage: 'new_lead',
+        lead_source: 'admin_manual',
+        active: true,
+      }).returning('*');
+      await createDefaultCustomerRows(trx, created.id);
+      return { ...created, _attachedToExistingAccount: !!account.existingCustomer, _propertyCount: Number(siblingCount?.count || 0) + 1 };
+    });
 
-    logger.info(`[customers] Quick-add: ${firstName} ${lastName} (${phone})`);
+    logger.info(`[customers] Quick-add created customer=${customer.id} account=${customer.account_id || 'none'}`);
 
     res.status(201).json({
       customer: {
@@ -207,8 +310,14 @@ router.post('/quick-add', async (req, res, next) => {
         firstName: customer.first_name,
         lastName: customer.last_name,
         phone: customer.phone,
+        accountId: customer.account_id,
+        profileLabel: customer.profile_label,
+        attachedToExistingAccount: customer._attachedToExistingAccount,
+        propertyCount: customer._propertyCount,
         address: `${customer.address_line1 || ''}, ${customer.city || ''}, ${customer.state || ''} ${customer.zip || ''}`.trim(),
         city: customer.city,
+        state: customer.state,
+        zip: customer.zip,
         tier: customer.waveguard_tier,
       },
     });
@@ -280,6 +389,8 @@ router.get('/', async (req, res, next) => {
     res.json({
       customers: customers.map(c => ({
         id: c.id, firstName: c.first_name, lastName: c.last_name,
+        accountId: c.account_id, profileLabel: c.profile_label,
+        isPrimaryProfile: !!c.is_primary_profile,
         email: c.email, phone: c.phone, city: c.city,
         address: `${c.address_line1 || ''}, ${c.city || ''}, ${c.state || ''} ${c.zip || ''}`.trim(),
         tier: c.waveguard_tier, monthlyRate: parseFloat(c.monthly_rate || 0),
@@ -335,6 +446,7 @@ router.get('/pipeline/view', async (req, res, next) => {
         monthlyRevenue: monthlyTotal,
         customers: customers.map(c => ({
           id: c.id, name: `${c.first_name} ${c.last_name}`,
+          accountId: c.account_id, profileLabel: c.profile_label,
           address: `${c.address_line1 || ''}, ${c.city || ''}`,
           phone: c.phone, tier: c.waveguard_tier,
           monthlyRate: parseFloat(c.monthly_rate || 0),
@@ -627,7 +739,7 @@ router.get('/:id', async (req, res, next) => {
     if (!c) return res.status(404).json({ error: 'Customer not found' });
 
     const currentYear = Number(etDateString().slice(0, 4));
-    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, smsLog, healthScore, invoices, cards, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary] = await Promise.all([
+    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, smsLog, healthScore, invoices, cards, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties] = await Promise.all([
       db('customer_tags').where({ customer_id: c.id }).select('tag'),
       db('customer_interactions').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(30),
       db('property_preferences').where({ customer_id: c.id }).first(),
@@ -678,6 +790,7 @@ router.get('/:id', async (req, res, next) => {
           db.raw('COUNT(*)::int as entries')
         )
         .catch(e => { logger.warn(`[customers:${c.id}] property_nutrient_ledger_summary: ${e.message}`); return null; }),
+      accountPropertySummary(c.account_id, c.id).catch(e => { logger.warn(`[customers:${c.id}] account_properties: ${e.message}`); return []; }),
     ]);
 
     // The invoices table stores the billed amount as `total`; the frontend reads
@@ -714,6 +827,9 @@ router.get('/:id', async (req, res, next) => {
     res.json({
       customer: {
         id: c.id, firstName: c.first_name, lastName: c.last_name,
+        accountId: c.account_id,
+        profileLabel: c.profile_label,
+        isPrimaryProfile: !!c.is_primary_profile,
         email: c.email, phone: c.phone, secondaryPhone: c.secondary_phone,
         secondaryContact: c.secondary_contact_name, companyName: c.company_name,
         serviceContactName: c.service_contact_name,
@@ -736,6 +852,14 @@ router.get('/:id', async (req, res, next) => {
         hasLeftGoogleReview: !!c.has_left_google_review,
         reviewMarkedAt: c.review_marked_at,
       },
+      accountProperties: accountProperties.map(p => ({
+        id: p.id,
+        profileLabel: p.profile_label,
+        address: { line1: p.address_line1, city: p.city, state: p.state, zip: p.zip },
+        pipelineStage: p.pipeline_stage,
+        monthlyRate: parseFloat(p.monthly_rate || 0),
+        isPrimaryProfile: !!p.is_primary_profile,
+      })),
       tags: tags.map(t => t.tag),
       interactions, preferences: prefs, services, estimates, payments, scheduled, smsLog,
       healthScore: healthScore || null,
@@ -768,48 +892,61 @@ router.get('/:id', async (req, res, next) => {
 // POST /api/admin/customers — create
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
-    const { firstName, lastName, phone, email, addressLine1, city, state, zip, tier, monthlyRate, leadSource, pipelineStage, tags, notes, companyName, propertyType } = req.body;
+    const { firstName, lastName, phone, email, address, addressLine1, city, state, zip, tier, monthlyRate, leadSource, pipelineStage, tags, notes, companyName, propertyType, profileLabel } = req.body;
     if (!firstName || !lastName || !phone) return res.status(400).json({ error: 'Name and phone required' });
-
-    const phoneDigits = String(phone).replace(/\D/g, '');
-    if (phoneDigits.length >= 10) {
-      const existing = await db('customers')
-        .whereRaw("regexp_replace(phone, '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits.slice(-10)}`])
-        .first();
-      if (existing) {
-        return res.status(409).json({
-          error: 'phone_exists',
-          message: `This phone is already on file for ${existing.first_name} ${existing.last_name}`,
-          existingCustomerId: existing.id,
-          existingCustomerName: `${existing.first_name} ${existing.last_name}`,
-        });
-      }
+    const normalized = {
+      firstName: cleanText(firstName),
+      lastName: cleanText(lastName),
+      phone: cleanText(phone),
+      email: cleanEmail(email),
+      addressLine1: cleanText(addressLine1 || address),
+      city: cleanText(city),
+      state: cleanState(state),
+      zip: cleanText(zip),
+      tier: cleanOptionalText(tier),
+      monthlyRate: monthlyRate === '' || monthlyRate === undefined || monthlyRate === null ? 0 : parseFloat(monthlyRate) || 0,
+      leadSource: cleanOptionalText(leadSource),
+      pipelineStage: cleanText(pipelineStage) || 'new_lead',
+      notes: cleanOptionalText(notes),
+      companyName: cleanOptionalText(companyName),
+      propertyType: cleanOptionalText(propertyType),
+      profileLabel: cleanOptionalText(profileLabel),
+    };
+    if (!normalized.firstName || !normalized.lastName || !normalized.phone) {
+      return res.status(400).json({ error: 'Name and phone required' });
     }
 
     const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
 
     const customer = await db.transaction(async (trx) => {
+      const account = await ensureCustomerAccount(trx, normalized);
+      const siblingCount = await trx('customers').where({ account_id: account.accountId }).whereNull('deleted_at').count('* as count').first();
       const [created] = await trx('customers').insert({
-        first_name: firstName, last_name: lastName, phone, email,
-        address_line1: addressLine1 || '', city: city || '', state: state || 'FL', zip: zip || '',
-        waveguard_tier: tier || null, monthly_rate: monthlyRate || 0,
+        account_id: account.accountId,
+        is_primary_profile: !account.existingCustomer,
+        profile_label: normalized.profileLabel || (account.existingCustomer ? 'Rental property' : 'Primary'),
+        first_name: normalized.firstName, last_name: normalized.lastName, phone: normalized.phone, email: normalized.email,
+        address_line1: normalized.addressLine1, city: normalized.city, state: normalized.state, zip: normalized.zip,
+        waveguard_tier: normalized.tier, monthly_rate: normalized.monthlyRate,
         member_since: etDateString(),
-        referral_code: code, lead_source: leadSource,
-        pipeline_stage: pipelineStage || 'new_lead',
+        referral_code: code, lead_source: normalized.leadSource,
+        pipeline_stage: normalized.pipelineStage,
         pipeline_stage_changed_at: new Date(),
         assigned_to: req.technicianId,
-        company_name: companyName, property_type: propertyType, crm_notes: notes,
+        company_name: normalized.companyName, property_type: normalized.propertyType, crm_notes: normalized.notes,
       }).returning('*');
 
-      await trx('property_preferences').insert({ customer_id: created.id });
-      await trx('notification_prefs').insert({ customer_id: created.id });
+      await createDefaultCustomerRows(trx, created.id);
 
       if (tags?.length) {
         for (const tag of tags) {
-          await trx('customer_tags').insert({ customer_id: created.id, tag }).onConflict(['customer_id', 'tag']).ignore();
+          const cleanTag = cleanText(tag);
+          if (cleanTag) {
+            await trx('customer_tags').insert({ customer_id: created.id, tag: cleanTag }).onConflict(['customer_id', 'tag']).ignore();
+          }
         }
       }
-      return created;
+      return { ...created, _attachedToExistingAccount: !!account.existingCustomer, _existingCustomer: account.existingCustomer, _propertyCount: Number(siblingCount?.count || 0) + 1 };
     });
 
     // Intentional fire-and-forget: derived pipeline/score state can lag the
@@ -823,18 +960,27 @@ router.post('/', requireAdmin, async (req, res, next) => {
     });
 
     // Fire-and-forget geocoding (don't block the create response)
-    if (addressLine1) {
+    if (normalized.addressLine1) {
       require('../services/geocoder').ensureCustomerGeocoded(customer.id).catch(() => {});
     }
 
-    res.status(201).json({ id: customer.id, referralCode: code });
+    res.status(201).json({
+      id: customer.id,
+      referralCode: code,
+      accountId: customer.account_id,
+      profileLabel: customer.profile_label,
+      attachedToExistingAccount: customer._attachedToExistingAccount,
+      propertyCount: customer._propertyCount,
+      existingCustomerId: customer._existingCustomer?.id || null,
+      existingCustomerName: customer._existingCustomer ? `${customer._existingCustomer.first_name} ${customer._existingCustomer.last_name}` : null,
+    });
   } catch (err) { next(err); }
 });
 
 // PUT /api/admin/customers/:id
 router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
-    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', addressLine1: 'address_line1', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', hasLeftGoogleReview: 'has_left_google_review' };
+    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', hasLeftGoogleReview: 'has_left_google_review' };
     const updates = {};
     for (const [k, v] of Object.entries(fields)) {
       if (req.body[k] !== undefined) {

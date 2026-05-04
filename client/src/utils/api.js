@@ -133,6 +133,17 @@ class ApiClient {
     return this.request('/auth/me');
   }
 
+  getAuthProperties() {
+    return this.request('/auth/properties');
+  }
+
+  selectAuthProperty(customerId) {
+    return this.request('/auth/select-property', {
+      method: 'POST',
+      body: JSON.stringify({ customerId }),
+    });
+  }
+
   // ---- Services ----
   getServices(params = {}) {
     const query = new URLSearchParams(params).toString();
