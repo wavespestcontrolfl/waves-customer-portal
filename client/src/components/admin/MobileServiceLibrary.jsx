@@ -285,6 +285,7 @@ function DiscountsView({ onBack }) {
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
   const [expandedId, setExpandedId] = useState(null);
+  const [creating, setCreating] = useState(false);
 
   const load = useCallback(() => {
     return aFetch('/admin/discounts')
@@ -320,9 +321,18 @@ function DiscountsView({ onBack }) {
         title="Discounts"
         centerTitle
         onBack={onBack}
-        onAdd={() => alert('Create discount — use the desktop Services > Discounts tab')}
+        onAdd={() => { setCreating(true); setExpandedId(null); }}
       />
       <SearchBar value={query} onChange={setQuery} placeholder="Search discounts" />
+      {creating && (
+        <div className="mb-3">
+          <DiscountEditPanel
+            discount={null}
+            onCancel={() => setCreating(false)}
+            onSaved={async () => { await load(); setCreating(false); }}
+          />
+        </div>
+      )}
       {loading ? (
         <div className="p-10 text-center text-ink-secondary" style={{ fontSize: 13 }}>Loading…</div>
       ) : list.length === 0 ? (
@@ -374,10 +384,11 @@ const DISCOUNT_TYPES = [
 ];
 
 function DiscountEditPanel({ discount, onCancel, onSaved }) {
-  const [name, setName] = useState(discount.name || '');
-  const [discountType, setDiscountType] = useState(discount.discount_type || 'percentage');
-  const [amount, setAmount] = useState(discount.amount != null ? String(discount.amount) : '');
-  const [isActive, setIsActive] = useState(discount.is_active !== false);
+  const isNew = !discount?.id;
+  const [name, setName] = useState(discount?.name || '');
+  const [discountType, setDiscountType] = useState(discount?.discount_type || 'percentage');
+  const [amount, setAmount] = useState(discount?.amount != null ? String(discount.amount) : '0');
+  const [isActive, setIsActive] = useState(discount?.is_active !== false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
@@ -386,8 +397,8 @@ function DiscountEditPanel({ discount, onCancel, onSaved }) {
     setSaving(true);
     setError(null);
     try {
-      await aFetch(`/admin/discounts/${discount.id}`, {
-        method: 'PUT',
+      await aFetch(isNew ? '/admin/discounts' : `/admin/discounts/${discount.id}`, {
+        method: isNew ? 'POST' : 'PUT',
         body: JSON.stringify({
           name: name.trim(),
           discount_type: discountType,
@@ -404,6 +415,11 @@ function DiscountEditPanel({ discount, onCancel, onSaved }) {
 
   return (
     <form onSubmit={submit} className={editPanelChrome}>
+      {isNew && (
+        <div className="text-ink-primary font-semibold" style={{ fontSize: 15 }}>
+          New Discount
+        </div>
+      )}
       <Field label="Name">
         <input className={inputChrome} value={name} onChange={(e) => setName(e.target.value)} required />
       </Field>
@@ -436,7 +452,7 @@ function DiscountEditPanel({ discount, onCancel, onSaved }) {
           Cancel
         </button>
         <button type="submit" disabled={saving} className="bg-zinc-900 text-white rounded-sm u-focus-ring" style={{ padding: '8px 14px', fontSize: 13, fontWeight: 500 }}>
-          {saving ? 'Saving…' : 'Save'}
+          {saving ? 'Saving…' : isNew ? 'Create' : 'Save'}
         </button>
       </div>
     </form>
@@ -449,12 +465,18 @@ function AllServicesView({ onBack }) {
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
   const [expandedId, setExpandedId] = useState(null);
+  const [status, setStatus] = useState('active');
+  const [creating, setCreating] = useState(false);
 
   const load = useCallback(() => {
-    return aFetch('/admin/services?is_active=true&limit=500')
+    setLoading(true);
+    const params = new URLSearchParams({ limit: '500' });
+    if (status === 'active') params.set('is_active', 'true');
+    if (status === 'inactive') params.set('is_active', 'false');
+    return aFetch(`/admin/services?${params}`)
       .then((d) => { setServices(d.services || []); setLoading(false); })
       .catch(() => setLoading(false));
-  }, []);
+  }, [status]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -483,14 +505,44 @@ function AllServicesView({ onBack }) {
       <Header title="All Services" centerTitle onBack={onBack} />
       <button
         type="button"
-        onClick={() => alert('Create Service — use the desktop Services > + Add Service')}
+        onClick={() => { setCreating(true); setExpandedId(null); }}
         className="w-full bg-zinc-100 text-zinc-900 font-semibold rounded-sm u-focus-ring mt-2"
         style={{ padding: '18px 20px', fontSize: 16 }}
       >
         Create Service
       </button>
+      {creating && (
+        <div className="mt-3">
+          <ServiceEditPanel
+            service={null}
+            onCancel={() => setCreating(false)}
+            onSaved={async () => {
+              setCreating(false);
+              if (status === 'active') await load();
+              else setStatus('active');
+            }}
+          />
+        </div>
+      )}
       <div className="mt-3">
         <SearchBar value={query} onChange={setQuery} placeholder="Search All Services" />
+      </div>
+      <div className="grid grid-cols-3 gap-2 mb-3">
+        {[
+          ['active', 'Active'],
+          ['inactive', 'Inactive'],
+          ['all', 'All'],
+        ].map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => { setStatus(key); setExpandedId(null); }}
+            className={`${status === key ? 'bg-zinc-900 text-white' : 'bg-white text-ink-secondary border-hairline border-zinc-200'} rounded-sm u-focus-ring`}
+            style={{ height: 36, fontSize: 13, fontWeight: 600 }}
+          >
+            {label}
+          </button>
+        ))}
       </div>
       {loading ? (
         <div className="p-10 text-center text-ink-secondary" style={{ fontSize: 13 }}>Loading…</div>
@@ -546,11 +598,12 @@ const PRICING_TYPES = [
 ];
 
 function ServiceEditPanel({ service, onCancel, onSaved }) {
-  const [name, setName] = useState(service.name || '');
-  const [duration, setDuration] = useState(service.default_duration_minutes != null ? String(service.default_duration_minutes) : '');
-  const [pricingType, setPricingType] = useState(service.pricing_type || 'fixed');
-  const [basePrice, setBasePrice] = useState(service.base_price != null ? String(service.base_price) : '');
-  const [isActive, setIsActive] = useState(service.is_active !== false);
+  const isNew = !service?.id;
+  const [name, setName] = useState(service?.name || '');
+  const [duration, setDuration] = useState(service?.default_duration_minutes != null ? String(service.default_duration_minutes) : '60');
+  const [pricingType, setPricingType] = useState(service?.pricing_type || 'variable');
+  const [basePrice, setBasePrice] = useState(service?.base_price != null ? String(service.base_price) : '');
+  const [isActive, setIsActive] = useState(service?.is_active !== false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
@@ -559,10 +612,12 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
     setSaving(true);
     setError(null);
     try {
-      await aFetch(`/admin/services/${service.id}`, {
-        method: 'PUT',
+      await aFetch(isNew ? '/admin/services' : `/admin/services/${service.id}`, {
+        method: isNew ? 'POST' : 'PUT',
         body: JSON.stringify({
           name: name.trim(),
+          category: isNew ? 'other' : undefined,
+          billing_type: isNew ? 'one_time' : undefined,
           default_duration_minutes: duration === '' ? null : Number(duration),
           pricing_type: pricingType,
           base_price: pricingType === 'fixed' && basePrice !== '' ? Number(basePrice) : null,
@@ -578,6 +633,11 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
 
   return (
     <form onSubmit={submit} className={editPanelChrome}>
+      {isNew && (
+        <div className="text-ink-primary font-semibold" style={{ fontSize: 15 }}>
+          New Service
+        </div>
+      )}
       <Field label="Name">
         <input className={inputChrome} value={name} onChange={(e) => setName(e.target.value)} required />
       </Field>
@@ -622,7 +682,7 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
           Cancel
         </button>
         <button type="submit" disabled={saving} className="bg-zinc-900 text-white rounded-sm u-focus-ring" style={{ padding: '8px 14px', fontSize: 13, fontWeight: 500 }}>
-          {saving ? 'Saving…' : 'Save'}
+          {saving ? 'Saving…' : isNew ? 'Create' : 'Save'}
         </button>
       </div>
     </form>
