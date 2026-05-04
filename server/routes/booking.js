@@ -135,24 +135,30 @@ function fallbackZoneCenter(city) {
   });
 }
 
+const ADDRESS_SUFFIXES = {
+  avenue: 'ave',
+  boulevard: 'blvd',
+  circle: 'cir',
+  court: 'ct',
+  cove: 'cv',
+  drive: 'dr',
+  lane: 'ln',
+  parkway: 'pkwy',
+  place: 'pl',
+  road: 'rd',
+  street: 'st',
+  terrace: 'ter',
+  terr: 'ter',
+  trail: 'trl',
+  way: 'wy',
+};
+const ADDRESS_SUFFIX_VARIANTS = Object.entries(ADDRESS_SUFFIXES).reduce((acc, [longForm, shortForm]) => {
+  acc[longForm] = [longForm, shortForm];
+  acc[shortForm] = [shortForm, longForm];
+  return acc;
+}, {});
+
 function normalizeAddress(value) {
-  const suffixes = {
-    avenue: 'ave',
-    boulevard: 'blvd',
-    circle: 'cir',
-    court: 'ct',
-    cove: 'cv',
-    drive: 'dr',
-    lane: 'ln',
-    parkway: 'pkwy',
-    place: 'pl',
-    road: 'rd',
-    street: 'st',
-    terrace: 'ter',
-    terr: 'ter',
-    trail: 'trl',
-    way: 'wy',
-  };
   return String(value || '')
     .split(',')[0]
     .trim()
@@ -161,7 +167,7 @@ function normalizeAddress(value) {
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
     .filter(Boolean)
-    .map(part => suffixes[part] || part)
+    .map(part => ADDRESS_SUFFIXES[part] || part)
     .join('');
 }
 
@@ -173,8 +179,8 @@ function streetNumber(value) {
   return String(value || '').split(',')[0].trim().match(/^\d+/)?.[0] || '';
 }
 
-function streetNameToken(value) {
-  return String(value || '')
+function streetNameTokens(value) {
+  const token = String(value || '')
     .split(',')[0]
     .trim()
     .toLowerCase()
@@ -182,6 +188,7 @@ function streetNameToken(value) {
     .split(/\s+/)
     .filter(Boolean)
     .find((part, index) => index > 0 && /[a-z]/.test(part)) || '';
+  return [...new Set(ADDRESS_SUFFIX_VARIANTS[token] || [token])];
 }
 
 function addressMatchesCustomer(customer, address, zip) {
@@ -198,8 +205,8 @@ async function findUniqueCustomerByAddress(address, city, zip) {
   if (!normalizedAddress) return null;
   const number = streetNumber(address);
   if (!number) return null;
-  const streetToken = streetNameToken(address);
-  if (!streetToken) return null;
+  const streetTokens = streetNameTokens(address);
+  if (!streetTokens.length || !streetTokens[0]) return null;
 
   const query = db('customers');
 
@@ -212,7 +219,11 @@ async function findUniqueCustomerByAddress(address, city, zip) {
   });
 
   query.andWhereRaw("split_part(trim(split_part(coalesce(address_line1, ''), ',', 1)), ' ', 1) = ?", [number]);
-  query.andWhereRaw("lower(split_part(coalesce(address_line1, ''), ',', 1)) LIKE ?", [`%${streetToken}%`]);
+  query.andWhere(function () {
+    for (const token of streetTokens) {
+      this.orWhereRaw("lower(split_part(coalesce(address_line1, ''), ',', 1)) LIKE ?", [`%${token}%`]);
+    }
+  });
 
   const candidates = await query
     .select('id', 'first_name', 'last_name', 'email', 'address_line1', 'city', 'state', 'zip', 'phone')
