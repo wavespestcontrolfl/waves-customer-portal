@@ -515,7 +515,7 @@ export default function LawnAssessmentPanel() {
               ))}
               {/* Text/numeric inputs */}
               {[
-                ['track_key', 'Track key (e.g. st_aug_full_sun)', 'text'],
+                ['track_key', 'Track key (e.g. st_augustine)', 'text'],
                 ['cultivar', 'Cultivar (e.g. Floratam, Palmetto)', 'text'],
                 ['lawn_sqft', 'Lawn area (sqft)', 'number'],
                 ['municipality', 'Municipality (e.g. North Port)', 'text'],

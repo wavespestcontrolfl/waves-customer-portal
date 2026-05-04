@@ -3495,8 +3495,8 @@ const PRODUCT_DESCRIPTIONS = {
   'three-way': 'broadleaf weed killer — backup when Atrazine is weather-blocked',
   'blindside wdg': 'broadleaf + sedge control — safe fallback after Celsius cap (Groups 14+2)',
   'blindside': 'broadleaf + sedge control — safe fallback after Celsius cap (Groups 14+2)',
-  'pillar sc': 'dual fungicide for take-all root rot in shade turf (FRAC 11+3)',
-  'pillar': 'dual fungicide for take-all root rot in shade turf (FRAC 11+3)',
+  'pillar sc': 'dual fungicide for take-all root rot / low-light stress sites (FRAC 11+3)',
+  'pillar': 'dual fungicide for take-all root rot / low-light stress sites (FRAC 11+3)',
   'moisture manager': 'wetting agent that helps water penetrate compacted soil',
   'dispatch': 'wetting agent that helps water penetrate compacted soil',
   'green flo 6-0-0': 'calcium supplement for summer cation balance',
@@ -3505,15 +3505,22 @@ const PRODUCT_DESCRIPTIONS = {
 
 /* Safety rules per track */
 const TRACK_SAFETY_RULES = {
+  'st_augustine': [
+    'Celsius WG: MAX 3 apps/year/property',
+    'SpeedZone: verify cultivar and do NOT apply >90\u00b0F',
+    'Hold PGR/hot herbicide on stressed turf',
+    'N blackout Jun 1 \u2013 Sep 30',
+  ],
   'A_St_Aug_Sun': [
     'Celsius WG: MAX 3 apps/year/property',
-    'SpeedZone: do NOT apply >90\u00b0F',
+    'SpeedZone: verify cultivar and do NOT apply >90\u00b0F',
+    'Hold PGR/hot herbicide on stressed turf',
     'N blackout Jun 1 \u2013 Sep 30',
   ],
   'B_St_Aug_Shade': [
     'Celsius WG: MAX 3 apps/year/property',
-    'NEVER SpeedZone on shade St. Aug',
-    'NO PGR (Primo Maxx) on shade turf',
+    'SpeedZone: verify cultivar and do NOT apply >90\u00b0F',
+    'Hold PGR/hot herbicide on stressed turf',
     'N blackout Jun 1 \u2013 Sep 30',
   ],
   'C1_Bermuda': [

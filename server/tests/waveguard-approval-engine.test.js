@@ -133,7 +133,7 @@ function basePlan(overrides = {}) {
       items: [{ productId: 'base' }],
     },
     propertyGate: {
-      trackName: 'Track A - St. Augustine Full Sun',
+      trackName: 'St. Augustine',
       latestAssessment: { stressFlags: {} },
     },
     ...overrides,

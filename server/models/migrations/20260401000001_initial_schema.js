@@ -40,7 +40,7 @@ exports.up = async function (knex) {
     t.string('zip', 10).notNullable();
 
     // Property details
-    t.string('lawn_type', 50); // 'St. Augustine Full Sun', 'St. Augustine Shade', 'Bermuda/Zoysia', 'Bahia'
+    t.string('lawn_type', 50); // 'St. Augustine', 'Bermuda', 'Zoysia', 'Bahia', etc.
     t.integer('property_sqft'); // treated lawn area
     t.integer('lot_sqft'); // total lot
     t.integer('bed_sqft'); // ornamental bed area
