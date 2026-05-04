@@ -66,8 +66,12 @@ async function apiCall(method, path, body) {
   return res.json();
 }
 
+async function sendSessionEvents(sessionId, events) {
+  return apiCall('POST', `/sessions/${sessionId}/events`, { events });
+}
+
 async function* streamSessionEvents(sessionId) {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/events?stream=true`, {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/events/stream`, {
     headers: {
       'x-api-key': ANTHROPIC_API_KEY,
       'anthropic-version': '2023-06-01',
@@ -159,10 +163,10 @@ const LeadResponseAgent = {
       const sessionId = session.id;
       logger.info(`[lead-agent] Session ${sessionId} for lead ${lead.leadId}`);
 
-      await apiCall('POST', `/sessions/${sessionId}/events`, {
-        type: 'user',
+      await sendSessionEvents(sessionId, [{
+        type: 'user.message',
         content: [{ type: 'text', text: prompt }],
-      });
+      }]);
 
       let report = '';
       let toolsExecuted = [];
@@ -182,7 +186,12 @@ const LeadResponseAgent = {
           }
         }
 
-        if (event === 'tool_use' || data?.type === 'tool_use') {
+        if (
+          event === 'tool_use' ||
+          event === 'agent.custom_tool_use' ||
+          data?.type === 'tool_use' ||
+          data?.type === 'agent.custom_tool_use'
+        ) {
           const toolName = data.name;
           const toolInput = data.input || {};
           const toolUseId = data.id;
@@ -316,12 +325,12 @@ const LeadResponseAgent = {
 
           toolsExecuted.push(toolName);
 
-          await apiCall('POST', `/sessions/${sessionId}/events`, {
-            type: 'tool_result',
-            tool_use_id: toolUseId,
+          await sendSessionEvents(sessionId, [{
+            type: 'user.custom_tool_result',
+            custom_tool_use_id: toolUseId,
             content: [{ type: 'text', text: JSON.stringify(toolResult) }],
             ...(failed ? { is_error: true } : {}),
-          });
+          }]);
         }
 
         if (event === 'done' || event === 'session_complete' || data?.stop_reason === 'end_turn') break;
