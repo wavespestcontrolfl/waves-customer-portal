@@ -117,19 +117,32 @@ class SmartRebooker {
     return { start: '09:00', end: '12:00', display: '9:00 AM-12:00 PM' };
   }
 
-  async reschedule(serviceId, newDate, newWindow, reason, initiatedBy) {
+  async reschedule(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
 
     const originalDate = service.scheduled_date;
     const win = parseWindow(newWindow);
-
-    await db('scheduled_services').where({ id: serviceId }).update({
+    const updates = {
       scheduled_date: newDate,
       window_start: win.start || service.window_start,
       window_end: win.end || service.window_end,
       status: 'confirmed',
-    });
+    };
+    if (Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
+      updates.technician_id = options.technicianId;
+    }
+
+    let updateQuery = db('scheduled_services').where({ id: serviceId });
+    if (Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
+      updateQuery = updateQuery.whereNotIn('status', ['completed', 'cancelled', 'skipped']);
+    }
+    const updated = await updateQuery.update(updates);
+    if (updated === 0) {
+      throw Object.assign(new Error('Cannot reassign — job transitioned to a terminal state concurrently'), {
+        statusCode: 409,
+      });
+    }
 
     await db('reschedule_log').insert({
       scheduled_service_id: serviceId,

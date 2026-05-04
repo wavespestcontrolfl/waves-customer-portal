@@ -1221,6 +1221,14 @@ router.put('/:id/status', async (req, res, next) => {
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
     const fromStatus = svc.status;
+    if (toStatus === 'en_route') {
+      const preEnRouteStatuses = new Set(['pending', 'confirmed', 'rescheduled']);
+      if (!preEnRouteStatuses.has(fromStatus) && fromStatus !== 'en_route') {
+        return res.status(409).json({
+          error: `Cannot mark en-route from status '${fromStatus}'`,
+        });
+      }
+    }
     const { transitionJobStatus } = require('../services/job-status');
 
     try {

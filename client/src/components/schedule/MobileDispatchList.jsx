@@ -75,6 +75,10 @@ function sortByWindow(services) {
   });
 }
 
+function canMarkEnRoute(service) {
+  return ['pending', 'confirmed', 'rescheduled'].includes(service?.status);
+}
+
 // Human section header for each day segment.
 // Today / Tomorrow / else weekday + month-day.
 function headerLabel(dateStr) {
@@ -159,7 +163,7 @@ function AppointmentRow({ service, onEdit, onEnRoute }) {
           {techInitial}
         </button>
       )}
-      {onEnRoute && (
+      {onEnRoute && canMarkEnRoute(service) && (
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onEnRoute(service); }}

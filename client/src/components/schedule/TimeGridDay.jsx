@@ -862,34 +862,34 @@ export default function TimeGridDay({
     const fromTech = svc.technicianId || '__unassigned__';
     setBusy(true);
     try {
-      const calls = [];
-      if (fromTech !== toTech) {
-        const techForApi = toTech === '__unassigned__' ? null : toTech;
-        calls.push(adminFetch(`/admin/schedule/${svc.id}/assign`, {
+      const techForApi = toTech === '__unassigned__' ? null : toTech;
+      if (fromMin === toMin && fromTech !== toTech) {
+        await adminFetch(`/admin/schedule/${svc.id}/assign`, {
           method: 'PUT',
           body: JSON.stringify({ technicianId: techForApi }),
-        }));
+        });
       }
       if (fromMin !== toMin) {
         const notifyCustomer = notificationType === 'sms';
-        calls.push(adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
+        const body = {
+          newDate: date,
+          newWindow,
+          reasonCode: 'dispatch_drag',
+          reasonText: 'Rescheduled via drag-and-drop on Day grid',
+          notifyCustomer,
+          scope: pending.technicianChange ? 'this_only' : (scope || 'this_only'),
+        };
+        if (fromTech !== toTech) body.technicianId = techForApi;
+        await adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
           method: 'POST',
-          body: JSON.stringify({
-            newDate: date,
-            newWindow,
-            reasonCode: 'dispatch_drag',
-            reasonText: 'Rescheduled via drag-and-drop on Day grid',
-            notifyCustomer,
-            scope: scope || 'this_only',
-          }),
+          body: JSON.stringify(body),
         }).then((result) => {
           if (notifyCustomer && result?.notificationSent === false) {
             alert(`Appointment moved, but SMS notification failed: ${result.notificationError || 'customer was not notified'}`);
           }
           return result;
-        }));
+        });
       }
-      await Promise.all(calls);
       setOptimistic(null);
       setPending(null);
       onChange?.();
@@ -1089,7 +1089,7 @@ export default function TimeGridDay({
         fromMinutes={pending?.fromMin}
         toDate={date}
         toMinutes={pending?.toMin}
-        isRecurring={!!pending?.svc?.isRecurring}
+        isRecurring={!!pending?.svc?.isRecurring && !pending?.technicianChange}
         technicianChange={pending?.technicianChange}
         onConfirm={commitReschedule}
         onCancel={cancelReschedule}
