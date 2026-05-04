@@ -1137,14 +1137,14 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
     // pre-fill has gone stale (user left the form open past the suggested
     // moment), we want to bail before the POST so a retry doesn't leave
     // an orphan draft on the customer.
-    let scheduledIso = null;
+    let scheduledValue = null;
     if (sendAfterCreate && scheduleSend) {
       const when = scheduledAt ? new Date(scheduledAt) : null;
       if (!when || isNaN(when.getTime()) || when <= new Date()) {
         showToast('Pick a future scheduled time');
         return;
       }
-      scheduledIso = when.toISOString();
+      scheduledValue = scheduledAt;
     }
 
     setSaving(true);
@@ -1165,9 +1165,9 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
       if (sendAfterCreate && invoice.id) {
         await adminFetch(`/admin/invoices/${invoice.id}/send`, {
           method: 'POST',
-          body: JSON.stringify({ requestReview, scheduledAt: scheduledIso }),
+          body: JSON.stringify({ requestReview, scheduledAt: scheduledValue }),
         });
-        showToast(scheduledIso
+        showToast(scheduledValue
           ? `Invoice scheduled: ${invoice.invoice_number}`
           : `Invoice created & sent: ${invoice.invoice_number}`);
       } else {
