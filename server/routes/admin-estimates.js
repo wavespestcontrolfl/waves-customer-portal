@@ -521,7 +521,7 @@ router.patch('/:id', async (req, res, next) => {
     if (Object.keys(updates).length === 0) return res.json({ success: true });
 
     await db('estimates').where({ id: req.params.id }).update(updates);
-    logger.info(`[estimates] Updated estimate ${req.params.id}: ${JSON.stringify(updates)}`);
+    logger.info(`[estimates] Updated estimate ${req.params.id}: ${JSON.stringify(Object.keys(updates))}`);
     res.json({ success: true });
   } catch (err) { next(err); }
 });
