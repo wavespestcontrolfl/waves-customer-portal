@@ -186,6 +186,7 @@ async function findUniqueCustomerByAddress(address, city, zip) {
   const normalizedAddress = normalizeAddress(address);
   if (!normalizedAddress) return null;
   const number = streetNumber(address);
+  if (!number) return null;
 
   const query = db('customers');
 
@@ -197,12 +198,11 @@ async function findUniqueCustomerByAddress(address, city, zip) {
     this.whereNull('active').orWhere('active', true);
   });
 
-  if (number) {
-    query.andWhereRaw("split_part(trim(split_part(coalesce(address_line1, ''), ',', 1)), ' ', 1) = ?", [number]);
-  }
+  query.andWhereRaw("split_part(trim(split_part(coalesce(address_line1, ''), ',', 1)), ' ', 1) = ?", [number]);
 
   const candidates = await query
-    .select('id', 'first_name', 'last_name', 'email', 'address_line1', 'city', 'state', 'zip', 'phone');
+    .select('id', 'first_name', 'last_name', 'email', 'address_line1', 'city', 'state', 'zip', 'phone')
+    .limit(1000);
 
   const matches = candidates.filter(customer => normalizeAddress(customer.address_line1) === normalizedAddress);
   const normalizedZip = normalizeZip(zip);
