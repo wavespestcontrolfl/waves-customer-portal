@@ -7,6 +7,7 @@ const { resolveLocation } = require('../config/locations');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 const { etDateString, parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
+const { formatSmsTimeRange } = require('../utils/sms-time-format');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const CompletionRecap = require('../services/completion-recap');
@@ -1821,7 +1822,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
           const displayDate = new Date(String(newDate).split('T')[0] + 'T12:00:00')
             .toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
           const win = parseRescheduleWindow(newWindow);
-          const windowText = win.start && win.end ? `, ${win.start}-${win.end}` : '';
+          const windowText = win.start && win.end ? `, ${formatSmsTimeRange(`${win.start}-${win.end}`)}` : '';
           try {
             const msg = await sendCustomerMessage({
               to: svc.phone,

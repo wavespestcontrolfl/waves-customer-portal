@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { formatSmsTemplateVars } = require('../utils/sms-time-format');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -124,7 +125,7 @@ router.post('/preview', async (req, res) => {
     const template = await db('sms_templates').where({ id: templateId }).first();
     if (!template) return res.status(404).json({ error: 'Template not found' });
     let preview = template.body;
-    for (const [key, val] of Object.entries(sampleData || {})) {
+    for (const [key, val] of Object.entries(formatSmsTemplateVars(sampleData || {}))) {
       preview = preview.replace(new RegExp(`\\{${key}\\}`, 'g'), val);
     }
     res.json({ preview, originalLength: template.body.length, previewLength: preview.length });
@@ -171,7 +172,7 @@ router.getTemplate = async function(templateKey, vars = {}) {
     const t = await db('sms_templates').where({ template_key: templateKey }).first();
     if (!t || t.is_active === false) return null;
     let body = t.body;
-    for (const [key, val] of Object.entries(vars)) {
+    for (const [key, val] of Object.entries(formatSmsTemplateVars(vars))) {
       body = body.replace(new RegExp(`\\{${key}\\}`, 'g'), val || '');
     }
     return body;
