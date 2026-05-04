@@ -334,7 +334,13 @@ function initScheduledJobs() {
 
             const [claimedRow] = await trx('invoices')
               .where({ id: inv.id })
-              .whereIn('status', ['scheduled', 'sending'])
+              .where(function () {
+                this.where({ status: 'scheduled' })
+                  .orWhere(function () {
+                    this.where({ status: 'sending' })
+                      .where('updated_at', '<', new Date(Date.now() - 30 * 60000));
+                  });
+              })
               .where('scheduled_at', '<=', new Date())
               .whereNotNull('scheduled_at')
               .update({ status: 'sending', updated_at: new Date() }, ['send_method']);
