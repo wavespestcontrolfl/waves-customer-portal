@@ -60,7 +60,7 @@ import Customer360ProfileV2 from '../../components/admin/Customer360ProfileV2';
 import HorizontalScroll from '../../components/HorizontalScroll';
 import useIsMobile from '../../hooks/useIsMobile';
 import { Button, Badge, Card, CardBody, cn } from '../../components/ui';
-import { etDateString, etStartOfWeek, isETToday as isETTodayStr } from '../../lib/timezone';
+import { etDateString, etStartOfWeek, formatETDate, isETToday as isETTodayStr } from '../../lib/timezone';
 import { adminFetch, isRateLimitError } from '../../utils/admin-fetch';
 
 const TechMatchPanel = lazy(() => import('../../components/dispatch/TechMatchPanelV2'));
@@ -91,9 +91,25 @@ function detectServiceCategory(serviceType) {
 
 const formatDateISO = (d) => etDateString(d);
 
+function dateAtNoonUTC(dateStr) {
+  const [year, month, day] = dateStr.split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+}
+
+function addDaysISO(dateStr, days) {
+  const d = dateAtNoonUTC(dateStr);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function addMonthsISO(dateStr, months) {
+  const d = dateAtNoonUTC(dateStr);
+  d.setUTCMonth(d.getUTCMonth() + months);
+  return d.toISOString().slice(0, 10);
+}
+
 function formatDateDisplay(dateStr) {
-  const d = new Date(dateStr + 'T12:00:00');
-  return d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+  return formatETDate(dateAtNoonUTC(dateStr), { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 }
 
 const isToday = (dateStr) => isETTodayStr(dateStr);
@@ -969,11 +985,9 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
   }, [date, fetchSchedule]);
 
   function shiftDate(dir) {
-    const d = new Date(date + 'T12:00:00');
-    if (viewMode === 'day') d.setDate(d.getDate() + dir);
-    else if (viewMode === 'week') d.setDate(d.getDate() + dir * 7);
-    else d.setMonth(d.getMonth() + dir);
-    setDate(formatDateISO(d));
+    if (viewMode === 'day') setDate(addDaysISO(date, dir));
+    else if (viewMode === 'week') setDate(addDaysISO(date, dir * 7));
+    else setDate(addMonthsISO(date, dir));
   }
 
   if (loading) return <div className="py-16 text-center text-13 text-ink-secondary">Loading schedule…</div>;
@@ -1082,15 +1096,11 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
           // date, so the header must label that same span — not
           // selected → selected + 6, which drifts as soon as the user
           // picks any non-Monday.
-          const d = new Date(date + 'T12:00:00');
-          const dow = d.getDay();
-          const monday = new Date(d);
-          monday.setDate(d.getDate() - (dow === 0 ? 6 : dow - 1));
-          const sunday = new Date(monday);
-          sunday.setDate(monday.getDate() + 6);
-          return `${monday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${sunday.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
+          const monday = etStartOfWeek(date);
+          const sunday = addDaysISO(monday, 6);
+          return `${formatETDate(dateAtNoonUTC(monday), { month: 'short', day: 'numeric' })} – ${formatETDate(dateAtNoonUTC(sunday), { month: 'short', day: 'numeric', year: 'numeric' })}`;
         })()
-      : new Date(date + 'T12:00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+      : formatETDate(dateAtNoonUTC(date), { month: 'long', year: 'numeric' });
 
   return (
     <div className="bg-surface-page min-h-full p-4 md:p-6 font-sans text-zinc-900">
@@ -1200,12 +1210,11 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
         <div className="md:hidden mb-4 flex justify-center -mx-4 px-4 overflow-x-auto" style={{ WebkitOverflowScrolling: 'touch' }}>
           <div className="inline-flex gap-1.5 min-w-max">
             {Array.from({ length: 7 }).map((_, i) => {
-              const d = new Date(date + 'T12:00:00');
-              d.setDate(d.getDate() + (i - 3));
-              const iso = formatDateISO(d);
+              const iso = addDaysISO(date, i - 3);
+              const d = dateAtNoonUTC(iso);
               const selected = iso === date;
-              const dayNum = d.getDate();
-              const weekdayLetter = d.toLocaleDateString('en-US', { weekday: 'narrow' });
+              const dayNum = d.getUTCDate();
+              const weekdayLetter = d.toLocaleDateString('en-US', { timeZone: 'UTC', weekday: 'narrow' });
               return (
                 <button
                   key={iso}
