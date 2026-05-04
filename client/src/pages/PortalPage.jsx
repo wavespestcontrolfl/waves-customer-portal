@@ -2545,6 +2545,12 @@ function formatPhoneDisplay(phone) {
   return phone;
 }
 
+function formatPropertyAddress(property) {
+  const address = property?.address || {};
+  const cityStateZip = [address.city, address.state, address.zip].filter(Boolean).join(' ');
+  return [address.line1, cityStateZip].filter(Boolean).join(', ');
+}
+
 function ScheduleTab({ customer, onRequestVisit }) {
   const [upcoming, setUpcoming] = useState([]);
   const [prefs, setPrefs] = useState(null);
@@ -7840,7 +7846,7 @@ function ChatWidget({ customer, onClose }) {
 }
 
 export default function PortalPage() {
-  const { customer, logout } = useAuth();
+  const { customer, logout, properties, switchProperty } = useAuth();
   const isMobileShell = useIsMobile(900);
   // Honor ?tab=billing etc. so deep-links from SMS (e.g. the "update your
   // card" link in autopay-failure texts) land the customer on the right tab.
@@ -7910,6 +7916,7 @@ export default function PortalPage() {
   const [showChat, setShowChat] = useState(false);
   const [showMoreSheet, setShowMoreSheet] = useState(false);
   const [requestRefreshKey, setRequestRefreshKey] = useState(0);
+  const [switchingPropertyId, setSwitchingPropertyId] = useState(null);
   const menuRef = useRef(null);
   const portalBadgeData = useBadges();
 
@@ -7926,6 +7933,21 @@ export default function PortalPage() {
   if (!customer) return null;
 
   const initials = `${customer.firstName?.[0] || ''}${customer.lastName?.[0] || ''}`;
+  const portalProperties = Array.isArray(properties) ? properties : [];
+  const canSwitchProperties = portalProperties.length > 1;
+  const selectProperty = async (propertyId) => {
+    if (!propertyId || propertyId === customer.id || switchingPropertyId) return;
+    setSwitchingPropertyId(propertyId);
+    const switched = await switchProperty(propertyId);
+    setSwitchingPropertyId(null);
+    if (switched) {
+      setActiveTab('dashboard');
+      setVisitsSubTab('upcoming');
+      setShowMenu(false);
+      setShowMoreSheet(false);
+      setRequestRefreshKey(key => key + 1);
+    }
+  };
 
   return (
     <div style={{
@@ -7984,6 +8006,52 @@ export default function PortalPage() {
                 <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>{customer.firstName} {customer.lastName}</div>
                 <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>{formatPhoneDisplay(customer.phone)}</div>
               </div>
+              {canSwitchProperties && (
+                <div style={{ padding: '10px 10px 8px', borderBottom: `1px solid ${B.grayLight}` }}>
+                  <div style={{
+                    fontSize: 10, color: B.grayMid, fontWeight: 800, letterSpacing: 0.5,
+                    textTransform: 'uppercase', padding: '0 6px 6px',
+                  }}>
+                    Service Property
+                  </div>
+                  <div style={{ display: 'grid', gap: 4 }}>
+                    {portalProperties.map(property => {
+                      const active = property.id === customer.id;
+                      const address = formatPropertyAddress(property);
+                      return (
+                        <button
+                          key={property.id}
+                          type="button"
+                          onClick={() => selectProperty(property.id)}
+                          disabled={active || !!switchingPropertyId}
+                          style={{
+                            width: '100%', border: 'none', borderRadius: 8, textAlign: 'left',
+                            padding: '9px 8px', cursor: active || switchingPropertyId ? 'default' : 'pointer',
+                            background: active ? B.offWhite : B.white,
+                            color: B.navy, fontFamily: FONTS.body,
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                            <span style={{ fontSize: 14, fontWeight: 800, minWidth: 0 }}>
+                              {property.profileLabel || (property.isPrimaryProfile ? 'Primary' : 'Property')}
+                            </span>
+                            {active && <span style={{ fontSize: 10, color: B.wavesBlue, fontWeight: 800 }}>Current</span>}
+                            {switchingPropertyId === property.id && <span style={{ fontSize: 10, color: B.grayMid, fontWeight: 800 }}>Switching</span>}
+                          </div>
+                          {address && (
+                            <div style={{
+                              fontSize: 12, color: B.grayMid, marginTop: 2,
+                              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                            }}>
+                              {address}
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
               {[
                 { icon: 'home', label: 'Home', action: () => { switchTab('dashboard'); setShowMenu(false); } },
                 { icon: 'plan', label: 'My Plan', action: () => { switchTab('plan'); setShowMenu(false); } },

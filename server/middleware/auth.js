@@ -27,6 +27,7 @@ async function authenticate(req, res, next) {
 
     req.customer = customer;
     req.customerId = customer.id;
+    req.accountId = decoded.accountId || customer.account_id || customer.id;
     next();
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
@@ -39,17 +40,17 @@ async function authenticate(req, res, next) {
 /**
  * Generate JWT for a customer
  */
-function generateToken(customerId) {
+function generateToken(customerId, accountId = null) {
   return jwt.sign(
-    { customerId },
+    { customerId, accountId: accountId || undefined },
     config.jwt.secret,
     { expiresIn: config.jwt.expiry }
   );
 }
 
-function generateRefreshToken(customerId) {
+function generateRefreshToken(customerId, accountId = null) {
   return jwt.sign(
-    { customerId, type: 'refresh' },
+    { customerId, accountId: accountId || undefined, type: 'refresh' },
     config.jwt.secret,
     { expiresIn: config.jwt.refreshExpiry }
   );

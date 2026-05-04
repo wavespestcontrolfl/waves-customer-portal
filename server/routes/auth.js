@@ -42,6 +42,89 @@ const UNIFORM_SEND_RESPONSE = {
   message: 'If an account exists for that number, a verification code has been sent.',
 };
 
+function activeCustomerByPhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  const last10 = digits.length >= 10 ? digits.slice(-10) : digits;
+  return db('customers')
+    .where({ active: true })
+    .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${last10}`])
+    .orderBy('is_primary_profile', 'desc')
+    .orderBy('created_at', 'asc')
+    .first();
+}
+
+function authCustomerPayload(customer) {
+  return {
+    id: customer.id,
+    accountId: customer.account_id,
+    profileLabel: customer.profile_label,
+    isPrimaryProfile: customer.is_primary_profile,
+    firstName: customer.first_name,
+    lastName: customer.last_name,
+    email: customer.email,
+    phone: customer.phone,
+    tier: customer.waveguard_tier,
+  };
+}
+
+function accountIdForCustomer(customer) {
+  return customer?.account_id || customer?.id || null;
+}
+
+function propertyPayload(customer) {
+  return {
+    id: customer.id,
+    accountId: customer.account_id,
+    profileLabel: customer.profile_label,
+    isPrimaryProfile: customer.is_primary_profile,
+    firstName: customer.first_name,
+    lastName: customer.last_name,
+    tier: customer.waveguard_tier,
+    monthlyRate: customer.monthly_rate != null ? parseFloat(customer.monthly_rate) : null,
+    address: {
+      line1: customer.address_line1,
+      line2: customer.address_line2,
+      city: customer.city,
+      state: customer.state,
+      zip: customer.zip,
+    },
+  };
+}
+
+async function accountPropertiesForCustomer(customer) {
+  const query = db('customers')
+    .where({ active: true })
+    .whereNull('deleted_at')
+    .select(
+      'id',
+      'account_id',
+      'profile_label',
+      'is_primary_profile',
+      'first_name',
+      'last_name',
+      'address_line1',
+      'address_line2',
+      'city',
+      'state',
+      'zip',
+      'waveguard_tier',
+      'monthly_rate',
+      'created_at'
+    )
+    .orderBy('is_primary_profile', 'desc')
+    .orderBy('profile_label', 'asc')
+    .orderBy('created_at', 'asc');
+
+  if (customer.account_id) {
+    query.where({ account_id: customer.account_id });
+  } else {
+    query.where({ id: customer.id });
+  }
+
+  const rows = await query;
+  return rows.map(propertyPayload);
+}
+
 // =========================================================================
 // POST /api/auth/send-code — Send OTP to phone number
 // =========================================================================
@@ -55,9 +138,7 @@ router.post('/send-code', sendCodeLimiter, async (req, res, next) => {
     const { phone } = await schema.validateAsync(req.body);
 
     // Check customer exists — but DO NOT leak existence in the response.
-    const customer = await db('customers')
-      .where({ phone, active: true })
-      .first();
+    const customer = await activeCustomerByPhone(phone);
 
     if (customer) {
       try {
@@ -97,30 +178,23 @@ router.post('/verify-code', verifyCodeLimiter, async (req, res, next) => {
       return res.status(401).json(invalidResponse);
     }
 
-    const customer = await db('customers')
-      .where({ phone, active: true })
-      .first();
+    const customer = await activeCustomerByPhone(phone);
 
     if (!customer) {
       return res.status(401).json(invalidResponse);
     }
 
-    const token = generateToken(customer.id);
-    const refreshToken = generateRefreshToken(customer.id);
+    const accountId = accountIdForCustomer(customer);
+    const token = generateToken(customer.id, accountId);
+    const refreshToken = generateRefreshToken(customer.id, accountId);
 
     logger.info(`[auth] customer login success: id=${customer.id}`);
 
     res.json({
       token,
       refreshToken,
-      customer: {
-        id: customer.id,
-        firstName: customer.first_name,
-        lastName: customer.last_name,
-        email: customer.email,
-        phone: customer.phone,
-        tier: customer.waveguard_tier,
-      },
+      customer: authCustomerPayload(customer),
+      properties: await accountPropertiesForCustomer(customer),
     });
   } catch (err) {
     next(err);
@@ -149,12 +223,22 @@ router.post('/refresh', refreshLimiter, async (req, res, next) => {
       return res.status(401).json({ error: 'Invalid refresh token' });
     }
 
-    const customer = await db('customers').where({ id: decoded.customerId, active: true }).first();
+    const customer = await db('customers').where({ id: decoded.customerId, active: true }).whereNull('deleted_at').first();
     if (!customer) return res.status(401).json({ error: 'Invalid refresh token' });
 
-    // Rotate: issue a new access AND refresh token tied to the same customer.
-    const newToken = generateToken(customer.id);
-    const newRefreshToken = generateRefreshToken(customer.id);
+    const accountId = decoded.accountId || accountIdForCustomer(customer);
+
+    if (decoded.accountId) {
+      const customerAccountId = accountIdForCustomer(customer);
+      if (String(decoded.accountId) !== String(customerAccountId)) {
+        return res.status(401).json({ error: 'Invalid refresh token' });
+      }
+    }
+
+    // Rotate: issue a new access AND refresh token tied to the same account
+    // and currently selected service property.
+    const newToken = generateToken(customer.id, accountId);
+    const newRefreshToken = generateRefreshToken(customer.id, accountId);
     res.json({ token: newToken, refreshToken: newRefreshToken });
   } catch (err) {
     return res.status(401).json({ error: 'Invalid refresh token' });
@@ -171,6 +255,9 @@ router.get('/me', authenticate, async (req, res, next) => {
 
   res.json({
     id: customer.id,
+    accountId: customer.account_id,
+    profileLabel: customer.profile_label,
+    isPrimaryProfile: customer.is_primary_profile,
     firstName: customer.first_name,
     lastName: customer.last_name,
     email: customer.email,
@@ -205,6 +292,54 @@ router.get('/me', authenticate, async (req, res, next) => {
     } : null,
   });
   } catch (err) { next(err); }
+});
+
+// =========================================================================
+// GET /api/auth/properties — List service properties for this login account
+// =========================================================================
+router.get('/properties', authenticate, async (req, res, next) => {
+  try {
+    res.json({ properties: await accountPropertiesForCustomer(req.customer) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
+// POST /api/auth/select-property — Switch portal token to another property
+// =========================================================================
+router.post('/select-property', authenticate, async (req, res, next) => {
+  try {
+    const schema = Joi.object({
+      customerId: Joi.string().uuid().required(),
+    });
+    const { customerId } = await schema.validateAsync(req.body);
+
+    const target = await db('customers')
+      .where({ id: customerId, active: true })
+      .whereNull('deleted_at')
+      .first();
+
+    if (!target) return res.status(404).json({ error: 'Property not found' });
+
+    const currentAccountId = req.accountId || accountIdForCustomer(req.customer);
+    const targetAccountId = accountIdForCustomer(target);
+    if (!currentAccountId || String(currentAccountId) !== String(targetAccountId)) {
+      return res.status(403).json({ error: 'Property is not available for this account' });
+    }
+
+    const token = generateToken(target.id, currentAccountId);
+    const refreshToken = generateRefreshToken(target.id, currentAccountId);
+
+    res.json({
+      token,
+      refreshToken,
+      customer: authCustomerPayload(target),
+      properties: await accountPropertiesForCustomer(target),
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
 module.exports = router;

@@ -10,7 +10,7 @@
 //   GET  /admin/services                  (service-library lookup)
 //   GET  /admin/techs/availability        (slot availability for a date)
 //   POST /admin/services                  (create the appointment)
-//   POST /admin/customers                 (when creating a new customer
+//   POST /admin/customers/quick-add       (when creating a new customer
 //                                          inline before booking)
 //
 // Audit focus:
@@ -161,7 +161,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [customerLoading, setCustomerLoading] = useState(false);
   const [selectedCustomer, setSelectedCustomer] = useState(defaultCustomer);
   const [showQuickAdd, setShowQuickAdd] = useState(false);
-  const [quickAdd, setQuickAdd] = useState({ firstName: '', lastName: '', phone: '', email: '', address: '', city: '', zip: '' });
+  const [quickAdd, setQuickAdd] = useState({ firstName: '', lastName: '', phone: '', email: '', address: '', city: '', state: 'FL', zip: '', profileLabel: '' });
 
   // Service state — mirrors ServiceLibraryPage's approach: ask the Service
   // Library endpoint directly, render what it returns. No local fallback
@@ -461,7 +461,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
   const selectCustomer = (c) => {
     setSelectedCustomer(c);
-    setCustomerSearch(`${c.firstName} ${c.lastName}`);
+    const label = c.profileLabel && c.profileLabel !== 'Primary' ? ` - ${c.profileLabel}` : '';
+    setCustomerSearch(`${c.firstName} ${c.lastName}${label}`);
     setCustomerResults([]);
   };
 
@@ -476,7 +477,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       if (r.customer) {
         selectCustomer(r.customer);
         setShowQuickAdd(false);
-        setQuickAdd({ firstName: '', lastName: '', phone: '', email: '', address: '', city: '', zip: '' });
+        setQuickAdd({ firstName: '', lastName: '', phone: '', email: '', address: '', city: '', state: 'FL', zip: '', profileLabel: '' });
       }
     } catch (e) { alert('Failed to add customer: ' + e.message); }
   };
@@ -904,10 +905,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 {customerSearch.trim().length >= 2 && (
                   <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: '0 0 10px 10px', maxHeight: 240, overflowY: 'auto', WebkitOverflowScrolling: 'touch', zIndex: 20 }}>
                     {customerResults.map(c => (
-                      <div key={c.id} onClick={() => selectCustomer(c)} className="waves-sq-row" style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 48, display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <strong>{c.firstName} {c.lastName}</strong>
-                        <span style={{ color: D.muted, fontSize: 12 }}>{c.phone || ''}</span>
-                        {c.tier && <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 6, background: `${TIER_COLORS[c.tier] || D.teal}22`, color: TIER_COLORS[c.tier] || D.teal }}>{c.tier}</span>}
+                      <div key={c.id} onClick={() => selectCustomer(c)} className="waves-sq-row" style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 58, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontWeight: 700 }}>
+                            {c.firstName} {c.lastName}
+                            {c.profileLabel && c.profileLabel !== 'Primary' && <span style={{ color: D.muted, fontWeight: 500 }}> · {c.profileLabel}</span>}
+                          </div>
+                          <div style={{ color: D.muted, fontSize: 12, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {c.address || c.phone || ''}
+                          </div>
+                        </div>
+                        {c.tier && <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 6, background: `${TIER_COLORS[c.tier] || D.teal}22`, color: TIER_COLORS[c.tier] || D.teal, flex: '0 0 auto' }}>{c.tier}</span>}
                       </div>
                     ))}
                     {!customerLoading && customerResults.length === 0 && (
@@ -941,12 +949,19 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         ...q,
                         address: parts.line1 || parts.formatted || '',
                         city: parts.city || q.city,
+                        state: parts.state || q.state,
                         zip: parts.zip || q.zip,
                       }))}
                       style={inputStyle}
                       placeholder=""
                     />
                   </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 100px', gap: 8, marginBottom: 8 }}>
+                    <div><label style={labelStyle}>City</label><input value={quickAdd.city} onChange={e => setQuickAdd(q => ({ ...q, city: e.target.value }))} style={inputStyle} /></div>
+                    <div><label style={labelStyle}>State</label><input value={quickAdd.state} onChange={e => setQuickAdd(q => ({ ...q, state: e.target.value.toUpperCase().slice(0, 2) }))} style={inputStyle} /></div>
+                  </div>
+                  <div style={{ marginBottom: 8 }}><label style={labelStyle}>ZIP</label><input value={quickAdd.zip} onChange={e => setQuickAdd(q => ({ ...q, zip: e.target.value }))} style={inputStyle} /></div>
+                  <div style={{ marginBottom: 8 }}><label style={labelStyle}>Property Label</label><input value={quickAdd.profileLabel || ''} onChange={e => setQuickAdd(q => ({ ...q, profileLabel: e.target.value }))} style={inputStyle} placeholder="Rental - Cape Coral" /></div>
                   <button onClick={handleQuickAdd} style={{ padding: '10px 16px', background: D.text, color: D.white, border: 'none', borderRadius: 6, fontSize: 14, fontWeight: 500, cursor: 'pointer', minHeight: 44, width: '100%' }}>Add customer</button>
                 </div>
               )}
@@ -954,7 +969,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           ) : (
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#FFFFFF', borderRadius: 10, padding: 12, border: `1px solid #E4E4E7` }}>
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, color: '#18181B', fontSize: 14 }}>{selectedCustomer.firstName} {selectedCustomer.lastName}</div>
+                <div style={{ fontWeight: 600, color: '#18181B', fontSize: 14 }}>
+                  {selectedCustomer.firstName} {selectedCustomer.lastName}
+                  {selectedCustomer.profileLabel && selectedCustomer.profileLabel !== 'Primary' && <span style={{ color: D.muted, fontWeight: 500 }}> · {selectedCustomer.profileLabel}</span>}
+                </div>
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{selectedCustomer.address || `${selectedCustomer.city || ''}`}</div>
                 {selectedCustomer.phone && <div style={{ fontSize: 12, color: D.muted }}>{selectedCustomer.phone}</div>}
               </div>
