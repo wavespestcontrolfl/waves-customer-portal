@@ -39,6 +39,7 @@ import {
 } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const ROBOTO = "'Roboto', Arial, sans-serif";
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -146,9 +147,8 @@ function StatusPillV3({ status }) {
   }
 }
 
-// Estimates v2 default sort (spec §7):
-//   expired → viewed → sent → accepted/declined → drafts last
-// Within a rank, tie-break by most-recent activity (updatedAt || createdAt).
+// Estimates v2 status-rank sort. Available as an explicit mobile sort option,
+// but the Estimates tab defaults to chronological createdAt order.
 const V3_STATUS_RANK = {
   expired: 0,
   viewed: 1,
@@ -505,13 +505,9 @@ function EstimatePipelineViewV2() {
     );
   }
 
-  // Classify + sort (priority first, then newest)
+  // Classify + sort chronologically so estimates read in created order.
   const classified = estimates.map((e) => ({ ...e, _class: classifyEstimate(e) }));
-  const sorted = [...classified].sort((a, b) => {
-    if (a.isPriority && !b.isPriority) return -1;
-    if (!a.isPriority && b.isPriority) return 1;
-    return new Date(b.createdAt) - new Date(a.createdAt);
-  });
+  const sorted = [...classified].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
 
   // Stats — preserved 1:1 from V1
   const total = estimates.length;
@@ -567,7 +563,7 @@ function EstimatePipelineViewV2() {
     filter === 'all' ? sorted : sorted.filter((e) => e._class === filter);
 
   return (
-    <div>
+    <div style={{ fontFamily: ROBOTO }}>
       {followUpTarget && (
         <FollowUpModalV2
           estimate={followUpTarget}
@@ -588,22 +584,6 @@ function EstimatePipelineViewV2() {
           }}
         />
       )}
-
-      {/* "+ Add Estimate" — mirrors the "+ New project" pill; routes to Create Estimate tab. */}
-      <div className="flex justify-end mb-3">
-        <button
-          type="button"
-          onClick={() => navigate('/admin/estimates?tab=new')}
-          style={{
-            padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
-            background: '#18181B', color: '#fff', border: 'none', cursor: 'pointer',
-            whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
-            fontFamily: "'DM Sans', sans-serif",
-          }}
-        >
-          + Add Estimate
-        </button>
-      </div>
 
       {/* Stats bar */}
       <div className="flex gap-2 mb-5 flex-wrap">
@@ -1439,9 +1419,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
   const [filter, setFilter] = useState('all');
   const [dateFilter, setDateFilter] = useState('all');
   const [customerPanelId, setCustomerPanelId] = useState(null);
-  // Spec §7 default sort is the v3 status-rank; keep the old newest/oldest
-  // options available when the flag is off.
-  const [sort, setSort] = useState(v3Flag ? 'v3' : 'newest');
+  const [sort, setSort] = useState('oldest');
 
   const refreshEstimates = useCallback(() => {
     adminFetch('/admin/estimates?limit=all')
@@ -1508,12 +1486,9 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
     return counts;
   }, [estimates, v3Flag]);
 
-  // Reset filter + default sort when the v3 flag flips (flags load async
-  // after initial render; useState seed can't see the resolved value).
+  // Reset filter when the v3 flag flips; keep chronological ordering stable.
   useEffect(() => {
     setFilter('all');
-    if (v3Flag) setSort((s) => (s === 'newest' ? 'v3' : s));
-    else setSort((s) => (s === 'v3' ? 'newest' : s));
   }, [v3Flag]);
 
   // Flat list across all days — mirrors CustomersPageV2 directory layout.
@@ -1522,7 +1497,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
   return (
     // Mirrors CustomersPageV2: page padding comes from AdminLayout, no
     // edge-to-edge overrides, list rows are cards (not hairlined rows).
-    <div>
+    <div style={{ fontFamily: ROBOTO }}>
       {/* Title row — matches Customers header: h1 + round FAB when v3 flag on. */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
         <h1 className="text-28 font-normal tracking-h1 text-ink-primary">
@@ -1635,18 +1610,23 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
 export default function EstimatesPageV2() {
   const isMobile = useIsMobile(768);
   const [searchParams, setSearchParams] = useSearchParams();
+  const readLeadPrefill = useCallback((params) => {
+    const legacyName = [params.get('first_name'), params.get('last_name')].filter(Boolean).join(' ').trim();
+    return {
+      customerId: params.get('customerId') || '',
+      address: params.get('address') || '',
+      customerName: params.get('customerName') || legacyName,
+      customerPhone: params.get('customerPhone') || params.get('phone') || '',
+      customerEmail: params.get('customerEmail') || params.get('email') || '',
+      serviceInterest: params.get('serviceInterest') || params.get('service_interest') || '',
+    };
+  }, []);
 
   // Prefill from URL params — populated when arriving from a Customer/Lead
   // row's "+ Estimate" quick action. Stays in state so consuming the params
   // (clearing the URL) doesn't blow away the wizard the user just landed on.
-  const [prefill, setPrefill] = useState(() => ({
-    customerId: searchParams.get('customerId') || '',
-    address: searchParams.get('address') || '',
-    customerName: searchParams.get('customerName') || '',
-    customerPhone: searchParams.get('customerPhone') || '',
-    customerEmail: searchParams.get('customerEmail') || '',
-  }));
-  const hasPrefill = !!(prefill.customerId || prefill.address || prefill.customerName || prefill.customerPhone || prefill.customerEmail);
+  const [prefill, setPrefill] = useState(() => readLeadPrefill(searchParams));
+  const hasPrefill = !!(prefill.customerId || prefill.address || prefill.customerName || prefill.customerPhone || prefill.customerEmail || prefill.serviceInterest);
   const initialTab = TABS.some((t) => t.key === searchParams.get('tab')) ? searchParams.get('tab') : null;
 
   const [activeTab, setActiveTab] = useState(initialTab || (hasPrefill ? 'new' : 'leads'));
@@ -1661,14 +1641,8 @@ export default function EstimatesPageV2() {
   //      initializer does NOT re-run. We have to react to searchParams here,
   //      pull the values into prefill state, and switch into the create flow.
   useEffect(() => {
-    const incoming = {
-      customerId: searchParams.get('customerId') || '',
-      address: searchParams.get('address') || '',
-      customerName: searchParams.get('customerName') || '',
-      customerPhone: searchParams.get('customerPhone') || '',
-      customerEmail: searchParams.get('customerEmail') || '',
-    };
-    const hasIncoming = !!(incoming.customerId || incoming.address || incoming.customerName || incoming.customerPhone || incoming.customerEmail);
+    const incoming = readLeadPrefill(searchParams);
+    const hasIncoming = !!(incoming.customerId || incoming.address || incoming.customerName || incoming.customerPhone || incoming.customerEmail || incoming.serviceInterest);
     const tabParam = searchParams.get('tab');
     const hasTabParam = TABS.some((t) => t.key === tabParam);
     if (!hasIncoming && !hasTabParam) return;
@@ -1681,12 +1655,12 @@ export default function EstimatesPageV2() {
       if (tabParam === 'new') setMobileView('new');
     }
     const stripped = new URLSearchParams(searchParams);
-    ['customerId', 'address', 'customerName', 'customerPhone', 'customerEmail', 'tab'].forEach((k) => stripped.delete(k));
+    ['customerId', 'address', 'customerName', 'customerPhone', 'customerEmail', 'serviceInterest', 'first_name', 'last_name', 'phone', 'email', 'service_interest', 'tab'].forEach((k) => stripped.delete(k));
     setSearchParams(stripped, { replace: true });
-  }, [searchParams, setSearchParams]);
+  }, [searchParams, setSearchParams, readLeadPrefill]);
 
   function clearPrefill() {
-    setPrefill({ customerId: '', address: '', customerName: '', customerPhone: '', customerEmail: '' });
+    setPrefill({ customerId: '', address: '', customerName: '', customerPhone: '', customerEmail: '', serviceInterest: '' });
   }
 
   // Mobile: list (default) + create-estimate flow. Leads + Pricing Logic are
@@ -1694,7 +1668,7 @@ export default function EstimatesPageV2() {
   if (isMobile) {
     if (mobileView === 'new') {
       return (
-        <div>
+        <div style={{ fontFamily: ROBOTO }}>
           <button
             type="button"
             onClick={() => { setMobileView('list'); clearPrefill(); }}
@@ -1710,6 +1684,7 @@ export default function EstimatesPageV2() {
             initialCustomerName={prefill.customerName}
             initialCustomerPhone={prefill.customerPhone}
             initialCustomerEmail={prefill.customerEmail}
+            initialServiceInterest={prefill.serviceInterest}
           />
         </div>
       );
@@ -1718,7 +1693,7 @@ export default function EstimatesPageV2() {
       <EstimatesMobileListView
         onNew={() => { clearPrefill(); setMobileView('new'); }}
         onCreateFromAddress={(addr) => {
-          setPrefill({ customerId: '', address: addr || '', customerName: '', customerPhone: '', customerEmail: '' });
+          setPrefill({ customerId: '', address: addr || '', customerName: '', customerPhone: '', customerEmail: '', serviceInterest: '' });
           setMobileView('new');
         }}
       />
@@ -1726,7 +1701,7 @@ export default function EstimatesPageV2() {
   }
 
   return (
-    <div>
+    <div style={{ fontFamily: ROBOTO }}>
       <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
         <h1 className="text-28 font-normal text-zinc-900 tracking-display">
           Pipeline
@@ -1738,7 +1713,7 @@ export default function EstimatesPageV2() {
             padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
             background: '#18181B', color: '#fff', border: 'none', cursor: 'pointer',
             whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
-            fontFamily: "'DM Sans', sans-serif",
+            fontFamily: ROBOTO,
           }}
         >
           + Create Estimate
@@ -1775,7 +1750,7 @@ export default function EstimatesPageV2() {
                 fontSize: 14,
                 fontWeight: 700,
                 transition: 'all 0.2s',
-                fontFamily: "'DM Sans', sans-serif",
+                fontFamily: ROBOTO,
               }}
             >
               {t.label}
@@ -1793,6 +1768,7 @@ export default function EstimatesPageV2() {
           initialCustomerName={prefill.customerName}
           initialCustomerPhone={prefill.customerPhone}
           initialCustomerEmail={prefill.customerEmail}
+          initialServiceInterest={prefill.serviceInterest}
         />
       )}
       {activeTab === 'pricing' && (

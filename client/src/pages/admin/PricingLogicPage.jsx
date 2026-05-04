@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import PricingLogicPanel from '../../components/admin/PricingLogicPanel';
 
+const ROBOTO = "'Roboto', Arial, sans-serif";
+
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
 const D = {
   bg: '#F4F4F5', card: '#FFFFFF', border: '#E4E4E7',
@@ -60,13 +62,13 @@ export function MarginCalculator() {
   const inputStyle = {
     padding: '8px 10px', background: D.input, border: `1px solid ${D.border}`,
     borderRadius: 6, color: D.heading, fontSize: 14, width: 90, textAlign: 'right',
-    fontFamily: "'JetBrains Mono', monospace", outline: 'none',
+    fontFamily: ROBOTO, outline: 'none',
   };
 
   return (
     <div style={{ background: D.card, borderRadius: 12, border: `1px solid ${D.border}`, padding: 20, marginBottom: 20 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <h2 style={{ margin: 0, fontSize: 12, fontWeight: 500, color: D.heading, fontFamily: "'Montserrat', sans-serif", letterSpacing: '0.02em' }}>Margin Calculator</h2>
+        <h2 style={{ margin: 0, fontSize: 12, fontWeight: 500, color: D.heading, fontFamily: ROBOTO, letterSpacing: '0.02em' }}>Margin Calculator</h2>
         <button onClick={fetchMargins} disabled={loading} style={{
           padding: '6px 14px', borderRadius: 6, border: 'none', cursor: 'pointer',
           fontSize: 12, fontWeight: 600, background: D.teal, color: D.white,
@@ -118,10 +120,10 @@ export function MarginCalculator() {
               {margins.services.map(s => (
                 <tr key={s.service} style={{ borderBottom: `1px solid ${D.border}22` }}>
                   <td style={{ padding: '8px 10px', color: D.text, fontWeight: 600, fontSize: 12, textTransform: 'capitalize' }}>{s.service.replace(/_/g, ' ')}</td>
-                  <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: "'JetBrains Mono', monospace", fontSize: 13 }}>${s.annual?.toLocaleString() || '—'}</td>
-                  <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: D.muted }}>${s.estimatedCost?.toLocaleString() || '—'}</td>
-                  <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: "'JetBrains Mono', monospace", fontSize: 13 }}>${s.afterDiscount?.toLocaleString() || '—'}</td>
-                  <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: "'JetBrains Mono', monospace", fontSize: 13, fontWeight: 700, color: marginColor(s.margin) }}>
+                  <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: ROBOTO, fontSize: 13 }}>${s.annual?.toLocaleString() || '—'}</td>
+                  <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: ROBOTO, fontSize: 13, color: D.muted }}>${s.estimatedCost?.toLocaleString() || '—'}</td>
+                  <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: ROBOTO, fontSize: 13 }}>${s.afterDiscount?.toLocaleString() || '—'}</td>
+                  <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: ROBOTO, fontSize: 13, fontWeight: 700, color: marginColor(s.margin) }}>
                     {s.margin != null ? `${(s.margin * 100).toFixed(1)}%` : '—'}
                   </td>
                   <td style={{ padding: '8px 10px', textAlign: 'center' }}>
@@ -155,21 +157,21 @@ function SpecServicesPanel() {
   return (
     <div style={{ background: D.card, borderRadius: 12, border: `1px solid ${D.border}`, padding: 20, marginBottom: 20 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-        <h2 style={{ margin: 0, fontSize: 12, fontWeight: 500, color: D.heading, fontFamily: "'Montserrat', sans-serif", letterSpacing: '0.02em' }}>Missing-Services Pricing Spec</h2>
+        <h2 style={{ margin: 0, fontSize: 12, fontWeight: 500, color: D.heading, fontFamily: ROBOTO, letterSpacing: '0.02em' }}>Missing-Services Pricing Spec</h2>
         <span style={{ fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 12, background: D.green + '22', color: D.green, border: `1px solid ${D.green}55` }}>
-          ✓ Linked to Estimator Engine
+          Linked to Estimator Engine
         </span>
       </div>
       <div style={{ fontSize: 12, color: D.muted, marginBottom: 14 }}>
-        These five services are wired into <code style={{ fontFamily: "'JetBrains Mono', monospace" }}>generateEstimate()</code> via the <code style={{ fontFamily: "'JetBrains Mono', monospace" }}>services.&lt;key&gt;</code> input. Spec doc: <code style={{ fontFamily: "'JetBrains Mono', monospace" }}>missing-services-pricing-spec.md</code>.
+        These five services are wired into <code style={{ fontFamily: ROBOTO }}>generateEstimate()</code> via the <code style={{ fontFamily: ROBOTO }}>services.&lt;key&gt;</code> input. Spec doc: <code style={{ fontFamily: ROBOTO }}>missing-services-pricing-spec.md</code>.
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 10 }}>
         {SPEC_SERVICES.map(s => (
           <div key={s.key} style={{ display: 'grid', gridTemplateColumns: '180px 1fr', gap: 14, padding: 12, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8 }}>
             <div>
               <div style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>{s.name}</div>
-              <div style={{ fontSize: 11, color: D.muted, fontFamily: "'JetBrains Mono', monospace", marginTop: 2 }}>services.{s.key}</div>
-              <div style={{ fontSize: 10, color: D.teal, fontFamily: "'JetBrains Mono', monospace", marginTop: 2 }}>{s.fn}()</div>
+              <div style={{ fontSize: 11, color: D.muted, fontFamily: ROBOTO, marginTop: 2 }}>services.{s.key}</div>
+              <div style={{ fontSize: 10, color: D.teal, fontFamily: ROBOTO, marginTop: 2 }}>{s.fn}()</div>
             </div>
             <div style={{ fontSize: 12, color: D.text, lineHeight: 1.5 }}>{s.desc}</div>
           </div>
@@ -181,7 +183,7 @@ function SpecServicesPanel() {
 
 export default function PricingLogicPage() {
   return (
-    <div style={{ padding: '24px 24px 60px' }}>
+    <div style={{ padding: '24px 24px 60px', fontFamily: ROBOTO }}>
       <div style={{ maxWidth: 1280, margin: '0 auto' }}>
         <div style={{ marginBottom: 24 }}>
           <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>

@@ -158,7 +158,7 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
               {c.phone && (
                 <div className="flex items-center gap-2">
                   <Phone size={14} strokeWidth={1.75} className="text-ink-tertiary flex-shrink-0" />
-                  <CallBridgeLink phone={c.phone} customerName={`${c.first_name || ''} ${c.last_name || ''}`.trim()} className="text-zinc-900 hover:underline font-mono">{c.phone}</CallBridgeLink>
+                  <CallBridgeLink phone={c.phone} customerName={`${c.first_name || ''} ${c.last_name || ''}`.trim()} className="text-zinc-900 hover:underline">{c.phone}</CallBridgeLink>
                 </div>
               )}
               {c.email && (

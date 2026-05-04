@@ -550,7 +550,9 @@ router.get('/', async (req, res, next) => {
         this.whereILike('leads.first_name', s)
           .orWhereILike('leads.last_name', s)
           .orWhereILike('leads.phone', s)
-          .orWhereILike('leads.email', s);
+          .orWhereILike('leads.email', s)
+          .orWhereILike('leads.address', s)
+          .orWhereILike('leads.service_interest', s);
       });
     }
     const { count } = await countQuery.count('* as count').first();
@@ -636,6 +638,9 @@ router.put('/:id', async (req, res, next) => {
       'monthly_value', 'initial_service_value', 'waveguard_tier',
       'next_follow_up_at', 'notes',
     ];
+    const existingLead = await db('leads').where('id', req.params.id).first();
+    if (!existingLead) return res.status(404).json({ error: 'Lead not found' });
+
     const updates = {};
     for (const key of allowed) {
       if (req.body[key] !== undefined) updates[key] = req.body[key];
@@ -645,6 +650,18 @@ router.put('/:id', async (req, res, next) => {
 
     const [lead] = await db('leads').where('id', req.params.id).update(updates).returning('*');
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
+    let responseLead = lead;
+
+    const contactStatuses = new Set(['contacted', 'estimate_sent', 'estimate_viewed', 'negotiating', 'won']);
+    if (
+      updates.status
+      && updates.status !== existingLead.status
+      && existingLead.response_time_minutes == null
+      && contactStatuses.has(updates.status)
+    ) {
+      await leadAttribution.logFirstResponse(req.params.id);
+      responseLead = await db('leads').where('id', req.params.id).first();
+    }
 
     await db('lead_activities').insert({
       lead_id: req.params.id,
@@ -654,7 +671,7 @@ router.put('/:id', async (req, res, next) => {
       metadata: JSON.stringify(updates),
     });
 
-    res.json({ lead });
+    res.json({ lead: responseLead });
   } catch (err) { next(err); }
 });
 
@@ -717,11 +734,6 @@ router.post('/:id/assign', async (req, res, next) => {
       description: `Assigned to ${tech ? tech.first_name + ' ' + (tech.last_name || '') : 'unassigned'}`,
       performed_by: req.technician.first_name + ' ' + (req.technician.last_name || ''),
     });
-
-    if (lead.response_time_minutes == null) {
-      await leadAttribution.logFirstResponse(req.params.id);
-    }
-
     res.json({ lead });
   } catch (err) { next(err); }
 });
