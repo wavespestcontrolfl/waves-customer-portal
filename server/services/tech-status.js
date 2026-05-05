@@ -93,6 +93,68 @@ async function upsertTechStatus(payload) {
 }
 
 /**
+ * Set the semantic job focus for a tech without clobbering the latest
+ * GPS coordinates. Used by service lifecycle transitions; Bouncie owns
+ * lat/lng freshness, the lifecycle owns current_job_id.
+ */
+async function setTechJobStatus({ tech_id, status, current_job_id }) {
+  if (!tech_id || !status) {
+    throw new Error('setTechJobStatus: tech_id and status are required');
+  }
+
+  const [row] = await db.raw(
+    `
+    INSERT INTO tech_status (tech_id, status, current_job_id, updated_at)
+    VALUES (?, ?, ?, NOW())
+    ON CONFLICT (tech_id) DO UPDATE SET
+      status = EXCLUDED.status,
+      current_job_id = EXCLUDED.current_job_id,
+      updated_at = NOW()
+    RETURNING id, tech_id, status, lat, lng, current_job_id, updated_at
+    `,
+    [tech_id, status, current_job_id ?? null]
+  ).then((r) => r.rows);
+
+  const io = getIo();
+  if (io) {
+    io.to(ROOM).emit(EVENT, row);
+  } else {
+    logger.warn('[tech-status] io not initialized; skipping job-status broadcast');
+  }
+
+  return row;
+}
+
+/**
+ * Clear a tech's current job only if it still points at the service
+ * being closed. This avoids wiping a newer en-route assignment when an
+ * old tab completes/cancels a stale job.
+ */
+async function clearTechCurrentJob({ tech_id, current_job_id, status = 'idle' }) {
+  if (!tech_id || !current_job_id) return null;
+
+  const [row] = await db('tech_status')
+    .where({ tech_id, current_job_id })
+    .update({
+      status,
+      current_job_id: null,
+      updated_at: db.fn.now(),
+    })
+    .returning(['id', 'tech_id', 'status', 'lat', 'lng', 'current_job_id', 'updated_at']);
+
+  if (!row) return null;
+
+  const io = getIo();
+  if (io) {
+    io.to(ROOM).emit(EVENT, row);
+  } else {
+    logger.warn('[tech-status] io not initialized; skipping clear-current-job broadcast');
+  }
+
+  return row;
+}
+
+/**
  * GPS-source ping. Called from the Bouncie webhook on every trip-data
  * sample (and trip-start / trip-end / connect / disconnect events).
  *
@@ -213,4 +275,11 @@ function haversineEtaMinutes(fromLat, fromLng, toLat, toLng) {
   return Math.max(1, Math.round((distMi / 30) * 60));
 }
 
-module.exports = { upsertTechStatus, pingTechLocation, ROOM, EVENT };
+module.exports = {
+  upsertTechStatus,
+  pingTechLocation,
+  setTechJobStatus,
+  clearTechCurrentJob,
+  ROOM,
+  EVENT,
+};

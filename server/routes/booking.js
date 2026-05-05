@@ -688,11 +688,7 @@ router.post('/confirm', async (req, res, next) => {
       zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
     }).returning('*');
 
-    // Sync to dispatch board (best-effort)
-    try {
-      const { syncJobsFromSchedule } = require('../services/dispatch/schedule-bridge');
-      await syncJobsFromSchedule(slot_date);
-    } catch { /* dispatch sync is best-effort */ }
+    // Dispatch-v2 reads scheduled_services directly; no legacy dispatch_jobs sync.
 
     // SMS notifications (best-effort)
     try {

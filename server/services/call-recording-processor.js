@@ -42,12 +42,7 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
     logger.error(`[call-proc] Appointment reminder registration failed: ${err.message}`);
   }
 
-  try {
-    const { syncJobsFromSchedule } = require('./dispatch/schedule-bridge');
-    await syncJobsFromSchedule(scheduledDate);
-  } catch (err) {
-    logger.error(`[call-proc] Dispatch calendar sync failed: ${err.message}`);
-  }
+  // Dispatch-v2 reads scheduled_services directly; no legacy dispatch_jobs sync.
 }
 
 async function findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType, trx = db }) {
