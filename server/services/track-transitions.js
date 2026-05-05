@@ -19,6 +19,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const TwilioService = require('./twilio');
+const { setTechJobStatus, clearTechCurrentJob } = require('./tech-status');
 
 function portalOrigin() {
   return process.env.CLIENT_URL
@@ -30,6 +31,28 @@ async function loadService(serviceId) {
   return db('scheduled_services')
     .where({ id: serviceId })
     .first();
+}
+
+async function syncOperationalStatus(svc, toStatus, actorId) {
+  if (!svc || svc.status === toStatus) return { skipped: true, reason: 'already_in_status' };
+  const allowed = {
+    en_route: new Set(['pending', 'confirmed', 'rescheduled']),
+    on_site: new Set(['pending', 'confirmed', 'rescheduled', 'en_route']),
+    completed: new Set(['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site']),
+    cancelled: new Set(['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site']),
+  }[toStatus];
+  if (!allowed || !allowed.has(svc.status)) {
+    return { skipped: true, reason: `bad_status: ${svc.status}` };
+  }
+
+  const { transitionJobStatus } = require('./job-status');
+  await transitionJobStatus({
+    jobId: svc.id,
+    fromStatus: svc.status,
+    toStatus,
+    transitionedBy: actorId || null,
+  });
+  return { skipped: false };
 }
 
 /**
@@ -46,6 +69,24 @@ async function markEnRoute(serviceId, opts = {}) {
   // Idempotent: if already en_route (or beyond), treat as success but don't
   // re-fire anything.
   if (svc.track_state !== 'scheduled') {
+    if (opts.syncOperationalStatus && svc.track_state === 'en_route') {
+      try {
+        await syncOperationalStatus(svc, 'en_route', opts.actorId);
+      } catch (err) {
+        logger.error(`[track-transitions] sync en_route status failed: ${err.message}`);
+      }
+    }
+    if (svc.technician_id && svc.track_state === 'en_route') {
+      try {
+        await setTechJobStatus({
+          tech_id: svc.technician_id,
+          status: 'en_route',
+          current_job_id: svc.id,
+        });
+      } catch (err) {
+        logger.error(`[track-transitions] tech_status en_route idempotent sync failed: ${err.message}`);
+      }
+    }
     return {
       ok: true,
       state: svc.track_state,
@@ -64,6 +105,17 @@ async function markEnRoute(serviceId, opts = {}) {
   if (updated === 0) {
     // Someone else won the race. Re-read and return their state.
     const fresh = await loadService(serviceId);
+    if (fresh?.technician_id && fresh.track_state === 'en_route') {
+      try {
+        await setTechJobStatus({
+          tech_id: fresh.technician_id,
+          status: 'en_route',
+          current_job_id: fresh.id,
+        });
+      } catch (err) {
+        logger.error(`[track-transitions] tech_status en_route race sync failed: ${err.message}`);
+      }
+    }
     return {
       ok: true,
       state: fresh?.track_state || 'en_route',
@@ -71,6 +123,26 @@ async function markEnRoute(serviceId, opts = {}) {
       smsSent: false,
       alreadyEnRoute: true,
     };
+  }
+
+  if (opts.syncOperationalStatus) {
+    try {
+      await syncOperationalStatus(svc, 'en_route', opts.actorId);
+    } catch (err) {
+      logger.error(`[track-transitions] sync en_route status failed: ${err.message}`);
+    }
+  }
+
+  if (svc.technician_id) {
+    try {
+      await setTechJobStatus({
+        tech_id: svc.technician_id,
+        status: 'en_route',
+        current_job_id: svc.id,
+      });
+    } catch (err) {
+      logger.error(`[track-transitions] tech_status en_route sync failed: ${err.message}`);
+    }
   }
 
   // SMS — guarded by track_sms_sent_at. A retap that won the UPDATE race
@@ -124,19 +196,67 @@ async function markOnProperty(serviceId) {
   if (!svc) return { ok: false, reason: 'not_found' };
   if (svc.cancelled_at) return { ok: false, reason: 'already_cancelled' };
   if (svc.track_state === 'on_property') {
+    try {
+      await syncOperationalStatus(svc, 'on_site');
+    } catch (err) {
+      logger.error(`[track-transitions] sync on_site status failed: ${err.message}`);
+    }
+    if (svc.technician_id) {
+      try {
+        await setTechJobStatus({
+          tech_id: svc.technician_id,
+          status: 'on_site',
+          current_job_id: svc.id,
+        });
+      } catch (err) {
+        logger.error(`[track-transitions] tech_status on_site idempotent sync failed: ${err.message}`);
+      }
+    }
     return { ok: true, state: 'on_property', arrivedAt: svc.arrived_at };
   }
-  if (svc.track_state !== 'en_route') {
+  // Geofence arrival can be the first signal we get when a tech forgot
+  // to tap En Route. Treat scheduled -> on_property as a valid forward
+  // jump so the public tracker reflects reality instead of getting
+  // stuck before arrival.
+  if (!['scheduled', 'en_route'].includes(svc.track_state)) {
     return { ok: false, reason: `bad_state: ${svc.track_state}` };
   }
 
   const now = new Date();
   const updated = await db('scheduled_services')
-    .where({ id: serviceId, track_state: 'en_route' })
+    .where({ id: serviceId })
+    .whereIn('track_state', ['scheduled', 'en_route'])
     .update({ track_state: 'on_property', arrived_at: now, updated_at: now });
   if (updated === 0) {
     const fresh = await loadService(serviceId);
+    if (fresh?.technician_id && fresh.track_state === 'on_property') {
+      try {
+        await setTechJobStatus({
+          tech_id: fresh.technician_id,
+          status: 'on_site',
+          current_job_id: fresh.id,
+        });
+      } catch (err) {
+        logger.error(`[track-transitions] tech_status on_site race sync failed: ${err.message}`);
+      }
+    }
     return { ok: true, state: fresh?.track_state || 'on_property', arrivedAt: fresh?.arrived_at || null };
+  }
+  try {
+    await syncOperationalStatus(svc, 'on_site');
+  } catch (err) {
+    logger.error(`[track-transitions] sync on_site status failed: ${err.message}`);
+  }
+  if (svc.technician_id) {
+    try {
+      await setTechJobStatus({
+        tech_id: svc.technician_id,
+        status: 'on_site',
+        current_job_id: svc.id,
+      });
+    } catch (err) {
+      logger.error(`[track-transitions] tech_status on_site sync failed: ${err.message}`);
+    }
   }
   return { ok: true, state: 'on_property', arrivedAt: now };
 }
@@ -164,6 +284,17 @@ async function markComplete(serviceId, opts = {}) {
   if (updated === 0) {
     const fresh = await loadService(serviceId);
     return { ok: true, state: fresh?.track_state || 'complete', completedAt: fresh?.completed_at || null };
+  }
+  if (svc.technician_id) {
+    try {
+      await clearTechCurrentJob({
+        tech_id: svc.technician_id,
+        current_job_id: svc.id,
+        status: 'idle',
+      });
+    } catch (err) {
+      logger.error(`[track-transitions] tech_status complete clear failed: ${err.message}`);
+    }
   }
   return {
     ok: true,
@@ -202,6 +333,17 @@ async function cancel(serviceId, { reason, actorId } = {}) {
   if (updated === 0) {
     const fresh = await loadService(serviceId);
     return { ok: true, state: fresh?.track_state || 'cancelled', cancelledAt: fresh?.cancelled_at || null };
+  }
+  if (svc.technician_id) {
+    try {
+      await clearTechCurrentJob({
+        tech_id: svc.technician_id,
+        current_job_id: svc.id,
+        status: 'idle',
+      });
+    } catch (err) {
+      logger.error(`[track-transitions] tech_status cancel clear failed: ${err.message}`);
+    }
   }
   return {
     ok: true,

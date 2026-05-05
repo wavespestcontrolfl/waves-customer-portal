@@ -298,6 +298,7 @@ router.get('/:token', async (req, res, next) => {
       cancellation: row.track_state === 'cancelled'
         ? { reason: row.cancellation_reason || null, cancelledAt: row.cancelled_at }
         : null,
+      arrivedAt: row.arrived_at || null,
       customerFirstName: row.cust_first_name || null,
       meta: {
         pollIntervalSeconds: row.track_state === 'en_route' ? EN_ROUTE_POLL_SECONDS : 0,

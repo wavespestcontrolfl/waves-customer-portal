@@ -77,6 +77,92 @@ function formatTracker(row, service, tech, customer) {
   };
 }
 
+function stepForTrackState(state) {
+  return {
+    scheduled: 1,
+    en_route: 3,
+    on_property: 4,
+    complete: 7,
+    cancelled: 7,
+  }[state] || 1;
+}
+
+function formatScheduledTracker(service, tech, customer) {
+  const currentStep = stepForTrackState(service?.track_state);
+  return {
+    id: service.id,
+    currentStep,
+    steps: [
+      { step: 1, name: STEP_NAMES[1], completedAt: service.created_at || null },
+      { step: 2, name: STEP_NAMES[2], completedAt: service.customer_confirmed ? service.updated_at : null },
+      { step: 3, name: STEP_NAMES[3], completedAt: service.en_route_at || null },
+      { step: 4, name: STEP_NAMES[4], completedAt: service.arrived_at || null },
+      { step: 5, name: STEP_NAMES[5], completedAt: service.arrived_at || null },
+      { step: 6, name: STEP_NAMES[6], completedAt: null },
+      { step: 7, name: STEP_NAMES[7], completedAt: service.completed_at || service.cancelled_at || null },
+    ],
+    etaMinutes: null,
+    liveNotes: [],
+    serviceSummary: null,
+    service: {
+      id: service.id,
+      date: service.scheduled_date,
+      type: service.service_type,
+      windowStart: service.window_start,
+      windowEnd: service.window_end,
+    },
+    technician: {
+      id: tech?.id,
+      name: tech?.name,
+      initials: tech?.name ? tech.name.split(' ').map(n => n[0]).join('') : '?',
+    },
+    office: resolveOffice(customer),
+    customerLocation: null,
+    techPosition: null,
+  };
+}
+
+async function findCanonicalScheduledService(customerId, opts = {}) {
+  const todayOnly = !!opts.todayOnly;
+  const activeOnly = !!opts.activeOnly;
+  const nowIso = new Date().toISOString();
+  const today = etDateString();
+  const q = db('scheduled_services')
+    .where({ customer_id: customerId })
+    .whereNotNull('track_view_token')
+    .where('track_token_expires_at', '>=', nowIso)
+    .orderByRaw(`
+      CASE track_state
+        WHEN 'en_route' THEN 1
+        WHEN 'on_property' THEN 2
+        WHEN 'scheduled' THEN 3
+        WHEN 'complete' THEN 4
+        WHEN 'cancelled' THEN 5
+        ELSE 9
+      END
+    `)
+    .orderBy('scheduled_date', 'asc')
+    .orderBy('window_start', 'asc');
+
+  if (activeOnly) {
+    q.where(function () {
+      this.whereIn('track_state', ['en_route', 'on_property'])
+        .orWhere(function () {
+          this.whereIn('track_state', ['scheduled', 'complete', 'cancelled'])
+            .where('scheduled_date', today);
+        });
+    });
+  } else {
+    q.where(function () {
+      this.whereIn('track_state', ['scheduled', 'en_route', 'on_property'])
+        .orWhereIn('track_state', ['complete', 'cancelled']);
+    });
+  }
+
+  if (todayOnly) q.where('scheduled_date', today);
+  return q.first();
+}
+
 // When the tracker is in the EN ROUTE step, enrich the response with
 // the live bouncie position for the assigned tech's truck + the
 // customer's geocoded home + an ETA from Google Distance Matrix (or
@@ -134,6 +220,48 @@ async function enrichWithLiveMap(tracker, service, tech, customer) {
   return tracker;
 }
 
+async function enrichScheduledWithTechStatus(tracker, service, customer) {
+  if (!tracker || tracker.currentStep !== 3) return tracker;
+  try {
+    const custLat = Number(customer?.latitude);
+    const custLng = Number(customer?.longitude);
+    if (Number.isFinite(custLat) && Number.isFinite(custLng)) {
+      tracker.customerLocation = { lat: custLat, lng: custLng };
+    }
+    if (!service?.technician_id) return tracker;
+    const ts = await db('tech_status')
+      .where({ tech_id: service.technician_id })
+      .first('lat', 'lng', 'updated_at');
+    if (!ts || ts.lat == null || ts.lng == null) return tracker;
+    const lat = Number(ts.lat);
+    const lng = Number(ts.lng);
+    let eta = null;
+    if (tracker.customerLocation) {
+      const BouncieService = require('../services/bouncie');
+      const etaData = await BouncieService.calculateETAFromCoords(lat, lng, custLat, custLng).catch(() => null);
+      if (etaData) {
+        eta = {
+          minutes: etaData.etaMinutes,
+          distanceMiles: etaData.distanceMiles,
+          source: etaData.source,
+        };
+        tracker.etaMinutes = etaData.etaMinutes ?? null;
+      }
+    }
+    tracker.techPosition = {
+      lat,
+      lng,
+      heading: null,
+      isRunning: null,
+      updatedAt: ts.updated_at,
+      eta,
+    };
+  } catch {
+    // Preserve read availability; live map is best-effort.
+  }
+  return tracker;
+}
+
 // =========================================================================
 // GET /api/tracking/maps-key — public Google Maps key for the live
 // en-route map. Safe to expose in-browser: Google Maps JS API keys are
@@ -151,6 +279,14 @@ router.get('/maps-key', (req, res) => {
 // =========================================================================
 router.get('/active', async (req, res, next) => {
   try {
+    const canonical = await findCanonicalScheduledService(req.customerId, { activeOnly: true });
+    if (canonical) {
+      const tech = canonical.technician_id ? await db('technicians').where({ id: canonical.technician_id }).first() : null;
+      const formatted = formatScheduledTracker(canonical, tech, req.customer);
+      await enrichScheduledWithTechStatus(formatted, canonical, req.customer);
+      return res.json({ tracker: formatted });
+    }
+
     const fourHoursAgo = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
 
     const tracker = await db('service_tracking')
@@ -179,6 +315,14 @@ router.get('/active', async (req, res, next) => {
 router.get('/today', async (req, res, next) => {
   try {
     const today = etDateString();
+
+    const canonical = await findCanonicalScheduledService(req.customerId, { todayOnly: true });
+    if (canonical) {
+      const tech = canonical.technician_id ? await db('technicians').where({ id: canonical.technician_id }).first() : null;
+      const formatted = formatScheduledTracker(canonical, tech, req.customer);
+      await enrichScheduledWithTechStatus(formatted, canonical, req.customer);
+      return res.json({ tracker: formatted });
+    }
 
     // Check for existing tracker
     let tracker = await db('service_tracking')
@@ -226,6 +370,7 @@ router.get('/today', async (req, res, next) => {
 // =========================================================================
 router.put('/:id/step', async (req, res, next) => {
   try {
+    return res.status(403).json({ error: 'Tracker updates are staff-only' });
     const stepSchema = Joi.object({
       step: Joi.number().integer().min(1).max(7).required(),
       note: Joi.string().trim().max(500).optional().allow(''),
@@ -314,6 +459,7 @@ router.put('/:id/step', async (req, res, next) => {
 // =========================================================================
 router.post('/:id/note', async (req, res, next) => {
   try {
+    return res.status(403).json({ error: 'Tracker notes are staff-only' });
     const noteSchema = Joi.object({
       note: Joi.string().trim().min(1).max(500).required(),
     });
@@ -342,6 +488,7 @@ router.post('/:id/note', async (req, res, next) => {
 // =========================================================================
 router.put('/:id/complete', async (req, res, next) => {
   try {
+    return res.status(403).json({ error: 'Tracker completion is staff-only' });
     const { summary } = req.body;
 
     await db('service_tracking')

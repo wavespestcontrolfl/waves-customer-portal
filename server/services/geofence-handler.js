@@ -188,7 +188,10 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
   // If tech already has a running job timer, don't start a second one.
   const existingTimer = await matcher.getActiveJobTimer(tech.id);
   if (existingTimer) {
-    if (job) await advanceServiceTracking(job.id, 4, eventTime);
+    if (job) {
+      await trackTransitions.markOnProperty(job.id);
+      await advanceServiceTracking(job.id, 4, eventTime);
+    }
     await matcher.logEvent({
       bouncie_imei: imei,
       technician_id: tech.id,
@@ -237,6 +240,7 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
     }
 
     if (job) {
+      await trackTransitions.markOnProperty(job.id);
       await advanceServiceTracking(job.id, 4, eventTime);
       // Fire-and-forget customer arrival SMS when tied to a real job
       sendArrivalSms(customer.id, tech.name).catch(() => {});
@@ -703,7 +707,12 @@ async function maybeAutoFlipNextJob({ tech, exitedCustomer, activeTimer, eventTi
   let result = null;
   let threw = null;
   try {
-    result = await trackTransitions.markEnRoute(nextJob.id, { etaMinutes: null });
+    result = await trackTransitions.markEnRoute(nextJob.id, {
+      etaMinutes: null,
+      actorType: 'system',
+      actorId: null,
+      syncOperationalStatus: true,
+    });
   } catch (err) {
     threw = err;
     logger.error(`[geofence-handler] markEnRoute failed: ${err.message}`);

@@ -900,7 +900,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
         body: JSON.stringify({ date }),
       });
       const d = await res.json();
-      setSyncMsg(`Synced ${d.bridge?.synced || 0} jobs from schedule`);
+      setSyncMsg(d.message || `Synced ${d.bridge?.synced || 0} jobs from schedule`);
       setTimeout(() => setSyncMsg(''), 5000);
     } catch { setSyncMsg('Sync failed'); }
     setSyncing(false);

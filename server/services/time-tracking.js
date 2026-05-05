@@ -132,6 +132,14 @@ async function startJob(technicianId, jobId, { lat, lng } = {}) {
     .returning('*');
 
   logger.info(`[time-tracking] Tech ${technicianId} started job`, { entryId: entry.id, jobId });
+  if (jobId) {
+    try {
+      const trackTransitions = require('./track-transitions');
+      await trackTransitions.markOnProperty(jobId);
+    } catch (err) {
+      logger.error(`[time-tracking] markOnProperty failed for job ${jobId}: ${err.message}`);
+    }
+  }
   return entry;
 }
 

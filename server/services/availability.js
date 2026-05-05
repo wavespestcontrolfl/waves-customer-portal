@@ -198,11 +198,7 @@ class AvailabilityEngine {
       zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
     }).returning('*');
 
-    // Sync to dispatch_jobs
-    try {
-      const { syncJobsFromSchedule } = require('./dispatch/schedule-bridge');
-      await syncJobsFromSchedule(date);
-    } catch { /* dispatch sync is best-effort */ }
+    // Dispatch-v2 reads scheduled_services directly; no legacy dispatch_jobs sync.
 
     // Send SMS notifications
     try {
