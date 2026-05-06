@@ -320,30 +320,50 @@ export default function EstimateViewPage() {
 
   const [countdownSeconds, setCountdownSeconds] = useState(0);
   const countdownRef = useRef(null);
+  const selectedFrequencyRef = useRef(null);
+
+  useEffect(() => {
+    selectedFrequencyRef.current = selectedFrequency;
+  }, [selectedFrequency]);
+
+  const loadEstimate = useCallback(async ({ preserveSelection = false } = {}) => {
+    setLoading(true);
+    const r = await fetch(`${API_BASE}/estimates/${token}/data`);
+    if (r.status === 404) {
+      setNotFound(true);
+      setLoading(false);
+      return;
+    }
+    if (!r.ok) throw new Error(`estimate fetch failed: ${r.status}`);
+    const body = await r.json();
+    setData(body);
+    setLoading(false);
+    const frequencies = body?.pricing?.frequencies || [];
+    const firstFreq = frequencies[0];
+    setSelectedFrequency((prev) => {
+      if (preserveSelection && prev && frequencies.some((f) => f.key === prev)) return prev;
+      return firstFreq?.key || prev;
+    });
+    const preservedFrequency = selectedFrequencyRef.current;
+    const freqForAddOns = (preserveSelection && preservedFrequency
+      ? frequencies.find((f) => f.key === preservedFrequency)
+      : firstFreq) || firstFreq;
+    if (freqForAddOns) {
+      setSelectedAddOns(new Set((freqForAddOns.addOns || []).filter((a) => a.preChecked).map((a) => a.key)));
+    }
+  }, [token]);
 
   // Fetch on mount
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    fetch(`${API_BASE}/estimates/${token}/data`)
-      .then((r) => {
-        if (r.status === 404) { setNotFound(true); setLoading(false); return null; }
-        return r.json();
-      })
-      .then((body) => {
-        if (cancelled || !body) return;
-        setData(body);
+    loadEstimate().catch(() => {
+      if (!cancelled) {
+        setNotFound(true);
         setLoading(false);
-        const firstFreq = body?.pricing?.frequencies?.[0];
-        if (firstFreq) {
-          setSelectedFrequency(firstFreq.key);
-          // Seed add-on selection from this frequency's preChecked defaults
-          setSelectedAddOns(new Set((firstFreq.addOns || []).filter((a) => a.preChecked).map((a) => a.key)));
-        }
-      })
-      .catch(() => { if (!cancelled) { setNotFound(true); setLoading(false); } });
+      }
+    });
     return () => { cancelled = true; };
-  }, [token]);
+  }, [loadEstimate]);
 
   // Rebuild add-on defaults when the customer changes frequency — but
   // preserve any manual toggles the customer already made by keying off
@@ -384,13 +404,30 @@ export default function EstimateViewPage() {
     return () => clearInterval(countdownRef.current);
   }, [reservation]);
 
-  const onToggleAddOn = useCallback((key) => {
+  const onToggleAddOn = useCallback(async (key) => {
+    const nextChecked = !selectedAddOns.has(key);
     setSelectedAddOns((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key); else next.add(key);
       return next;
     });
-  }, []);
+    try {
+      const r = await fetch(`${API_BASE}/estimates/${token}/preferences`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ [key]: nextChecked }),
+      });
+      if (!r.ok) throw new Error(`preferences failed: ${r.status}`);
+      await loadEstimate({ preserveSelection: true });
+    } catch (err) {
+      setError(err.message);
+      setSelectedAddOns((prev) => {
+        const next = new Set(prev);
+        if (nextChecked) next.delete(key); else next.add(key);
+        return next;
+      });
+    }
+  }, [loadEstimate, selectedAddOns, token]);
 
   const handlePaymentChoice = useCallback(async (pref) => {
     if (!selectedSlotId) return;
@@ -431,6 +468,7 @@ export default function EstimateViewPage() {
           slotId: selectedSlotId,
           paymentMethodPreference: paymentPreference,
           serviceMode,
+          selectedFrequency,
         }),
       });
       if (!r.ok) {
@@ -453,7 +491,7 @@ export default function EstimateViewPage() {
       setError(err.message);
       setCtaPhase('review');
     }
-  }, [token, selectedSlotId, paymentPreference, serviceMode]);
+  }, [token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency]);
 
   const handleReviewCancel = useCallback(() => {
     setCtaPhase('configure');

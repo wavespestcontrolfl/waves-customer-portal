@@ -96,6 +96,10 @@ const INPUT_CLS =
   'w-full h-10 px-3 text-14 text-zinc-900 bg-white border-hairline border-zinc-300 ' +
   'rounded-sm u-focus-ring placeholder:text-ink-disabled';
 
+const CONTACT_FIELDS = new Set(['customerId', 'customerName', 'customerPhone', 'customerEmail']);
+const SEND_FIELDS = new Set(['scheduleSend', 'scheduledAt']);
+const DELIVERY_OPTION_FIELDS = new Set(['showOneTimeOption', 'billByInvoice']);
+
 function InputV2({ k, type = 'text', placeholder, min, max, className }) {
   const { form, set } = useContext(FormCtx);
   return (
@@ -443,7 +447,16 @@ export default function EstimateToolViewV2({
   const token = localStorage.getItem('waves_admin_token');
   const authHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
 
-  const set = useCallback((key, val) => setForm((f) => ({ ...f, [key]: val })), []);
+  const set = useCallback((key, val) => {
+    setForm((f) => ({ ...f, [key]: val }));
+    if (SEND_FIELDS.has(key)) return;
+    if (CONTACT_FIELDS.has(key) || DELIVERY_OPTION_FIELDS.has(key)) {
+      setSavedId(null);
+      return;
+    }
+    setEstimate(null);
+    setSavedId(null);
+  }, []);
   const toggle = useCallback((key) => {
     setForm((f) => ({ ...f, [key]: !f[key] }));
     if (key.startsWith('svc')) { setEstimate(null); setSavedId(null); }
@@ -513,6 +526,8 @@ export default function EstimateToolViewV2({
   }, []);
 
   function applyDiscountPreset(key) {
+    setEstimate(null);
+    setSavedId(null);
     if (key === '__custom__' || !key) {
       setForm((f) => ({ ...f, manualDiscountPreset: key || '' }));
       return;

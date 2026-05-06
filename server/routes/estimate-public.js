@@ -1386,6 +1386,10 @@ router.put('/:token/accept', async (req, res, next) => {
     // upgrade, no EstimateConverter recurring schedule creation.
     const requestedOneTime = req.body?.serviceMode === 'one_time';
     const serviceMode = requestedOneTime ? 'one_time' : 'recurring';
+    const selectedFrequencyKey = (() => {
+      const raw = req.body?.selectedFrequency;
+      return typeof raw === 'string' ? raw.trim() : '';
+    })();
     // Invoice-mode: admin opted the estimate into auto-invoicing. Skips
     // onboarding/SetupIntent; after commit we generate an invoice (due
     // immediately) for the first visit's amount and send SMS + email
@@ -1426,7 +1430,7 @@ router.put('/:token/accept', async (req, res, next) => {
     // Structural "one-time only" — the estimate was built with no
     // recurring services, only one-time items. Older concept.
     const isOneTimeOnly = recurringSvcList.length === 0 && oneTimeList.length > 0;
-    const pricingBundle = requestedOneTime ? await buildPricingBundle(estimate) : null;
+    const pricingBundle = (requestedOneTime || selectedFrequencyKey) ? await buildPricingBundle(estimate) : null;
     const oneTimeChoicePrice = Number(pricingBundle?.anchorOneTimePrice || estimate.onetime_total || 0);
     const canChooseOneTime = !!estimate.show_one_time_option && oneTimeChoicePrice > 0;
     if (requestedOneTime && !isOneTimeOnly && !canChooseOneTime) {
@@ -1438,12 +1442,42 @@ router.put('/:token/accept', async (req, res, next) => {
     // post-commit branches (no onboarding session, no tier upgrade,
     // no recurring schedule via EstimateConverter).
     const treatAsOneTime = isOneTimeOnly || serviceMode === 'one_time';
+    const selectedFrequency = !treatAsOneTime && pricingBundle?.frequencies?.length
+      ? pricingBundle.frequencies.find((f) => f.key === selectedFrequencyKey)
+      : null;
+    if (selectedFrequencyKey && !treatAsOneTime && !selectedFrequency) {
+      return res.status(400).json({ error: 'selectedFrequency is not available for this estimate' });
+    }
+    const effectiveMonthlyTotal = selectedFrequency?.monthly != null
+      ? Number(selectedFrequency.monthly)
+      : Number(estimate.monthly_total || 0);
+    const effectiveAnnualTotal = selectedFrequency?.annual != null
+      ? Number(selectedFrequency.annual)
+      : Number(estimate.annual_total || 0);
 
     // All DB mutations run atomically so a mid-flight failure can't leave a
     // half-created customer without an onboarding session (or vice versa).
     // SMS / notifications / auto-conversion are fired AFTER the commit below.
     const txResult = await db.transaction(async (trx) => {
-      await trx('estimates').where({ id: estimate.id }).update({ status: 'accepted', accepted_at: trx.fn.now() });
+      const acceptedUpdates = {
+        status: 'accepted',
+        accepted_at: trx.fn.now(),
+      };
+      if (selectedFrequency) {
+        acceptedUpdates.monthly_total = effectiveMonthlyTotal;
+        acceptedUpdates.annual_total = effectiveAnnualTotal;
+        let nextEstimateData = estData && typeof estData === 'object' ? { ...estData } : {};
+        nextEstimateData.customerSelection = {
+          ...(nextEstimateData.customerSelection || {}),
+          frequency: selectedFrequency.key,
+          frequencyLabel: selectedFrequency.label,
+          monthlyTotal: effectiveMonthlyTotal,
+          annualTotal: effectiveAnnualTotal,
+          selectedAt: new Date().toISOString(),
+        };
+        acceptedUpdates.estimate_data = JSON.stringify(nextEstimateData);
+      }
+      await trx('estimates').where({ id: estimate.id }).update(acceptedUpdates);
 
       let customerId = estimate.customer_id;
       if (!customerId && estimate.customer_phone) {
@@ -1461,7 +1495,7 @@ router.put('/:token/accept', async (req, res, next) => {
             address_line1: estimate.address || '',
             city: '', state: 'FL', zip: '',
             waveguard_tier: estimate.waveguard_tier || 'Bronze',
-            monthly_rate: estimate.monthly_total || 0,
+            monthly_rate: effectiveMonthlyTotal,
             member_since: etDateString(),
             referral_code: code,
           }).returning('*');
@@ -1530,7 +1564,7 @@ router.put('/:token/accept', async (req, res, next) => {
           token: obToken,
           service_type: `WaveGuard ${estimate.waveguard_tier || 'Bronze'} — ${svcType}`,
           waveguard_tier: estimate.waveguard_tier,
-          monthly_rate: estimate.monthly_total,
+          monthly_rate: effectiveMonthlyTotal,
           status: 'started',
           expires_at: expiresAt,
         }).returning('*');
@@ -1553,6 +1587,7 @@ router.put('/:token/accept', async (req, res, next) => {
           waveguard_tier: estimate.waveguard_tier || 'Bronze',
           monthly_total: estimate.monthly_total || 0,
         };
+        officeVars.monthly_total = effectiveMonthlyTotal || officeVars.monthly_total;
         const officeFallback = treatAsOneTime
           ? `🎉 One-time booking! ${officeVars.customer_name} at ${officeVars.address} — ${oneTimeList[0]?.name || 'service'}. Booking link sent.`
           : `🎉 Estimate accepted! ${officeVars.customer_name} at ${officeVars.address} — ${officeVars.waveguard_tier} WaveGuard $${officeVars.monthly_total}/mo. Onboarding link sent.`;
@@ -1642,7 +1677,7 @@ router.put('/:token/accept', async (req, res, next) => {
     // In-app notifications for estimate accepted
     try {
       const NotificationService = require('../services/notification-service');
-      await NotificationService.notifyAdmin('estimate', `Estimate accepted: ${estimate.customer_name}`, `${estimate.waveguard_tier || 'Bronze'} WaveGuard $${estimate.monthly_total}/mo`, { icon: '\u2705', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId } });
+      await NotificationService.notifyAdmin('estimate', `Estimate accepted: ${estimate.customer_name}`, `${estimate.waveguard_tier || 'Bronze'} WaveGuard $${effectiveMonthlyTotal || estimate.monthly_total}/mo`, { icon: '\u2705', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId } });
       if (customerId) {
         await NotificationService.notifyCustomer(customerId, 'account', 'Estimate accepted', `Your ${estimate.waveguard_tier || 'Bronze'} WaveGuard plan is confirmed. Complete onboarding to get started.`, { icon: '\u2705', link: '/onboarding' });
       }
@@ -1690,7 +1725,7 @@ router.put('/:token/accept', async (req, res, next) => {
           lineItems = [{ description: oneTimeLabel, quantity: 1, unit_price: amount }];
           notes = `Auto-generated from accepted estimate #${estimate.id} (invoice-mode one-time).`;
         } else {
-          const monthly = parseFloat(estimate.monthly_total || 0);
+          const monthly = parseFloat(effectiveMonthlyTotal || estimate.monthly_total || 0);
           const quarterAmount = Math.round(monthly * 3 * 100) / 100;
           invoiceAmount = quarterAmount;
           const svcType = recurringSvcList.map(s => s.name).join(' + ') || 'Pest Control';
@@ -1863,6 +1898,7 @@ router.put('/:token/preferences', async (req, res, next) => {
       onetime_total: onetimeTotal,
       updated_at: db.fn.now(),
     });
+    pricingCache.delete(estimate.id);
 
     // Per-row metadata for client re-render (off-desc + savings label)
     const prefMeta = {};
@@ -2254,7 +2290,22 @@ function readV1Shape(estData) {
   };
 }
 
-function shapeFromV1(v1, ladder, pestTier) {
+function shapePreferenceAddOns(prefs, pestTier) {
+  if (!pestTier) return [];
+  const visitsPerYear = Number(pestTier.apps || pestTier.v || 4) || 4;
+  return SERVICE_PREF_KEYS.map((key) => {
+    const cfg = SERVICE_PREFS[key];
+    const monthlySavings = Math.round(((cfg.perVisit * visitsPerYear) / 12) * 100) / 100;
+    return {
+      key,
+      label: cfg.label,
+      detail: `${cfg.offDesc} Save $${monthlySavings.toFixed(monthlySavings % 1 ? 2 : 0)}/mo if removed.`,
+      preChecked: prefs[key] !== false,
+    };
+  });
+}
+
+function shapeFromV1(v1, ladder, pestTier, prefs) {
   // pestTier may be null if pest isn't in this estimate. In that case
   // the frequency entry shows the recurring total regardless of freq key
   // (lawn-only / mosquito-only estimates — slider position doesn't
@@ -2267,9 +2318,13 @@ function shapeFromV1(v1, ladder, pestTier) {
   }, 0);
 
   const totalMoBefore = pestMoBefore + nonPestMoBefore;
+  const pestRecurring = pestTier
+    ? { monthlyBase: pestMoBefore, visitsPerYear: Number(pestTier.apps || pestTier.v || 4) || 4 }
+    : null;
+  const { monthlyOff } = computePrefDiscount(prefs, pestRecurring, false, 0);
   // v1 applies the tier discount on the summed monthly (verified against
   // the recurring.monthlyTotal = (pest + lawn) * (1 - discount) relation).
-  const totalMoAfter = Math.round(totalMoBefore * (1 - v1.discount) * 100) / 100;
+  const totalMoAfter = Math.max(0, Math.round((totalMoBefore * (1 - v1.discount) - monthlyOff) * 100) / 100);
   const totalAnnAfter = Math.round(totalMoAfter * 12 * 100) / 100;
 
   // Included items: full recurring services list. These don't change with
@@ -2282,17 +2337,7 @@ function shapeFromV1(v1, ladder, pestTier) {
     includedAtThisFrequency: true,
   }));
 
-  // Same logic as engine-invocation path — only surface add-ons when the
-  // defaults config pre-checks at least one. Hides the "Customize your
-  // plan" block entirely for v1 estimates with no real add-on catalog.
-  const preCheckedKeys = new Set(addonDefaults[ladder.key] || []);
-  const hasPreChecked = included.some((item) => preCheckedKeys.has(item.key));
-  const addOns = hasPreChecked
-    ? included.map((item) => ({
-        ...item,
-        preChecked: preCheckedKeys.has(item.key),
-      }))
-    : [];
+  const addOns = shapePreferenceAddOns(prefs, pestTier);
 
   return {
     key: ladder.key,
@@ -2316,6 +2361,7 @@ async function buildPricingBundle(estimate) {
   const estData = typeof estimate.estimate_data === 'string'
     ? JSON.parse(estimate.estimate_data)
     : estimate.estimate_data;
+  const prefs = normalizePrefs(estData?.preferences);
 
   // v1 shape (admin UI estimates) — read pre-computed pestTiers directly.
   // This is the dominant path until Session 11 retires the client engine.
@@ -2324,7 +2370,7 @@ async function buildPricingBundle(estimate) {
     const frequencies = [];
     for (const [v1Label, ladder] of Object.entries(V1_LABEL_TO_LADDER)) {
       const pestTier = v1.pestTiers.find((t) => t?.label === v1Label) || null;
-      frequencies.push(shapeFromV1(v1, ladder, pestTier));
+      frequencies.push(shapeFromV1(v1, ladder, pestTier, prefs));
     }
 
     // If no pest at all, drop the extra two entries — slider is meaningless
@@ -2475,7 +2521,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // First-view transition — gate on viewed_at IS NULL AND !adminIP.
     // Admin allowlist keeps Virginia's preview clicks from firing the
     // "customer just opened their estimate" office SMS.
-    if (!estimate.viewed_at && !isAdminIp(ip)) {
+    if (!estimate.viewed_at && !isAdminIp(ip) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
       await db('estimates').where({ id: estimate.id }).update({
         viewed_at: db.fn.now(),
         status: 'viewed',
