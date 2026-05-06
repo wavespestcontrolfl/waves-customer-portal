@@ -416,17 +416,6 @@ class ApiClient {
     return this.request('/tracking/today');
   }
 
-  advanceTrackerDemo() {
-    return this.request('/tracking/demo/advance', { method: 'POST' });
-  }
-
-  addTrackerNote(trackerId, note) {
-    return this.request(`/tracking/${trackerId}/note`, {
-      method: 'POST',
-      body: JSON.stringify({ note }),
-    });
-  }
-
   // ---- Bouncie GPS ----
   getVehicles() {
     return this.request('/bouncie/vehicles');

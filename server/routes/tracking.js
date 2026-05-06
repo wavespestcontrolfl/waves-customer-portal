@@ -1,12 +1,9 @@
 const express = require('express');
 const router = express.Router();
-const Joi = require('joi');
 const db = require('../models/db');
-const TwilioService = require('../services/twilio');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
-const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const {
   calculateBoundedTrackingEta,
@@ -467,198 +464,38 @@ router.get('/today', async (req, res, next) => {
 });
 
 // =========================================================================
-// PUT /api/tracking/:id/step — advance step
+// PUT /api/tracking/:id/step — legacy customer mutation retired
 // =========================================================================
 router.put('/:id/step', async (req, res, next) => {
   try {
     return res.status(403).json({ error: 'Tracker updates are staff-only' });
-    const stepSchema = Joi.object({
-      step: Joi.number().integer().min(1).max(7).required(),
-      note: Joi.string().trim().max(500).optional().allow(''),
-      etaMinutes: Joi.number().integer().min(0).max(720).optional(),
-    });
-    const { value: vStep, error: stepErr } = stepSchema.validate(req.body, { stripUnknown: true });
-    if (stepErr) return res.status(400).json({ error: stepErr.details[0].message });
-    const { step, note, etaMinutes } = vStep;
-    const trackerId = req.params.id;
-
-    const tracker = await db('service_tracking')
-      .where({ id: trackerId, customer_id: req.customerId })
-      .first();
-
-    if (!tracker) return res.status(404).json({ error: 'Tracker not found' });
-
-    // Monotonic progression only: may stay on current step or advance by one.
-    // Prevents rolling back a "Complete" tracker or skipping ahead silently.
-    const currentStep = tracker.current_step || 1;
-    if (step < currentStep || step > currentStep + 1) {
-      return res.status(400).json({
-        error: `Invalid step transition (current=${currentStep}, requested=${step})`,
-      });
-    }
-
-    const updates = {
-      current_step: step,
-      [`step_${step}_at`]: db.fn.now(),
-    };
-    if (etaMinutes !== undefined) updates.eta_minutes = etaMinutes;
-
-    // Append note if provided
-    if (note) {
-      const notes = safeJsonParse(tracker.live_notes, []);
-      notes.push({ note, timestamp: new Date().toISOString() });
-      updates.live_notes = JSON.stringify(notes);
-    }
-
-    await db('service_tracking').where({ id: trackerId }).update(updates);
-
-    // Send SMS at key steps
-    const customer = req.customer;
-    const service = await db('scheduled_services').where({ id: tracker.scheduled_service_id }).first();
-    const tech = tracker.technician_id ? await db('technicians').where({ id: tracker.technician_id }).first() : null;
-    const techName = tech?.name || 'Your tech';
-    const techFirst = techName.split(' ')[0];
-
-    const formatWindow = () => {
-      if (!service?.window_start) return 'today';
-      const fmt = (t) => { const [h, m] = t.split(':').map(Number); return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`; };
-      return `${fmt(service.window_start)} – ${fmt(service.window_end)}`;
-    };
-
-    // Only send SMS when tech is en route — other steps update in the portal
-    try {
-      if (step === 3) {
-        const etaText = etaMinutes ? `ETA: ~${etaMinutes} minutes.` : '';
-        const smsResult = await sendCustomerMessage({
-          to: customer.phone,
-          body: `${techName} is headed to your property. ${etaText} Please make sure gates are unlocked and pets are secured. Track live in your Waves portal.`,
-          channel: 'sms',
-          audience: 'customer',
-          purpose: 'appointment',
-          customerId: customer.id,
-          appointmentId: tracker.scheduled_service_id,
-          identityTrustLevel: 'phone_matches_customer',
-          entryPoint: 'tracking_step_update',
-          metadata: { original_message_type: 'en_route' },
-        });
-        if (!smsResult.sent) {
-          logger.warn(`Tracking SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
-        }
-      }
-    } catch (smsErr) {
-      logger.error(`Tracking SMS failed: ${smsErr.message}`);
-    }
-
-    // Fetch updated
-    const updated = await db('service_tracking').where({ id: trackerId }).first();
-    res.json({ tracker: formatTracker(updated, service, tech, req.customer) });
   } catch (err) { next(err); }
 });
 
 // =========================================================================
-// POST /api/tracking/:id/note — tech pushes a live note
+// POST /api/tracking/:id/note — legacy customer mutation retired
 // =========================================================================
 router.post('/:id/note', async (req, res, next) => {
   try {
     return res.status(403).json({ error: 'Tracker notes are staff-only' });
-    const noteSchema = Joi.object({
-      note: Joi.string().trim().min(1).max(500).required(),
-    });
-    const { value: vNote, error: noteErr } = noteSchema.validate(req.body, { stripUnknown: true });
-    if (noteErr) return res.status(400).json({ error: noteErr.details[0].message });
-    const { note } = vNote;
-
-    const tracker = await db('service_tracking')
-      .where({ id: req.params.id, customer_id: req.customerId })
-      .first();
-    if (!tracker) return res.status(404).json({ error: 'Tracker not found' });
-
-    const notes = safeJsonParse(tracker.live_notes, []);
-    notes.push({ note, timestamp: new Date().toISOString() });
-
-    await db('service_tracking')
-      .where({ id: req.params.id })
-      .update({ live_notes: JSON.stringify(notes) });
-
-    res.json({ success: true, notes });
   } catch (err) { next(err); }
 });
 
 // =========================================================================
-// PUT /api/tracking/:id/complete — full completion with summary
+// PUT /api/tracking/:id/complete — legacy customer mutation retired
 // =========================================================================
 router.put('/:id/complete', async (req, res, next) => {
   try {
     return res.status(403).json({ error: 'Tracker completion is staff-only' });
-    const { summary } = req.body;
-
-    await db('service_tracking')
-      .where({ id: req.params.id, customer_id: req.customerId })
-      .update({
-        current_step: 7,
-        step_7_at: db.fn.now(),
-        service_summary: summary ? JSON.stringify(summary) : null,
-      });
-
-    res.json({ success: true });
   } catch (err) { next(err); }
 });
 
 // =========================================================================
-// POST /api/tracking/demo/advance — demo: advance by one step
+// POST /api/tracking/demo/advance — legacy demo mutator retired
 // =========================================================================
 router.post('/demo/advance', async (req, res, next) => {
   try {
-    if (process.env.NODE_ENV === 'production') {
-      return res.status(404).json({ error: 'Not found' });
-    }
-    const tracker = await db('service_tracking')
-      .where({ customer_id: req.customerId })
-      .where('current_step', '<', 7)
-      .orderBy('created_at', 'desc')
-      .first();
-
-    if (!tracker) return res.status(404).json({ error: 'No active tracker' });
-
-    const nextStep = tracker.current_step + 1;
-    const demoNotes = {
-      3: 'Headed to your property now',
-      4: 'Arrived — starting inspection',
-      5: 'Treating exterior perimeter — Demand CS applied',
-      6: 'Final walkthrough and cleanup',
-      7: 'Service complete — all areas treated',
-    };
-
-    const updates = {
-      current_step: nextStep,
-      [`step_${nextStep}_at`]: db.fn.now(),
-    };
-
-    if (nextStep === 3) updates.eta_minutes = 12;
-    if (nextStep >= 4) updates.eta_minutes = 0;
-
-    if (demoNotes[nextStep]) {
-      const notes = safeJsonParse(tracker.live_notes, []);
-      notes.push({ note: demoNotes[nextStep], timestamp: new Date().toISOString() });
-      updates.live_notes = JSON.stringify(notes);
-    }
-
-    if (nextStep === 7) {
-      updates.service_summary = JSON.stringify({
-        productsApplied: ['Demand CS', 'Advion WDG Granular', 'Alpine WSG'],
-        areasTreated: ['Exterior perimeter', 'Garage entry', 'Lanai baseboards', 'All eaves (cobweb sweep)'],
-        recommendations: 'Keep garage door sealed at bottom. Consider adding monthly mosquito barrier for rainy season.',
-        nextVisitDate: '2026-05-06',
-      });
-    }
-
-    await db('service_tracking').where({ id: tracker.id }).update(updates);
-
-    const updated = await db('service_tracking').where({ id: tracker.id }).first();
-    const service = await db('scheduled_services').where({ id: tracker.scheduled_service_id }).first();
-    const tech = tracker.technician_id ? await db('technicians').where({ id: tracker.technician_id }).first() : null;
-
-    res.json({ tracker: formatTracker(updated, service, tech, req.customer) });
+    return res.status(404).json({ error: 'Not found' });
   } catch (err) { next(err); }
 });
 
