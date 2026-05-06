@@ -122,27 +122,15 @@ function formatScheduledTracker(service, tech, customer) {
   };
 }
 
-async function findCanonicalScheduledService(customerId, opts = {}) {
+function buildCanonicalScheduledServiceQuery(knex, customerId, opts = {}) {
   const todayOnly = !!opts.todayOnly;
   const activeOnly = !!opts.activeOnly;
-  const nowIso = new Date().toISOString();
-  const today = etDateString();
-  const q = db('scheduled_services')
+  const nowIso = opts.nowIso || new Date().toISOString();
+  const today = opts.today || etDateString();
+  const q = knex('scheduled_services')
     .where({ customer_id: customerId })
     .whereNotNull('track_view_token')
-    .where('track_token_expires_at', '>=', nowIso)
-    .orderByRaw(`
-      CASE track_state
-        WHEN 'en_route' THEN 1
-        WHEN 'on_property' THEN 2
-        WHEN 'scheduled' THEN 3
-        WHEN 'complete' THEN 4
-        WHEN 'cancelled' THEN 5
-        ELSE 9
-      END
-    `)
-    .orderBy('scheduled_date', 'asc')
-    .orderBy('window_start', 'asc');
+    .where('track_token_expires_at', '>=', nowIso);
 
   if (activeOnly) {
     q.where(function () {
@@ -160,7 +148,25 @@ async function findCanonicalScheduledService(customerId, opts = {}) {
   }
 
   if (todayOnly) q.where('scheduled_date', today);
-  return q.first();
+
+  return q
+    .orderByRaw(`
+      CASE track_state
+        WHEN 'en_route' THEN 1
+        WHEN 'on_property' THEN 2
+        WHEN 'scheduled' THEN 3
+        WHEN 'complete' THEN 4
+        WHEN 'cancelled' THEN 5
+        ELSE 9
+      END
+    `)
+    .orderBy('scheduled_date', 'asc')
+    .orderBy('window_start', 'asc');
+}
+
+async function findCanonicalScheduledService(customerId, opts = {}) {
+  const today = etDateString();
+  return buildCanonicalScheduledServiceQuery(db, customerId, { ...opts, today }).first();
 }
 
 // When the tracker is in the EN ROUTE step, enrich the response with
@@ -560,5 +566,9 @@ router.post('/demo/advance', async (req, res, next) => {
     res.json({ tracker: formatTracker(updated, service, tech, req.customer) });
   } catch (err) { next(err); }
 });
+
+router._test = {
+  buildCanonicalScheduledServiceQuery,
+};
 
 module.exports = router;

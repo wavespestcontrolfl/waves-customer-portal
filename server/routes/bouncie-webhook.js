@@ -1,8 +1,9 @@
 /**
  * Bouncie Webhook Route
  *
- * PUBLIC endpoint — no auth required.
- * Bouncie sends trip/vehicle events here.
+ * Public Bouncie receiver for trip/vehicle events. Requests must include
+ * BOUNCIE_WEBHOOK_SECRET via x-webhook-key or x-bouncie-webhook-key unless
+ * BOUNCIE_WEBHOOK_VERIFICATION=log/disabled is explicitly configured.
  * All events are logged; tripCompleted events are processed.
  */
 const express = require('express');
@@ -11,6 +12,10 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const mileageService = require('../services/bouncie-mileage');
 const geofenceHandler = require('../services/geofence-handler');
+const {
+  inspectBouncieWebhook,
+  stringifyBounciePayload,
+} = require('../services/bouncie-webhook-security');
 
 // POST /api/bouncie/webhook
 router.post('/', async (req, res) => {
@@ -20,28 +25,13 @@ router.post('/', async (req, res) => {
     const eventType = payload.eventType || payload.event_type || payload.type || 'unknown';
     const imei = payload.imei || payload.vehicleId || (payload.data && payload.data.imei) || '';
 
-    // Key verification. Default non-strict: log mismatches, accept the event.
-    // Set BOUNCIE_WEBHOOK_STRICT=true once Bouncie's side is confirmed sending
-    // x-webhook-key — strict mode returns 401 on mismatch. Non-strict exists
-    // because flipping straight to strict would 401 every in-flight event
-    // the instant the secret lands in Railway, and Bouncie auto-deactivates
-    // a webhook after enough non-2xx responses.
-    const expected = process.env.BOUNCIE_WEBHOOK_SECRET;
-    const strict = process.env.BOUNCIE_WEBHOOK_STRICT === 'true';
-    if (expected) {
-      const headerKey = req.get('x-webhook-key');
-      const bodyKey = payload.webhookKey || payload.webhook_key;
-      const ok = [headerKey, bodyKey].some((k) => k && k === expected);
-      if (!ok) {
-        if (strict) {
-          logger.warn(`[bouncie-webhook] secret mismatch for ${eventType} imei=${imei} — rejected (strict)`);
-          return res.status(401).json({ ok: false });
-        }
-        logger.warn(`[bouncie-webhook] secret mismatch for ${eventType} imei=${imei} — accepted anyway (non-strict)`);
-      }
-    } else if (strict) {
-      logger.error('[bouncie-webhook] BOUNCIE_WEBHOOK_STRICT=true but BOUNCIE_WEBHOOK_SECRET unset — rejecting');
+    const verify = inspectBouncieWebhook(req);
+    if (!verify.accepted) {
+      logger.warn(`[bouncie-webhook] secret ${verify.reason} for ${eventType} imei=${imei} — rejected (${verify.mode})`);
       return res.status(401).json({ ok: false });
+    }
+    if (!verify.matched) {
+      logger.warn(`[bouncie-webhook] secret ${verify.reason} for ${eventType} imei=${imei} — accepted (${verify.mode})`);
     }
 
     // Log the webhook event
@@ -51,7 +41,7 @@ router.post('/', async (req, res) => {
         .insert({
           event_type: eventType,
           vehicle_imei: imei,
-          payload: JSON.stringify(payload),
+          payload: stringifyBounciePayload(payload),
           processed: false,
         })
         .returning('id');
