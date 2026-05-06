@@ -3,8 +3,6 @@ const config = require('../config');
 const db = require('../models/db');
 const logger = require('./logger');
 
-const WAVES_LOGO_URL = 'https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png';
-
 // Owner-SMS kill switch.
 //
 // 25+ places in the codebase send SMS to the operator's personal phone
@@ -224,10 +222,10 @@ const TwilioService = {
 
       const msgPayload = { from: fromNumber, to };
       if (body && String(body).trim()) msgPayload.body = body;
-      // Include Waves logo for automated messages, not manual correspondence.
       // Admin composer can attach multiple images via `mediaUrls` (plural) —
       // preserve the legacy single-image `mediaUrl` path for existing callers.
-      const isManual = options.messageType === 'manual' || options.skipLogo;
+      // Do not attach default media to automated SMS. If Twilio cannot fetch
+      // the media URL, the whole outbound message can fail before carrier handoff.
       const urls = [];
       let explicitMedia = [];
       if (Array.isArray(options.mediaUrls) && options.mediaUrls.length > 0) {
@@ -238,8 +236,6 @@ const TwilioService = {
       } else if (options.mediaUrl) {
         urls.push(options.mediaUrl);
         explicitMedia = [{ url: options.mediaUrl, index: 0 }];
-      } else if (!isManual) {
-        urls.push(WAVES_LOGO_URL);
       }
       if (urls.length > 0) msgPayload.mediaUrl = urls;
       const message = await c.messages.create(msgPayload);
