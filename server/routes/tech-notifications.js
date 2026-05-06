@@ -89,7 +89,7 @@ router.post('/:id/confirm-start', async (req, res, next) => {
     }
 
     if (jobId) {
-      await geofenceHandler.advanceServiceTracking(jobId, 4, new Date());
+      await geofenceHandler.markOnPropertyFromGeofence(jobId, new Date());
       // Fire-and-forget arrival SMS to customer
       (async () => {
         try {
