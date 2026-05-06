@@ -70,6 +70,23 @@ const PROJECT_TYPES = {
     ],
   },
 
+  flea: {
+    label: 'Flea Service',
+    short: 'Flea',
+    description: 'Flea inspection, treatment notes, host pressure, and customer prep/follow-up documentation.',
+    requiresFollowup: false,
+    photoCategories: ['exterior', 'living_area', 'bedroom', 'pet_area', 'yard', 'evidence', 'treatment_area', 'other'],
+    findingsFields: [
+      { key: 'areas_inspected', label: 'Areas inspected', type: 'textarea', placeholder: 'Pet resting areas, rugs, furniture edges, bedrooms, yard, shaded exterior areas…' },
+      { key: 'evidence_level', label: 'Evidence level', type: 'select', options: ['Low', 'Moderate', 'Heavy', 'Severe'] },
+      { key: 'host_activity', label: 'Host / activity notes', type: 'textarea', placeholder: 'Pets in home, recent bites, wildlife pressure, shaded yard activity…' },
+      { key: 'treatment_areas', label: 'Treatment areas', type: 'textarea', placeholder: 'Interior rooms, pet resting zones, exterior shaded areas, crawlspace, lanai…' },
+      { key: 'products_used', label: 'Products used', type: 'textarea' },
+      { key: 'prep_for_customer', label: 'Customer prep / responsibilities', type: 'textarea', placeholder: 'Vacuuming, washing pet bedding, coordinating vet flea control, staying off treated areas until dry…' },
+      { key: 'followup_plan', label: 'Follow-up plan', type: 'textarea' },
+    ],
+  },
+
   rodent_exclusion: {
     label: 'Rodent Exclusion',
     short: 'Rodent',

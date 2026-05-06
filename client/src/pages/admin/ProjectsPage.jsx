@@ -30,6 +30,7 @@ const TYPE_LABELS = {
   wdo_inspection: 'WDO',
   termite_inspection: 'Termite',
   pest_inspection: 'Pest',
+  flea: 'Flea',
   rodent_exclusion: 'Rodent',
   bed_bug: 'Bed Bug',
 };

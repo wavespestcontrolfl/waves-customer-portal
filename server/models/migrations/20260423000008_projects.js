@@ -1,8 +1,8 @@
 /**
  * Projects — post-service inspection / documentation records.
  *
- * Created by techs in the field for WDO, termite, pest, rodent exclusion,
- * and bed-bug jobs — the documentation-heavy work that doesn't fit the
+ * Created by techs in the field for WDO, termite, pest, flea, rodent
+ * exclusion, and bed-bug jobs — the documentation-heavy work that doesn't fit the
  * routine service_records flow. Each project owns its own photo set and
  * generates a customer-facing report at /report/project/:token (reusing
  * the existing public-report infrastructure).
@@ -24,7 +24,7 @@ exports.up = async function (knex) {
 
     t.string('project_type', 50).notNullable();
     // 'wdo_inspection' | 'termite_inspection' | 'pest_inspection'
-    // | 'rodent_exclusion' | 'bed_bug'
+    // | 'flea' | 'rodent_exclusion' | 'bed_bug'
 
     t.enu('status', ['draft', 'sent', 'closed']).notNullable().defaultTo('draft');
     t.string('title', 200);

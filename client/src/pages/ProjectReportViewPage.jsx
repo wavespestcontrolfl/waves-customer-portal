@@ -24,6 +24,7 @@ const TYPE_LABELS = {
   wdo_inspection: 'WDO Inspection',
   termite_inspection: 'Termite Inspection',
   pest_inspection: 'Pest Inspection',
+  flea: 'Flea Service',
   rodent_exclusion: 'Rodent Exclusion',
   bed_bug: 'Bed Bug Treatment',
 };
@@ -136,6 +137,8 @@ const FIELD_LABELS = {
   treatment_method: 'Treatment method',
   products_used: 'Products used',
   prep_for_customer: 'Customer prep for follow-up',
+  host_activity: 'Host / activity notes',
+  treatment_areas: 'Treatment areas',
 };
 
 function humanizeKey(k) {
@@ -178,6 +181,7 @@ function getProjectKind(projectType) {
   if (projectType === 'termite_inspection') return 'termite';
   if (projectType === 'rodent_exclusion') return 'rodent';
   if (projectType === 'bed_bug') return 'bed_bug';
+  if (projectType === 'flea') return 'flea';
   if (projectType === 'pest_inspection') return 'pest';
   return 'general';
 }
@@ -203,6 +207,9 @@ function getRiskInsight(kind, allText) {
   }
   if (kind === 'bed_bug') {
     return 'Bed bugs spread through resting areas, furniture, luggage, and personal items, and missed preparation can make follow-up activity harder to control. A complete treatment plan and the scheduled recheck are what keep the problem contained.';
+  }
+  if (kind === 'flea') {
+    return 'Fleas can continue emerging from eggs and pupae after the first service, especially around pet resting areas, rugs, furniture edges, shaded yard areas, and wildlife travel zones. Vacuuming, pet flea prevention, and follow-up timing are what keep the cycle from restarting.';
   }
   if (kind === 'pest') {
     return 'General pest pressure is usually strongest where food, water, shelter, or entry gaps line up. Treating the current activity while correcting those conditions helps prevent the same issue from returning.';
@@ -266,6 +273,14 @@ function buildClientSnapshot({ projectType, findings, recommendations }) {
       meaning: 'Bed bug work depends on treatment coverage, customer preparation, and a timely follow-up check.',
       insight: getRiskInsight('bed_bug', allText),
       next: hasAction ? 'Complete the listed preparation steps and keep the recommended follow-up on schedule.' : 'Review the treated rooms and contact Waves if activity is seen before the follow-up window.',
+    };
+  }
+  if (kind === 'flea') {
+    return {
+      priority: hasAction ? 'Action recommended' : 'Review recommended',
+      meaning: 'Flea work depends on treating the active areas while breaking the egg, larva, pupa, and adult cycle.',
+      insight: getRiskInsight('flea', allText),
+      next: hasAction ? 'Complete the prep steps, keep vacuuming on schedule, and follow the listed treatment or follow-up plan.' : 'Review the inspected areas and contact Waves if bites or pet activity continue.',
     };
   }
   if (kind === 'pest') {

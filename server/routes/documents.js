@@ -615,6 +615,7 @@ router.get('/', authenticate, async (req, res, next) => {
         wdo_inspection: 'WDO Inspection',
         termite_inspection: 'Termite Inspection',
         pest_inspection: 'Pest Inspection',
+        flea: 'Flea Service',
         rodent_exclusion: 'Rodent Exclusion',
         bed_bug: 'Bed Bug Treatment',
       };
