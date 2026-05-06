@@ -58,6 +58,7 @@ const projectsRouter = require('../routes/admin-projects');
 function chain(overrides = {}) {
   return {
     where: jest.fn().mockReturnThis(),
+    whereRaw: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
     whereNotNull: jest.fn().mockReturnThis(),
     leftJoin: jest.fn().mockReturnThis(),
@@ -123,6 +124,69 @@ describe('admin projects routes', () => {
       const body = await res.json();
       expect(res.status).toBe(403);
       expect(body.error).toBe('Project access denied');
+    });
+  });
+
+  test('technician cannot read another technician project activity', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-1',
+        customer_id: 'customer-1',
+        created_by_tech_id: 'tech-1',
+      }),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'projects') return projectRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/activity`, {
+        headers: { Authorization: 'Bearer tech-2' },
+      });
+      const body = await res.json();
+      expect(res.status).toBe(403);
+      expect(body.error).toBe('Project access denied');
+    });
+  });
+
+  test('admin can read project activity history', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-1',
+        customer_id: 'customer-1',
+        created_by_tech_id: 'tech-1',
+      }),
+    });
+    const activityRows = [
+      {
+        id: 'activity-1',
+        action: 'project_report_sent',
+        description: 'Project report sent: Pest Inspection',
+        metadata: { project_id: 'project-1' },
+        created_at: '2026-05-06T12:00:00.000Z',
+        admin_user_id: 'admin-1',
+        actor_name: 'Admin User',
+      },
+    ];
+    const activityRead = chain({
+      limit: jest.fn().mockResolvedValue(activityRows),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'projects') return projectRead;
+      if (table === 'activity_log as a') return activityRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/activity`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.activity).toEqual(activityRows);
+      expect(activityRead.whereRaw).toHaveBeenCalledWith("a.metadata->>'project_id' = ?", ['project-1']);
+      expect(activityRead.limit).toHaveBeenCalledWith(100);
     });
   });
 
