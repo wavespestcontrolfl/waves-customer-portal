@@ -963,7 +963,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
       && !invoiceWasAlreadyPaid
       && !invoiceWasAlreadySent
     ) {
-      const completedService = services.find((s) => s.id === serviceId) || completingService;
+      const completedService = (data?.services || []).find((s) => s.id === serviceId) || completingService;
       pendingPaymentAfterCompletionRef.current = {
         service: completedService,
         invoiceId: r.invoiceId,
@@ -972,7 +972,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
       };
     }
     return r;
-  }, [completingService, handleStatusChange, isMobile, services]);
+  }, [completingService, handleStatusChange, isMobile, data]);
 
   const handleDelete = useCallback(async (service) => {
     const name = service.customerName || service.customer_name || 'this customer';
