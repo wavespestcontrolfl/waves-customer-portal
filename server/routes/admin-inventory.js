@@ -9,6 +9,7 @@ const {
   costLineFromUsage,
   normalizeQuantityToOz,
 } = require('../services/product-costing');
+const protocols = require('../config/protocols.json');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -49,6 +50,27 @@ function mapProduct(product, vendorPricing = []) {
     lowStockThreshold,
     lowStock,
     vendorPricing,
+  };
+}
+
+function serviceLineForType(serviceType) {
+  const value = String(serviceType || '').toLowerCase();
+  if (value.includes('termite') || value.includes('bora-care') || value.includes('bora care') || value.includes('termidor')) return 'termite';
+  if (value.includes('mosquito')) return 'mosquito';
+  if (value.includes('rodent') || value.includes('rat') || value.includes('mouse') || value.includes('mice')) return 'rodent';
+  if (value.includes('lawn')) return 'lawn';
+  if (value.includes('tree') || value.includes('shrub') || value.includes('palm')) return 'tree_shrub';
+  return 'pest';
+}
+
+function protocolTemplateCounts() {
+  return {
+    pest: Math.max(0, (protocols.pest?.visits || []).length - 2),
+    termite: (protocols.termite?.visits || []).length,
+    lawn: Object.keys(protocols.lawn || {}).length,
+    mosquito: (protocols.pest?.visits || []).filter((v) => String(v.primary || '').toLowerCase().includes('mosquito')).length,
+    rodent: (protocols.pest?.visits || []).filter((v) => String(v.primary || '').toLowerCase().includes('rodent')).length,
+    tree_shrub: (protocols.tree_shrub?.visits || []).length,
   };
 }
 
@@ -411,6 +433,74 @@ router.get('/:productId/movements', async (req, res, next) => {
         serviceDate: r.service_date || r.scheduled_date || null,
         serviceType: r.service_type || null,
         createdAt: r.created_at,
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
+// GET /protocol-health — protocol template + COGS coverage by service line
+// =========================================================================
+router.get('/protocol-health', async (req, res, next) => {
+  try {
+    const templateCounts = protocolTemplateCounts();
+    const lines = Object.keys(templateCounts);
+    const summary = {};
+    lines.forEach((line) => {
+      summary[line] = {
+        serviceLine: line,
+        templateCount: templateCounts[line],
+        serviceCount: 0,
+        cogsRows: 0,
+        missingCostRows: 0,
+        warningRows: 0,
+        totalCost: 0,
+        warnings: [],
+      };
+    });
+
+    const usage = await db('service_product_usage')
+      .join('products_catalog', 'service_product_usage.product_id', 'products_catalog.id')
+      .select('service_product_usage.*', 'products_catalog.name as product_name',
+        'products_catalog.best_price', 'products_catalog.cost_per_unit',
+        'products_catalog.cost_unit', 'products_catalog.unit_size_oz')
+      .orderBy('service_type');
+
+    const servicesByLine = {};
+    usage.forEach((row) => {
+      const line = serviceLineForType(row.service_type);
+      if (!summary[line]) return;
+      servicesByLine[line] = servicesByLine[line] || new Set();
+      servicesByLine[line].add(row.service_type);
+      const costLine = costLineFromUsage(row);
+      summary[line].cogsRows += 1;
+      summary[line].totalCost += costLine.cost || 0;
+      if (costLine.warning) {
+        summary[line].warningRows += 1;
+        summary[line].warnings.push({
+          serviceType: row.service_type,
+          productName: row.product_name,
+          warning: costLine.warning,
+        });
+      }
+      if (!costLine.source || (costLine.cost || 0) <= 0) summary[line].missingCostRows += 1;
+    });
+
+    Object.entries(servicesByLine).forEach(([line, services]) => {
+      summary[line].serviceCount = services.size;
+    });
+
+    res.json({
+      generatedAt: new Date().toISOString(),
+      lines: lines.map((line) => ({
+        ...summary[line],
+        totalCost: Math.round(summary[line].totalCost * 100) / 100,
+        status: summary[line].templateCount === 0 || summary[line].cogsRows === 0
+          ? 'missing'
+          : summary[line].missingCostRows > 0
+            ? 'warning'
+            : 'healthy',
+        warnings: summary[line].warnings.slice(0, 5),
       })),
     });
   } catch (err) { next(err); }
