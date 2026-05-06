@@ -1603,9 +1603,16 @@ router.put('/:token/accept', async (req, res, next) => {
           monthly_total: estimate.monthly_total || 0,
         };
         officeVars.monthly_total = effectiveMonthlyTotal || officeVars.monthly_total;
-        const officeFallback = treatAsOneTime
-          ? `🎉 One-time booking! ${officeVars.customer_name} at ${officeVars.address} — ${oneTimeList[0]?.name || 'service'}. Booking link sent.`
-          : `🎉 Estimate accepted! ${officeVars.customer_name} at ${officeVars.address} — ${officeVars.waveguard_tier} WaveGuard $${officeVars.monthly_total}/mo. Onboarding link sent.`;
+        const officeFallback = buildAcceptOfficeFallback({
+          customerName: officeVars.customer_name,
+          address: officeVars.address,
+          waveguardTier: officeVars.waveguard_tier,
+          monthlyTotal: officeVars.monthly_total,
+          serviceLabel: oneTimeList[0]?.name || 'service',
+          treatAsOneTime,
+          billByInvoice,
+          reservationCommitted,
+        });
         const officeBody = await renderTemplate('estimate_accepted_office', officeVars, officeFallback);
         await TwilioService.sendSMS(WAVES_OFFICE_PHONE, officeBody);
       } catch (e) { logger.error(`Estimate accept SMS failed: ${e.message}`); }
@@ -1728,15 +1735,6 @@ router.put('/:token/accept', async (req, res, next) => {
       } catch (e) { logger.error(`[estimate-accept] Acceptance SMS failed: ${e.message}`); }
     }
 
-    // In-app notifications for estimate accepted
-    try {
-      const NotificationService = require('../services/notification-service');
-      await NotificationService.notifyAdmin('estimate', `Estimate accepted: ${estimate.customer_name}`, `${estimate.waveguard_tier || 'Bronze'} WaveGuard $${effectiveMonthlyTotal || estimate.monthly_total}/mo`, { icon: '\u2705', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId } });
-      if (customerId) {
-        await NotificationService.notifyCustomer(customerId, 'account', 'Estimate accepted', `Your ${estimate.waveguard_tier || 'Bronze'} WaveGuard plan is confirmed. Complete onboarding to get started.`, { icon: '\u2705', link: '/onboarding' });
-      }
-    } catch (e) { logger.error(`[notifications] Estimate accepted notification failed: ${e.message}`); }
-
     // Auto-convert estimate to active customer (Feature #5). Skip entirely
     // when this is a one-time booking — EstimateConverter creates recurring
     // scheduled_services rows + upgrades the customer's WaveGuard tier +
@@ -1765,6 +1763,7 @@ router.put('/:token/accept', async (req, res, next) => {
     let invoiceMode = false;
     let invoiceId = null;
     let invoiceAmount = null;
+    let invoiceLinkDelivered = false;
     if (customerId && billByInvoice) {
       try {
         const InvoiceService = require('../services/invoice');
@@ -1802,12 +1801,19 @@ router.put('/:token/accept', async (req, res, next) => {
           });
           invoiceId = inv?.id || null;
           if (invoiceId) {
-            try { await InvoiceService.sendViaSMS(invoiceId); }
+            try {
+              await InvoiceService.sendViaSMS(invoiceId);
+              invoiceLinkDelivered = true;
+            }
             catch (smsErr) { logger.error(`[estimate-accept] Invoice SMS failed: ${smsErr.message}`); }
-            try { await sendInvoiceEmail(invoiceId); }
+            try {
+              const emailResult = await sendInvoiceEmail(invoiceId);
+              if (emailResult?.ok) invoiceLinkDelivered = true;
+              else logger.error(`[estimate-accept] Invoice email failed: ${emailResult?.error || 'unknown error'}`);
+            }
             catch (emailErr) { logger.error(`[estimate-accept] Invoice email failed: ${emailErr.message}`); }
             invoiceMode = true;
-            logger.info(`[estimate-accept] Invoice-mode invoice ${invoiceId} created + sent for estimate ${estimate.id} — $${invoiceAmount}`);
+            logger.info(`[estimate-accept] Invoice-mode invoice ${invoiceId} created for estimate ${estimate.id} — $${invoiceAmount}; delivery=${invoiceLinkDelivered ? 'sent' : 'failed'}`);
           }
         } else {
           logger.warn(`[estimate-accept] Invoice-mode skipped for estimate ${estimate.id} — amount is 0 (monthly=${estimate.monthly_total}, onetime=${estimate.onetime_total})`);
@@ -1816,6 +1822,29 @@ router.put('/:token/accept', async (req, res, next) => {
         logger.error(`[estimate-accept] Invoice-mode failed for estimate ${estimate.id}: ${e.message}`);
       }
     }
+
+    // In-app notifications for estimate accepted. Invoice-mode copy uses
+    // invoiceMode, not billByInvoice, so we don't promise a pay link if
+    // invoice creation/send failed or was skipped for a zero amount.
+    try {
+      const NotificationService = require('../services/notification-service');
+      const notificationPayload = buildAcceptNotificationPayload({
+        customerName: estimate.customer_name,
+        waveguardTier: estimate.waveguard_tier || 'Bronze',
+        monthlyTotal: effectiveMonthlyTotal || estimate.monthly_total,
+        serviceLabel: oneTimeList[0]?.name || 'One-time service',
+        treatAsOneTime,
+        billByInvoice,
+        invoiceMode,
+        invoiceLinkDelivered,
+        reservationCommitted,
+        bookingUrl,
+      });
+      await NotificationService.notifyAdmin('estimate', notificationPayload.adminTitle, notificationPayload.adminBody, { icon: '\u2705', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId, invoiceId } });
+      if (customerId) {
+        await NotificationService.notifyCustomer(customerId, 'account', notificationPayload.customerTitle, notificationPayload.customerBody, { icon: '\u2705', link: notificationPayload.customerLink, metadata: { estimateId: estimate.id, invoiceId } });
+      }
+    } catch (e) { logger.error(`[notifications] Estimate accepted notification failed: ${e.message}`); }
 
     res.json(buildAcceptSuccessPayload({
       onboardingToken,
@@ -2545,6 +2574,105 @@ function buildAcceptSuccessPayload({
   };
 }
 
+function buildAcceptOfficeFallback({
+  customerName = '',
+  address = '',
+  waveguardTier = 'Bronze',
+  monthlyTotal = 0,
+  serviceLabel = 'service',
+  treatAsOneTime = false,
+  billByInvoice = false,
+  reservationCommitted = false,
+} = {}) {
+  if (billByInvoice) {
+    const label = treatAsOneTime
+      ? `${serviceLabel} one-time service`
+      : `${waveguardTier} WaveGuard $${monthlyTotal}/mo`;
+    return `Estimate accepted by ${customerName} at ${address} - ${label}. Invoice mode selected.`;
+  }
+  if (treatAsOneTime) {
+    const nextStep = reservationCommitted ? 'Appointment confirmed.' : 'Booking link sent.';
+    return `One-time estimate accepted by ${customerName} at ${address} - ${serviceLabel}. ${nextStep}`;
+  }
+  return `Estimate accepted by ${customerName} at ${address} - ${waveguardTier} WaveGuard $${monthlyTotal}/mo. Onboarding link sent.`;
+}
+
+function buildAcceptNotificationPayload({
+  customerName = '',
+  waveguardTier = 'Bronze',
+  monthlyTotal = 0,
+  serviceLabel = 'One-time service',
+  treatAsOneTime = false,
+  billByInvoice = false,
+  invoiceMode = false,
+  invoiceLinkDelivered = false,
+  reservationCommitted = false,
+  bookingUrl = null,
+} = {}) {
+  if (billByInvoice) {
+    if (treatAsOneTime) {
+      if (!invoiceMode || !invoiceLinkDelivered) {
+        return {
+          adminTitle: `One-time estimate accepted: ${customerName}`,
+          adminBody: `${serviceLabel} approved. Invoice was not sent automatically; office follow-up needed.`,
+          customerTitle: 'Estimate accepted',
+          customerBody: `Your ${serviceLabel} estimate is approved. Our team will follow up with the invoice details.`,
+          customerLink: '/?tab=billing',
+        };
+      }
+      return {
+        adminTitle: `One-time estimate accepted: ${customerName}`,
+        adminBody: `${serviceLabel} approved. Invoice pay link is being sent.`,
+        customerTitle: 'Estimate accepted',
+        customerBody: `Your ${serviceLabel} estimate is approved. Use the invoice pay link we sent to complete payment.`,
+        customerLink: '/?tab=billing',
+      };
+    }
+    if (!invoiceMode || !invoiceLinkDelivered) {
+      return {
+        adminTitle: `Estimate accepted: ${customerName}`,
+        adminBody: `${waveguardTier} WaveGuard $${monthlyTotal}/mo approved. Invoice was not sent automatically; office follow-up needed.`,
+        customerTitle: 'Estimate accepted',
+        customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Our team will follow up with the invoice details.`,
+        customerLink: '/?tab=billing',
+      };
+    }
+    return {
+      adminTitle: `Estimate accepted: ${customerName}`,
+      adminBody: `${waveguardTier} WaveGuard $${monthlyTotal}/mo approved. Invoice pay link is being sent.`,
+      customerTitle: 'Estimate accepted',
+      customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Use the invoice pay link we sent to complete payment.`,
+      customerLink: '/?tab=billing',
+    };
+  }
+
+  if (treatAsOneTime) {
+    const adminBody = reservationCommitted
+      ? `${serviceLabel} approved and appointment confirmed.`
+      : `${serviceLabel} approved. ${bookingUrl ? 'Booking link sent.' : 'Office follow-up needed to schedule.'}`;
+    const customerBody = reservationCommitted
+      ? `Your ${serviceLabel} appointment is confirmed. Check your phone for the confirmation text.`
+      : bookingUrl
+        ? `Your ${serviceLabel} estimate is approved. Pick your appointment from the booking link we sent.`
+        : `Your ${serviceLabel} estimate is approved. Our team will follow up to help schedule your appointment.`;
+    return {
+      adminTitle: `One-time estimate accepted: ${customerName}`,
+      adminBody,
+      customerTitle: 'One-time service approved',
+      customerBody,
+      customerLink: bookingUrl || '/?tab=schedule',
+    };
+  }
+
+  return {
+    adminTitle: `Estimate accepted: ${customerName}`,
+    adminBody: `${waveguardTier} WaveGuard $${monthlyTotal}/mo approved. Onboarding link sent.`,
+    customerTitle: 'Estimate accepted',
+    customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Complete onboarding to get started.`,
+    customerLink: '/?tab=plan',
+  };
+}
+
 function readV1Shape(estData) {
   if (!estData || typeof estData !== 'object') return null;
   const result = estData.result;
@@ -2896,3 +3024,5 @@ module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate;
 module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
+module.exports.buildAcceptOfficeFallback = buildAcceptOfficeFallback;
+module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
