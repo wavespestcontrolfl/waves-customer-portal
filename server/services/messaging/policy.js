@@ -151,7 +151,7 @@ const PURPOSE_POLICY = {
     maxSegments: 2,
     requireConsent: 'transactional',
     prefsColumn: null,
-    minIdentityTrust: 'phone_matches_customer',
+    minIdentityTrust: 'service_contact_authorized',
     requireIds: ['customerId'],
   },
   appointment_reminder_72h: {
@@ -160,7 +160,7 @@ const PURPOSE_POLICY = {
     maxSegments: 2,
     requireConsent: 'transactional',
     prefsColumn: 'service_reminder_72h',
-    minIdentityTrust: 'phone_matches_customer',
+    minIdentityTrust: 'service_contact_authorized',
     requireIds: ['customerId'],
   },
   appointment_reminder_24h: {
@@ -169,7 +169,7 @@ const PURPOSE_POLICY = {
     maxSegments: 2,
     requireConsent: 'transactional',
     prefsColumn: 'service_reminder_24h',
-    minIdentityTrust: 'phone_matches_customer',
+    minIdentityTrust: 'service_contact_authorized',
     requireIds: ['customerId'],
   },
   appointment_confirmation: {
@@ -178,7 +178,7 @@ const PURPOSE_POLICY = {
     maxSegments: 2,
     requireConsent: 'transactional',
     prefsColumn: 'appointment_confirmation',
-    minIdentityTrust: 'phone_matches_customer',
+    minIdentityTrust: 'service_contact_authorized',
     requireIds: ['customerId'],
   },
   appointment_cancellation: {
@@ -187,7 +187,7 @@ const PURPOSE_POLICY = {
     maxSegments: 2,
     requireConsent: 'transactional',
     prefsColumn: null,
-    minIdentityTrust: 'phone_matches_customer',
+    minIdentityTrust: 'service_contact_authorized',
     requireIds: ['customerId'],
   },
   tech_en_route: {
@@ -196,7 +196,7 @@ const PURPOSE_POLICY = {
     maxSegments: 2,
     requireConsent: 'transactional',
     prefsColumn: 'tech_en_route',
-    minIdentityTrust: 'phone_matches_customer',
+    minIdentityTrust: 'service_contact_authorized',
     requireIds: ['customerId'],
   },
   billing: {
