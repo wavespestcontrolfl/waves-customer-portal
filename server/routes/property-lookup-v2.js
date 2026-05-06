@@ -1333,6 +1333,14 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   if (sel.has('PLUGGING')) {
     services.plugging = { area: o.plugArea, spacing: o.plugSpacing || 12, urgency, afterHours };
   }
+  if (sel.has('RODENT_SANITATION')) {
+    services.sanitation = {
+      tier: o.sanitationTier || 'standard',
+      affectedSqFt: o.sanitationArea || 0,
+      insulationRemovalCuFt: o.sanitationDebris || 0,
+      accessType: o.sanitationAccess || 'normal',
+    };
+  }
 
   // Features — normalize v2's UPPERCASE enum shape to v1's lowercase boolean/string shape
   const features = {
