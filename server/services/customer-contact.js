@@ -47,6 +47,32 @@ function getBillingContact(customer) {
   };
 }
 
+function samePhone(a, b) {
+  const da = clean(a).replace(/\D/g, '').slice(-10);
+  const db = clean(b).replace(/\D/g, '').slice(-10);
+  return !!da && !!db && da === db;
+}
+
+function getAppointmentContacts(customer, prefs = {}) {
+  if (!customer) return [];
+  const service = getServiceContact(customer);
+  const billing = getBillingContact(customer);
+  const servicePhone = clean(customer.service_contact_phone);
+  const hasDistinctServicePhone = !!servicePhone && !samePhone(servicePhone, billing.phone);
+  const notifyPrimary = !hasDistinctServicePhone || prefs.appointment_notify_primary === true;
+  const contacts = [];
+
+  if (hasDistinctServicePhone) {
+    contacts.push({ ...service, role: 'service_contact' });
+  }
+
+  if (notifyPrimary && billing.phone && !contacts.some(c => samePhone(c.phone, billing.phone))) {
+    contacts.push({ ...billing, role: 'primary' });
+  }
+
+  return contacts;
+}
+
 // True if this customer has a distinct service contact configured. Used by
 // audit tools + the admin UI to surface a "Service contact: …" chip.
 function hasDistinctServiceContact(customer) {
@@ -57,5 +83,6 @@ function hasDistinctServiceContact(customer) {
 module.exports = {
   getServiceContact,
   getBillingContact,
+  getAppointmentContacts,
   hasDistinctServiceContact,
 };

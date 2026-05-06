@@ -11,35 +11,40 @@
 // and profile label. Line 2 is collected in the UI for parity with the mobile
 // layout but not sent (no column exists yet; add a migration if needed).
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { X } from 'lucide-react';
 import AddressAutocomplete from '../AddressAutocomplete';
+import { PROPERTY_LABEL_OPTIONS } from '../../lib/customerFormOptions';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-
-const PROPERTY_LABEL_OPTIONS = [
-  { value: 'Primary', label: 'Primary' },
-  { value: 'Rental property', label: 'Rental property' },
-  { value: 'Vacation home', label: 'Vacation home' },
-  { value: 'Airbnb / short-term rental', label: 'Airbnb / short-term rental' },
-  { value: 'Family property', label: 'Family property' },
-  { value: 'Commercial property', label: 'Commercial property' },
-  { value: 'HOA / common area', label: 'HOA / common area' },
-  { value: 'Other property', label: 'Other property' },
-  { value: '__custom__', label: 'Custom label...' },
-];
 
 function ringClass() {
   return 'block w-full bg-white text-zinc-900 border-hairline border-zinc-300 rounded-md px-4 ' +
     'focus:outline-none focus:border-zinc-900 focus:ring-1 focus:ring-zinc-900 u-focus-ring';
 }
 
-export default function MobileNewCustomerSheet({ open, onClose, onCreated }) {
-  const [form, setForm] = useState({
-    firstName: '', lastName: '', phone: '', email: '',
-    addressLine1: '', addressLine2: '', city: '', state: 'FL', zip: '',
-    profileLabel: 'Primary', customProfileLabel: '',
-  });
+function formFromInitialValues(initialValues = null) {
+  return {
+    firstName: initialValues?.firstName || '',
+    lastName: initialValues?.lastName || '',
+    phone: initialValues?.phone || '',
+    email: initialValues?.email || '',
+    addressLine1: initialValues?.address || '',
+    addressLine2: '',
+    city: initialValues?.city || '',
+    state: initialValues?.state || 'FL',
+    zip: initialValues?.zip || '',
+    profileLabel: initialValues?.profileLabel || 'Primary',
+    customProfileLabel: initialValues?.customProfileLabel || '',
+    leadSource: initialValues?.leadSource || 'manual_entry',
+    pipelineStage: initialValues?.pipelineStage || 'new_lead',
+    tags: Array.isArray(initialValues?.tags) ? initialValues.tags : [],
+    notes: initialValues?.notes || '',
+  };
+}
+
+export default function MobileNewCustomerSheet({ open, onClose, onCreated, initialValues = null }) {
+  const [form, setForm] = useState(() => formFromInitialValues(initialValues));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
 
@@ -50,6 +55,10 @@ export default function MobileNewCustomerSheet({ open, onClose, onCreated }) {
     () => form.firstName.trim() && form.lastName.trim() && form.phone.trim(),
     [form.firstName, form.lastName, form.phone],
   );
+
+  useEffect(() => {
+    if (open) setForm(formFromInitialValues(initialValues));
+  }, [open, initialValues]);
 
   if (!open) return null;
 
@@ -76,6 +85,10 @@ export default function MobileNewCustomerSheet({ open, onClose, onCreated }) {
           profileLabel: form.profileLabel === '__custom__'
             ? form.customProfileLabel.trim() || undefined
             : form.profileLabel.trim() || undefined,
+          leadSource: form.leadSource,
+          pipelineStage: form.pipelineStage,
+          tags: form.tags,
+          notes: form.notes.trim() || undefined,
         }),
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -90,7 +103,7 @@ export default function MobileNewCustomerSheet({ open, onClose, onCreated }) {
   }
 
   return (
-    <div className="fixed inset-0 z-[110] bg-white overflow-y-auto md:hidden">
+    <div className="fixed inset-0 z-[110] bg-white overflow-y-auto md:hidden" style={{ fontFamily: 'Roboto, Arial, sans-serif' }}>
       {/* Sticky header: X left, Save pill right. 56px tall. */}
       <div
         className="sticky top-0 bg-white flex items-center px-3"

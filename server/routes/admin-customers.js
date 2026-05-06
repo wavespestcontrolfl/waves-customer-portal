@@ -315,7 +315,7 @@ router.post('/backfill-review-status', requireAdmin, async (req, res, next) => {
 // POST /api/admin/customers/quick-add — minimal customer creation from appointment modal
 router.post('/quick-add', async (req, res, next) => {
   try {
-    const { firstName, lastName, phone, email, address, city, state, zip, profileLabel } = req.body;
+    const { firstName, lastName, phone, email, address, city, state, zip, profileLabel, leadSource, pipelineStage, tags, notes } = req.body;
     if (!firstName || !lastName || !phone) {
       return res.status(400).json({ error: 'firstName, lastName, phone required' });
     }
@@ -329,6 +329,9 @@ router.post('/quick-add', async (req, res, next) => {
       state: cleanState(state),
       zip: cleanText(zip),
       profileLabel: cleanOptionalText(profileLabel),
+      leadSource: cleanOptionalText(leadSource) || 'admin_manual',
+      pipelineStage: cleanText(pipelineStage) || 'new_lead',
+      notes: cleanOptionalText(notes),
     };
     if (!normalized.firstName || !normalized.lastName || !normalized.phone) {
       return res.status(400).json({ error: 'firstName, lastName, phone required' });
@@ -349,11 +352,21 @@ router.post('/quick-add', async (req, res, next) => {
         city: normalized.city,
         state: normalized.state,
         zip: normalized.zip,
-        pipeline_stage: 'new_lead',
-        lead_source: 'admin_manual',
+        pipeline_stage: normalized.pipelineStage,
+        pipeline_stage_changed_at: new Date(),
+        lead_source: normalized.leadSource,
+        crm_notes: normalized.notes,
         active: true,
       }).returning('*');
       await createDefaultCustomerRows(trx, created.id);
+      if (Array.isArray(tags) && tags.length) {
+        for (const tag of tags) {
+          const cleanTag = cleanText(tag);
+          if (cleanTag) {
+            await trx('customer_tags').insert({ customer_id: created.id, tag: cleanTag }).onConflict(['customer_id', 'tag']).ignore();
+          }
+        }
+      }
       return { ...created, _attachedToExistingAccount: !!account.existingCustomer, _propertyCount: Number(siblingCount?.count || 0) + 1 };
     });
 

@@ -331,29 +331,43 @@ const TwilioService = {
     const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
     if (!customer || !prefs?.tech_en_route || !prefs?.sms_enabled) return;
 
-    const firstName = customer.first_name || '';
     const eta = etaMinutes ? `ETA: ~${etaMinutes} minutes.\n\n` : '';
+    const { getAppointmentContacts } = require('./customer-contact');
+    const contacts = getAppointmentContacts(customer, prefs);
+    if (!contacts.length) return;
 
-    let body;
-    if (trackToken) {
-      const origin = process.env.CLIENT_URL
-        || process.env.PUBLIC_PORTAL_URL
-        || 'https://portal.wavespestcontrol.com';
-      const trackUrl = `${origin}/track/${trackToken}`;
-      body = `Hi ${firstName} — ${techName} is on the way.\n${eta}` +
-        `Track live: ${trackUrl}\n\n` +
-        `Reply STOP to opt out.`;
-    } else {
-      body = `🌊 Waves Pest Control\n\n` +
-        `${techName} is on the way to your property! ` +
-        `${eta}` +
-        `Please ensure gates are unlocked and pets are secured.`;
+    const origin = process.env.CLIENT_URL
+      || process.env.PUBLIC_PORTAL_URL
+      || 'https://portal.wavespestcontrol.com';
+    const trackUrl = trackToken ? `${origin}/track/${trackToken}` : null;
+
+    const results = [];
+    const { sendCustomerMessage } = require('./messaging/send-customer-message');
+    for (const contact of contacts) {
+      const firstName = contact.name || customer.first_name || '';
+      const body = trackUrl
+        ? `Hi ${firstName} — ${techName} is on the way.\n${eta}` +
+          `Track live: ${trackUrl}\n\n` +
+          `Reply STOP to opt out.`
+        : `Waves Pest Control\n\n` +
+          `${techName} is on the way to your property! ` +
+          `${eta}` +
+          `Please ensure gates are unlocked and pets are secured.`;
+      results.push(await sendCustomerMessage({
+        to: contact.phone,
+        body,
+        channel: 'sms',
+        audience: 'customer',
+        purpose: 'tech_en_route',
+        customerId,
+        identityTrustLevel: contact.role === 'service_contact'
+          ? 'service_contact_authorized'
+          : 'phone_matches_customer',
+        metadata: { original_message_type: 'tech_en_route' },
+      }));
     }
 
-    return this.sendSMS(customer.phone, body, {
-      customerId,
-      messageType: 'tech_en_route',
-    });
+    return { success: results.some(r => r?.sent), results };
   },
 
   /**

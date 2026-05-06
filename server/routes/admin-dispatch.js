@@ -1434,6 +1434,73 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // the raw Railway URL (CLIENT_URL is set to the Railway hostname on
     // prod for app-internal redirects). PORTAL_URL can override for dev.
     const portalUrl = process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com';
+    const toCents = (value) => Math.max(0, Math.round((Number(value) || 0) * 100));
+    const centsToDollars = (cents) => (cents / 100).toFixed(2);
+    const applyPrepaidCreditToInvoice = async (invoiceRow) => {
+      const prepaidCents = svc.prepaid_amount != null ? toCents(svc.prepaid_amount) : 0;
+      if (!(prepaidCents > 0) || !invoiceRow?.id) return invoiceRow;
+
+      return db.transaction(async (trx) => {
+        const lockedInvoice = await trx('invoices')
+          .where({ id: invoiceRow.id })
+          .forUpdate()
+          .first();
+        if (!lockedInvoice) return invoiceRow;
+        if (lockedInvoice.status === 'paid') return lockedInvoice;
+        const invoiceTotalCents = toCents(lockedInvoice.total);
+        if (!(invoiceTotalCents > 0)) return lockedInvoice;
+        const existingCredit = await trx('payments')
+          .where({ customer_id: svc.customer_id, status: 'paid' })
+          .whereRaw("metadata::jsonb ->> 'source' = ?", ['scheduled_service_prepaid'])
+          .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [lockedInvoice.id])
+          .whereRaw("metadata::jsonb ->> 'scheduled_service_id' = ?", [svc.id])
+          .first('id');
+        if (existingCredit) return lockedInvoice;
+
+        const creditCents = Math.min(prepaidCents, invoiceTotalCents);
+        const remainingCents = Math.max(0, invoiceTotalCents - creditCents);
+        const prepaidCredit = centsToDollars(creditCents);
+        const remainingTotal = centsToDollars(remainingCents);
+        const stamp = etDateString();
+        const noteLine = `[${stamp}] Prepaid amount applied after tax: $${prepaidCredit}`;
+        const nextNotes = lockedInvoice.notes ? `${lockedInvoice.notes}\n${noteLine}` : noteLine;
+        const paidByPrepayment = remainingCents <= 0;
+        const [updatedInvoice] = await trx('invoices')
+          .where({ id: lockedInvoice.id })
+          .update({
+            total: remainingTotal,
+            status: paidByPrepayment ? 'paid' : lockedInvoice.status,
+            paid_at: paidByPrepayment ? trx.fn.now() : lockedInvoice.paid_at,
+            notes: nextNotes,
+            payment_method: svc.prepaid_method || lockedInvoice.payment_method || null,
+            payment_reference: svc.prepaid_note || lockedInvoice.payment_reference || null,
+            payment_recorded_at: svc.prepaid_at || trx.fn.now(),
+            updated_at: trx.fn.now(),
+          })
+          .returning('*');
+        const creditedInvoice = updatedInvoice || {
+          ...lockedInvoice,
+          total: remainingTotal,
+          status: paidByPrepayment ? 'paid' : lockedInvoice.status,
+          notes: nextNotes,
+        };
+        await trx('payments').insert({
+          customer_id: svc.customer_id,
+          amount: prepaidCredit,
+          status: 'paid',
+          description: `Prepaid credit applied to invoice ${creditedInvoice.invoice_number}`,
+          payment_date: etDateString(),
+          metadata: JSON.stringify({
+            invoice_id: lockedInvoice.id,
+            scheduled_service_id: svc.id,
+            source: 'scheduled_service_prepaid',
+            method: svc.prepaid_method || null,
+            note: svc.prepaid_note || null,
+          }),
+        });
+        return creditedInvoice;
+      });
+    };
 
     if (shouldInvoice) {
       try {
@@ -1443,6 +1510,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           description: svc.service_type,
           taxRate: svc.property_type === 'commercial' ? 0.07 : 0,
         });
+        invoice = await applyPrepaidCreditToInvoice(invoice);
         invoiceCreated = true;
         payUrl = `${portalUrl}/pay/${invoice.token}`;
       } catch (invErr) {
@@ -1458,10 +1526,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           updated_at: new Date(),
         });
       } catch (e) { logger.warn(`[dispatch] Could not back-link invoice to service_record: ${e.message}`); }
+      preMintedInvoice = await applyPrepaidCreditToInvoice(preMintedInvoice);
       invoice = preMintedInvoice;
-      payUrl = `${portalUrl}/pay/${preMintedInvoice.token}`;
+      payUrl = `${portalUrl}/pay/${invoice.token}`;
       // Treat already-paid pre-mint as the same SMS branch as prepaid.
-      if (preMintedInvoice.status === 'paid') alreadyPaid = true;
+      if (invoice.status === 'paid') alreadyPaid = true;
       else invoiceCreated = true;
     }
 

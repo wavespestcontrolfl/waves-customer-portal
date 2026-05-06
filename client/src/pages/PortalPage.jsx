@@ -2547,9 +2547,10 @@ function formatPropertyAddress(property) {
   return [address.line1, cityStateZip].filter(Boolean).join(', ');
 }
 
-function ScheduleTab({ customer, onRequestVisit }) {
+function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const [upcoming, setUpcoming] = useState([]);
   const [prefs, setPrefs] = useState(null);
+  const [propertyPrefs, setPropertyPrefs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
   const [confirmingIds, setConfirmingIds] = useState({});
@@ -2559,9 +2560,11 @@ function ScheduleTab({ customer, onRequestVisit }) {
     Promise.all([
       api.getSchedule(90),
       api.getNotificationPrefs(),
-    ]).then(([schedData, prefsData]) => {
+      api.getPropertyNotificationPrefs().catch(() => ({ properties: [] })),
+    ]).then(([schedData, prefsData, propertyPrefsData]) => {
       setUpcoming(schedData.upcoming || []);
       setPrefs(prefsData);
+      setPropertyPrefs(propertyPrefsData.properties || []);
       setLoading(false);
     }).catch(console.error);
   }, []);
@@ -2579,6 +2582,82 @@ function ScheduleTab({ customer, onRequestVisit }) {
       console.error(err);
     } finally {
       setPrefsLocked(prev => ({ ...prev, [key]: false }));
+    }
+  };
+
+  const handlePropertyPrefToggle = async (propertyId, key) => {
+    const property = propertyPrefs.find(p => p.id === propertyId);
+    if (!property || prefsLocked[`${propertyId}:${key}`]) return;
+    const current = property.preferences?.[key] !== false;
+    const newVal = !current;
+    const lockKey = `${propertyId}:${key}`;
+    setPrefsLocked(prev => ({ ...prev, [lockKey]: true }));
+    setPropertyPrefs(prev => prev.map(p => (
+      p.id === propertyId
+        ? { ...p, preferences: { ...(p.preferences || {}), [key]: newVal } }
+        : p
+    )));
+    try {
+      const result = await api.updatePropertyNotificationPrefs(propertyId, { [key]: newVal });
+      setPropertyPrefs(prev => prev.map(p => (
+        p.id === propertyId
+          ? { ...p, preferences: { ...(p.preferences || {}), ...(result.preferences || {}) } }
+          : p
+      )));
+      if (propertyId === customer.id) {
+        setPrefs(prev => ({ ...(prev || {}), ...(result.preferences || {}) }));
+      }
+    } catch (err) {
+      setPropertyPrefs(prev => prev.map(p => (
+        p.id === propertyId
+          ? { ...p, preferences: { ...(p.preferences || {}), [key]: current } }
+          : p
+      )));
+      alert('Could not update notification preferences. Please try again.');
+      console.error(err);
+    } finally {
+      setPrefsLocked(prev => ({ ...prev, [lockKey]: false }));
+    }
+  };
+
+  const handlePropertyContactChange = (propertyId, key, value) => {
+    setPropertyPrefs(prev => prev.map(p => (
+      p.id === propertyId
+        ? { ...p, serviceContact: { ...(p.serviceContact || {}), [key]: value } }
+        : p
+    )));
+  };
+
+  const handlePropertyContactSave = async (propertyId) => {
+    const property = propertyPrefs.find(p => p.id === propertyId);
+    if (!property || prefsLocked[`${propertyId}:contact`]) return;
+    const serviceContact = property.serviceContact || {};
+    const savedContact = {
+      firstName: serviceContact.firstName || '',
+      lastName: serviceContact.lastName || '',
+      phone: serviceContact.phone || '',
+      email: serviceContact.email || '',
+    };
+    const lockKey = `${propertyId}:contact`;
+    setPrefsLocked(prev => ({ ...prev, [lockKey]: true }));
+    try {
+      const result = await api.updatePropertyNotificationPrefs(propertyId, {
+        serviceContact: savedContact,
+      });
+      setPropertyPrefs(prev => prev.map(p => (
+        p.id === propertyId
+          ? {
+            ...p,
+            preferences: { ...(p.preferences || {}), ...(result.preferences || {}) },
+            serviceContact: result.serviceContact || savedContact,
+          }
+          : p
+      )));
+    } catch (err) {
+      alert('Could not save the on-location contact. Please try again.');
+      console.error(err);
+    } finally {
+      setPrefsLocked(prev => ({ ...prev, [lockKey]: false }));
     }
   };
 
@@ -2911,7 +2990,7 @@ function ScheduleTab({ customer, onRequestVisit }) {
         </div>
       )}
 
-      {/* Notification Preferences — with locked toggles */}
+      {/* Notification Preferences */}
       {prefs && (
         <div style={{ marginTop: 8, background: B.white, borderRadius: 14, overflow: 'hidden', border: `1px solid ${B.grayLight}` }}>
           <div style={{
@@ -2925,9 +3004,10 @@ function ScheduleTab({ customer, onRequestVisit }) {
             <div style={{ fontSize: 12, color: B.grayMid, padding: '10px 0 6px' }}>Messages sent to {formatPhoneDisplay(customer.phone)}</div>
             {(() => {
               const items = [
+                { key: 'appointmentConfirmation', label: 'New Appointment Confirmation', desc: 'Get a text when a visit is booked or rescheduled', icon: 'checkCircle', locked: false, defaultOn: true },
                 { key: 'serviceReminder72h', label: '72-Hour Appointment Reminder', desc: 'Get a text 3 days before every visit', icon: 'smartphone', locked: false, defaultOn: true },
-                { key: 'serviceReminder24h', label: '24-Hour Service Reminder', desc: 'Get a text the day before every visit', icon: 'smartphone', locked: true },
-                { key: 'techEnRoute', label: 'Tech En Route Alert', desc: 'Know exactly when your tech is headed over — live GPS', icon: 'truck', locked: true },
+                { key: 'serviceReminder24h', label: '24-Hour Service Reminder', desc: 'Get a text the day before every visit', icon: 'smartphone', locked: false, defaultOn: true },
+                { key: 'techEnRoute', label: 'Tech En Route Alert', desc: 'Know exactly when your tech is headed over — live GPS', icon: 'truck', locked: false, defaultOn: true },
                 // Phase 2E: per-customer auto-flip opt-out. Distinct
                 // from techEnRoute — that one fires when the tech taps
                 // "En Route". This one fires automatically when the
@@ -2980,6 +3060,136 @@ function ScheduleTab({ customer, onRequestVisit }) {
               );
               });
             })()}
+          </div>
+        </div>
+      )}
+
+      {propertyPrefs.length > 1 && (
+        <div style={{ marginTop: 8, background: B.white, borderRadius: 14, overflow: 'hidden', border: `1px solid ${B.grayLight}` }}>
+          <div style={{ padding: '16px 20px', borderBottom: `1px solid ${B.grayLight}` }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Notifications by Property</div>
+            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 3 }}>
+              Choose which service texts each property receives.
+            </div>
+          </div>
+          <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {propertyPrefs.map((property) => {
+              const label = property.profileLabel || 'Service property';
+              const address = formatPropertyAddress(property);
+              const options = [
+                { key: 'appointmentConfirmation', label: 'New appt' },
+                { key: 'serviceReminder72h', label: '72 hr' },
+                { key: 'serviceReminder24h', label: '24 hr' },
+                { key: 'techEnRoute', label: 'En route' },
+                { key: 'appointmentNotifyPrimary', label: 'Me too' },
+              ];
+              const contact = property.serviceContact || {};
+              const contactLockKey = `${property.id}:contact`;
+              return (
+                <div key={property.id} style={{
+                  border: `1px solid ${B.grayLight}`,
+                  borderRadius: 12,
+                  padding: 14,
+                  background: property.id === customer.id ? B.bluePale : B.offWhite,
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', marginBottom: 10 }}>
+                    <div>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>{label}</div>
+                      <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>{address || 'No address on file'}</div>
+                    </div>
+                    {property.id === customer.id && (
+                      <span style={{
+                        fontSize: 10, fontWeight: 700, color: B.wavesBlue,
+                        background: '#fff', border: `1px solid ${B.wavesBlue}22`,
+                        borderRadius: 999, padding: '4px 8px', whiteSpace: 'nowrap',
+                      }}>Current</span>
+                    )}
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(86px, 1fr))', gap: 8 }}>
+                    {options.map((option) => {
+                      const on = property.preferences?.[option.key] !== false;
+                      const lockKey = `${property.id}:${option.key}`;
+                      return (
+                        <button
+                          key={option.key}
+                          type="button"
+                          disabled={!!prefsLocked[lockKey]}
+                          onClick={() => handlePropertyPrefToggle(property.id, option.key)}
+                          style={{
+                            border: `1px solid ${on ? B.wavesBlue : B.grayLight}`,
+                            borderRadius: 10,
+                            padding: '9px 6px',
+                            background: on ? '#fff' : B.white,
+                            color: on ? B.wavesBlue : B.grayMid,
+                            fontSize: 14,
+                            fontWeight: 700,
+                            cursor: prefsLocked[lockKey] ? 'wait' : 'pointer',
+                            opacity: prefsLocked[lockKey] ? 0.6 : 1,
+                          }}
+                        >
+                          {option.label}
+                          <div style={{ fontSize: 14, marginTop: 2, color: on ? B.green : B.grayMid }}>{on ? 'On' : 'Off'}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${B.grayLight}` }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, marginBottom: 8 }}>On-location contact</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8, marginBottom: 8 }}>
+                      <input
+                        value={contact.firstName || ''}
+                        onChange={(e) => handlePropertyContactChange(property.id, 'firstName', e.target.value)}
+                        placeholder="First name"
+                        style={{ padding: '10px 12px', borderRadius: 10, border: `1px solid ${B.grayLight}`, fontSize: 16, color: B.navy, fontFamily: FONTS.body }}
+                      />
+                      <input
+                        value={contact.lastName || ''}
+                        onChange={(e) => handlePropertyContactChange(property.id, 'lastName', e.target.value)}
+                        placeholder="Last name"
+                        style={{ padding: '10px 12px', borderRadius: 10, border: `1px solid ${B.grayLight}`, fontSize: 16, color: B.navy, fontFamily: FONTS.body }}
+                      />
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8, marginBottom: 10 }}>
+                      <input
+                        value={contact.phone || ''}
+                        onChange={(e) => handlePropertyContactChange(property.id, 'phone', e.target.value)}
+                        placeholder="Phone number"
+                        inputMode="tel"
+                        style={{ padding: '10px 12px', borderRadius: 10, border: `1px solid ${B.grayLight}`, fontSize: 16, color: B.navy, fontFamily: FONTS.body }}
+                      />
+                      <input
+                        value={contact.email || ''}
+                        onChange={(e) => handlePropertyContactChange(property.id, 'email', e.target.value)}
+                        placeholder="Email address"
+                        inputMode="email"
+                        style={{ padding: '10px 12px', borderRadius: 10, border: `1px solid ${B.grayLight}`, fontSize: 16, color: B.navy, fontFamily: FONTS.body }}
+                      />
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <div style={{ fontSize: 14, color: B.grayMid, lineHeight: 1.4 }}>
+                        This person receives appointment texts for this property. Turn on “Me too” to send those texts to you as well.
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handlePropertyContactSave(property.id)}
+                        disabled={!!prefsLocked[contactLockKey]}
+                        style={{
+                          ...BUTTON_BASE,
+                          padding: '9px 14px',
+                          background: B.wavesBlue,
+                          color: '#fff',
+                          fontSize: 14,
+                          flexShrink: 0,
+                          opacity: prefsLocked[contactLockKey] ? 0.6 : 1,
+                        }}
+                      >
+                        {prefsLocked[contactLockKey] ? 'Saving...' : 'Save contact'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -7737,7 +7947,7 @@ function MoreSheet({ activeTab, onSelect, onClose }) {
 // Wraps ScheduleTab (upcoming) + ServicesTab (completed) behind a single
 // "Visits" surface — a visit is one object moving from upcoming → completed,
 // so customers shouldn't have to know which tab holds which state.
-function VisitsTab({ customer, subTab, onSubTabChange, onRequestVisit }) {
+function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onRequestVisit }) {
   const active = subTab === 'completed' ? 'completed' : 'upcoming';
   const pill = (id, label) => {
     const isActive = active === id;
@@ -7770,7 +7980,7 @@ function VisitsTab({ customer, subTab, onSubTabChange, onRequestVisit }) {
           Tap <strong style={{ color: B.navy }}>Completed</strong> above to see your past visits and service reports.
         </div>
       )}
-      {active === 'upcoming' ? <ScheduleTab customer={customer} onRequestVisit={onRequestVisit} /> : <ServicesTab />}
+      {active === 'upcoming' ? <ScheduleTab customer={customer} properties={properties} onRequestVisit={onRequestVisit} /> : <ServicesTab />}
     </div>
   );
 }
@@ -8168,7 +8378,7 @@ export default function PortalPage() {
         {activeTab !== 'dashboard' && <h1 style={VISUALLY_HIDDEN}>{TAB_TITLES[activeTab] || 'Customer Portal'}</h1>}
         {activeTab === 'dashboard' && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} />}
-        {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} subTab={visitsSubTab} onSubTabChange={setVisitsSubTab} onRequestVisit={() => setShowReportIssue(true)} />}
+        {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} subTab={visitsSubTab} onSubTabChange={setVisitsSubTab} onRequestVisit={() => setShowReportIssue(true)} />}
         {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} />}
         {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}

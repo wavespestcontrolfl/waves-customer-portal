@@ -401,7 +401,7 @@ function AdminAutopayPanelV2({ customerId, monthlyRate, customerName }) {
 // ============================================================================
 // MAIN COMPONENT
 // ============================================================================
-export default function Customer360ProfileV2({ customerId, onClose, onSelectCustomer, initialTab = 'overview', initialScheduledServiceId = null }) {
+export default function Customer360ProfileV2({ customerId, onClose, onSelectCustomer, onAddProperty, initialTab = 'overview', initialScheduledServiceId = null }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState(initialTab);
@@ -693,6 +693,10 @@ export default function Customer360ProfileV2({ customerId, onClose, onSelectCust
                 className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Book Appt</a>
               <a href={`/admin/invoices?customer=${customerId}`}
                 className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Invoice</a>
+              <button
+                type="button"
+                onClick={() => onAddProperty?.(c)}
+                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Add Property</button>
               <button onClick={() => setActiveTab('comms')}
                 className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Add Note</button>
               <button
@@ -791,6 +795,13 @@ export default function Customer360ProfileV2({ customerId, onClose, onSelectCust
                         className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
                       >
                         Add note
+                      </button>
+                      <button
+                        role="menuitem"
+                        onClick={() => { onAddProperty?.(c); setMenuOpen(false); }}
+                        className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                      >
+                        Add property
                       </button>
                     </div>
                   )}

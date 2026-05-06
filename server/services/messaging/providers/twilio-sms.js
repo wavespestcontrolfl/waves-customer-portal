@@ -85,7 +85,11 @@ function mapPurposeToMessageType(purpose) {
   switch (purpose) {
     case 'conversational':      return 'ai_assistant';
     case 'appointment':         return 'appointment_reminder';
+    case 'appointment_reminder_72h': return 'reminder_72h';
+    case 'appointment_reminder_24h': return 'appointment_reminder';
     case 'appointment_confirmation': return 'appointment_confirmation';
+    case 'appointment_cancellation': return 'appointment_cancelled';
+    case 'tech_en_route':       return 'tech_en_route';
     case 'billing':             return 'billing_reminder';
     case 'payment_receipt':     return 'receipt';
     case 'payment_failure':     return 'payment_failure';

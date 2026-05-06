@@ -41,14 +41,17 @@ import Customer360Profile from '../../components/admin/Customer360ProfileV2';
 import MobileNewCustomerSheet from '../../components/admin/MobileNewCustomerSheet';
 import AddressAutocomplete from '../../components/AddressAutocomplete';
 import useIsMobile from '../../hooks/useIsMobile';
+import {
+  CUSTOMER_TAG_OPTIONS,
+  PROPERTY_LABEL_OPTIONS,
+  normalizeCustomerTag,
+} from '../../lib/customerFormOptions';
 import { CustomerHealthSection } from './CustomerHealthTabs';
 import {
   STAGES,
   STAGE_MAP,
   KANBAN_STAGES,
   LEAD_SOURCES,
-  PROPERTY_LABEL_OPTIONS,
-  CUSTOMER_TAG_OPTIONS,
   CustomerMap,
   CustomerIntelligenceTab,
 } from './CustomersPage';
@@ -85,6 +88,16 @@ function StageBadgeV2({ stage }) {
   );
 }
 
+function formatCustomerAddress(address) {
+  if (!address) return '';
+  if (typeof address === 'string') return address.replace(/^,\s*|\s*,\s*$/g, '').trim();
+  if (typeof address === 'object') {
+    const cityStateZip = [address.city, address.state, address.zip].filter(Boolean).join(' ');
+    return [address.line1, cityStateZip].filter(Boolean).join(', ').trim();
+  }
+  return '';
+}
+
 // Health-score dot. Single color for valid score, alert red only for
 // critical (<40). Amber is collapsed to neutral per the alert-reservation
 // rule — the numeric score still communicates severity.
@@ -117,7 +130,7 @@ function PipelineCardV2({ customer, onDelete }) {
   const daysInStage = customer.stageEnteredAt
     ? Math.floor((Date.now() - new Date(customer.stageEnteredAt)) / 86400000)
     : null;
-  const addressLine = customer.address ? customer.address.split(',')[0] : '';
+  const addressLine = formatCustomerAddress(customer.address).split(',')[0] || '';
   const tier = customer.tier && customer.tier !== 'Bronze' ? customer.tier : null;
 
   return (
@@ -233,14 +246,31 @@ function PipelineColumnV2({ stage, customers, onDeleteCustomer, fullWidth = fals
 }
 
 // --- Quick Add Modal (V2) ---
-function QuickAddModalV2({ open, onClose, onCreated }) {
-  const [form, setForm] = useState({
-    firstName: '', lastName: '', phone: '', email: '', address: '',
-    city: '', state: 'FL', zip: '',
-    profileLabel: 'Primary',
-    customProfileLabel: '',
-    leadSource: 'referral', pipelineStage: 'new_lead', tags: [], customTag: '', notes: '',
-  });
+const EMPTY_QUICK_ADD_FORM = {
+  firstName: '', lastName: '', phone: '', email: '', address: '',
+  city: '', state: 'FL', zip: '',
+  profileLabel: 'Primary',
+  customProfileLabel: '',
+  leadSource: 'manual_entry', pipelineStage: 'new_lead', tags: [], customTag: '', notes: '',
+};
+
+function normalizeQuickAddInitialValues(initialValues = {}) {
+  const values = initialValues || {};
+  return {
+    ...EMPTY_QUICK_ADD_FORM,
+    ...values,
+    state: values.state || EMPTY_QUICK_ADD_FORM.state,
+    tags: Array.isArray(values.tags) ? values.tags : EMPTY_QUICK_ADD_FORM.tags,
+    customTag: '',
+    customProfileLabel: values.customProfileLabel || '',
+  };
+}
+
+function QuickAddModalV2({ open, onClose, onCreated, initialValues = null, title = 'Add Customer' }) {
+  const [form, setForm] = useState(() => normalizeQuickAddInitialValues(initialValues));
+  useEffect(() => {
+    if (open) setForm(normalizeQuickAddInitialValues(initialValues));
+  }, [open, initialValues]);
   const [submitting, setSubmitting] = useState(false);
 
   const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
@@ -250,10 +280,11 @@ function QuickAddModalV2({ open, onClose, onCreated }) {
     : form.profileLabel;
 
   const addTag = (value) => {
-    if (!value) return;
+    const normalized = normalizeCustomerTag(value);
+    if (!normalized) return;
     setForm((p) => {
       const tags = Array.isArray(p.tags) ? p.tags : [];
-      return tags.includes(value) ? p : { ...p, tags: [...tags, value] };
+      return tags.includes(normalized) ? p : { ...p, tags: [...tags, normalized] };
     });
   };
 
@@ -262,7 +293,7 @@ function QuickAddModalV2({ open, onClose, onCreated }) {
   };
 
   const addCustomTag = () => {
-    const tag = form.customTag.trim();
+    const tag = normalizeCustomerTag(form.customTag);
     if (!tag) return;
     addTag(tag);
     set('customTag', '');
@@ -308,7 +339,7 @@ function QuickAddModalV2({ open, onClose, onCreated }) {
   return (
     <Dialog open={open} onClose={onClose} size="md">
       <DialogHeader>
-        <DialogTitle>Add Customer</DialogTitle>
+        <DialogTitle>{title}</DialogTitle>
       </DialogHeader>
       <form onSubmit={handleSubmit} style={FORM_FONT}>
         <DialogBody className="flex flex-col gap-3">
@@ -347,6 +378,20 @@ function QuickAddModalV2({ open, onClose, onCreated }) {
               className={INPUT_CLS}
               style={{ height: 36 }}
             />
+          </div>
+          <div className="grid grid-cols-[1fr_80px_120px] gap-3">
+            <div>
+              <label className={LABEL_CLS}>City</label>
+              <input value={form.city} onChange={(e) => set('city', e.target.value)} className={INPUT_CLS} />
+            </div>
+            <div>
+              <label className={LABEL_CLS}>State</label>
+              <input value={form.state} onChange={(e) => set('state', e.target.value.toUpperCase().slice(0, 2))} className={INPUT_CLS} />
+            </div>
+            <div>
+              <label className={LABEL_CLS}>ZIP</label>
+              <input value={form.zip} onChange={(e) => set('zip', e.target.value)} className={INPUT_CLS} inputMode="numeric" />
+            </div>
           </div>
           <div>
             <label className={LABEL_CLS}>Property label</label>
@@ -581,6 +626,7 @@ export default function CustomersPageV2() {
   const [sortBy, setSortBy] = useState('lastName');
   const [sortDir, setSortDir] = useState('asc');
   const [showAddModal, setShowAddModal] = useState(false);
+  const [quickAddPreset, setQuickAddPreset] = useState(null);
   const [filterHasBalance, setFilterHasBalance] = useState(false);
   const [filterLastVisited, setFilterLastVisited] = useState('all'); // all | 30 | 90 | 180 | never
   const [filterCards, setFilterCards] = useState('all'); // all | has | none
@@ -598,6 +644,16 @@ export default function CustomersPageV2() {
   const [savingEdit, setSavingEdit] = useState(false);
   const loadSeqRef = useRef(0);
   const loadAbortRef = useRef(null);
+
+  const openAddCustomer = (preset = null) => {
+    setQuickAddPreset(preset);
+    setShowAddModal(true);
+  };
+
+  const closeAddCustomer = () => {
+    setShowAddModal(false);
+    setQuickAddPreset(null);
+  };
 
   const startEdit = (c) => {
     setEditingId(c.id);
@@ -807,7 +863,7 @@ export default function CustomersPageV2() {
           {view === 'directory' && (
             <button
               type="button"
-              onClick={() => setShowAddModal(true)}
+              onClick={() => openAddCustomer()}
               aria-label="Add customer"
               className="sm:hidden flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring"
               style={{ width: 36, height: 36 }}
@@ -829,7 +885,7 @@ export default function CustomersPageV2() {
           {view === 'directory' && (
             <button
               type="button"
-              onClick={() => setShowAddModal(true)}
+              onClick={() => openAddCustomer()}
               className="hidden sm:inline-flex"
               style={{
                 padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
@@ -1050,7 +1106,7 @@ export default function CustomersPageV2() {
               return (
                 <div key={c.id} className="mb-2">
                   {isMobile ? (() => {
-                    const addr = (c.address || '').replace(/^,\s*|\s*,\s*$/g, '').trim();
+                    const addr = formatCustomerAddress(c.address);
                     return (
                       <div
                         onClick={() => setSelected360Id(c.id)}
@@ -1123,7 +1179,7 @@ export default function CustomersPageV2() {
                       </div>
                       <div className="text-12 text-ink-secondary truncate text-center">
                         {(() => {
-                          const full = (c.address || '').replace(/^,\s*|\s*,\s*$/g, '').trim();
+                          const full = formatCustomerAddress(c.address);
                           if (!full) return <span className="text-ink-tertiary">—</span>;
                           return (
                             <a
@@ -1362,7 +1418,9 @@ export default function CustomersPageV2() {
       {!isMobile && (
         <QuickAddModalV2
           open={showAddModal}
-          onClose={() => setShowAddModal(false)}
+          onClose={closeAddCustomer}
+          initialValues={quickAddPreset}
+          title={quickAddPreset ? 'Add Property' : 'Add Customer'}
           onCreated={(customer) => {
             loadCustomers();
             if (view === 'pipeline') loadPipeline();
@@ -1373,7 +1431,8 @@ export default function CustomersPageV2() {
       {isMobile && (
         <MobileNewCustomerSheet
           open={showAddModal}
-          onClose={() => setShowAddModal(false)}
+          onClose={closeAddCustomer}
+          initialValues={quickAddPreset}
           onCreated={(customer) => {
             loadCustomers();
             if (view === 'pipeline') loadPipeline();
@@ -1388,6 +1447,24 @@ export default function CustomersPageV2() {
         <Customer360Profile
           customerId={selected360Id}
           onSelectCustomer={(id) => setSelected360Id(id)}
+          onAddProperty={(customer) => {
+            setSelected360Id(null);
+            openAddCustomer({
+              firstName: customer.firstName || '',
+              lastName: customer.lastName || '',
+              phone: customer.phone || '',
+              email: customer.email || '',
+              address: '',
+              city: '',
+              state: 'FL',
+              zip: '',
+              profileLabel: 'Other property',
+              leadSource: 'existing_customer',
+              pipelineStage: customer.pipelineStage === 'active_customer' ? 'active_customer' : 'won',
+              tags: ['multi_property', 'existing_customer_addon'],
+              notes: customer.profileLabel ? `Additional property for ${customer.profileLabel}.` : '',
+            });
+          }}
           onClose={() => setSelected360Id(null)}
         />
       )}
