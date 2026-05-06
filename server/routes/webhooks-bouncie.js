@@ -6,17 +6,10 @@
  * public /track/:token map. Two webhooks on purpose — mileage and
  * tracking have different failure modes and shouldn't cascade.
  *
- * Verification defaults to non-strict, mirroring /api/bouncie/webhook.
- * Bouncie has no formal signing contract and several account-level
- * mismatches in our setup history caused the first deploy of this
- * endpoint to 401 every event — Bouncie auto-deactivates a webhook
- * after enough non-2xx responses. We log mismatches and accept the
- * event; downstream authorization is the IMEI → technician lookup
- * (unknown IMEI = no-op). Set BOUNCIE_WEBHOOK_STRICT=true once Bouncie's
- * side is confirmed sending x-webhook-key to flip to reject-on-mismatch.
- * Receiver inspects header `x-webhook-key` and body `webhookKey` so we
- * know which transport Bouncie chose for the first event with a
- * matching secret.
+ * Verification is fail-closed by default. Configure
+ * BOUNCIE_WEBHOOK_SECRET and send it via x-webhook-key or
+ * x-bouncie-webhook-key. Temporary rollout escape hatch:
+ * BOUNCIE_WEBHOOK_VERIFICATION=log accepts mismatches while logging them.
  *
  * Event model:
  *   - trip-start / trip-data / trip-end / trip-metrics / connect / disconnect
@@ -30,21 +23,10 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { pingTechLocation } = require('../services/tech-status');
-
-// ---------- verification ----------
-
-// Non-strict: returns { matched, from } describing which transport (if any)
-// produced a key that matches BOUNCIE_WEBHOOK_SECRET. Caller logs but does
-// not reject — see header comment.
-function inspectKey(req) {
-  const expected = process.env.BOUNCIE_WEBHOOK_SECRET;
-  if (!expected) return { matched: false, from: null, reason: 'no-secret-configured' };
-  const headerKey = req.get('x-webhook-key');
-  if (headerKey && headerKey === expected) return { matched: true, from: 'header' };
-  const bodyKey = req.body && (req.body.webhookKey || req.body.webhook_key);
-  if (bodyKey && bodyKey === expected) return { matched: true, from: 'body' };
-  return { matched: false, from: null, reason: 'mismatch' };
-}
+const {
+  inspectBouncieWebhook,
+  stringifyBounciePayload,
+} = require('../services/bouncie-webhook-security');
 
 // ---------- normalization ----------
 
@@ -231,8 +213,8 @@ async function processTrackingEvent({ logId, eventType, payload }) {
 // Header-only on purpose: query strings leak into Railway access logs and
 // any upstream proxy logs, so the secret can't ride in the URL.
 router.get('/ping', (req, res) => {
-  const expected = process.env.BOUNCIE_WEBHOOK_SECRET;
-  if (!expected || req.get('x-webhook-key') !== expected) {
+  const verify = inspectBouncieWebhook(req);
+  if (!verify.accepted || !verify.matched) {
     return res.status(401).json({ ok: false });
   }
   res.json({ ok: true, timestamp: new Date().toISOString() });
@@ -240,14 +222,13 @@ router.get('/ping', (req, res) => {
 
 // POST /api/webhooks/bouncie
 router.post('/', async (req, res) => {
-  const strict = process.env.BOUNCIE_WEBHOOK_STRICT === 'true';
-  const verify = inspectKey(req);
+  const verify = inspectBouncieWebhook(req);
+  if (!verify.accepted) {
+    logger.warn(`[webhooks-bouncie] secret ${verify.reason} — rejected (${verify.mode})`);
+    return res.status(401).json({ ok: false });
+  }
   if (!verify.matched) {
-    if (strict) {
-      logger.warn(`[webhooks-bouncie] secret ${verify.reason} — rejected (strict)`);
-      return res.status(401).json({ ok: false });
-    }
-    logger.warn(`[webhooks-bouncie] secret ${verify.reason} — accepted anyway (non-strict)`);
+    logger.warn(`[webhooks-bouncie] secret ${verify.reason} — accepted (${verify.mode})`);
   }
 
   const payload = req.body || {};
@@ -265,7 +246,7 @@ router.post('/', async (req, res) => {
       .insert({
         event_type: eventType,
         vehicle_imei: imei,
-        payload: JSON.stringify(payload),
+        payload: stringifyBounciePayload(payload),
         processed: false,
       })
       .returning('id');
