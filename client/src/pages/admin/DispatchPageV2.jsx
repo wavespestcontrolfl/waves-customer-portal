@@ -68,6 +68,12 @@ const CSRPanel = lazy(() => import('../../components/dispatch/CSRPanelV2'));
 const RevenuePanel = lazy(() => import('../../components/dispatch/RevenuePanelV2'));
 const InsightsPanel = lazy(() => import('../../components/dispatch/InsightsPanelV2'));
 
+const ACTIVE_MOBILE_COMPLETION_STATUSES = new Set(['en_route', 'on_site']);
+
+function shouldOpenMobileCompletion(service) {
+  return ACTIVE_MOBILE_COMPLETION_STATUSES.has(String(service?.status || '').toLowerCase());
+}
+
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 const SKIP_REASONS = [
@@ -778,6 +784,7 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
   const [detailService, setDetailService] = useState(null);
   const [checkoutService, setCheckoutService] = useState(null);
   const [paymentData, setPaymentData] = useState(null);
+  const pendingPaymentAfterCompletionRef = useRef(null);
   const [editingLineService, setEditingLineService] = useState(null);
   const [prepaidService, setPrepaidService] = useState(null);
   const [protocolService, setProtocolService] = useState(null);
@@ -943,8 +950,29 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
   const handleCompleteSubmit = useCallback(async (serviceId, body) => {
     const r = await adminFetch(`/admin/dispatch/${serviceId}/complete`, { method: 'POST', body: JSON.stringify(body) });
     handleStatusChange(serviceId, 'completed');
+    const invoiceWasAlreadyBundled = r?.completionSmsType === 'service_complete_with_invoice'
+      && r?.completionSmsStatus === 'sent';
+    const invoiceWasAlreadyPaid = r?.invoiceStatus === 'paid' || r?.completionSmsType === 'service_complete_prepaid';
+    const invoiceWasAlreadySent = !!body?.invoiceAlreadySent || !!completingService?.completionInvoiceAlreadySent;
+    if (
+      isMobile
+      && r?.invoiceId
+      && r?.invoiceToken
+      && Number(r?.invoiceTotal || 0) > 0
+      && !invoiceWasAlreadyBundled
+      && !invoiceWasAlreadyPaid
+      && !invoiceWasAlreadySent
+    ) {
+      const completedService = services.find((s) => s.id === serviceId) || completingService;
+      pendingPaymentAfterCompletionRef.current = {
+        service: completedService,
+        invoiceId: r.invoiceId,
+        invoiceToken: r.invoiceToken,
+        amount: Number(r.invoiceTotal),
+      };
+    }
     return r;
-  }, [handleStatusChange]);
+  }, [completingService, handleStatusChange, isMobile, services]);
 
   const handleDelete = useCallback(async (service) => {
     const name = service.customerName || service.customer_name || 'this customer';
@@ -1280,7 +1308,13 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
         <MobileDispatchList
           mode="week"
           date={date}
-          onEdit={(svc) => setDetailService(svc)}
+          onEdit={(svc) => {
+            if (shouldOpenMobileCompletion(svc)) {
+              setCompletingService(svc);
+            } else {
+              setDetailService(svc);
+            }
+          }}
           onEnRoute={handleEnRoute}
           onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
         />
@@ -1498,7 +1532,13 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
               mode="day"
               date={date}
               services={services}
-              onEdit={(svc) => setDetailService(svc)}
+              onEdit={(svc) => {
+                if (shouldOpenMobileCompletion(svc)) {
+                  setCompletingService(svc);
+                } else {
+                  setDetailService(svc);
+                }
+              }}
               onEnRoute={handleEnRoute}
               onProtocol={(svc) => setProtocolService(svc)}
               onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
@@ -1513,7 +1553,13 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
         <CompletionPanel
           service={completingService}
           products={products}
-          onClose={() => setCompletingService(null)}
+          onClose={() => {
+            setCompletingService(null);
+            if (pendingPaymentAfterCompletionRef.current) {
+              setPaymentData(pendingPaymentAfterCompletionRef.current);
+              pendingPaymentAfterCompletionRef.current = null;
+            }
+          }}
           onSubmit={handleCompleteSubmit}
         />
       )}
@@ -1570,6 +1616,13 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
           service={checkoutService}
           onClose={() => setCheckoutService(null)}
           onChargeSuccess={({ service: svc, invoiceId, invoiceToken, amount }) => {
+            if (Number(amount || 0) <= 0) {
+              setCheckoutService(null);
+              setDetailService(null);
+              setCompletingService({ ...svc, checkoutInvoiceId: invoiceId, checkoutInvoiceToken: invoiceToken });
+              fetchSchedule(date);
+              return;
+            }
             setPaymentData({ service: svc, invoiceId, invoiceToken, amount });
           }}
           onEditServiceLine={(svc) => setEditingLineService(svc)}

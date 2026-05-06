@@ -13,8 +13,21 @@
 
 import { useMemo, useState } from 'react';
 import { X } from 'lucide-react';
+import AddressAutocomplete from '../AddressAutocomplete';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+
+const PROPERTY_LABEL_OPTIONS = [
+  { value: 'Primary', label: 'Primary' },
+  { value: 'Rental property', label: 'Rental property' },
+  { value: 'Vacation home', label: 'Vacation home' },
+  { value: 'Airbnb / short-term rental', label: 'Airbnb / short-term rental' },
+  { value: 'Family property', label: 'Family property' },
+  { value: 'Commercial property', label: 'Commercial property' },
+  { value: 'HOA / common area', label: 'HOA / common area' },
+  { value: 'Other property', label: 'Other property' },
+  { value: '__custom__', label: 'Custom label...' },
+];
 
 function ringClass() {
   return 'block w-full bg-white text-zinc-900 border-hairline border-zinc-300 rounded-md px-4 ' +
@@ -25,7 +38,7 @@ export default function MobileNewCustomerSheet({ open, onClose, onCreated }) {
   const [form, setForm] = useState({
     firstName: '', lastName: '', phone: '', email: '',
     addressLine1: '', addressLine2: '', city: '', state: 'FL', zip: '',
-    profileLabel: '',
+    profileLabel: 'Primary', customProfileLabel: '',
   });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
@@ -60,7 +73,9 @@ export default function MobileNewCustomerSheet({ open, onClose, onCreated }) {
           city: form.city.trim() || undefined,
           state: form.state.trim() || undefined,
           zip: form.zip.trim() || undefined,
-          profileLabel: form.profileLabel.trim() || undefined,
+          profileLabel: form.profileLabel === '__custom__'
+            ? form.customProfileLabel.trim() || undefined
+            : form.profileLabel.trim() || undefined,
         }),
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -194,13 +209,19 @@ export default function MobileNewCustomerSheet({ open, onClose, onCreated }) {
             </div>
             <span className="text-zinc-400" style={{ fontSize: 18 }}>▾</span>
           </div>
-          <input
+          <AddressAutocomplete
             className={ringClass()}
             style={{ height: 56, fontSize: 15 }}
             placeholder="Address line 1"
             value={form.addressLine1}
-            onChange={(e) => set('addressLine1', e.target.value)}
-            autoComplete="address-line1"
+            onChange={(value) => set('addressLine1', value)}
+            onSelect={(parts) => setForm((p) => ({
+              ...p,
+              addressLine1: parts.line1 || parts.formatted || p.addressLine1,
+              city: parts.city || p.city,
+              state: parts.state || p.state || 'FL',
+              zip: parts.zip || p.zip,
+            }))}
           />
           <input
             className={ringClass()}
@@ -210,13 +231,25 @@ export default function MobileNewCustomerSheet({ open, onClose, onCreated }) {
             onChange={(e) => set('addressLine2', e.target.value)}
             autoComplete="address-line2"
           />
-          <input
+          <select
             className={ringClass()}
             style={{ height: 56, fontSize: 15 }}
-            placeholder="Property label"
             value={form.profileLabel}
             onChange={(e) => set('profileLabel', e.target.value)}
-          />
+          >
+            {PROPERTY_LABEL_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+          {form.profileLabel === '__custom__' && (
+            <input
+              className={ringClass()}
+              style={{ height: 56, fontSize: 15 }}
+              placeholder="Rental - Cape Coral"
+              value={form.customProfileLabel}
+              onChange={(e) => set('customProfileLabel', e.target.value)}
+            />
+          )}
           <input
             className={ringClass()}
             style={{ height: 56, fontSize: 15 }}

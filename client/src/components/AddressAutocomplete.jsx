@@ -26,6 +26,7 @@ export default function AddressAutocomplete({
   onSelect,
   placeholder = '123 Main St',
   autoFocus = false,
+  className,
   style,
   country = 'us',
 }) {
@@ -119,6 +120,7 @@ export default function AddressAutocomplete({
       ref={inputRef}
       type="text"
       autoFocus={autoFocus}
+      className={className}
       placeholder={placeholder}
       value={value}
       onChange={(e) => onChange?.(e.target.value)}

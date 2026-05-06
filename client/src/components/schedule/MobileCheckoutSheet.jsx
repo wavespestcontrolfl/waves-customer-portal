@@ -97,7 +97,10 @@ export default function MobileCheckoutSheet({
 
   const servicesSubtotal = price + extraServicesTotal;
   const tierDiscountAmt = Math.round(servicesSubtotal * pct * 100) / 100;
-  const total = Math.max(0, servicesSubtotal - tierDiscountAmt + extraDiscountsTotal);
+  const prepaidAmount = service.prepaidAmount != null ? Math.max(0, Number(service.prepaidAmount) || 0) : 0;
+  const totalBeforePrepaid = Math.max(0, servicesSubtotal - tierDiscountAmt + extraDiscountsTotal);
+  const prepaidCredit = Math.min(prepaidAmount, totalBeforePrepaid);
+  const total = Math.max(0, totalBeforePrepaid - prepaidCredit);
 
   const startTime = formatTime(service.windowStart);
   const duration = service.estimatedDuration ? `${service.estimatedDuration} mins` : '';
@@ -305,6 +308,17 @@ export default function MobileCheckoutSheet({
               </span>
               <span className="u-nums text-zinc-900" style={{ fontSize: 15 }}>
                 −${tierDiscountAmt.toFixed(2)}
+              </span>
+            </div>
+          )}
+
+          {prepaidCredit > 0 && (
+            <div className="flex items-center justify-between py-4 border-b border-hairline border-zinc-200">
+              <span className="font-medium text-zinc-900" style={{ fontSize: 15 }}>
+                Prepaid credit
+              </span>
+              <span className="u-nums text-zinc-900" style={{ fontSize: 15 }}>
+                −${prepaidCredit.toFixed(2)}
               </span>
             </div>
           )}

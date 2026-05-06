@@ -78,7 +78,46 @@ STAGES.forEach(s => { STAGE_MAP[s.key] = s; });
 
 const TIER_COLORS = { Platinum: '#7C3AED', Gold: D.amber, Silver: '#64748B', Bronze: '#cd7f32', 'One-Time': '#0A7EC2' };
 
-const LEAD_SOURCES = ['referral', 'google', 'facebook', 'nextdoor', 'website', 'door_knock', 'yelp', 'other'];
+const LEAD_SOURCES = [
+  'existing_customer',
+  'referral',
+  'phone_call',
+  'google',
+  'facebook',
+  'nextdoor',
+  'website',
+  'door_knock',
+  'yelp',
+  'field_tech',
+  'manual_entry',
+  'other',
+];
+
+const PROPERTY_LABEL_OPTIONS = [
+  { value: 'Primary', label: 'Primary' },
+  { value: 'Rental property', label: 'Rental property' },
+  { value: 'Vacation home', label: 'Vacation home' },
+  { value: 'Airbnb / short-term rental', label: 'Airbnb / short-term rental' },
+  { value: 'Family property', label: 'Family property' },
+  { value: 'Commercial property', label: 'Commercial property' },
+  { value: 'HOA / common area', label: 'HOA / common area' },
+  { value: 'Other property', label: 'Other property' },
+  { value: '__custom__', label: 'Custom label...' },
+];
+
+const CUSTOMER_TAG_OPTIONS = [
+  { value: 'multi_property', label: 'Multi-property' },
+  { value: 'existing_customer_addon', label: 'Existing customer add-on' },
+  { value: 'rental_property', label: 'Rental property' },
+  { value: 'short_term_rental', label: 'Short-term rental' },
+  { value: 'family_property', label: 'Family property' },
+  { value: 'commercial', label: 'Commercial' },
+  { value: 'vip', label: 'VIP' },
+  { value: 'referral_machine', label: 'Referral machine' },
+  { value: 'price_sensitive', label: 'Price sensitive' },
+  { value: 'gate_code_required', label: 'Gate code required' },
+  { value: 'pets_on_property', label: 'Pets on property' },
+];
 
 // V2 re-uses these constants + sub-panels via named exports (see end of file).
 
@@ -921,6 +960,8 @@ export {
   KANBAN_STAGES,
   TIER_COLORS,
   LEAD_SOURCES,
+  PROPERTY_LABEL_OPTIONS,
+  CUSTOMER_TAG_OPTIONS,
   CustomerMap,
   PipelineColumn,
   CustomerIntelligenceTab,
