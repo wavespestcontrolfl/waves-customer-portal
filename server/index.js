@@ -593,6 +593,7 @@ httpServer.listen(PORT, () => {
     setInterval(async () => {
       try {
         const processor = require('./services/call-recording-processor');
+        if (processor.recoverMissingRecentRecordings) await processor.recoverMissingRecentRecordings();
         const result = await processor.processAllPending();
         if (result.processed > 0) {
           logger.info(`[call-proc-cron] Processed ${result.processed} pending recording(s)`);

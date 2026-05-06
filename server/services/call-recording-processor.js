@@ -1333,8 +1333,9 @@ const CallRecordingProcessor = {
         this.whereNull('recording_url').orWhere('recording_url', '');
       })
       .whereNotNull('twilio_call_sid')
-      .where('created_at', '>=', db.raw("NOW() - INTERVAL '24 hours'"))
+      .where('created_at', '>=', db.raw("NOW() - INTERVAL '7 days'"))
       .where('created_at', '<=', db.raw("NOW() - INTERVAL '2 minutes'"))
+      .where('duration_seconds', '>', 10)
       .orderBy('created_at', 'desc')
       .limit(25);
 
