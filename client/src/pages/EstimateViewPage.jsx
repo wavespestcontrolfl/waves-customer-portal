@@ -557,9 +557,20 @@ export default function EstimateViewPage() {
         body: JSON.stringify({ slotId: selectedSlotId }),
       });
       if (r.status === 409) {
-        setCtaPhase('slot_conflict');
+        const body = await r.json().catch(() => ({}));
+        const message = body.error || 'Unable to reserve this slot.';
+        setPaymentPreference(null);
         setSelectedSlotId(null);
-        setSlotsRefreshSignal((v) => v + 1);
+        if (/slot no longer available/i.test(message)) {
+          setCtaPhase('slot_conflict');
+          setSlotsRefreshSignal((v) => v + 1);
+        } else if (/estimate is no longer active/i.test(message)) {
+          setCtaPhase('configure');
+          await loadEstimate();
+        } else {
+          setError(message);
+          setCtaPhase('configure');
+        }
         return;
       }
       if (!r.ok) throw new Error(`reserve failed: ${r.status}`);
@@ -570,7 +581,7 @@ export default function EstimateViewPage() {
       setError(err.message);
       setCtaPhase('configure');
     }
-  }, [selectedSlotId, token]);
+  }, [loadEstimate, selectedSlotId, token]);
 
   const handleConfirm = useCallback(async () => {
     setCtaPhase('submitting');
