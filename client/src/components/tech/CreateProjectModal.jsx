@@ -133,6 +133,24 @@ const QUICK_ACTIONS = {
       note: 'Focus treatment around entry points, harborage areas, and activity zones identified during the inspection.',
     },
   ],
+  flea: [
+    {
+      label: 'Light activity',
+      findings: { evidence_level: 'Low' },
+      prefix: 'Finding',
+      note: 'Light flea activity was documented. Treatment performance depends on treating active areas and keeping vacuuming and pet flea control consistent.',
+    },
+    {
+      label: 'Prep needed',
+      prefix: 'Next',
+      note: 'Customer prep is needed: vacuum floors and furniture edges, wash pet bedding on high heat, and coordinate pet flea prevention with a veterinarian.',
+    },
+    {
+      label: 'Follow-up',
+      prefix: 'Next',
+      note: 'A follow-up may be needed because flea eggs and pupae can continue emerging after the initial treatment cycle.',
+    },
+  ],
   rodent_exclusion: [
     {
       label: 'Entry points',
