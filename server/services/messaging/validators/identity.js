@@ -38,8 +38,9 @@ function validateRequiredIds(input, policy) {
  *   - if customer matched on phone   → phone_matches_customer
  *   - else if input.customerId set   → phone_matches_customer
  *     (the caller asserted identity by passing the ID; downstream
- *     wrappers can elevate to authenticated_portal/admin_operator
- *     when they have actual session context)
+ *     wrappers can elevate to service_contact_authorized,
+ *     authenticated_portal, or admin_operator when they have actual
+ *     session/contact context)
  *   - else if input.estimate_token   → estimate_token_verified
  *     (passed through by the upstream estimate-view session)
  *   - else                           → anonymous

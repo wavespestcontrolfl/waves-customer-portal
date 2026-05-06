@@ -37,6 +37,7 @@
  *   'anonymous'                  |
  *   'phone_provided_unverified'  |
  *   'phone_matches_customer'     |
+ *   'service_contact_authorized' |
  *   'authenticated_portal'       |
  *   'estimate_token_verified'    |
  *   'admin_operator'
@@ -92,6 +93,7 @@ const IDENTITY_TRUST_LEVELS = [
   'anonymous',
   'phone_provided_unverified',
   'phone_matches_customer',
+  'service_contact_authorized',
   'authenticated_portal',
   'estimate_token_verified',
   'admin_operator',
@@ -101,6 +103,7 @@ const TRUST_RANK = {
   anonymous: 0,
   phone_provided_unverified: 1,
   phone_matches_customer: 2,
+  service_contact_authorized: 2,
   estimate_token_verified: 2,
   authenticated_portal: 3,
   admin_operator: 3,

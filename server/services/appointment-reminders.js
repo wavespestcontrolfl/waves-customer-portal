@@ -152,7 +152,7 @@ async function isLandline(customerId, phone) {
 
 // ── Send SMS with landline guard ──
 
-async function safeSend(customerId, phone, body, messageType = 'appointment_reminder', purpose = 'appointment') {
+async function safeSend(customerId, phone, body, messageType = 'appointment_reminder', purpose = 'appointment', identityTrustLevel = 'phone_matches_customer') {
   if (!phone) {
     logger.warn(`[appt-remind] No phone for customer ${customerId}, skipping SMS`);
     return false;
@@ -169,7 +169,7 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     audience: 'customer',
     purpose,
     customerId,
-    identityTrustLevel: 'phone_matches_customer',
+    identityTrustLevel,
     metadata: { original_message_type: messageType },
   });
   if (result.blocked || result.sent === false) {
@@ -189,7 +189,10 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
   let sentAny = false;
   for (const contact of contacts) {
     const body = typeof renderBody === 'function' ? await renderBody(contact) : renderBody;
-    const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose);
+    const identityTrustLevel = contact.role === 'service_contact'
+      ? 'service_contact_authorized'
+      : 'phone_matches_customer';
+    const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel);
     sentAny = sentAny || sent;
   }
   return sentAny;
@@ -368,9 +371,6 @@ const AppointmentReminders = {
           if (!prefs.smsEnabled || !prefs.serviceReminder72h) {
             logger.info(`[appt-remind] Skipping 72h reminder for ${r.scheduled_service_id} — disabled by customer preference`);
             results.skipped++;
-            await db('appointment_reminders')
-              .where({ id: r.id })
-              .update({ reminder_72h_sent: true, reminder_72h_sent_at: new Date() });
             continue;
           }
 
@@ -421,9 +421,6 @@ const AppointmentReminders = {
           if (!prefs.smsEnabled || !prefs.serviceReminder24h) {
             logger.info(`[appt-remind] Skipping 24h reminder for ${r.scheduled_service_id} — disabled by customer preference`);
             results.skipped++;
-            await db('appointment_reminders')
-              .where({ id: r.id })
-              .update({ reminder_24h_sent: true, reminder_24h_sent_at: new Date() });
             continue;
           }
 
