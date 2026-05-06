@@ -1698,6 +1698,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (e) {
         logger.error(`[dispatch] activity log insert failed after completion: ${e.message}`);
       }
+
+      try {
+        const { triggerNotification } = require('../services/notification-triggers');
+        await triggerNotification('job_complete', {
+          techName: svc.tech_name, serviceName: svc.service_type,
+          customerName: `${svc.first_name} ${svc.last_name}`, serviceId: svc.id,
+        });
+      } catch (e) {
+        logger.error(`[dispatch] triggerNotification job_complete failed: ${e.message}`);
+      }
     }
 
     // Job form submission (non-blocking)
