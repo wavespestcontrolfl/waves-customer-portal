@@ -1229,6 +1229,23 @@ const CallRecordingProcessor = {
       }
     }
 
+    if (newsletterCandidate) {
+      const stillOwned = await db('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .first('id');
+      if (stillOwned) {
+        try {
+          newsletterResult = await subscribeNewCallCustomerToNewsletter(newsletterCandidate);
+        } catch (e) {
+          logger.warn(`[call-proc] Newsletter subscribe failed for customer ${newsletterCandidate.customerId}`);
+          newsletterResult = { error: 'newsletter_subscribe_failed' };
+        }
+      } else {
+        logger.warn(`[call-proc] Skipped newsletter subscribe for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
+      }
+    }
+
     const finalized = await db('call_log')
       .where({ id: call.id })
       .where('processing_token', procToken)
@@ -1242,15 +1259,6 @@ const CallRecordingProcessor = {
       logger.warn(`[call-proc] Skipped final status write for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
     } else if (finalStatus === 'customer_creation_failed') {
       logger.warn(`[call-proc] Marked ${callSid} customer_creation_failed — required customer fields were incomplete`);
-    }
-
-    if (newsletterCandidate) {
-      try {
-        newsletterResult = await subscribeNewCallCustomerToNewsletter(newsletterCandidate);
-      } catch (e) {
-        logger.warn(`[call-proc] Newsletter subscribe failed for customer ${newsletterCandidate.customerId}`);
-        newsletterResult = { error: 'newsletter_subscribe_failed' };
-      }
     }
 
     logger.info(`[call-proc] Completed processing for ${callSid}: customer=${customerId}, appointment=${!!extracted.appointment_confirmed}`);
