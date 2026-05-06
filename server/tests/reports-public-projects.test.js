@@ -30,6 +30,7 @@ function chain(overrides = {}) {
     leftJoin: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     first: jest.fn(),
+    insert: jest.fn().mockResolvedValue(1),
     update: jest.fn().mockResolvedValue(1),
     orderBy: jest.fn().mockReturnThis(),
     ...overrides,
@@ -66,6 +67,7 @@ describe('public project reports', () => {
     const projectRead = chain({
       first: jest.fn().mockResolvedValue({
         id: 'project-1',
+        customer_id: 'customer-1',
         report_token: '0123456789abcdef0123456789abcdef',
         report_viewed_at: null,
         project_type: 'pest_inspection',
@@ -76,6 +78,7 @@ describe('public project reports', () => {
       }),
     });
     const markViewed = chain();
+    const activityInsert = chain();
     const photosRead = chain({
       orderBy: jest.fn().mockResolvedValue([
         {
@@ -102,6 +105,7 @@ describe('public project reports', () => {
     db.mockImplementation((table) => {
       if (table === 'projects as p') return projectQueries.shift();
       if (table === 'projects') return projectQueries.shift();
+      if (table === 'activity_log') return activityInsert;
       if (table === 'project_photos') return photosRead;
       throw new Error(`Unexpected table query: ${table}`);
     });
@@ -115,6 +119,11 @@ describe('public project reports', () => {
         expect.objectContaining({ id: 'photo-2', url: null }),
       ]);
       expect(markViewed.update).toHaveBeenCalledWith({ report_viewed_at: 'NOW' });
+      expect(activityInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+        customer_id: 'customer-1',
+        action: 'project_report_viewed',
+        metadata: expect.objectContaining({ project_id: 'project-1', project_type: 'pest_inspection' }),
+      }));
     });
   });
 });
