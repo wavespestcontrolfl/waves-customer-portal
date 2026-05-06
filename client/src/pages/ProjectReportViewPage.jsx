@@ -367,7 +367,7 @@ export default function ProjectReportViewPage() {
                       <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 3 }}>{humanizeKey(key)}</div>
                       <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{String(value)}</div>
                       {insight && (
-                        <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.55, marginTop: 8 }}>
+                        <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, marginTop: 8 }}>
                           {insight}
                         </div>
                       )}
