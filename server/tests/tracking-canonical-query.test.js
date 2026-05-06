@@ -34,7 +34,7 @@ describe('canonical customer tracker query', () => {
     }).toSQL();
 
     expect(sql).toMatch(/"track_state" in \((?:\?, ){2}\?\)/);
-    expect(sql).toMatch(/or "track_state" in \(\?, \?\)/);
+    expect(sql).toMatch(/or (?:".+"\.)?"track_state" in \(\?, \?\)/);
     expect(sql).toMatch(/"scheduled_date" = \?/);
     expect(bindings).toEqual(expect.arrayContaining([
       'cust-2',
