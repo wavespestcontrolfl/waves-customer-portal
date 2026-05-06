@@ -10,12 +10,30 @@
  *
  * Tier 1 V2 styling.
  */
-import React from 'react';
+import React, { useState } from 'react';
 import { useDispatchAlerts } from '../../hooks/useDispatchAlerts';
 import AlertCard from './AlertCard';
+import { Button } from '../ui';
 
 export default function ActionQueuePane() {
-  const { alerts, loading, error, resolveAlert } = useDispatchAlerts();
+  const { alerts, loading, error, resolveAlert, clearAlerts } = useDispatchAlerts();
+  const [clearing, setClearing] = useState(false);
+  const [clearError, setClearError] = useState(null);
+
+  async function handleClearAll() {
+    if (clearing || alerts.length === 0) return;
+    const ok = window.confirm('Clear all active Action Queue alerts? This marks them resolved and keeps audit history.');
+    if (!ok) return;
+    setClearing(true);
+    setClearError(null);
+    try {
+      await clearAlerts();
+    } catch (err) {
+      setClearError(err?.message || 'Clear failed');
+    } finally {
+      setClearing(false);
+    }
+  }
 
   return (
     <aside className="w-full md:w-80 md:flex-shrink-0 bg-white md:border-l border-hairline border-zinc-200 flex flex-col">
@@ -23,9 +41,20 @@ export default function ActionQueuePane() {
         <h2 className="text-12 uppercase tracking-label font-medium text-ink-secondary">
           Action Queue
         </h2>
-        <span className="text-11 text-ink-tertiary tabular-nums">
-          {alerts.length}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-11 text-ink-tertiary tabular-nums">
+            {alerts.length}
+          </span>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={handleClearAll}
+            disabled={loading || clearing || alerts.length === 0}
+            className="h-7 px-2"
+          >
+            {clearing ? 'Clearing...' : 'Clear'}
+          </Button>
+        </div>
       </div>
       <div className="flex-1 overflow-y-auto p-3">
         {loading ? (
@@ -41,9 +70,16 @@ export default function ActionQueuePane() {
             No active alerts.
           </div>
         ) : (
-          alerts.map((a) => (
-            <AlertCard key={a.id} alert={a} onResolve={resolveAlert} />
-          ))
+          <>
+            {clearError && (
+              <div className="text-12 text-alert-fg px-1 pb-2">
+                Clear failed: {clearError}
+              </div>
+            )}
+            {alerts.map((a) => (
+              <AlertCard key={a.id} alert={a} onResolve={resolveAlert} />
+            ))}
+          </>
         )}
       </div>
     </aside>
