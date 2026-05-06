@@ -141,6 +141,8 @@ export default function MobileAppointmentDetailSheet({
   const coveredByMembership = !!tier && (rawPrice === 0 || rawPrice == null);
   const prepaidAmt = service.prepaidAmount != null ? Number(service.prepaidAmount) : null;
   const isPrepaid = prepaidAmt != null && prepaidAmt > 0;
+  const prepaidCovered = isPrepaid && prepaidAmt >= total;
+  const hasChargeableAmount = total > 0 && !coveredByMembership && !prepaidCovered;
 
   const noteDirty = (service?.notes || '') !== note;
   const isLawn = String(service?.serviceType || '').toLowerCase().includes('lawn');
@@ -202,6 +204,12 @@ export default function MobileAppointmentDetailSheet({
     onCompleteService?.({ ...service, notes: note });
   };
 
+  const handleReviewAction = () => {
+    if (hasChargeableAmount || canCompleteService) {
+      onReviewCheckout?.(service);
+    }
+  };
+
   return (
     <div
       className="fixed inset-0 z-[100] bg-white overflow-y-auto"
@@ -251,11 +259,12 @@ export default function MobileAppointmentDetailSheet({
         {/* Review & checkout */}
         <button
           type="button"
-          onClick={() => onReviewCheckout?.(service)}
+          onClick={handleReviewAction}
+          disabled={!hasChargeableAmount && !canCompleteService}
           className={`w-full rounded-sm u-focus-ring ${canCompleteService ? 'bg-white text-zinc-900 border border-hairline border-zinc-300 mt-3' : 'bg-zinc-900 text-white'}`}
-          style={{ padding: '14px 20px', fontSize: 16 }}
+          style={{ padding: '14px 20px', fontSize: 16, opacity: (!hasChargeableAmount && !canCompleteService) ? 0.55 : 1 }}
         >
-          {coveredByMembership || isPrepaid ? 'Review visit details' : 'Review & checkout'}
+          {hasChargeableAmount ? 'Review & checkout' : canCompleteService ? 'Review visit details' : 'Visit complete'}
         </button>
         {coveredByMembership && !isPrepaid && (
           <div className="text-ink-secondary text-center mt-2" style={{ fontSize: 12 }}>

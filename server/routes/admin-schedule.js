@@ -1363,7 +1363,7 @@ router.post('/:id/invoice', async (req, res, next) => {
       amount,
       category: svc.service_type || null,
     }] : [];
-    const invoice = await InvoiceService.create({
+    let invoice = await InvoiceService.create({
       customerId: svc.customer_id,
       scheduledServiceId: svc.id,
       title: svc.service_type || 'Service visit',
@@ -1371,12 +1371,54 @@ router.post('/:id/invoice', async (req, res, next) => {
       taxRate: svc.cust_property_type === 'commercial' ? 0.07 : 0,
     });
 
+    const prepaidAmount = svc.prepaid_amount != null ? Math.max(0, Number(svc.prepaid_amount) || 0) : 0;
+    const invoiceTotal = Number(invoice.total || 0);
+    const prepaidCredit = Math.min(prepaidAmount, invoiceTotal);
+    if (prepaidCredit > 0) {
+      const remainingTotal = Math.max(0, Math.round((invoiceTotal - prepaidCredit) * 100) / 100);
+      const stamp = new Date().toISOString().slice(0, 10);
+      const noteLine = `[${stamp}] Prepaid amount applied after tax: $${prepaidCredit.toFixed(2)}`;
+      const nextNotes = invoice.notes ? `${invoice.notes}\n${noteLine}` : noteLine;
+      const paidByPrepayment = remainingTotal <= 0;
+      const [updatedInvoice] = await db('invoices')
+        .where({ id: invoice.id })
+        .update({
+          total: remainingTotal,
+          status: paidByPrepayment ? 'paid' : invoice.status,
+          paid_at: paidByPrepayment ? db.fn.now() : invoice.paid_at,
+          notes: nextNotes,
+          payment_method: svc.prepaid_method || invoice.payment_method || null,
+          payment_reference: svc.prepaid_note || invoice.payment_reference || null,
+          payment_recorded_at: svc.prepaid_at || db.fn.now(),
+          updated_at: db.fn.now(),
+        })
+        .returning('*');
+      if (updatedInvoice) invoice = updatedInvoice;
+      await db('payments').insert({
+        customer_id: svc.customer_id,
+        amount: prepaidCredit,
+        status: 'paid',
+        description: `Prepaid credit applied to invoice ${invoice.invoice_number}`,
+        payment_date: etDateString(),
+        metadata: JSON.stringify({
+          invoice_id: invoice.id,
+          scheduled_service_id: svc.id,
+          source: 'scheduled_service_prepaid',
+          method: svc.prepaid_method || null,
+          note: svc.prepaid_note || null,
+        }),
+      }).catch((err) => {
+        logger.error(`[schedule] Prepaid ledger insert failed for invoice ${invoice.invoice_number}: ${err.message}`);
+      });
+    }
+
     logger.info(`[schedule] Pre-completion invoice ${invoice.invoice_number} minted for service ${svc.id}: $${invoice.total}`);
     res.json({
       success: true,
       reused: false,
       invoiceId: invoice.id,
       total: Number(invoice.total),
+      prepaidCredit,
       token: invoice.token,
       status: invoice.status,
     });

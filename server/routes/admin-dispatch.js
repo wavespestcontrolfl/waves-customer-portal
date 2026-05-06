@@ -1665,6 +1665,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       serviceRecordId: record.id,
       invoiceId: invoice?.id || null,
       invoiceTotal: invoice?.total != null ? Number(invoice.total) : null,
+      invoiceToken: invoice?.token || null,
+      invoiceStatus: invoice?.status || null,
       completionSmsStatus,
       completionSmsError: finalRecordNotes.completionSmsError || null,
       completionSmsType: finalRecordNotes.completionSmsType || finalRecordNotes.sentSmsType || null,

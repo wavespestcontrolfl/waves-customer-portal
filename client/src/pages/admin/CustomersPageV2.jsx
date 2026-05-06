@@ -39,6 +39,7 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Filter, Phone, MessageSquare, Plus, Trash2 } from 'lucide-react';
 import Customer360Profile from '../../components/admin/Customer360ProfileV2';
 import MobileNewCustomerSheet from '../../components/admin/MobileNewCustomerSheet';
+import AddressAutocomplete from '../../components/AddressAutocomplete';
 import useIsMobile from '../../hooks/useIsMobile';
 import { CustomerHealthSection } from './CustomerHealthTabs';
 import {
@@ -46,6 +47,8 @@ import {
   STAGE_MAP,
   KANBAN_STAGES,
   LEAD_SOURCES,
+  PROPERTY_LABEL_OPTIONS,
+  CUSTOMER_TAG_OPTIONS,
   CustomerMap,
   CustomerIntelligenceTab,
 } from './CustomersPage';
@@ -233,12 +236,37 @@ function PipelineColumnV2({ stage, customers, onDeleteCustomer, fullWidth = fals
 function QuickAddModalV2({ open, onClose, onCreated }) {
   const [form, setForm] = useState({
     firstName: '', lastName: '', phone: '', email: '', address: '',
-    profileLabel: '',
-    leadSource: 'referral', pipelineStage: 'new_lead', tags: '', notes: '',
+    city: '', state: 'FL', zip: '',
+    profileLabel: 'Primary',
+    customProfileLabel: '',
+    leadSource: 'referral', pipelineStage: 'new_lead', tags: [], customTag: '', notes: '',
   });
   const [submitting, setSubmitting] = useState(false);
 
   const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
+  const selectedTags = Array.isArray(form.tags) ? form.tags : [];
+  const resolvedProfileLabel = form.profileLabel === '__custom__'
+    ? form.customProfileLabel.trim()
+    : form.profileLabel;
+
+  const addTag = (value) => {
+    if (!value) return;
+    setForm((p) => {
+      const tags = Array.isArray(p.tags) ? p.tags : [];
+      return tags.includes(value) ? p : { ...p, tags: [...tags, value] };
+    });
+  };
+
+  const removeTag = (value) => {
+    setForm((p) => ({ ...p, tags: (Array.isArray(p.tags) ? p.tags : []).filter((tag) => tag !== value) }));
+  };
+
+  const addCustomTag = () => {
+    const tag = form.customTag.trim();
+    if (!tag) return;
+    addTag(tag);
+    set('customTag', '');
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -247,8 +275,11 @@ function QuickAddModalV2({ open, onClose, onCreated }) {
     try {
       const body = {
         ...form,
-        tags: form.tags ? form.tags.split(',').map((t) => t.trim()).filter(Boolean) : [],
+        profileLabel: resolvedProfileLabel || undefined,
+        tags: selectedTags,
       };
+      delete body.customProfileLabel;
+      delete body.customTag;
       const r = await fetch(`${API_BASE}/admin/customers`, {
         method: 'POST',
         headers: {
@@ -269,16 +300,17 @@ function QuickAddModalV2({ open, onClose, onCreated }) {
   };
 
   const INPUT_CLS =
-    'block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-3 ' +
+    'block w-full bg-white text-13 text-zinc-900 border-hairline border-zinc-300 rounded-sm h-9 px-3 ' +
     'focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900';
-  const LABEL_CLS = 'block u-label text-ink-tertiary mb-1';
+  const LABEL_CLS = 'block u-label text-zinc-900 mb-1';
+  const FORM_FONT = { fontFamily: 'Roboto, Arial, sans-serif' };
 
   return (
     <Dialog open={open} onClose={onClose} size="md">
       <DialogHeader>
         <DialogTitle>Add Customer</DialogTitle>
       </DialogHeader>
-      <form onSubmit={handleSubmit}>
+      <form onSubmit={handleSubmit} style={FORM_FONT}>
         <DialogBody className="flex flex-col gap-3">
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -302,11 +334,35 @@ function QuickAddModalV2({ open, onClose, onCreated }) {
           </div>
           <div>
             <label className={LABEL_CLS}>Address</label>
-            <input value={form.address} onChange={(e) => set('address', e.target.value)} className={INPUT_CLS} />
+            <AddressAutocomplete
+              value={form.address}
+              onChange={(value) => set('address', value)}
+              onSelect={(parts) => setForm((p) => ({
+                ...p,
+                address: parts.line1 || parts.formatted || p.address,
+                city: parts.city || p.city,
+                state: parts.state || p.state || 'FL',
+                zip: parts.zip || p.zip,
+              }))}
+              className={INPUT_CLS}
+              style={{ height: 36 }}
+            />
           </div>
           <div>
             <label className={LABEL_CLS}>Property label</label>
-            <input value={form.profileLabel} onChange={(e) => set('profileLabel', e.target.value)} className={INPUT_CLS} placeholder="Primary, Rental - Cape Coral, Airbnb" />
+            <select value={form.profileLabel} onChange={(e) => set('profileLabel', e.target.value)} className={cn(INPUT_CLS, 'cursor-pointer')}>
+              {PROPERTY_LABEL_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+            {form.profileLabel === '__custom__' && (
+              <input
+                value={form.customProfileLabel}
+                onChange={(e) => set('customProfileLabel', e.target.value)}
+                className={cn(INPUT_CLS, 'mt-2')}
+                placeholder="Rental - Cape Coral"
+              />
+            )}
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -327,8 +383,43 @@ function QuickAddModalV2({ open, onClose, onCreated }) {
             </div>
           </div>
           <div>
-            <label className={LABEL_CLS}>Tags (comma-separated)</label>
-            <input value={form.tags} onChange={(e) => set('tags', e.target.value)} className={INPUT_CLS} placeholder="VIP, referral_machine" />
+            <label className={LABEL_CLS}>Tags</label>
+            <div className="flex gap-2">
+              <select value="" onChange={(e) => addTag(e.target.value)} className={cn(INPUT_CLS, 'cursor-pointer flex-1')}>
+                <option value="">Add a tag...</option>
+                {CUSTOMER_TAG_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+              <input
+                value={form.customTag}
+                onChange={(e) => set('customTag', e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ',') {
+                    e.preventDefault();
+                    addCustomTag();
+                  }
+                }}
+                onBlur={addCustomTag}
+                className={cn(INPUT_CLS, 'flex-1')}
+                placeholder="Custom tag"
+              />
+            </div>
+            {selectedTags.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mt-2">
+                {selectedTags.map((tag) => (
+                  <button
+                    key={tag}
+                    type="button"
+                    onClick={() => removeTag(tag)}
+                    className="inline-flex items-center h-6 px-2 rounded-xs border-hairline border-zinc-200 bg-zinc-50 text-11 text-ink-secondary hover:bg-zinc-100"
+                    title="Remove tag"
+                  >
+                    {tag.replace(/_/g, ' ')} ×
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
           <div>
             <label className={LABEL_CLS}>Notes</label>
@@ -337,8 +428,8 @@ function QuickAddModalV2({ open, onClose, onCreated }) {
         </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={onClose} type="button">Cancel</Button>
-          <Button variant="primary" type="submit" disabled={submitting}>
-            {submitting ? 'Creating…' : 'Create property profile'}
+          <Button variant="primary" type="submit" disabled={submitting} className="font-bold">
+            {submitting ? 'Submitting…' : 'Submit'}
           </Button>
         </DialogFooter>
       </form>
