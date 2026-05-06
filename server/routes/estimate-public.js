@@ -7,7 +7,8 @@ const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, formatETDate } = require('../utils/datetime-et');
+const { formatSmsTimeRange } = require('../utils/sms-time-format');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
@@ -77,6 +78,16 @@ function bookingServiceFor(name) {
   if (n.includes('termite') || n.includes('wdo')) return { id: 'termite', label: 'Termite Inspection' };
   if (n.includes('rodent') || n.includes('rat') || n.includes('mouse')) return { id: 'rodent', label: 'Rodent Control' };
   return { id: 'pest_control', label: 'Pest Control' };
+}
+
+function dateOnly(value) {
+  if (!value) return '';
+  if (value instanceof Date) return value.toISOString().split('T')[0];
+  return String(value).split('T')[0];
+}
+
+function hhmm(value) {
+  return value ? String(value).slice(0, 5) : '';
 }
 
 async function renderTemplate(templateKey, vars, fallback) {
@@ -1525,6 +1536,7 @@ router.put('/:token/accept', async (req, res, next) => {
         } catch (e) { logger.warn(`[estimate-accept] service_preferences copy skipped: ${e.message}`); }
       }
 
+      let reservationCommitted = false;
       // Commit the slot reservation (if one) now that we have customerId.
       // Runs inside the same trx so either everything lands or nothing
       // does — a mid-flight failure here won't leave a committed customer
@@ -1537,6 +1549,7 @@ router.put('/:token/accept', async (req, res, next) => {
             paymentMethodPreference,
             trx,
           });
+          reservationCommitted = true;
         } catch (commitErr) {
           // Only RESERVATION_EXPIRED is interesting here — race between
           // our 15-min window and the final tap. Let the outer catch
@@ -1575,10 +1588,10 @@ router.put('/:token/accept', async (req, res, next) => {
         onboardingToken = obToken;
       }
 
-      return { customerId, onboardingToken };
+      return { customerId, onboardingToken, reservationCommitted };
     });
 
-    const { customerId, onboardingToken } = txResult;
+    const { customerId, onboardingToken, reservationCommitted } = txResult;
 
     // Notify office
     if (customerId) {
@@ -1603,41 +1616,80 @@ router.put('/:token/accept', async (req, res, next) => {
     // booking link) — so skip this branch entirely when bill_by_invoice
     // is set to avoid a double-text.
     let bookingUrl = null;
+    let oneTimeBookingService = null;
+    if (treatAsOneTime && !billByInvoice && !reservationCommitted) {
+      oneTimeBookingService = bookingServiceFor(oneTimeList[0]?.name || '');
+      const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${oneTimeBookingService.id}&source=estimate-accept`;
+      bookingUrl = await shortenOrPassthrough(longBookingUrl, {
+        kind: 'booking',
+        entityType: 'estimates',
+        entityId: estimate.id,
+        customerId,
+      });
+    }
     if (estimate.customer_phone && !billByInvoice) {
       try {
         if (treatAsOneTime) {
-          const primarySvc = bookingServiceFor(oneTimeList[0]?.name || '');
-          const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${primarySvc.id}&source=estimate-accept`;
-          bookingUrl = await shortenOrPassthrough(longBookingUrl, {
-            kind: 'booking',
-            entityType: 'estimates',
-            entityId: estimate.id,
-            customerId,
-          });
-          const customerBody = await renderTemplate(
-            'estimate_accepted_onetime',
-            { first_name: firstName, service_label: primarySvc.label, booking_url: bookingUrl },
-            `Hey ${firstName}! Thanks for booking your ${primarySvc.label} with Waves. Pick your time here - we'll show you slots when a tech will already be in your neighborhood: ${bookingUrl}`
-          );
-          const sendResult = await sendCustomerMessage({
-            to: estimate.customer_phone,
-            body: customerBody,
-            channel: 'sms',
-            audience: customerId ? 'customer' : 'lead',
-            purpose: 'estimate_followup',
-            customerId: customerId || undefined,
-            estimateId: estimate.id,
-            identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
-            consentBasis: customerId ? undefined : {
-              status: 'transactional_allowed',
-              source: 'estimate_token_acceptance',
-              capturedAt: new Date().toISOString(),
-            },
-            entryPoint: 'estimate_accept_onetime_booking',
-            metadata: { original_message_type: 'estimate_accepted_onetime' },
-          });
-          if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
-          logger.info(`[estimate-accept] One-time booking SMS sent for estimate ${estimate.id} - ${primarySvc.label}`);
+          const primarySvc = oneTimeBookingService || bookingServiceFor(oneTimeList[0]?.name || '');
+          if (bookingUrl) {
+            const customerBody = await renderTemplate(
+              'estimate_accepted_onetime',
+              { first_name: firstName, service_label: primarySvc.label, booking_url: bookingUrl },
+              `Hey ${firstName}! Thanks for booking your ${primarySvc.label} with Waves. Pick your time here - we'll show you slots when a tech will already be in your neighborhood: ${bookingUrl}`
+            );
+            const sendResult = await sendCustomerMessage({
+              to: estimate.customer_phone,
+              body: customerBody,
+              channel: 'sms',
+              audience: customerId ? 'customer' : 'lead',
+              purpose: 'estimate_followup',
+              customerId: customerId || undefined,
+              estimateId: estimate.id,
+              identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
+              consentBasis: customerId ? undefined : {
+                status: 'transactional_allowed',
+                source: 'estimate_token_acceptance',
+                capturedAt: new Date().toISOString(),
+              },
+              entryPoint: 'estimate_accept_onetime_booking',
+              metadata: { original_message_type: 'estimate_accepted_onetime' },
+            });
+            if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+            logger.info(`[estimate-accept] One-time booking SMS sent for estimate ${estimate.id} - ${primarySvc.label}`);
+          } else {
+            const scheduledDate = dateOnly(reservationRow?.scheduled_date);
+            const serviceDate = scheduledDate
+              ? formatETDate(new Date(`${scheduledDate}T12:00:00Z`))
+              : 'your selected date';
+            const start = hhmm(reservationRow?.window_start);
+            const end = hhmm(reservationRow?.window_end);
+            const timeWindow = start && end ? formatSmsTimeRange(`${start}-${end}`) : 'your selected window';
+            const customerBody = await renderTemplate(
+              'appointment_confirmation',
+              {
+                first_name: firstName,
+                service_type: primarySvc.label,
+                date: serviceDate,
+                time: timeWindow,
+              },
+              `Hi ${firstName}! Your ${primarySvc.label} with Waves is confirmed for ${serviceDate} between ${timeWindow}. Reply to reschedule.`
+            );
+            const sendResult = await sendCustomerMessage({
+              to: estimate.customer_phone,
+              body: customerBody,
+              channel: 'sms',
+              audience: 'customer',
+              purpose: 'appointment_confirmation',
+              customerId: customerId || undefined,
+              appointmentId: reservationRow?.id,
+              estimateId: estimate.id,
+              identityTrustLevel: 'service_contact_authorized',
+              entryPoint: 'estimate_accept_onetime_confirmed',
+              metadata: { original_message_type: 'appointment_confirmation' },
+            });
+            if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+            logger.info(`[estimate-accept] One-time confirmation SMS sent for estimate ${estimate.id} - ${primarySvc.label}`);
+          }
         } else {
           const longObUrl = onboardingToken ? `https://portal.wavespestcontrol.com/onboard/${onboardingToken}` : '';
           const obUrl = longObUrl
@@ -1765,7 +1817,15 @@ router.put('/:token/accept', async (req, res, next) => {
       }
     }
 
-    res.json({ success: true, onboardingToken, invoiceMode, invoiceId, invoiceAmount });
+    res.json(buildAcceptSuccessPayload({
+      onboardingToken,
+      invoiceMode,
+      invoiceId,
+      invoiceAmount,
+      bookingUrl,
+      treatAsOneTime,
+      reservationCommitted,
+    }));
   } catch (err) {
     // Translate user-visible 4xx errors thrown from inside the transaction
     // (e.g. reservation expiring between the pre-tx check and the commit).
@@ -2458,6 +2518,33 @@ function resolveAcceptOneTimeTotal(estimate = {}, pricingBundle = null) {
   return 0;
 }
 
+function buildAcceptSuccessPayload({
+  onboardingToken = null,
+  invoiceMode = false,
+  invoiceId = null,
+  invoiceAmount = null,
+  bookingUrl = null,
+  treatAsOneTime = false,
+  reservationCommitted = false,
+} = {}) {
+  let nextStep = 'confirmed';
+  if (invoiceMode) nextStep = 'pay_invoice';
+  else if (treatAsOneTime && !reservationCommitted) nextStep = 'book_one_time';
+  else if (onboardingToken) nextStep = 'complete_onboarding';
+
+  return {
+    success: true,
+    nextStep,
+    serviceMode: treatAsOneTime ? 'one_time' : 'recurring',
+    reservationCommitted,
+    onboardingToken,
+    invoiceMode,
+    invoiceId,
+    invoiceAmount,
+    bookingUrl,
+  };
+}
+
 function readV1Shape(estData) {
   if (!estData || typeof estData !== 'object') return null;
   const result = estData.result;
@@ -2808,3 +2895,4 @@ module.exports.buildPricingBundle = buildPricingBundle;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate;
 module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
+module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;

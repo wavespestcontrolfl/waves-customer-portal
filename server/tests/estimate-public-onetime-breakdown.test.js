@@ -1,4 +1,5 @@
 const {
+  buildAcceptSuccessPayload,
   buildPricingBundle,
   isStructuralOneTimeOnlyEstimate,
   normalizeOneTimeBreakdown,
@@ -363,5 +364,59 @@ describe('public estimate one-time breakdown', () => {
       { onetime_total: 199 },
       { anchorOneTimePrice: null, oneTimeBreakdown: { total: 0 } },
     )).toBe(199);
+  });
+
+  test('accept success payload marks invoice payment as the next step', () => {
+    expect(buildAcceptSuccessPayload({
+      invoiceMode: true,
+      invoiceId: 'inv-123',
+      invoiceAmount: 249,
+      treatAsOneTime: true,
+    })).toEqual(expect.objectContaining({
+      success: true,
+      nextStep: 'pay_invoice',
+      serviceMode: 'one_time',
+      invoiceMode: true,
+      invoiceId: 'inv-123',
+      invoiceAmount: 249,
+    }));
+  });
+
+  test('accept success payload distinguishes one-time booking from onboarding', () => {
+    expect(buildAcceptSuccessPayload({
+      bookingUrl: 'https://portal.wavespestcontrol.com/book?service=pest_control',
+      treatAsOneTime: true,
+    })).toEqual(expect.objectContaining({
+      nextStep: 'book_one_time',
+      serviceMode: 'one_time',
+      bookingUrl: 'https://portal.wavespestcontrol.com/book?service=pest_control',
+    }));
+
+    expect(buildAcceptSuccessPayload({
+      treatAsOneTime: true,
+    })).toEqual(expect.objectContaining({
+      nextStep: 'book_one_time',
+      serviceMode: 'one_time',
+      bookingUrl: null,
+    }));
+
+    expect(buildAcceptSuccessPayload({
+      bookingUrl: 'https://portal.wavespestcontrol.com/book?service=pest_control',
+      treatAsOneTime: true,
+      reservationCommitted: true,
+    })).toEqual(expect.objectContaining({
+      nextStep: 'confirmed',
+      serviceMode: 'one_time',
+      reservationCommitted: true,
+    }));
+
+    expect(buildAcceptSuccessPayload({
+      onboardingToken: 'setup-token',
+      treatAsOneTime: false,
+    })).toEqual(expect.objectContaining({
+      nextStep: 'complete_onboarding',
+      serviceMode: 'recurring',
+      onboardingToken: 'setup-token',
+    }));
   });
 });
