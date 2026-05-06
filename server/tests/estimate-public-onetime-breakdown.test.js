@@ -1,5 +1,6 @@
 const {
   buildPricingBundle,
+  isStructuralOneTimeOnlyEstimate,
   normalizeOneTimeBreakdown,
 } = require('../routes/estimate-public');
 
@@ -310,5 +311,37 @@ describe('public estimate one-time breakdown', () => {
       amount: payload.anchorOneTimePrice,
     }));
     expect(payload.oneTimeBreakdown.total).toBe(payload.anchorOneTimePrice);
+  });
+
+  test('detects nested legacy one-time-only estimates for acceptance flow', () => {
+    const oneTimeOnly = {
+      result: {
+        results: {
+          oneTime: {
+            total: 200,
+            items: [{ service: 'one_time_pest', name: 'One-Time Pest', price: 200 }],
+          },
+        },
+      },
+    };
+
+    expect(isStructuralOneTimeOnlyEstimate(oneTimeOnly, { monthly_total: 0, annual_total: 0 })).toBe(true);
+  });
+
+  test('does not treat recurring estimates with first-visit fees as one-time-only', () => {
+    expect(isStructuralOneTimeOnlyEstimate(savedAdminEstimateData(), {
+      monthly_total: 50,
+      annual_total: 600,
+    })).toBe(false);
+  });
+
+  test('detects top-level specialty-only estimates as one-time-only', () => {
+    const specialtyOnly = {
+      result: {
+        specItems: [{ service: 'rodent_sanitation', name: 'Rodent Sanitation', price: 650 }],
+      },
+    };
+
+    expect(isStructuralOneTimeOnlyEstimate(specialtyOnly, { monthly_total: 0, annual_total: 0 })).toBe(true);
   });
 });
