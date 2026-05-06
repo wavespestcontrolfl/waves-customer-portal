@@ -257,6 +257,7 @@ export default function ProjectReportViewPage() {
   );
 
   const typeLabel = TYPE_LABELS[data.projectType] || 'Inspection';
+  const reportTitle = data.title || typeLabel;
   const findings = data.findings || {};
   const findingsEntries = Object.entries(findings).filter(([, v]) => v !== null && v !== undefined && v !== '');
   const primaryPhotos = (data.photos || []).filter(p => p.visit === 'primary');
@@ -299,7 +300,7 @@ export default function ProjectReportViewPage() {
               fontFamily: FONTS.display, fontWeight: 400,
               fontSize: 20, color: '#fff',
               letterSpacing: '0.02em', lineHeight: 1, margin: 0,
-            }}>{typeLabel}</h1>
+            }}>{reportTitle}</h1>
             <div style={{ fontSize: 12, color: B.blueLight, marginTop: 4 }}>{data.customerName}</div>
           </div>
         </div>
@@ -309,7 +310,7 @@ export default function ProjectReportViewPage() {
         {/* Summary card */}
         <div style={{ background: '#fff', borderRadius: 16, padding: 20, border: `1px solid ${B.bluePale}` }}>
           <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>
-            {data.title || typeLabel}
+            {reportTitle}
           </div>
           {contactRows.length > 0 && (
             <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -515,7 +516,7 @@ function PhotoGrid({ title, photos, noCard }) {
 // named sections and render each with its own heading. Otherwise render the
 // whole block under a single "Recommendations" heading like before.
 const REQUIRED_SECTION_HEADINGS = ['WHAT WE INSPECTED', 'WHAT WE FOUND', 'WHAT WE RECOMMEND'];
-const SECTION_HEADINGS = ['WHAT WE INSPECTED', 'WHAT WE FOUND', 'WHAT WE DID', 'WHAT WE RECOMMEND'];
+const SECTION_HEADINGS = ['CUSTOMER CONCERN', 'WHAT WE INSPECTED', 'WHAT WE FOUND', 'WHAT WE DID', 'WHAT WE RECOMMEND'];
 
 function parseSections(text) {
   const hasAll = REQUIRED_SECTION_HEADINGS.every(h => text.includes(h));
