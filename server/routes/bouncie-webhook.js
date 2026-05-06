@@ -17,13 +17,40 @@ const {
   stringifyBounciePayload,
 } = require('../services/bouncie-webhook-security');
 
+function extractImei(payload) {
+  return (
+    payload.imei ||
+    payload.vehicleId ||
+    payload.vehicle_id ||
+    payload.deviceId ||
+    payload.device_id ||
+    (payload.vehicle && payload.vehicle.imei) ||
+    (payload.data && !Array.isArray(payload.data) && (
+      payload.data.imei ||
+      payload.data.vehicleId ||
+      payload.data.vehicle_id ||
+      payload.data.deviceId ||
+      payload.data.device_id
+    )) ||
+    ''
+  );
+}
+
+function isTripCompletedEvent(eventType) {
+  return eventType === 'tripCompleted' || eventType === 'trip.completed' || eventType === 'trip';
+}
+
+function isGeozoneEvent(eventType) {
+  return eventType === 'userGeozone' || eventType === 'geozone' || eventType === 'user.geozone';
+}
+
 // POST /api/bouncie/webhook
-router.post('/', async (req, res) => {
+async function handleBouncieWebhook(req, res) {
   // Always return 200 to Bouncie — never let errors cause retries
   try {
     const payload = req.body || {};
     const eventType = payload.eventType || payload.event_type || payload.type || 'unknown';
-    const imei = payload.imei || payload.vehicleId || (payload.data && payload.data.imei) || '';
+    const imei = extractImei(payload);
 
     const verify = inspectBouncieWebhook(req);
     if (!verify.accepted) {
@@ -51,7 +78,7 @@ router.post('/', async (req, res) => {
     }
 
     // Process tripCompleted events
-    if (eventType === 'tripCompleted' || eventType === 'trip.completed' || eventType === 'trip') {
+    if (isTripCompletedEvent(eventType)) {
       try {
         await mileageService.processTripWebhook(payload);
 
@@ -73,7 +100,7 @@ router.post('/', async (req, res) => {
             .update({ error: processErr.message });
         }
       }
-    } else if (eventType === 'userGeozone' || eventType === 'geozone' || eventType === 'user.geozone') {
+    } else if (isGeozoneEvent(eventType)) {
       try {
         await geofenceHandler.handleGeozoneEvent(payload);
         if (logId) {
@@ -87,7 +114,13 @@ router.post('/', async (req, res) => {
         }
       }
     } else {
-      logger.info(`[bouncie-webhook] Received ${eventType} for ${imei} (not processed)`);
+      if (logId) {
+        await db('bouncie_webhook_log')
+          .where('id', logId)
+          .update({ processed: true })
+          .catch((markErr) => logger.warn(`[bouncie-webhook] Failed to mark ignored ${eventType} processed: ${markErr.message}`));
+      }
+      logger.info(`[bouncie-webhook] Received ${eventType} for ${imei} (ignored)`);
     }
   } catch (err) {
     logger.error(`[bouncie-webhook] Unhandled error: ${err.message}`);
@@ -95,6 +128,15 @@ router.post('/', async (req, res) => {
 
   // Always 200
   res.status(200).json({ received: true });
-});
+}
+
+router.post('/', handleBouncieWebhook);
+
+router._test = {
+  extractImei,
+  handleBouncieWebhook,
+  isGeozoneEvent,
+  isTripCompletedEvent,
+};
 
 module.exports = router;
