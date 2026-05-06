@@ -1030,10 +1030,19 @@ ${shellQuestionsBar()}
         body: JSON.stringify({ slotId: bookingState.selectedSlotId }),
       });
       if (r.status === 409) {
-        toast('That slot was just taken. Pick another.');
+        const data = await r.json().catch(() => ({}));
+        const message = data.error || 'Could not reserve this slot.';
+        if (/slot no longer available/i.test(message)) {
+          toast('That slot was just taken. Pick another.');
+          loadSlots();
+        } else {
+          toast(message);
+          if (/estimate is no longer active/i.test(message)) {
+            setTimeout(() => location.reload(), 900);
+          }
+        }
         buttons.forEach((b) => { b.disabled = false; });
         bookingState.pickedPref = null;
-        loadSlots();
         return;
       }
       if (!r.ok) throw new Error('reserve failed');
