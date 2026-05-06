@@ -600,6 +600,14 @@ export default function EstimateViewPage() {
       if (!r.ok) {
         const body = await r.json().catch(() => ({}));
         if (r.status === 409) {
+          if (/estimate is no longer active/i.test(body.error || '')) {
+            setCtaPhase('configure');
+            setReservation(null);
+            setSelectedSlotId(null);
+            setPaymentPreference(null);
+            await loadEstimate();
+            return;
+          }
           const expired = /expired|no active reservation/i.test(body.error || '');
           setCtaPhase(expired ? 'reservation_expired' : 'slot_conflict');
           setSlotsRefreshSignal((v) => v + 1);
@@ -618,7 +626,7 @@ export default function EstimateViewPage() {
       setError(err.message);
       setCtaPhase('review');
     }
-  }, [token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency]);
+  }, [loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency]);
 
   const handleReviewCancel = useCallback(() => {
     setCtaPhase('configure');

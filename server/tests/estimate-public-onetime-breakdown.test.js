@@ -3,6 +3,7 @@ const {
   buildAcceptOfficeFallback,
   buildAcceptSuccessPayload,
   buildPricingBundle,
+  isEstimateAcceptActive,
   isStructuralOneTimeOnlyEstimate,
   normalizeAcceptPaymentMethodPreference,
   normalizeOneTimeBreakdown,
@@ -392,6 +393,16 @@ describe('public estimate one-time breakdown', () => {
     expect(normalizeAcceptPaymentMethodPreference('pay_at_visit')).toBe('pay_at_visit');
     expect(normalizeAcceptPaymentMethodPreference('prepay_annual')).toBe('prepay_annual');
     expect(normalizeAcceptPaymentMethodPreference('deposit_later')).toBeNull();
+  });
+
+  test('accept active guard rejects terminal and past-expiry estimates', () => {
+    const now = new Date('2026-05-06T12:00:00Z');
+
+    expect(isEstimateAcceptActive({ status: 'sent', expires_at: '2026-05-06T12:01:00Z' }, now)).toBe(true);
+    expect(isEstimateAcceptActive({ status: 'viewed', expires_at: null }, now)).toBe(true);
+    expect(isEstimateAcceptActive({ status: 'declined', expires_at: '2026-05-06T12:01:00Z' }, now)).toBe(false);
+    expect(isEstimateAcceptActive({ status: 'expired', expires_at: '2026-05-06T12:01:00Z' }, now)).toBe(false);
+    expect(isEstimateAcceptActive({ status: 'sent', expires_at: '2026-05-06T11:59:59Z' }, now)).toBe(false);
   });
 
   test('accept success payload exposes invoice delivery state', () => {
