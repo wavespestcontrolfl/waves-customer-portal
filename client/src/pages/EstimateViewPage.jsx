@@ -256,7 +256,7 @@ function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, o
       <div style={{ fontSize: 18, color: COLORS.navy, marginTop: 10, lineHeight: 1.5 }}>
         Pay option: <strong>{
           invoiceMode ? 'Invoice due now'
-          : paymentPreference === 'deposit_now' ? 'Deposit now'
+          : paymentPreference === 'deposit_now' ? 'Card on file'
           : paymentPreference === 'prepay_annual' ? 'Pay the year upfront'
           : 'At the visit'
         }</strong>
