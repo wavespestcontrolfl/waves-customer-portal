@@ -124,6 +124,11 @@ function validateUploadedImage(file) {
   return detected;
 }
 
+function isMissingS3ObjectError(err) {
+  const statusCode = err?.$metadata?.httpStatusCode || err?.statusCode;
+  return statusCode === 404 || ['NoSuchKey', 'NotFound'].includes(err?.name || err?.Code || err?.code);
+}
+
 function escapeHtml(value) {
   return String(value || '')
     .replace(/&/g, '&amp;')
@@ -866,17 +871,21 @@ router.delete('/:id/photos/:photoId', async (req, res, next) => {
     if (!(await requireProjectAccess(req, res, project))) return;
     const photo = await db('project_photos').where({ id: req.params.photoId, project_id: req.params.id }).first();
     if (!photo) return res.status(404).json({ error: 'Photo not found' });
-    const deleted = await db('project_photos')
-      .where({ id: req.params.photoId, project_id: req.params.id })
-      .del();
-    if (!deleted) return res.status(404).json({ error: 'Photo not found' });
     if (config.s3?.bucket && photo.s3_key) {
       try {
         await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: photo.s3_key }));
       } catch (err) {
-        logger.warn(`[projects] failed to delete photo object ${photo.id}: ${err.message}`);
+        if (!isMissingS3ObjectError(err)) {
+          logger.warn(`[projects] failed to delete photo object ${photo.id}: ${err.message}`);
+          return res.status(502).json({ error: 'Could not delete photo from storage. Please retry.' });
+        }
+        logger.warn(`[projects] photo object already missing ${photo.id}: ${photo.s3_key}`);
       }
     }
+    const deleted = await db('project_photos')
+      .where({ id: req.params.photoId, project_id: req.params.id })
+      .del();
+    if (!deleted) return res.status(404).json({ error: 'Photo not found' });
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
@@ -903,6 +912,7 @@ router._private = {
   hasProjectAccess,
   detectedImageMime,
   validateUploadedImage,
+  isMissingS3ObjectError,
 };
 
 module.exports = router;

@@ -963,12 +963,20 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
 
 function PhotoThumb({ photo, projectId, onDelete }) {
   const [url, setUrl] = useState(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   useEffect(() => {
     let cancelled = false;
+    setUrl(null);
+    setLoadFailed(false);
     adminFetch(`/admin/projects/${projectId}/photos/${photo.id}/url`)
-      .then(r => r.json())
-      .then(d => { if (!cancelled) setUrl(d.url); })
-      .catch(() => {});
+      .then(r => readJsonResponse(r, 'Could not load photo'))
+      .then(d => {
+        if (!cancelled) {
+          if (d.url) setUrl(d.url);
+          else setLoadFailed(true);
+        }
+      })
+      .catch(() => { if (!cancelled) setLoadFailed(true); });
     return () => { cancelled = true; };
   }, [projectId, photo.id]);
 
@@ -983,7 +991,7 @@ function PhotoThumb({ photo, projectId, onDelete }) {
         </a>
       ) : (
         <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, color: D.muted }}>
-          Loading…
+          {loadFailed ? 'Photo unavailable' : 'Loading…'}
         </div>
       )}
       <div style={{

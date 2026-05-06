@@ -1,5 +1,7 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
+const mockS3Send = jest.fn();
+
 jest.mock('../models/db', () => {
   const mock = jest.fn();
   mock.fn = { now: jest.fn(() => 'NOW') };
@@ -40,7 +42,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
 }));
 jest.mock('@aws-sdk/client-s3', () => ({
-  S3Client: jest.fn().mockImplementation(() => ({ send: jest.fn().mockResolvedValue({}) })),
+  S3Client: jest.fn().mockImplementation(() => ({ send: mockS3Send })),
   PutObjectCommand: jest.fn(),
   GetObjectCommand: jest.fn(),
   DeleteObjectCommand: jest.fn(),
@@ -98,6 +100,7 @@ describe('admin projects routes', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db.fn.now.mockReturnValue('NOW');
+    mockS3Send.mockResolvedValue({});
   });
 
   test('technician cannot read another technician project detail', async () => {
@@ -222,6 +225,76 @@ describe('admin projects routes', () => {
         delivery_channels: body.channels,
         last_delivery_at: 'NOW',
       }));
+    });
+  });
+
+  test('photo delete does not drop database row when storage delete fails', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({ id: 'project-1', created_by_tech_id: 'tech-1' }),
+    });
+    const photoRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'photo-1',
+        project_id: 'project-1',
+        s3_key: 'project-photos/project-1/photo.jpg',
+      }),
+    });
+    const photoDelete = chain();
+    const storageError = new Error('S3 timeout');
+    mockS3Send.mockRejectedValue(storageError);
+
+    db.mockImplementation((table) => {
+      if (table === 'projects') return projectRead;
+      if (table === 'project_photos') return table === 'project_photos' && photoRead.first.mock.calls.length === 0
+        ? photoRead
+        : photoDelete;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/photos/photo-1`, {
+        method: 'DELETE',
+        headers: { Authorization: 'Bearer tech-1' },
+      });
+      const body = await res.json();
+      expect(res.status).toBe(502);
+      expect(body.error).toMatch(/storage/);
+      expect(photoDelete.del).not.toHaveBeenCalled();
+    });
+  });
+
+  test('photo delete removes database row when storage object is already missing', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({ id: 'project-1', created_by_tech_id: 'tech-1' }),
+    });
+    const photoRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'photo-1',
+        project_id: 'project-1',
+        s3_key: 'project-photos/project-1/missing.jpg',
+      }),
+    });
+    const photoDelete = chain();
+    const missingError = new Error('No such key');
+    missingError.name = 'NoSuchKey';
+    mockS3Send.mockRejectedValue(missingError);
+
+    const photoQueries = [photoRead, photoDelete];
+    db.mockImplementation((table) => {
+      if (table === 'projects') return projectRead;
+      if (table === 'project_photos') return photoQueries.shift();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/photos/photo-1`, {
+        method: 'DELETE',
+        headers: { Authorization: 'Bearer tech-1' },
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.ok).toBe(true);
+      expect(photoDelete.del).toHaveBeenCalledTimes(1);
     });
   });
 });

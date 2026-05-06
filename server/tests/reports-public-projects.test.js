@@ -1,0 +1,120 @@
+jest.mock('../models/db', () => {
+  const mock = jest.fn();
+  mock.fn = { now: jest.fn(() => 'NOW') };
+  return mock;
+});
+jest.mock('../config', () => ({
+  s3: { bucket: 'test-bucket', region: 'us-east-1' },
+}));
+jest.mock('../services/logger', () => ({
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+}));
+jest.mock('@aws-sdk/client-s3', () => ({
+  S3Client: jest.fn().mockImplementation(() => ({})),
+  GetObjectCommand: jest.fn(),
+}));
+jest.mock('@aws-sdk/s3-request-presigner', () => ({
+  getSignedUrl: jest.fn(),
+}));
+
+const express = require('express');
+const db = require('../models/db');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const reportsRouter = require('../routes/reports-public');
+
+function chain(overrides = {}) {
+  return {
+    where: jest.fn().mockReturnThis(),
+    leftJoin: jest.fn().mockReturnThis(),
+    select: jest.fn().mockReturnThis(),
+    first: jest.fn(),
+    update: jest.fn().mockResolvedValue(1),
+    orderBy: jest.fn().mockReturnThis(),
+    ...overrides,
+  };
+}
+
+function appServer() {
+  const app = express();
+  app.use('/reports', reportsRouter);
+  app.use((err, _req, res, _next) => {
+    res.status(err.status || 500).json({ error: err.message });
+  });
+  const server = app.listen(0);
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  return { server, baseUrl };
+}
+
+async function withServer(fn) {
+  const { server, baseUrl } = appServer();
+  try {
+    return await fn(baseUrl);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+describe('public project reports', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.fn.now.mockReturnValue('NOW');
+  });
+
+  test('returns report data when one project photo cannot be signed', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-1',
+        report_token: '0123456789abcdef0123456789abcdef',
+        report_viewed_at: null,
+        project_type: 'pest_inspection',
+        status: 'sent',
+        title: 'Inspection report',
+        first_name: 'Van',
+        last_name: 'Lee',
+      }),
+    });
+    const markViewed = chain();
+    const photosRead = chain({
+      orderBy: jest.fn().mockResolvedValue([
+        {
+          id: 'photo-1',
+          category: 'entry_point',
+          caption: 'Front entry',
+          visit: 'primary',
+          s3_key: 'project-photos/project-1/front.jpg',
+        },
+        {
+          id: 'photo-2',
+          category: 'damage',
+          caption: 'Damaged trim',
+          visit: 'primary',
+          s3_key: 'project-photos/project-1/missing.jpg',
+        },
+      ]),
+    });
+    getSignedUrl
+      .mockResolvedValueOnce('https://signed.example/front.jpg')
+      .mockRejectedValueOnce(new Error('NoSuchKey'));
+
+    const projectQueries = [projectRead, markViewed];
+    db.mockImplementation((table) => {
+      if (table === 'projects as p') return projectQueries.shift();
+      if (table === 'projects') return projectQueries.shift();
+      if (table === 'project_photos') return photosRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/data`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.photos).toEqual([
+        expect.objectContaining({ id: 'photo-1', url: 'https://signed.example/front.jpg' }),
+        expect.objectContaining({ id: 'photo-2', url: null }),
+      ]);
+      expect(markViewed.update).toHaveBeenCalledWith({ report_viewed_at: 'NOW' });
+    });
+  });
+});

@@ -379,24 +379,27 @@ function PhotoGrid({ title, photos, noCard }) {
         </div>
       )}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 8 }}>
-        {photos.map(ph => (
-          <a
-            key={ph.id}
-            href={ph.url}
-            target="_blank"
-            rel="noreferrer"
-            style={{
-              display: 'block', aspectRatio: '1/1', borderRadius: 8, overflow: 'hidden',
-              border: `1px solid ${B.bluePale}`, position: 'relative', background: B.offWhite,
-            }}
-          >
+        {photos.map(ph => {
+          const tileStyle = {
+            display: 'block', aspectRatio: '1/1', borderRadius: 8, overflow: 'hidden',
+            border: `1px solid ${B.bluePale}`, position: 'relative', background: B.offWhite,
+          };
+          const content = (
+            <>
             {ph.url ? (
               <img
                 src={ph.url}
                 alt={ph.caption || ph.category || 'Photo'}
                 style={{ width: '100%', height: '100%', objectFit: 'cover' }}
               />
-            ) : null}
+            ) : (
+              <div style={{
+                width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                padding: 12, textAlign: 'center', color: B.grayMid, fontSize: 14, fontWeight: 700,
+              }}>
+                Photo unavailable
+              </div>
+            )}
             {(ph.caption || ph.category) && (
               <div style={{
                 position: 'absolute', left: 0, right: 0, bottom: 0,
@@ -404,8 +407,18 @@ function PhotoGrid({ title, photos, noCard }) {
                 fontSize: 10, fontWeight: 600, textTransform: 'capitalize',
               }}>{ph.caption || ph.category.replace(/_/g, ' ')}</div>
             )}
-          </a>
-        ))}
+            </>
+          );
+          return ph.url ? (
+            <a key={ph.id} href={ph.url} target="_blank" rel="noreferrer" style={tileStyle}>
+              {content}
+            </a>
+          ) : (
+            <div key={ph.id} style={tileStyle}>
+              {content}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
