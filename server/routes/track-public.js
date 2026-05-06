@@ -34,7 +34,10 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const PhotoService = require('../services/photos');
-const BouncieService = require('../services/bouncie');
+const {
+  calculateBoundedTrackingEta,
+  finiteNumber,
+} = require('../services/customer-tracking-eta');
 
 // If tech_status hasn't been pinged in this long, surface coords but
 // flag stale so the UI can soften the "live" framing. 5 min covers
@@ -100,7 +103,7 @@ async function buildVehicle(service) {
   // card in either case. Never throws — Distance Matrix outages or DB
   // hiccups degrade to null silently.
   if (!service.technician_id) return null;
-  if (service.latitude == null || service.longitude == null) return null;
+  if (finiteNumber(service.latitude) == null || finiteNumber(service.longitude) == null) return null;
 
   let ts;
   try {
@@ -111,28 +114,32 @@ async function buildVehicle(service) {
     logger.warn(`[track-public] tech_status lookup failed: ${err.message}`);
     return null;
   }
-  if (!ts || ts.lat == null || ts.lng == null) return null;
+  if (!ts || finiteNumber(ts.lat) == null || finiteNumber(ts.lng) == null) return null;
 
-  const lat = parseFloat(ts.lat);
-  const lng = parseFloat(ts.lng);
-  const propLat = parseFloat(service.latitude);
-  const propLng = parseFloat(service.longitude);
+  const lat = finiteNumber(ts.lat);
+  const lng = finiteNumber(ts.lng);
   const lastReportedAt = ts.updated_at;
   const stale = lastReportedAt
     ? (Date.now() - new Date(lastReportedAt).getTime()) > STALE_VEHICLE_MS
     : true;
 
-  let etaMinutes = null;
-  let etaSource = null;
-  try {
-    const eta = await BouncieService.calculateETAFromCoords(lat, lng, propLat, propLng);
-    etaMinutes = eta?.etaMinutes ?? null;
-    etaSource = eta?.source ?? null;
-  } catch (err) {
-    logger.warn(`[track-public] ETA calc failed: ${err.message}`);
-  }
+  const eta = await calculateBoundedTrackingEta({
+    techLat: lat,
+    techLng: lng,
+    customerLat: service.latitude,
+    customerLng: service.longitude,
+    techUpdatedAt: lastReportedAt,
+    logPrefix: 'track-public',
+  });
 
-  return { lat, lng, lastReportedAt, stale, etaMinutes, etaSource };
+  return {
+    lat,
+    lng,
+    lastReportedAt,
+    stale,
+    etaMinutes: eta?.minutes ?? null,
+    etaSource: eta?.source ?? null,
+  };
 }
 
 async function buildSummary(service) {
