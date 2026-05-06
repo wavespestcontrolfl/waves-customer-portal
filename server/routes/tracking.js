@@ -78,6 +78,11 @@ function isTrackTokenLive(expiresAt) {
   return Number.isFinite(expiresMs) && expiresMs >= Date.now();
 }
 
+function isFreshTechStatusTimestamp(updatedAt) {
+  const updatedMs = new Date(updatedAt).getTime();
+  return Number.isFinite(updatedMs) && (Date.now() - updatedMs) <= STALE_VEHICLE_MS;
+}
+
 function formatScheduledTracker(service, tech, customer) {
   const currentStep = stepForTrackState(service?.track_state);
   const custLat = parseFiniteCoordinate(customer?.latitude);
@@ -217,6 +222,9 @@ async function enrichScheduledWithTechStatus(tracker, service, customer) {
     const lat = finiteNumber(ts.lat);
     const lng = finiteNumber(ts.lng);
     let eta = null;
+    const lastReportedAt = ts.updated_at;
+    if (!isFreshTechStatusTimestamp(lastReportedAt)) return tracker;
+
     if (tracker.customerLocation) {
       const BouncieService = require('../services/bouncie');
       const etaData = await calculateBoundedTrackingEta({
@@ -238,10 +246,6 @@ async function enrichScheduledWithTechStatus(tracker, service, customer) {
         tracker.etaSource = etaData.source ?? null;
       }
     }
-    const lastReportedAt = ts.updated_at;
-    const stale = lastReportedAt
-      ? (Date.now() - new Date(lastReportedAt).getTime()) > STALE_VEHICLE_MS
-      : true;
     tracker.techPosition = {
       lat,
       lng,
@@ -249,7 +253,7 @@ async function enrichScheduledWithTechStatus(tracker, service, customer) {
       isRunning: null,
       updatedAt: lastReportedAt,
       lastReportedAt,
-      stale,
+      stale: false,
       eta,
     };
   } catch {
@@ -345,6 +349,7 @@ router.post('/demo/advance', async (req, res, next) => {
 router._test = {
   buildCanonicalScheduledServiceQuery,
   canonicalQueryOptions,
+  isFreshTechStatusTimestamp,
 };
 
 module.exports = router;

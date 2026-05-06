@@ -5,6 +5,14 @@ describe('canonical customer tracker query', () => {
   const build = trackingRouter._test.buildCanonicalScheduledServiceQuery;
   const canonicalOptions = trackingRouter._test.canonicalQueryOptions;
 
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-05-05T12:00:00.000Z'));
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
   test('/active scope excludes future scheduled trackers', () => {
     const { sql, bindings } = build(db, 'cust-1', {
       activeOnly: true,
@@ -82,5 +90,12 @@ describe('canonical customer tracker query', () => {
 
   test('authenticated tracking exposes no service_tracking fallback query', () => {
     expect(trackingRouter._test.buildLegacyTrackerQuery).toBeUndefined();
+  });
+
+  test('authenticated tracking only exposes fresh tech_status coordinates', () => {
+    expect(trackingRouter._test.isFreshTechStatusTimestamp('2026-05-05T11:55:00.000Z')).toBe(true);
+    expect(trackingRouter._test.isFreshTechStatusTimestamp('2026-05-05T11:54:59.999Z')).toBe(false);
+    expect(trackingRouter._test.isFreshTechStatusTimestamp(null)).toBe(false);
+    expect(trackingRouter._test.isFreshTechStatusTimestamp('not-a-date')).toBe(false);
   });
 });

@@ -125,7 +125,10 @@ describe('Bouncie tracking webhook trip-metrics processing', () => {
     });
 
     expect(mileageService.processTripWebhook).not.toHaveBeenCalled();
-    expect(logUpdate.update).toHaveBeenCalledWith({ error: 'unknown IMEI missing-imei' });
+    expect(logUpdate.update).toHaveBeenCalledWith({
+      processed: true,
+      error: 'unknown IMEI missing-imei',
+    });
   });
 
   test('normalizes metric payloads from nested data objects', () => {
