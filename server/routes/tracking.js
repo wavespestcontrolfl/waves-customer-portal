@@ -122,16 +122,23 @@ function stepForTrackState(state) {
   }[state] || 1;
 }
 
+function isTrackTokenLive(expiresAt) {
+  if (!expiresAt) return true;
+  const expiresMs = new Date(expiresAt).getTime();
+  return Number.isFinite(expiresMs) && expiresMs >= Date.now();
+}
+
 function formatScheduledTracker(service, tech, customer) {
   const currentStep = stepForTrackState(service?.track_state);
   const custLat = parseFiniteCoordinate(customer?.latitude);
   const custLng = parseFiniteCoordinate(customer?.longitude);
   const serviceSummary = service.service_customer_visible === false ? null : service.service_description || null;
+  const trackTokenLive = !!service.track_view_token && isTrackTokenLive(service.track_token_expires_at);
   return {
     id: service.id,
     state: service.track_state || 'scheduled',
-    trackToken: service.track_view_token || null,
-    trackUrl: service.track_view_token ? `/track/${service.track_view_token}` : null,
+    trackToken: trackTokenLive ? service.track_view_token : null,
+    trackUrl: trackTokenLive ? `/track/${service.track_view_token}` : null,
     enRouteAt: service.en_route_at || null,
     arrivedAt: service.arrived_at || null,
     completedAt: service.completed_at || null,
@@ -182,6 +189,7 @@ function buildCanonicalScheduledServiceQuery(knex, customerId, opts = {}) {
   const activeOnly = !!opts.activeOnly;
   const nowIso = opts.nowIso || new Date().toISOString();
   const today = opts.today || etDateString();
+  const requireUnexpiredToken = opts.requireUnexpiredToken !== false;
   const q = knex('scheduled_services')
     .leftJoin('services as sv', 'scheduled_services.service_id', 'sv.id')
     .select(
@@ -190,8 +198,11 @@ function buildCanonicalScheduledServiceQuery(knex, customerId, opts = {}) {
       'sv.customer_visible as service_customer_visible'
     )
     .where({ 'scheduled_services.customer_id': customerId })
-    .whereNotNull('scheduled_services.track_view_token')
-    .where('scheduled_services.track_token_expires_at', '>=', nowIso);
+    .whereNotNull('scheduled_services.track_view_token');
+
+  if (requireUnexpiredToken) {
+    q.where('scheduled_services.track_token_expires_at', '>=', nowIso);
+  }
 
   if (activeOnly) {
     q.where(function () {
@@ -225,9 +236,55 @@ function buildCanonicalScheduledServiceQuery(knex, customerId, opts = {}) {
     .orderBy('scheduled_services.window_start', 'asc');
 }
 
+function canonicalQueryOptions(opts = {}) {
+  const queryOpts = {
+    ...opts,
+    today: opts.today || etDateString(),
+  };
+  if (queryOpts.requireUnexpiredToken === undefined) {
+    queryOpts.requireUnexpiredToken = !queryOpts.todayOnly;
+  }
+  return queryOpts;
+}
+
 async function findCanonicalScheduledService(customerId, opts = {}) {
-  const today = etDateString();
-  return buildCanonicalScheduledServiceQuery(db, customerId, { ...opts, today }).first();
+  return buildCanonicalScheduledServiceQuery(db, customerId, canonicalQueryOptions(opts)).first();
+}
+
+function buildLegacyTrackerQuery(knex, customerId, opts = {}) {
+  const fourHoursAgo = opts.fourHoursAgo || new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
+  const today = opts.today || etDateString();
+  const q = knex('service_tracking')
+    .leftJoin('scheduled_services as s', 'service_tracking.scheduled_service_id', 's.id')
+    .where({ 'service_tracking.customer_id': customerId })
+    // Modern tracked services are served from scheduled_services.track_state.
+    // Only keep this fallback for historical tracker rows linked to services
+    // that never received a track token.
+    .whereNull('s.track_view_token');
+
+  if (opts.todayOnly) {
+    q.where('s.scheduled_date', today)
+      .where('service_tracking.current_step', '<=', 7);
+  } else {
+    q.where(function () {
+      this.where('service_tracking.current_step', '<', 7)
+        .orWhere('service_tracking.step_7_at', '>=', fourHoursAgo);
+    });
+  }
+
+  return q
+    .orderBy('service_tracking.created_at', 'desc')
+    .first('service_tracking.*');
+}
+
+async function formatLegacyTracker(row, customer) {
+  if (!row) return null;
+  const service = await db('scheduled_services').where({ id: row.scheduled_service_id }).first();
+  const tech = row.technician_id ? await db('technicians').where({ id: row.technician_id }).first() : null;
+  const formatted = formatTracker(row, service, tech, customer);
+  await attachTechPhoto(formatted, tech);
+  await enrichWithLiveMap(formatted, service, tech, customer);
+  return formatted;
 }
 
 // When the tracker is in the EN ROUTE step, enrich the response with
@@ -383,31 +440,13 @@ router.get('/active', async (req, res, next) => {
       return res.json({ tracker: formatted });
     }
 
-    const fourHoursAgo = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
-
-    const tracker = await db('service_tracking')
-      .where({ 'service_tracking.customer_id': req.customerId })
-      .where(function () {
-        this.where('current_step', '<', 7)
-          .orWhere('step_7_at', '>=', fourHoursAgo);
-      })
-      .orderBy('created_at', 'desc')
-      .first();
-
-    if (!tracker) return res.json({ tracker: null });
-
-    const service = await db('scheduled_services').where({ id: tracker.scheduled_service_id }).first();
-    const tech = tracker.technician_id ? await db('technicians').where({ id: tracker.technician_id }).first() : null;
-
-    const formatted = formatTracker(tracker, service, tech, req.customer);
-    await attachTechPhoto(formatted, tech);
-    await enrichWithLiveMap(formatted, service, tech, req.customer);
-    res.json({ tracker: formatted });
+    const legacy = await buildLegacyTrackerQuery(db, req.customerId);
+    return res.json({ tracker: await formatLegacyTracker(legacy, req.customer) });
   } catch (err) { next(err); }
 });
 
 // =========================================================================
-// GET /api/tracking/today — auto-create tracker for today's service
+// GET /api/tracking/today — today's canonical tracker
 // =========================================================================
 router.get('/today', async (req, res, next) => {
   try {
@@ -422,46 +461,8 @@ router.get('/today', async (req, res, next) => {
       return res.json({ tracker: formatted });
     }
 
-    // Check for existing tracker
-    let tracker = await db('service_tracking')
-      .where({ 'service_tracking.customer_id': req.customerId })
-      .where('current_step', '<=', 7)
-      .orderBy('created_at', 'desc')
-      .first();
-
-    if (tracker) {
-      const service = await db('scheduled_services').where({ id: tracker.scheduled_service_id }).first();
-      const tech = tracker.technician_id ? await db('technicians').where({ id: tracker.technician_id }).first() : null;
-      const formatted = formatTracker(tracker, service, tech, req.customer);
-      await attachTechPhoto(formatted, tech);
-      await enrichWithLiveMap(formatted, service, tech, req.customer);
-      return res.json({ tracker: formatted });
-    }
-
-    // Find today's scheduled service
-    const scheduled = await db('scheduled_services')
-      .where({ customer_id: req.customerId })
-      .where('scheduled_date', today)
-      .whereNotIn('status', ['cancelled', 'completed'])
-      .first();
-
-    if (!scheduled) return res.json({ tracker: null });
-
-    // Auto-create tracker
-    const [newTracker] = await db('service_tracking').insert({
-      scheduled_service_id: scheduled.id,
-      customer_id: req.customerId,
-      technician_id: scheduled.technician_id,
-      current_step: 1,
-      step_1_at: db.fn.now(),
-    }).returning('*');
-
-    const tech = scheduled.technician_id ? await db('technicians').where({ id: scheduled.technician_id }).first() : null;
-
-    const formatted = formatTracker(newTracker, scheduled, tech, req.customer);
-    await attachTechPhoto(formatted, tech);
-    await enrichWithLiveMap(formatted, scheduled, tech, req.customer);
-    res.json({ tracker: formatted });
+    const legacy = await buildLegacyTrackerQuery(db, req.customerId, { todayOnly: true, today });
+    return res.json({ tracker: await formatLegacyTracker(legacy, req.customer) });
   } catch (err) { next(err); }
 });
 
@@ -663,6 +664,8 @@ router.post('/demo/advance', async (req, res, next) => {
 
 router._test = {
   buildCanonicalScheduledServiceQuery,
+  buildLegacyTrackerQuery,
+  canonicalQueryOptions,
 };
 
 module.exports = router;
