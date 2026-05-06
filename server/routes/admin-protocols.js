@@ -10,6 +10,7 @@ const {
   parseProtocolLines,
   isConditionalSelected,
 } = require('../services/waveguard-plan-engine');
+const { matchServiceProtocol } = require('../services/protocol-matcher');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -158,6 +159,26 @@ router.get('/equipment', async (req, res, next) => {
     res.json({ checklists: checklists.map(c => ({
       ...c, checklist_items: typeof c.checklist_items === 'string' ? JSON.parse(c.checklist_items) : c.checklist_items,
     }))});
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/protocols/match — best service template plus full program fallback.
+router.get('/match', async (req, res, next) => {
+  try {
+    const protocols = require('../config/protocols.json');
+    const serviceType = req.query.serviceType || req.query.service_type || '';
+    const result = matchServiceProtocol(protocols, serviceType);
+
+    if (!result.program) return res.status(404).json({ error: 'Protocol program not found' });
+
+    res.json({
+      serviceType,
+      programKey: result.programKey,
+      program: result.program,
+      matchedVisit: result.matchedVisit,
+      matched: result.matched,
+      reason: result.reason,
+    });
   } catch (err) { next(err); }
 });
 
