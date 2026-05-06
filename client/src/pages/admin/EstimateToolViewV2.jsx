@@ -130,6 +130,15 @@ function validateDeliveryOptions(form, estimate) {
   return null;
 }
 
+function formatDatetimeLocal(date) {
+  const pad = (value) => String(value).padStart(2, '0');
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+  ].join('-') + `T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 function InputV2({ k, type = 'text', placeholder, min, max, className }) {
   const { form, set } = useContext(FormCtx);
   return (
@@ -1569,7 +1578,7 @@ export default function EstimateToolViewV2({
                         const tomorrow = new Date();
                         tomorrow.setDate(tomorrow.getDate() + 1);
                         tomorrow.setHours(8, 0, 0, 0);
-                        set('scheduledAt', tomorrow.toISOString().slice(0, 16));
+                        set('scheduledAt', formatDatetimeLocal(tomorrow));
                       }}
                       className="underline font-medium u-focus-ring"
                     >
