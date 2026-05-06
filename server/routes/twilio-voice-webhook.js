@@ -5,6 +5,13 @@ const logger = require('../services/logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const twilio = require('twilio');
 const VoiceResponse = twilio.twiml.VoiceResponse;
+const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
+
+function notifyTwilioFailure(payload) {
+  void alertTwilioFailure(payload).catch((err) => {
+    logger.error(`[twilio-alerts] async notification failed: ${err.message}`);
+  });
+}
 
 // Phone normalization consolidated to server/utils/phone.js (PR1 of
 // call-triage work — see docs/call-triage-discovery.md §9). The unified
@@ -156,6 +163,17 @@ router.post('/voice', async (req, res) => {
     res.type('text/xml').send(twiml);
   } catch (err) {
     logger.error(`Voice webhook error: ${err.message}`);
+    notifyTwilioFailure({
+      channel: 'voice',
+      direction: 'inbound',
+      phase: 'webhook',
+      status: 'failed',
+      sid: req.body?.CallSid,
+      errorMessage: err.message,
+      from: req.body?.From,
+      to: req.body?.To,
+      link: '/admin/communications',
+    });
     res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say>We're sorry, please try again.</Say></Response>`);
   }
 });
@@ -181,6 +199,19 @@ router.post('/call-complete', async (req, res) => {
       answered_by: answeredBy,
       updated_at: new Date(),
     });
+
+    if (isFailureStatus(status)) {
+      notifyTwilioFailure({
+        channel: 'voice',
+        direction: 'inbound',
+        phase: 'dial',
+        status,
+        sid: CallSid,
+        from: req.body?.From,
+        to: req.body?.To,
+        link: '/admin/communications',
+      });
+    }
 
     logger.info(`Call complete: ${CallSid} status=${status} duration=${duration}s`);
 
@@ -209,6 +240,17 @@ router.post('/call-complete', async (req, res) => {
     res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
   } catch (err) {
     logger.error(`Call complete webhook error: ${err.message}`);
+    notifyTwilioFailure({
+      channel: 'voice',
+      direction: 'inbound',
+      phase: 'call_complete_webhook',
+      status: 'failed',
+      sid: req.body?.CallSid,
+      errorMessage: err.message,
+      from: req.body?.From,
+      to: req.body?.To,
+      link: '/admin/communications',
+    });
     res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
   }
 });
@@ -519,6 +561,17 @@ router.post('/outbound-connect', async (req, res) => {
     res.type('text/xml').send(twiml.toString());
   } catch (err) {
     logger.error(`Outbound connect error: ${err.message}`);
+    notifyTwilioFailure({
+      channel: 'voice',
+      direction: 'outbound',
+      phase: 'outbound_connect_webhook',
+      status: 'failed',
+      sid: req.body?.CallSid,
+      errorMessage: err.message,
+      from: req.body?.From,
+      to: req.body?.To,
+      link: '/admin/communications',
+    });
     res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Sorry, unable to connect.</Say></Response>');
   }
 });
@@ -534,7 +587,7 @@ router.post('/outbound-connect', async (req, res) => {
 // =========================================================================
 router.post('/call-status', async (req, res) => {
   try {
-    const { CallSid, CallStatus, CallDuration, From, To, Direction } = req.body;
+    const { CallSid, CallStatus, CallDuration, From, To, Direction, ErrorCode, ErrorMessage } = req.body;
 
     await db.transaction(async (trx) => {
       // Serialize per-CallSid so overlapping Twilio retries can't both
@@ -609,9 +662,36 @@ router.post('/call-status', async (req, res) => {
       });
     });
 
+    if (isFailureStatus(CallStatus)) {
+      const isOutbound = Direction === 'outbound-api' || Direction === 'outbound-dial';
+      notifyTwilioFailure({
+        channel: 'voice',
+        direction: isOutbound ? 'outbound' : 'inbound',
+        phase: 'status',
+        status: CallStatus,
+        sid: CallSid,
+        errorCode: ErrorCode,
+        errorMessage: ErrorMessage,
+        from: From,
+        to: To,
+        link: '/admin/communications',
+      });
+    }
+
     res.sendStatus(200);
   } catch (err) {
     logger.error(`Call status webhook error: ${err.message}`);
+    notifyTwilioFailure({
+      channel: 'voice',
+      direction: 'unknown',
+      phase: 'status_webhook',
+      status: 'failed',
+      sid: req.body?.CallSid,
+      errorMessage: err.message,
+      from: req.body?.From,
+      to: req.body?.To,
+      link: '/admin/communications',
+    });
     res.sendStatus(200);
   }
 });

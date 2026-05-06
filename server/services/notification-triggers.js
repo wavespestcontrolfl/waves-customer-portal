@@ -42,6 +42,24 @@ const TRIGGER_REGISTRY = {
       link: p.threadId ? `/admin/communications?thread=${p.threadId}` : '/admin/communications',
     }),
   },
+  twilio_failure: {
+    label: 'Twilio call/SMS failure',
+    category: 'system',
+    priority: 'urgent',
+    group: 'Communication',
+    build: (p) => {
+      const channel = String(p.channel || 'message').toUpperCase();
+      const direction = p.direction ? `${p.direction} ` : '';
+      const phase = p.phase ? ` (${p.phase})` : '';
+      const status = p.status || 'failed';
+      const code = p.errorCode ? ` error ${p.errorCode}` : '';
+      return {
+        title: `Twilio ${channel} ${status}`,
+        body: `${direction}${channel}${phase}${code}: ${p.errorMessage || `from ${p.fromMasked || 'unknown'} to ${p.toMasked || 'unknown'}`} — ${p.sidMasked || 'no SID'}`,
+        link: p.link || '/admin/communications',
+      };
+    },
+  },
   payment_succeeded: {
     label: 'Payment received',
     category: 'payment',

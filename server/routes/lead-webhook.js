@@ -12,6 +12,13 @@ const { aiTriageLead } = require('../services/lead-triage');
 const { etDateString } = require('../utils/datetime-et');
 const { isEnabled } = require('../config/feature-gates');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
+
+function notifyTwilioFailure(payload) {
+  void alertTwilioFailure(payload).catch((alertErr) => {
+    logger.error(`[twilio-alerts] async notification failed: ${alertErr.message}`);
+  });
+}
 
 function capitalizeName(name) {
   if (!name) return '';
@@ -241,6 +248,7 @@ router.post('/', async (req, res) => {
     const etHour = parseInt(now.toLocaleString('en-US', { hour: 'numeric', hour12: false, timeZone: 'America/New_York' }));
     const isDuringHours = etHour >= 8 && etHour < 20;
     let callConnected = false;
+    let attemptedLeadCallFrom = null;
 
     try {
       const twilioClient = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
@@ -251,6 +259,7 @@ router.post('/', async (req, res) => {
         try {
           const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
           const fromNumber = '+19412972606';
+          attemptedLeadCallFrom = fromNumber;
           const autoBridge = isEnabled('leadAutoBridge');
 
           if (autoBridge) {
@@ -339,6 +348,16 @@ router.post('/', async (req, res) => {
           }
         } catch (callErr) {
           logger.error(`[lead-webhook] Lead alert call failed, falling back to SMS: ${callErr.message}`);
+          notifyTwilioFailure({
+            channel: 'voice',
+            direction: 'outbound',
+            phase: 'send_api',
+            status: 'failed',
+            errorMessage: callErr.message,
+            from: attemptedLeadCallFrom,
+            to: ADAM_CELL,
+            link: '/admin/leads',
+          });
           await TwilioService.sendSMS(ADAM_CELL,
             `🔔 New lead!\n${firstName} ${lastName}\n📞 ${phoneFormatted}\n📍 ${address || 'No address'}\n🌐 ${leadSource.detail || leadSource.source}\n${utmCampaign ? '📊 Campaign: ' + utmCampaign : ''}`,
             { messageType: 'internal_alert' }
