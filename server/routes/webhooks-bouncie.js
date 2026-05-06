@@ -13,7 +13,7 @@
  *
  * Event model:
  *   - trip-start / trip-data / trip-end / trip-metrics / connect / disconnect
- *   - IMEI resolved to a technician row; unknown IMEI = log-warn-and-return 200.
+ *   - IMEI resolved to a technician row; unknown IMEI = log, mark processed, return 200.
  *   - Raw payload logged to bouncie_webhook_log BEFORE processing so a
  *     handler crash can't lose the event.
  *   - Responds 200 synchronously, processes via setImmediate.
@@ -217,7 +217,7 @@ async function processTrackingEvent({ logId, eventType, payload }) {
       if (logId) {
         await db('bouncie_webhook_log')
           .where('id', logId)
-          .update({ error: `unknown IMEI ${imei || '(missing)'}` })
+          .update({ processed: true, error: `unknown IMEI ${imei || '(missing)'}` })
           .catch(() => {});
       }
       return;

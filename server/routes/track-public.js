@@ -39,9 +39,8 @@ const {
   finiteNumber,
 } = require('../services/customer-tracking-eta');
 
-// If tech_status hasn't been pinged in this long, surface coords but
-// flag stale so the UI can soften the "live" framing. 5 min covers
-// brief Bouncie webhook gaps without showing a long-stale dot.
+// If tech_status hasn't been pinged in this long, hide coords so the
+// customer page shows its no-map reconnecting state instead of a stale dot.
 const STALE_VEHICLE_MS = 5 * 60 * 1000;
 
 // Polling cadence for the customer track page while tech is en-route.
@@ -96,6 +95,17 @@ function durationMinutes(windowStart, windowEnd) {
   return (eh * 60 + em) - (sh * 60 + sm);
 }
 
+function isTrackTokenLive(expiresAt) {
+  if (!expiresAt) return true;
+  const expiresMs = new Date(expiresAt).getTime();
+  return Number.isFinite(expiresMs) && expiresMs >= Date.now();
+}
+
+function isFreshVehicleTimestamp(updatedAt) {
+  const updatedMs = new Date(updatedAt).getTime();
+  return Number.isFinite(updatedMs) && (Date.now() - updatedMs) <= STALE_VEHICLE_MS;
+}
+
 async function buildVehicle(service) {
   // Phase 2: live tech location + ETA from tech_status. Returns null
   // if either the tech's last GPS ping is missing or the property
@@ -119,9 +129,7 @@ async function buildVehicle(service) {
   const lat = finiteNumber(ts.lat);
   const lng = finiteNumber(ts.lng);
   const lastReportedAt = ts.updated_at;
-  const stale = lastReportedAt
-    ? (Date.now() - new Date(lastReportedAt).getTime()) > STALE_VEHICLE_MS
-    : true;
+  if (!isFreshVehicleTimestamp(lastReportedAt)) return null;
 
   const eta = await calculateBoundedTrackingEta({
     techLat: lat,
@@ -136,7 +144,7 @@ async function buildVehicle(service) {
     lat,
     lng,
     lastReportedAt,
-    stale,
+    stale: false,
     etaMinutes: eta?.minutes ?? null,
     etaSource: eta?.source ?? null,
   };
@@ -256,7 +264,7 @@ router.get('/:token', async (req, res, next) => {
       );
 
     if (!row) return res.status(404).json({ error: 'Not found' });
-    if (row.track_token_expires_at && new Date(row.track_token_expires_at) < new Date()) {
+    if (!isTrackTokenLive(row.track_token_expires_at)) {
       return res.status(404).json({ error: 'Not found' });
     }
 
@@ -317,5 +325,10 @@ router.get('/:token', async (req, res, next) => {
     next(err);
   }
 });
+
+router._test = {
+  isTrackTokenLive,
+  isFreshVehicleTimestamp,
+};
 
 module.exports = router;
