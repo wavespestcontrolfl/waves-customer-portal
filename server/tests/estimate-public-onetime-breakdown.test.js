@@ -2,6 +2,7 @@ const {
   buildPricingBundle,
   isStructuralOneTimeOnlyEstimate,
   normalizeOneTimeBreakdown,
+  resolveAcceptOneTimeTotal,
 } = require('../routes/estimate-public');
 
 function savedAdminEstimateData() {
@@ -343,5 +344,24 @@ describe('public estimate one-time breakdown', () => {
     };
 
     expect(isStructuralOneTimeOnlyEstimate(specialtyOnly, { monthly_total: 0, annual_total: 0 })).toBe(true);
+  });
+
+  test('acceptance one-time total prefers live pricing over stale stored totals', () => {
+    expect(resolveAcceptOneTimeTotal(
+      { onetime_total: 0 },
+      { anchorOneTimePrice: 249, oneTimeBreakdown: { total: 249 } },
+    )).toBe(249);
+  });
+
+  test('acceptance one-time total falls back to breakdown and stored amount', () => {
+    expect(resolveAcceptOneTimeTotal(
+      { onetime_total: 199 },
+      { anchorOneTimePrice: null, oneTimeBreakdown: { total: 275 } },
+    )).toBe(275);
+
+    expect(resolveAcceptOneTimeTotal(
+      { onetime_total: 199 },
+      { anchorOneTimePrice: null, oneTimeBreakdown: { total: 0 } },
+    )).toBe(199);
   });
 });
