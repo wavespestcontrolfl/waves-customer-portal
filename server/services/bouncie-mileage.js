@@ -41,6 +41,10 @@ function getIrsRate(year) {
   return rates[year] || rates[2026];
 }
 
+function tripDateForBouncieStart(startTime) {
+  return startTime ? etDateString(new Date(startTime)) : etDateString();
+}
+
 // ─── Trip-to-Job Matching ────────────────────────────────────────
 
 /**
@@ -185,9 +189,7 @@ async function processTripWebhook(event) {
     const durationSeconds = trip.duration || 0;
     const durationMinutes = Math.round(durationSeconds / 60);
 
-    const tripDate = trip.startTime
-      ? new Date(trip.startTime).toISOString().split('T')[0]
-      : etDateString();
+    const tripDate = tripDateForBouncieStart(trip.startTime);
 
     const tripId = trip.transactionId || trip.id || `${imei}-${trip.startTime || Date.now()}`;
 
@@ -694,6 +696,7 @@ async function exportIrsCsv(year) {
 module.exports = {
   haversineMeters,
   getIrsRate,
+  tripDateForBouncieStart,
   matchTripToJob,
   classifyTrip,
   processTripWebhook,
