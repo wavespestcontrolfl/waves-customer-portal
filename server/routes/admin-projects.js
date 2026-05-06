@@ -353,7 +353,7 @@ Standalone (not tied to a real-estate transaction). Same care as WDO. Can lean m
 General survey. Identify pests, severity, likely conducive conditions. Recommendations should connect to a treatment plan without becoming a sales pitch.
 
 ### Rodent Exclusion
-Blend of inspection + work performed in one visit. Cover: species identified, entry points found, exclusion work completed today, work pending, trap count and placement, follow-up schedule for trap checks.
+Blend of inspection + work performed in one visit. Cover: species identified, entry points found, exclusion work completed during the documented visit, work pending, trap count and placement, follow-up schedule for trap checks. Do not use date-relative words like "today" unless that exact word appears in the technician's notes.
 
 ### Bed Bug Treatment
 Sensitive topic — no stigma, no judgment. Address: rooms treated, treatment method (chemical, heat, steam, combo), customer prep instructions, and the 14-day follow-up visit if applicable. Keep language matter-of-fact.
