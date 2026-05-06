@@ -1,7 +1,7 @@
 /**
- * Sole writer for tech_status. Wraps the upsert in a Knex transaction
- * and emits dispatch:tech_status to the dispatch:admins room *after*
- * the transaction commits — never before, never inside.
+ * Canonical writer for tech_status. These helpers wrap tech_status
+ * mutations and emit dispatch:tech_status to the dispatch:admins room
+ * *after* the database write commits — never before, never inside.
  *
  * Why this matters:
  *   If the emit fired inside the transaction (or before commit) and
@@ -10,16 +10,18 @@
  *   in the DB. Admins would see a phantom status; the dispatch
  *   board's left-pane roster would drift from the source of truth.
  *
- * Pattern:
- *   1. await db.transaction(async (trx) => { upsert via trx, return row })
+ * Transactional pattern:
+ *   1. await db.transaction(async (trx) => { mutate via trx, return row })
  *   2. trx auto-commits when the callback resolves
  *   3. THEN emit the freshly-committed row
- *   If the upsert throws inside the trx callback, Knex rolls back and
+ *   If the mutation throws inside the trx callback, Knex rolls back and
  *   re-throws. The emit line never runs. Caller gets the error.
  *
- * Single emit point — no other code path writes to tech_status.
- * Bouncie webhook integration in a follow-up PR will call this
- * function; do not modify the Bouncie webhook in this PR.
+ * Write boundary:
+ *   No route should write tech_status directly. Bouncie webhooks call
+ *   pingTechLocation(), service lifecycle transitions call
+ *   setTechJobStatus() / clearTechCurrentJob(), and dev-only status
+ *   tools call upsertTechStatus().
  *
  * Future siblings (job_status_history insert, GPS history append,
  * etc.) belong inside this same trx callback so commit ordering
