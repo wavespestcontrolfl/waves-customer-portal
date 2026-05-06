@@ -33,6 +33,18 @@ async function renderTemplate(templateKey, vars, fallback) {
   return fallback;
 }
 
+async function renderRequiredTemplate(templateKey, vars) {
+  try {
+    if (typeof smsTemplatesRouter.getTemplate === 'function') {
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
+      if (body) return body;
+    }
+  } catch (err) {
+    throw new Error(`SMS template ${templateKey} could not be rendered: ${err.message}`);
+  }
+  throw new Error(`SMS template ${templateKey} is missing or inactive`);
+}
+
 // Date formatting helpers live in utils/datetime-et.js — re-aliased here to
 // keep the existing call sites below unchanged.
 const formatDay = formatETDay;
@@ -534,15 +546,15 @@ const AppointmentReminders = {
         const serviceLabel = smsServiceLabelStored(record.service_type);
         await safeSendAppointment(customer, prefs || {}, async (contact) => {
           const firstName = contact.name || customer?.first_name || 'there';
-          return renderTemplate(
-            'appointment_rescheduled',
-            { first_name: firstName, service_type: serviceLabel, day, date, time },
-            `Hello ${firstName}! Your ${serviceLabel} with Waves has been rescheduled to ${day}, ${date} at ${time}.\n\n` +
-              `Need to change it again? Log into your Waves Customer Portal at portal.wavespestcontrol.com.\n\n` +
-              `Questions or requests? Reply to this message.`,
-          );
+          return renderRequiredTemplate('appointment_rescheduled', {
+            first_name: firstName,
+            service_type: serviceLabel,
+            day,
+            date,
+            time,
+          });
         }, 'appointment_rescheduled', 'appointment_confirmation');
-        logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id} - ${record.service_type} -> ${day} ${date}`);
+        logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);
       }
 
       return record;
@@ -587,14 +599,14 @@ const AppointmentReminders = {
         const serviceLabel = smsServiceLabelStored(record.service_type);
         await safeSendAppointment(customer, prefs || {}, async (contact) => {
           const firstName = contact.name || customer?.first_name || 'there';
-          return renderTemplate(
-            'appointment_cancelled',
-            { first_name: firstName, service_type: serviceLabel, day, date },
-            `Hello ${firstName}! Your ${serviceLabel} with Waves scheduled for ${day}, ${date} has been cancelled.\n\n` +
-              `Want to reschedule? Reply to this message and we'll get you back on the calendar.`,
-          );
+          return renderRequiredTemplate('appointment_cancelled', {
+            first_name: firstName,
+            service_type: serviceLabel,
+            day,
+            date,
+          });
         }, 'appointment_cancelled', 'appointment_cancellation');
-        logger.info(`[appt-remind] Cancellation notice sent for customer ${record.customer_id} - ${record.service_type}`);
+        logger.info(`[appt-remind] Cancellation notice sent for customer ${record.customer_id}`);
       }
 
       return record;

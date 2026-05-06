@@ -52,6 +52,18 @@ async function renderTemplate(templateKey, vars, fallback) {
   return fallback;
 }
 
+async function renderRequiredTemplate(templateKey, vars) {
+  try {
+    if (typeof smsTemplatesRouter.getTemplate === 'function') {
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
+      if (body) return body;
+    }
+  } catch (err) {
+    throw new Error(`SMS template ${templateKey} could not be rendered: ${err.message}`);
+  }
+  throw new Error(`SMS template ${templateKey} is missing or inactive`);
+}
+
 // Templates say "Your {service_type} service report is ready", but
 // many service_type values already end in "Service" / "Services"
 // (e.g. "One-Time Pest Control Service") which would duplicate the
@@ -1929,13 +1941,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       } else {
         try {
           const vars = formatRescheduleTemplateVars(svc);
-          const body = await renderTemplate(
-            'appointment_rescheduled',
-            vars,
-            `Hello ${vars.first_name}! Your ${vars.service_type} with Waves has been rescheduled to ${vars.day}, ${vars.date} at ${vars.time}.\n\n` +
-              'Need to change it again? Log into your Waves Customer Portal at portal.wavespestcontrol.com.\n\n' +
-              'Questions or requests? Reply to this message.',
-          );
+          const body = await renderRequiredTemplate('appointment_rescheduled', vars);
           const msg = await sendCustomerMessage({
             to: svc.phone,
             body,
