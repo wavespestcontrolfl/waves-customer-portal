@@ -56,23 +56,31 @@ function firstPositiveNumber(...values) {
 function resolveLineItemDiscount(row, item, parentAmount) {
   let amount = Number(row.amount) || 0;
   let dollars = 0;
+  const itemDollars = Math.abs(Number(item.amount) || 0);
+  const isCustomPercentage = row.discount_type === 'variable_percentage'
+    || (row.discount_type === 'percentage' && (row.discount_key === 'custom_percent' || !(amount > 0)));
+  const isCustomAmount = row.discount_type === 'variable_amount'
+    || (row.discount_type === 'fixed_amount' && (row.discount_key === 'custom_dollar' || !(amount > 0)));
 
-  if (row.discount_type === 'percentage') {
+  if (isCustomPercentage) {
+    amount = firstPositiveNumber(
+      item.custom_discount_percentage,
+      item.discount_percentage,
+      row.amount
+    );
     dollars = roundMoney(parentAmount * (amount / 100));
     if (row.max_discount_dollars) dollars = Math.min(dollars, Number(row.max_discount_dollars));
-  } else if (row.discount_type === 'variable_percentage') {
-    amount = firstPositiveNumber(item.custom_discount_percentage, item.discount_percentage, row.amount);
+  } else if (row.discount_type === 'percentage') {
     dollars = roundMoney(parentAmount * (amount / 100));
     if (row.max_discount_dollars) dollars = Math.min(dollars, Number(row.max_discount_dollars));
-  } else if (row.discount_type === 'fixed_amount') {
-    dollars = amount;
-  } else if (row.discount_type === 'variable_amount') {
+  } else if (isCustomAmount) {
     amount = firstPositiveNumber(
       item.custom_discount_amount,
       item.discount_amount,
-      Math.abs(Number(item.amount) || 0),
       row.amount
     );
+    dollars = amount;
+  } else if (row.discount_type === 'fixed_amount') {
     dollars = amount;
   } else if (row.discount_type === 'free_service') {
     amount = parentAmount;
