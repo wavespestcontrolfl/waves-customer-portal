@@ -633,7 +633,7 @@ If no contradictions, return: { "contradictions": [] }`
       for (const tech of techs) {
         // Lawn services assigned/completed that day. scheduled_services
         // standardised on technician_id; assigned_tech_id is a column
-        // on dispatch_jobs, not here. The prior `or assigned_tech_id`
+        // on the retired dispatch AI shadow tables, not here. The prior `or assigned_tech_id`
         // branch silently 500s the whole query.
         const lawnServices = await db('scheduled_services')
           .where('scheduled_date', trackingDate)

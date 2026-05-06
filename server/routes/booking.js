@@ -688,7 +688,7 @@ router.post('/confirm', async (req, res, next) => {
       zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
     }).returning('*');
 
-    // Dispatch-v2 reads scheduled_services directly; no legacy dispatch_jobs sync.
+    // Dispatch-v2 reads scheduled_services directly; no legacy dispatch sync.
 
     // SMS notifications (best-effort)
     try {
