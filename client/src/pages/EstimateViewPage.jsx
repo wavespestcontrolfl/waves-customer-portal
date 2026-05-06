@@ -291,6 +291,7 @@ function SuccessCard({ acceptResult }) {
   const nextStep = acceptResult?.nextStep || (acceptResult?.invoiceMode ? 'pay_invoice' : 'confirmed');
   const onboardingToken = acceptResult?.onboardingToken || null;
   const bookingUrl = acceptResult?.bookingUrl || null;
+  const invoiceLinkDelivered = !!acceptResult?.invoiceLinkDelivered;
 
   if (nextStep === 'pay_invoice') {
     return (
@@ -300,11 +301,12 @@ function SuccessCard({ acceptResult }) {
         marginBottom: 16,
       }}>
         <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
-          Thanks — your invoice is on the way.
+          {invoiceLinkDelivered ? 'Thanks — your invoice is on the way.' : 'Thanks — your estimate is approved.'}
         </div>
       <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
-        Check your phone and email for the pay link. Your service request
-        has been received and our team will confirm the schedule.
+        {invoiceLinkDelivered
+          ? 'Use the invoice pay link we sent to complete payment. Your service request has been received and our team will confirm the schedule.'
+          : 'Our team will follow up with the invoice details. Your service request has been received and our team will confirm the schedule.'}
       </div>
     </div>
     );

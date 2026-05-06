@@ -1849,6 +1849,7 @@ router.put('/:token/accept', async (req, res, next) => {
     res.json(buildAcceptSuccessPayload({
       onboardingToken,
       invoiceMode,
+      invoiceLinkDelivered,
       invoiceId,
       invoiceAmount,
       bookingUrl,
@@ -2550,6 +2551,7 @@ function resolveAcceptOneTimeTotal(estimate = {}, pricingBundle = null) {
 function buildAcceptSuccessPayload({
   onboardingToken = null,
   invoiceMode = false,
+  invoiceLinkDelivered = false,
   invoiceId = null,
   invoiceAmount = null,
   bookingUrl = null,
@@ -2568,6 +2570,7 @@ function buildAcceptSuccessPayload({
     reservationCommitted,
     onboardingToken,
     invoiceMode,
+    invoiceLinkDelivered,
     invoiceId,
     invoiceAmount,
     bookingUrl,
