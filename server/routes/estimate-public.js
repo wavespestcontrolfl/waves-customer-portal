@@ -790,7 +790,7 @@ ${shellTopBar()}
     <div id="slot-area" class="booking-state">Loading available times...</div>
     <div id="pay-pref-area" style="display:none">
       <h3 style="margin:20px 0 4px">How would you like to pay?</h3>
-      <p class="card-sub" style="margin:0">Both options reserve your slot. You will not be charged until you confirm on the next screen.</p>
+      <p class="card-sub" style="margin:0">Both options reserve your slot. You will not be charged today.</p>
       <div class="pay-pref-grid">
         <button type="button" class="pay-pref-btn primary" data-pay-pref="deposit_now"><span class="pay-pref-title">Save a card to lock my slot</span><span class="pay-pref-sub">Add a card on file now so your slot is reserved. We charge on the visit day, not today.</span></button>
         <button type="button" class="pay-pref-btn" data-pay-pref="pay_at_visit"><span class="pay-pref-title">Pay at the visit</span><span class="pay-pref-sub">We will collect payment with the tech on-site. No card needed now.</span></button>
