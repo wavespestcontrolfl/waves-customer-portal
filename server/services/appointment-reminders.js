@@ -111,6 +111,22 @@ async function buildServiceLabel(scheduledServiceId, parentName) {
   }
 }
 
+function mergeServiceLabels(existingLabel, nextLabel) {
+  const existing = smsServiceLabelStored(existingLabel);
+  const next = smsServiceLabelStored(nextLabel);
+  if (!existing || existing === 'service') return next || 'service';
+  if (!next || next === 'service') return existing;
+
+  const existingLower = existing.toLowerCase();
+  const nextLower = next.toLowerCase();
+  if (existingLower.includes(nextLower)) return existing;
+  if (nextLower.includes(existingLower)) return next;
+
+  return /(?:\s&\s|,\s)/.test(existing)
+    ? `${existing}, and ${next}`
+    : `${existing} & ${next}`;
+}
+
 // ── Landline detection ──
 
 async function isLandline(customerId, phone) {
@@ -256,43 +272,114 @@ const AppointmentReminders = {
    */
   async registerAppointment(scheduledServiceId, customerId, appointmentTime, serviceType, source, options = {}) {
     try {
-      // Check if already registered
-      const existing = await db('appointment_reminders')
-        .where({ scheduled_service_id: scheduledServiceId })
-        .first();
-
-      if (existing) {
-        logger.info(`[appt-remind] Already registered: ${scheduledServiceId}`);
-        return existing;
-      }
-
       const apptTime = parseETDateTime(appointmentTime);
       if (isNaN(apptTime.getTime())) {
         logger.error(`[appt-remind] Invalid appointment time: ${appointmentTime}`);
         return null;
       }
 
-      const sendConfirmation = typeof options.sendConfirmation === 'boolean'
-        ? options.sendConfirmation
-        : (source === 'booking_new' || source === 'admin_manual');
-
       // Resolve once and persist — cron, reschedule, and cancel all read this
       // column back, so multi-service formatting inherits without extra work.
       const serviceLabel = await buildServiceLabel(scheduledServiceId, serviceType);
 
-      const [record] = await db('appointment_reminders').insert({
-        scheduled_service_id: scheduledServiceId,
-        customer_id: customerId,
-        appointment_time: apptTime,
-        service_type: serviceLabel,
-        source,
-        confirmation_sent: false,
-      }).returning('*');
+      const sendConfirmation = typeof options.sendConfirmation === 'boolean'
+        ? options.sendConfirmation
+        : (source === 'booking_new' || source === 'admin_manual');
+
+      const registration = await db.transaction(async (trx) => {
+        await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [
+          `appointment-reminder:${customerId}:${apptTime.toISOString()}`,
+        ]);
+
+        const existing = await trx('appointment_reminders')
+          .where({ scheduled_service_id: scheduledServiceId })
+          .first();
+
+        if (existing) {
+          return { record: existing, serviceLabel: existing.service_type, inserted: false, reason: 'already_registered' };
+        }
+
+        const sameAppointment = await trx('appointment_reminders')
+          .where({ customer_id: customerId, appointment_time: apptTime, cancelled: false })
+          .orderBy([
+            { column: 'reminder_72h_sent', order: 'asc' },
+            { column: 'reminder_24h_sent', order: 'asc' },
+            { column: 'created_at', order: 'asc' },
+          ])
+          .first();
+
+        if (sameAppointment) {
+          const mergedServiceLabel = mergeServiceLabels(sameAppointment.service_type, serviceLabel);
+          if (mergedServiceLabel !== sameAppointment.service_type) {
+            await trx('appointment_reminders')
+              .where({ id: sameAppointment.id })
+              .update({ service_type: mergedServiceLabel, updated_at: new Date() });
+          }
+
+          const now = new Date();
+          const [suppressedRecord] = await trx('appointment_reminders').insert({
+            scheduled_service_id: scheduledServiceId,
+            customer_id: customerId,
+            appointment_time: apptTime,
+            service_type: mergedServiceLabel,
+            source,
+            confirmation_sent: true,
+            confirmation_sent_at: now,
+            reminder_72h_sent: true,
+            reminder_72h_sent_at: now,
+            reminder_24h_sent: true,
+            reminder_24h_sent_at: now,
+          }).returning('*');
+
+          return {
+            record: suppressedRecord,
+            serviceLabel: mergedServiceLabel,
+            inserted: false,
+            reason: 'same_appointment',
+          };
+        }
+
+        const [record] = await trx('appointment_reminders').insert({
+          scheduled_service_id: scheduledServiceId,
+          customer_id: customerId,
+          appointment_time: apptTime,
+          service_type: serviceLabel,
+          source,
+          confirmation_sent: false,
+        }).returning('*');
+
+        return { record, serviceLabel, inserted: true };
+      });
+
+      const { record } = registration;
+      if (!registration.inserted) {
+        if (registration.reason === 'same_appointment') {
+          logger.info(
+            `[appt-remind] Same customer appointment already registered: ` +
+            `${customerId} at ${apptTime.toISOString()} (${record.scheduled_service_id}); ` +
+            `merged ${scheduledServiceId} into reminder label`,
+          );
+        } else {
+          logger.info(`[appt-remind] Already registered: ${scheduledServiceId}`);
+        }
+        return record;
+      }
 
       logger.info(`[appt-remind] Registered: ${scheduledServiceId} (source: ${source})`);
 
       // Send confirmation SMS for booking_new / admin_manual
       if (sendConfirmation) {
+        if (apptTime.getTime() <= Date.now()) {
+          await db('appointment_reminders')
+            .where({ id: record.id })
+            .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
+          logger.warn(
+            `[appt-remind] Confirmation skipped for past appointment ${scheduledServiceId} ` +
+            `at ${apptTime.toISOString()}`,
+          );
+          return record;
+        }
+
         try {
           const prefs = await getReminderPrefs(customerId);
           if (!prefs.appointmentConfirmation) {
@@ -312,8 +399,8 @@ const AppointmentReminders = {
               const firstName = contact.name || customer.first_name || 'there';
               return renderTemplate(
                 'appointment_confirmation',
-                { first_name: firstName, service_type: serviceLabel, date, time, day },
-                `Hello ${firstName}! Your ${serviceLabel} appointment has been successfully scheduled for ${date} at ${time}.\n\nPlease reply to this message if you need any assistance.`,
+                { first_name: firstName, service_type: registration.serviceLabel, date, time, day },
+                `Hello ${firstName}! Your ${registration.serviceLabel} appointment has been successfully scheduled for ${date} at ${time}.\n\nPlease reply to this message if you need any assistance.`,
               );
             }, 'confirmation', 'appointment_confirmation');
 
@@ -321,7 +408,7 @@ const AppointmentReminders = {
               await db('appointment_reminders')
                 .where({ id: record.id })
                 .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
-              logger.info(`[appt-remind] Confirmation sent for customer ${customerId} for ${serviceLabel}`);
+              logger.info(`[appt-remind] Confirmation sent for customer ${customerId} for ${registration.serviceLabel}`);
             } else {
               // Mark as sent even if landline — don't retry
               await db('appointment_reminders')
