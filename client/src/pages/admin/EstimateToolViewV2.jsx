@@ -470,6 +470,7 @@ export default function EstimateToolViewV2({
   const [lookupStatus, setLookupStatus] = useState({ type: '', msg: '' });
   const [customerSearch, setCustomerSearch] = useState('');
   const [customers, setCustomers] = useState([]);
+  const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [sending, setSending] = useState(false);
   const [showSendForm, setShowSendForm] = useState(false);
@@ -727,6 +728,8 @@ export default function EstimateToolViewV2({
   }
 
   async function doGenerate(overrides = {}) {
+    if (generating) return null;
+    setGenerating(true);
     try {
       const selectedServices = [];
       if (form.svcLawn) selectedServices.push('LAWN');
@@ -820,11 +823,11 @@ export default function EstimateToolViewV2({
       if (!profile.lotSqFt) profile.lotSqFt = 0;
       if (profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
         alert('Enter home sq ft or lot size.');
-        return;
+        return null;
       }
       if ((form.svcLawn || form.svcOnetimeLawn) && profile.lotSqFt <= 0 && !profile.estimatedTurfSf) {
         alert('Enter lot size or run Property Lookup for lawn pricing.');
-        return;
+        return null;
       }
 
       const r = await fetch('/api/admin/estimator/calculate-estimate', {
@@ -833,7 +836,7 @@ export default function EstimateToolViewV2({
       });
       if (!r.ok) throw new Error(await summarizeEstimateResponseFailure(r, 'Estimate calculation failed'));
       const result = await r.json();
-      if (result.error) { alert(result.error); setLookupStatus((s) => ({ ...s, type: 'err', msg: result.error })); return; }
+      if (result.error) { alert(result.error); setLookupStatus((s) => ({ ...s, type: 'err', msg: result.error })); return null; }
 
       if (!result.modifiers) {
         const p = result.property || profile || {};
@@ -880,8 +883,12 @@ export default function EstimateToolViewV2({
       setEstimate(result);
       setSavedId(null);
       setLookupStatus((s) => ({ ...s, type: 'ok' }));
+      return result;
     } catch (e) {
       alert('Estimate calculation failed: ' + e.message);
+      return null;
+    } finally {
+      setGenerating(false);
     }
   }
 
@@ -987,7 +994,7 @@ export default function EstimateToolViewV2({
   }
 
   async function saveAndSend(method) {
-    if (saving || sending) return;
+    if (generating || saving || sending) return;
     if (!estimate) { alert('Click "Generate Estimate" first.'); return; }
     if (form.scheduleSend) {
       if (!form.scheduledAt) { alert('Pick a send time.'); return; }
@@ -1004,7 +1011,8 @@ export default function EstimateToolViewV2({
   const E = estimate;
   const R = E?.results || {};
   const formCtx = { form, set, toggle };
-  const sendBusy = saving || sending;
+  const sendBusy = generating || saving || sending;
+  const generateBusy = generating || saving || sending;
 
   // ═══════════════════════════════════════════════════════════════
   // RENDER
@@ -1430,19 +1438,27 @@ export default function EstimateToolViewV2({
 
             {/* Action buttons */}
             <div className="grid grid-cols-2 gap-3">
-              <Button onClick={() => doGenerate()} variant="primary" size="md" className="h-12 text-14">
-                Generate Estimate
+              <Button
+                onClick={() => doGenerate()}
+                disabled={generateBusy}
+                variant="primary"
+                size="md"
+                className="h-12 text-14"
+              >
+                {generating ? 'Generating…' : 'Generate Estimate'}
               </Button>
               <Button
                 variant="secondary"
                 size="md"
                 className="h-12 text-14"
-                onClick={() => {
-                  if (!estimate) { doGenerate(); }
-                  setShowSendForm(true);
+                disabled={generateBusy}
+                onClick={async () => {
+                  if (estimate || await doGenerate()) {
+                    setShowSendForm(true);
+                  }
                 }}
               >
-                Send Estimate
+                {generating ? 'Generating…' : 'Send Estimate'}
               </Button>
             </div>
 
