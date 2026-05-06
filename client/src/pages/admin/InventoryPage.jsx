@@ -582,6 +582,7 @@ function protocolLineForService(serviceType) {
 function ProtocolsTab({ showToast }) {
   const [services, setServices] = useState([]);
   const [products, setProducts] = useState([]);
+  const [health, setHealth] = useState(null);
   const [loading, setLoading] = useState(true);
   const [serviceFilter, setServiceFilter] = useState('all');
   const [editingRow, setEditingRow] = useState(null);
@@ -592,8 +593,15 @@ function ProtocolsTab({ showToast }) {
   const [showNewService, setShowNewService] = useState(false);
 
   const load = async () => {
-    const [sData, pData] = await Promise.all([adminFetch('/admin/inventory/service-usage'), adminFetch('/admin/inventory?limit=200')]);
-    setServices(sData.services || []); setProducts(pData.products || []); setLoading(false);
+    const [sData, pData, hData] = await Promise.all([
+      adminFetch('/admin/inventory/service-usage'),
+      adminFetch('/admin/inventory?limit=200'),
+      adminFetch('/admin/inventory/protocol-health').catch(() => null),
+    ]);
+    setServices(sData.services || []);
+    setProducts(pData.products || []);
+    setHealth(hData);
+    setLoading(false);
   };
   useEffect(() => { load(); }, []);
 
@@ -621,6 +629,42 @@ function ProtocolsTab({ showToast }) {
           <div style={{ fontSize: 12, color: D.muted }}>Define which products each service uses, at what rates — drives COGS calculations</div></div>
         <button onClick={() => setShowNewService(!showNewService)} style={sBtn(D.green, D.white)}>+ New Service Type</button>
       </div>
+
+      {health?.lines?.length > 0 && (
+        <div style={{ ...sCard, padding: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: 12 }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>Protocol Health</div>
+              <div style={{ fontSize: 11, color: D.muted }}>Template coverage, linked inventory COGS rows, and missing cost warnings</div>
+            </div>
+            <button onClick={load} style={{ ...sBtn('transparent', D.muted), border: `1px solid ${D.border}`, fontSize: 11, padding: '6px 10px' }}>Refresh</button>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(155px, 1fr))', gap: 8 }}>
+            {health.lines.map((line) => {
+              const label = PROTOCOL_FILTERS.find((f) => f.key === line.serviceLine)?.label || line.serviceLine;
+              const color = line.status === 'healthy' ? D.green : line.status === 'warning' ? D.amber : D.red;
+              return (
+                <button
+                  key={line.serviceLine}
+                  onClick={() => setServiceFilter(line.serviceLine)}
+                  style={{ textAlign: 'left', background: D.input, border: `1px solid ${color}55`, borderRadius: 8, padding: 10, cursor: 'pointer' }}
+                  title={(line.warnings || []).map((w) => `${w.serviceType}: ${w.warning}`).join('\n')}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                    <div style={{ fontSize: 12, fontWeight: 800, color: D.heading }}>{label}</div>
+                    <span style={sBadge(`${color}22`, color)}>{line.status}</span>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginTop: 8 }}>
+                    <div><div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 15, color: D.heading }}>{line.templateCount}</div><div style={{ fontSize: 9, color: D.muted, textTransform: 'uppercase' }}>Templates</div></div>
+                    <div><div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 15, color: D.heading }}>{line.cogsRows}</div><div style={{ fontSize: 9, color: D.muted, textTransform: 'uppercase' }}>COGS</div></div>
+                    <div><div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 15, color }}>{line.missingCostRows}</div><div style={{ fontSize: 9, color: D.muted, textTransform: 'uppercase' }}>Missing</div></div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14 }}>
         {PROTOCOL_FILTERS.map((filter) => {
