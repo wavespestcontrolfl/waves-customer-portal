@@ -85,7 +85,6 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
   if (existing?.status === 'unsubscribed') {
     await db('newsletter_subscribers')
       .where({ id: existing.id })
-      .whereNull('customer_id')
       .update({ customer_id: customerId, updated_at: new Date() });
     logger.info(`[call-proc] Newsletter subscribe skipped for customer ${customerId}: previously unsubscribed`);
     return { skipped: true, reason: 'previously_unsubscribed' };
