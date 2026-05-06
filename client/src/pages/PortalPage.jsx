@@ -1728,12 +1728,8 @@ function DashboardTab({ customer, onSwitchTab }) {
         ))}
       </div>
 
-      {/* Tech Tracker — shows when service is today */}
-      {/* Domino's-style Service Tracker */}
+      {/* Service Tracker — shows when a canonical tracker is active */}
       <ServiceTracker />
-
-      {/* Legacy tracker — only if no new tracker active */}
-      {nextService && false && <TechTrackerCard nextService={nextService} />}
 
       {/* Next service — enhanced pre-service communication */}
       {nextService && (() => {
