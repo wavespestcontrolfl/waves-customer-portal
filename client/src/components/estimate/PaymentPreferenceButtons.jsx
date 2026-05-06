@@ -37,7 +37,7 @@ export default function PaymentPreferenceButtons({ onSelect, disabled, serviceMo
   const fineprint = offerPrepay
     ? 'Saving a card on file locks your slot — we still charge on the visit day. Pick "pay the year upfront" to settle the year now.'
     : invoiceMode
-      ? 'No card setup here. Once you accept, we send an invoice due immediately by text and email.'
+      ? 'No card setup here. Once you accept, we send an invoice pay link due immediately.'
       : isOneTime
         ? 'This books a single visit. We do not charge you now.'
       : 'Saving a card on file locks your slot. Either way, we charge on the visit day, not now.';
