@@ -1424,12 +1424,8 @@ router.put('/:token/accept', async (req, res, next) => {
 
     // Parse estimate data + detect one-time-only vs recurring (read-only — safe outside txn)
     const estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
-    const estResult = estData?.result || estData || {};
-    const recurringSvcList = estResult?.recurring?.services || [];
-    const oneTimeList = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
-    // Structural "one-time only" — the estimate was built with no
-    // recurring services, only one-time items. Older concept.
-    const isOneTimeOnly = recurringSvcList.length === 0 && oneTimeList.length > 0;
+    const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
+    const isOneTimeOnly = isStructuralOneTimeOnlyEstimate(estData, estimate);
     const pricingBundle = (requestedOneTime || selectedFrequencyKey) ? await buildPricingBundle(estimate) : null;
     const oneTimeChoicePrice = Number(pricingBundle?.anchorOneTimePrice || estimate.onetime_total || 0);
     const canChooseOneTime = !!estimate.show_one_time_option && oneTimeChoicePrice > 0;
@@ -2372,6 +2368,75 @@ function normalizeOneTimeBreakdown(estData) {
   };
 }
 
+function isStructuralOneTimeOnlyEstimate(estData, estimate = {}) {
+  const result = estData?.result && typeof estData.result === 'object'
+    ? estData.result
+    : (estData && typeof estData === 'object' ? estData : {});
+  const recurring = result.recurring && typeof result.recurring === 'object'
+    ? result.recurring
+    : {};
+  const nestedRecurring = result.results?.recurring && typeof result.results.recurring === 'object'
+    ? result.results.recurring
+    : {};
+  const recurringServices = [
+    ...(Array.isArray(recurring.services) ? recurring.services : []),
+    ...(Array.isArray(nestedRecurring.services) ? nestedRecurring.services : []),
+  ];
+  const hasRecurringAmount = [
+    recurring.serviceCount,
+    nestedRecurring.serviceCount,
+    recurring.monthlyTotal,
+    recurring.grandTotal,
+    recurring.annualAfterDiscount,
+    estimate.monthly_total,
+    estimate.annual_total,
+  ].some((value) => Number(value || 0) > 0);
+  const oneTimeBreakdown = normalizeOneTimeBreakdown(estData);
+
+  return recurringServices.length === 0
+    && !hasRecurringAmount
+    && oneTimeBreakdown.items.length > 0
+    && Number(oneTimeBreakdown.total || 0) > 0;
+}
+
+function acceptanceServiceLists(estData) {
+  const result = estData?.result && typeof estData.result === 'object'
+    ? estData.result
+    : (estData && typeof estData === 'object' ? estData : {});
+  const recurring = result.recurring && typeof result.recurring === 'object'
+    ? result.recurring
+    : {};
+  const nestedRecurring = result.results?.recurring && typeof result.results.recurring === 'object'
+    ? result.results.recurring
+    : {};
+  const oneTime = result.oneTime && typeof result.oneTime === 'object' ? result.oneTime : {};
+  const nestedOneTime = result.results?.oneTime && typeof result.results.oneTime === 'object'
+    ? result.results.oneTime
+    : {};
+  const rawOneTimeRows = [
+    ...(Array.isArray(oneTime.items) ? oneTime.items : []),
+    ...(Array.isArray(oneTime.specItems) ? oneTime.specItems : []),
+    ...(Array.isArray(nestedOneTime.items) ? nestedOneTime.items : []),
+    ...(Array.isArray(nestedOneTime.specItems) ? nestedOneTime.specItems : []),
+    ...(Array.isArray(result.specItems) ? result.specItems : []),
+  ].filter((item) => item && item.onProg !== true && item.includedOnProgram !== true);
+  const oneTimeList = rawOneTimeRows.length
+    ? rawOneTimeRows
+    : normalizeOneTimeBreakdown(estData).items.map((item) => ({
+        service: item.service,
+        name: item.label,
+        price: item.amount,
+      }));
+
+  return {
+    recurringSvcList: [
+      ...(Array.isArray(recurring.services) ? recurring.services : []),
+      ...(Array.isArray(nestedRecurring.services) ? nestedRecurring.services : []),
+    ],
+    oneTimeList,
+  };
+}
+
 function readV1Shape(estData) {
   if (!estData || typeof estData !== 'object') return null;
   const result = estData.result;
@@ -2720,3 +2785,4 @@ module.exports = router;
 module.exports.handleEstimateView = handleEstimateView;
 module.exports.buildPricingBundle = buildPricingBundle;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
+module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate;
