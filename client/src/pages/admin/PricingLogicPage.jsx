@@ -59,6 +59,12 @@ export function MarginCalculator() {
     return 'Below Floor';
   };
 
+  const costSourceLabel = (source) => {
+    if (source === 'inventory_cost_per_unit') return 'Inventory';
+    if (source === 'inventory_best_price_unit_size') return 'Inventory';
+    return 'Fallback';
+  };
+
   const inputStyle = {
     padding: '8px 10px', background: D.input, border: `1px solid ${D.border}`,
     borderRadius: 6, color: D.heading, fontSize: 14, width: 90, textAlign: 'right',
@@ -111,6 +117,7 @@ export function MarginCalculator() {
                 <th style={{ padding: '8px 10px', textAlign: 'left', color: D.muted, borderBottom: `2px solid ${D.border}`, fontSize: 11, fontWeight: 700 }}>Service</th>
                 <th style={{ padding: '8px 10px', textAlign: 'right', color: D.muted, borderBottom: `2px solid ${D.border}`, fontSize: 11, fontWeight: 700 }}>Annual Price</th>
                 <th style={{ padding: '8px 10px', textAlign: 'right', color: D.muted, borderBottom: `2px solid ${D.border}`, fontSize: 11, fontWeight: 700 }}>Est. Cost</th>
+                <th style={{ padding: '8px 10px', textAlign: 'left', color: D.muted, borderBottom: `2px solid ${D.border}`, fontSize: 11, fontWeight: 700 }}>Cost Source</th>
                 <th style={{ padding: '8px 10px', textAlign: 'right', color: D.muted, borderBottom: `2px solid ${D.border}`, fontSize: 11, fontWeight: 700 }}>After Discount</th>
                 <th style={{ padding: '8px 10px', textAlign: 'right', color: D.muted, borderBottom: `2px solid ${D.border}`, fontSize: 11, fontWeight: 700 }}>Margin</th>
                 <th style={{ padding: '8px 10px', textAlign: 'center', color: D.muted, borderBottom: `2px solid ${D.border}`, fontSize: 11, fontWeight: 700 }}>Status</th>
@@ -122,6 +129,10 @@ export function MarginCalculator() {
                   <td style={{ padding: '8px 10px', color: D.text, fontWeight: 600, fontSize: 12, textTransform: 'capitalize' }}>{s.service.replace(/_/g, ' ')}</td>
                   <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: ROBOTO, fontSize: 13 }}>${s.annual?.toLocaleString() || '—'}</td>
                   <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: ROBOTO, fontSize: 13, color: D.muted }}>${s.estimatedCost?.toLocaleString() || '—'}</td>
+                  <td style={{ padding: '8px 10px', color: s.materialCostSource === 'fallback' ? D.amber : D.green, fontSize: 11, fontWeight: 600 }}>
+                    {costSourceLabel(s.materialCostSource)}
+                    {s.materialPerVisit != null ? ` · $${Number(s.materialPerVisit).toFixed(2)}/visit` : ''}
+                  </td>
                   <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: ROBOTO, fontSize: 13 }}>${s.afterDiscount?.toLocaleString() || '—'}</td>
                   <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: ROBOTO, fontSize: 13, fontWeight: 700, color: marginColor(s.margin) }}>
                     {s.margin != null ? `${(s.margin * 100).toFixed(1)}%` : '—'}
