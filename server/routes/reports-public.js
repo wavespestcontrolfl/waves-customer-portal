@@ -7,6 +7,7 @@ const rateLimit = require('express-rate-limit');
 const PDFDocument = require('pdfkit');
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { etDateString } = require('../utils/datetime-et');
 
 // Rate-limit public report access to deter token brute-forcing.
 const reportLimiter = rateLimit({
@@ -21,6 +22,7 @@ router.use(reportLimiter);
 
 // Token format: 32-char lowercase hex. Reject anything else immediately.
 const TOKEN_RE = /^[a-f0-9]{32}$/;
+const ACTIVE_APPOINTMENT_STATUSES = ['pending', 'confirmed', 'rescheduled'];
 
 // GET /api/reports/project/:token/data — project report JSON for the viewer page
 router.get('/project/:token/data', async (req, res, next) => {
@@ -85,6 +87,27 @@ router.get('/project/:token/data', async (req, res, next) => {
       return { id: ph.id, category: ph.category, caption: ph.caption, visit: ph.visit, url };
     }));
 
+    let upcomingAppointment = null;
+    const appointmentSelect = [
+      's.id',
+      's.service_type',
+      's.scheduled_date',
+      's.window_start',
+      's.window_end',
+      's.status',
+      'st.name as technician_name',
+    ];
+    const todayET = etDateString();
+    if (project.scheduled_service_id) {
+      upcomingAppointment = await db('scheduled_services as s')
+        .where({ 's.id': project.scheduled_service_id, 's.customer_id': project.customer_id })
+        .where('s.scheduled_date', '>=', todayET)
+        .whereIn('s.status', ACTIVE_APPOINTMENT_STATUSES)
+        .leftJoin('technicians as st', 's.technician_id', 'st.id')
+        .select(appointmentSelect)
+        .first();
+    }
+
     res.json({
       projectType: project.project_type,
       status: project.status,
@@ -99,6 +122,14 @@ router.get('/project/:token/data', async (req, res, next) => {
       followupDate: project.followup_date,
       followupFindings: project.followup_findings,
       followupCompletedAt: project.followup_completed_at,
+      upcomingAppointment: upcomingAppointment ? {
+        serviceType: upcomingAppointment.service_type,
+        scheduledDate: upcomingAppointment.scheduled_date,
+        windowStart: upcomingAppointment.window_start,
+        windowEnd: upcomingAppointment.window_end,
+        technicianName: upcomingAppointment.technician_name,
+        status: upcomingAppointment.status,
+      } : null,
       photos: photosWithUrls,
     });
   } catch (err) { next(err); }
