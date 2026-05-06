@@ -54,6 +54,10 @@ describe('admin schedule assigned-tech ETA helpers', () => {
       available: false,
       reason: 'no_tech_status',
     });
+    expect(formatAssignedVehicleLocation({ technician_id: 'tech-1', tech_lat: '', tech_lng: '-82.2' })).toMatchObject({
+      available: false,
+      reason: 'no_tech_status',
+    });
 
     expect(formatAssignedVehicleLocation({
       technician_id: 'tech-1',
