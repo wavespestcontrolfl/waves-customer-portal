@@ -75,6 +75,8 @@ describe('public project reports', () => {
         title: 'Inspection report',
         first_name: 'Van',
         last_name: 'Lee',
+        city: 'Bradenton',
+        state: 'FL',
       }),
     });
     const markViewed = chain();

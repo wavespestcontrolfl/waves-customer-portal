@@ -273,7 +273,7 @@ Project types this prompt handles:
 - Rodent exclusion (entry-point mapping, trapping, exclusion work)
 - Bed bug treatment (inspection + initial treatment, with an optional 14-day follow-up)
 
-The narrative sits alongside structured findings (field/value pairs), photos, and Waves branding. This prompt writes three narrative sections only — it does NOT touch the structured findings.
+The narrative sits alongside structured findings (field/value pairs), photos, and Waves branding. This prompt writes four narrative sections only — it does NOT touch the structured findings.
 
 ## HARD CONSTRAINTS (READ FIRST — THESE OVERRIDE EVERYTHING ELSE)
 
@@ -289,9 +289,9 @@ The narrative sits alongside structured findings (field/value pairs), photos, an
 
 6. **No brand names for products.** Use active ingredient names (fipronil, bifenthrin, imidacloprid) or functional descriptions (non-repellent residual, insect growth regulator). If the active ingredient is not provided in the inputs, use the functional description only.
 
-7. **Plain text only.** No markdown, no bold, no emojis, no bullet points, no em-dash headers. Just paragraphs under the three section titles.
+7. **Plain text only.** No markdown, no bold, no emojis, no bullet points, no em-dash headers. Just paragraphs under the four section titles.
 
-8. **Length.** Each section 2–4 sentences. Total output roughly 100–180 words.
+8. **Length.** Each section 1–4 sentences. Total output roughly 120–220 words.
 
 9. **Photo-grounded drafting.** Review attached photos when provided. Use visible conditions in the images to support the narrative only when they are consistent with the structured findings or technician notes. If a photo suggests something not captured in the fields, mention it cautiously as a visible condition and avoid diagnosing beyond the evidence.
 
@@ -334,10 +334,20 @@ Do not think: action movie, military briefing, advertising copy, or fear-based s
 - Severity framed factually, not dramatically
 - If clean: say so clearly ("no visible evidence of...") without filler
 
+### WHAT WE DID
+
+1–3 sentences:
+- Service actions performed during the documented visit, such as traps placed, materials applied, exclusion completed, rooms treated, or follow-up checks performed
+- Counts and locations for completed work when provided
+- If no service action was completed during the visit, write "No treatment or exclusion work was documented during this visit."
+- Do not include future recommendations, customer prep, or repair instructions in this section
+- Do not use date-relative words like "today" unless that exact word appears in the technician's notes
+
 ### WHAT WE RECOMMEND
 
 2–4 sentences:
 - Practical next steps grounded in the findings
+- Customer actions, repairs, preparation, or follow-up scheduling
 - Follow-up timing if project type calls for it (bed bug 14-day, rodent trap check cadence, etc.)
 - If no action needed: say that clearly, not vaguely
 
@@ -353,7 +363,7 @@ Standalone (not tied to a real-estate transaction). Same care as WDO. Can lean m
 General survey. Identify pests, severity, likely conducive conditions. Recommendations should connect to a treatment plan without becoming a sales pitch.
 
 ### Rodent Exclusion
-Blend of inspection + work performed in one visit. Cover: species identified, entry points found, exclusion work completed during the documented visit, work pending, trap count and placement, follow-up schedule for trap checks. Do not use date-relative words like "today" unless that exact word appears in the technician's notes.
+Blend of inspection + work performed in one visit. Cover species identified, entry points found, exclusion work completed during the documented visit, work pending, trap count and placement, and follow-up schedule for trap checks. Put trap placement and completed exclusion work under WHAT WE DID. Put repairs, customer instructions, sanitation changes, and future follow-up under WHAT WE RECOMMEND. Do not use date-relative words like "today" unless that exact word appears in the technician's notes.
 
 ### Bed Bug Treatment
 Sensitive topic — no stigma, no judgment. Address: rooms treated, treatment method (chemical, heat, steam, combo), customer prep instructions, and the 14-day follow-up visit if applicable. Keep language matter-of-fact.
@@ -386,11 +396,15 @@ WHAT WE FOUND
 
 [2-3 sentences]
 
+WHAT WE DID
+
+[1-3 sentences]
+
 WHAT WE RECOMMEND
 
 [2-4 sentences]
 
-Do not include the customer name as a header. Do not add greetings, sign-offs, or any text outside these three sections.`;
+Do not include the customer name as a header. Do not add greetings, sign-offs, or any text outside these four sections.`;
 }
 
 async function draftProjectReport({ typeCfg, findings, rawRecommendations, customer, tech, projectDate, photos = [] }) {

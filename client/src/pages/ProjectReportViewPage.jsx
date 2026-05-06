@@ -264,6 +264,14 @@ export default function ProjectReportViewPage() {
   const projectDateLabel = formatReportDate(data.projectDate || data.sentAt);
   const sentDateLabel = data.sentAt ? formatReportDate(data.sentAt) : '';
   const showSentDate = sentDateLabel && reportDateKey(data.sentAt) !== reportDateKey(data.projectDate);
+  const reportMetaStyle = { fontSize: 13, color: B.grayDark, lineHeight: 1.45 };
+  const contactRows = [
+    projectDateLabel ? `Inspection date: ${projectDateLabel}${data.technicianName ? ` · ${data.technicianName}` : ''}` : '',
+    showSentDate ? `Report sent: ${sentDateLabel}` : '',
+    data.customerAddress || data.cityState || '',
+    data.customerEmail ? `Email: ${data.customerEmail}` : '',
+    data.customerPhone ? `Phone: ${data.customerPhone}` : '',
+  ].filter(Boolean);
   const clientSnapshot = buildClientSnapshot({
     projectType: data.projectType,
     findings,
@@ -303,15 +311,12 @@ export default function ProjectReportViewPage() {
           <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>
             {data.title || typeLabel}
           </div>
-          <div style={{ fontSize: 14, color: B.grayDark, marginTop: 4 }}>
-            {projectDateLabel && `Inspection date: ${projectDateLabel}`}
-            {data.technicianName ? ` · ${data.technicianName}` : ''}
-          </div>
-          {showSentDate && (
-            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>Report sent: {sentDateLabel}</div>
-          )}
-          {data.cityState && (
-            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>{data.cityState}</div>
+          {contactRows.length > 0 && (
+            <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 2 }}>
+              {contactRows.map(row => (
+                <div key={row} style={{ ...reportMetaStyle, whiteSpace: 'pre-wrap' }}>{row}</div>
+              ))}
+            </div>
           )}
 
           {clientSnapshot && (
@@ -506,13 +511,14 @@ function PhotoGrid({ title, photos, noCard }) {
   );
 }
 
-// Heuristic: if the text contains all three section markers, split it into
+// Heuristic: if the text contains the core section markers, split it into
 // named sections and render each with its own heading. Otherwise render the
 // whole block under a single "Recommendations" heading like before.
-const SECTION_HEADINGS = ['WHAT WE INSPECTED', 'WHAT WE FOUND', 'WHAT WE RECOMMEND'];
+const REQUIRED_SECTION_HEADINGS = ['WHAT WE INSPECTED', 'WHAT WE FOUND', 'WHAT WE RECOMMEND'];
+const SECTION_HEADINGS = ['WHAT WE INSPECTED', 'WHAT WE FOUND', 'WHAT WE DID', 'WHAT WE RECOMMEND'];
 
 function parseSections(text) {
-  const hasAll = SECTION_HEADINGS.every(h => text.includes(h));
+  const hasAll = REQUIRED_SECTION_HEADINGS.every(h => text.includes(h));
   if (!hasAll) return null;
   const sections = [];
   const headingPattern = new RegExp(`^(${SECTION_HEADINGS.join('|')})\\s*$`, 'gm');
@@ -526,7 +532,8 @@ function parseSections(text) {
     const body = text.slice(indices[i].contentStart, end).trim();
     if (body) sections.push({ heading: indices[i].heading, body });
   }
-  return sections.length === SECTION_HEADINGS.length ? sections : null;
+  const foundRequired = REQUIRED_SECTION_HEADINGS.every(h => sections.some(s => s.heading === h));
+  return foundRequired ? sections : null;
 }
 
 function titleCase(s) {
