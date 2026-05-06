@@ -559,10 +559,31 @@ function costSourceLabel(product) {
   return product.costWarning ? 'Missing' : 'Fallback';
 }
 
+const PROTOCOL_FILTERS = [
+  { key: 'all', label: 'All' },
+  { key: 'pest', label: 'Pest' },
+  { key: 'termite', label: 'Termite' },
+  { key: 'lawn', label: 'Lawn' },
+  { key: 'mosquito', label: 'Mosquito' },
+  { key: 'rodent', label: 'Rodent' },
+  { key: 'tree_shrub', label: 'Tree & Shrub' },
+];
+
+function protocolLineForService(serviceType) {
+  const value = String(serviceType || '').toLowerCase();
+  if (value.includes('termite') || value.includes('bora-care') || value.includes('termidor')) return 'termite';
+  if (value.includes('mosquito')) return 'mosquito';
+  if (value.includes('rodent')) return 'rodent';
+  if (value.includes('lawn')) return 'lawn';
+  if (value.includes('tree') || value.includes('shrub')) return 'tree_shrub';
+  return 'pest';
+}
+
 function ProtocolsTab({ showToast }) {
   const [services, setServices] = useState([]);
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [serviceFilter, setServiceFilter] = useState('all');
   const [editingRow, setEditingRow] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [showAdd, setShowAdd] = useState(null);
@@ -589,6 +610,9 @@ function ProtocolsTab({ showToast }) {
   if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading protocols...</div>;
 
   const unitOpts = ['oz','ml','gal','lb','g','packets','tube','station','blocks','traps','each'];
+  const visibleServices = serviceFilter === 'all'
+    ? services
+    : services.filter((svc) => protocolLineForService(svc.serviceType) === serviceFilter);
 
   return (
     <div>
@@ -596,6 +620,26 @@ function ProtocolsTab({ showToast }) {
         <div><div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>Treatment Protocols by Service Line</div>
           <div style={{ fontSize: 12, color: D.muted }}>Define which products each service uses, at what rates — drives COGS calculations</div></div>
         <button onClick={() => setShowNewService(!showNewService)} style={sBtn(D.green, D.white)}>+ New Service Type</button>
+      </div>
+
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14 }}>
+        {PROTOCOL_FILTERS.map((filter) => {
+          const active = serviceFilter === filter.key;
+          return (
+            <button
+              key={filter.key}
+              onClick={() => setServiceFilter(filter.key)}
+              style={{
+                ...sBtn(active ? D.teal : 'transparent', active ? D.white : D.muted),
+                border: `1px solid ${active ? D.teal : D.border}`,
+                fontSize: 11,
+                padding: '6px 10px',
+              }}
+            >
+              {filter.label}
+            </button>
+          );
+        })}
       </div>
 
       {showNewService && (
@@ -614,8 +658,9 @@ function ProtocolsTab({ showToast }) {
       )}
 
       {services.length === 0 && !showAdd && <div style={{ ...sCard, textAlign: 'center', padding: 40, color: D.muted }}>No protocols defined yet.</div>}
+      {services.length > 0 && visibleServices.length === 0 && !showAdd && <div style={{ ...sCard, textAlign: 'center', padding: 40, color: D.muted }}>No protocols in this service category yet.</div>}
 
-      {services.map(svc => (
+      {visibleServices.map(svc => (
         <div key={svc.serviceType} style={{ ...sCard }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
             <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>{svc.serviceType}</div>

@@ -937,5 +937,145 @@
         "notes": "NEONIC winter. Biostim. Report."
       }
     ]
+  },
+  "pest": {
+    "name": "Residential Pest Control Protocol Templates",
+    "notes": [
+      "Use these templates as service-line SOPs. Product quantities still come from Inventory service-product usage so estimate pricing stays rule-based while margin checks stay inventory-aware.",
+      "Rotate active ingredient classes when a callback shows live activity after the expected control window.",
+      "Do not use repellent sprays directly on active ant or German roach trails when bait transfer is the objective."
+    ],
+    "visits": [
+      {
+        "visit": 1,
+        "month": "Any",
+        "primary": "Exterior General Pest Perimeter\nDemand CS or Talstar P perimeter band\nAlpine WSG interior cracks/crevices only if activity is present\nWebster sweep eaves, windows, doors, and lanai frames",
+        "secondary": "Advion WDG or granular bait in landscape beds\nGlue boards in garage or utility areas\nEscalate moisture, exclusion, or sanitation issues in notes",
+        "material_cost": "inventory",
+        "labor_cost": "standard",
+        "tiers": { "bronze": true, "silver": true, "enhanced": true, "premium": true },
+        "notes": "Default recurring pest template for quarterly, bimonthly, and monthly visits. Keep interior treatment targeted."
+      },
+      {
+        "visit": 2,
+        "month": "Any",
+        "primary": "German Roach Cleanout\nAdvion Cockroach Gel Bait in kitchen, bath, hinges, appliances, and plumbing voids\nAlpine WSG crack-and-crevice treatment\nGentrol IGR point-source or aerosol where label allows",
+        "secondary": "Vacuum visible aggregation before application\nPlace monitors and document count/location\nSchedule 10-14 day follow-up when live activity is confirmed",
+        "material_cost": "inventory",
+        "labor_cost": "elevated",
+        "tiers": { "bronze": false, "silver": false, "enhanced": true, "premium": true },
+        "notes": "Non-repellent and bait-first protocol. Do not contaminate bait placements with pyrethroid spray."
+      },
+      {
+        "visit": 3,
+        "month": "Any",
+        "primary": "Ant Service\nIdentify species and trail source before applying\nAdvion Ant Gel or granular bait along active trails\nAlpine WSG exterior/interior non-repellent treatment for ghost ants or trailing ants",
+        "secondary": "Treat conducive entry points and moisture sources\nAvoid repellent spray on active trails\nRecheck bait acceptance at callback",
+        "material_cost": "inventory",
+        "labor_cost": "standard",
+        "tiers": { "bronze": true, "silver": true, "enhanced": true, "premium": true },
+        "notes": "Species ID drives product choice. Ghost ants require patience and non-repellent transfer."
+      },
+      {
+        "visit": 4,
+        "month": "Any",
+        "primary": "Flea/Tick Treatment\nInterior crack/edge treatment where pets rest\nExterior shaded harborage, fence lines, and transition zones\nIGR where label allows",
+        "secondary": "Customer must vacuum before and after service\nPet treatment is required through veterinarian or approved pet product\nSecond treatment may be needed in 10-14 days",
+        "material_cost": "inventory",
+        "labor_cost": "elevated",
+        "tiers": { "bronze": false, "silver": true, "enhanced": true, "premium": true },
+        "notes": "Do not guarantee resolution unless pet treatment and vacuum protocol are followed."
+      },
+      {
+        "visit": 5,
+        "month": "Any",
+        "primary": "Rodent Monitoring / Bait\nInspect attic, garage, exterior penetrations, roof returns, AC chase, and utility entries\nContrac Blox in tamper-resistant stations where label allows\nSnap traps in attic/garage when activity is active",
+        "secondary": "Document exclusion findings with photos\nEscalate seal-up proposal when entry points are active\nRemove carcasses and reset traps on follow-up",
+        "material_cost": "inventory",
+        "labor_cost": "elevated",
+        "tiers": { "bronze": false, "silver": false, "enhanced": true, "premium": true },
+        "notes": "Baiting without exclusion is monitoring, not remediation. Separate exclusion scope when needed."
+      },
+      {
+        "visit": 6,
+        "month": "Any",
+        "primary": "Mosquito Barrier\nCyzmic CS or equivalent barrier spray to foliage, fence lines, shaded resting zones, and lanai perimeter\nTekko Pro or larvicide in drains, planters, or non-potable standing water where labeled",
+        "secondary": "Dump standing water\nFlag inaccessible breeding sources\nAvoid blooming plants and pollinator activity windows",
+        "material_cost": "inventory",
+        "labor_cost": "standard",
+        "tiers": { "bronze": false, "silver": true, "enhanced": true, "premium": true },
+        "notes": "Peak pressure May-Oct. Wind, rain, and access constraints must be documented."
+      }
+    ]
+  },
+  "termite": {
+    "name": "Termite Service Protocol Templates",
+    "notes": [
+      "Termite protocols are compliance-sensitive. These templates define workflow and product family, while final application must follow the product label, graph/diagram, and state documentation requirements.",
+      "Keep bait, liquid, foam, and wood-treatment scopes separate because cost drivers, warranty language, and follow-up cadence differ.",
+      "Use Inventory service-product usage for COGS visibility; do not make live estimate prices depend directly on inventory quantity."
+    ],
+    "visits": [
+      {
+        "visit": 1,
+        "month": "Any",
+        "primary": "Termite Inspection / WDO Support\nInspect foundation, plumbing penetrations, garage, attic access, windows, bath traps, expansion joints, and moisture areas\nDocument swarmers, wings, mud tubes, damaged wood, conducive conditions, and prior treatment evidence",
+        "secondary": "Recommend bait, liquid, foam, or Bora-Care scope based on finding location\nCollect photos before treatment proposal\nEscalate active structural findings immediately",
+        "material_cost": "0.00",
+        "labor_cost": "inspection",
+        "tiers": { "bronze": false, "silver": true, "enhanced": true, "premium": true },
+        "notes": "Inspection is the qualifying step. Treatment scope must match evidence and construction type."
+      },
+      {
+        "visit": 2,
+        "month": "Any",
+        "primary": "Termite Bait Installation / Monitoring\nInstall Trelona, Advance, or HexPro stations per label and site plan\nPlace stations around accessible perimeter and high-risk conducive zones\nRecord station count, spacing exceptions, obstructions, and diagram notes",
+        "secondary": "Inspect stations on recurring cadence\nReplace consumed bait or wood monitors as needed\nEscalate active hits to treatment recommendation",
+        "material_cost": "inventory",
+        "labor_cost": "station_count",
+        "tiers": { "bronze": false, "silver": false, "enhanced": true, "premium": true },
+        "notes": "COGS should scale with station count. Inventory service usage tracks per-station product cost."
+      },
+      {
+        "visit": 3,
+        "month": "Any",
+        "primary": "Liquid Perimeter / Trench and Rod\nTermidor SC or approved termiticide per label\nTreat soil at foundation, expansion joints, plumbing penetrations, and active tube zones\nDiagram treated linear footage and gallons applied",
+        "secondary": "Drill slab or paver zones only when required and approved\nProtect wells, drains, water bodies, and inaccessible areas per label\nSchedule reinspection based on activity",
+        "material_cost": "inventory",
+        "labor_cost": "linear_footage",
+        "tiers": { "bronze": false, "silver": false, "enhanced": false, "premium": true },
+        "notes": "High-liability workflow. Requires exact label rate, volume, diagram, and access notes."
+      },
+      {
+        "visit": 4,
+        "month": "Any",
+        "primary": "Foam Drill / Localized Void Treatment\nTermidor Foam or approved foam product into active galleries, wall voids, or localized inaccessible areas\nConfirm target void, drill pattern, and customer approval before application",
+        "secondary": "Patch/clean drill points where in scope\nPair with bait or liquid when structural risk is broader than localized activity\nPhoto before and after",
+        "material_cost": "inventory",
+        "labor_cost": "elevated",
+        "tiers": { "bronze": false, "silver": false, "enhanced": true, "premium": true },
+        "notes": "Localized treatment only. Do not represent as whole-structure protection unless paired with a full program."
+      },
+      {
+        "visit": 5,
+        "month": "Any",
+        "primary": "Bora-Care / Wood Treatment\nApply Bora-Care or approved borate to accessible raw wood, attic members, crawlspace framing, or new construction wood\nMeasure treatable surface area and document inaccessible/painted/sealed areas",
+        "secondary": "Protect finished surfaces and insulation\nUse foam or spray method as label and access require\nRecommend follow-up inspection for active evidence",
+        "material_cost": "inventory",
+        "labor_cost": "square_footage",
+        "tiers": { "bronze": false, "silver": false, "enhanced": false, "premium": true },
+        "notes": "Best for accessible wood. Cost scales by treatable sqft and dilution/application method."
+      },
+      {
+        "visit": 6,
+        "month": "Any",
+        "primary": "Annual Renewal / Warranty Inspection\nInspect stations or treated zones, conducive conditions, moisture, wood-to-ground contact, and customer-reported activity\nUpdate diagram and photos\nConfirm renewal eligibility and warranty status",
+        "secondary": "Quote corrective work for conducive conditions outside warranty scope\nReplace bait/monitors as needed\nSchedule next inspection cadence",
+        "material_cost": "inventory",
+        "labor_cost": "inspection",
+        "tiers": { "bronze": false, "silver": true, "enhanced": true, "premium": true },
+        "notes": "Renewal workflow protects liability and keeps the graph/current condition record clean."
+      }
+    ]
   }
 }
