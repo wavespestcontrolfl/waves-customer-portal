@@ -1,4 +1,4 @@
-const CACHE_NAME = 'waves-v6-admin-customers-tdz';
+const CACHE_NAME = 'waves-v7-admin-customers-loadpipeline-tdz';
 const OFFLINE_URL = '/';
 
 const OFFLINE_FALLBACK_HTML = `<!doctype html>
