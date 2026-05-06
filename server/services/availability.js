@@ -198,7 +198,7 @@ class AvailabilityEngine {
       zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
     }).returning('*');
 
-    // Dispatch-v2 reads scheduled_services directly; no legacy dispatch_jobs sync.
+    // Dispatch-v2 reads scheduled_services directly; no legacy dispatch sync.
 
     // Send SMS notifications
     try {

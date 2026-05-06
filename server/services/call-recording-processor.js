@@ -42,7 +42,7 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
     logger.error(`[call-proc] Appointment reminder registration failed: ${err.message}`);
   }
 
-  // Dispatch-v2 reads scheduled_services directly; no legacy dispatch_jobs sync.
+  // Dispatch-v2 reads scheduled_services directly; no legacy dispatch sync.
 }
 
 async function findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType, trx = db }) {

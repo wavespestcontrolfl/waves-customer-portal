@@ -3,8 +3,8 @@
 /**
  * Retired legacy dispatch seed.
  *
- * This script used to seed dispatch_technicians, the retired dispatch AI
- * shadow table. Canonical dispatch now reads technicians directly, so keeping
+ * This script used to seed the retired dispatch AI technician shadow table.
+ * Canonical dispatch now reads technicians directly, so keeping
  * this as a writer would reintroduce split dispatch state in local/dev data.
  */
 

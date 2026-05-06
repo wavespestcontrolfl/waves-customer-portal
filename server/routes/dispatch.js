@@ -1,7 +1,7 @@
 // server/routes/dispatch.js
 //
 // Compatibility facade for the dispatch-v2 sidebar tools. These endpoints used
-// to read and write dispatch_jobs/dispatch_technicians copies; keep the URLs and
+// to read and write retired dispatch AI shadow tables; keep the URLs and
 // response shapes, but source everything from canonical scheduled_services and
 // technicians so GPS/dispatch state has a single data plane.
 
