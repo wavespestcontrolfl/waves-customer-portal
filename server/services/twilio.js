@@ -360,7 +360,9 @@ const TwilioService = {
         audience: 'customer',
         purpose: 'tech_en_route',
         customerId,
-        identityTrustLevel: 'phone_matches_customer',
+        identityTrustLevel: contact.role === 'service_contact'
+          ? 'service_contact_authorized'
+          : 'phone_matches_customer',
         metadata: { original_message_type: 'tech_en_route' },
       }));
     }
