@@ -2,7 +2,6 @@ const { v4: uuidv4 } = require('uuid');
 
 exports.seed = async function (knex) {
   // Clear existing data (order matters for foreign keys)
-  await knex('service_tracking').del();
   await knex('promotion_dismissals').del();
   await knex('satisfaction_responses').del();
   await knex('service_requests').del();
