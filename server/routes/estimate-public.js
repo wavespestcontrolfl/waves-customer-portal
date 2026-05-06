@@ -2262,6 +2262,116 @@ function findInitialRoachItem(_pestTiers, estData) {
   return null;
 }
 
+function normalizeOneTimeBreakdown(estData) {
+  const result = estData?.result && typeof estData.result === 'object'
+    ? estData.result
+    : (estData?.engineResult && typeof estData.engineResult === 'object' ? estData.engineResult : null);
+  if (!result) return { items: [], total: 0 };
+
+  const rows = [];
+  const seen = new Set();
+  const oneTime = result.oneTime && typeof result.oneTime === 'object' ? result.oneTime : null;
+  const nestedOneTime = result.results?.oneTime && typeof result.results.oneTime === 'object'
+    ? result.results.oneTime
+    : null;
+  const addRows = (list) => {
+    if (!Array.isArray(list)) return;
+    for (const item of list) {
+      if (!item || typeof item !== 'object') continue;
+      if (item.onProg === true || item.includedOnProgram === true) continue;
+
+      const rawPrice = Number(item.price ?? item.amount ?? item.total);
+      const discounted = Number(item.priceAfterDiscount ?? item.totalAfterDiscount);
+      const amount = Number.isFinite(rawPrice) && rawPrice < 0
+        ? (Number.isFinite(discounted) && discounted !== 0 ? discounted : rawPrice)
+        : (Number.isFinite(discounted) ? discounted : rawPrice);
+      if (!Number.isFinite(amount) || amount === 0) continue;
+
+      const label = String(item.label || item.displayName || item.name || item.service || 'One-time service').trim();
+      const service = item.service || (ROACH_NAME_RX.test(label) ? 'pest_initial_roach' : null);
+      const detail = item.detail || item.det || item.note || item.frequency || null;
+      const key = [service || '', label, amount, detail || ''].join('|');
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      rows.push({
+        service,
+        label,
+        amount: Math.round(amount * 100) / 100,
+        detail,
+        kind: amount < 0 ? 'discount' : 'charge',
+      });
+    }
+  };
+
+  addRows(oneTime?.items);
+  if (nestedOneTime && nestedOneTime !== oneTime) addRows(nestedOneTime.items);
+  const membershipFee = Number(oneTime?.membershipFee ?? nestedOneTime?.membershipFee);
+  if (Number.isFinite(membershipFee) && membershipFee > 0) {
+    addRows([{
+      service: 'waveguard_setup',
+      name: 'WaveGuard setup',
+      price: membershipFee,
+      detail: 'Membership setup fee',
+    }]);
+  }
+  const termiteInstall = Number(oneTime?.tmInstall ?? nestedOneTime?.tmInstall);
+  const termiteInstallItems = [
+    ...(Array.isArray(oneTime?.items) ? oneTime.items : []),
+    ...(nestedOneTime && nestedOneTime !== oneTime && Array.isArray(nestedOneTime.items) ? nestedOneTime.items : []),
+  ];
+  const hasTermiteInstallRow = termiteInstallItems.some((item) => {
+      const amount = Number(item?.price ?? item?.amount);
+      const label = String(item?.label || item?.name || item?.service || '').toLowerCase();
+      return Number.isFinite(amount)
+        && Math.abs(amount - termiteInstall) < 0.01
+        && (label.includes('install') || item?.service === 'termite_bait_installation');
+    });
+  if (Number.isFinite(termiteInstall) && termiteInstall > 0 && !hasTermiteInstallRow) {
+    addRows([{
+      service: 'termite_bait_installation',
+      name: 'Termite bait installation',
+      price: termiteInstall,
+    }]);
+  }
+  if (Array.isArray(result.specItems)) {
+    addRows(result.specItems);
+  } else {
+    addRows(oneTime?.specItems);
+    if (nestedOneTime && nestedOneTime !== oneTime) addRows(nestedOneTime.specItems);
+  }
+  addRows(result.lineItems);
+  if (Array.isArray(result.lineItems)) {
+    const installationRows = result.lineItems
+      .filter((item) => item && typeof item === 'object' && Number(item.installation?.price) > 0)
+      .map((item) => ({
+        service: `${item.service || 'service'}_installation`,
+        name: `${item.label || item.displayName || item.name || item.service || 'Service'} installation`,
+        price: Number(item.installation.price),
+        detail: item.stations ? `${item.stations} stations` : null,
+      }));
+    addRows(installationRows);
+  }
+
+  const rowTotal = rows.reduce((sum, row) => sum + row.amount, 0);
+  const explicitTotal = Number(oneTime?.total ?? nestedOneTime?.total);
+  const difference = Math.round(((Number.isFinite(explicitTotal) ? explicitTotal : rowTotal) - rowTotal) * 100) / 100;
+  if (difference !== 0) {
+    rows.push({
+      service: 'one_time_adjustment',
+      label: 'Other one-time services',
+      amount: difference,
+      detail: null,
+      kind: difference < 0 ? 'discount' : 'charge',
+    });
+  }
+  const total = Number.isFinite(explicitTotal) ? explicitTotal : rowTotal + difference;
+  return {
+    items: rows,
+    total: Math.round(total * 100) / 100,
+  };
+}
+
 function readV1Shape(estData) {
   if (!estData || typeof estData !== 'object') return null;
   const result = estData.result;
@@ -2362,6 +2472,7 @@ async function buildPricingBundle(estimate) {
     ? JSON.parse(estimate.estimate_data)
     : estimate.estimate_data;
   const prefs = normalizePrefs(estData?.preferences);
+  const storedOneTimeBreakdown = normalizeOneTimeBreakdown(estData);
 
   // v1 shape (admin UI estimates) — read pre-computed pestTiers directly.
   // This is the dominant path until Session 11 retires the client engine.
@@ -2385,11 +2496,17 @@ async function buildPricingBundle(estimate) {
     // visit-1 cost regardless of customer churn.
     const firstVisitFees = [];
     if (hasPest) {
-      firstVisitFees.push({ amount: 99, label: 'WaveGuard setup', waivedWithPrepay: true });
+      firstVisitFees.push({
+        service: 'waveguard_setup',
+        amount: 99,
+        label: 'WaveGuard setup',
+        waivedWithPrepay: true,
+      });
     }
     const initialRoachItem = findInitialRoachItem(v1.pestTiers, estData);
     if (initialRoachItem) {
       firstVisitFees.push({
+        service: 'pest_initial_roach',
         amount: initialRoachItem.price,
         label: initialRoachItem.label || 'Initial Roach Knockdown',
         waivedWithPrepay: false,
@@ -2404,6 +2521,7 @@ async function buildPricingBundle(estimate) {
       // for any older client build still reading the singular field.
       setupFee: firstVisitFees.find((f) => f.waivedWithPrepay) || null,
       firstVisitFees,
+      oneTimeBreakdown: storedOneTimeBreakdown,
       source: 'v1_engine_shape',
     };
     pricingCache.set(estimate.id, { payload, expiresAt: Date.now() + PRICING_TTL_MS });
@@ -2432,6 +2550,7 @@ async function buildPricingBundle(estimate) {
       }],
       waveGuardTier: estimate.waveguard_tier || 'Bronze',
       anchorOneTimePrice: Number(estimate.onetime_total || 0) || null,
+      oneTimeBreakdown: storedOneTimeBreakdown,
       fallback: 'no_engine_inputs',
     };
     pricingCache.set(estimate.id, { payload, expiresAt: Date.now() + PRICING_TTL_MS });
@@ -2439,6 +2558,7 @@ async function buildPricingBundle(estimate) {
   }
 
   const frequencies = [];
+  let anchorEngineResult = null;
   if (canVaryPestFrequency(engineInputs)) {
     // Run the engine 3x with different pest frequencies. Each call is
     // pure JS; no external I/O beyond the engine's own DB constants
@@ -2452,6 +2572,7 @@ async function buildPricingBundle(estimate) {
       };
       try {
         const engineResult = generateEstimate(inputsForFrequency);
+        if (!anchorEngineResult) anchorEngineResult = engineResult;
         frequencies.push(shapeFrequencyEntry(ladder, engineResult, engineInputs));
       } catch (err) {
         logger.error(`[estimate-data] engine failed at ${ladder.key}: ${err.message}`);
@@ -2462,6 +2583,7 @@ async function buildPricingBundle(estimate) {
     // using the single engine call at whatever was stored.
     try {
       const engineResult = generateEstimate(engineInputs);
+      anchorEngineResult = engineResult;
       frequencies.push(shapeFrequencyEntry(FREQUENCY_LADDER[0], engineResult, engineInputs));
     } catch (err) {
       logger.error(`[estimate-data] engine failed (no-pest path): ${err.message}`);
@@ -2470,11 +2592,18 @@ async function buildPricingBundle(estimate) {
 
   const anchorOneTimePrice = frequencies[0]?.oneTimeTotal
     ?? (Number(estimate.onetime_total || 0) || null);
+  const generatedOneTimeBreakdown = anchorEngineResult
+    ? normalizeOneTimeBreakdown({ engineResult: anchorEngineResult })
+    : { items: [], total: 0 };
+  const oneTimeBreakdown = generatedOneTimeBreakdown.items.length
+    ? generatedOneTimeBreakdown
+    : storedOneTimeBreakdown;
 
   const payload = {
     frequencies,
     waveGuardTier: estimate.waveguard_tier || 'Bronze',
     anchorOneTimePrice,
+    oneTimeBreakdown,
     source: 'engine_invocation',
   };
   pricingCache.set(estimate.id, { payload, expiresAt: Date.now() + PRICING_TTL_MS });
@@ -2589,3 +2718,5 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
 
 module.exports = router;
 module.exports.handleEstimateView = handleEstimateView;
+module.exports.buildPricingBundle = buildPricingBundle;
+module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
