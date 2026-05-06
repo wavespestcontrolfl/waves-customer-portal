@@ -526,8 +526,10 @@ router.get('/:date?', async (req, res, next) => {
       const lastService = await db('service_records')
         .where({ customer_id: s.customer_id, status: 'completed' })
         .orderBy('service_date', 'desc').first();
-      const statusLog = await db('service_status_log')
-        .where({ scheduled_service_id: s.id }).orderBy('created_at');
+      const statusLog = await db('job_status_history')
+        .where({ job_id: s.id })
+        .orderBy('transitioned_at')
+        .select('to_status as status', 'transitioned_at as at', 'notes');
 
       // Build property notes
       const alerts = [];
@@ -570,7 +572,9 @@ router.get('/:date?', async (req, res, next) => {
         actualStartTime: s.actual_start_time,
         actualEndTime: s.actual_end_time,
         serviceTimeMinutes: s.service_time_minutes,
-        statusLog: statusLog.map(l => ({ status: l.status, at: l.created_at, notes: l.notes })),
+        checkInTime: s.check_in_time || s.actual_start_time,
+        checkOutTime: s.check_out_time || s.actual_end_time,
+        statusLog: statusLog.map(l => ({ status: l.status, at: l.at, notes: l.notes || null })),
       };
     }));
 
@@ -632,8 +636,6 @@ router.patch('/:serviceId/note', async (req, res, next) => {
 //      statement; semantically equivalent).
 //
 // What stays the same:
-//   - service_status_log INSERT (legacy audit table; not migrating
-//     its schema in this PR).
 //   - track-transitions.markEnRoute / markComplete / cancel (track_state
 //     is a separate customer-visible state machine; en_route still
 //     fires the tracking-link SMS via that helper).
@@ -681,20 +683,14 @@ router.put('/:serviceId/status', async (req, res, next) => {
       const { transitionJobStatus } = require('../services/job-status');
       await db.transaction(async (trx) => {
         for (const target of targets) {
-          await trx('service_status_log').insert({
-            scheduled_service_id: target.id,
-            status: toStatus,
-            changed_by: req.technicianId,
-            lat,
-            lng,
-            notes,
-          });
-
           await transitionJobStatus({
             jobId: target.id,
             fromStatus: target.status,
             toStatus,
             transitionedBy: req.technicianId,
+            lat,
+            lng,
+            notes,
             trx,
           });
         }
@@ -732,22 +728,6 @@ router.put('/:serviceId/status', async (req, res, next) => {
     const { transitionJobStatus } = require('../services/job-status');
     try {
       await db.transaction(async (trx) => {
-        // Legacy audit row INSIDE the trx so a race rejection (or
-        // any other transitionJobStatus throw) rolls it back too.
-        // Otherwise a 409 would leave a phantom service_status_log
-        // row mismatching scheduled_services.status and
-        // job_status_history. Codex P1 on PR #328.
-        //
-        // service_status_log itself isn't migrated in this PR — it's
-        // still consumed by the tech portal + reporting under its
-        // legacy schema (lat / lng / notes columns). Wrapping it in
-        // the trx makes the audit consistent without changing the
-        // table.
-        await trx('service_status_log').insert({
-          scheduled_service_id: svc.id, status: toStatus,
-          changed_by: req.technicianId, lat, lng, notes,
-        });
-
         // Lifecycle timestamps live on the same row as status; flip
         // them inside the same trx so a rollback also rolls back the
         // timestamp change. transitionJobStatus owns the status +
@@ -777,6 +757,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
           fromStatus,
           toStatus,
           transitionedBy: req.technicianId,
+          lat,
+          lng,
+          notes,
           trx,
         });
       });
@@ -1044,8 +1027,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // job whose status flip didn't actually happen. Wrapping them
     // in the same trx makes the whole completion atomic — either
     // the row gets all of {service_record, service_products,
-    // service_status_log, lifecycle UPDATE, status flip,
-    // job_status_history} or none of them.
+    // lifecycle UPDATE, status flip, job_status_history} or none of
+    // them.
     //
     // The MOA-violation detector runs AFTER the trx commits — it
     // reads property_application_history (not the just-inserted
@@ -1189,15 +1172,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .update({ structured_notes: serializeJsonb(record.structured_notes) });
         }
 
-        // 3. Legacy audit row INSIDE the trx — race rejection rolls it
-        // back too (PR #328 / #329 pattern; phantom rows on 409
-        // would otherwise mismatch scheduled_services.status and
-        // job_status_history).
-        await trx('service_status_log').insert({
-          scheduled_service_id: svc.id, status: 'completed', changed_by: req.technicianId,
-        });
-
-        // 4. Lifecycle timestamps the route owns. transitionJobStatus
+        // 3. Lifecycle timestamps the route owns. transitionJobStatus
         // owns status + updated_at; we own actual_end_time +
         // service_time_minutes. No constraint conflict — separate
         // columns on the same row.
