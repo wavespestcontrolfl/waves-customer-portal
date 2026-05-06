@@ -110,6 +110,43 @@ function includesAny(text, words) {
   return words.some(word => value.includes(word));
 }
 
+function getProjectKind(projectType) {
+  if (projectType === 'wdo_inspection') return 'wdo';
+  if (projectType === 'termite_inspection') return 'termite';
+  if (projectType === 'rodent_exclusion') return 'rodent';
+  if (projectType === 'bed_bug') return 'bed_bug';
+  if (projectType === 'pest_inspection') return 'pest';
+  return 'general';
+}
+
+function getRiskInsight(kind, allText) {
+  if (kind === 'rodent') {
+    if (includesAny(allText, ['roof rat'])) {
+      return 'Roof rats are strong climbers, so soffits, roof returns, vents, utility gaps, and overhanging vegetation can become repeat access routes. Once inside, they may contaminate insulation, gnaw wiring or AC lines, and keep returning until openings are sealed.';
+    }
+    if (includesAny(allText, ['norway rat'])) {
+      return 'Norway rats usually work from ground-level burrows, wall gaps, garage seals, and utility penetrations. Activity can expand quickly when food, water, and shelter stay available, so exclusion and sanitation matter as much as trap placement.';
+    }
+    if (includesAny(allText, ['mouse', 'mice'])) {
+      return 'Mice can fit through very small openings and often use garage seals, pipe gaps, and stored materials as cover. A small opening can keep producing activity until the access route is corrected.';
+    }
+    return 'Rodents do more than create noise or droppings. They can contaminate stored items and insulation, chew wiring and soft building materials, and keep cycling through the same access points until exclusion work closes the routes.';
+  }
+  if (kind === 'termite') {
+    return 'Termites can damage wood framing and trim from concealed areas before the surface looks severe. Early treatment and moisture correction help limit repair costs and reduce the chance of activity spreading.';
+  }
+  if (kind === 'wdo') {
+    return 'Wood-destroying organisms and moisture conditions can affect structural materials over time. Correcting the source early helps protect the property and keeps inspection findings from becoming larger repair issues.';
+  }
+  if (kind === 'bed_bug') {
+    return 'Bed bugs spread through resting areas, furniture, luggage, and personal items, and missed preparation can make follow-up activity harder to control. A complete treatment plan and the scheduled recheck are what keep the problem contained.';
+  }
+  if (kind === 'pest') {
+    return 'General pest pressure is usually strongest where food, water, shelter, or entry gaps line up. Treating the current activity while correcting those conditions helps prevent the same issue from returning.';
+  }
+  return 'Targeted service works best when the finding, source condition, and follow-up plan all match the specific issue documented in the report.';
+}
+
 function buildClientSnapshot({ projectType, findings, recommendations }) {
   const allText = [
     projectType,
@@ -118,6 +155,7 @@ function buildClientSnapshot({ projectType, findings, recommendations }) {
   ].filter(Boolean).join(' ').toLowerCase();
 
   const hasAction = shouldShowBookingCta(recommendations);
+  const kind = getProjectKind(projectType);
   const hasMoisture = includesAny(allText, ['moisture', 'wood rot', 'rot ', 'leak', 'eave', 'attic']);
   const hasWdo = includesAny(allText, ['termite', 'wdo', 'wood-destroying', 'shelter tube', 'frass', 'boracare', 'bora care']);
   const hasRodent = includesAny(allText, ['rodent', 'rat', 'mouse', 'entry point', 'exclusion', 'trap']);
@@ -126,28 +164,60 @@ function buildClientSnapshot({ projectType, findings, recommendations }) {
   if (clean) {
     return {
       priority: 'Monitor',
-      meaning: 'No visible active issue was documented at the time of inspection.',
-      next: 'Keep routine service and address new activity, moisture, or access issues if they appear.',
+      meaning: kind === 'rodent'
+        ? 'No active rodent pressure was documented at the time of inspection.'
+        : 'No visible active issue was documented at the time of inspection.',
+      insight: getRiskInsight(kind, allText),
+      next: kind === 'rodent'
+        ? 'Keep exterior access points monitored and contact Waves if scratching, droppings, odors, or new entry signs appear.'
+        : 'Keep routine service and address new activity, moisture, or access issues if they appear.',
     };
   }
-  if (hasWdo || hasMoisture) {
+  if (kind === 'rodent' || (kind === 'general' && hasRodent)) {
+    return {
+      priority: hasAction ? 'Action recommended' : 'Review recommended',
+      meaning: 'Rodent activity usually continues until entry points, travel routes, and nesting conditions are corrected together.',
+      insight: getRiskInsight('rodent', allText),
+      next: hasAction ? 'Schedule the recommended exclusion, trapping, or follow-up plan.' : 'Review the mapped areas and contact Waves with any activity changes.',
+    };
+  }
+  if (kind === 'termite') {
+    return {
+      priority: hasAction ? 'Action recommended' : 'Review recommended',
+      meaning: 'Termite activity or conditions that support termites can affect wood members and may worsen if the source is not corrected.',
+      insight: getRiskInsight('termite', allText),
+      next: hasAction ? 'Review the recommendation and schedule the listed termite treatment or follow-up.' : 'Review the findings and contact Waves if you want help prioritizing treatment options.',
+    };
+  }
+  if (kind === 'wdo' || (kind === 'general' && (hasWdo || hasMoisture))) {
     return {
       priority: hasAction ? 'Action recommended' : 'Review recommended',
       meaning: 'Moisture, wood damage, or WDO evidence can affect structural materials and may worsen if the source is not corrected.',
+      insight: getRiskInsight('wdo', allText),
       next: hasAction ? 'Review the recommendation and schedule the listed treatment or follow-up.' : 'Review the findings and contact Waves if you want help prioritizing repairs or treatment.',
     };
   }
-  if (hasRodent) {
+  if (kind === 'bed_bug') {
     return {
       priority: hasAction ? 'Action recommended' : 'Review recommended',
-      meaning: 'Rodent access points and travel signs can continue producing activity until entry routes are corrected.',
-      next: hasAction ? 'Schedule the recommended exclusion, trapping, or follow-up plan.' : 'Review the mapped areas and contact Waves with any activity changes.',
+      meaning: 'Bed bug work depends on treatment coverage, customer preparation, and a timely follow-up check.',
+      insight: getRiskInsight('bed_bug', allText),
+      next: hasAction ? 'Complete the listed preparation steps and keep the recommended follow-up on schedule.' : 'Review the treated rooms and contact Waves if activity is seen before the follow-up window.',
+    };
+  }
+  if (kind === 'pest') {
+    return {
+      priority: hasAction ? 'Action recommended' : 'Review recommended',
+      meaning: 'The report documents pest pressure or conducive conditions that can keep activity returning if they are not addressed.',
+      insight: getRiskInsight('pest', allText),
+      next: hasAction ? 'Use the recommendation below to book the correct pest service.' : 'Review the findings and contact Waves if the activity changes or spreads.',
     };
   }
   if (hasAction) {
     return {
       priority: 'Action recommended',
       meaning: 'The inspection found conditions that benefit from a targeted service or follow-up.',
+      insight: getRiskInsight(kind, allText),
       next: 'Use the recommendation below to book the correct next visit.',
     };
   }
@@ -258,6 +328,11 @@ export default function ProjectReportViewPage() {
               <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, marginTop: 6 }}>
                 {clientSnapshot.meaning}
               </div>
+              {clientSnapshot.insight && (
+                <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.5, marginTop: 6 }}>
+                  {clientSnapshot.insight}
+                </div>
+              )}
               <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.5, marginTop: 6 }}>
                 {clientSnapshot.next}
               </div>
