@@ -146,7 +146,7 @@ async function buildCustomerEta(row, toStatus, bouncieService) {
     return null;
   }
 
-  const updatedAt = row.tech_status_updated_at || null;
+  const updatedAt = row.tech_location_updated_at || null;
   const updatedMs = updatedAt ? new Date(updatedAt).getTime() : NaN;
   if (!Number.isFinite(updatedMs) || Date.now() - updatedMs > STALE_TECH_STATUS_MS) {
     return null;
@@ -212,7 +212,7 @@ async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
       'c.longitude as customer_longitude',
       'ts.lat as tech_lat',
       'ts.lng as tech_lng',
-      'ts.updated_at as tech_status_updated_at'
+      'ts.location_updated_at as tech_location_updated_at'
     );
   if (!row) throw new Error(`transitionJobStatus: job ${jobId} not found`);
 

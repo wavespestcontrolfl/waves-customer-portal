@@ -43,6 +43,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const DISPATCH_LOCATION_FRESH_MS = 24 * 60 * 60 * 1000;
 
 function adminAuthHeaders() {
   const token = localStorage.getItem('waves_admin_token');
@@ -69,6 +70,12 @@ function socketOrigin() {
   } catch {
     return undefined;
   }
+}
+
+function hasFreshDispatchLocation(payload) {
+  if (payload?.lat == null || payload?.lng == null || !payload?.location_updated_at) return false;
+  const updatedMs = new Date(payload.location_updated_at).getTime();
+  return Number.isFinite(updatedMs) && Date.now() - updatedMs <= DISPATCH_LOCATION_FRESH_MS;
 }
 
 export function useDispatchBoard() {
@@ -140,6 +147,7 @@ export function useDispatchBoard() {
       setTechsMap((prev) => {
         const existing = prev.get(payload.tech_id);
         if (!existing) {
+          if (!hasFreshDispatchLocation(payload)) return prev;
           // First broadcast for a tech we didn't see at hydration
           // (e.g. tech started a shift after page load). Add a stub
           // row; the next /board fetch on remount will fill in name /
@@ -156,6 +164,7 @@ export function useDispatchBoard() {
             current_job_id: payload.current_job_id || null,
             eta_minutes: payload.eta_minutes ?? null,
             updated_at: payload.updated_at,
+            location_updated_at: payload.location_updated_at || null,
             today_total: 0,
             today_completed: 0,
           });
@@ -170,6 +179,7 @@ export function useDispatchBoard() {
           current_job_id: payload.current_job_id || null,
           eta_minutes: payload.eta_minutes ?? null,
           updated_at: payload.updated_at,
+          location_updated_at: payload.location_updated_at || existing.location_updated_at || null,
         });
         return next;
       });

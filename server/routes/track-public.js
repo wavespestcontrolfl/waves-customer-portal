@@ -119,7 +119,7 @@ async function buildVehicle(service) {
   try {
     ts = await db('tech_status')
       .where({ tech_id: service.technician_id })
-      .first('lat', 'lng', 'updated_at');
+      .first('lat', 'lng', 'location_updated_at', 'updated_at');
   } catch (err) {
     logger.warn(`[track-public] tech_status lookup failed: ${err.message}`);
     return null;
@@ -128,7 +128,7 @@ async function buildVehicle(service) {
 
   const lat = finiteNumber(ts.lat);
   const lng = finiteNumber(ts.lng);
-  const lastReportedAt = ts.updated_at;
+  const lastReportedAt = ts.location_updated_at;
   if (!isFreshVehicleTimestamp(lastReportedAt)) return null;
 
   const eta = await calculateBoundedTrackingEta({

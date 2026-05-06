@@ -16,6 +16,8 @@ describe('admin schedule assigned-tech ETA helpers', () => {
     expect(sql).toContain('"s"."technician_id" = "ts"."tech_id"');
     expect(sql).toContain('"c"."latitude" as "customer_latitude"');
     expect(sql).toContain('"c"."longitude" as "customer_longitude"');
+    expect(sql).toContain('"ts"."location_updated_at" as "tech_updated_at"');
+    expect(sql).not.toContain('"ts"."updated_at" as "tech_updated_at"');
     expect(sql).not.toContain('"s"."lat" as "service_lat"');
     expect(sql).not.toContain('"s"."lng" as "service_lng"');
     expect(sql).not.toContain('"customers"."lat"');
@@ -28,6 +30,8 @@ describe('admin schedule assigned-tech ETA helpers', () => {
 
     expect(sql).toContain('from "tech_status"');
     expect(sql).toContain('"tech_id" = ?');
+    expect(sql).toContain('"location_updated_at"');
+    expect(sql).not.toContain('"updated_at"');
     expect(bindings).toEqual(['tech-1', 1]);
   });
 
@@ -63,6 +67,17 @@ describe('admin schedule assigned-tech ETA helpers', () => {
       technician_id: 'tech-1',
       tech_lat: '27.1',
       tech_lng: '-82.2',
+      updated_at: '2026-05-05T11:59:00.000Z',
+    })).toMatchObject({
+      available: false,
+      stale: true,
+      reason: 'stale_tech_status',
+    });
+
+    expect(formatAssignedVehicleLocation({
+      technician_id: 'tech-1',
+      tech_lat: '27.1',
+      tech_lng: '-82.2',
       tech_updated_at: '2026-05-05T11:54:59.000Z',
     })).toMatchObject({
       available: false,
@@ -76,6 +91,7 @@ describe('admin schedule assigned-tech ETA helpers', () => {
       technician_id: 'tech-1',
       tech_lat: '27.1',
       tech_lng: '-82.2',
+      updated_at: '2026-05-05T11:54:00.000Z',
       tech_updated_at: '2026-05-05T11:58:00.000Z',
     })).toEqual({
       found: true,

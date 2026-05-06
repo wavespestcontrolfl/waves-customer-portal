@@ -1972,7 +1972,7 @@ router.get('/reschedules/log', async (req, res, next) => {
 //
 // Filter rules (per phase 2 brief):
 //   - techs[]:  technicians.role IN ('admin','technician') AND active=TRUE,
-//               must have a tech_status row with updated_at >= NOW()-24h
+//               must have a tech_status row with location_updated_at >= NOW()-24h
 //               (rolling window, not midnight ET — avoids the "tech pinged
 //               at 11:50pm last night, card disappears at midnight" gap).
 //   - jobs[]:   all scheduled_services WHERE scheduled_date = today (ET),
@@ -2002,6 +2002,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         ts.lng,
         ts.current_job_id,
         ts.updated_at,
+        ts.location_updated_at,
         COALESCE(today_agg.total, 0)     AS today_total,
         COALESCE(today_agg.completed, 0) AS today_completed
       FROM technicians t
@@ -2018,7 +2019,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
       ) today_agg ON today_agg.technician_id = t.id
       WHERE t.role IN ('admin','technician')
         AND t.active = TRUE
-        AND ts.updated_at >= NOW() - INTERVAL '24 hours'
+        AND ts.location_updated_at >= NOW() - INTERVAL '24 hours'
       ORDER BY t.name
       `,
       [today]
@@ -2082,6 +2083,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
       current_job_id: r.current_job_id || null,
       eta_minutes: computeTechEta(r, jobsById.get(r.current_job_id)),
       updated_at: r.updated_at,
+      location_updated_at: r.location_updated_at,
       today_total: parseInt(r.today_total, 10) || 0,
       today_completed: parseInt(r.today_completed, 10) || 0,
     })));
@@ -2243,7 +2245,8 @@ router.get('/techs/:id', requireAdmin, async (req, res, next) => {
       .first(
         't.id', 't.name', 't.role', 't.phone', 't.email', 't.active',
         'ts.status', 'ts.lat', 'ts.lng', 'ts.current_job_id',
-        'ts.updated_at as status_updated_at'
+        'ts.updated_at as status_updated_at',
+        'ts.location_updated_at'
       );
     if (!tech) return res.status(404).json({ error: 'Tech not found' });
 
@@ -2307,6 +2310,7 @@ router.get('/techs/:id', requireAdmin, async (req, res, next) => {
       lat: tech.lat == null ? null : Number(tech.lat),
       lng: tech.lng == null ? null : Number(tech.lng),
       status_updated_at: tech.status_updated_at || null,
+      location_updated_at: tech.location_updated_at || null,
       today: {
         scheduled_date: today,
         completed,

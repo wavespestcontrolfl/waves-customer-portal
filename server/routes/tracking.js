@@ -217,12 +217,12 @@ async function enrichScheduledWithTechStatus(tracker, service, customer) {
     if (!service?.technician_id) return tracker;
     const ts = await db('tech_status')
       .where({ tech_id: service.technician_id })
-      .first('lat', 'lng', 'updated_at');
+      .first('lat', 'lng', 'location_updated_at', 'updated_at');
     if (!ts || finiteNumber(ts.lat) == null || finiteNumber(ts.lng) == null) return tracker;
     const lat = finiteNumber(ts.lat);
     const lng = finiteNumber(ts.lng);
     let eta = null;
-    const lastReportedAt = ts.updated_at;
+    const lastReportedAt = ts.location_updated_at;
     if (!isFreshTechStatusTimestamp(lastReportedAt)) return tracker;
 
     if (tracker.customerLocation) {
@@ -232,7 +232,7 @@ async function enrichScheduledWithTechStatus(tracker, service, customer) {
         techLng: lng,
         customerLat: custLat,
         customerLng: custLng,
-        techUpdatedAt: ts.updated_at,
+        techUpdatedAt: lastReportedAt,
         bouncieService: BouncieService,
         logPrefix: 'tracking-tech-status',
       });

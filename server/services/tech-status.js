@@ -31,6 +31,22 @@ const logger = require('./logger');
 
 const ROOM = 'dispatch:admins';
 const EVENT = 'dispatch:tech_status';
+const DISPATCH_LOCATION_FRESH_MS = 24 * 60 * 60 * 1000;
+
+function isFreshDispatchLocation(row, now = Date.now()) {
+  const updatedMs = new Date(row?.location_updated_at).getTime();
+  return Number.isFinite(updatedMs) && (now - updatedMs) <= DISPATCH_LOCATION_FRESH_MS;
+}
+
+function sanitizeTechStatusForDispatch(row) {
+  if (!row || isFreshDispatchLocation(row)) return row;
+  return {
+    ...row,
+    lat: null,
+    lng: null,
+    eta_minutes: null,
+  };
+}
 
 /**
  * Upsert a tech_status row and broadcast to the admin room.
@@ -39,8 +55,8 @@ const EVENT = 'dispatch:tech_status';
  * @param {string} payload.tech_id           required, FK technicians.id
  * @param {string} payload.status            required, one of the CHECK values
  *                                           (en_route|on_site|wrapping_up|driving|break|idle)
- * @param {number} [payload.lat]             optional
- * @param {number} [payload.lng]             optional
+ * @param {number} [payload.lat]             optional, status-only callers should not use
+ * @param {number} [payload.lng]             optional, status-only callers should not use
  * @param {string} [payload.current_job_id]  optional, FK scheduled_services.id
  * @returns {Promise<object>} the committed row (full shape)
  */
@@ -56,6 +72,7 @@ async function upsertTechStatus(payload) {
     lng: payload.lng ?? null,
     current_job_id: payload.current_job_id ?? null,
     updated_at: db.fn.now(),
+    location_updated_at: payload.lat != null && payload.lng != null ? db.fn.now() : null,
   };
 
   // Transaction-bounded — the upsert (and any future siblings added
@@ -68,19 +85,20 @@ async function upsertTechStatus(payload) {
       .onConflict('tech_id')
       .merge({
         status: upsertCols.status,
-        lat: upsertCols.lat,
-        lng: upsertCols.lng,
+        lat: payload.lat != null && payload.lng != null ? upsertCols.lat : db.raw('tech_status.lat'),
+        lng: payload.lat != null && payload.lng != null ? upsertCols.lng : db.raw('tech_status.lng'),
         current_job_id: upsertCols.current_job_id,
         updated_at: upsertCols.updated_at,
+        location_updated_at: upsertCols.location_updated_at || db.raw('tech_status.location_updated_at'),
       })
-      .returning(['id', 'tech_id', 'status', 'lat', 'lng', 'current_job_id', 'updated_at']);
+      .returning(['id', 'tech_id', 'status', 'lat', 'lng', 'current_job_id', 'updated_at', 'location_updated_at']);
     row = committed;
   });
   // trx is committed by here. Anything below is "after commit."
 
   const io = getIo();
   if (io) {
-    io.to(ROOM).emit(EVENT, row);
+    io.to(ROOM).emit(EVENT, sanitizeTechStatusForDispatch(row));
   } else {
     // attachSockets() didn't run — typically only happens in unit
     // tests that import this module without booting the full server.
@@ -110,14 +128,14 @@ async function setTechJobStatus({ tech_id, status, current_job_id }) {
       status = EXCLUDED.status,
       current_job_id = EXCLUDED.current_job_id,
       updated_at = NOW()
-    RETURNING id, tech_id, status, lat, lng, current_job_id, updated_at
+    RETURNING id, tech_id, status, lat, lng, current_job_id, updated_at, location_updated_at
     `,
     [tech_id, status, current_job_id ?? null]
   ).then((r) => r.rows);
 
   const io = getIo();
   if (io) {
-    io.to(ROOM).emit(EVENT, row);
+    io.to(ROOM).emit(EVENT, sanitizeTechStatusForDispatch(row));
   } else {
     logger.warn('[tech-status] io not initialized; skipping job-status broadcast');
   }
@@ -140,13 +158,13 @@ async function clearTechCurrentJob({ tech_id, current_job_id, status = 'idle' })
       current_job_id: null,
       updated_at: db.fn.now(),
     })
-    .returning(['id', 'tech_id', 'status', 'lat', 'lng', 'current_job_id', 'updated_at']);
+    .returning(['id', 'tech_id', 'status', 'lat', 'lng', 'current_job_id', 'updated_at', 'location_updated_at']);
 
   if (!row) return null;
 
   const io = getIo();
   if (io) {
-    io.to(ROOM).emit(EVENT, row);
+    io.to(ROOM).emit(EVENT, sanitizeTechStatusForDispatch(row));
   } else {
     logger.warn('[tech-status] io not initialized; skipping clear-current-job broadcast');
   }
@@ -176,7 +194,7 @@ async function clearTechCurrentJob({ tech_id, current_job_id, status = 'idle' })
  *   2. Bouncie doesn't know about jobs. current_job_id is set by
  *      track-transitions or future tech-mobile heartbeats — the
  *      Bouncie path never touches it. The CASE here updates lat / lng
- *      / updated_at unconditionally, leaves current_job_id alone.
+ *      / location_updated_at unconditionally, leaves current_job_id alone.
  *
  * After commit we still emit dispatch:tech_status with the full row
  * (including the preserved current_job_id) so the dispatch board's
@@ -204,18 +222,19 @@ async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph }) {
     // see header comment for why.
     const [committed] = await trx.raw(
       `
-      INSERT INTO tech_status (tech_id, status, lat, lng, updated_at)
-      VALUES (?, ?, ?, ?, NOW())
+      INSERT INTO tech_status (tech_id, status, lat, lng, updated_at, location_updated_at)
+      VALUES (?, ?, ?, ?, NOW(), NOW())
       ON CONFLICT (tech_id) DO UPDATE SET
         lat = EXCLUDED.lat,
         lng = EXCLUDED.lng,
         updated_at = NOW(),
+        location_updated_at = NOW(),
         status = CASE
           WHEN tech_status.status IN ('en_route','on_site','wrapping_up')
             THEN tech_status.status
           ELSE EXCLUDED.status
         END
-      RETURNING id, tech_id, status, lat, lng, current_job_id, updated_at
+      RETURNING id, tech_id, status, lat, lng, current_job_id, updated_at, location_updated_at
       `,
       [tech_id, derivedStatus, lat, lng]
     ).then((r) => r.rows);
@@ -254,7 +273,7 @@ async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph }) {
 
   const io = getIo();
   if (io) {
-    io.to(ROOM).emit(EVENT, enrichedRow);
+    io.to(ROOM).emit(EVENT, sanitizeTechStatusForDispatch(enrichedRow));
   } else {
     logger.warn('[tech-status] io not initialized; skipping ping broadcast');
   }
@@ -282,4 +301,8 @@ module.exports = {
   clearTechCurrentJob,
   ROOM,
   EVENT,
+  _test: {
+    sanitizeTechStatusForDispatch,
+    isFreshDispatchLocation,
+  },
 };

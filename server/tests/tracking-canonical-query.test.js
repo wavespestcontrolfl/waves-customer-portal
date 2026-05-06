@@ -92,7 +92,7 @@ describe('canonical customer tracker query', () => {
     expect(trackingRouter._test.buildLegacyTrackerQuery).toBeUndefined();
   });
 
-  test('authenticated tracking only exposes fresh tech_status coordinates', () => {
+  test('authenticated tracking only exposes fresh tech_status location timestamps', () => {
     expect(trackingRouter._test.isFreshTechStatusTimestamp('2026-05-05T11:55:00.000Z')).toBe(true);
     expect(trackingRouter._test.isFreshTechStatusTimestamp('2026-05-05T11:54:59.999Z')).toBe(false);
     expect(trackingRouter._test.isFreshTechStatusTimestamp(null)).toBe(false);
