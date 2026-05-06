@@ -1,6 +1,13 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { COLORS as B, FONTS, BUTTON_BASE, HALFTONE_PATTERN, HALFTONE_SIZE } from '../theme-brand';
+import {
+  COLORS as B,
+  FONTS,
+  GOLD_CTA,
+  INFO_CTA,
+  HALFTONE_PATTERN,
+  HALFTONE_SIZE,
+} from '../theme-brand';
 import BrandFooter from '../components/BrandFooter';
 import Icon from '../components/Icon';
 
@@ -28,6 +35,36 @@ function formatReportDate(value) {
   const date = dateOnlyValue ? new Date(`${dateOnlyValue}T12:00:00`) : new Date(raw);
   if (Number.isNaN(date.getTime())) return '';
   return date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
+}
+
+function formatAppointmentDate(value) {
+  if (!value) return '';
+  const raw = String(value);
+  const dateOnlyValue = dateOnly(raw);
+  const date = dateOnlyValue ? new Date(`${dateOnlyValue}T12:00:00`) : new Date(raw);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
+}
+
+function formatAppointmentTime(value) {
+  if (!value) return '';
+  const raw = String(value).trim();
+  const match = /^(\d{1,2}):(\d{2})/.exec(raw);
+  if (!match) return raw;
+  const hour24 = Number(match[1]);
+  const minute = match[2];
+  const hour12 = hour24 % 12 || 12;
+  const suffix = hour24 >= 12 ? 'PM' : 'AM';
+  return `${hour12}:${minute} ${suffix}`;
+}
+
+function formatAppointmentWindow(appt) {
+  if (!appt) return '';
+  const date = formatAppointmentDate(appt.scheduledDate);
+  const start = formatAppointmentTime(appt.windowStart);
+  const end = formatAppointmentTime(appt.windowEnd);
+  const window = start && end ? `${start}-${end}` : start || end;
+  return [date, window].filter(Boolean).join(' ');
 }
 
 function dateOnly(value) {
@@ -106,14 +143,23 @@ function humanizeKey(k) {
 }
 
 const ROOF_RAT_SPECIES_NOTE = [
-  "Roof rats are one of Florida's most serious household rodent pests. UF/IFAS describes them as the state's worst and most abundant rodent pest, and they are especially adapted to Florida homes because they climb trees, vines, utility lines, fences, and rooflines.",
-  'That climbing behavior lets them reach attics, soffits, wall voids, fruit trees, pet food, birdseed, and garbage areas. Adults are usually about 12-14 inches long including the tail and 5-10 ounces, but females can produce 5-8 pups per litter and multiple litters per year in Florida\'s warm climate.',
-  'The health risk is what makes roof rats more than a nuisance: rodents can contaminate food, storage areas, insulation, and household surfaces with urine, droppings, saliva, and nesting material. Florida health authorities associate rats and mice with diseases such as leptospirosis, salmonella, typhus, and rat-bite fever.',
+  'Roof rats are common climbers in Florida and often access homes through garage gaps, soffits, vents, roof returns, utility openings, and vegetation touching the structure.',
+  'Because they can contaminate insulation, storage areas, and household surfaces, entry points should be sealed after trapping activity is addressed.',
+].join(' ');
+
+const ROOF_RAT_LEARN_MORE = [
+  "UF/IFAS describes roof rats as one of Florida's most serious household rodent pests because they are well adapted to climbing trees, vines, utility lines, fences, and rooflines.",
+  "Adults are usually about 12-14 inches long including the tail and 5-10 ounces, but Florida's warm climate can support multiple litters per year.",
+  'The Florida Department of Health associates rats and mice with illnesses such as leptospirosis, salmonella, typhus, and rat-bite fever, so droppings, urine, saliva, nesting material, and contaminated dust are part of the concern.',
 ].join(' ');
 
 function getFindingInsight(key, value) {
   if (key === 'species' && includesAny(value, ['roof rat'])) return ROOF_RAT_SPECIES_NOTE;
   return '';
+}
+
+function isRoofRatFinding(key, value) {
+  return key === 'species' && includesAny(value, ['roof rat']);
 }
 
 function includesAny(text, words) {
@@ -235,6 +281,38 @@ function buildClientSnapshot({ projectType, findings, recommendations }) {
   return null;
 }
 
+function getReportText(data, findings) {
+  return [
+    data?.projectType,
+    data?.title,
+    data?.recommendations,
+    ...Object.values(findings || {}),
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function buildAtAGlance({ data, findings, reportTitle, clientSnapshot }) {
+  const text = getReportText(data, findings);
+  const kind = getProjectKind(data.projectType);
+  const rows = [
+    ['Service type', reportTitle],
+  ];
+  if (kind === 'rodent' || includesAny(text, ['rat', 'rodent', 'trap'])) {
+    rows.push(['Activity level', includesAny(text, ['active', 'trap', 'pressure']) ? 'Active / suspected active roof rat activity' : 'Rodent activity documented']);
+    rows.push(['Primary concern', includesAny(text, ['garage', 'jamb']) ? 'Garage entry point at right-side jamb' : 'Rodent travel routes and possible entry points']);
+    rows.push(['Immediate action', includesAny(text, ['trap']) ? 'Leave traps undisturbed and keep children and pets away' : 'Monitor activity and avoid disturbing evidence']);
+    rows.push(['Recommended next step', includesAny(text, ['seal', 'sweep', 'exclusion']) ? 'Garage door seal repair plus follow-up trapping/exclusion inspection' : clientSnapshot?.next || 'Review findings with Waves']);
+  } else if (clientSnapshot) {
+    rows.push(['Next step', clientSnapshot.priority]);
+    rows.push(['Recommended action', clientSnapshot.next]);
+  }
+  if (data.upcomingAppointment) {
+    rows.push(['Follow-up', formatAppointmentWindow(data.upcomingAppointment)]);
+  } else if (data.followupDate) {
+    rows.push(['Follow-up', formatAppointmentDate(data.followupDate)]);
+  }
+  return rows.filter(([, value]) => value);
+}
+
 export default function ProjectReportViewPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
@@ -259,10 +337,8 @@ export default function ProjectReportViewPage() {
         <div style={{ color: B.grayMid }}><Icon name="document" size={32} strokeWidth={1.75} /></div>
         <div style={{ fontSize: 16, fontWeight: 700, color: B.navy, marginTop: 8 }}>Report not found</div>
         <a href="tel:+19412975749" style={{
-          ...BUTTON_BASE, marginTop: 16, padding: '10px 22px', borderRadius: 9999,
-          background: B.yellow, color: B.blueDeeper, textDecoration: 'none',
-          display: 'inline-flex', fontWeight: 800,
-        }}>Call (941) 297-5749</a>
+          ...GOLD_CTA, marginTop: 16, fontSize: 14, minHeight: 44,
+        }}>Call Us</a>
       </div>
     </div>
   );
@@ -280,7 +356,7 @@ export default function ProjectReportViewPage() {
   const contactRows = [
     projectDateLabel ? `Inspection date: ${projectDateLabel}${data.technicianName ? ` · ${data.technicianName}` : ''}` : '',
     showSentDate ? `Report sent: ${sentDateLabel}` : '',
-    data.customerAddress || data.cityState || '',
+    data.customerAddress || '',
     data.customerEmail ? `Email: ${data.customerEmail}` : '',
     data.customerPhone ? `Phone: ${data.customerPhone}` : '',
   ].filter(Boolean);
@@ -289,6 +365,9 @@ export default function ProjectReportViewPage() {
     findings,
     recommendations: data.recommendations,
   });
+  const reportText = getReportText(data, findings);
+  const atAGlanceRows = buildAtAGlance({ data, findings, reportTitle, clientSnapshot });
+  const showRodentDetails = getProjectKind(data.projectType) === 'rodent' || includesAny(reportText, ['roof rat', 'rodent', 'trap']);
 
   return (
     <div style={{ minHeight: '100vh', background: B.offWhite, fontFamily: FONTS.body }}>
@@ -328,6 +407,8 @@ export default function ProjectReportViewPage() {
             </div>
           )}
 
+          {atAGlanceRows.length > 0 && <AtAGlance rows={atAGlanceRows} />}
+
           {clientSnapshot && (
             <div style={{
               marginTop: 16,
@@ -353,6 +434,8 @@ export default function ProjectReportViewPage() {
             </div>
           )}
 
+          {showRodentDetails && <RodentDetails text={reportText} />}
+
           {/* Findings */}
           {findingsEntries.length > 0 && (
             <div style={{ marginTop: 16 }}>
@@ -362,14 +445,26 @@ export default function ProjectReportViewPage() {
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 {findingsEntries.map(([key, value]) => {
                   const insight = getFindingInsight(key, value);
+                  const showRoofRatPhoto = isRoofRatFinding(key, value);
                   return (
                     <div key={key} style={{ padding: '10px 12px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
                       <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 3 }}>{humanizeKey(key)}</div>
                       <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{String(value)}</div>
+                      {showRoofRatPhoto && <RoofRatPhoto />}
                       {insight && (
                         <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, marginTop: 8 }}>
                           {insight}
                         </div>
+                      )}
+                      {showRoofRatPhoto && (
+                        <details style={{ marginTop: 8 }}>
+                          <summary style={{ fontSize: 14, fontWeight: 800, color: B.blueDeeper, cursor: 'pointer' }}>
+                            Learn more about roof rats
+                          </summary>
+                          <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, marginTop: 6 }}>
+                            {ROOF_RAT_LEARN_MORE}
+                          </div>
+                        </details>
                       )}
                     </div>
                   );
@@ -381,7 +476,7 @@ export default function ProjectReportViewPage() {
           {/* Recommendations — if the text is the three-section AI-drafted
                format, render each section with its own heading. Otherwise
                fall back to the single "Recommendations" block. */}
-          {data.recommendations && <RecommendationsBlock text={data.recommendations} />}
+          {data.recommendations && <RecommendationsBlock text={data.recommendations} upcomingAppointment={data.upcomingAppointment} />}
         </div>
 
         {data.projectType === 'wdo_inspection' && (
@@ -397,13 +492,10 @@ export default function ProjectReportViewPage() {
               target="_blank"
               rel="noreferrer"
               style={{
-                ...BUTTON_BASE, marginTop: 12, padding: '0 18px', height: 40, fontSize: 14,
-                borderRadius: 999, background: B.navy, color: '#fff',
-                textDecoration: 'none', display: 'inline-flex', alignItems: 'center',
-                fontWeight: 800,
+                ...INFO_CTA, marginTop: 12, padding: '14px 20px', minHeight: 44, fontSize: 14,
               }}
             >
-              <Icon name="document" size={15} strokeWidth={2} style={{ marginRight: 6 }} /> View FDACS-13645
+              <Icon name="document" size={15} strokeWidth={2} /> View FDACS-13645
             </a>
           </div>
         )}
@@ -447,23 +539,126 @@ export default function ProjectReportViewPage() {
           <div style={{ fontSize: 14, color: B.grayDark }}>Questions about this report?</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, justifyContent: 'center', marginTop: 8 }}>
             <a href="sms:+19412975749" style={{
-              ...BUTTON_BASE, padding: '0 22px', height: 44, fontSize: 14,
-              borderRadius: 999, background: B.yellow, color: B.blueDeeper,
-              textDecoration: 'none', display: 'inline-flex', alignItems: 'center',
-              fontWeight: 800,
-            }}><Icon name="message" size={16} strokeWidth={2} style={{ marginRight: 6 }} /> Text Us — (941) 297-5749</a>
+              ...GOLD_CTA, padding: '14px 20px', minHeight: 44, fontSize: 14,
+            }}><Icon name="message" size={16} strokeWidth={2} /> Text Us</a>
             <a href="tel:+19412975749" style={{
-              ...BUTTON_BASE, padding: '0 22px', height: 44, fontSize: 14,
-              borderRadius: 999, background: B.navy, color: '#fff',
-              textDecoration: 'none', display: 'inline-flex', alignItems: 'center',
-              fontWeight: 800,
-            }}><Icon name="phone" size={16} strokeWidth={2} style={{ marginRight: 6 }} /> Call Us — (941) 297-5749</a>
+              ...INFO_CTA, padding: '14px 20px', minHeight: 44, fontSize: 14,
+            }}><Icon name="phone" size={16} strokeWidth={2} /> Call Us</a>
           </div>
         </div>
 
         <BrandFooter />
       </div>
     </div>
+  );
+}
+
+function AtAGlance({ rows }) {
+  return (
+    <div style={{ marginTop: 16, padding: '12px 14px', borderRadius: 10, background: '#fff', border: `1px solid ${B.bluePale}` }}>
+      <div style={{ fontSize: 12, fontWeight: 800, color: B.blueDeeper, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+        At a glance
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(120px, 0.45fr) 1fr', gap: '8px 12px' }}>
+        {rows.map(([label, value]) => (
+          <div key={label} style={{ display: 'contents' }}>
+            <div style={{ fontSize: 14, fontWeight: 800, color: B.navy }}>{label}</div>
+            <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.45 }}>{value}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RodentDetails({ text }) {
+  const entryRows = [];
+  if (includesAny(text, ['right-side jamb']) && includesAny(text, ['vinyl weather stripping']) && includesAny(text, ['quarter inch'])) {
+    entryRows.push(['Garage door, right-side jamb', 'Gnawed vinyl weather stripping with gap over 1/4 inch', 'High', 'Replace side seal and install rodent-resistant sweep']);
+  }
+  if (includesAny(text, ['refuse containers staged close', 'refuse containers']) && includesAny(text, ['8-10 feet', 'sealed lidded bins'])) {
+    entryRows.push(['Garage refuse area', 'Trash containers staged near damaged jamb', 'Medium', 'Move bins 8-10 feet away or use sealed lidded bins']);
+  }
+  if (includesAny(text, ['full door perimeter', 'full garage door perimeter']) && includesAny(text, ['follow-up', 'followup'])) {
+    entryRows.push(['Full garage door perimeter', 'Needs reassessment during follow-up', 'Pending', 'Inspect during scheduled follow-up']);
+  }
+  const trapRows = [];
+  if (includesAny(text, ['six snap traps']) && includesAny(text, ['behind the refrigerator']) && includesAny(text, ['under the sink'])) {
+    trapRows.push(['Snap traps', '2', 'Kitchen: behind refrigerator and under sink']);
+  }
+  if (includesAny(text, ['six snap traps']) && includesAny(text, ['four in the garage']) && includesAny(text, ['wall-floor junctions'])) {
+    trapRows.push(['Snap traps', '4', 'Garage: wall-floor junctions near entry corridor']);
+  }
+  if (trapRows.length > 0 && includesAny(text, ['pets and children', 'children and pets'])) {
+    trapRows.push(['Safety note', '-', 'Do not move, reset, or dispose of traps. Keep children and pets away from trap locations.']);
+  }
+  if (entryRows.length === 0 && trapRows.length === 0) return null;
+  return (
+    <div style={{ marginTop: 16, display: 'grid', gap: 12 }}>
+      {entryRows.length > 0 && (
+        <ReportTable
+          title="Entry points and vulnerabilities"
+          columns={['Location', 'Finding', 'Priority', 'Recommendation']}
+          rows={entryRows}
+        />
+      )}
+      {trapRows.length > 0 && (
+        <ReportTable
+          title="Trap placement and safety"
+          columns={['Trap type', 'Quantity', 'Location']}
+          rows={trapRows}
+        />
+      )}
+    </div>
+  );
+}
+
+function ReportTable({ title, columns, rows }) {
+  return (
+    <div style={{ borderRadius: 10, overflow: 'hidden', border: `1px solid ${B.bluePale}`, background: '#fff' }}>
+      <div style={{ padding: '10px 12px', fontSize: 12, fontWeight: 800, color: B.blueDeeper, textTransform: 'uppercase', letterSpacing: 0.5, background: B.blueSurface }}>
+        {title}
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14, color: B.grayDark }}>
+          <thead>
+            <tr>
+              {columns.map(col => (
+                <th key={col} style={{ textAlign: 'left', padding: '9px 10px', color: B.navy, borderTop: `1px solid ${B.bluePale}`, borderBottom: `1px solid ${B.bluePale}` }}>
+                  {col}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => (
+              <tr key={`${row[0]}-${i}`}>
+                {row.map((cell, idx) => (
+                  <td key={`${row[0]}-${idx}`} style={{ padding: '9px 10px', verticalAlign: 'top', borderBottom: i === rows.length - 1 ? 'none' : `1px solid ${B.bluePale}` }}>
+                    {cell}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function RoofRatPhoto() {
+  return (
+    <figure style={{ margin: '10px 0 0', borderRadius: 8, overflow: 'hidden', border: `1px solid ${B.bluePale}`, background: '#fff' }}>
+      <img
+        src="/brand/roof-rat-report.png"
+        alt="Roof rat"
+        style={{ display: 'block', width: '100%', maxHeight: 240, objectFit: 'cover' }}
+      />
+      <figcaption style={{ padding: '6px 8px', fontSize: 14, color: B.grayDark, lineHeight: 1.35 }}>
+        AI-generated roof rat reference image.
+      </figcaption>
+    </figure>
   );
 }
 
@@ -557,7 +752,7 @@ function titleCase(s) {
   return s.split(' ').map(w => w[0] + w.slice(1).toLowerCase()).join(' ');
 }
 
-function RecommendationsBlock({ text }) {
+function RecommendationsBlock({ text, upcomingAppointment }) {
   const sections = parseSections(text);
   if (sections) {
     return (
@@ -568,7 +763,7 @@ function RecommendationsBlock({ text }) {
               {titleCase(s.heading)}
             </div>
             <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.65, whiteSpace: 'pre-wrap' }}>{s.body}</div>
-            {s.heading === 'WHAT WE RECOMMEND' && shouldShowBookingCta(s.body) && <BookingCta />}
+            {s.heading === 'WHAT WE RECOMMEND' && shouldShowBookingCta(s.body) && <BookingCta upcomingAppointment={upcomingAppointment} text={s.body} />}
           </div>
         ))}
       </div>
@@ -578,7 +773,7 @@ function RecommendationsBlock({ text }) {
     <div style={{ marginTop: 16, padding: '12px 14px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
       <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 4 }}>Recommendations</div>
       <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{text}</div>
-      {shouldShowBookingCta(text) && <BookingCta />}
+      {shouldShowBookingCta(text) && <BookingCta upcomingAppointment={upcomingAppointment} text={text} />}
     </div>
   );
 }
@@ -592,28 +787,46 @@ function shouldShowBookingCta(text) {
   return /\b(schedule|book|appointment|recommend(?:ed)? (?:service|treatment|follow[-\s]?up|inspection)|apply|application|treatment|treat|follow[-\s]?up|exclusion|bait|boracare|bora care|termite|rodent|bed bug)\b/i.test(value);
 }
 
-function BookingCta() {
+function BookingCta({ upcomingAppointment, text }) {
+  const appt = upcomingAppointment;
+  if (appt) {
+    return (
+      <div style={{
+        marginTop: 14,
+        padding: '12px 14px',
+        borderRadius: 8,
+        background: '#fff',
+        border: `1px solid ${B.bluePale}`,
+        textAlign: 'center',
+      }}>
+        <div style={{ fontSize: 12, fontWeight: 800, color: B.blueDeeper, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+          Upcoming appointment
+        </div>
+        <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, marginTop: 4 }}>
+          {[appt.serviceType, formatAppointmentWindow(appt)].filter(Boolean).join(' - ')}
+        </div>
+        {appt.technicianName && (
+          <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.45 }}>
+            Technician: {appt.technicianName}
+          </div>
+        )}
+      </div>
+    );
+  }
   return (
-    <div style={{ marginTop: 14 }}>
+    <div style={{ marginTop: 14, display: 'flex', justifyContent: 'center' }}>
       <a
         href={BOOK_URL}
         target="_blank"
         rel="noreferrer"
         style={{
-          ...BUTTON_BASE,
-          padding: '0 18px',
-          height: 40,
+          ...GOLD_CTA,
+          padding: '14px 20px',
+          minHeight: 44,
           fontSize: 14,
-          borderRadius: 999,
-          background: B.yellow,
-          color: B.blueDeeper,
-          textDecoration: 'none',
-          display: 'inline-flex',
-          alignItems: 'center',
-          fontWeight: 800,
         }}
       >
-        <Icon name="calendar" size={15} strokeWidth={2} style={{ marginRight: 6 }} /> Book an appointment
+        <Icon name="calendar" size={15} strokeWidth={2} /> {includesAny(text, ['rodent', 'exclusion', 'trap']) ? 'Request Exclusion Estimate' : 'Book an appointment'}
       </a>
     </div>
   );
