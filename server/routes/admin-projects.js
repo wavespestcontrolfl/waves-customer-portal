@@ -253,7 +253,68 @@ async function buildAiPhotoInputs(photos = []) {
   };
 }
 
-function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, customer, tech, projectDate, photoLines }) {
+function compactText(value, max = 360) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  return text.length > max ? `${text.slice(0, max - 3).trim()}...` : text;
+}
+
+function formatContextDate(value) {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toISOString().slice(0, 10);
+}
+
+async function getCustomerCommunicationContext(customerId) {
+  if (!customerId) return '';
+  const [calls, sms, emails] = await Promise.all([
+    db('call_log')
+      .where({ customer_id: customerId })
+      .select('created_at', 'direction', 'call_outcome', 'lead_synopsis', 'transcription', 'notes')
+      .orderBy('created_at', 'desc')
+      .limit(3)
+      .catch((err) => {
+        logger.warn(`[projects] call context unavailable: ${err.message}`);
+        return [];
+      }),
+    db('sms_log')
+      .where({ customer_id: customerId })
+      .select('created_at', 'direction', 'message_body', 'message_type')
+      .orderBy('created_at', 'desc')
+      .limit(4)
+      .catch((err) => {
+        logger.warn(`[projects] sms context unavailable: ${err.message}`);
+        return [];
+      }),
+    db('emails')
+      .where({ customer_id: customerId })
+      .select('received_at', 'subject', 'snippet', 'body_text')
+      .orderBy('received_at', 'desc')
+      .limit(3)
+      .catch((err) => {
+        logger.warn(`[projects] email context unavailable: ${err.message}`);
+        return [];
+      }),
+  ]);
+
+  const lines = [];
+  for (const call of calls) {
+    const summary = compactText(call.lead_synopsis || call.notes || call.transcription);
+    if (summary) lines.push(`Call ${formatContextDate(call.created_at)} (${call.direction || 'unknown'}${call.call_outcome ? `, ${call.call_outcome}` : ''}): ${summary}`);
+  }
+  for (const msg of sms) {
+    const summary = compactText(msg.message_body, 260);
+    if (summary) lines.push(`Text ${formatContextDate(msg.created_at)} (${msg.direction || 'unknown'}${msg.message_type ? `, ${msg.message_type}` : ''}): ${summary}`);
+  }
+  for (const email of emails) {
+    const summary = compactText(email.snippet || email.body_text, 260);
+    const subject = compactText(email.subject, 120);
+    if (summary || subject) lines.push(`Email ${formatContextDate(email.received_at)}${subject ? ` "${subject}"` : ''}: ${summary || '[no body preview]'}`);
+  }
+  return lines.slice(0, 6).join('\n');
+}
+
+function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, customer, tech, projectDate, photoLines, communicationContext }) {
   const labelMap = Object.fromEntries((typeCfg.findingsFields || []).map(f => [f.key, f.label]));
   const findingsLines = Object.entries(findings || {})
     .filter(([, v]) => v !== null && v !== undefined && String(v).trim() !== '')
@@ -273,7 +334,7 @@ Project types this prompt handles:
 - Rodent exclusion (entry-point mapping, trapping, exclusion work)
 - Bed bug treatment (inspection + initial treatment, with an optional 14-day follow-up)
 
-The narrative sits alongside structured findings (field/value pairs), photos, and Waves branding. This prompt writes four narrative sections only — it does NOT touch the structured findings.
+The narrative sits alongside structured findings (field/value pairs), photos, recent customer communication context, and Waves branding. This prompt writes four or five narrative sections only — it does NOT touch the structured findings.
 
 ## HARD CONSTRAINTS (READ FIRST — THESE OVERRIDE EVERYTHING ELSE)
 
@@ -289,9 +350,9 @@ The narrative sits alongside structured findings (field/value pairs), photos, an
 
 6. **No brand names for products.** Use active ingredient names (fipronil, bifenthrin, imidacloprid) or functional descriptions (non-repellent residual, insect growth regulator). If the active ingredient is not provided in the inputs, use the functional description only.
 
-7. **Plain text only.** No markdown, no bold, no emojis, no bullet points, no em-dash headers. Just paragraphs under the four section titles.
+7. **Plain text only.** No markdown, no bold, no emojis, no bullet points, no em-dash headers. Just paragraphs under the allowed section titles.
 
-8. **Length.** Each section 1–4 sentences. Total output roughly 120–220 words.
+8. **Length.** Each section 1–4 sentences. Total output roughly 120–240 words.
 
 9. **Photo-grounded drafting.** Review attached photos when provided. Use visible conditions in the images to support the narrative only when they are consistent with the structured findings or technician notes. If a photo suggests something not captured in the fields, mention it cautiously as a visible condition and avoid diagnosing beyond the evidence.
 
@@ -313,10 +374,18 @@ Do not think: action movie, military briefing, advertising copy, or fear-based s
 
 - Vary sentence openings. Do not start more than one sentence in a row with "We."
 - Blend what was done with why it matters in the same sentence when you can.
-- Avoid repeating the same word more than twice across all three sections (especially: treatment, inspect, applied, control, recommend).
+- Avoid repeating the same word more than twice across the report sections (especially: treatment, inspect, applied, control, recommend).
 - Add technical value without jargon dumping. Good examples: moisture supports wood decay; wood-to-ground contact increases WDO risk; gaps or rub marks can indicate rodent travel; sanitation and moisture can sustain pest pressure.
 
 ## SECTIONS
+
+### CUSTOMER CONCERN
+
+1–2 sentences, only when recent customer communication context is provided:
+- Summarize the customer's stated concern from calls, text messages, or emails
+- Reference the channel naturally when useful, for example "The recent call notes described..." or "The customer texted about..."
+- Do not include phone numbers, email addresses, private transcript details unrelated to the pest concern, or unsupported assumptions
+- If no communication context is provided, omit this section entirely
 
 ### WHAT WE INSPECTED
 
@@ -384,9 +453,20 @@ ${rawRecommendations || '[none provided]'}
 Attached photo review:
 ${photoLines || '[no photos attached]'}
 
+Recent customer communication context:
+${communicationContext || '[none provided]'}
+
 ## OUTPUT FORMAT
 
 Output exactly this structure, plain text, no markdown:
+
+If recent customer communication context is provided, start with:
+
+CUSTOMER CONCERN
+
+[1-2 sentences]
+
+Then continue with:
 
 WHAT WE INSPECTED
 
@@ -404,10 +484,12 @@ WHAT WE RECOMMEND
 
 [2-4 sentences]
 
-Do not include the customer name as a header. Do not add greetings, sign-offs, or any text outside these four sections.`;
+If recent customer communication context is [none provided], omit CUSTOMER CONCERN and output only WHAT WE INSPECTED, WHAT WE FOUND, WHAT WE DID, and WHAT WE RECOMMEND.
+
+Do not include the customer name as a header. Do not add greetings, sign-offs, or any text outside the allowed sections.`;
 }
 
-async function draftProjectReport({ typeCfg, findings, rawRecommendations, customer, tech, projectDate, photos = [] }) {
+async function draftProjectReport({ typeCfg, findings, rawRecommendations, customer, tech, projectDate, photos = [], communicationContext = '' }) {
   const Anthropic = require('@anthropic-ai/sdk');
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   const { photoLines, imageBlocks } = await buildAiPhotoInputs(photos);
@@ -419,6 +501,7 @@ async function draftProjectReport({ typeCfg, findings, rawRecommendations, custo
     tech,
     projectDate,
     photoLines,
+    communicationContext,
   });
   const msg = await anthropic.messages.create({
     model: MODELS.FLAGSHIP,
@@ -601,6 +684,7 @@ router.post('/ai-write-preview', requireAdmin, async (req, res, next) => {
     const typeCfg = getProjectType(project_type);
     const customer = customer_id ? await db('customers').where({ id: customer_id }).first() : null;
     const tech = req.technicianId ? await db('technicians').where({ id: req.technicianId }).first() : null;
+    const communicationContext = await getCustomerCommunicationContext(customer_id);
     const report = await draftProjectReport({
       typeCfg,
       findings: findings || {},
@@ -608,6 +692,7 @@ router.post('/ai-write-preview', requireAdmin, async (req, res, next) => {
       customer,
       tech,
       projectDate: normalizeDateOnly(project_date),
+      communicationContext,
     });
 
     logger.info(`[projects] ai-write-preview ${project_type} — ${report.length} chars`);
@@ -858,9 +943,9 @@ router.post('/:id/followup', async (req, res, next) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /api/admin/projects/:id/ai-write — Claude drafts the three
-// customer-facing narrative sections (WHAT WE INSPECTED / FOUND / RECOMMEND)
-// from the structured findings + tech's raw notes. Admin reviews before Send.
+// POST /api/admin/projects/:id/ai-write — Claude drafts the
+// customer-facing narrative sections from findings, communication context,
+// tech notes, and photos. Admin reviews before Send.
 //
 // Accepts optional overrides in the body so the admin can generate against
 // unsaved edits without a round-trip save. Admin-only — techs capture facts,
@@ -886,6 +971,7 @@ router.post('/:id/ai-write', requireAdmin, async (req, res, next) => {
     const tech = project.created_by_tech_id
       ? await db('technicians').where({ id: project.created_by_tech_id }).first()
       : null;
+    const communicationContext = await getCustomerCommunicationContext(project.customer_id);
     const photos = await db('project_photos')
       .where({ project_id: project.id })
       .orderBy(['visit', 'sort_order', 'created_at'])
@@ -899,6 +985,7 @@ router.post('/:id/ai-write', requireAdmin, async (req, res, next) => {
       tech,
       projectDate,
       photos,
+      communicationContext,
     });
     logger.info(`[projects] ai-write ${project.id} — ${report.length} chars`);
     res.json({ report });

@@ -858,7 +858,7 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
               type="button"
               onClick={handleAiWrite}
               disabled={aiWriting || saving}
-              title="Claude drafts What We Inspected / Found / Recommend from findings, tech notes, and attached photos."
+              title="Claude drafts Customer Concern, What We Inspected, What We Found, What We Did, and What We Recommend from available context."
               style={{
                 padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700,
                 background: aiWriting ? D.muted : D.card, color: D.heading,
@@ -875,7 +875,7 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
             value={editRecs}
             onChange={(e) => { setEditRecs(e.target.value); setDirty(true); }}
             rows={8}
-            placeholder={`Write freely, or tap "Write with AI" to draft the three customer-facing sections from the findings above.`}
+            placeholder={`Write freely, or tap "Write with AI" to draft the customer-facing report sections from findings, communication context, tech notes, and photos.`}
             style={{ ...inputStyle, resize: 'vertical', minHeight: 160, fontFamily: "'DM Sans', sans-serif" }}
           />
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>

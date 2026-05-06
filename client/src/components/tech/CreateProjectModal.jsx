@@ -218,6 +218,9 @@ export default function CreateProjectModal({
     defaultProjectDate || (defaultServiceRecordId || defaultScheduledServiceId ? '' : todayDateInput())
   );
   const [title, setTitle] = useState('');
+  const [serviceSearch, setServiceSearch] = useState('');
+  const [serviceResults, setServiceResults] = useState([]);
+  const [serviceLoading, setServiceLoading] = useState(false);
   const [findings, setFindings] = useState({});
   const [recommendations, setRecommendations] = useState('');
   const [saving, setSaving] = useState(false);
@@ -249,6 +252,31 @@ export default function CreateProjectModal({
     }, 250);
     return () => clearTimeout(t);
   }, [customerQuery]);
+
+  // Debounced Service Library search for the report title. This mirrors the
+  // appointment booking service picker so report names can match real services.
+  useEffect(() => {
+    const q = serviceSearch.trim();
+    if (q.length < 2) { setServiceResults([]); setServiceLoading(false); return; }
+    setServiceLoading(true);
+    const t = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams();
+        params.set('search', q);
+        params.set('is_active', 'true');
+        params.set('limit', '10');
+        const r = await adminFetch(`/admin/services?${params}`);
+        const d = await r.json();
+        const list = (d.services || []).slice(0, 10);
+        setServiceResults(list);
+      } catch {
+        setServiceResults([]);
+      } finally {
+        setServiceLoading(false);
+      }
+    }, 200);
+    return () => clearTimeout(t);
+  }, [serviceSearch]);
 
   const typeCfg = typesRegistry && projectType ? typesRegistry[projectType] : null;
   const visibleTypes = typesRegistry
@@ -539,14 +567,45 @@ export default function CreateProjectModal({
           {typeCfg && (
             <>
               <div>
-                <label style={labelStyle}>Title (optional)</label>
+                <label style={labelStyle}>Title / service performed (optional)</label>
                 <input
                   type="text"
                   value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  placeholder={`${typeCfg.label} — ${new Date().toLocaleDateString()}`}
+                  onChange={(e) => { setTitle(e.target.value); setServiceSearch(e.target.value); }}
+                  placeholder="Search services, e.g. Rodent Trapping"
                   style={inputStyle}
                 />
+                {(serviceLoading || serviceResults.length > 0) && (
+                  <div style={{
+                    marginTop: 6, background: theme === 'light' ? P.card : P.bg, borderRadius: 8,
+                    border: `1px solid ${P.border}`, overflow: 'hidden',
+                  }}>
+                    {serviceLoading && (
+                      <div style={{ padding: '9px 12px', fontSize: 12, color: P.muted }}>Searching services...</div>
+                    )}
+                    {!serviceLoading && serviceResults.map(s => (
+                      <button
+                        key={s.id}
+                        type="button"
+                        onClick={() => {
+                          setTitle(s.name || '');
+                          setServiceSearch('');
+                          setServiceResults([]);
+                        }}
+                        style={{
+                          width: '100%', textAlign: 'left', background: 'transparent',
+                          border: 'none', borderBottom: `1px solid ${P.border}`,
+                          padding: '10px 12px', cursor: 'pointer', color: P.text,
+                        }}
+                      >
+                        <div style={{ fontSize: 13, fontWeight: 800 }}>{s.name}</div>
+                        <div style={{ fontSize: 11, color: P.muted }}>
+                          {[s.category, s.billing_type, s.default_duration_minutes ? `${s.default_duration_minutes} min` : ''].filter(Boolean).join(' · ')}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div>
