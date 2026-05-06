@@ -8,6 +8,7 @@ const {
   normalizeAcceptPaymentMethodPreference,
   normalizeOneTimeBreakdown,
   resolveAcceptOneTimeTotal,
+  resolveEstimateDeclineGuard,
 } = require('../routes/estimate-public');
 
 function savedAdminEstimateData() {
@@ -403,6 +404,42 @@ describe('public estimate one-time breakdown', () => {
     expect(isEstimateAcceptActive({ status: 'declined', expires_at: '2026-05-06T12:01:00Z' }, now)).toBe(false);
     expect(isEstimateAcceptActive({ status: 'expired', expires_at: '2026-05-06T12:01:00Z' }, now)).toBe(false);
     expect(isEstimateAcceptActive({ status: 'sent', expires_at: '2026-05-06T11:59:59Z' }, now)).toBe(false);
+  });
+
+  test('decline guard rejects missing, accepted, and expired estimates', () => {
+    const now = new Date('2026-05-06T12:00:00Z');
+
+    expect(resolveEstimateDeclineGuard(null, now)).toEqual({
+      ok: false,
+      status: 404,
+      error: 'Estimate not found',
+    });
+    expect(resolveEstimateDeclineGuard({ status: 'accepted', expires_at: '2026-05-06T12:01:00Z' }, now)).toEqual({
+      ok: false,
+      status: 409,
+      error: 'Estimate is no longer active',
+    });
+    expect(resolveEstimateDeclineGuard({ status: 'expired', expires_at: '2026-05-06T12:01:00Z' }, now)).toEqual({
+      ok: false,
+      status: 409,
+      error: 'Estimate is no longer active',
+    });
+    expect(resolveEstimateDeclineGuard({ status: 'sent', expires_at: '2026-05-06T11:59:59Z' }, now)).toEqual({
+      ok: false,
+      status: 409,
+      error: 'Estimate is no longer active',
+    });
+  });
+
+  test('decline guard allows active estimates and makes declined idempotent', () => {
+    const now = new Date('2026-05-06T12:00:00Z');
+
+    expect(resolveEstimateDeclineGuard({ status: 'draft', expires_at: null }, now)).toEqual({ ok: true });
+    expect(resolveEstimateDeclineGuard({ status: 'viewed', expires_at: '2026-05-06T12:01:00Z' }, now)).toEqual({ ok: true });
+    expect(resolveEstimateDeclineGuard({ status: 'declined', expires_at: '2026-05-06T12:01:00Z' }, now)).toEqual({
+      ok: true,
+      alreadyDeclined: true,
+    });
   });
 
   test('accept success payload exposes invoice delivery state', () => {
