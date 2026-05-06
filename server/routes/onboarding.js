@@ -136,7 +136,7 @@ router.get('/:token', loadSession, async (req, res, next) => {
         serviceType: scheduled.service_type,
         techName: scheduled.tech_name,
         confirmed: scheduled.customer_confirmed,
-        // Carries the deposit_now / pay_at_visit choice the customer made
+        // Carries the card_on_file / pay_at_visit choice the customer made
         // during inline accept so the onboarding UI can skip the Stripe
         // screen when they opted to pay at the visit.
         paymentMethodPreference: scheduled.payment_method_preference || null,
@@ -275,7 +275,7 @@ router.put('/:token/details', loadSession, async (req, res, next) => {
     const { scheduling, access, pets, property, attribution } = req.body;
     const customerId = req.customer.id;
 
-    // Card-required guard. Customers who chose "deposit now with card" on
+    // Card-required guard. Customers who chose "card on file" on
     // the estimate page must save a payment method before they can finish
     // onboarding — otherwise they end up with a committed scheduled visit
     // and no card on file. The client UI enforces this via screen routing,
@@ -286,7 +286,7 @@ router.put('/:token/details', loadSession, async (req, res, next) => {
       .whereNotIn('status', ['cancelled', 'completed'])
       .orderBy('scheduled_date', 'asc')
       .first('payment_method_preference');
-    if (upcoming?.payment_method_preference === 'deposit_now') {
+    if (['card_on_file', 'deposit_now'].includes(upcoming?.payment_method_preference)) {
       const card = await db('payment_methods').where({ customer_id: customerId }).first('id');
       if (!card) {
         return res.status(409).json({

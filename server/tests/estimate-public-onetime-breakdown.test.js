@@ -4,6 +4,7 @@ const {
   buildAcceptSuccessPayload,
   buildPricingBundle,
   isStructuralOneTimeOnlyEstimate,
+  normalizeAcceptPaymentMethodPreference,
   normalizeOneTimeBreakdown,
   resolveAcceptOneTimeTotal,
 } = require('../routes/estimate-public');
@@ -383,6 +384,14 @@ describe('public estimate one-time breakdown', () => {
       invoiceId: 'inv-123',
       invoiceAmount: 249,
     }));
+  });
+
+  test('accept payment preference canonicalizes card-on-file aliases', () => {
+    expect(normalizeAcceptPaymentMethodPreference('card_on_file')).toBe('card_on_file');
+    expect(normalizeAcceptPaymentMethodPreference('deposit_now')).toBe('card_on_file');
+    expect(normalizeAcceptPaymentMethodPreference('pay_at_visit')).toBe('pay_at_visit');
+    expect(normalizeAcceptPaymentMethodPreference('prepay_annual')).toBe('prepay_annual');
+    expect(normalizeAcceptPaymentMethodPreference('deposit_later')).toBeNull();
   });
 
   test('accept success payload exposes invoice delivery state', () => {
