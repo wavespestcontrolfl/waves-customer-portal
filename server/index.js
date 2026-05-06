@@ -185,12 +185,33 @@ function rateLimitKey(req) {
   return ipFallbackKey(req.ip);
 }
 
+// Explicit allowlist of signed third-party webhook callbacks that bypass
+// the global limiter. Each of these routes verifies its own signature
+// (Twilio request validation, SendGrid ECDSA, Svix HMAC for Resend,
+// Bouncie token) and the providers retry on non-2xx — so a 429 there
+// just causes duplicate deliveries, and the JSON body would also corrupt
+// Twilio's expected TwiML. The lead-webhook (`/api/webhooks/lead`) and
+// `/api/leads` are NOT in this list: they're unauthenticated public form
+// endpoints with expensive side effects (customer creation, outbound SMS)
+// and the global limiter is the only abuse throttle they have.
+const SIGNED_WEBHOOK_PREFIXES = [
+  '/api/webhooks/twilio/',
+  '/api/webhooks/sendgrid',
+  '/api/webhooks/resend',
+  '/api/webhooks/bouncie',
+];
+
+function isSignedWebhookPath(originalUrl) {
+  if (originalUrl.includes('..')) return false;
+  return SIGNED_WEBHOOK_PREFIXES.some((p) => originalUrl.startsWith(p));
+}
+
 const limiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
   max: config.rateLimit.max,
   message: { error: 'Too many requests, please try again later.' },
   keyGenerator: rateLimitKey,
-  skip: () => process.env.NODE_ENV !== 'production',
+  skip: (req) => process.env.NODE_ENV !== 'production' || isSignedWebhookPath(req.originalUrl),
 });
 app.use('/api/', limiter);
 
