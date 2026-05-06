@@ -2189,15 +2189,27 @@ router.post('/:token/bundle-inquiry', async (req, res, next) => {
 router.put('/:token/decline', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
-    await db('estimates').where({ token: req.params.token }).update({ status: 'declined', declined_at: db.fn.now() });
+    const guard = resolveEstimateDeclineGuard(estimate);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+    if (guard.alreadyDeclined) return res.json({ success: true, alreadyDeclined: true });
+
+    const declinedCount = await db('estimates')
+      .where({ id: estimate.id })
+      .whereNotIn('status', ['accepted', 'declined', 'expired'])
+      .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', db.raw('NOW()')))
+      .update({ status: 'declined', declined_at: db.fn.now(), updated_at: db.fn.now() });
+    if (!declinedCount) {
+      const fresh = await db('estimates').where({ id: estimate.id }).first('status', 'expires_at');
+      const freshGuard = resolveEstimateDeclineGuard(fresh);
+      if (freshGuard.alreadyDeclined) return res.json({ success: true, alreadyDeclined: true });
+      return res.status(409).json({ error: 'Estimate is no longer active' });
+    }
 
     // Notify admin of declined estimate
-    if (estimate) {
-      try {
-        const NotificationService = require('../services/notification-service');
-        await NotificationService.notifyAdmin('estimate', `Estimate declined: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 $${estimate.monthly_total || 0}/mo`, { icon: '\u274C', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } });
-      } catch (e) { logger.error(`[notifications] Estimate declined notification failed: ${e.message}`); }
-    }
+    try {
+      const NotificationService = require('../services/notification-service');
+      await NotificationService.notifyAdmin('estimate', `Estimate declined: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 $${estimate.monthly_total || 0}/mo`, { icon: '\u274C', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } });
+    } catch (e) { logger.error(`[notifications] Estimate declined notification failed: ${e.message}`); }
 
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -2577,6 +2589,22 @@ function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   if (['accepted', 'declined', 'expired'].includes(estimate.status)) return false;
   if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
   return true;
+}
+
+function resolveEstimateDeclineGuard(estimate, now = new Date()) {
+  if (!estimate) {
+    return { ok: false, status: 404, error: 'Estimate not found' };
+  }
+  if (estimate.status === 'declined') {
+    return { ok: true, alreadyDeclined: true };
+  }
+  if (['accepted', 'expired'].includes(estimate.status)) {
+    return { ok: false, status: 409, error: 'Estimate is no longer active' };
+  }
+  if (estimate.expires_at && new Date(estimate.expires_at) < now) {
+    return { ok: false, status: 409, error: 'Estimate is no longer active' };
+  }
+  return { ok: true };
 }
 
 function buildAcceptSuccessPayload({
@@ -3059,6 +3087,7 @@ module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate
 module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
 module.exports.normalizeAcceptPaymentMethodPreference = normalizeAcceptPaymentMethodPreference;
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
+module.exports.resolveEstimateDeclineGuard = resolveEstimateDeclineGuard;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
 module.exports.buildAcceptOfficeFallback = buildAcceptOfficeFallback;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
