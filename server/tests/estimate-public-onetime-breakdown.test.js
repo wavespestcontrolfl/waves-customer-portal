@@ -1,4 +1,6 @@
 const {
+  buildAcceptNotificationPayload,
+  buildAcceptOfficeFallback,
   buildAcceptSuccessPayload,
   buildPricingBundle,
   isStructuralOneTimeOnlyEstimate,
@@ -417,6 +419,108 @@ describe('public estimate one-time breakdown', () => {
       nextStep: 'complete_onboarding',
       serviceMode: 'recurring',
       onboardingToken: 'setup-token',
+    }));
+  });
+
+  test('accept office fallback reflects one-time appointment and invoice next steps', () => {
+    expect(buildAcceptOfficeFallback({
+      customerName: 'Jane Doe',
+      address: '123 Main St',
+      serviceLabel: 'Rodent Service',
+      treatAsOneTime: true,
+      reservationCommitted: true,
+    })).toBe('One-time estimate accepted by Jane Doe at 123 Main St - Rodent Service. Appointment confirmed.');
+
+    expect(buildAcceptOfficeFallback({
+      customerName: 'Jane Doe',
+      address: '123 Main St',
+      serviceLabel: 'Rodent Service',
+      treatAsOneTime: true,
+    })).toBe('One-time estimate accepted by Jane Doe at 123 Main St - Rodent Service. Booking link sent.');
+
+    expect(buildAcceptOfficeFallback({
+      customerName: 'Jane Doe',
+      address: '123 Main St',
+      waveguardTier: 'Gold',
+      monthlyTotal: 89,
+      billByInvoice: true,
+    })).toBe('Estimate accepted by Jane Doe at 123 Main St - Gold WaveGuard $89/mo. Invoice mode selected.');
+  });
+
+  test('accept notification payload avoids WaveGuard onboarding copy for one-time accepts', () => {
+    expect(buildAcceptNotificationPayload({
+      customerName: 'Jane Doe',
+      serviceLabel: 'Rodent Service',
+      treatAsOneTime: true,
+      reservationCommitted: true,
+    })).toEqual(expect.objectContaining({
+      adminTitle: 'One-time estimate accepted: Jane Doe',
+      adminBody: 'Rodent Service approved and appointment confirmed.',
+      customerTitle: 'One-time service approved',
+      customerBody: 'Your Rodent Service appointment is confirmed. Check your phone for the confirmation text.',
+      customerLink: '/?tab=schedule',
+    }));
+
+    expect(buildAcceptNotificationPayload({
+      customerName: 'Jane Doe',
+      serviceLabel: 'Rodent Service',
+      treatAsOneTime: true,
+      bookingUrl: 'https://portal.wavespestcontrol.com/book?service=rodent',
+    })).toEqual(expect.objectContaining({
+      adminBody: 'Rodent Service approved. Booking link sent.',
+      customerBody: 'Your Rodent Service estimate is approved. Pick your appointment from the booking link we sent.',
+      customerLink: 'https://portal.wavespestcontrol.com/book?service=rodent',
+    }));
+
+    expect(buildAcceptNotificationPayload({
+      customerName: 'Jane Doe',
+      waveguardTier: 'Gold',
+      monthlyTotal: 89,
+      treatAsOneTime: false,
+    })).toEqual(expect.objectContaining({
+      adminTitle: 'Estimate accepted: Jane Doe',
+      adminBody: 'Gold WaveGuard $89/mo approved. Onboarding link sent.',
+      customerBody: 'Your Gold WaveGuard plan is confirmed. Complete onboarding to get started.',
+      customerLink: '/?tab=plan',
+    }));
+  });
+
+  test('accept notification payload only promises invoice links after invoice creation succeeds', () => {
+    expect(buildAcceptNotificationPayload({
+      customerName: 'Jane Doe',
+      serviceLabel: 'Rodent Service',
+      treatAsOneTime: true,
+      billByInvoice: true,
+      invoiceMode: true,
+      invoiceLinkDelivered: true,
+    })).toEqual(expect.objectContaining({
+      adminBody: 'Rodent Service approved. Invoice pay link is being sent.',
+      customerBody: 'Your Rodent Service estimate is approved. Use the invoice pay link we sent to complete payment.',
+      customerLink: '/?tab=billing',
+    }));
+
+    expect(buildAcceptNotificationPayload({
+      customerName: 'Jane Doe',
+      serviceLabel: 'Rodent Service',
+      treatAsOneTime: true,
+      billByInvoice: true,
+      invoiceMode: false,
+    })).toEqual(expect.objectContaining({
+      adminBody: 'Rodent Service approved. Invoice was not sent automatically; office follow-up needed.',
+      customerBody: 'Your Rodent Service estimate is approved. Our team will follow up with the invoice details.',
+      customerLink: '/?tab=billing',
+    }));
+
+    expect(buildAcceptNotificationPayload({
+      customerName: 'Jane Doe',
+      serviceLabel: 'Rodent Service',
+      treatAsOneTime: true,
+      billByInvoice: true,
+      invoiceMode: true,
+      invoiceLinkDelivered: false,
+    })).toEqual(expect.objectContaining({
+      adminBody: 'Rodent Service approved. Invoice was not sent automatically; office follow-up needed.',
+      customerBody: 'Your Rodent Service estimate is approved. Our team will follow up with the invoice details.',
     }));
   });
 });
