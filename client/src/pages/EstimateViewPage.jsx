@@ -172,6 +172,67 @@ function OneTimePriceCard({ oneTimePrice }) {
   );
 }
 
+function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
+  const excluded = new Set(excludeServices.filter(Boolean));
+  const items = (Array.isArray(breakdown?.items) ? breakdown.items : [])
+    .filter((item) => !excluded.has(item?.service));
+  if (items.length === 0) return null;
+  const total = excludeServices.length === 0 && Number.isFinite(Number(breakdown?.total))
+    ? Number(breakdown.total)
+    : items.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+
+  return (
+    <div style={{
+      background: COLORS.white, borderRadius: 16, padding: 18,
+      border: `1px solid ${COLORS.grayLight}`, marginBottom: 16,
+      boxShadow: '0 1px 6px rgba(15,23,42,0.04)',
+    }}>
+      <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.navy, marginBottom: 10 }}>
+        One-time services
+      </div>
+      <div style={{ display: 'grid', gap: 10 }}>
+        {items.map((item, i) => {
+          const amount = Number(item.amount) || 0;
+          const isDiscount = amount < 0 || item.kind === 'discount';
+          return (
+            <div key={`${item.service || item.label || 'item'}-${i}`} style={{
+              display: 'grid', gridTemplateColumns: '1fr auto', gap: 12,
+              alignItems: 'start', paddingBottom: i === items.length - 1 ? 0 : 10,
+              borderBottom: i === items.length - 1 ? 'none' : `1px solid ${COLORS.grayLight}`,
+            }}>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>
+                  {item.label || 'One-time service'}
+                </div>
+                {item.detail ? (
+                  <div style={{ fontSize: 12, color: COLORS.textCaption, marginTop: 2, lineHeight: 1.35 }}>
+                    {item.detail}
+                  </div>
+                ) : null}
+              </div>
+              <div style={{
+                fontSize: 14, fontWeight: 700,
+                color: isDiscount ? COLORS.green : COLORS.navy,
+                whiteSpace: 'nowrap',
+              }}>
+                {isDiscount ? '-' : ''}{fmtMoney(Math.abs(amount))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{
+        display: 'flex', justifyContent: 'space-between', gap: 12,
+        borderTop: `1px solid ${COLORS.grayLight}`, marginTop: 12, paddingTop: 12,
+        fontSize: 15, fontWeight: 700, color: COLORS.navy,
+      }}>
+        <span>One-time total</span>
+        <span>{fmtMoney(total)}</span>
+      </div>
+    </div>
+  );
+}
+
 function CountdownLine({ secondsRemaining }) {
   const m = Math.max(0, Math.floor(secondsRemaining / 60));
   const s = Math.max(0, secondsRemaining % 60);
@@ -610,6 +671,13 @@ export default function EstimateViewPage() {
                 </div>
               ))}
 
+              {!estimate.showOneTimeOption ? (
+                <OneTimeBreakdownCard
+                  breakdown={pricing.oneTimeBreakdown}
+                  excludeServices={(pricing.firstVisitFees || []).map((fee) => fee.service)}
+                />
+              ) : null}
+
               <IncludedChecklist included={currentFrequency?.included || []} />
 
               <AddOnsBlock
@@ -619,7 +687,10 @@ export default function EstimateViewPage() {
               />
             </>
           ) : (
-            <OneTimePriceCard oneTimePrice={pricing.anchorOneTimePrice} />
+            <>
+              <OneTimePriceCard oneTimePrice={pricing.anchorOneTimePrice} />
+              <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} />
+            </>
           )}
 
           <SlotPicker
