@@ -1120,7 +1120,9 @@ ${shellQuestionsBar()}
       });
       const data = await r.json();
       if (r.status === 409) {
-        toast('Slot conflict — pick another time.');
+        toast(/expired|no active reservation/i.test(data.error || '')
+          ? 'Reservation expired — pick another time.'
+          : 'Slot conflict — pick another time.');
         cancelReservation();
         return;
       }
@@ -1551,7 +1553,7 @@ router.put('/:token/accept', async (req, res, next) => {
           // our 15-min window and the final tap. Let the outer catch
           // translate it into a user-facing 409.
           if (commitErr.code === 'RESERVATION_EXPIRED') {
-            const err = new Error('reservation expired during commit');
+            const err = new Error('reservation expired — re-pick a slot');
             err.status = 409;
             throw err;
           }

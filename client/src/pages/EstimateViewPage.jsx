@@ -14,7 +14,7 @@
  *   selectedFrequency    — one of { quarterly | bi_monthly | monthly }
  *   selectedAddOns       — Set of addon keys
  *   selectedSlotId       — string | null
- *   ctaPhase             — 'configure' | 'review' | 'submitting' | 'success' | 'slot_conflict'
+ *   ctaPhase             — 'configure' | 'review' | 'submitting' | 'success' | 'slot_conflict' | 'reservation_expired'
  *   reservation          — { scheduledServiceId, expiresAt } | null
  *   paymentPreference    — 'card_on_file' | 'pay_at_visit' | null
  *   countdownSeconds     — derived from reservation.expiresAt
@@ -385,14 +385,17 @@ function SuccessCard({ acceptResult }) {
   );
 }
 
-function SlotConflictBanner({ onRetry }) {
+function SlotIssueBanner({ kind = 'conflict', onRetry }) {
+  const expired = kind === 'expired';
   return (
     <div style={{
       background: '#fff4e5', borderRadius: 12, padding: 14,
       border: `1px solid #f5bb5c`, marginBottom: 16,
     }}>
       <div style={{ fontSize: 14, color: COLORS.navy }}>
-        That slot was just taken. We've refreshed the options below — pick another.
+        {expired
+          ? 'Your hold expired. Pick a new time to continue.'
+          : "That slot was just taken. We've refreshed the options below — pick another."}
       </div>
       {onRetry ? (
         <button
@@ -504,7 +507,7 @@ export default function EstimateViewPage() {
       setCountdownSeconds(remaining);
       if (remaining === 0) {
         clearInterval(countdownRef.current);
-        setCtaPhase('configure');
+        setCtaPhase('reservation_expired');
         setReservation(null);
         setSelectedSlotId(null);
         setPaymentPreference(null);
@@ -586,10 +589,12 @@ export default function EstimateViewPage() {
       if (!r.ok) {
         const body = await r.json().catch(() => ({}));
         if (r.status === 409) {
-          setCtaPhase('slot_conflict');
+          const expired = /expired|no active reservation/i.test(body.error || '');
+          setCtaPhase(expired ? 'reservation_expired' : 'slot_conflict');
           setSlotsRefreshSignal((v) => v + 1);
           setReservation(null);
           setSelectedSlotId(null);
+          setPaymentPreference(null);
           return;
         }
         throw new Error(body.error || `accept failed: ${r.status}`);
@@ -652,8 +657,11 @@ export default function EstimateViewPage() {
     <Page>
       <Header customerFirstName={estimate.customerFirstName} address={estimate.address} />
 
-      {ctaPhase === 'slot_conflict' ? (
-        <SlotConflictBanner onRetry={() => setSlotsRefreshSignal((v) => v + 1)} />
+      {ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
+        <SlotIssueBanner
+          kind={ctaPhase === 'reservation_expired' ? 'expired' : 'conflict'}
+          onRetry={() => setSlotsRefreshSignal((v) => v + 1)}
+        />
       ) : null}
 
       {ctaPhase === 'review' && reservation ? (
