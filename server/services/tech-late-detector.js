@@ -1,16 +1,29 @@
 /**
  * tech-late-detector — first dispatch alert generator. Runs every
  * 5 minutes via initScheduledJobs (gated by GATE_CRON_JOBS). Finds
- * jobs whose window_start (in America/New_York) has passed by
- * ≥ 15 min while the job hasn't moved to on_site / completed /
+ * jobs whose arrival window due time (window_end, or window_start +
+ * estimated duration fallback) has passed by ≥ 15 min while the job
+ * hasn't moved to on_site / completed /
  * cancelled / skipped, and creates a `tech_late` dispatch_alert via
  * createAlert(). The Action Queue surfaces the row in real time
  * because createAlert emits `dispatch:alert` to dispatch:admins
  * post-commit.
  *
  * Severity bands (frozen at insert time):
- *   15–29 min  → warn
- *   ≥ 30 min   → critical
+ *   15–29 min after due time  → warn
+ *   ≥ 30 min after due time   → critical
+ *
+ * Noise controls:
+ *   - Do not fire at window_start. Most Waves jobs have an arrival
+ *     window; warning 15 minutes after the start created noisy cards
+ *     for normal in-window arrivals.
+ *   - Do not create tech_late for stale pending jobs more than 3
+ *     hours past due. Those are data hygiene / completion cleanup,
+ *     not live dispatch signals.
+ *   - Do not re-alert the same scheduled window after a dispatcher
+ *     clears it. A cleared alert is treated as acknowledged only
+ *     when its payload matches this job's scheduled_date/window_start/
+ *     window_end, so a later reschedule can still alert if it slips.
  *
  * Idempotency is enforced at TWO layers, on purpose:
  *   1. Read-side NOT EXISTS in the SELECT — drops 99% of duplicate
@@ -49,6 +62,17 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { createAlert } = require('./dispatch-alerts');
 
+const TECH_LATE_GRACE_MINUTES = 15;
+const TECH_LATE_CRITICAL_MINUTES = 30;
+const TECH_LATE_MAX_DELAY_MINUTES = 180;
+const TECH_LATE_FALLBACK_DURATION_MINUTES = 60;
+
+function normalizeDateOnly(value) {
+  if (!value) return value;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
 // In-process mutex matches dashboard-alerts-cron.js. node-cron fires
 // regardless of whether the prior tick finished, and the detector
 // query + per-row createAlert chain can take a few seconds on a
@@ -75,27 +99,54 @@ async function runInner() {
   let rows;
   try {
     const result = await db.raw(`
+      WITH candidates AS (
+        SELECT
+          s.id AS job_id,
+          s.technician_id AS tech_id,
+          s.window_start,
+          s.window_end,
+          s.scheduled_date,
+          (
+            CASE
+              WHEN s.window_end IS NOT NULL
+                THEN s.scheduled_date + s.window_end
+              ELSE
+                s.scheduled_date
+                  + s.window_start
+                  + make_interval(mins => COALESCE(NULLIF(s.estimated_duration_minutes, 0), ${TECH_LATE_FALLBACK_DURATION_MINUTES}))
+            END
+          ) AT TIME ZONE 'America/New_York' AS due_at
+        FROM scheduled_services s
+        WHERE s.scheduled_date >= ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '1 day')
+          AND s.scheduled_date <= ((NOW() AT TIME ZONE 'America/New_York')::date)
+          AND s.status NOT IN ('on_site', 'completed', 'cancelled', 'skipped')
+          AND s.technician_id IS NOT NULL
+          AND s.window_start IS NOT NULL
+      )
       SELECT
-        s.id AS job_id,
-        s.technician_id AS tech_id,
-        s.window_start,
-        s.scheduled_date,
+        c.job_id,
+        c.tech_id,
+        c.window_start,
+        c.window_end,
+        c.scheduled_date,
         EXTRACT(EPOCH FROM (
-          NOW() - ((s.scheduled_date + s.window_start) AT TIME ZONE 'America/New_York')
+          NOW() - c.due_at
         )) / 60 AS delay_minutes
-      FROM scheduled_services s
-      WHERE s.scheduled_date >= ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '1 day')
-        AND s.scheduled_date <= ((NOW() AT TIME ZONE 'America/New_York')::date)
-        AND s.status NOT IN ('on_site', 'completed', 'cancelled', 'skipped')
-        AND s.technician_id IS NOT NULL
-        AND s.window_start IS NOT NULL
-        AND ((s.scheduled_date + s.window_start) AT TIME ZONE 'America/New_York')
-              < NOW() - INTERVAL '15 minutes'
+      FROM candidates c
+      WHERE c.due_at < NOW() - INTERVAL '${TECH_LATE_GRACE_MINUTES} minutes'
+        AND c.due_at >= NOW() - INTERVAL '${TECH_LATE_MAX_DELAY_MINUTES} minutes'
         AND NOT EXISTS (
           SELECT 1 FROM dispatch_alerts a
           WHERE a.type = 'tech_late'
-            AND a.job_id = s.id
-            AND a.resolved_at IS NULL
+            AND a.job_id = c.job_id
+            AND (
+              a.resolved_at IS NULL
+              OR (
+                LEFT(a.payload->>'scheduled_date', 10) = c.scheduled_date::text
+                AND a.payload->>'window_start' = c.window_start::text
+                AND COALESCE(a.payload->>'window_end', '') = COALESCE(c.window_end::text, '')
+              )
+            )
         )
     `);
     rows = result.rows || [];
@@ -108,7 +159,7 @@ async function runInner() {
   let suppressed = 0;
   for (const row of rows) {
     const delayMin = Math.floor(Number(row.delay_minutes) || 0);
-    const severity = delayMin >= 30 ? 'critical' : 'warn';
+    const severity = delayMin >= TECH_LATE_CRITICAL_MINUTES ? 'critical' : 'warn';
     try {
       await createAlert({
         type: 'tech_late',
@@ -118,7 +169,8 @@ async function runInner() {
         payload: {
           delay_minutes: delayMin,
           window_start: row.window_start,
-          scheduled_date: row.scheduled_date,
+          window_end: row.window_end,
+          scheduled_date: normalizeDateOnly(row.scheduled_date),
         },
       });
       created += 1;
@@ -144,4 +196,13 @@ async function runInner() {
   return { created, suppressed, scanned: rows.length };
 }
 
-module.exports = { runTechLateCheck };
+module.exports = {
+  runTechLateCheck,
+  TECH_LATE_GRACE_MINUTES,
+  TECH_LATE_CRITICAL_MINUTES,
+  TECH_LATE_MAX_DELAY_MINUTES,
+  TECH_LATE_FALLBACK_DURATION_MINUTES,
+  _test: {
+    normalizeDateOnly,
+  },
+};
