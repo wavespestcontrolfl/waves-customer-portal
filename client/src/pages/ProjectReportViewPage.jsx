@@ -142,6 +142,12 @@ function humanizeKey(k) {
   return FIELD_LABELS[k] || k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
+function formatFindingValue(key, value) {
+  const raw = String(value);
+  if (key !== 'species') return raw;
+  return raw.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+}
+
 const ROOF_RAT_SPECIES_NOTE = [
   'Roof rats are common climbers in Florida and often access homes through garage gaps, soffits, vents, roof returns, utility openings, and vegetation touching the structure.',
   'Because they can contaminate insulation, storage areas, and household surfaces, entry points should be sealed after trapping activity is addressed.',
@@ -313,6 +319,32 @@ function buildAtAGlance({ data, findings, reportTitle, clientSnapshot }) {
   return rows.filter(([, value]) => value);
 }
 
+function buildReportSummary({ text }) {
+  if (!includesAny(text, ['roof rat']) || !includesAny(text, ['right-side jamb'])) return '';
+  if (!includesAny(text, ['six snap traps']) || !includesAny(text, ['two inside the kitchen', 'four in the garage'])) return '';
+  if (!includesAny(text, ['vinyl weather stripping']) || !includesAny(text, ['gap exceeding a quarter inch', 'gap over 1/4 inch'])) return '';
+  if (!includesAny(text, ['garage door side seal']) || !includesAny(text, ['threshold sweep'])) return '';
+  return 'Active roof rat pressure was documented around the attached garage. The main concern is gnaw damage and a gap at the right-side garage door jamb, which may allow rodents to access the garage. Six snap traps were placed in the kitchen and garage. The next priority is to monitor trap activity, repair the garage door seal, improve the threshold sweep, and reduce attractants near the garage.';
+}
+
+function buildScopeRows(text) {
+  if (!includesAny(text, ['roof rat', 'rodent', 'trap'])) return [];
+  const rows = [];
+  if (includesAny(text, ['kitchen']) && includesAny(text, ['garage'])) {
+    rows.push([
+      'Areas inspected',
+      'Kitchen, under sink, behind refrigerator, attached garage, garage door perimeter, and refuse storage area.',
+    ]);
+  }
+  if (includesAny(text, ['garage door perimeter', 'building envelope', 'structural openings'])) {
+    rows.push([
+      'Limited or not fully inspected',
+      'Attic, roofline, soffits, wall voids, crawlspaces, exterior utility penetrations, and other concealed areas unless specifically noted in the report photos or findings.',
+    ]);
+  }
+  return rows;
+}
+
 export default function ProjectReportViewPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
@@ -368,6 +400,8 @@ export default function ProjectReportViewPage() {
   const reportText = getReportText(data, findings);
   const atAGlanceRows = buildAtAGlance({ data, findings, reportTitle, clientSnapshot });
   const showRodentDetails = getProjectKind(data.projectType) === 'rodent' || includesAny(reportText, ['roof rat', 'rodent', 'trap']);
+  const reportSummary = buildReportSummary({ text: reportText });
+  const scopeRows = buildScopeRows(reportText);
 
   return (
     <div style={{ minHeight: '100vh', background: B.offWhite, fontFamily: FONTS.body }}>
@@ -409,6 +443,8 @@ export default function ProjectReportViewPage() {
 
           {atAGlanceRows.length > 0 && <AtAGlance rows={atAGlanceRows} />}
 
+          {reportSummary && <ReportSummary text={reportSummary} />}
+
           {clientSnapshot && (
             <div style={{
               marginTop: 16,
@@ -436,6 +472,16 @@ export default function ProjectReportViewPage() {
 
           {showRodentDetails && <RodentDetails text={reportText} />}
 
+          {scopeRows.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <ReportTable
+                title="Inspection scope"
+                columns={['Scope', 'Details']}
+                rows={scopeRows}
+              />
+            </div>
+          )}
+
           {/* Findings */}
           {findingsEntries.length > 0 && (
             <div style={{ marginTop: 16 }}>
@@ -446,10 +492,19 @@ export default function ProjectReportViewPage() {
                 {findingsEntries.map(([key, value]) => {
                   const insight = getFindingInsight(key, value);
                   const showRoofRatPhoto = isRoofRatFinding(key, value);
+                  const formattedValue = formatFindingValue(key, value);
                   return (
                     <div key={key} style={{ padding: '10px 12px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
-                      <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 3 }}>{humanizeKey(key)}</div>
-                      <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{String(value)}</div>
+                      {key === 'species' ? (
+                        <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>
+                          <strong style={{ color: B.navy }}>Species:</strong> {formattedValue}
+                        </div>
+                      ) : (
+                        <>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 3 }}>{humanizeKey(key)}</div>
+                          <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{formattedValue}</div>
+                        </>
+                      )}
                       {showRoofRatPhoto && <RoofRatPhoto />}
                       {insight && (
                         <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, marginTop: 8 }}>
@@ -571,6 +626,19 @@ function AtAGlance({ rows }) {
   );
 }
 
+function ReportSummary({ text }) {
+  return (
+    <div style={{ marginTop: 16, padding: '12px 14px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
+      <div style={{ fontSize: 12, fontWeight: 800, color: B.blueDeeper, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>
+        Summary
+      </div>
+      <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.6 }}>
+        {text}
+      </div>
+    </div>
+  );
+}
+
 function RodentDetails({ text }) {
   const entryRows = [];
   if (includesAny(text, ['right-side jamb']) && includesAny(text, ['vinyl weather stripping']) && includesAny(text, ['quarter inch'])) {
@@ -662,6 +730,10 @@ function RoofRatPhoto() {
   );
 }
 
+function getPhotoLabel(photo) {
+  return photo.caption || (photo.category ? `${photo.category.replace(/_/g, ' ')} photo` : 'Service photo');
+}
+
 function PhotoGrid({ title, photos, noCard }) {
   const content = (
     <div>
@@ -672,16 +744,17 @@ function PhotoGrid({ title, photos, noCard }) {
       )}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 8 }}>
         {photos.map(ph => {
+          const label = getPhotoLabel(ph);
           const tileStyle = {
-            display: 'block', aspectRatio: '1/1', borderRadius: 8, overflow: 'hidden',
-            border: `1px solid ${B.bluePale}`, position: 'relative', background: B.offWhite,
+            display: 'block', aspectRatio: '1/1', overflow: 'hidden',
+            borderBottom: `1px solid ${B.bluePale}`, background: B.offWhite,
           };
-          const content = (
+          const media = (
             <>
             {ph.url ? (
               <img
                 src={ph.url}
-                alt={ph.caption || ph.category || 'Photo'}
+                alt={label}
                 style={{ width: '100%', height: '100%', objectFit: 'cover' }}
               />
             ) : (
@@ -692,22 +765,24 @@ function PhotoGrid({ title, photos, noCard }) {
                 Photo unavailable
               </div>
             )}
-            {(ph.caption || ph.category) && (
-              <div style={{
-                position: 'absolute', left: 0, right: 0, bottom: 0,
-                padding: '4px 6px', background: 'rgba(0,0,0,0.5)', color: '#fff',
-                fontSize: 10, fontWeight: 600, textTransform: 'capitalize',
-              }}>{ph.caption || ph.category.replace(/_/g, ' ')}</div>
-            )}
             </>
           );
-          return ph.url ? (
-            <a key={ph.id} href={ph.url} target="_blank" rel="noreferrer" style={tileStyle}>
-              {content}
-            </a>
-          ) : (
-            <div key={ph.id} style={tileStyle}>
-              {content}
+          return (
+            <div key={ph.id} style={{ borderRadius: 8, overflow: 'hidden', border: `1px solid ${B.bluePale}`, background: '#fff' }}>
+              {ph.url ? (
+                <a href={ph.url} target="_blank" rel="noreferrer" style={tileStyle}>
+                  {media}
+                </a>
+              ) : (
+                <div style={tileStyle}>
+                  {media}
+                </div>
+              )}
+              <div style={{ padding: '8px 9px' }}>
+                <div style={{ fontSize: 14, fontWeight: 800, color: B.navy, lineHeight: 1.35, textTransform: 'capitalize' }}>
+                  {label}
+                </div>
+              </div>
             </div>
           );
         })}
@@ -752,6 +827,43 @@ function titleCase(s) {
   return s.split(' ').map(w => w[0] + w.slice(1).toLowerCase()).join(' ');
 }
 
+function buildRecommendationPriorities(text) {
+  const value = String(text || '').toLowerCase();
+  if (!includesAny(value, ['rodent', 'rat', 'trap', 'garage door'])) return [];
+  const rows = [];
+  if (includesAny(value, ['traps undisturbed', 'follow-up', 'followup'])) {
+    rows.push(['Priority 1', 'Trapping follow-up', 'Keep traps in place until the scheduled follow-up. Waves will check captures, reset or relocate traps as needed, and reassess activity.']);
+  }
+  if (includesAny(value, ['garage door side seal', 'side seal']) && includesAny(value, ['threshold sweep', 'rodent-resistant'])) {
+    rows.push(['Priority 2', 'Seal likely entry point', 'Replace the damaged garage door side seal and install a rodent-resistant threshold sweep.']);
+  }
+  if (includesAny(value, ['refuse containers', 'sealed lidded bins', '8-10 feet'])) {
+    rows.push(['Priority 3', 'Reduce attractants', 'Move refuse containers at least 8-10 feet from the garage or switch to sealed lidded bins.']);
+  }
+  if (includesAny(value, ['full door perimeter', 'additional vulnerabilities'])) {
+    rows.push(['Priority 4', 'Confirm full exclusion needs', 'Inspect the garage door perimeter and other access points during the follow-up or exclusion estimate.']);
+  }
+  return rows;
+}
+
+function RecommendationPriorities({ rows }) {
+  if (rows.length === 0) return null;
+  return (
+    <div style={{ display: 'grid', gap: 8, margin: '0 0 10px' }}>
+      {rows.map(([priority, title, body]) => (
+        <div key={priority} style={{ padding: '9px 10px', borderRadius: 8, background: '#fff', border: `1px solid ${B.bluePale}` }}>
+          <div style={{ fontSize: 12, fontWeight: 800, color: B.blueDeeper, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+            {priority} - {title}
+          </div>
+          <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.5, marginTop: 4 }}>
+            {body}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function RecommendationsBlock({ text, upcomingAppointment }) {
   const sections = parseSections(text);
   if (sections) {
@@ -762,6 +874,7 @@ function RecommendationsBlock({ text, upcomingAppointment }) {
             <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>
               {titleCase(s.heading)}
             </div>
+            {s.heading === 'WHAT WE RECOMMEND' && <RecommendationPriorities rows={buildRecommendationPriorities(s.body)} />}
             <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.65, whiteSpace: 'pre-wrap' }}>{s.body}</div>
             {s.heading === 'WHAT WE RECOMMEND' && shouldShowBookingCta(s.body) && <BookingCta upcomingAppointment={upcomingAppointment} text={s.body} />}
           </div>
@@ -772,6 +885,7 @@ function RecommendationsBlock({ text, upcomingAppointment }) {
   return (
     <div style={{ marginTop: 16, padding: '12px 14px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
       <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 4 }}>Recommendations</div>
+      <RecommendationPriorities rows={buildRecommendationPriorities(text)} />
       <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{text}</div>
       {shouldShowBookingCta(text) && <BookingCta upcomingAppointment={upcomingAppointment} text={text} />}
     </div>

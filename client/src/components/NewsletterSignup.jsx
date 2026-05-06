@@ -26,7 +26,7 @@
 // for grandfathered rows that confirmed under the old flow.
 
 import { useState } from 'react';
-import { COLORS as B, FONTS } from '../theme-brand';
+import { COLORS as B, FONTS, GOLD_CTA } from '../theme-brand';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -175,17 +175,10 @@ export default function NewsletterSignup({
           type="submit"
           disabled={state === 'loading' || locked}
           style={{
-            height: 44,
+            ...GOLD_CTA,
             padding: '0 20px',
-            fontFamily: FONTS.ui,
-            fontSize: 13,
-            fontWeight: 800,
-            letterSpacing: '0.04em',
-            textTransform: 'uppercase',
-            color: B.blueDeeper,
-            background: B.yellow,
-            border: `2px solid ${B.blueDeeper}`,
-            borderRadius: 10,
+            minHeight: 44,
+            fontSize: 14,
             cursor: state === 'loading' || locked ? 'default' : 'pointer',
             opacity: state === 'loading' || locked ? 0.7 : 1,
             whiteSpace: 'nowrap',
