@@ -41,6 +41,48 @@ function normalizeInvoiceLineItems(lineItems = []) {
   });
 }
 
+function roundMoney(value) {
+  return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+function firstPositiveNumber(...values) {
+  for (const value of values) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return 0;
+}
+
+function resolveLineItemDiscount(row, item, parentAmount) {
+  let amount = Number(row.amount) || 0;
+  let dollars = 0;
+
+  if (row.discount_type === 'percentage') {
+    dollars = roundMoney(parentAmount * (amount / 100));
+    if (row.max_discount_dollars) dollars = Math.min(dollars, Number(row.max_discount_dollars));
+  } else if (row.discount_type === 'variable_percentage') {
+    amount = firstPositiveNumber(item.custom_discount_percentage, item.discount_percentage, row.amount);
+    dollars = roundMoney(parentAmount * (amount / 100));
+    if (row.max_discount_dollars) dollars = Math.min(dollars, Number(row.max_discount_dollars));
+  } else if (row.discount_type === 'fixed_amount') {
+    dollars = amount;
+  } else if (row.discount_type === 'variable_amount') {
+    amount = firstPositiveNumber(
+      item.custom_discount_amount,
+      item.discount_amount,
+      Math.abs(Number(item.amount) || 0),
+      row.amount
+    );
+    dollars = amount;
+  } else if (row.discount_type === 'free_service') {
+    amount = parentAmount;
+    dollars = parentAmount;
+  }
+
+  dollars = Math.min(parentAmount, Math.max(0, roundMoney(dollars)));
+  return { amount: roundMoney(amount), dollars };
+}
+
 async function calculateUpdateFinancials({ lineItems, customer, invoice, taxRate }) {
   const items = normalizeInvoiceLineItems(lineItems);
   const subtotal = Math.round(items.reduce((sum, item) => {
@@ -84,17 +126,7 @@ async function calculateUpdateFinancials({ lineItems, customer, invoice, taxRate
       }
 
       const parentAmount = Math.max(0, Number(parent.amount) || 0);
-      const amt = Number(row.amount) || 0;
-      let dollars = 0;
-      if (row.discount_type === 'percentage' || row.discount_type === 'variable_percentage') {
-        dollars = Math.round(parentAmount * (amt / 100) * 100) / 100;
-        if (row.max_discount_dollars) dollars = Math.min(dollars, Number(row.max_discount_dollars));
-      } else if (row.discount_type === 'fixed_amount' || row.discount_type === 'variable_amount') {
-        dollars = amt;
-      } else if (row.discount_type === 'free_service') {
-        dollars = parentAmount;
-      }
-      dollars = Math.min(parentAmount, Math.max(0, Math.round(dollars * 100) / 100));
+      const { dollars } = resolveLineItemDiscount(row, item, parentAmount);
       item.quantity = 1;
       item.unit_price = -dollars;
       item.amount = -dollars;
@@ -270,17 +302,8 @@ const InvoiceService = {
           };
         }
         const parentAmount = Math.max(0, Number(parent.amount) || 0);
-        const amt = Number(row.amount) || 0;
-        let dollars = 0;
-        if (row.discount_type === 'percentage' || row.discount_type === 'variable_percentage') {
-          dollars = Math.round(parentAmount * (amt / 100) * 100) / 100;
-          if (row.max_discount_dollars) dollars = Math.min(dollars, Number(row.max_discount_dollars));
-        } else if (row.discount_type === 'fixed_amount' || row.discount_type === 'variable_amount') {
-          dollars = amt;
-        } else if (row.discount_type === 'free_service') {
-          dollars = parentAmount;
-        }
-        dollars = Math.min(parentAmount, Math.max(0, Math.round(dollars * 100) / 100));
+        const resolved = resolveLineItemDiscount(row, item, parentAmount);
+        const dollars = resolved.dollars;
         item.quantity = 1;
         item.unit_price = -dollars;
         item.amount = -dollars;
@@ -288,7 +311,7 @@ const InvoiceService = {
           row,
           name: row.name,
           discount_type: row.discount_type,
-          amount: Number(row.amount) || 0,
+          amount: resolved.amount,
           dollars,
         };
       });

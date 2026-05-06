@@ -1111,12 +1111,50 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   };
 
   const formatDiscountLabel = (d) => d.discount_type === 'percentage' || d.discount_type === 'variable_percentage'
-    ? `${Number(d.amount)}%`
+    ? d.discount_type === 'variable_percentage' && !(Number(d.amount) > 0) ? 'custom %' : `${Number(d.amount)}%`
     : d.discount_type === 'fixed_amount' || d.discount_type === 'variable_amount'
-    ? `$${Number(d.amount).toFixed(2)}`
+    ? d.discount_type === 'variable_amount' && !(Number(d.amount) > 0) ? 'custom $' : `$${Number(d.amount).toFixed(2)}`
     : d.discount_type === 'free_service'
     ? 'free'
     : '';
+
+  const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100;
+
+  const getCustomDiscountValue = (discount, parent, baseAmount) => {
+    if (discount.discount_type === 'variable_amount') {
+      const raw = window.prompt(
+        `Discount amount for ${parent.description || 'this line'} ($)`,
+        Number(discount.amount) > 0 ? Number(discount.amount).toFixed(2) : ''
+      );
+      if (raw === null) return null;
+      const customAmount = roundMoney(raw);
+      if (!(customAmount > 0)) {
+        showToast('Enter a discount amount greater than $0');
+        return null;
+      }
+      return {
+        dollars: Math.min(baseAmount, customAmount),
+        custom_discount_amount: customAmount,
+      };
+    }
+    if (discount.discount_type === 'variable_percentage') {
+      const raw = window.prompt(
+        `Discount percentage for ${parent.description || 'this line'} (%)`,
+        Number(discount.amount) > 0 ? String(Number(discount.amount)) : ''
+      );
+      if (raw === null) return null;
+      const customPercentage = Number(raw);
+      if (!Number.isFinite(customPercentage) || customPercentage <= 0 || customPercentage > 100) {
+        showToast('Enter a discount percentage between 0 and 100');
+        return null;
+      }
+      return {
+        dollars: Math.min(baseAmount, roundMoney(previewDiscount({ ...discount, amount: customPercentage }, baseAmount))),
+        custom_discount_percentage: customPercentage,
+      };
+    }
+    return null;
+  };
 
   const matchingDiscounts = (lineIdx) => {
     const lineKey = lineItems[lineIdx]?.client_id || lineIdx;
@@ -1135,7 +1173,9 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
       showToast('Choose a service and enter a price before applying a discount');
       return;
     }
-    const dollars = Math.min(baseAmount, Math.round(previewDiscount(discount, baseAmount) * 100) / 100);
+    const custom = getCustomDiscountValue(discount, parent, baseAmount);
+    if ((discount.discount_type === 'variable_amount' || discount.discount_type === 'variable_percentage') && !custom) return;
+    const dollars = custom?.dollars ?? Math.min(baseAmount, roundMoney(previewDiscount(discount, baseAmount)));
     if (dollars <= 0) { showToast('Discount has no amount for this line'); return; }
     const discountItem = {
       client_id: `li_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -1146,6 +1186,8 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
       quantity: 1,
       unit_price: -dollars,
       amount: -dollars,
+      ...(custom?.custom_discount_amount ? { custom_discount_amount: custom.custom_discount_amount } : {}),
+      ...(custom?.custom_discount_percentage ? { custom_discount_percentage: custom.custom_discount_percentage } : {}),
     };
     const updated = [...lineItems];
     let insertAt = lineIdx + 1;
