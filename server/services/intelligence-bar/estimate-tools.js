@@ -13,6 +13,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { generateEstimate } = require('../pricing-engine');
 const { shortenOrPassthrough } = require('../short-url');
+const { validateEstimateDeliveryOptions } = require('../estimate-delivery-options');
 
 const RENTCAST_KEY = process.env.RENTCAST_API_KEY || '6dfcb2eaa9f34bf285e101b74e1a3ef6';
 const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY || 'AIzaSyCvzQ84QWUKMby5YcbM8MhDBlEZ2oF7Bsk';
@@ -562,6 +563,16 @@ async function toggleShowOneTimeOption({ estimate_identifier, enabled }) {
   }
 
   const next = typeof enabled === 'boolean' ? enabled : !estimate.show_one_time_option;
+  if (next) {
+    const deliveryError = validateEstimateDeliveryOptions({
+      showOneTimeOption: true,
+      billByInvoice: false,
+      onetimeTotal: estimate.onetime_total,
+      monthlyTotal: estimate.monthly_total,
+      annualTotal: estimate.annual_total,
+    });
+    if (deliveryError) return { error: deliveryError };
+  }
   await db('estimates').where({ id: estimate.id }).update({ show_one_time_option: next });
 
   logger.info(`[estimate-v2] Toggled show_one_time_option for estimate ${estimate.id} → ${next}`);

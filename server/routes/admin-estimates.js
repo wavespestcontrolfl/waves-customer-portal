@@ -8,6 +8,7 @@ const logger = require('../services/logger');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { wrapEmail, plainText } = require('../services/email-template');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { validateEstimateDeliveryOptions } = require('../services/estimate-delivery-options');
 
 async function renderTemplate(templateKey, vars, fallback) {
   try {
@@ -25,6 +26,14 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 router.post('/', async (req, res, next) => {
   try {
     const { customerId, estimateData, address, customerName, customerPhone, customerEmail, monthlyTotal, annualTotal, onetimeTotal, waveguardTier, notes, satelliteUrl, showOneTimeOption, billByInvoice } = req.body;
+    const deliveryError = validateEstimateDeliveryOptions({
+      showOneTimeOption: !!showOneTimeOption,
+      billByInvoice: !!billByInvoice,
+      onetimeTotal,
+      monthlyTotal,
+      annualTotal,
+    });
+    if (deliveryError) return res.status(400).json({ error: deliveryError });
 
     // 16 bytes = 128 bits of entropy. Old format (`name-slug-${4 bytes}`)
     // was guessable: customer name is public-ish and 32 bits is brute-forceable
@@ -511,8 +520,30 @@ router.patch('/:id', async (req, res, next) => {
     const updates = {};
     if (req.body.isPriority !== undefined) updates.is_priority = req.body.isPriority;
     if (req.body.declineReason !== undefined) updates.decline_reason = req.body.declineReason;
-    if (req.body.showOneTimeOption !== undefined) updates.show_one_time_option = !!req.body.showOneTimeOption;
-    if (req.body.billByInvoice !== undefined) updates.bill_by_invoice = !!req.body.billByInvoice;
+    if (req.body.showOneTimeOption !== undefined) {
+      const nextShowOneTimeOption = !!req.body.showOneTimeOption;
+      const deliveryError = nextShowOneTimeOption ? validateEstimateDeliveryOptions({
+        showOneTimeOption: true,
+        billByInvoice: false,
+        onetimeTotal: estimate.onetime_total,
+        monthlyTotal: estimate.monthly_total,
+        annualTotal: estimate.annual_total,
+      }) : null;
+      if (deliveryError) return res.status(400).json({ error: deliveryError });
+      updates.show_one_time_option = nextShowOneTimeOption;
+    }
+    if (req.body.billByInvoice !== undefined) {
+      const nextBillByInvoice = !!req.body.billByInvoice;
+      const deliveryError = nextBillByInvoice ? validateEstimateDeliveryOptions({
+        showOneTimeOption: false,
+        billByInvoice: true,
+        onetimeTotal: estimate.onetime_total,
+        monthlyTotal: estimate.monthly_total,
+        annualTotal: estimate.annual_total,
+      }) : null;
+      if (deliveryError) return res.status(400).json({ error: deliveryError });
+      updates.bill_by_invoice = nextBillByInvoice;
+    }
     if (req.body.status !== undefined) {
       updates.status = req.body.status;
       if (req.body.status === 'declined') updates.declined_at = db.fn.now();

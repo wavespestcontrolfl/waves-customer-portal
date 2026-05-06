@@ -100,6 +100,22 @@ const CONTACT_FIELDS = new Set(['customerId', 'customerName', 'customerPhone', '
 const SEND_FIELDS = new Set(['scheduleSend', 'scheduledAt']);
 const DELIVERY_OPTION_FIELDS = new Set(['showOneTimeOption', 'billByInvoice']);
 
+function validateDeliveryOptions(form, estimate) {
+  const oneTimeAmount = Number(estimate?.oneTime?.total || 0);
+  const recurringAmount = Math.max(
+    Number(estimate?.recurring?.grandTotal || 0),
+    Number(estimate?.recurring?.monthlyTotal || 0),
+    Number(estimate?.recurring?.annualAfterDiscount || 0),
+  );
+  if (form.showOneTimeOption && oneTimeAmount <= 0) {
+    return 'Offer one-time option requires a one-time total on the generated estimate.';
+  }
+  if (form.billByInvoice && oneTimeAmount <= 0 && recurringAmount <= 0) {
+    return 'Bill by invoice requires a billable recurring or one-time total.';
+  }
+  return null;
+}
+
 function InputV2({ k, type = 'text', placeholder, min, max, className }) {
   const { form, set } = useContext(FormCtx);
   return (
@@ -856,6 +872,8 @@ export default function EstimateToolViewV2({
 
   async function doSave() {
     if (!estimate) return null;
+    const deliveryError = validateDeliveryOptions(form, estimate);
+    if (deliveryError) { alert(deliveryError); return null; }
     setSaving(true);
     try {
       const E = estimate;

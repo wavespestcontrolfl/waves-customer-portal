@@ -48,8 +48,17 @@ function adminFetch(path, options = {}) {
       'Content-Type': 'application/json',
     },
     ...options,
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  }).then(async (r) => {
+    if (!r.ok) {
+      let serverMsg = '';
+      try {
+        const body = await r.clone().json();
+        serverMsg = body?.error || '';
+      } catch {
+        try { serverMsg = await r.text(); } catch { /* ignore */ }
+      }
+      throw new Error(serverMsg || `HTTP ${r.status}`);
+    }
     return r.json();
   });
 }
@@ -474,8 +483,8 @@ function EstimatePipelineViewV2() {
       setEstimates((prev) =>
         prev.map((est) => (est.id === e.id ? { ...est, showOneTimeOption: newVal } : est)),
       );
-    } catch {
-      alert('Failed to update one-time option');
+    } catch (err) {
+      alert(`Failed to update one-time option: ${err.message}`);
     }
   }, []);
 
@@ -492,8 +501,8 @@ function EstimatePipelineViewV2() {
       setEstimates((prev) =>
         prev.map((est) => (est.id === e.id ? { ...est, billByInvoice: newVal } : est)),
       );
-    } catch {
-      alert('Failed to update invoice mode');
+    } catch (err) {
+      alert(`Failed to update invoice mode: ${err.message}`);
     }
   }, []);
 
