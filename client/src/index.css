@@ -68,17 +68,21 @@
   color: #000 !important;
 }
 
-/* /admin/* — Roboto everywhere except <h1>. Scoped to .admin-shell-v2 (the
-   AdminLayoutV2 root) so the customer portal and tech portal keep their
-   existing brand fonts (Luckiest Guy / Baloo 2 / Inter / Montserrat).
-   <h1> is excluded so the dashboard greeting keeps its Anton / Luckiest
-   Guy display font. The mono override below handles the JetBrains-Mono
-   number/code path (Tailwind .font-mono, <code>, <pre>) so numeric
-   columns don't lose their tabular monospace styling.
-   !important is required because every nav link and many inline-styled
-   elements set their own font-family via the style attribute, which
-   beats class-based rules in the cascade. */
-.admin-shell-v2 *:not(h1):not(h1 *) {
+/* /admin/* — Roboto everywhere except <h1>. Scoped to two roots:
+     .admin-shell-v2  → AdminLayoutV2 (every admin route except login)
+     .admin-login     → AdminLoginPage (the only admin route outside
+                        AdminLayoutV2 — sits at /admin/login)
+   so the customer portal and tech portal keep their existing brand fonts
+   (Luckiest Guy / Baloo 2 / Inter / Montserrat). <h1> is excluded so the
+   dashboard greeting keeps its Anton / Luckiest Guy display font. The
+   mono override below handles the JetBrains-Mono number/code path
+   (Tailwind .font-mono, <code>, <pre>) so numeric columns don't lose
+   their tabular monospace styling. !important is required because every
+   nav link and many inline-styled elements set their own font-family
+   via the style attribute, which beats class-based rules in the
+   cascade. */
+.admin-shell-v2 *:not(h1):not(h1 *),
+.admin-login *:not(h1):not(h1 *) {
   font-family: 'Roboto', system-ui, sans-serif !important;
 }
 .admin-shell-v2 [class*="font-mono"],
@@ -86,7 +90,13 @@
 .admin-shell-v2 code,
 .admin-shell-v2 code *,
 .admin-shell-v2 pre,
-.admin-shell-v2 pre * {
+.admin-shell-v2 pre *,
+.admin-login [class*="font-mono"],
+.admin-login [class*="font-mono"] *,
+.admin-login code,
+.admin-login code *,
+.admin-login pre,
+.admin-login pre * {
   font-family: 'JetBrains Mono', ui-monospace, monospace !important;
 }
 
