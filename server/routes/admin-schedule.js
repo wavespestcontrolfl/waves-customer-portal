@@ -26,6 +26,105 @@ function devOnly(req, res, next) {
   next();
 }
 
+function finiteNumber(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+const STALE_TECH_STATUS_MS = 5 * 60 * 1000;
+
+function buildAssignedScheduleEtaQuery(knex, serviceId) {
+  return knex('scheduled_services as s')
+    .leftJoin('customers as c', 's.customer_id', 'c.id')
+    .leftJoin('tech_status as ts', 's.technician_id', 'ts.tech_id')
+    .where('s.id', serviceId)
+    .first(
+      's.id as service_id',
+      's.technician_id',
+      'c.latitude as customer_latitude',
+      'c.longitude as customer_longitude',
+      'ts.lat as tech_lat',
+      'ts.lng as tech_lng',
+      'ts.updated_at as tech_updated_at'
+    );
+}
+
+function buildTechStatusQuery(knex, techId) {
+  return knex('tech_status')
+    .where({ tech_id: techId })
+    .first('tech_id', 'lat', 'lng', 'updated_at');
+}
+
+function formatAssignedVehicleLocation(row) {
+  if (!row) {
+    return { found: false, available: false, reason: 'not_found', message: 'Service not found' };
+  }
+  if (!row.technician_id && !row.tech_id) {
+    return { found: true, available: false, reason: 'no_assigned_tech', message: 'No assigned technician' };
+  }
+
+  const lat = finiteNumber(row.tech_lat ?? row.lat);
+  const lng = finiteNumber(row.tech_lng ?? row.lng);
+  if (lat == null || lng == null) {
+    return { found: true, available: false, reason: 'no_tech_status', message: 'No assigned tech GPS available' };
+  }
+  const updatedAt = row.tech_updated_at || row.updated_at || null;
+  const updatedMs = updatedAt ? new Date(updatedAt).getTime() : NaN;
+  if (!Number.isFinite(updatedMs) || Date.now() - updatedMs > STALE_TECH_STATUS_MS) {
+    return {
+      found: true,
+      available: false,
+      stale: true,
+      reason: 'stale_tech_status',
+      message: 'Assigned tech GPS is stale',
+      techId: row.technician_id || row.tech_id,
+      updatedAt,
+    };
+  }
+
+  return {
+    found: true,
+    available: true,
+    source: 'tech_status',
+    techId: row.technician_id || row.tech_id,
+    lat,
+    lng,
+    updatedAt,
+  };
+}
+
+async function calculateAssignedScheduleEta(serviceId, bouncieService) {
+  const row = await buildAssignedScheduleEtaQuery(db, serviceId);
+  const location = formatAssignedVehicleLocation(row);
+  if (!location.found) return location;
+  if (!location.available) return { ...location, etaMinutes: null, source: 'unavailable' };
+
+  const customerLat = finiteNumber(row.customer_latitude);
+  const customerLng = finiteNumber(row.customer_longitude);
+  if (customerLat == null || customerLng == null) {
+    return {
+      found: true,
+      available: false,
+      reason: 'no_customer_geocode',
+      message: 'No customer geocode available',
+      etaMinutes: null,
+      source: 'unavailable',
+      techId: location.techId,
+      techUpdatedAt: location.updatedAt,
+    };
+  }
+
+  const eta = await bouncieService.calculateETAFromCoords(location.lat, location.lng, customerLat, customerLng);
+  return {
+    available: true,
+    etaMinutes: eta?.etaMinutes ?? null,
+    distanceMiles: eta?.distanceMiles ?? null,
+    source: eta?.source || null,
+    techId: location.techId,
+    techUpdatedAt: location.updatedAt,
+  };
+}
+
 // POST /api/admin/schedule/cleanup-duplicates — remove duplicate scheduled_services.
 // Dedupe key intentionally excludes cancelled/rescheduled rows so a cancelled+rebooked
 // pair doesn't collide; preserves the row with FK references (invoices, service_records)
@@ -1933,33 +2032,46 @@ async function scheduleReviewRequest(svc) {
   }
 }
 
-// GET /api/admin/schedule/vehicle-location — live GPS from Bouncie
+// GET /api/admin/schedule/vehicle-location — assigned tech GPS from tech_status
 router.get('/vehicle-location', async (req, res, next) => {
   try {
-    const BouncieService = require('../services/bouncie');
-    const location = await BouncieService.getLiveLocation();
-    if (!location) return res.json({ available: false, message: 'No vehicle location available' });
-    res.json({ available: true, ...location });
+    const { serviceId, techId } = req.query || {};
+    if (serviceId) {
+      const row = await buildAssignedScheduleEtaQuery(db, serviceId);
+      const location = formatAssignedVehicleLocation(row);
+      if (!location.found) return res.status(404).json({ error: 'Service not found' });
+      return res.json(location);
+    }
+    if (techId) {
+      const row = await buildTechStatusQuery(db, techId);
+      const location = formatAssignedVehicleLocation(row ? {
+        ...row,
+        technician_id: row.tech_id,
+        tech_lat: row.lat,
+        tech_lng: row.lng,
+        tech_updated_at: row.updated_at,
+      } : { technician_id: techId });
+      return res.json(location);
+    }
+    res.json({
+      available: false,
+      reason: 'selector_required',
+      message: 'Pass serviceId or techId to resolve an assigned tech GPS location',
+    });
   } catch (err) {
     res.json({ available: false, error: err.message });
   }
 });
 
-// GET /api/admin/schedule/eta/:serviceId — calculate ETA to a service
+// GET /api/admin/schedule/eta/:serviceId — calculate assigned tech ETA to a service
 router.get('/eta/:serviceId', async (req, res, next) => {
   try {
-    const svc = await db('scheduled_services')
-      .where('scheduled_services.id', req.params.serviceId)
-      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-      .select('customers.lat', 'customers.lng')
-      .first();
-    if (!svc) return res.status(404).json({ error: 'Service not found' });
-
     const BouncieService = require('../services/bouncie');
-    const eta = await BouncieService.calculateETA(parseFloat(svc.lat), parseFloat(svc.lng));
+    const eta = await calculateAssignedScheduleEta(req.params.serviceId, BouncieService);
+    if (!eta.found && eta.reason === 'not_found') return res.status(404).json({ error: 'Service not found' });
     res.json(eta);
   } catch (err) {
-    res.json({ etaMinutes: 15, source: 'default', error: err.message });
+    res.json({ available: false, etaMinutes: null, source: 'unavailable', error: err.message });
   }
 });
 
@@ -2580,5 +2692,11 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
     res.json({ success: true, action, created });
   } catch (err) { next(err); }
 });
+
+router._test = {
+  buildAssignedScheduleEtaQuery,
+  buildTechStatusQuery,
+  formatAssignedVehicleLocation,
+};
 
 module.exports = router;
