@@ -431,10 +431,8 @@ const ReviewService = {
     // call so newly-uploaded tech photos surface on review pages
     // without expiring URLs baked into the row.
     //
-    // Falls back to technicians.photo_url for legacy techs whose
-    // photo lives at an external host (e.g., Google Business),
-    // and beyond that to dispatch_technicians.photo_url (legacy
-    // table, may not exist on every deploy).
+    // Falls back only to technicians.photo_url for legacy techs whose
+    // photo lives at an external host (e.g., Google Business).
     const { resolveTechPhotoUrl } = require('./tech-photo');
     let techPhoto = null;
     if (request.technician_id) {
@@ -443,13 +441,6 @@ const ReviewService = {
         .select('photo_url', 'photo_s3_key')
         .first();
       techPhoto = await resolveTechPhotoUrl(tech?.photo_s3_key, tech?.photo_url);
-      if (!techPhoto) {
-        try {
-          const dispatchTech = await db('dispatch_technicians')
-            .where({ name: request.tech_name }).select('photo_url').first();
-          techPhoto = dispatchTech?.photo_url || null;
-        } catch { /* table might not exist */ }
-      }
     }
 
     // Social proof: count of ratings for this tech
