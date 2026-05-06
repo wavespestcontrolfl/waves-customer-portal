@@ -1407,10 +1407,10 @@ router.post('/:id/invoice', async (req, res, next) => {
 //   3. Auto-resolve of overdue-family alerts atomically with the flip.
 //   4. customer:job_update + dispatch:job_update broadcast on every
 //      status change (was: not emitted from here at all).
-//   5. service_status_log + lifecycle columns (check_in_time /
-//      check_out_time / actual_duration_minutes / customer_confirmed)
-//      now write inside the same trx; rollback on race avoids phantom
-//      audit rows + half-set lifecycle timestamps.
+//   5. lifecycle columns (check_in_time / check_out_time /
+//      actual_duration_minutes / customer_confirmed) now write inside
+//      the same trx; rollback on race avoids half-set lifecycle
+//      timestamps.
 //   6. Post-completion automation chain only fires on success.
 //      Cancellation handler likewise.
 //
@@ -1444,15 +1444,6 @@ router.put('/:id/status', async (req, res, next) => {
 
     try {
       await db.transaction(async (trx) => {
-        // Legacy audit row INSIDE the trx so a race rejection rolls
-        // it back too. Was: written AFTER the UPDATE outside any trx
-        // (PR #328 caught the same issue on the dispatch route's
-        // pre-trx INSERT).
-        await trx('service_status_log').insert({
-          scheduled_service_id: svc.id, status: toStatus,
-          changed_by: req.technicianId || null, notes: notes || null,
-        });
-
         // Lifecycle / metadata columns the route owns. Same trx as
         // transitionJobStatus's status flip so a race rollback also
         // rolls back these timestamps + flags.
@@ -1478,6 +1469,7 @@ router.put('/:id/status', async (req, res, next) => {
           fromStatus,
           toStatus,
           transitionedBy: req.technicianId,
+          notes: notes || null,
           trx,
         });
       });

@@ -276,6 +276,9 @@ async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
  *                                       value set
  * @param {string} args.transitionedBy  required, technicians.id of the
  *                                       admin/tech who triggered it
+ * @param {number|string} [args.lat]    optional audit GPS latitude
+ * @param {number|string} [args.lng]    optional audit GPS longitude
+ * @param {string} [args.notes]         optional audit note for the transition
  * @param {object} [args.trx]           optional Knex transaction; if
  *                                       passed, both writes use it and
  *                                       BOTH emits chain on commit. If
@@ -285,12 +288,16 @@ async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
  *           the two payloads broadcast (or, with an outer trx, the
  *           payloads that will broadcast on commit)
  */
-async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy, trx }) {
+async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy, lat, lng, notes, trx }) {
   if (!jobId || !toStatus || fromStatus == null) {
     throw new Error(
       'transitionJobStatus: jobId, fromStatus, and toStatus are required'
     );
   }
+
+  const auditLat = finiteNumber(lat);
+  const auditLng = finiteNumber(lng);
+  const auditNotes = notes == null || notes === '' ? null : String(notes);
 
   async function doWrites(t) {
     // Atomic guard: only update if the row is currently in fromStatus.
@@ -314,6 +321,9 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
       from_status: fromStatus,
       to_status: toStatus,
       transitioned_by: transitionedBy || null,
+      lat: auditLat,
+      lng: auditLng,
+      notes: auditNotes,
     });
 
     // Auto-resolve any open overdue-family alerts (tech_late +
