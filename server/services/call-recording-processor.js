@@ -45,6 +45,13 @@ function newestCompletedRecording(recordings) {
     .sort((a, b) => new Date(b.dateCreated || 0) - new Date(a.dateCreated || 0))[0] || null;
 }
 
+function maskSid(sid) {
+  if (!sid) return 'none';
+  const value = String(sid);
+  if (value.length <= 8) return `${value.slice(0, 2)}...`;
+  return `${value.slice(0, 2)}...${value.slice(-6)}`;
+}
+
 async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType }) {
   try {
     const AppointmentReminders = require('./appointment-reminders');
@@ -1288,7 +1295,7 @@ const CallRecordingProcessor = {
     try {
       recordings = await client.recordings.list({ callSid, limit: 10 });
     } catch (err) {
-      logger.warn(`[call-proc] Recording recovery lookup failed for ${callSid}: ${err.message}`);
+      logger.warn(`[call-proc] Recording recovery lookup failed for ${maskSid(callSid)}: ${err.message}`);
       return { success: false, reason: 'twilio_lookup_failed', error: err.message };
     }
 
@@ -1314,7 +1321,7 @@ const CallRecordingProcessor = {
 
     if (updated === 0) return { success: true, skipped: true, reason: 'already_recovered_by_peer' };
 
-    logger.info(`[call-proc] Recovered missing recording for ${callSid} → ${recording.sid}`);
+    logger.info(`[call-proc] Recovered missing recording for ${maskSid(callSid)} → ${maskSid(recording.sid)}`);
     return { success: true, recovered: true, recordingSid: recording.sid };
   },
 
