@@ -421,6 +421,7 @@ function EstimatePipelineViewV2() {
   const [filter, setFilter] = useState('all');
   const [followUpTarget, setFollowUpTarget] = useState(null);
   const [declineTarget, setDeclineTarget] = useState(null);
+  const [pendingToggleKeys, setPendingToggleKeys] = useState(() => new Set());
 
   const refreshEstimates = useCallback(() => {
     // When the "Archived" filter is picked, ask the API for archived-only;
@@ -458,35 +459,49 @@ function EstimatePipelineViewV2() {
     }
   }, [refreshEstimates]);
 
+  const patchEstimateToggle = useCallback(async (estimate, field, value) => {
+    const key = `${estimate.id}:${field}`;
+    if (pendingToggleKeys.has(key)) return false;
+    setPendingToggleKeys((prev) => new Set(prev).add(key));
+    try {
+      await adminFetch(`/admin/estimates/${estimate.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ [field]: value }),
+      });
+      setEstimates((prev) =>
+        prev.map((est) => (est.id === estimate.id ? { ...est, [field]: value } : est)),
+      );
+      return true;
+    } finally {
+      setPendingToggleKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }
+  }, [pendingToggleKeys]);
+
+  const isEstimateTogglePending = useCallback((estimateId, field) => (
+    pendingToggleKeys.has(`${estimateId}:${field}`)
+  ), [pendingToggleKeys]);
+
   const togglePriority = useCallback(async (e) => {
     const newVal = !e.isPriority;
     try {
-      await adminFetch(`/admin/estimates/${e.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ isPriority: newVal }),
-      });
-      setEstimates((prev) =>
-        prev.map((est) => (est.id === e.id ? { ...est, isPriority: newVal } : est)),
-      );
-    } catch {
-      alert('Failed to update priority');
+      await patchEstimateToggle(e, 'isPriority', newVal);
+    } catch (err) {
+      alert(`Failed to update priority: ${err.message}`);
     }
-  }, []);
+  }, [patchEstimateToggle]);
 
   const toggleOneTimeOption = useCallback(async (e) => {
     const newVal = !e.showOneTimeOption;
     try {
-      await adminFetch(`/admin/estimates/${e.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ showOneTimeOption: newVal }),
-      });
-      setEstimates((prev) =>
-        prev.map((est) => (est.id === e.id ? { ...est, showOneTimeOption: newVal } : est)),
-      );
+      await patchEstimateToggle(e, 'showOneTimeOption', newVal);
     } catch (err) {
       alert(`Failed to update one-time option: ${err.message}`);
     }
-  }, []);
+  }, [patchEstimateToggle]);
 
   const toggleBillByInvoice = useCallback(async (e) => {
     const newVal = !e.billByInvoice;
@@ -494,17 +509,11 @@ function EstimatePipelineViewV2() {
       'Invoice mode: when the customer accepts, an invoice due immediately will be created and pay-link delivery will be attempted — no onboarding or payment method up front.\n\nContinue?',
     )) return;
     try {
-      await adminFetch(`/admin/estimates/${e.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ billByInvoice: newVal }),
-      });
-      setEstimates((prev) =>
-        prev.map((est) => (est.id === e.id ? { ...est, billByInvoice: newVal } : est)),
-      );
+      await patchEstimateToggle(e, 'billByInvoice', newVal);
     } catch (err) {
       alert(`Failed to update invoice mode: ${err.message}`);
     }
-  }, []);
+  }, [patchEstimateToggle]);
 
   if (loading) {
     return (
@@ -862,10 +871,12 @@ function EstimatePipelineViewV2() {
                   <button
                     type="button"
                     onClick={() => togglePriority(e)}
+                    disabled={isEstimateTogglePending(e.id, 'isPriority')}
                     title={e.isPriority ? 'Remove priority' : 'Flag as urgent'}
                     aria-label={e.isPriority ? 'Remove priority' : 'Flag as urgent'}
                     className={cn(
                       'h-11 w-11 sm:h-7 sm:w-7 flex-shrink-0 flex items-center justify-center rounded-full sm:rounded-xs border-hairline u-focus-ring transition-colors',
+                      isEstimateTogglePending(e.id, 'isPriority') && 'opacity-60 cursor-wait',
                       e.isPriority
                         ? 'bg-alert-bg text-alert-fg border-alert-fg'
                         : 'bg-white text-ink-secondary border-zinc-300 hover:bg-zinc-50',
@@ -881,6 +892,7 @@ function EstimatePipelineViewV2() {
                         variant={e.showOneTimeOption ? 'secondary' : 'ghost'}
                         className="w-full sm:w-auto rounded-full whitespace-nowrap"
                         onClick={() => toggleOneTimeOption(e)}
+                        disabled={isEstimateTogglePending(e.id, 'showOneTimeOption')}
                         title={
                           e.showOneTimeOption
                             ? 'One-time option is visible to the customer. Click to hide.'
@@ -897,6 +909,7 @@ function EstimatePipelineViewV2() {
                         variant={e.billByInvoice ? 'secondary' : 'ghost'}
                         className="w-full sm:w-auto rounded-full whitespace-nowrap"
                         onClick={() => toggleBillByInvoice(e)}
+                        disabled={isEstimateTogglePending(e.id, 'billByInvoice')}
                         title={
                           e.billByInvoice
                             ? 'Invoice mode is ON — customer acceptance creates an invoice due immediately and attempts pay-link delivery. Click to switch back to the normal onboarding flow.'
