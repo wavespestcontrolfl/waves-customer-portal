@@ -964,6 +964,7 @@ function initScheduledJobs() {
   cron.schedule('*/5 * * * *', async () => {
     try {
       const processor = require('./call-recording-processor');
+      if (processor.recoverMissingRecentRecordings) await processor.recoverMissingRecentRecordings();
       if (processor.processAllPending) await processor.processAllPending();
     } catch (e) { logger.error(`Recording batch process failed: ${e.message}`); }
   }, { timezone: 'America/New_York' });

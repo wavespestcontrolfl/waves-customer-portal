@@ -13,6 +13,18 @@ function notifyTwilioFailure(payload) {
   });
 }
 
+function scheduleRecordingRecovery(callSid) {
+  if (!callSid) return;
+  setTimeout(async () => {
+    try {
+      const processor = require('../services/call-recording-processor');
+      if (processor.recoverRecordingForCall) await processor.recoverRecordingForCall(callSid);
+    } catch (err) {
+      logger.warn(`[call-status] Recording recovery failed for ${maskSid(callSid)}: ${err.message}`);
+    }
+  }, 2 * 60 * 1000);
+}
+
 // Phone normalization consolidated to server/utils/phone.js (PR1 of
 // call-triage work — see docs/call-triage-discovery.md §9). The unified
 // implementation is the verbatim toE164 contract that previously lived
@@ -588,6 +600,7 @@ router.post('/outbound-connect', async (req, res) => {
 router.post('/call-status', async (req, res) => {
   try {
     const { CallSid, CallStatus, CallDuration, From, To, Direction, ErrorCode, ErrorMessage } = req.body;
+    const isOutbound = Direction === 'outbound-api' || Direction === 'outbound-dial';
 
     await db.transaction(async (trx) => {
       // Serialize per-CallSid so overlapping Twilio retries can't both
@@ -610,7 +623,6 @@ router.post('/call-status', async (req, res) => {
       // synthesizing a row from those fields would key the call to the wrong
       // contact. If the row is missing here, the originator's insert failed
       // upstream; log and skip rather than pollute communications history.
-      const isOutbound = Direction === 'outbound-api' || Direction === 'outbound-dial';
       if (isOutbound) {
         logger.warn(
           `Outbound status_callback with no call_log row CallSid=${CallSid} — originator did not insert; skipping fallback insert`
@@ -662,8 +674,11 @@ router.post('/call-status', async (req, res) => {
       });
     });
 
+    if (!isOutbound && CallStatus === 'completed') {
+      scheduleRecordingRecovery(CallSid);
+    }
+
     if (isFailureStatus(CallStatus)) {
-      const isOutbound = Direction === 'outbound-api' || Direction === 'outbound-dial';
       notifyTwilioFailure({
         channel: 'voice',
         direction: isOutbound ? 'outbound' : 'inbound',

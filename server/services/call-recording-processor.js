@@ -14,6 +14,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const twilio = require('twilio');
 
 function capitalizeName(name) {
   if (!name) return '';
@@ -26,6 +27,23 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString } = require('../utils/datetime-et');
+
+function twilioClient() {
+  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return null;
+  return twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+}
+
+function recordingMediaUrl(recording) {
+  if (recording.mediaUrl) return `${recording.mediaUrl}.mp3`;
+  if (!recording.uri) return null;
+  return `https://api.twilio.com${recording.uri.replace(/\.json$/, '')}.mp3`;
+}
+
+function newestCompletedRecording(recordings) {
+  return recordings
+    .filter((r) => r && r.status === 'completed' && r.sid)
+    .sort((a, b) => new Date(b.dateCreated || 0) - new Date(a.dateCreated || 0))[0] || null;
+}
 
 async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType }) {
   try {
@@ -1250,6 +1268,81 @@ const CallRecordingProcessor = {
       }
     }
     return { processed: results.length, results };
+  },
+
+  /**
+   * Recover recordings Twilio created but the portal did not receive via the
+   * Studio make-http-request / recording-status callback path.
+   */
+  async recoverRecordingForCall(callSid) {
+    if (!callSid) return { success: false, reason: 'missing_call_sid' };
+
+    const client = twilioClient();
+    if (!client) return { success: false, reason: 'twilio_not_configured' };
+
+    const call = await db('call_log').where('twilio_call_sid', callSid).first();
+    if (!call) return { success: false, reason: 'call_not_found' };
+    if (call.recording_url) return { success: true, skipped: true, reason: 'already_has_recording' };
+
+    let recordings;
+    try {
+      recordings = await client.recordings.list({ callSid, limit: 10 });
+    } catch (err) {
+      logger.warn(`[call-proc] Recording recovery lookup failed for ${callSid}: ${err.message}`);
+      return { success: false, reason: 'twilio_lookup_failed', error: err.message };
+    }
+
+    const recording = newestCompletedRecording(recordings);
+    if (!recording) return { success: true, skipped: true, reason: 'no_completed_recording' };
+
+    const url = recordingMediaUrl(recording);
+    if (!url) return { success: false, reason: 'recording_url_missing' };
+
+    const updated = await db('call_log')
+      .where('twilio_call_sid', callSid)
+      .where(function () {
+        this.whereNull('recording_url').orWhere('recording_url', '');
+      })
+      .update({
+        recording_url: url,
+        recording_sid: recording.sid,
+        recording_duration_seconds: parseInt(recording.duration || call.duration_seconds || 0),
+        transcription_status: 'pending',
+        processing_status: call.processing_status || null,
+        updated_at: new Date(),
+      });
+
+    if (updated === 0) return { success: true, skipped: true, reason: 'already_recovered_by_peer' };
+
+    logger.info(`[call-proc] Recovered missing recording for ${callSid} → ${recording.sid}`);
+    return { success: true, recovered: true, recordingSid: recording.sid };
+  },
+
+  async recoverMissingRecentRecordings() {
+    const rows = await db('call_log')
+      .select('twilio_call_sid')
+      .where({ direction: 'inbound', status: 'completed' })
+      .where(function () {
+        this.whereNull('recording_url').orWhere('recording_url', '');
+      })
+      .whereNotNull('twilio_call_sid')
+      .where('created_at', '>=', db.raw("NOW() - INTERVAL '24 hours'"))
+      .where('created_at', '<=', db.raw("NOW() - INTERVAL '2 minutes'"))
+      .orderBy('created_at', 'desc')
+      .limit(25);
+
+    const results = [];
+    for (const row of rows) {
+      try {
+        results.push({ callSid: row.twilio_call_sid, ...(await this.recoverRecordingForCall(row.twilio_call_sid)) });
+      } catch (err) {
+        results.push({ callSid: row.twilio_call_sid, success: false, error: err.message });
+      }
+    }
+
+    const recovered = results.filter((r) => r.recovered).length;
+    if (recovered > 0) logger.info(`[call-proc] Recovered ${recovered} missing recent recording(s)`);
+    return { checked: rows.length, recovered, results };
   },
 
   /**
