@@ -264,7 +264,7 @@ export default function ProjectReportViewPage() {
   const projectDateLabel = formatReportDate(data.projectDate || data.sentAt);
   const sentDateLabel = data.sentAt ? formatReportDate(data.sentAt) : '';
   const showSentDate = sentDateLabel && reportDateKey(data.sentAt) !== reportDateKey(data.projectDate);
-  const reportMetaStyle = { fontSize: 13, color: B.grayDark, lineHeight: 1.45 };
+  const reportMetaStyle = { fontSize: 14, color: B.grayDark, lineHeight: 1.45 };
   const contactRows = [
     projectDateLabel ? `Inspection date: ${projectDateLabel}${data.technicianName ? ` · ${data.technicianName}` : ''}` : '',
     showSentDate ? `Report sent: ${sentDateLabel}` : '',
