@@ -1385,6 +1385,9 @@ router.put('/:token/accept', async (req, res, next) => {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (estimate.status === 'accepted') return res.json({ success: true, alreadyAccepted: true });
+    if (!isEstimateAcceptActive(estimate)) {
+      return res.status(409).json({ error: 'Estimate is no longer active' });
+    }
 
     const firstName = (estimate.customer_name || '').split(' ')[0] || 'there';
 
@@ -1497,7 +1500,16 @@ router.put('/:token/accept', async (req, res, next) => {
       if (treatAsOneTime && effectiveOneTimeTotal > 0 && Number(estimate.onetime_total || 0) !== effectiveOneTimeTotal) {
         acceptedUpdates.onetime_total = effectiveOneTimeTotal;
       }
-      await trx('estimates').where({ id: estimate.id }).update(acceptedUpdates);
+      const acceptedCount = await trx('estimates')
+        .where({ id: estimate.id })
+        .whereNotIn('status', ['accepted', 'declined', 'expired'])
+        .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', trx.raw('NOW()')))
+        .update(acceptedUpdates);
+      if (!acceptedCount) {
+        const err = new Error('Estimate is no longer active');
+        err.status = 409;
+        throw err;
+      }
 
       let customerId = estimate.customer_id;
       if (!customerId && estimate.customer_phone) {
@@ -2561,6 +2573,12 @@ function normalizeAcceptPaymentMethodPreference(raw) {
   return null;
 }
 
+function isEstimateAcceptActive(estimate = {}, now = new Date()) {
+  if (['accepted', 'declined', 'expired'].includes(estimate.status)) return false;
+  if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
+  return true;
+}
+
 function buildAcceptSuccessPayload({
   onboardingToken = null,
   invoiceMode = false,
@@ -3040,6 +3058,7 @@ module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate;
 module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
 module.exports.normalizeAcceptPaymentMethodPreference = normalizeAcceptPaymentMethodPreference;
+module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
 module.exports.buildAcceptOfficeFallback = buildAcceptOfficeFallback;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
