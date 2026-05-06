@@ -905,9 +905,11 @@ export function ProtocolPanel({ service, onClose }) {
   const [lawnProtocol, setLawnProtocol] = useState(null);
   const [lawnMix, setLawnMix] = useState(null);
   const [lawnContext, setLawnContext] = useState({ trackKey: null, lawnSqft: null });
+  const [serviceProtocol, setServiceProtocol] = useState(null);
   const [productLabels, setProductLabels] = useState([]);
   const [loading, setLoading] = useState(true);
-  const isLawn = detectServiceCategory(service.serviceType) === 'lawn';
+  const serviceCategory = detectServiceCategory(service.serviceType);
+  const isLawn = serviceCategory === 'lawn';
   const [activeSection, setActiveSection] = useState(isLawn ? 'lawn_protocol' : 'overview');
 
   useEffect(() => {
@@ -917,13 +919,19 @@ export function ProtocolPanel({ service, onClose }) {
   useEffect(() => {
     let cancelled = false;
     const svcType = (service.serviceType || '').toLowerCase();
-    const line = svcType.includes('lawn') ? 'lawn' : svcType.includes('tree') || svcType.includes('shrub') ? 'tree_shrub' : svcType.includes('mosquito') ? 'mosquito' : 'pest';
+    const line = svcType.includes('lawn') ? 'lawn'
+      : svcType.includes('tree') || svcType.includes('shrub') ? 'tree_shrub'
+      : svcType.includes('termite') ? 'termite'
+      : svcType.includes('mosquito') ? 'mosquito'
+      : 'pest';
+    const protocolProgram = line === 'tree_shrub' || line === 'termite' || line === 'pest' ? line : null;
     const month = new Date().getMonth() + 1;
 
     setLoading(true);
     setLawnProtocol(null);
     setLawnMix(null);
     setLawnContext({ trackKey: null, lawnSqft: null });
+    setServiceProtocol(null);
 
     (async () => {
       const profileResponse = isLawn && service.customerId
@@ -945,13 +953,14 @@ export function ProtocolPanel({ service, onClose }) {
           })
         : null;
 
-      const [p, s, sc, eq, lp, lm] = await Promise.all([
+      const [p, s, sc, eq, lp, lm, sp] = await Promise.all([
         adminFetch(`/admin/protocols/photos/relevant?serviceType=${encodeURIComponent(service.serviceType)}&month=${month}`),
         adminFetch(`/admin/protocols/seasonal-index?month=${month}&service_line=${line}`),
         adminFetch(`/admin/protocols/scripts?service_line=${line}`),
         adminFetch(`/admin/protocols/equipment?service_line=${line}`),
         isLawn && trackKey ? adminFetch(`/admin/protocols/programs?track=${trackKey}`) : Promise.resolve(null),
         isLawn && trackKey && lawnSqft ? adminFetch(`/admin/protocols/lawn-mix?track=${trackKey}&month=${month}&lawnSqft=${encodeURIComponent(lawnSqft)}`) : Promise.resolve(null),
+        !isLawn && protocolProgram ? adminFetch(`/admin/protocols/programs?program=${protocolProgram}`) : Promise.resolve(null),
       ]);
 
       if (cancelled) return;
@@ -962,6 +971,7 @@ export function ProtocolPanel({ service, onClose }) {
       setLawnProtocol(lp?.track || null);
       setLawnMix(lm || null);
       setLawnContext({ trackKey, lawnSqft });
+      setServiceProtocol(sp?.program || null);
       setLoading(false);
     })().catch(() => {
       if (!cancelled) setLoading(false);
@@ -972,6 +982,7 @@ export function ProtocolPanel({ service, onClose }) {
 
   const SECTIONS = [
     ...(isLawn ? [{ id: 'lawn_protocol', label: '🌱 Lawn Protocol', count: lawnProtocol?.visits?.length || null }] : []),
+    ...(!isLawn && serviceProtocol ? [{ id: 'service_protocol', label: '📋 Protocol', count: serviceProtocol?.visits?.length || null }] : []),
     { id: 'overview', label: '📊 Overview', count: null },
     { id: 'seasonal', label: '🌡️ Pest Pressure', count: seasonal.length },
     { id: 'photos', label: '📸 ID Guide', count: photos.length },
@@ -1114,6 +1125,43 @@ export function ProtocolPanel({ service, onClose }) {
                     ))}
                   </>
                 )}
+              </div>
+            )}
+
+            {/* SERVICE PROTOCOL */}
+            {activeSection === 'service_protocol' && !isLawn && serviceProtocol && (
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 4 }}>{serviceProtocol.name}</div>
+                <div style={{ fontSize: 11, color: D.muted, marginBottom: 12 }}>Service-line templates, treatment method, escalation triggers, and inventory-backed COGS references</div>
+
+                {(serviceProtocol.notes || []).map((note, i) => (
+                  <div key={i} style={{ background: D.bg, borderRadius: 8, padding: 10, border: `1px solid ${D.border}`, color: D.text, fontSize: 11, lineHeight: 1.45, marginBottom: 8 }}>
+                    {note}
+                  </div>
+                ))}
+
+                {(serviceProtocol.visits || []).map((v) => (
+                  <div key={v.visit} style={{ background: D.bg, borderRadius: 10, padding: 12, border: `1px solid ${D.border}`, marginBottom: 10 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, marginBottom: 8 }}>
+                      <div>
+                        <div style={{ fontSize: 12, fontWeight: 800, color: D.heading }}>Template {v.visit} · {v.month}</div>
+                        <div style={{ fontSize: 10, color: D.muted, marginTop: 2 }}>{v.notes || 'Standard service workflow'}</div>
+                      </div>
+                      <div style={{ textAlign: 'right', fontSize: 10, color: D.muted, flexShrink: 0 }}>
+                        <div>Mat: {v.material_cost || 'inventory'}</div>
+                        <div>Labor: {v.labor_cost || 'standard'}</div>
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 11, fontWeight: 800, color: D.teal, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Primary</div>
+                    <div style={{ fontSize: 11, color: D.text, whiteSpace: 'pre-wrap', lineHeight: 1.45 }}>{v.primary}</div>
+                    {v.secondary && (
+                      <>
+                        <div style={{ fontSize: 11, fontWeight: 800, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 10, marginBottom: 4 }}>Conditional / Follow-up</div>
+                        <div style={{ fontSize: 11, color: D.muted, whiteSpace: 'pre-wrap', lineHeight: 1.45 }}>{v.secondary}</div>
+                      </>
+                    )}
+                  </div>
+                ))}
               </div>
             )}
 

@@ -21,6 +21,17 @@ const TRACK_MAP = {
   C2_Zoysia: 'zoysia',
   D_Bahia: 'bahia',
 };
+const PROGRAM_KEYS = ['tree_shrub', 'pest', 'termite'];
+
+function programSummary(key, program) {
+  if (!program) return null;
+  return {
+    key,
+    name: program.name,
+    visits: Array.isArray(program.visits) ? program.visits.length : 0,
+    notes: Array.isArray(program.notes) ? program.notes.length : 0,
+  };
+}
 
 function monthAbbr(value) {
   const n = parseInt(value, 10);
@@ -299,14 +310,14 @@ router.get('/product-label/:productId', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/admin/protocols/programs — WaveGuard lawn + T&S protocols
+// GET /api/admin/protocols/programs — WaveGuard lawn + service-line protocols
 router.get('/programs', async (req, res, next) => {
   try {
     const protocols = require('../config/protocols.json');
     const { track, program } = req.query;
 
-    if (program === 'tree_shrub') {
-      return res.json({ program: protocols.tree_shrub });
+    if (program && PROGRAM_KEYS.includes(program) && protocols[program]) {
+      return res.json({ program: protocols[program] });
     }
 
     // Backward compat: map old track letters to new keys
@@ -323,7 +334,10 @@ router.get('/programs', async (req, res, next) => {
 
     res.json({
       lawn: { tracks: summary },
-      tree_shrub: { name: protocols.tree_shrub.name, visits: protocols.tree_shrub.visits.length },
+      programs: PROGRAM_KEYS.map((key) => programSummary(key, protocols[key])).filter(Boolean),
+      tree_shrub: programSummary('tree_shrub', protocols.tree_shrub),
+      pest: programSummary('pest', protocols.pest),
+      termite: programSummary('termite', protocols.termite),
     });
   } catch (err) { next(err); }
 });

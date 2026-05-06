@@ -14,6 +14,11 @@ const FALLBACK_LAWN_TRACKS = [
   { key: 'zoysia', name: 'Zoysia', visits: 12 },
   { key: 'bahia', name: 'Bahia', visits: 12 },
 ];
+const FALLBACK_SERVICE_PROGRAMS = [
+  { key: 'tree_shrub', name: 'Tree & Shrub v3', visits: 12 },
+  { key: 'pest', name: 'Residential Pest Control Protocol Templates', visits: 6 },
+  { key: 'termite', name: 'Termite Service Protocol Templates', visits: 6 },
+];
 
 function adminFetch(path, options = {}) {
   const token = localStorage.getItem('waves_admin_token') || localStorage.getItem('adminToken');
@@ -82,7 +87,11 @@ function CurrentVisitCardV2({ visit, trackName }) {
   if (!visit) return null;
   const primaryProducts = parseProductLines(visit.primary);
   const secondaryProducts = parseProductLines(visit.secondary);
-  const totalCost = (parseFloat(visit.material_cost) || 0) + (parseFloat(visit.labor_cost) || 0);
+  const materialCost = parseFloat(visit.material_cost);
+  const laborCost = parseFloat(visit.labor_cost);
+  const hasNumericCost = Number.isFinite(materialCost) || Number.isFinite(laborCost);
+  const totalCost = (Number.isFinite(materialCost) ? materialCost : 0) + (Number.isFinite(laborCost) ? laborCost : 0);
+  const costLabel = (value) => (Number.isFinite(parseFloat(value)) ? `$${value}` : value || '0');
 
   const warnings = [];
   if (visit.notes) {
@@ -158,14 +167,16 @@ function CurrentVisitCardV2({ visit, trackName }) {
         <div className="flex gap-3 flex-wrap items-center px-3 py-2 bg-zinc-50 rounded border border-hairline border-zinc-200">
           <div className="text-12 text-ink-tertiary">
             Materials:{' '}
-            <span className="font-mono u-nums text-ink-primary font-medium">${visit.material_cost || '0'}</span>
+            <span className="font-mono u-nums text-ink-primary font-medium">{costLabel(visit.material_cost)}</span>
           </div>
           <div className="text-12 text-ink-tertiary">
-            Labor: <span className="font-mono u-nums text-ink-primary font-medium">${visit.labor_cost || '0'}</span>
+            Labor: <span className="font-mono u-nums text-ink-primary font-medium">{costLabel(visit.labor_cost)}</span>
           </div>
-          <div className="ml-auto text-13 text-ink-primary font-medium font-mono u-nums">
-            Total: ${totalCost.toFixed(2)}
-          </div>
+          {hasNumericCost && (
+            <div className="ml-auto text-13 text-ink-primary font-medium font-mono u-nums">
+              Total: ${totalCost.toFixed(2)}
+            </div>
+          )}
         </div>
 
         {visit.notes && stripLegacyBoilerplate(visit.notes) && (
@@ -374,12 +385,16 @@ export default function ProtocolReferenceTabV2() {
   const [selectedConditionalIds, setSelectedConditionalIds] = useState([]);
 
   const lawnTracks = programs?.lawn?.tracks?.length ? programs.lawn.tracks : FALLBACK_LAWN_TRACKS;
+  const servicePrograms = programs?.programs?.length ? programs.programs : FALLBACK_SERVICE_PROGRAMS;
+  const lawnTrackKeys = lawnTracks.map((t) => t.key);
+  const isLawnTrack = selectedTrack && lawnTrackKeys.includes(selectedTrack);
+  const isServiceProgram = selectedTrack && !isLawnTrack;
 
   const loadTrack = async (key) => {
     setSelectedTrack(key);
     setTrackData(null);
     setShowFullCalendar(false);
-    const param = key === 'tree_shrub' ? 'program=tree_shrub' : `track=${key}`;
+    const param = lawnTrackKeys.includes(key) ? `track=${key}` : `program=${key}`;
     const d = await adminFetch(`/admin/protocols/programs?${param}`);
     setTrackData(d.track || d.program);
     setSelectedConditionalIds([]);
@@ -395,7 +410,7 @@ export default function ProtocolReferenceTabV2() {
         const defaultTrack = tracks.find((t) => t.key === 'st_augustine')?.key || tracks[0]?.key;
         if (defaultTrack) {
           try {
-            const param = defaultTrack === 'tree_shrub' ? 'program=tree_shrub' : `track=${defaultTrack}`;
+            const param = `track=${defaultTrack}`;
             const track = await adminFetch(`/admin/protocols/programs?${param}`);
             if (!cancelled) {
               setSelectedTrack(defaultTrack);
@@ -427,7 +442,7 @@ export default function ProtocolReferenceTabV2() {
   }, []);
 
   useEffect(() => {
-    if (!selectedTrack || selectedTrack === 'tree_shrub') return;
+    if (!selectedTrack || !isLawnTrack) return;
     let cancelled = false;
     const params = new URLSearchParams({
       track: selectedTrack,
@@ -442,7 +457,7 @@ export default function ProtocolReferenceTabV2() {
       .catch(() => { if (!cancelled) setMixPlan(null); })
       .finally(() => { if (!cancelled) setMixLoading(false); });
     return () => { cancelled = true; };
-  }, [selectedTrack, selectedMonth, equipmentSystemId, lawnSqft, selectedConditionalIds]);
+  }, [selectedTrack, selectedMonth, equipmentSystemId, lawnSqft, selectedConditionalIds, isLawnTrack]);
 
   function toggleConditional(productId) {
     setSelectedConditionalIds((prev) => (
@@ -457,9 +472,10 @@ export default function ProtocolReferenceTabV2() {
   }
 
   const currentMonthAbbr = MONTH_NAMES[selectedMonth - 1];
-  const currentVisit = trackData?.visits?.find((v) => v.month === currentMonthAbbr);
+  const currentVisit = trackData?.visits?.find((v) => v.month === currentMonthAbbr)
+    || (isServiceProgram ? trackData?.visits?.[0] : null);
   const safetyRules =
-    selectedTrack && selectedTrack !== 'tree_shrub' ? TRACK_SAFETY_RULES[selectedTrack] || [] : [];
+    isLawnTrack ? TRACK_SAFETY_RULES[selectedTrack] || [] : [];
 
   return (
     <div className="flex flex-col gap-4">
@@ -488,25 +504,26 @@ export default function ProtocolReferenceTabV2() {
             </button>
           );
         })}
-        <button
-          onClick={() => loadTrack('tree_shrub')}
-          className={cn(
-            'px-4 py-2.5 rounded-md u-focus-ring flex-shrink-0 text-left transition-colors border-hairline',
-            selectedTrack === 'tree_shrub'
-              ? 'bg-zinc-900 border-zinc-900 text-white'
-              : 'bg-white border-zinc-200 text-ink-primary hover:bg-zinc-50',
-          )}
-        >
-          <div className="text-13 font-medium">Tree &amp; Shrub v3</div>
-          <div
-            className={cn(
-              'text-11 mt-0.5 u-label',
-              selectedTrack === 'tree_shrub' ? 'text-white/70' : 'text-ink-tertiary',
-            )}
-          >
-            12 visits/year
-          </div>
-        </button>
+        {servicePrograms.map((program) => {
+          const active = selectedTrack === program.key;
+          return (
+            <button
+              key={program.key}
+              onClick={() => loadTrack(program.key)}
+              className={cn(
+                'px-4 py-2.5 rounded-md u-focus-ring flex-shrink-0 text-left transition-colors border-hairline',
+                active
+                  ? 'bg-zinc-900 border-zinc-900 text-white'
+                  : 'bg-white border-zinc-200 text-ink-primary hover:bg-zinc-50',
+              )}
+            >
+              <div className="text-13 font-medium">{program.name?.substring(0, 35) || program.key}</div>
+              <div className={cn('text-11 mt-0.5 u-label', active ? 'text-white/70' : 'text-ink-tertiary')}>
+                {program.visits} templates
+              </div>
+            </button>
+          );
+        })}
       </div>
 
       {trackData && (
@@ -514,7 +531,7 @@ export default function ProtocolReferenceTabV2() {
           <Card className="overflow-hidden">
             <div className="px-4 py-3 flex flex-col gap-3">
               <div className="text-16 font-medium text-ink-primary tracking-tight">{trackData.name}</div>
-              {selectedTrack !== 'tree_shrub' && (
+              {isLawnTrack && (
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                   <div>
                     <label className="u-label text-ink-tertiary block mb-1">Month</label>
@@ -565,7 +582,7 @@ export default function ProtocolReferenceTabV2() {
             </div>
           )}
 
-          {selectedTrack !== 'tree_shrub' && (
+          {isLawnTrack && (
             mixLoading ? (
               <Card className="px-5 py-4 text-center text-13 text-ink-tertiary">Calculating mix…</Card>
             ) : (
@@ -577,7 +594,7 @@ export default function ProtocolReferenceTabV2() {
             )
           )}
 
-          {selectedTrack === 'tree_shrub' && currentVisit && <CurrentVisitCardV2 visit={currentVisit} trackName={trackData.name} />}
+          {isServiceProgram && currentVisit && <CurrentVisitCardV2 visit={currentVisit} trackName={trackData.name} />}
 
           {!currentVisit && trackData.visits?.length > 0 && (
             <Card className="px-5 py-4 text-center">
