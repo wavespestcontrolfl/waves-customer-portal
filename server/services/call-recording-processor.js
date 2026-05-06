@@ -83,9 +83,13 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
 
   const existing = await db('newsletter_subscribers').where({ email: emailLc }).first();
   if (existing?.status === 'unsubscribed') {
-    await db('newsletter_subscribers')
-      .where({ id: existing.id })
-      .update({ customer_id: customerId, updated_at: new Date() });
+    if (!existing.customer_id) {
+      await db('newsletter_subscribers')
+        .where({ id: existing.id })
+        .update({ customer_id: customerId, updated_at: new Date() });
+    } else if (existing.customer_id !== customerId) {
+      logger.info(`[call-proc] Newsletter subscriber link unchanged for customer ${customerId}: previously linked elsewhere`);
+    }
     logger.info(`[call-proc] Newsletter subscribe skipped for customer ${customerId}: previously unsubscribed`);
     return { skipped: true, reason: 'previously_unsubscribed' };
   }
