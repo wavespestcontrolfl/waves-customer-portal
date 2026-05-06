@@ -14,13 +14,6 @@ router.use(authenticate);
 
 const STALE_VEHICLE_MS = 5 * 60 * 1000;
 
-// Safely parse a JSON column; tolerate already-parsed objects and bad data.
-function safeJsonParse(val, fallback = null) {
-  if (val === null || val === undefined) return fallback;
-  if (typeof val === 'object') return val;
-  try { return JSON.parse(val); } catch { return fallback; }
-}
-
 const STEP_NAMES = ['', 'Scheduled', 'Confirmed', 'En Route', 'On-Site', 'In Progress', 'Wrapping Up', 'Complete'];
 
 const OFFICES = {
@@ -67,46 +60,6 @@ async function attachTechPhoto(tracker, tech) {
     yearsWithWaves: null,
   };
   return tracker;
-}
-
-function formatTracker(row, service, tech, customer) {
-  const notes = safeJsonParse(row.live_notes, []);
-  const summary = safeJsonParse(row.service_summary, null);
-
-  return {
-    id: row.id,
-    currentStep: row.current_step,
-    steps: Array.from({ length: 7 }, (_, i) => ({
-      step: i + 1,
-      name: STEP_NAMES[i + 1],
-      completedAt: row[`step_${i + 1}_at`] || null,
-    })),
-    etaMinutes: row.eta_minutes,
-    liveNotes: notes,
-    serviceSummary: summary,
-    service: {
-      id: service?.id,
-      date: service?.scheduled_date,
-      type: service?.service_type,
-      windowStart: service?.window_start,
-      windowEnd: service?.window_end,
-    },
-    technician: {
-      id: tech?.id,
-      name: tech?.name,
-      firstName: firstNameOf(tech?.name),
-      initials: tech?.name ? tech.name.split(' ').map(n => n[0]).join('') : '?',
-      photoUrl: null,
-    },
-    tech: tech?.id ? { firstName: firstNameOf(tech?.name), photoUrl: null, yearsWithWaves: null } : null,
-    office: resolveOffice(customer),
-    // customerLocation is set when we have the customer's geocoded
-    // lat/lng AND the tracker is en route — lets the client drop a
-    // destination marker on the live map. GOOGLE_MAPS_API_KEY is
-    // exposed separately via /api/portal/env so the map can bootstrap.
-    customerLocation: null,
-    techPosition: null,
-  };
 }
 
 function stepForTrackState(state) {
@@ -248,112 +201,6 @@ async function findCanonicalScheduledService(customerId, opts = {}) {
   return buildCanonicalScheduledServiceQuery(db, customerId, canonicalQueryOptions(opts)).first();
 }
 
-function buildLegacyTrackerQuery(knex, customerId, opts = {}) {
-  const fourHoursAgo = opts.fourHoursAgo || new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
-  const today = opts.today || etDateString();
-  const q = knex('service_tracking')
-    .leftJoin('scheduled_services as s', 'service_tracking.scheduled_service_id', 's.id')
-    .where({ 'service_tracking.customer_id': customerId })
-    // Modern tracked services are served from scheduled_services.track_state.
-    // Only keep this fallback for historical tracker rows linked to services
-    // that never received a track token.
-    .whereNull('s.track_view_token');
-
-  if (opts.todayOnly) {
-    q.where('s.scheduled_date', today)
-      .where('service_tracking.current_step', '<=', 7);
-  } else {
-    q.where(function () {
-      this.where('service_tracking.current_step', '<', 7)
-        .orWhere('service_tracking.step_7_at', '>=', fourHoursAgo);
-    });
-  }
-
-  return q
-    .orderBy('service_tracking.created_at', 'desc')
-    .first('service_tracking.*');
-}
-
-async function formatLegacyTracker(row, customer) {
-  if (!row) return null;
-  const service = await db('scheduled_services').where({ id: row.scheduled_service_id }).first();
-  const tech = row.technician_id ? await db('technicians').where({ id: row.technician_id }).first() : null;
-  const formatted = formatTracker(row, service, tech, customer);
-  await attachTechPhoto(formatted, tech);
-  await enrichWithLiveMap(formatted, service, tech, customer);
-  return formatted;
-}
-
-// When the tracker is in the EN ROUTE step, enrich the response with
-// the live bouncie position for the assigned tech's truck + the
-// customer's geocoded home + an ETA from Google Distance Matrix (or
-// haversine fallback). Bails silently if bouncie_imei is missing on
-// the tech or geocode is missing on the customer — the client falls
-// back to the existing en-route card.
-async function enrichWithLiveMap(tracker, service, tech, customer) {
-  if (!tracker || tracker.currentStep !== 3) return tracker;
-  try {
-    const custLat = finiteNumber(customer?.latitude);
-    const custLng = finiteNumber(customer?.longitude);
-    if (custLat != null && custLng != null) {
-      tracker.customerLocation = { lat: custLat, lng: custLng };
-    }
-
-    const imei = tech?.bouncie_imei;
-    if (!imei) return tracker;
-
-    const BouncieService = require('../services/bouncie');
-    const pos = await BouncieService.getLocationByImei(imei);
-    if (!pos) return tracker;
-
-    let eta = null;
-    if (tracker.customerLocation) {
-      try {
-        const etaData = await calculateBoundedTrackingEta({
-          techLat: pos.lat,
-          techLng: pos.lng,
-          customerLat: custLat,
-          customerLng: custLng,
-          techUpdatedAt: pos.updatedAt,
-          bouncieService: BouncieService,
-          logPrefix: 'tracking-live-map',
-        });
-        if (etaData) {
-          eta = {
-            minutes: etaData.minutes,
-            distanceMiles: etaData.distanceMiles,
-            source: etaData.source,
-          };
-          tracker.etaSource = etaData.source ?? null;
-          if (etaData.minutes && (!tracker.etaMinutes || Math.abs(tracker.etaMinutes - etaData.minutes) > 2)) {
-            tracker.etaMinutes = etaData.minutes;
-          }
-        }
-      } catch { /* non-fatal */ }
-    }
-
-    const lastReportedAt = pos.updatedAt;
-    const stale = lastReportedAt
-      ? (Date.now() - new Date(lastReportedAt).getTime()) > STALE_VEHICLE_MS
-      : true;
-    tracker.techPosition = {
-      lat: pos.lat,
-      lng: pos.lng,
-      heading: pos.heading,
-      isRunning: pos.isRunning,
-      updatedAt: lastReportedAt,
-      lastReportedAt,
-      stale,
-      eta,
-    };
-  } catch {
-    // Live-map enrichment is entirely best-effort; never let it break
-    // the tracker response for a customer who just wants to see the
-    // stepper.
-  }
-  return tracker;
-}
-
 async function enrichScheduledWithTechStatus(tracker, service, customer) {
   if (!tracker || tracker.currentStep !== 3) return tracker;
   try {
@@ -437,8 +284,7 @@ router.get('/active', async (req, res, next) => {
       return res.json({ tracker: formatted });
     }
 
-    const legacy = await buildLegacyTrackerQuery(db, req.customerId);
-    return res.json({ tracker: await formatLegacyTracker(legacy, req.customer) });
+    return res.json({ tracker: null });
   } catch (err) { next(err); }
 });
 
@@ -447,8 +293,6 @@ router.get('/active', async (req, res, next) => {
 // =========================================================================
 router.get('/today', async (req, res, next) => {
   try {
-    const today = etDateString();
-
     const canonical = await findCanonicalScheduledService(req.customerId, { todayOnly: true });
     if (canonical) {
       const tech = canonical.technician_id ? await db('technicians').where({ id: canonical.technician_id }).first() : null;
@@ -458,8 +302,7 @@ router.get('/today', async (req, res, next) => {
       return res.json({ tracker: formatted });
     }
 
-    const legacy = await buildLegacyTrackerQuery(db, req.customerId, { todayOnly: true, today });
-    return res.json({ tracker: await formatLegacyTracker(legacy, req.customer) });
+    return res.json({ tracker: null });
   } catch (err) { next(err); }
 });
 
@@ -501,7 +344,6 @@ router.post('/demo/advance', async (req, res, next) => {
 
 router._test = {
   buildCanonicalScheduledServiceQuery,
-  buildLegacyTrackerQuery,
   canonicalQueryOptions,
 };
 
