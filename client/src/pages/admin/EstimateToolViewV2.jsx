@@ -57,7 +57,7 @@ function summarizeEstimateSend(data) {
   return parts.join(' / ');
 }
 
-async function summarizeEstimateSaveFailure(response) {
+async function summarizeEstimateResponseFailure(response, fallbackLabel) {
   try {
     const data = await response.clone().json();
     if (data?.error) return data.error;
@@ -68,7 +68,7 @@ async function summarizeEstimateSaveFailure(response) {
       if (text) return text;
     } catch { /* ignore */ }
   }
-  return `Save failed: ${response.status}`;
+  return `${fallbackLabel}: ${response.status}`;
 }
 
 // ── Error Boundary ──────────────────────────────────────────────
@@ -831,6 +831,7 @@ export default function EstimateToolViewV2({
         method: 'POST', headers: authHeaders,
         body: JSON.stringify({ profile, selectedServices, options }),
       });
+      if (!r.ok) throw new Error(await summarizeEstimateResponseFailure(r, 'Estimate calculation failed'));
       const result = await r.json();
       if (result.error) { alert(result.error); setLookupStatus((s) => ({ ...s, type: 'err', msg: result.error })); return; }
 
@@ -910,7 +911,7 @@ export default function EstimateToolViewV2({
           billByInvoice: !!form.billByInvoice,
         }),
       });
-      if (!r.ok) throw new Error(await summarizeEstimateSaveFailure(r));
+      if (!r.ok) throw new Error(await summarizeEstimateResponseFailure(r, 'Save failed'));
       const d = await r.json();
       const id = d.id || d.estimateId;
       setSavedId(id);
