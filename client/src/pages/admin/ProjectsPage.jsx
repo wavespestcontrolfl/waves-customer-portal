@@ -97,6 +97,27 @@ function hasMeaningfulValue(value) {
   return value !== null && value !== undefined && String(value).trim() !== '';
 }
 
+async function readJsonResponse(response, fallbackMessage) {
+  let payload = {};
+  try {
+    payload = await response.json();
+  } catch {
+    payload = {};
+  }
+  if (!response.ok) {
+    throw new Error(payload?.error || fallbackMessage || `Request failed (${response.status})`);
+  }
+  return payload;
+}
+
+function deliverySummary(channels = {}) {
+  const entries = Object.entries(channels);
+  if (!entries.length) return '';
+  return entries
+    .map(([name, result]) => `${name.toUpperCase()}: ${result?.ok ? 'sent' : result?.error || 'failed'}`)
+    .join(' · ');
+}
+
 function evaluateProjectReadiness({ project, typeCfg, findings, recommendations, projectDate, photos }) {
   const required = [
     { label: 'Inspection date', ok: hasMeaningfulValue(projectDate) },
@@ -147,43 +168,52 @@ export default function ProjectsPage() {
   const [selectedId, setSelectedId] = useState(null);
   const [typesRegistry, setTypesRegistry] = useState(null);
   const [createMode, setCreateMode] = useState(null);
+  const [error, setError] = useState('');
 
   const loadProjects = useCallback(async () => {
     setLoading(true);
+    setError('');
     const qs = new URLSearchParams();
     if (filterStatus) qs.set('status', filterStatus);
-    const wdoQs = new URLSearchParams(qs);
-    wdoQs.set('project_type', WDO_TYPE);
+    if (filterType) qs.set('project_type', filterType);
     try {
-      if (filterType) {
-        const generalQs = new URLSearchParams(qs);
-        generalQs.set('project_type', filterType);
+      if (!filterType) {
+        const wdoQs = new URLSearchParams(qs);
+        wdoQs.set('project_type', WDO_TYPE);
         const [generalRes, wdoRes] = await Promise.all([
-          adminFetch(`/admin/projects?${generalQs.toString()}`),
-          adminFetch(`/admin/projects?${wdoQs.toString()}`),
-        ]);
-        const [generalData, wdoData] = await Promise.all([generalRes.json(), wdoRes.json()]);
-        setProjects([...(generalData.projects || []), ...(wdoData.projects || [])]);
-      } else {
-        const [allRes, wdoRes] = await Promise.all([
           adminFetch(`/admin/projects?${qs.toString()}`),
           adminFetch(`/admin/projects?${wdoQs.toString()}`),
         ]);
-        const [allData, wdoData] = await Promise.all([allRes.json(), wdoRes.json()]);
-        setProjects(mergeProjectsUnique(allData.projects || [], wdoData.projects || []));
+        const [generalData, wdoData] = await Promise.all([
+          readJsonResponse(generalRes, 'Could not load projects'),
+          readJsonResponse(wdoRes, 'Could not load WDO reports'),
+        ]);
+        setProjects(mergeProjectsUnique(generalData.projects || [], wdoData.projects || []));
+      } else {
+        const res = await adminFetch(`/admin/projects?${qs.toString()}`);
+        const data = await readJsonResponse(res, 'Could not load projects');
+        setProjects(data.projects || []);
       }
-    } catch { /* ignore */ }
+    } catch (e) {
+      setError(e.message || 'Could not load projects');
+      setProjects([]);
+    }
     finally { setLoading(false); }
   }, [filterStatus, filterType]);
 
   useEffect(() => { loadProjects(); }, [loadProjects]);
 
   useEffect(() => {
-    adminFetch('/admin/projects/types').then(r => r.json()).then(d => setTypesRegistry(d.types)).catch(() => {});
+    adminFetch('/admin/projects/types')
+      .then(r => readJsonResponse(r, 'Could not load project types'))
+      .then(d => setTypesRegistry(d.types))
+      .catch(e => setError(e.message || 'Could not load project types'));
   }, []);
 
   const regularProjects = projects.filter(p => p.project_type !== WDO_TYPE && (!filterType || p.project_type === filterType));
   const wdoProjects = projects.filter(p => p.project_type === WDO_TYPE);
+  const showRegularProjects = filterType !== WDO_TYPE;
+  const showWdoProjects = !filterType || filterType === WDO_TYPE;
   const selected = projects.find(p => p.id === selectedId);
 
   return (
@@ -226,7 +256,7 @@ export default function ProjectsPage() {
         ))}
         <div style={{ width: 12 }} />
         <FilterPill label="All types" active={!filterType} onClick={() => setFilterType('')} />
-        {Object.entries(GENERAL_TYPE_LABELS).map(([key, label]) => (
+        {Object.entries(TYPE_LABELS).map(([key, label]) => (
           <FilterPill
             key={key}
             label={label}
@@ -235,36 +265,41 @@ export default function ProjectsPage() {
           />
         ))}
       </div>
+      {error && <Alert tone="error">{error}</Alert>}
 
       <div style={{ display: 'grid', gridTemplateColumns: selected ? '1fr 1.4fr' : '1fr', gap: 16 }}>
         {/* List */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {loading ? (
-            <div style={{ padding: 24, color: D.muted }}>Loading…</div>
-          ) : regularProjects.length === 0 ? (
-            <div style={{
-              padding: 24, background: D.card, borderRadius: 10,
-              border: `1px dashed ${D.border}`, color: D.muted, textAlign: 'center',
-            }}>
-              No projects match these filters.
-            </div>
-          ) : (
-            regularProjects.map(p => (
-              <ProjectRow
-                key={p.id}
-                project={p}
-                active={selectedId === p.id}
-                onSelect={() => setSelectedId(p.id)}
-              />
-            ))
+          {showRegularProjects && (
+            loading ? (
+              <div style={{ padding: 24, color: D.muted }}>Loading…</div>
+            ) : regularProjects.length === 0 ? (
+              <div style={{
+                padding: 24, background: D.card, borderRadius: 10,
+                border: `1px dashed ${D.border}`, color: D.muted, textAlign: 'center',
+              }}>
+                No projects match these filters.
+              </div>
+            ) : (
+              regularProjects.map(p => (
+                <ProjectRow
+                  key={p.id}
+                  project={p}
+                  active={selectedId === p.id}
+                  onSelect={() => setSelectedId(p.id)}
+                />
+              ))
+            )
           )}
 
-          <WdoReportsSection
-            projects={wdoProjects}
-            selectedId={selectedId}
-            onSelect={setSelectedId}
-            onCreate={() => setCreateMode('wdo')}
-          />
+          {showWdoProjects && (
+            <WdoReportsSection
+              projects={wdoProjects}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+              onCreate={() => setCreateMode('wdo')}
+            />
+          )}
         </div>
 
         {/* Detail */}
@@ -442,12 +477,16 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
   const [dirty, setDirty] = useState(false);
   const [sentLink, setSentLink] = useState('');
   const [aiWriting, setAiWriting] = useState(false);
+  const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
+  const [delivery, setDelivery] = useState(null);
 
   async function load() {
     setLoading(true);
+    setError('');
     try {
       const r = await adminFetch(`/admin/projects/${projectId}`);
-      const d = await r.json();
+      const d = await readJsonResponse(r, 'Could not load project');
       setData(d);
       setEditFindings(d.project.findings || {});
       setEditRecs(d.project.recommendations || '');
@@ -459,7 +498,10 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
       } else {
         setSentLink('');
       }
-    } catch { /* ignore */ }
+    } catch (e) {
+      setError(e.message || 'Could not load project');
+      setData(null);
+    }
     finally { setLoading(false); }
   }
 
@@ -470,15 +512,21 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
 
   async function saveEdits() {
     setSaving(true);
+    setError('');
+    setNotice('');
     try {
-      await adminFetch(`/admin/projects/${projectId}`, {
+      const r = await adminFetch(`/admin/projects/${projectId}`, {
         method: 'PUT',
         body: { title: editTitle || null, project_date: editProjectDate || null, findings: editFindings, recommendations: editRecs || null },
       });
+      await readJsonResponse(r, 'Could not save project changes');
       setDirty(false);
       await load();
       onChanged?.();
-    } catch { /* ignore */ }
+      setNotice('Changes saved.');
+    } catch (e) {
+      setError(e.message || 'Could not save project changes');
+    }
     finally { setSaving(false); }
   }
 
@@ -498,25 +546,33 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
       ];
       if (!confirm(`This report has items to review before sending:\n\n${lines.join('\n')}\n\nSend anyway?`)) return;
     }
-    if (!confirm('Send report to customer? This generates a public link and marks the project as Sent.')) return;
+    const actionLabel = project.status === 'sent' ? 'Resend report to customer?' : 'Send report to customer? This generates a public link and marks the project as Sent.';
+    if (!confirm(actionLabel)) return;
     setSaving(true);
+    setError('');
+    setNotice('');
     try {
       // Persist any dirty edits (including an AI-drafted Recommendations block)
       // before we flip the project to Sent — otherwise the customer sees the
       // pre-edit version at the public link.
       if (dirty) {
-        await adminFetch(`/admin/projects/${projectId}`, {
+        const saveRes = await adminFetch(`/admin/projects/${projectId}`, {
           method: 'PUT',
           body: { title: editTitle || null, project_date: editProjectDate || null, findings: editFindings, recommendations: editRecs || null },
         });
+        await readJsonResponse(saveRes, 'Could not save project before sending');
         setDirty(false);
       }
       const r = await adminFetch(`/admin/projects/${projectId}/send`, { method: 'POST' });
-      const d = await r.json();
+      const d = await readJsonResponse(r, 'Could not send report');
       if (d.report_url) setSentLink(`${window.location.origin}${d.report_url}`);
+      setDelivery(d.channels || null);
+      setNotice(`Report link ready. ${deliverySummary(d.channels)}`.trim());
       await load();
       onChanged?.();
-    } catch { /* ignore */ }
+    } catch (e) {
+      setError(e.message || 'Could not send report');
+    }
     finally { setSaving(false); }
   }
 
@@ -526,13 +582,14 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
     // admin liked prior text, Cmd-Z restores it before save.
     if (editRecs && editRecs.trim() && !confirm('Replace the current Recommendations text with an AI-drafted version?\n\nThe tech\'s original notes will still be used as context for the AI.')) return;
     setAiWriting(true);
+    setError('');
+    setNotice('');
     try {
       const r = await adminFetch(`/admin/projects/${projectId}/ai-write`, {
         method: 'POST',
         body: { findings: editFindings, recommendations: editRecs, project_date: editProjectDate || null },
       });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d?.error || 'AI draft failed');
+      const d = await readJsonResponse(r, 'AI draft failed');
       if (d.report) {
         const aiText = d.report.trim();
         setEditRecs(aiText);
@@ -540,19 +597,22 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
         // the admin manually saves. Other pending edits (title/findings)
         // are included in the same PUT.
         try {
-          await adminFetch(`/admin/projects/${projectId}`, {
+          const saveRes = await adminFetch(`/admin/projects/${projectId}`, {
             method: 'PUT',
             body: { title: editTitle || null, project_date: editProjectDate || null, findings: editFindings, recommendations: aiText },
           });
+          await readJsonResponse(saveRes, 'AI draft created but autosave failed');
           setDirty(false);
           await load();
+          setNotice('AI draft saved.');
         } catch {
           // Autosave failed — leave it marked dirty so manual Save still works.
           setDirty(true);
+          setNotice('AI draft created. Save changes to keep it.');
         }
       }
     } catch (e) {
-      alert(`AI draft failed: ${e.message}`);
+      setError(`AI draft failed: ${e.message}`);
     } finally {
       setAiWriting(false);
     }
@@ -561,20 +621,32 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
   async function handleClose() {
     if (!confirm('Close this project? It stays accessible but is filtered out of Sent view.')) return;
     setSaving(true);
+    setError('');
+    setNotice('');
     try {
-      await adminFetch(`/admin/projects/${projectId}/close`, { method: 'POST' });
+      const r = await adminFetch(`/admin/projects/${projectId}/close`, { method: 'POST' });
+      await readJsonResponse(r, 'Could not close project');
       await load();
       onChanged?.();
-    } catch { /* ignore */ }
+      setNotice('Project closed.');
+    } catch (e) {
+      setError(e.message || 'Could not close project');
+    }
     finally { setSaving(false); }
   }
 
   async function handlePhotoDelete(photoId) {
     if (!confirm('Remove this photo?')) return;
+    setError('');
+    setNotice('');
     try {
-      await adminFetch(`/admin/projects/${projectId}/photos/${photoId}`, { method: 'DELETE' });
+      const r = await adminFetch(`/admin/projects/${projectId}/photos/${photoId}`, { method: 'DELETE' });
+      await readJsonResponse(r, 'Could not remove photo');
       await load();
-    } catch { /* ignore */ }
+      setNotice('Photo removed.');
+    } catch (e) {
+      setError(e.message || 'Could not remove photo');
+    }
   }
 
   async function handlePhotoUpload(e) {
@@ -582,14 +654,25 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
     e.target.value = '';
     if (!files.length) return;
     setSaving(true);
+    setError('');
+    setNotice('');
+    const failed = [];
     for (const f of files) {
       const fd = new FormData();
       fd.append('photo', f);
       try {
-        await adminFetch(`/admin/projects/${projectId}/photos`, { method: 'POST', body: fd, headers: {} });
-      } catch { /* ignore */ }
+        const r = await adminFetch(`/admin/projects/${projectId}/photos`, { method: 'POST', body: fd, headers: {} });
+        await readJsonResponse(r, `Could not upload ${f.name}`);
+      } catch (e) {
+        failed.push(`${f.name}: ${e.message || 'upload failed'}`);
+      }
     }
     await load();
+    if (failed.length) {
+      setError(`Some photos did not upload: ${failed.join('; ')}`);
+    } else {
+      setNotice(`${files.length} photo${files.length === 1 ? '' : 's'} uploaded.`);
+    }
     setSaving(false);
   }
 
@@ -601,7 +684,7 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
   if (loading || !project) {
     return (
       <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, padding: 24, color: D.muted }}>
-        Loading project…
+        {loading ? 'Loading project…' : (error || 'Project unavailable.')}
       </div>
     );
   }
@@ -654,6 +737,10 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
 
       {/* Body */}
       <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 18 }}>
+        {error && <Alert tone="error">{error}</Alert>}
+        {notice && <Alert tone="success">{notice}</Alert>}
+        {delivery && <DeliveryPanel channels={delivery} />}
+
         {sentLink && (
           <div style={{
             padding: '10px 12px', background: '#ECFDF5', border: `1px solid #A7F3D0`,
@@ -852,6 +939,14 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
           disabled={saving || !dirty}
           style={{ ...btnSecondary, opacity: (saving || !dirty) ? 0.4 : 1 }}
         >{saving ? 'Saving…' : 'Save changes'}</button>
+        {project.status === 'sent' && project.status !== 'closed' && (
+          <button
+            type="button"
+            onClick={handleSend}
+            disabled={saving}
+            style={{ ...btnPrimary, opacity: saving ? 0.5 : 1 }}
+          >Resend report</button>
+        )}
         {project.status !== 'sent' && project.status !== 'closed' && (
           <button
             type="button"
@@ -963,6 +1058,48 @@ function ReadinessPanel({ readiness }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function Alert({ tone = 'success', children }) {
+  const isError = tone === 'error';
+  return (
+    <div style={{
+      padding: '9px 12px',
+      background: isError ? '#FEF2F2' : '#ECFDF5',
+      border: `1px solid ${isError ? '#FECACA' : '#A7F3D0'}`,
+      borderRadius: 8,
+      color: isError ? D.red : '#065F46',
+      fontSize: 12,
+      lineHeight: 1.45,
+    }}>
+      {children}
+    </div>
+  );
+}
+
+function DeliveryPanel({ channels }) {
+  const entries = Object.entries(channels || {});
+  if (!entries.length) return null;
+  return (
+    <div style={{
+      padding: '10px 12px',
+      background: D.pill,
+      border: `1px solid ${D.border}`,
+      borderRadius: 8,
+    }}>
+      <div style={{ fontSize: 12, fontWeight: 800, color: D.heading, marginBottom: 8 }}>Delivery status</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {entries.map(([channel, result]) => (
+          <div key={channel} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 12 }}>
+            <span style={{ color: D.text, fontWeight: 700, textTransform: 'uppercase' }}>{channel}</span>
+            <span style={{ color: result?.ok ? D.success : D.red, textAlign: 'right' }}>
+              {result?.ok ? 'Sent' : result?.error || 'Failed'}
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
