@@ -16,7 +16,7 @@
  *   selectedSlotId       — string | null
  *   ctaPhase             — 'configure' | 'review' | 'submitting' | 'success' | 'slot_conflict'
  *   reservation          — { scheduledServiceId, expiresAt } | null
- *   paymentPreference    — 'deposit_now' | 'pay_at_visit' | null
+ *   paymentPreference    — 'card_on_file' | 'pay_at_visit' | null
  *   countdownSeconds     — derived from reservation.expiresAt
  *
  * Matches PayPage / TrackPage convention: inline styles + W palette,
@@ -256,7 +256,7 @@ function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, o
       <div style={{ fontSize: 18, color: COLORS.navy, marginTop: 10, lineHeight: 1.5 }}>
         Pay option: <strong>{
           invoiceMode ? 'Invoice due now'
-          : paymentPreference === 'deposit_now' ? 'Card on file'
+          : paymentPreference === 'card_on_file' ? 'Card on file'
           : paymentPreference === 'prepay_annual' ? 'Pay the year upfront'
           : 'At the visit'
         }</strong>

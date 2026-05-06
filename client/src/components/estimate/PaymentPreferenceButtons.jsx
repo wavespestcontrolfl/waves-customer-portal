@@ -32,7 +32,7 @@ export default function PaymentPreferenceButtons({ onSelect, disabled, serviceMo
     opacity: disabled ? 0.65 : 1,
   };
 
-  const depositLabel = isOneTime ? 'Book visit' : 'Reserve + save card on file';
+  const cardOnFileLabel = isOneTime ? 'Book visit' : 'Reserve + save card on file';
   const payAtVisitLabel = isOneTime ? 'Book + pay on service day' : 'Reserve + pay at visit';
   const fineprint = offerPrepay
     ? 'Saving a card on file locks your slot — we still charge on the visit day. Pick "pay the year upfront" to settle the year now.'
@@ -110,9 +110,9 @@ export default function PaymentPreferenceButtons({ onSelect, disabled, serviceMo
         <button
           type="button"
           disabled={disabled}
-          onClick={() => onSelect('deposit_now')}
+          onClick={() => onSelect('card_on_file')}
           style={{ ...btnBase, background: W.blueBright, color: W.white }}
-        >{depositLabel}</button>
+        >{cardOnFileLabel}</button>
         <button
           type="button"
           disabled={disabled}

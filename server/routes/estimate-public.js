@@ -792,7 +792,7 @@ ${shellTopBar()}
       <h3 style="margin:20px 0 4px">How would you like to pay?</h3>
       <p class="card-sub" style="margin:0">Both options reserve your slot. You will not be charged today.</p>
       <div class="pay-pref-grid">
-        <button type="button" class="pay-pref-btn primary" data-pay-pref="deposit_now"><span class="pay-pref-title">Save a card to lock my slot</span><span class="pay-pref-sub">Add a card on file now so your slot is reserved. We charge on the visit day, not today.</span></button>
+        <button type="button" class="pay-pref-btn primary" data-pay-pref="card_on_file"><span class="pay-pref-title">Save a card to lock my slot</span><span class="pay-pref-sub">Add a card on file now so your slot is reserved. We charge on the visit day, not today.</span></button>
         <button type="button" class="pay-pref-btn" data-pay-pref="pay_at_visit"><span class="pay-pref-title">Pay at the visit</span><span class="pay-pref-sub">We will collect payment with the tech on-site. No card needed now.</span></button>
       </div>
     </div>
@@ -1046,7 +1046,7 @@ ${shellQuestionsBar()}
       reviewArea.style.display = '';
       const title = document.getElementById('confirm-book-title');
       const sub = document.getElementById('confirm-book-sub');
-      if (pref === 'deposit_now') {
+      if (pref === 'card_on_file') {
         if (title) title.textContent = 'Confirm and save card';
         if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · next step adds your card on file. We charge on the visit day, not now.';
       } else {
@@ -1128,7 +1128,7 @@ ${shellQuestionsBar()}
       if (bookingState.countdownTimer) clearInterval(bookingState.countdownTimer);
       // Everything continues in /onboard/:token — the payment preference
       // we submitted on accept is persisted on the customer row, and
-      // onboarding handles the Stripe step for deposit_now and the
+      // onboarding handles the Stripe step for card_on_file and the
       // scheduling confirmation for pay_at_visit.
       if (data.onboardingToken) {
         window.location.href = '/onboard/' + data.onboardingToken;
@@ -1362,7 +1362,7 @@ router.get('/:token', handleEstimateView);
 
 // PUT /api/estimates/:token/accept — customer accepts
 // Body (backward compatible — both optional):
-//   { slotId?: string, paymentMethodPreference?: 'deposit_now' | 'pay_at_visit' }
+//   { slotId?: string, paymentMethodPreference?: 'card_on_file' | 'deposit_now' | 'pay_at_visit' | 'prepay_annual' }
 // When slotId is present, a prior POST /:token/reserve call must have
 // created a scheduled_services reservation row for the same estimate.
 // The accept handler commits that reservation inside the existing
@@ -1380,11 +1380,7 @@ router.put('/:token/accept', async (req, res, next) => {
     // Slot commit inputs. Validate early so we can reject before opening
     // a transaction if the payload is malformed.
     const slotId = req.body && typeof req.body.slotId === 'string' ? req.body.slotId.trim() : '';
-    const paymentMethodPreference = (() => {
-      const raw = req.body?.paymentMethodPreference;
-      if (raw === 'deposit_now' || raw === 'pay_at_visit' || raw === 'prepay_annual') return raw;
-      return null;
-    })();
+    const paymentMethodPreference = normalizeAcceptPaymentMethodPreference(req.body?.paymentMethodPreference);
     // Billing term is a separate concept from payment method. "prepay_annual"
     // means the customer is paying for 12 months upfront, which waives the
     // $99 WaveGuard setup fee. The converter reads this to decide what kind
@@ -2548,6 +2544,12 @@ function resolveAcceptOneTimeTotal(estimate = {}, pricingBundle = null) {
   return 0;
 }
 
+function normalizeAcceptPaymentMethodPreference(raw) {
+  if (raw === 'card_on_file' || raw === 'deposit_now') return 'card_on_file';
+  if (raw === 'pay_at_visit' || raw === 'prepay_annual') return raw;
+  return null;
+}
+
 function buildAcceptSuccessPayload({
   onboardingToken = null,
   invoiceMode = false,
@@ -3026,6 +3028,7 @@ module.exports.buildPricingBundle = buildPricingBundle;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate;
 module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
+module.exports.normalizeAcceptPaymentMethodPreference = normalizeAcceptPaymentMethodPreference;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
 module.exports.buildAcceptOfficeFallback = buildAcceptOfficeFallback;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
