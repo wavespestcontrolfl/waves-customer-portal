@@ -1426,8 +1426,10 @@ router.put('/:token/accept', async (req, res, next) => {
     const estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
     const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
     const isOneTimeOnly = isStructuralOneTimeOnlyEstimate(estData, estimate);
-    const pricingBundle = (requestedOneTime || selectedFrequencyKey) ? await buildPricingBundle(estimate) : null;
-    const oneTimeChoicePrice = Number(pricingBundle?.anchorOneTimePrice || estimate.onetime_total || 0);
+    const pricingBundle = (requestedOneTime || selectedFrequencyKey || billByInvoice || isOneTimeOnly)
+      ? await buildPricingBundle(estimate)
+      : null;
+    const oneTimeChoicePrice = resolveAcceptOneTimeTotal(estimate, pricingBundle);
     const canChooseOneTime = !!estimate.show_one_time_option && oneTimeChoicePrice > 0;
     if (requestedOneTime && !isOneTimeOnly && !canChooseOneTime) {
       return res.status(400).json({ error: 'one-time option is not available for this estimate' });
@@ -1450,6 +1452,7 @@ router.put('/:token/accept', async (req, res, next) => {
     const effectiveAnnualTotal = selectedFrequency?.annual != null
       ? Number(selectedFrequency.annual)
       : Number(estimate.annual_total || 0);
+    const effectiveOneTimeTotal = treatAsOneTime ? oneTimeChoicePrice : Number(estimate.onetime_total || 0);
 
     // All DB mutations run atomically so a mid-flight failure can't leave a
     // half-created customer without an onboarding session (or vice versa).
@@ -1472,6 +1475,9 @@ router.put('/:token/accept', async (req, res, next) => {
           selectedAt: new Date().toISOString(),
         };
         acceptedUpdates.estimate_data = JSON.stringify(nextEstimateData);
+      }
+      if (treatAsOneTime && effectiveOneTimeTotal > 0 && Number(estimate.onetime_total || 0) !== effectiveOneTimeTotal) {
+        acceptedUpdates.onetime_total = effectiveOneTimeTotal;
       }
       await trx('estimates').where({ id: estimate.id }).update(acceptedUpdates);
 
@@ -1715,7 +1721,7 @@ router.put('/:token/accept', async (req, res, next) => {
         let title; let lineItems; let notes;
         if (treatAsOneTime) {
           const oneTimeLabel = oneTimeList[0]?.name || 'One-time pest control';
-          const amount = Math.round((parseFloat(estimate.onetime_total || 0)) * 100) / 100;
+          const amount = effectiveOneTimeTotal;
           invoiceAmount = amount;
           title = `${oneTimeLabel} — one-time service`;
           lineItems = [{ description: oneTimeLabel, quantity: 1, unit_price: amount }];
@@ -2437,6 +2443,21 @@ function acceptanceServiceLists(estData) {
   };
 }
 
+function resolveAcceptOneTimeTotal(estimate = {}, pricingBundle = null) {
+  const candidates = [
+    pricingBundle?.anchorOneTimePrice,
+    pricingBundle?.oneTimeBreakdown?.total,
+    estimate.onetime_total,
+  ];
+  for (const candidate of candidates) {
+    const amount = Number(candidate || 0);
+    if (Number.isFinite(amount) && amount > 0) {
+      return Math.round(amount * 100) / 100;
+    }
+  }
+  return 0;
+}
+
 function readV1Shape(estData) {
   if (!estData || typeof estData !== 'object') return null;
   const result = estData.result;
@@ -2786,3 +2807,4 @@ module.exports.handleEstimateView = handleEstimateView;
 module.exports.buildPricingBundle = buildPricingBundle;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate;
+module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
