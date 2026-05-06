@@ -491,7 +491,7 @@ function EstimatePipelineViewV2() {
   const toggleBillByInvoice = useCallback(async (e) => {
     const newVal = !e.billByInvoice;
     if (newVal && !window.confirm(
-      'Invoice mode: when the customer picks their option, an invoice (due immediately) will be auto-sent to their phone + email — no onboarding or payment method up front.\n\nContinue?',
+      'Invoice mode: when the customer accepts, an invoice due immediately will be created and pay-link delivery will be attempted — no onboarding or payment method up front.\n\nContinue?',
     )) return;
     try {
       await adminFetch(`/admin/estimates/${e.id}`, {
@@ -899,8 +899,8 @@ function EstimatePipelineViewV2() {
                         onClick={() => toggleBillByInvoice(e)}
                         title={
                           e.billByInvoice
-                            ? 'Invoice mode is ON — picking an option auto-sends an invoice (due immediately). Click to switch back to the normal onboarding flow.'
-                            : 'Switch to invoice mode — skip onboarding / payment up front and auto-send an invoice when the customer picks their option.'
+                            ? 'Invoice mode is ON — customer acceptance creates an invoice due immediately and attempts pay-link delivery. Click to switch back to the normal onboarding flow.'
+                            : 'Switch to invoice mode — skip onboarding / payment up front and create an invoice when the customer accepts.'
                         }
                       >
                         {e.billByInvoice ? 'Invoice: On' : 'Invoice: Off'}

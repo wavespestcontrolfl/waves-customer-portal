@@ -1503,7 +1503,7 @@ export default function EstimateToolViewV2({
                     <span>
                       <span className="font-medium">Bill by invoice</span>
                       <span className="block text-11 text-ink-secondary">
-                        Skip onboarding / payment up front — auto-email an invoice (due immediately) once they pick.
+                        Skip onboarding / payment up front — create an invoice due immediately when the customer accepts.
                       </span>
                     </span>
                   </label>
