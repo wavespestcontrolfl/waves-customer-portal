@@ -571,7 +571,7 @@ const PROTOCOL_FILTERS = [
 
 function protocolLineForService(serviceType) {
   const value = String(serviceType || '').toLowerCase();
-  if (value.includes('termite') || value.includes('bora-care') || value.includes('termidor')) return 'termite';
+  if (value.includes('termite') || value.includes('bora-care') || value.includes('bora care') || value.includes('termidor')) return 'termite';
   if (value.includes('mosquito')) return 'mosquito';
   if (value.includes('rodent')) return 'rodent';
   if (value.includes('lawn')) return 'lawn';
@@ -579,12 +579,22 @@ function protocolLineForService(serviceType) {
   return 'pest';
 }
 
+const DEFAULT_PROTOCOL_SERVICE = {
+  pest: 'General Pest Perimeter',
+  termite: 'Termite Bait Station',
+  lawn: 'Lawn Care',
+  mosquito: 'Mosquito Treatment',
+  rodent: 'Rodent Control',
+  tree_shrub: 'Tree & Shrub',
+};
+
 function ProtocolsTab({ showToast }) {
   const [services, setServices] = useState([]);
   const [products, setProducts] = useState([]);
   const [health, setHealth] = useState(null);
   const [loading, setLoading] = useState(true);
   const [serviceFilter, setServiceFilter] = useState('all');
+  const [costHighlightLine, setCostHighlightLine] = useState(null);
   const [editingRow, setEditingRow] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [showAdd, setShowAdd] = useState(null);
@@ -622,6 +632,27 @@ function ProtocolsTab({ showToast }) {
     ? services
     : services.filter((svc) => protocolLineForService(svc.serviceType) === serviceFilter);
 
+  const lineLabel = (lineKey) => PROTOCOL_FILTERS.find((f) => f.key === lineKey)?.label || lineKey;
+  const firstServiceForLine = (lineKey) => services.find((svc) => protocolLineForService(svc.serviceType) === lineKey)?.serviceType;
+  const filterToLine = (lineKey) => {
+    setServiceFilter(lineKey);
+    setCostHighlightLine(null);
+    showToast(`Showing ${lineLabel(lineKey)} protocols`);
+  };
+  const openAddForLine = (lineKey) => {
+    const serviceType = firstServiceForLine(lineKey) || DEFAULT_PROTOCOL_SERVICE[lineKey] || lineLabel(lineKey);
+    setServiceFilter(lineKey);
+    setCostHighlightLine(null);
+    setShowAdd(serviceType);
+    showToast(`Add a COGS product for ${lineLabel(lineKey)}`);
+  };
+  const highlightMissingCosts = (lineKey) => {
+    setServiceFilter(lineKey);
+    setShowAdd(null);
+    setCostHighlightLine(lineKey);
+    showToast(`Highlighted missing cost data for ${lineLabel(lineKey)}`);
+  };
+
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
@@ -641,13 +672,14 @@ function ProtocolsTab({ showToast }) {
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(155px, 1fr))', gap: 8 }}>
             {health.lines.map((line) => {
-              const label = PROTOCOL_FILTERS.find((f) => f.key === line.serviceLine)?.label || line.serviceLine;
+              const label = lineLabel(line.serviceLine);
               const color = line.status === 'healthy' ? D.green : line.status === 'warning' ? D.amber : D.red;
+              const needsCogs = line.cogsRows === 0;
+              const needsCosts = line.missingCostRows > 0;
               return (
-                <button
+                <div
                   key={line.serviceLine}
-                  onClick={() => setServiceFilter(line.serviceLine)}
-                  style={{ textAlign: 'left', background: D.input, border: `1px solid ${color}55`, borderRadius: 8, padding: 10, cursor: 'pointer' }}
+                  style={{ textAlign: 'left', background: D.input, border: `1px solid ${color}55`, borderRadius: 8, padding: 10 }}
                   title={(line.warnings || []).map((w) => `${w.serviceType}: ${w.warning}`).join('\n')}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
@@ -659,7 +691,17 @@ function ProtocolsTab({ showToast }) {
                     <div><div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 15, color: D.heading }}>{line.cogsRows}</div><div style={{ fontSize: 9, color: D.muted, textTransform: 'uppercase' }}>COGS</div></div>
                     <div><div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 15, color }}>{line.missingCostRows}</div><div style={{ fontSize: 9, color: D.muted, textTransform: 'uppercase' }}>Missing</div></div>
                   </div>
-                </button>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
+                    <button onClick={() => filterToLine(line.serviceLine)} style={{ ...sBtn('transparent', D.teal), border: `1px solid ${D.border}`, fontSize: 10, padding: '5px 8px' }}>View</button>
+                    {needsCogs && (
+                      <button onClick={() => openAddForLine(line.serviceLine)} style={{ ...sBtn(D.teal, D.white), fontSize: 10, padding: '5px 8px' }}>+ COGS</button>
+                    )}
+                    {needsCosts && (
+                      <button onClick={() => highlightMissingCosts(line.serviceLine)} style={{ ...sBtn(`${D.amber}22`, D.amber), border: `1px solid ${D.amber}44`, fontSize: 10, padding: '5px 8px' }}>Cost Data</button>
+                    )}
+                    <button onClick={() => { window.location.href = '/admin/dispatch?tab=protocols'; }} style={{ ...sBtn(line.templateCount === 0 ? `${D.red}12` : 'transparent', line.templateCount === 0 ? D.red : D.muted), border: `1px solid ${line.templateCount === 0 ? `${D.red}33` : D.border}`, fontSize: 10, padding: '5px 8px' }}>Templates</button>
+                  </div>
+                </div>
               );
             })}
           </div>
@@ -672,7 +714,7 @@ function ProtocolsTab({ showToast }) {
           return (
             <button
               key={filter.key}
-              onClick={() => setServiceFilter(filter.key)}
+              onClick={() => { setServiceFilter(filter.key); setCostHighlightLine(null); }}
               style={{
                 ...sBtn(active ? D.teal : 'transparent', active ? D.white : D.muted),
                 border: `1px solid ${active ? D.teal : D.border}`,
@@ -704,19 +746,24 @@ function ProtocolsTab({ showToast }) {
       {services.length === 0 && !showAdd && <div style={{ ...sCard, textAlign: 'center', padding: 40, color: D.muted }}>No protocols defined yet.</div>}
       {services.length > 0 && visibleServices.length === 0 && !showAdd && <div style={{ ...sCard, textAlign: 'center', padding: 40, color: D.muted }}>No protocols in this service category yet.</div>}
 
-      {visibleServices.map(svc => (
-        <div key={svc.serviceType} style={{ ...sCard }}>
+      {visibleServices.map(svc => {
+        const serviceLine = protocolLineForService(svc.serviceType);
+        const highlightService = costHighlightLine === serviceLine && svc.products.some((p) => p.costWarning || !p.costPerApp);
+        return (
+        <div key={svc.serviceType} style={{ ...sCard, border: highlightService ? `1px solid ${D.amber}` : sCard.border, boxShadow: highlightService ? `0 0 0 3px ${D.amber}18` : sCard.boxShadow }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
             <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>{svc.serviceType}</div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 16, fontWeight: 700, color: D.green }}>${svc.totalCost.toFixed(2)}/app</div>
-              <button onClick={() => setShowAdd(showAdd === svc.serviceType ? null : svc.serviceType)} style={{ ...sBtn(D.teal, D.white), fontSize: 11, padding: '6px 12px' }}>+ Product</button>
+              <button onClick={() => { setCostHighlightLine(null); setShowAdd(showAdd === svc.serviceType ? null : svc.serviceType); }} style={{ ...sBtn(D.teal, D.white), fontSize: 11, padding: '6px 12px' }}>+ Product</button>
             </div>
           </div>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead><tr>{['Product', 'Usage', 'Per 1000sf', 'Best Price', 'Cost/App', 'Cost Source', 'Primary', 'Notes', ''].map(h => <th key={h} style={thS}>{h}</th>)}</tr></thead>
             <tbody>
-              {svc.products.map(p => editingRow === p.id ? (
+              {svc.products.map(p => {
+                const highlightProductCost = costHighlightLine === serviceLine && (p.costWarning || !p.costPerApp);
+                return editingRow === p.id ? (
                 <tr key={p.id} style={{ background: `${D.teal}10` }}>
                   <td style={{ ...tdS, fontWeight: 500 }}>{p.productName}</td>
                   <td style={tdS}><div style={{ display: 'flex', gap: 4 }}><input value={editForm.usageAmount} onChange={e => setEditForm(f => ({ ...f, usageAmount: e.target.value }))} type="number" step="0.01" style={{ ...sInput, width: 60 }} /><select value={editForm.usageUnit} onChange={e => setEditForm(f => ({ ...f, usageUnit: e.target.value }))} style={{ ...sInput, width: 70 }}>{unitOpts.map(u => <option key={u} value={u}>{u}</option>)}</select></div></td>
@@ -729,7 +776,7 @@ function ProtocolsTab({ showToast }) {
                   <td style={{ ...tdS, width: 80 }}><div style={{ display: 'flex', gap: 4 }}><button onClick={() => saveEdit(p.id)} style={{ fontSize: 10, padding: '3px 6px', borderRadius: 4, border: 'none', background: D.green, color: '#fff', cursor: 'pointer' }}>Save</button><button onClick={() => setEditingRow(null)} style={{ fontSize: 10, padding: '3px 6px', borderRadius: 4, border: `1px solid ${D.border}`, background: 'none', color: D.muted, cursor: 'pointer' }}>×</button></div></td>
                 </tr>
               ) : (
-                <tr key={p.id}>
+                <tr key={p.id} style={{ background: highlightProductCost ? `${D.amber}12` : 'transparent' }}>
                   <td style={{ ...tdS, fontWeight: 500 }}>{p.productName} {p.isPrimary && <span style={sBadge(`${D.teal}22`, D.teal)}>Primary</span>}</td>
                   <td style={{ ...tdS, fontSize: 12 }}>{p.usageAmount} {p.usageUnit}</td>
                   <td style={{ ...tdS, fontSize: 12 }}>{p.usagePer1000sf || '—'}</td>
@@ -743,7 +790,7 @@ function ProtocolsTab({ showToast }) {
                     <button onClick={() => deleteRow(p.id)} style={{ fontSize: 10, padding: '2px 6px', borderRadius: 4, border: 'none', background: `${D.red}22`, color: D.red, cursor: 'pointer' }}>×</button>
                   </div></td>
                 </tr>
-              ))}
+              ); })}
             </tbody>
           </table>
           {showAdd === svc.serviceType && (
@@ -752,7 +799,7 @@ function ProtocolsTab({ showToast }) {
             </div>
           )}
         </div>
-      ))}
+      ); })}
     </div>
   );
 }
