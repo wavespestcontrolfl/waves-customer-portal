@@ -379,8 +379,22 @@ describe('public estimate one-time breakdown', () => {
       nextStep: 'pay_invoice',
       serviceMode: 'one_time',
       invoiceMode: true,
+      invoiceLinkDelivered: false,
       invoiceId: 'inv-123',
       invoiceAmount: 249,
+    }));
+  });
+
+  test('accept success payload exposes invoice delivery state', () => {
+    expect(buildAcceptSuccessPayload({
+      invoiceMode: true,
+      invoiceLinkDelivered: true,
+      invoiceId: 'inv-123',
+    })).toEqual(expect.objectContaining({
+      nextStep: 'pay_invoice',
+      invoiceMode: true,
+      invoiceLinkDelivered: true,
+      invoiceId: 'inv-123',
     }));
   });
 
