@@ -47,14 +47,14 @@ function buildAssignedScheduleEtaQuery(knex, serviceId) {
       'c.longitude as customer_longitude',
       'ts.lat as tech_lat',
       'ts.lng as tech_lng',
-      'ts.updated_at as tech_updated_at'
+      'ts.location_updated_at as tech_updated_at'
     );
 }
 
 function buildTechStatusQuery(knex, techId) {
   return knex('tech_status')
     .where({ tech_id: techId })
-    .first('tech_id', 'lat', 'lng', 'updated_at');
+    .first('tech_id', 'lat', 'lng', 'location_updated_at');
 }
 
 function formatAssignedVehicleLocation(row) {
@@ -70,7 +70,7 @@ function formatAssignedVehicleLocation(row) {
   if (lat == null || lng == null) {
     return { found: true, available: false, reason: 'no_tech_status', message: 'No assigned tech GPS available' };
   }
-  const updatedAt = row.tech_updated_at || row.updated_at || null;
+  const updatedAt = row.tech_updated_at || row.location_updated_at || null;
   const updatedMs = updatedAt ? new Date(updatedAt).getTime() : NaN;
   if (!Number.isFinite(updatedMs) || Date.now() - updatedMs > STALE_TECH_STATUS_MS) {
     return {
@@ -2059,7 +2059,7 @@ router.get('/vehicle-location', async (req, res, next) => {
         technician_id: row.tech_id,
         tech_lat: row.lat,
         tech_lng: row.lng,
-        tech_updated_at: row.updated_at,
+        tech_updated_at: row.location_updated_at,
       } : { technician_id: techId });
       return res.json(location);
     }

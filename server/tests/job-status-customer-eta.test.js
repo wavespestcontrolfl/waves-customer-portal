@@ -16,7 +16,7 @@ describe('job-status customer ETA payload', () => {
       tech_lng: '-82.2',
       customer_latitude: '27.2',
       customer_longitude: '-82.3',
-      tech_status_updated_at: '2026-05-05T11:59:00.000Z',
+      tech_location_updated_at: '2026-05-05T11:59:00.000Z',
     }, 'on_site', {
       calculateETAFromCoords: jest.fn(),
     });
@@ -33,7 +33,7 @@ describe('job-status customer ETA payload', () => {
       tech_lng: null,
       customer_latitude: '27.2',
       customer_longitude: '-82.3',
-      tech_status_updated_at: '2026-05-05T11:59:00.000Z',
+      tech_location_updated_at: '2026-05-05T11:59:00.000Z',
     }, 'en_route', bouncie)).resolves.toBeNull();
 
     await expect(_test.buildCustomerEta({
@@ -42,7 +42,7 @@ describe('job-status customer ETA payload', () => {
       tech_lng: '-82.2',
       customer_latitude: '27.2',
       customer_longitude: '-82.3',
-      tech_status_updated_at: '2026-05-05T11:54:59.000Z',
+      tech_location_updated_at: '2026-05-05T11:54:59.000Z',
     }, 'en_route', bouncie)).resolves.toBeNull();
 
     expect(bouncie.calculateETAFromCoords).not.toHaveBeenCalled();
@@ -63,7 +63,8 @@ describe('job-status customer ETA payload', () => {
       tech_lng: '-82.2',
       customer_latitude: '27.2',
       customer_longitude: '-82.3',
-      tech_status_updated_at: '2026-05-05T11:59:00.000Z',
+      tech_status_updated_at: '2026-05-05T11:20:00.000Z',
+      tech_location_updated_at: '2026-05-05T11:59:00.000Z',
     }, 'en_route', bouncie);
 
     expect(bouncie.calculateETAFromCoords).toHaveBeenCalledWith(27.1, -82.2, 27.2, -82.3);
@@ -88,7 +89,7 @@ describe('job-status customer ETA payload', () => {
       tech_lng: '-82.2',
       customer_latitude: '27.2',
       customer_longitude: '-82.3',
-      tech_status_updated_at: '2026-05-05T11:59:00.000Z',
+      tech_location_updated_at: '2026-05-05T11:59:00.000Z',
     }, 'en_route', bouncie);
 
     jest.advanceTimersByTime(750);
