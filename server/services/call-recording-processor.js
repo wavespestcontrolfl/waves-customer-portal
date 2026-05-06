@@ -24,6 +24,8 @@ function capitalizeName(name) {
     .replace(/\bO'(\w)/g, (_, c) => "O'" + c.toUpperCase());
 }
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { subscribeOrResubscribe, linkToCustomer, EMAIL_RE } = require('./newsletter-subscribers');
+const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString } = require('../utils/datetime-et');
@@ -68,6 +70,50 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
   }
 
   // Dispatch-v2 reads scheduled_services directly; no legacy dispatch sync.
+}
+
+async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstName, lastName }) {
+  const emailLc = String(email || '').trim().toLowerCase();
+  if (!customerId || !emailLc) return null;
+
+  if (!EMAIL_RE.test(emailLc)) {
+    logger.warn(`[call-proc] Newsletter subscribe skipped for customer ${customerId}: invalid email from extraction`);
+    return { skipped: true, reason: 'invalid_email' };
+  }
+
+  const existing = await db('newsletter_subscribers').where({ email: emailLc }).first();
+  if (existing?.status === 'unsubscribed') {
+    await linkToCustomer(emailLc);
+    logger.info(`[call-proc] Newsletter subscribe skipped for customer ${customerId}: previously unsubscribed`);
+    return { skipped: true, reason: 'previously_unsubscribed' };
+  }
+
+  const result = await subscribeOrResubscribe({
+    email: emailLc,
+    firstName: firstName || null,
+    lastName: lastName || null,
+    source: 'call_recording',
+    strict: true,
+    requireConfirmation: true,
+  });
+
+  let confirmationEmailSent = null;
+  if (result.action === 'confirmation_sent' || result.action === 'confirmation_resent') {
+    try {
+      await sendConfirmationEmail(result.subscriber);
+      confirmationEmailSent = true;
+    } catch (e) {
+      logger.warn(`[call-proc] Newsletter confirmation email failed for customer ${customerId}`);
+      confirmationEmailSent = false;
+    }
+  }
+
+  logger.info(`[call-proc] Newsletter subscriber ${result.action} for customer ${customerId}`);
+  return {
+    action: result.action,
+    subscriberId: result.subscriber?.id || null,
+    confirmationEmailSent,
+  };
 }
 
 async function findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType, trx = db }) {
@@ -501,6 +547,8 @@ const CallRecordingProcessor = {
     // Step 3: Create or update customer
     let customerId = call.customer_id;
     const phone = extracted.phone || call.from_phone;
+    let newsletterResult = null;
+    let newsletterCandidate = null;
 
     if (!customerId && phone) {
       // Try to find existing customer by phone
@@ -578,6 +626,13 @@ const CallRecordingProcessor = {
           } catch (e) {
             logger.warn(`[call-proc] Stripe customer create failed for ${customerId}: ${e.message}`);
           }
+
+          newsletterCandidate = {
+            customerId,
+            email: extracted.email,
+            firstName: capitalizeName(extracted.first_name),
+            lastName: extracted.last_name ? capitalizeName(extracted.last_name) : null,
+          };
         } catch (err) {
           logger.error(`[call-proc] Customer creation failed: ${err.message}`);
         }
@@ -1183,6 +1238,15 @@ const CallRecordingProcessor = {
       logger.warn(`[call-proc] Marked ${callSid} customer_creation_failed — required customer fields were incomplete`);
     }
 
+    if (newsletterCandidate) {
+      try {
+        newsletterResult = await subscribeNewCallCustomerToNewsletter(newsletterCandidate);
+      } catch (e) {
+        logger.warn(`[call-proc] Newsletter subscribe failed for customer ${newsletterCandidate.customerId}`);
+        newsletterResult = { error: 'newsletter_subscribe_failed' };
+      }
+    }
+
     logger.info(`[call-proc] Completed processing for ${callSid}: customer=${customerId}, appointment=${!!extracted.appointment_confirmed}`);
 
     return {
@@ -1193,6 +1257,7 @@ const CallRecordingProcessor = {
       extracted,
       appointmentResult,
       estimateQueueResult,
+      newsletterResult,
       beehiivResult,
     };
     } catch (procErr) {
