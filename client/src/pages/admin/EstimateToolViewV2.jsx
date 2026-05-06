@@ -57,6 +57,20 @@ function summarizeEstimateSend(data) {
   return parts.join(' / ');
 }
 
+async function summarizeEstimateSaveFailure(response) {
+  try {
+    const data = await response.clone().json();
+    if (data?.error) return data.error;
+    if (data?.message) return data.message;
+  } catch {
+    try {
+      const text = await response.text();
+      if (text) return text;
+    } catch { /* ignore */ }
+  }
+  return `Save failed: ${response.status}`;
+}
+
 // ── Error Boundary ──────────────────────────────────────────────
 class EstimateErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { error: null }; }
@@ -896,7 +910,7 @@ export default function EstimateToolViewV2({
           billByInvoice: !!form.billByInvoice,
         }),
       });
-      if (!r.ok) throw new Error('Save failed: ' + r.status);
+      if (!r.ok) throw new Error(await summarizeEstimateSaveFailure(r));
       const d = await r.json();
       const id = d.id || d.estimateId;
       setSavedId(id);
