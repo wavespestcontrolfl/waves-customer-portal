@@ -105,6 +105,17 @@ function humanizeKey(k) {
   return FIELD_LABELS[k] || k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
+const ROOF_RAT_SPECIES_NOTE = [
+  "Roof rats are one of Florida's most serious household rodent pests. UF/IFAS describes them as the state's worst and most abundant rodent pest, and they are especially adapted to Florida homes because they climb trees, vines, utility lines, fences, and rooflines.",
+  'That climbing behavior lets them reach attics, soffits, wall voids, fruit trees, pet food, birdseed, and garbage areas. Adults are usually about 12-14 inches long including the tail and 5-10 ounces, but females can produce 5-8 pups per litter and multiple litters per year in Florida\'s warm climate.',
+  'The health risk is what makes roof rats more than a nuisance: rodents can contaminate food, storage areas, insulation, and household surfaces with urine, droppings, saliva, and nesting material. Florida health authorities associate rats and mice with diseases such as leptospirosis, salmonella, typhus, and rat-bite fever.',
+].join(' ');
+
+function getFindingInsight(key, value) {
+  if (key === 'species' && includesAny(value, ['roof rat'])) return ROOF_RAT_SPECIES_NOTE;
+  return '';
+}
+
 function includesAny(text, words) {
   const value = String(text || '').toLowerCase();
   return words.some(word => value.includes(word));
@@ -257,7 +268,7 @@ export default function ProjectReportViewPage() {
   );
 
   const typeLabel = TYPE_LABELS[data.projectType] || 'Inspection';
-  const reportTitle = data.title || typeLabel;
+  const reportTitle = String(data.title || '').trim() || typeLabel;
   const findings = data.findings || {};
   const findingsEntries = Object.entries(findings).filter(([, v]) => v !== null && v !== undefined && v !== '');
   const primaryPhotos = (data.photos || []).filter(p => p.visit === 'primary');
@@ -309,11 +320,8 @@ export default function ProjectReportViewPage() {
       <div style={{ maxWidth: 720, margin: '16px auto', padding: '0 16px' }}>
         {/* Summary card */}
         <div style={{ background: '#fff', borderRadius: 16, padding: 20, border: `1px solid ${B.bluePale}` }}>
-          <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>
-            {reportTitle}
-          </div>
           {contactRows.length > 0 && (
-            <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
               {contactRows.map(row => (
                 <div key={row} style={{ ...reportMetaStyle, whiteSpace: 'pre-wrap' }}>{row}</div>
               ))}
@@ -352,12 +360,20 @@ export default function ProjectReportViewPage() {
                 Findings
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {findingsEntries.map(([key, value]) => (
-                  <div key={key} style={{ padding: '10px 12px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 3 }}>{humanizeKey(key)}</div>
-                    <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{String(value)}</div>
-                  </div>
-                ))}
+                {findingsEntries.map(([key, value]) => {
+                  const insight = getFindingInsight(key, value);
+                  return (
+                    <div key={key} style={{ padding: '10px 12px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 3 }}>{humanizeKey(key)}</div>
+                      <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{String(value)}</div>
+                      {insight && (
+                        <div style={{ fontSize: 13, color: B.grayDark, lineHeight: 1.55, marginTop: 8 }}>
+                          {insight}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
