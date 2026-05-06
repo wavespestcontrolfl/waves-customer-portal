@@ -13,7 +13,7 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const multer = require('multer');
-const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const db = require('../models/db');
@@ -28,7 +28,20 @@ const { etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
+const ALLOWED_UPLOAD_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const contentType = String(file.mimetype || '').split(';')[0].trim().toLowerCase();
+    if (!ALLOWED_UPLOAD_IMAGE_TYPES.has(contentType)) {
+      const err = new Error('Only JPEG, PNG, GIF, or WebP images can be uploaded');
+      err.status = 400;
+      return cb(err);
+    }
+    return cb(null, true);
+  },
+});
 const s3 = new S3Client({
   region: config.s3?.region,
   credentials: config.s3?.accessKeyId
@@ -41,6 +54,75 @@ const AI_PHOTO_MAX_BYTES = 4.5 * 1024 * 1024;
 const AI_PHOTO_TOTAL_MAX_BYTES = 12 * 1024 * 1024;
 const AI_SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function isAdmin(req) {
+  return req.techRole === 'admin';
+}
+
+function canAccessProject(req, project) {
+  return isAdmin(req) || String(project?.created_by_tech_id || '') === String(req.technicianId || '');
+}
+
+async function hasProjectAccess(req, project) {
+  if (canAccessProject(req, project)) return true;
+  if (!project || !req.technicianId) return false;
+
+  if (project.service_record_id) {
+    const service = await db('service_records')
+      .where({ id: project.service_record_id, technician_id: req.technicianId })
+      .first('id');
+    if (service) return true;
+  }
+
+  if (project.scheduled_service_id) {
+    const scheduled = await db('scheduled_services')
+      .where({ id: project.scheduled_service_id, technician_id: req.technicianId })
+      .first('id');
+    if (scheduled) return true;
+  }
+
+  return false;
+}
+
+async function requireProjectAccess(req, res, project) {
+  if (!project) {
+    res.status(404).json({ error: 'Project not found' });
+    return false;
+  }
+  if (!(await hasProjectAccess(req, project))) {
+    res.status(403).json({ error: 'Project access denied' });
+    return false;
+  }
+  return true;
+}
+
+function detectedImageMime(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 12) return null;
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
+  if (
+    buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47 &&
+    buffer[4] === 0x0d && buffer[5] === 0x0a && buffer[6] === 0x1a && buffer[7] === 0x0a
+  ) return 'image/png';
+  if (buffer.slice(0, 6).toString('ascii') === 'GIF87a' || buffer.slice(0, 6).toString('ascii') === 'GIF89a') return 'image/gif';
+  if (buffer.slice(0, 4).toString('ascii') === 'RIFF' && buffer.slice(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  return null;
+}
+
+function validateUploadedImage(file) {
+  const declared = String(file?.mimetype || '').split(';')[0].trim().toLowerCase();
+  const detected = detectedImageMime(file?.buffer);
+  if (!detected || !ALLOWED_UPLOAD_IMAGE_TYPES.has(detected)) {
+    const err = new Error('Uploaded file is not a supported image');
+    err.status = 400;
+    throw err;
+  }
+  if (declared !== detected) {
+    const err = new Error(`Image content does not match declared type (${declared || 'unknown'})`);
+    err.status = 400;
+    throw err;
+  }
+  return detected;
+}
 
 function escapeHtml(value) {
   return String(value || '')
@@ -331,6 +413,8 @@ router.get('/', async (req, res, next) => {
     let q = db('projects as p')
       .leftJoin('customers as c', 'p.customer_id', 'c.id')
       .leftJoin('technicians as t', 'p.created_by_tech_id', 't.id')
+      .leftJoin('service_records as srp', 'p.service_record_id', 'srp.id')
+      .leftJoin('scheduled_services as ssp', 'p.scheduled_service_id', 'ssp.id')
       .select(
         'p.*',
         'c.first_name', 'c.last_name', 'c.city', 'c.state',
@@ -339,6 +423,13 @@ router.get('/', async (req, res, next) => {
       .orderBy('p.created_at', 'desc')
       .limit(Math.min(Number(limit) || 100, 500));
 
+    if (!isAdmin(req)) {
+      q = q.where(function () {
+        this.where('p.created_by_tech_id', req.technicianId)
+          .orWhere('srp.technician_id', req.technicianId)
+          .orWhere('ssp.technician_id', req.technicianId);
+      });
+    }
     if (status) q = q.where('p.status', status);
     if (project_type) q = q.where('p.project_type', project_type);
     if (customer_id) q = q.where('p.customer_id', customer_id);
@@ -378,7 +469,7 @@ router.get('/:id', async (req, res, next) => {
         't.name as tech_name',
       )
       .first();
-    if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (!(await requireProjectAccess(req, res, project))) return;
 
     const photos = await db('project_photos')
       .where({ project_id: project.id })
@@ -462,7 +553,7 @@ router.post('/ai-write-preview', requireAdmin, async (req, res, next) => {
 router.put('/:id', async (req, res, next) => {
   try {
     const project = await db('projects').where({ id: req.params.id }).first();
-    if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (!(await requireProjectAccess(req, res, project))) return;
 
     const updates = {};
     const allowed = ['title', 'project_date', 'findings', 'recommendations', 'followup_date', 'followup_findings'];
@@ -646,7 +737,7 @@ router.post('/:id/close', requireAdmin, async (req, res, next) => {
 router.post('/:id/followup', async (req, res, next) => {
   try {
     const project = await db('projects').where({ id: req.params.id }).first();
-    if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (!(await requireProjectAccess(req, res, project))) return;
     if (project.project_type !== 'bed_bug') {
       return res.status(400).json({ error: 'Follow-up only applies to bed bug projects' });
     }
@@ -720,9 +811,10 @@ router.post('/:id/ai-write', requireAdmin, async (req, res, next) => {
 router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
   try {
     const project = await db('projects').where({ id: req.params.id }).first();
-    if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (!(await requireProjectAccess(req, res, project))) return;
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
     if (!config.s3?.bucket) return res.status(500).json({ error: 'S3 not configured' });
+    const contentType = validateUploadedImage(req.file);
 
     const safeName = req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
     const key = `${PHOTO_PREFIX}${project.id}/${Date.now()}-${safeName}`;
@@ -730,7 +822,7 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
       Bucket: config.s3.bucket,
       Key: key,
       Body: req.file.buffer,
-      ContentType: req.file.mimetype,
+      ContentType: contentType,
     }));
 
     const [row] = await db('project_photos').insert({
@@ -749,8 +841,11 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
 // GET /api/admin/projects/:id/photos/:photoId/url — presigned view URL
 router.get('/:id/photos/:photoId/url', async (req, res, next) => {
   try {
+    const project = await db('projects').where({ id: req.params.id }).first();
+    if (!(await requireProjectAccess(req, res, project))) return;
     const photo = await db('project_photos').where({ id: req.params.photoId, project_id: req.params.id }).first();
     if (!photo) return res.status(404).json({ error: 'Photo not found' });
+    if (!config.s3?.bucket) return res.status(500).json({ error: 'S3 not configured' });
     const url = await getSignedUrl(s3, new GetObjectCommand({
       Bucket: config.s3.bucket, Key: photo.s3_key,
     }), { expiresIn: 3600 });
@@ -761,10 +856,21 @@ router.get('/:id/photos/:photoId/url', async (req, res, next) => {
 // DELETE /api/admin/projects/:id/photos/:photoId — remove a photo
 router.delete('/:id/photos/:photoId', async (req, res, next) => {
   try {
+    const project = await db('projects').where({ id: req.params.id }).first();
+    if (!(await requireProjectAccess(req, res, project))) return;
+    const photo = await db('project_photos').where({ id: req.params.photoId, project_id: req.params.id }).first();
+    if (!photo) return res.status(404).json({ error: 'Photo not found' });
     const deleted = await db('project_photos')
       .where({ id: req.params.photoId, project_id: req.params.id })
       .del();
     if (!deleted) return res.status(404).json({ error: 'Photo not found' });
+    if (config.s3?.bucket && photo.s3_key) {
+      try {
+        await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: photo.s3_key }));
+      } catch (err) {
+        logger.warn(`[projects] failed to delete photo object ${photo.id}: ${err.message}`);
+      }
+    }
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
@@ -772,6 +878,8 @@ router.delete('/:id/photos/:photoId', async (req, res, next) => {
 // PUT /api/admin/projects/:id/photos/:photoId — update caption / category
 router.put('/:id/photos/:photoId', async (req, res, next) => {
   try {
+    const project = await db('projects').where({ id: req.params.id }).first();
+    if (!(await requireProjectAccess(req, res, project))) return;
     const updates = {};
     for (const f of ['caption', 'category', 'sort_order']) {
       if (req.body[f] !== undefined) updates[f] = req.body[f];
@@ -783,5 +891,12 @@ router.put('/:id/photos/:photoId', async (req, res, next) => {
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
+
+router._private = {
+  canAccessProject,
+  hasProjectAccess,
+  detectedImageMime,
+  validateUploadedImage,
+};
 
 module.exports = router;

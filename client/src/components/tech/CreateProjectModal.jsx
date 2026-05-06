@@ -223,6 +223,7 @@ export default function CreateProjectModal({
   const [saving, setSaving] = useState(false);
   const [aiWriting, setAiWriting] = useState(false);
   const [error, setError] = useState(null);
+  const [createdProject, setCreatedProject] = useState(null);
 
   // Photo buffer — queued locally, uploaded after project is created.
   const [photoQueue, setPhotoQueue] = useState([]);
@@ -309,27 +310,49 @@ export default function CreateProjectModal({
     setSaving(true);
     setError(null);
     try {
-      const r = await adminFetch('/admin/projects', {
-        method: 'POST',
-        body: {
-          customer_id: customerId,
-          project_type: projectType,
-          project_date: projectDate || null,
-          title: title || null,
-          findings,
-          recommendations: recommendations || null,
-          service_record_id: defaultServiceRecordId || null,
-          scheduled_service_id: defaultScheduledServiceId || null,
-        },
-      });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data?.error || 'Save failed');
+      let data = createdProject ? { project: createdProject } : null;
+      if (!data) {
+        const r = await adminFetch('/admin/projects', {
+          method: 'POST',
+          body: {
+            customer_id: customerId,
+            project_type: projectType,
+            project_date: projectDate || null,
+            title: title || null,
+            findings,
+            recommendations: recommendations || null,
+            service_record_id: defaultServiceRecordId || null,
+            scheduled_service_id: defaultScheduledServiceId || null,
+          },
+        });
+        data = await r.json();
+        if (!r.ok) throw new Error(data?.error || 'Save failed');
+        setCreatedProject(data.project);
+      } else {
+        const r = await adminFetch(`/admin/projects/${data.project.id}`, {
+          method: 'PUT',
+          body: {
+            project_date: projectDate || null,
+            title: title || null,
+            findings,
+            recommendations: recommendations || null,
+          },
+        });
+        const updated = await r.json();
+        if (!r.ok) throw new Error(updated?.error || 'Save failed');
+        if (updated.project) {
+          data = { project: updated.project };
+          setCreatedProject(updated.project);
+        }
+      }
       const projectId = data.project.id;
 
       // Upload queued photos one by one. Kept serial so a mid-upload failure
       // reports accurate progress; volume is typically small (5–30 photos).
       if (photoQueue.length) {
         setUploadProgress({ done: 0, total: photoQueue.length });
+        const failedUploads = [];
+        const failedIds = new Set();
         for (let i = 0; i < photoQueue.length; i++) {
           const ph = photoQueue[i];
           const fd = new FormData();
@@ -337,9 +360,25 @@ export default function CreateProjectModal({
           if (ph.category) fd.append('category', ph.category);
           if (ph.caption) fd.append('caption', ph.caption);
           try {
-            await adminFetch(`/admin/projects/${projectId}/photos`, { method: 'POST', body: fd, headers: {} });
-          } catch { /* individual photo failure is non-fatal */ }
+            const uploadRes = await adminFetch(`/admin/projects/${projectId}/photos`, { method: 'POST', body: fd, headers: {} });
+            if (!uploadRes.ok) {
+              let message = 'upload failed';
+              try {
+                const body = await uploadRes.json();
+                message = body?.error || message;
+              } catch { /* keep fallback */ }
+              throw new Error(message);
+            }
+          } catch (err) {
+            failedUploads.push(`${ph.file.name}: ${err.message || 'upload failed'}`);
+            failedIds.add(ph.id);
+          }
           setUploadProgress({ done: i + 1, total: photoQueue.length });
+        }
+        if (failedUploads.length) {
+          setPhotoQueue(prev => prev.filter(item => failedIds.has(item.id)));
+          setError(`Project draft was saved, but some photos did not upload. Retry Save Draft to upload the remaining photo${failedUploads.length === 1 ? '' : 's'}. ${failedUploads.join('; ')}`);
+          return;
         }
       }
 
