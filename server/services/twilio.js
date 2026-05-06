@@ -121,6 +121,7 @@ const TwilioService = {
    * options: { customerId, customerLocationId, fromNumber, messageType, adminUserId }
    */
   async sendSMS(to, body, options = {}) {
+    let attemptedFrom = options.fromNumber || null;
     try {
       // Owner-SMS kill switch: when OWNER_SMS_DISABLED=true, suppress
       // every send addressed to one of the operator's known phones.
@@ -213,6 +214,7 @@ const TwilioService = {
 
         fromNumber = TWILIO_NUMBERS.getOutboundNumber(locationId || 'lakewood-ranch');
       }
+      attemptedFrom = fromNumber;
 
       const c = getClient();
       if (!c) {
@@ -220,7 +222,12 @@ const TwilioService = {
         return { success: false, sid: null, error: 'Twilio not configured' };
       }
 
-      const msgPayload = { from: fromNumber, to };
+      const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
+      const msgPayload = {
+        from: fromNumber,
+        to,
+        statusCallback: `https://${domain}/api/webhooks/twilio/status`,
+      };
       if (body && String(body).trim()) msgPayload.body = body;
       // Admin composer can attach multiple images via `mediaUrls` (plural) —
       // preserve the legacy single-image `mediaUrl` path for existing callers.
@@ -278,6 +285,18 @@ const TwilioService = {
       return { success: true, sid: message.sid, fromNumber };
     } catch (err) {
       logger.error(`SMS send failed to ${maskPhone(to)}: ${err.message}`);
+      void require('./twilio-failure-alerts').alertTwilioFailure({
+        channel: 'sms',
+        direction: 'outbound',
+        phase: 'send_api',
+        status: 'failed',
+        errorMessage: err.message,
+        from: attemptedFrom,
+        to,
+        link: '/admin/communications',
+      }).catch((alertErr) => {
+        logger.error(`[twilio-alerts] async notification failed: ${alertErr.message}`);
+      });
       throw new Error('Failed to send SMS');
     }
   },

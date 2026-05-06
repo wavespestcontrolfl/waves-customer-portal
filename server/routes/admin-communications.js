@@ -10,6 +10,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { normalizePhone } = require('../utils/phone');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
+const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -18,6 +19,12 @@ const ADMIN_PHONES = [
   `+1${ADMIN_PHONE_RAW}`, `1${ADMIN_PHONE_RAW}`, ADMIN_PHONE_RAW,
   ...(process.env.ADAM_PHONE ? [process.env.ADAM_PHONE] : []),
 ];
+
+function notifyTwilioFailure(payload) {
+  void alertTwilioFailure(payload).catch((alertErr) => {
+    logger.error(`[twilio-alerts] async notification failed: ${alertErr.message}`);
+  });
+}
 
 // POST /api/admin/communications/sms — send an SMS from admin
 router.post('/sms', async (req, res, next) => {
@@ -65,7 +72,19 @@ router.post('/sms', async (req, res, next) => {
     }
 
     res.json(result);
-  } catch (err) { next(err); }
+  } catch (err) {
+    notifyTwilioFailure({
+      channel: 'sms',
+      direction: 'outbound',
+      phase: 'send_api',
+      status: 'failed',
+      errorMessage: err.message,
+      from: req.body?.fromNumber,
+      to: req.body?.to,
+      link: '/admin/communications',
+    });
+    next(err);
+  }
 });
 
 // POST /api/admin/communications/call — initiate an outbound call via Twilio
@@ -149,7 +168,19 @@ router.post('/call', async (req, res, next) => {
     }).catch(() => {});
 
     res.json({ success: true, callSid: call.sid, callLogId });
-  } catch (err) { next(err); }
+  } catch (err) {
+    notifyTwilioFailure({
+      channel: 'voice',
+      direction: 'outbound',
+      phase: 'send_api',
+      status: 'failed',
+      errorMessage: err.message,
+      from: req.body?.fromNumber,
+      to: req.body?.to,
+      link: '/admin/communications',
+    });
+    next(err);
+  }
 });
 
 // GET /api/admin/communications/log — SMS history (reads unified messages

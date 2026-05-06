@@ -8,8 +8,15 @@ const { etDateString } = require('../utils/datetime-et');
 const { recordSuppression, clearSuppression } = require('../services/messaging/validators/suppression');
 const { updateByTwilioSid } = require('../services/conversations');
 const { uploadTwilioMedia } = require('../services/sms-media');
+const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
 
 const WAVES_ADMIN_PHONE = '+19413187612';
+
+function notifyTwilioFailure(payload) {
+  void alertTwilioFailure(payload).catch((err) => {
+    logger.error(`[twilio-alerts] async notification failed: ${err.message}`);
+  });
+}
 
 function normalizeE164(phone) {
   if (!phone) return null;
@@ -456,6 +463,17 @@ router.post('/sms', async (req, res) => {
     res.type('text/xml').send('<Response></Response>');
   } catch (err) {
     logger.error(`Webhook error: ${err.message}`);
+    notifyTwilioFailure({
+      channel: 'sms',
+      direction: 'inbound',
+      phase: 'webhook',
+      status: 'failed',
+      sid: req.body?.MessageSid,
+      errorMessage: err.message,
+      from: req.body?.From,
+      to: req.body?.To,
+      link: '/admin/communications',
+    });
     res.type('text/xml').send('<Response></Response>');
   }
 });
@@ -463,13 +481,38 @@ router.post('/sms', async (req, res) => {
 // POST /api/webhooks/twilio/status — delivery status callback
 router.post('/status', async (req, res) => {
   try {
-    const { MessageSid, MessageStatus } = req.body;
+    const { MessageSid, MessageStatus, ErrorCode, ErrorMessage, From, To } = req.body;
     if (MessageSid && MessageStatus) {
       await db('sms_log').where({ twilio_sid: MessageSid }).update({ status: MessageStatus });
       await updateByTwilioSid(MessageSid, { delivery_status: MessageStatus, updated_at: new Date() });
+      if (isFailureStatus(MessageStatus)) {
+        notifyTwilioFailure({
+          channel: 'sms',
+          direction: 'outbound',
+          phase: 'delivery',
+          status: MessageStatus,
+          sid: MessageSid,
+          errorCode: ErrorCode,
+          errorMessage: ErrorMessage,
+          from: From,
+          to: To,
+          link: '/admin/communications',
+        });
+      }
     }
   } catch (err) {
     logger.error(`Status webhook error: ${err.message}`);
+    notifyTwilioFailure({
+      channel: 'sms',
+      direction: 'outbound',
+      phase: 'status_webhook',
+      status: 'failed',
+      sid: req.body?.MessageSid,
+      errorMessage: err.message,
+      from: req.body?.From,
+      to: req.body?.To,
+      link: '/admin/communications',
+    });
   }
   res.sendStatus(200);
 });
