@@ -987,6 +987,7 @@ export default function EstimateToolViewV2({
   }
 
   async function saveAndSend(method) {
+    if (saving || sending) return;
     if (!estimate) { alert('Click "Generate Estimate" first.'); return; }
     if (form.scheduleSend) {
       if (!form.scheduledAt) { alert('Pick a send time.'); return; }
@@ -1003,6 +1004,7 @@ export default function EstimateToolViewV2({
   const E = estimate;
   const R = E?.results || {};
   const formCtx = { form, set, toggle };
+  const sendBusy = saving || sending;
 
   // ═══════════════════════════════════════════════════════════════
   // RENDER
@@ -1568,9 +1570,9 @@ export default function EstimateToolViewV2({
                         if (!form.customerPhone) { alert('Enter a phone number.'); return; }
                         await saveAndSend('sms');
                       }}
-                      disabled={sending}
+                      disabled={sendBusy}
                     >
-                      {sending ? '…' : form.scheduleSend ? 'Schedule SMS' : 'SMS Only'}
+                      {sendBusy ? '…' : form.scheduleSend ? 'Schedule SMS' : 'SMS Only'}
                     </Button>
                     <Button
                       variant="secondary" size="md"
@@ -1578,9 +1580,9 @@ export default function EstimateToolViewV2({
                         if (!form.customerEmail) { alert('Enter an email.'); return; }
                         await saveAndSend('email');
                       }}
-                      disabled={sending}
+                      disabled={sendBusy}
                     >
-                      {sending ? '…' : form.scheduleSend ? 'Schedule Email' : 'Email Only'}
+                      {sendBusy ? '…' : form.scheduleSend ? 'Schedule Email' : 'Email Only'}
                     </Button>
                     <Button
                       variant="primary" size="md"
@@ -1588,9 +1590,9 @@ export default function EstimateToolViewV2({
                         if (!form.customerPhone && !form.customerEmail) { alert('Enter phone or email.'); return; }
                         await saveAndSend('both');
                       }}
-                      disabled={sending}
+                      disabled={sendBusy}
                     >
-                      {sending ? '…' : form.scheduleSend ? 'Schedule Both' : 'Both'}
+                      {sendBusy ? '…' : form.scheduleSend ? 'Schedule Both' : 'Both'}
                     </Button>
                   </div>
                   <Button variant="ghost" size="md" onClick={() => setShowSendForm(false)}>Cancel</Button>
