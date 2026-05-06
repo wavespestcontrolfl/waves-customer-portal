@@ -50,6 +50,8 @@ const SERVICE_LABEL = {
   stinging: 'Stinging Insect',
   exclusion: 'Exclusion',
   rodent_trapping: 'Rodent Trapping',
+  rodent_sanitation: 'Rodent Sanitation',
+  rodent_bundle_discount: 'Rodent Bundle Discount',
   rodent_guarantee: 'Rodent Guarantee',
   foam_drill: 'Foam Drill',
   rodent_plugging: 'Rodent Plugging',

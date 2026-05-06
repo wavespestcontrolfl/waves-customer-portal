@@ -369,6 +369,7 @@ export default function EstimateToolViewV2({
     grassType: 'st_augustine',
     otLawnType: 'FERT',
     exclSimple: '0', exclModerate: '0', exclAdvanced: '0', exclWaive: 'NO',
+    sanitationTier: 'standard', sanitationArea: '', sanitationDebris: '0', sanitationAccess: 'normal',
     bedbugRooms: '1', bedbugMethod: 'BOTH',
     boracareSqft: '', preslabSqft: '', preslabWarranty: 'BASIC', preslabVolume: 'NONE',
     foamPoints: '5', roachType: 'REGULAR',
@@ -376,7 +377,7 @@ export default function EstimateToolViewV2({
     svcTermiteBait: false, svcRodentBait: false,
     svcOnetimePest: false, svcOnetimeLawn: false, svcOnetimeMosquito: false,
     svcPlugging: false, svcTopdress: false, svcDethatch: false, svcTrenching: false,
-    svcBoracare: false, svcPreslab: false, svcFoam: false, svcRodentTrap: false,
+    svcBoracare: false, svcPreslab: false, svcFoam: false, svcRodentTrap: false, svcRodentSanitation: false,
     svcFlea: false, svcWasp: false, svcRoach: false, svcBedbug: false, svcExclusion: false,
     showOneTimeOption: false, billByInvoice: false,
   });
@@ -427,7 +428,7 @@ export default function EstimateToolViewV2({
     const annualRecurring = recurringMonthly * 12;
     const annualSavings = Math.round(recurringMonthlyBefore * tier.discount * 12);
 
-    const onetimeKeys = ['svcOnetimePest', 'svcOnetimeLawn', 'svcOnetimeMosquito', 'svcPlugging', 'svcTopdress', 'svcDethatch', 'svcTrenching', 'svcBoracare', 'svcPreslab', 'svcFoam', 'svcRodentTrap', 'svcFlea', 'svcWasp', 'svcRoach', 'svcBedbug', 'svcExclusion'];
+    const onetimeKeys = ['svcOnetimePest', 'svcOnetimeLawn', 'svcOnetimeMosquito', 'svcPlugging', 'svcTopdress', 'svcDethatch', 'svcTrenching', 'svcBoracare', 'svcPreslab', 'svcFoam', 'svcRodentTrap', 'svcRodentSanitation', 'svcFlea', 'svcWasp', 'svcRoach', 'svcBedbug', 'svcExclusion'];
     const onetimeCount = onetimeKeys.filter((k) => form[k]).length;
     const anySelected = recurringCount > 0 || onetimeCount > 0;
 
@@ -716,6 +717,7 @@ export default function EstimateToolViewV2({
       if (form.svcPreslab) selectedServices.push('PRESLAB');
       if (form.svcFoam) selectedServices.push('FOAM');
       if (form.svcRodentTrap) selectedServices.push('RODENT_TRAP');
+      if (form.svcRodentSanitation) selectedServices.push('RODENT_SANITATION');
       if (form.svcFlea) selectedServices.push('FLEA');
       if (form.svcWasp) selectedServices.push('STING');
       if (form.svcRoach) selectedServices.push('ROACH');
@@ -750,6 +752,10 @@ export default function EstimateToolViewV2({
         exclModerate: parseInt(form.exclModerate, 10) || 0,
         exclAdvanced: parseInt(form.exclAdvanced, 10) || 0,
         exclWaiveInspection: form.exclWaive === 'YES',
+        sanitationTier: form.sanitationTier || 'standard',
+        sanitationArea: parseInt(form.sanitationArea, 10) || 0,
+        sanitationDebris: parseInt(form.sanitationDebris, 10) || 0,
+        sanitationAccess: form.sanitationAccess || 'normal',
         roachType: form.roachType || 'REGULAR',
         onetimeLawnType: form.otLawnType || 'FERT',
       };
@@ -1254,7 +1260,6 @@ export default function EstimateToolViewV2({
               )}
               <CheckboxV2 k="svcTopdress" label="Top Dressing" />
               <CheckboxV2 k="svcDethatch" label="Dethatching" />
-              <CheckboxV2 k="svcOverseed" label="Overseeding" />
 
               <SubGroupLabel className="mt-3">Termite</SubGroupLabel>
               <CheckboxV2 k="svcTrenching" label="Termite Trenching" />
@@ -1311,6 +1316,16 @@ export default function EstimateToolViewV2({
               <SubGroupLabel className="mt-3">Rodent</SubGroupLabel>
               <CheckboxV2 k="svcRodentTrap" label="Rodent Trapping" />
               <CheckboxV2 k="svcRodentSanitation" label="Rodent Sanitation" />
+              {form.svcRodentSanitation && (
+                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  <div className="grid grid-cols-2 gap-3">
+                    <FieldV2 label="Tier"><SelectV2 k="sanitationTier" options={[{ value: 'light', label: 'Light' }, { value: 'standard', label: 'Standard' }, { value: 'heavy', label: 'Heavy' }]} /></FieldV2>
+                    <FieldV2 label="Access"><SelectV2 k="sanitationAccess" options={[{ value: 'normal', label: 'Normal' }, { value: 'crawlspace', label: 'Crawlspace' }, { value: 'tight', label: 'Tight' }]} /></FieldV2>
+                    <FieldV2 label="Affected Sq Ft"><InputV2 k="sanitationArea" type="number" min="0" placeholder="Auto from footprint" /></FieldV2>
+                    <FieldV2 label="Debris Cu Ft"><InputV2 k="sanitationDebris" type="number" min="0" /></FieldV2>
+                  </div>
+                </div>
+              )}
               <CheckboxV2 k="svcExclusion" label="Rodent Exclusion" />
               {form.svcExclusion && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
