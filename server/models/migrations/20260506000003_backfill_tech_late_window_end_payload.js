@@ -10,7 +10,7 @@ exports.up = async function (knex) {
     FROM scheduled_services AS s
     WHERE a.type = 'tech_late'
       AND a.job_id = s.id
-      AND NOT (COALESCE(a.payload, '{}'::jsonb) ? 'window_end')
+      AND NOT (COALESCE(a.payload, '{}'::jsonb) \? 'window_end')
       AND s.window_end IS NOT NULL
   `);
 };
