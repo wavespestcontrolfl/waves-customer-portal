@@ -1489,7 +1489,7 @@ export default function EstimateToolViewV2({
                     <span>
                       <span className="font-medium">Offer one-time option</span>
                       <span className="block text-11 text-ink-secondary">
-                        Customer sees a Recurring / One-time toggle and picks either.
+                        Customer sees a Recurring / One-time toggle and can select either.
                       </span>
                     </span>
                   </label>

@@ -1753,9 +1753,9 @@ router.put('/:token/accept', async (req, res, next) => {
     }
 
     // Invoice-mode: auto-generate + send an invoice due immediately based
-    // on the customer's pick. Recurring → first quarter (monthly × 3);
-    // one-time → the one-time total. SMS + email both go out with the
-    // pay link; no onboarding, no payment-method capture up front.
+    // on the accepted selection. Recurring → first quarter (monthly × 3);
+    // one-time → the one-time total. Pay-link delivery is attempted via
+    // SMS and email; no onboarding, no payment-method capture up front.
     let invoiceMode = false;
     let invoiceId = null;
     let invoiceAmount = null;
