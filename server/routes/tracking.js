@@ -7,8 +7,11 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { resolveTechPhotoUrl } = require('../services/tech-photo');
 
 router.use(authenticate);
+
+const STALE_VEHICLE_MS = 5 * 60 * 1000;
 
 // Safely parse a JSON column; tolerate already-parsed objects and bad data.
 function safeJsonParse(val, fallback = null) {
@@ -40,6 +43,32 @@ function resolveOffice(customer) {
   return OFFICES[key];
 }
 
+function firstNameOf(fullName) {
+  if (!fullName) return null;
+  const trimmed = String(fullName).trim();
+  if (!trimmed) return null;
+  return trimmed.split(/\s+/)[0];
+}
+
+function parseFiniteCoordinate(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+async function attachTechPhoto(tracker, tech) {
+  if (!tracker?.technician || !tech?.id) return tracker;
+  tracker.technician.photoUrl = await resolveTechPhotoUrl(tech.photo_s3_key, tech.photo_url).catch((err) => {
+    logger.warn(`[tracking] tech photo resolve failed for ${tech.id}: ${err.message}`);
+    return null;
+  });
+  tracker.tech = {
+    firstName: tracker.technician.firstName || firstNameOf(tech.name) || tracker.technician.name || null,
+    photoUrl: tracker.technician.photoUrl,
+    yearsWithWaves: null,
+  };
+  return tracker;
+}
+
 function formatTracker(row, service, tech, customer) {
   const notes = safeJsonParse(row.live_notes, []);
   const summary = safeJsonParse(row.service_summary, null);
@@ -65,8 +94,11 @@ function formatTracker(row, service, tech, customer) {
     technician: {
       id: tech?.id,
       name: tech?.name,
+      firstName: firstNameOf(tech?.name),
       initials: tech?.name ? tech.name.split(' ').map(n => n[0]).join('') : '?',
+      photoUrl: null,
     },
+    tech: tech?.id ? { firstName: firstNameOf(tech?.name), photoUrl: null, yearsWithWaves: null } : null,
     office: resolveOffice(customer),
     // customerLocation is set when we have the customer's geocoded
     // lat/lng AND the tracker is en route — lets the client drop a
@@ -89,8 +121,18 @@ function stepForTrackState(state) {
 
 function formatScheduledTracker(service, tech, customer) {
   const currentStep = stepForTrackState(service?.track_state);
+  const custLat = parseFiniteCoordinate(customer?.latitude);
+  const custLng = parseFiniteCoordinate(customer?.longitude);
+  const serviceSummary = service.service_customer_visible === false ? null : service.service_description || null;
   return {
     id: service.id,
+    state: service.track_state || 'scheduled',
+    trackToken: service.track_view_token || null,
+    trackUrl: service.track_view_token ? `/track/${service.track_view_token}` : null,
+    enRouteAt: service.en_route_at || null,
+    arrivedAt: service.arrived_at || null,
+    completedAt: service.completed_at || null,
+    cancelledAt: service.cancelled_at || null,
     currentStep,
     steps: [
       { step: 1, name: STEP_NAMES[1], completedAt: service.created_at || null },
@@ -102,22 +144,32 @@ function formatScheduledTracker(service, tech, customer) {
       { step: 7, name: STEP_NAMES[7], completedAt: service.completed_at || service.cancelled_at || null },
     ],
     etaMinutes: null,
+    etaSource: null,
     liveNotes: [],
     serviceSummary: null,
     service: {
       id: service.id,
       date: service.scheduled_date,
       type: service.service_type,
+      summary: serviceSummary,
       windowStart: service.window_start,
       windowEnd: service.window_end,
+    },
+    property: {
+      addressLine1: customer?.address_line1 || null,
+      lat: custLat,
+      lng: custLng,
     },
     technician: {
       id: tech?.id,
       name: tech?.name,
+      firstName: firstNameOf(tech?.name),
       initials: tech?.name ? tech.name.split(' ').map(n => n[0]).join('') : '?',
+      photoUrl: null,
     },
+    tech: tech?.id ? { firstName: firstNameOf(tech?.name), photoUrl: null, yearsWithWaves: null } : null,
     office: resolveOffice(customer),
-    customerLocation: null,
+    customerLocation: custLat != null && custLng != null ? { lat: custLat, lng: custLng } : null,
     techPosition: null,
   };
 }
@@ -128,30 +180,36 @@ function buildCanonicalScheduledServiceQuery(knex, customerId, opts = {}) {
   const nowIso = opts.nowIso || new Date().toISOString();
   const today = opts.today || etDateString();
   const q = knex('scheduled_services')
-    .where({ customer_id: customerId })
-    .whereNotNull('track_view_token')
-    .where('track_token_expires_at', '>=', nowIso);
+    .leftJoin('services as sv', 'scheduled_services.service_id', 'sv.id')
+    .select(
+      'scheduled_services.*',
+      'sv.description as service_description',
+      'sv.customer_visible as service_customer_visible'
+    )
+    .where({ 'scheduled_services.customer_id': customerId })
+    .whereNotNull('scheduled_services.track_view_token')
+    .where('scheduled_services.track_token_expires_at', '>=', nowIso);
 
   if (activeOnly) {
     q.where(function () {
-      this.whereIn('track_state', ['en_route', 'on_property'])
+      this.whereIn('scheduled_services.track_state', ['en_route', 'on_property'])
         .orWhere(function () {
-          this.whereIn('track_state', ['scheduled', 'complete', 'cancelled'])
-            .where('scheduled_date', today);
+          this.whereIn('scheduled_services.track_state', ['scheduled', 'complete', 'cancelled'])
+            .where('scheduled_services.scheduled_date', today);
         });
     });
   } else {
     q.where(function () {
-      this.whereIn('track_state', ['scheduled', 'en_route', 'on_property'])
-        .orWhereIn('track_state', ['complete', 'cancelled']);
+      this.whereIn('scheduled_services.track_state', ['scheduled', 'en_route', 'on_property'])
+        .orWhereIn('scheduled_services.track_state', ['complete', 'cancelled']);
     });
   }
 
-  if (todayOnly) q.where('scheduled_date', today);
+  if (todayOnly) q.where('scheduled_services.scheduled_date', today);
 
   return q
     .orderByRaw(`
-      CASE track_state
+      CASE scheduled_services.track_state
         WHEN 'en_route' THEN 1
         WHEN 'on_property' THEN 2
         WHEN 'scheduled' THEN 3
@@ -160,8 +218,8 @@ function buildCanonicalScheduledServiceQuery(knex, customerId, opts = {}) {
         ELSE 9
       END
     `)
-    .orderBy('scheduled_date', 'asc')
-    .orderBy('window_start', 'asc');
+    .orderBy('scheduled_services.scheduled_date', 'asc')
+    .orderBy('scheduled_services.window_start', 'asc');
 }
 
 async function findCanonicalScheduledService(customerId, opts = {}) {
@@ -203,6 +261,7 @@ async function enrichWithLiveMap(tracker, service, tech, customer) {
             distanceMiles: etaData.distanceMiles,
             source: etaData.source,
           };
+          tracker.etaSource = etaData.source ?? null;
           if (etaData.etaMinutes && (!tracker.etaMinutes || Math.abs(tracker.etaMinutes - etaData.etaMinutes) > 2)) {
             tracker.etaMinutes = etaData.etaMinutes;
           }
@@ -210,12 +269,18 @@ async function enrichWithLiveMap(tracker, service, tech, customer) {
       } catch { /* non-fatal */ }
     }
 
+    const lastReportedAt = pos.updatedAt;
+    const stale = lastReportedAt
+      ? (Date.now() - new Date(lastReportedAt).getTime()) > STALE_VEHICLE_MS
+      : true;
     tracker.techPosition = {
       lat: pos.lat,
       lng: pos.lng,
       heading: pos.heading,
       isRunning: pos.isRunning,
-      updatedAt: pos.updatedAt,
+      updatedAt: lastReportedAt,
+      lastReportedAt,
+      stale,
       eta,
     };
   } catch {
@@ -252,14 +317,21 @@ async function enrichScheduledWithTechStatus(tracker, service, customer) {
           source: etaData.source,
         };
         tracker.etaMinutes = etaData.etaMinutes ?? null;
+        tracker.etaSource = etaData.source ?? null;
       }
     }
+    const lastReportedAt = ts.updated_at;
+    const stale = lastReportedAt
+      ? (Date.now() - new Date(lastReportedAt).getTime()) > STALE_VEHICLE_MS
+      : true;
     tracker.techPosition = {
       lat,
       lng,
       heading: null,
       isRunning: null,
-      updatedAt: ts.updated_at,
+      updatedAt: lastReportedAt,
+      lastReportedAt,
+      stale,
       eta,
     };
   } catch {
@@ -289,6 +361,7 @@ router.get('/active', async (req, res, next) => {
     if (canonical) {
       const tech = canonical.technician_id ? await db('technicians').where({ id: canonical.technician_id }).first() : null;
       const formatted = formatScheduledTracker(canonical, tech, req.customer);
+      await attachTechPhoto(formatted, tech);
       await enrichScheduledWithTechStatus(formatted, canonical, req.customer);
       return res.json({ tracker: formatted });
     }
@@ -310,6 +383,7 @@ router.get('/active', async (req, res, next) => {
     const tech = tracker.technician_id ? await db('technicians').where({ id: tracker.technician_id }).first() : null;
 
     const formatted = formatTracker(tracker, service, tech, req.customer);
+    await attachTechPhoto(formatted, tech);
     await enrichWithLiveMap(formatted, service, tech, req.customer);
     res.json({ tracker: formatted });
   } catch (err) { next(err); }
@@ -326,6 +400,7 @@ router.get('/today', async (req, res, next) => {
     if (canonical) {
       const tech = canonical.technician_id ? await db('technicians').where({ id: canonical.technician_id }).first() : null;
       const formatted = formatScheduledTracker(canonical, tech, req.customer);
+      await attachTechPhoto(formatted, tech);
       await enrichScheduledWithTechStatus(formatted, canonical, req.customer);
       return res.json({ tracker: formatted });
     }
@@ -341,6 +416,7 @@ router.get('/today', async (req, res, next) => {
       const service = await db('scheduled_services').where({ id: tracker.scheduled_service_id }).first();
       const tech = tracker.technician_id ? await db('technicians').where({ id: tracker.technician_id }).first() : null;
       const formatted = formatTracker(tracker, service, tech, req.customer);
+      await attachTechPhoto(formatted, tech);
       await enrichWithLiveMap(formatted, service, tech, req.customer);
       return res.json({ tracker: formatted });
     }
@@ -366,6 +442,7 @@ router.get('/today', async (req, res, next) => {
     const tech = scheduled.technician_id ? await db('technicians').where({ id: scheduled.technician_id }).first() : null;
 
     const formatted = formatTracker(newTracker, scheduled, tech, req.customer);
+    await attachTechPhoto(formatted, tech);
     await enrichWithLiveMap(formatted, scheduled, tech, req.customer);
     res.json({ tracker: formatted });
   } catch (err) { next(err); }

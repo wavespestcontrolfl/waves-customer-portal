@@ -6040,6 +6040,27 @@ function EnRouteLiveMap({ techPosition, customerLocation, techName }) {
 // =========================================================================
 // WAVES SERVICE TRACKER — Domino's-style real-time tracker
 // =========================================================================
+function useLastUpdated(iso) {
+  const [text, setText] = useState('');
+  useEffect(() => {
+    if (!iso) {
+      setText('');
+      return undefined;
+    }
+    const tick = () => {
+      const sec = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+      if (sec < 10) setText('Updated just now');
+      else if (sec < 60) setText(`Updated ${sec}s ago`);
+      else if (sec < 3600) setText(`Updated ${Math.floor(sec / 60)} min ago`);
+      else setText(`Updated ${Math.floor(sec / 3600)}h ago`);
+    };
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => clearInterval(id);
+  }, [iso]);
+  return text;
+}
+
 function ServiceTracker() {
   const [tracker, setTracker] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -6066,6 +6087,9 @@ function ServiceTracker() {
     return () => clearInterval(interval);
   }, [tracker?.currentStep, fetchTracker]);
 
+  const lastReportedAt = tracker?.techPosition?.lastReportedAt || tracker?.techPosition?.updatedAt;
+  const lastUpdated = useLastUpdated(lastReportedAt);
+
   if (loading || !tracker) return null;
 
   const step = tracker.currentStep;
@@ -6076,6 +6100,7 @@ function ServiceTracker() {
   const eta = tracker.etaMinutes;
   const notes = tracker.liveNotes || [];
   const summary = tracker.serviceSummary;
+  const serviceDescription = tracker.service?.summary;
   const office = tracker.office || { name: 'Waves Pest Control', phone: '(941) 297-5749', area: 'Southwest Florida' };
   const isLawn = svcType.toLowerCase().includes('lawn');
   const isPest = svcType.toLowerCase().includes('pest');
@@ -6085,6 +6110,9 @@ function ServiceTracker() {
   const fmtTime = (t) => { if (!t) return ''; const [h, m] = t.split(':').map(Number); return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`; };
   const window = tracker.service?.windowStart ? `${fmtTime(tracker.service.windowStart)} – ${fmtTime(tracker.service.windowEnd)}` : 'today';
   const stepTs = tracker.steps[step - 1]?.completedAt;
+  const etaSource = tracker.etaSource || tracker.techPosition?.eta?.source;
+  const etaDisplay = eta == null ? '—' : eta < 1 ? 'Now' : Math.round(eta);
+  const hasLiveMap = !!(tracker.techPosition && tracker.customerLocation);
 
   // Estimated completion
   const avgDurations = { lawn: 45, pest: 35, mosquito: 25, termite: 60 };
@@ -6183,36 +6211,58 @@ function ServiceTracker() {
         {/* Step 3: EN ROUTE — Anton ETA hero + map + tech block + gold CTA */}
         {step === 3 && (
           <>
-            {eta && (
-              <div>
-                <div style={{ fontSize: 16, color: B.textBody, marginBottom: 4 }}>
-                  {techName} arrives in
-                </div>
-                <div style={{
-                  fontFamily: FONTS.display,
-                  fontSize: 'clamp(56px, 14vw, 88px)',
-                  fontWeight: 700,
-                  color: B.blueDeeper,
-                  lineHeight: 1,
-                  letterSpacing: '0.02em',
-                  display: 'flex',
-                  alignItems: 'baseline',
-                  gap: 12,
-                }}>
-                  <span>{eta}</span>
+            <div>
+              <div style={{ fontSize: 16, color: B.textBody, marginBottom: 4 }}>
+                {techName} arrives in
+              </div>
+              <div style={{
+                fontFamily: FONTS.display,
+                fontSize: 'clamp(56px, 14vw, 88px)',
+                fontWeight: 700,
+                color: B.blueDeeper,
+                lineHeight: 1,
+                letterSpacing: '0.02em',
+                display: 'flex',
+                alignItems: 'baseline',
+                gap: 12,
+              }}>
+                <span>{etaDisplay}</span>
+                {eta != null && eta >= 1 && (
                   <span style={{
                     fontSize: 22, color: B.textCaption,
                     fontFamily: FONTS.body, fontWeight: 600, letterSpacing: '0.02em',
                   }}>min</span>
-                </div>
+                )}
               </div>
-            )}
-            {tracker.techPosition && tracker.customerLocation && (
-              <EnRouteLiveMap
-                techPosition={tracker.techPosition}
-                customerLocation={tracker.customerLocation}
-                techName={techName}
-              />
+              {etaSource === 'haversine' && (
+                <div style={{ fontSize: 14, color: B.textCaption, marginTop: 8 }}>
+                  Estimated based on distance
+                </div>
+              )}
+            </div>
+            {hasLiveMap ? (
+              <>
+                <EnRouteLiveMap
+                  techPosition={tracker.techPosition}
+                  customerLocation={tracker.customerLocation}
+                  techName={techName}
+                />
+                {lastUpdated && (
+                  <div style={{
+                    fontSize: 14, color: B.textCaption,
+                    marginTop: 10, textAlign: 'right',
+                  }}>
+                    {lastUpdated}{tracker.techPosition?.stale ? ' · GPS reconnecting' : ''}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div style={{
+                marginTop: 20, padding: 14, background: B.blueSurface || B.blueLight,
+                borderRadius: 10, fontSize: 14, color: B.textBody,
+              }}>
+                {techFirst} is on the way. We'll update once GPS reconnects.
+              </div>
             )}
           </>
         )}
@@ -6256,12 +6306,23 @@ function ServiceTracker() {
             marginTop: 20, paddingTop: 16,
             borderTop: `1px solid ${B.offWhite}`,
           }}>
-            <div style={{
-              width: 56, height: 56, borderRadius: '50%',
-              background: B.blueDeeper, color: '#fff',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, flexShrink: 0,
-            }}>{techInitials}</div>
+            {tracker.technician?.photoUrl ? (
+              <img
+                src={tracker.technician.photoUrl}
+                alt={tracker.technician?.firstName || techName}
+                style={{
+                  width: 56, height: 56, borderRadius: '50%',
+                  objectFit: 'cover', border: `2px solid ${B.offWhite}`, flexShrink: 0,
+                }}
+              />
+            ) : (
+              <div style={{
+                width: 56, height: 56, borderRadius: '50%',
+                background: B.blueDeeper, color: '#fff',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, flexShrink: 0,
+              }}>{techInitials}</div>
+            )}
             <div>
               <div style={{ fontSize: 18, fontWeight: 700, color: B.navy, lineHeight: 1.2 }}>{techName}</div>
               <div style={{ fontSize: 14, color: B.textCaption, marginTop: 4 }}>{svcType}</div>
@@ -6276,6 +6337,11 @@ function ServiceTracker() {
         }}>
           <div style={{ fontSize: 14, color: B.textCaption, marginBottom: 4 }}>Today's visit</div>
           <div style={{ fontSize: 16, fontWeight: 600, color: B.navy }}>{svcType}</div>
+          {serviceDescription && (
+            <div style={{ fontSize: 15, color: B.textBody, marginTop: 6, lineHeight: 1.5 }}>
+              {serviceDescription}
+            </div>
+          )}
           {tracker.service?.windowStart && (
             <div style={{ fontSize: 14, color: B.textBody, marginTop: 6 }}>{window}</div>
           )}
@@ -6283,6 +6349,18 @@ function ServiceTracker() {
             <div style={{ fontSize: 14, color: B.textCaption, marginTop: 4 }}>
               {techFirst} · {new Date(stepTs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
             </div>
+          )}
+          {tracker.trackUrl && (
+            <a
+              href={tracker.trackUrl}
+              style={{
+                display: 'inline-flex', alignItems: 'center',
+                fontSize: 14, color: B.wavesBlue, fontWeight: 700,
+                marginTop: 10, textDecoration: 'none',
+              }}
+            >
+              Open live tracking page
+            </a>
           )}
         </div>
 
