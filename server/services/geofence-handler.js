@@ -4,7 +4,8 @@
  * Called from the Bouncie webhook. Uses:
  *   - geofence-matcher.js  (pure lookups)
  *   - time-tracking.js     (startJob / endJob)
- *   - service_tracking     (advance step via direct db update, matching tracking.js pattern)
+ *   - track-transitions.js (canonical scheduled_services.track_state lifecycle)
+ *   - service_tracking     (legacy compatibility mirror only)
  *   - tech_notifications   (in-app reminder queue polled by the tech PWA)
  */
 const db = require('../models/db');
@@ -55,8 +56,11 @@ async function sendTechNotification(technicianId, { type, message, payload }) {
 }
 
 /**
- * Advance a service_tracking row to a given step, setting the step_N_at timestamp.
- * No-op if the tracker is already at or past that step.
+ * Legacy compatibility mirror for the old portal stepper.
+ *
+ * Canonical customer-visible state lives on scheduled_services.track_state and
+ * must be changed through services/track-transitions.js before this helper is
+ * called. This row is kept in sync only for older /api/tracking fallback paths.
  */
 async function advanceServiceTracking(scheduledServiceId, targetStep, eventTime) {
   try {
@@ -79,6 +83,31 @@ async function advanceServiceTracking(scheduledServiceId, targetStep, eventTime)
     logger.error(`[geofence-handler] advanceServiceTracking failed: ${err.message}`);
     return null;
   }
+}
+
+async function markOnPropertyFromGeofence(scheduledServiceId, eventTime = new Date()) {
+  let canonical = null;
+  try {
+    canonical = await trackTransitions.markOnProperty(scheduledServiceId);
+  } catch (err) {
+    logger.error(`[geofence-handler] markOnProperty failed for job ${scheduledServiceId}: ${err.message}`);
+  }
+  const legacy = await advanceServiceTracking(scheduledServiceId, 4, eventTime);
+  return { canonical, legacy };
+}
+
+async function markCompleteFromGeofence(scheduledServiceId, eventTime = new Date()) {
+  let canonical = null;
+  try {
+    canonical = await trackTransitions.markComplete(scheduledServiceId, {
+      actorType: 'system',
+      actorId: null,
+    });
+  } catch (err) {
+    logger.error(`[geofence-handler] markComplete failed for job ${scheduledServiceId}: ${err.message}`);
+  }
+  const legacy = await advanceServiceTracking(scheduledServiceId, 7, eventTime);
+  return { canonical, legacy };
 }
 
 /**
@@ -189,8 +218,7 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
   const existingTimer = await matcher.getActiveJobTimer(tech.id);
   if (existingTimer) {
     if (job) {
-      await trackTransitions.markOnProperty(job.id);
-      await advanceServiceTracking(job.id, 4, eventTime);
+      await markOnPropertyFromGeofence(job.id, eventTime);
     }
     await matcher.logEvent({
       bouncie_imei: imei,
@@ -240,8 +268,7 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
     }
 
     if (job) {
-      await trackTransitions.markOnProperty(job.id);
-      await advanceServiceTracking(job.id, 4, eventTime);
+      await markOnPropertyFromGeofence(job.id, eventTime);
       // Fire-and-forget customer arrival SMS when tied to a real job
       sendArrivalSms(customer.id, tech.name).catch(() => {});
     }
@@ -382,7 +409,7 @@ async function handleDeparture({ tech, customer, job, lat, lng, eventTime, imei,
   const autoComplete = await matcher.getAutoCompleteOnExit();
   const completeJobId = activeTimer.job_id || null;
   if (autoComplete && completeJobId) {
-    await advanceServiceTracking(completeJobId, 7, eventTime);
+    await markCompleteFromGeofence(completeJobId, eventTime);
   }
 
   const durationMin = stopped && stopped.duration_minutes
@@ -782,4 +809,6 @@ module.exports = {
   handleGeozoneEvent,
   sendTechNotification,
   advanceServiceTracking,
+  markOnPropertyFromGeofence,
+  markCompleteFromGeofence,
 };
