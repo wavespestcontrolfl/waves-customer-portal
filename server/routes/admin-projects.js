@@ -510,6 +510,33 @@ router.get('/:id', async (req, res, next) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/admin/projects/:id/activity — project-specific activity history
+// ---------------------------------------------------------------------------
+router.get('/:id/activity', async (req, res, next) => {
+  try {
+    const project = await db('projects').where({ id: req.params.id }).first();
+    if (!(await requireProjectAccess(req, res, project))) return;
+
+    const activity = await db('activity_log as a')
+      .leftJoin('technicians as t', 'a.admin_user_id', 't.id')
+      .whereRaw("a.metadata->>'project_id' = ?", [project.id])
+      .select(
+        'a.id',
+        'a.action',
+        'a.description',
+        'a.metadata',
+        'a.created_at',
+        'a.admin_user_id',
+        't.name as actor_name',
+      )
+      .orderBy('a.created_at', 'desc')
+      .limit(100);
+
+    res.json({ activity });
+  } catch (err) { next(err); }
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/admin/projects — create (tech-facing)
 // ---------------------------------------------------------------------------
 router.post('/', async (req, res, next) => {

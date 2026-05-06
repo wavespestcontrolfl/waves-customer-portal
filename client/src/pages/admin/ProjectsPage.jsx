@@ -485,8 +485,13 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
     setLoading(true);
     setError('');
     try {
-      const r = await adminFetch(`/admin/projects/${projectId}`);
-      const d = await readJsonResponse(r, 'Could not load project');
+      const [projectRes, activityRes] = await Promise.all([
+        adminFetch(`/admin/projects/${projectId}`),
+        adminFetch(`/admin/projects/${projectId}/activity`),
+      ]);
+      const d = await readJsonResponse(projectRes, 'Could not load project');
+      const activityData = await readJsonResponse(activityRes, 'Could not load project history');
+      d.activity = activityData.activity || [];
       setData(d);
       setEditFindings(d.project.findings || {});
       setEditRecs(d.project.recommendations || '');
@@ -919,6 +924,8 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
             </div>
           )}
         </div>
+
+        <ProjectHistoryPanel activity={data.activity || []} />
       </div>
 
       {/* Footer actions */}
@@ -957,6 +964,76 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
           >Send report</button>
         )}
       </div>
+    </div>
+  );
+}
+
+const PROJECT_ACTIVITY_LABELS = {
+  project_created: 'Created',
+  project_updated: 'Updated',
+  project_report_sent: 'Sent',
+  project_report_resent: 'Resent',
+  project_closed: 'Closed',
+  project_followup_recorded: 'Follow-up',
+  project_photo_uploaded: 'Photo uploaded',
+  project_photo_deleted: 'Photo deleted',
+  project_report_viewed: 'Viewed',
+};
+
+function fmtDateTime(value) {
+  if (!value) return '—';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString([], {
+    timeZone: 'America/New_York',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+function ProjectHistoryPanel({ activity }) {
+  return (
+    <div>
+      <div style={{ fontSize: 14, fontWeight: 800, color: D.heading, marginBottom: 8 }}>History</div>
+      {activity.length > 0 ? (
+        <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, overflow: 'hidden' }}>
+          {activity.map((item, idx) => (
+            <div
+              key={item.id || `${item.action}-${item.created_at}-${idx}`}
+              style={{
+                padding: '10px 12px',
+                borderTop: idx === 0 ? 'none' : `1px solid ${D.border}`,
+                background: D.card,
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 800, color: D.heading }}>
+                    {PROJECT_ACTIVITY_LABELS[item.action] || item.action}
+                  </div>
+                  <div style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>
+                    {item.description || 'Project activity recorded.'}
+                  </div>
+                  {item.actor_name && (
+                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+                      By {item.actor_name}
+                    </div>
+                  )}
+                </div>
+                <div style={{ flexShrink: 0, fontSize: 14, color: D.muted, textAlign: 'right' }}>
+                  {fmtDateTime(item.created_at)}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div style={{ padding: '12px 0', fontSize: 14, color: D.muted }}>
+          No activity recorded yet.
+        </div>
+      )}
     </div>
   );
 }
