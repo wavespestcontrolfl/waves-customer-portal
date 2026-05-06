@@ -6,6 +6,199 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+const UNIT_TO_OZ = {
+  fl_oz: 1,
+  floz: 1,
+  oz: 1,
+  ounce: 1,
+  ounces: 1,
+  gal: 128,
+  gallon: 128,
+  gallons: 128,
+  qt: 32,
+  quart: 32,
+  pt: 16,
+  pint: 16,
+  ml: 0.033814,
+  l: 33.814,
+  liter: 33.814,
+  lb: 16,
+  lbs: 16,
+  pound: 16,
+  pounds: 16,
+  g: 0.035274,
+  gram: 0.035274,
+  kg: 35.274,
+};
+
+const ESTIMATE_COST_FALLBACKS = {
+  pest_control: {
+    serviceTypes: ['Quarterly Pest Control', 'Pest Control'],
+    laborMin: 20,
+    materialPerVisit: 6.67,
+    visitsPerYear: 4,
+    areaField: 'homeSqFt',
+  },
+  lawn_care: {
+    serviceTypes: ['Lawn Care'],
+    laborMin: 30,
+    materialPerVisit: 25,
+    visitsPerYear: 9,
+    areaField: 'lawnSqFt',
+  },
+  tree_shrub: {
+    serviceTypes: ['Tree & Shrub'],
+    laborMin: 25,
+    materialPerVisit: 20,
+    visitsPerYear: 9,
+    areaField: 'bedArea',
+  },
+  mosquito: {
+    serviceTypes: ['Mosquito Treatment'],
+    laborMin: 15,
+    materialPerVisit: 8,
+    visitsPerYear: 12,
+    areaField: 'lotSqFt',
+  },
+  termite_bait: {
+    serviceTypes: ['Termite Bait'],
+    laborMin: 20,
+    materialPerVisit: 10,
+    visitsPerYear: 1,
+    areaField: 'homeSqFt',
+  },
+  rodent_bait: {
+    serviceTypes: ['Rodent Bait'],
+    laborMin: 20,
+    materialPerVisit: 10,
+    visitsPerYear: 4,
+    areaField: 'homeSqFt',
+  },
+};
+
+function normalizeUnit(unit) {
+  return String(unit || '').trim().toLowerCase().replace(/\s+/g, '_').replace(/s$/, '');
+}
+
+function convertToOz(amount, unit) {
+  const n = Number(amount);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const factor = UNIT_TO_OZ[normalizeUnit(unit)];
+  return factor ? n * factor : null;
+}
+
+function costLineFromUsage(row, areaSqFt) {
+  const usageAmount = Number(row.usage_per_1000sf || 0) > 0 && areaSqFt > 0
+    ? (Number(row.usage_per_1000sf) * areaSqFt) / 1000
+    : Number(row.usage_amount || 0);
+  if (!Number.isFinite(usageAmount) || usageAmount <= 0) {
+    return { cost: 0, warning: `Missing usage amount for ${row.product_name}` };
+  }
+
+  const usageUnit = row.usage_unit;
+  const costPerUnit = row.cost_per_unit != null ? Number(row.cost_per_unit) : null;
+  if (costPerUnit != null && Number.isFinite(costPerUnit) && costPerUnit >= 0) {
+    const costUnit = row.cost_unit || usageUnit;
+    const usageOz = convertToOz(usageAmount, usageUnit);
+    const costUnitOz = convertToOz(1, costUnit);
+    const convertedUsage = usageOz != null && costUnitOz != null
+      ? usageOz / costUnitOz
+      : usageAmount;
+    return {
+      cost: convertedUsage * costPerUnit,
+      source: 'cost_per_unit',
+    };
+  }
+
+  const bestPrice = row.best_price != null ? Number(row.best_price) : null;
+  const unitSizeOz = row.unit_size_oz != null ? Number(row.unit_size_oz) : null;
+  const usageOz = convertToOz(usageAmount, usageUnit);
+  if (
+    bestPrice != null && Number.isFinite(bestPrice) && bestPrice >= 0
+    && unitSizeOz != null && Number.isFinite(unitSizeOz) && unitSizeOz > 0
+    && usageOz != null
+  ) {
+    return {
+      cost: (usageOz / unitSizeOz) * bestPrice,
+      source: 'best_price_unit_size',
+    };
+  }
+
+  return {
+    cost: 0,
+    warning: `No normalized cost data for ${row.product_name}`,
+  };
+}
+
+async function getInventoryCostEstimate(serviceKey, dimensions) {
+  const fallback = ESTIMATE_COST_FALLBACKS[serviceKey] || {
+    serviceTypes: [],
+    laborMin: 20,
+    materialPerVisit: 10,
+    visitsPerYear: 6,
+    areaField: 'homeSqFt',
+  };
+  const result = {
+    ...fallback,
+    materialPerVisit: fallback.materialPerVisit,
+    materialCostSource: 'fallback',
+    materialCostWarnings: [],
+    materialCostLines: [],
+  };
+
+  try {
+    if (!(await db.schema.hasTable('service_product_usage'))) return result;
+    if (!(await db.schema.hasTable('products_catalog'))) return result;
+
+    const rows = await db('service_product_usage')
+      .join('products_catalog', 'service_product_usage.product_id', 'products_catalog.id')
+      .whereIn('service_product_usage.service_type', fallback.serviceTypes)
+      .select(
+        'service_product_usage.service_type',
+        'service_product_usage.usage_amount',
+        'service_product_usage.usage_unit',
+        'service_product_usage.usage_per_1000sf',
+        'products_catalog.id as product_id',
+        'products_catalog.name as product_name',
+        'products_catalog.cost_per_unit',
+        'products_catalog.cost_unit',
+        'products_catalog.best_price',
+        'products_catalog.unit_size_oz',
+        'products_catalog.best_vendor',
+      );
+
+    if (!rows.length) return result;
+
+    const areaSqFt = Number(dimensions[fallback.areaField] || 0);
+    let materialPerVisit = 0;
+    const sources = new Set();
+    for (const row of rows) {
+      const line = costLineFromUsage(row, areaSqFt);
+      if (line.warning) result.materialCostWarnings.push(line.warning);
+      if (line.source) sources.add(line.source);
+      materialPerVisit += line.cost || 0;
+      result.materialCostLines.push({
+        productId: row.product_id,
+        productName: row.product_name,
+        serviceType: row.service_type,
+        cost: Math.round((line.cost || 0) * 100) / 100,
+        source: line.source || 'missing',
+      });
+    }
+
+    if (materialPerVisit > 0) {
+      result.materialPerVisit = Math.round(materialPerVisit * 100) / 100;
+      result.materialCostSource = sources.has('cost_per_unit')
+        ? 'inventory_cost_per_unit'
+        : 'inventory_best_price_unit_size';
+    }
+  } catch (err) {
+    result.materialCostWarnings.push(`Inventory COGS unavailable: ${err.message}`);
+  }
+
+  return result;
+}
+
 async function ensureTable() {
   if (!(await db.schema.hasTable('pricing_config'))) {
     await db.schema.createTable('pricing_config', t => {
@@ -193,6 +386,7 @@ router.get('/changelog', async (req, res, next) => {
 router.post('/margin-check', async (req, res) => {
   try {
     const { lotSqFt = 10000, homeSqFt = 2000, lawnSqFt = 5000, bedArea = 1500, waveguardTier = 'gold' } = req.body;
+    const dimensions = { lotSqFt, homeSqFt, lawnSqFt, bedArea };
 
     // Try to use the pricing engine
     let pricingEngine;
@@ -223,18 +417,10 @@ router.post('/margin-check', async (req, res) => {
       },
     });
 
-    // Estimated costs per service
-    const costEstimates = {
-      pest_control: { laborMin: 20, materialPerVisit: 6.67, visitsPerYear: 4 },
-      lawn_care: { laborMin: 30, materialPerVisit: 25, visitsPerYear: 9 },
-      tree_shrub: { laborMin: 25, materialPerVisit: 20, visitsPerYear: 9 },
-      mosquito: { laborMin: 15, materialPerVisit: 8, visitsPerYear: 12 },
-    };
-
     const services = [];
     for (const item of estimate.lineItems) {
       if (!item.annual) continue;
-      const ce = costEstimates[item.service] || { laborMin: 20, materialPerVisit: 10, visitsPerYear: 6 };
+      const ce = await getInventoryCostEstimate(item.service, dimensions);
       const laborPerVisit = laborRate * ce.laborMin / 60;
       const costPerVisit = laborPerVisit + ce.materialPerVisit + driveCost;
       const annualCost = costPerVisit * (item.visits || item.visitsPerYear || ce.visitsPerYear);
@@ -245,6 +431,11 @@ router.post('/margin-check', async (req, res) => {
         service: item.service,
         annual: item.annual,
         estimatedCost: Math.round(annualCost),
+        costPerVisit: Math.round(costPerVisit * 100) / 100,
+        materialPerVisit: ce.materialPerVisit,
+        materialCostSource: ce.materialCostSource,
+        materialCostWarnings: ce.materialCostWarnings,
+        materialCostLines: ce.materialCostLines,
         afterDiscount: Math.round(afterDiscount),
         discount: item.discount?.effectiveDiscount || 0,
         margin: Math.round(margin * 1000) / 1000,
