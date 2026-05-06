@@ -24,7 +24,7 @@ function capitalizeName(name) {
     .replace(/\bO'(\w)/g, (_, c) => "O'" + c.toUpperCase());
 }
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
-const { subscribeOrResubscribe, linkToCustomer, EMAIL_RE } = require('./newsletter-subscribers');
+const { subscribeOrResubscribe, EMAIL_RE } = require('./newsletter-subscribers');
 const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { resolveLocation } = require('../config/locations');
@@ -83,7 +83,10 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
 
   const existing = await db('newsletter_subscribers').where({ email: emailLc }).first();
   if (existing?.status === 'unsubscribed') {
-    await linkToCustomer(emailLc);
+    await db('newsletter_subscribers')
+      .where({ id: existing.id })
+      .whereNull('customer_id')
+      .update({ customer_id: customerId, updated_at: new Date() });
     logger.info(`[call-proc] Newsletter subscribe skipped for customer ${customerId}: previously unsubscribed`);
     return { skipped: true, reason: 'previously_unsubscribed' };
   }
