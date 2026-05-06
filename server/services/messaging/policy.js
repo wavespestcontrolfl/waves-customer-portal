@@ -147,7 +147,7 @@ const PURPOSE_POLICY = {
     allowExactPrice: false,
     maxSegments: 2,
     requireConsent: 'transactional',
-    prefsColumn: 'service_reminder_24h',
+    prefsColumn: null,
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId'],
   },
