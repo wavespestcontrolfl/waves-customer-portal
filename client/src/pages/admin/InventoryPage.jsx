@@ -553,6 +553,12 @@ function ApprovalsTab({ showToast, onUpdate }) {
 // ══════════════════════════════════════════════════════════════
 // PROTOCOLS TAB
 // ══════════════════════════════════════════════════════════════
+function costSourceLabel(product) {
+  if (product.costSource === 'cost_per_unit') return 'Unit cost';
+  if (product.costSource === 'best_price_unit_size') return 'Best price';
+  return product.costWarning ? 'Missing' : 'Fallback';
+}
+
 function ProtocolsTab({ showToast }) {
   const [services, setServices] = useState([]);
   const [products, setProducts] = useState([]);
@@ -619,7 +625,7 @@ function ProtocolsTab({ showToast }) {
             </div>
           </div>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead><tr>{['Product', 'Usage', 'Per 1000sf', 'Best Price', 'Cost/App', 'Primary', 'Notes', ''].map(h => <th key={h} style={thS}>{h}</th>)}</tr></thead>
+            <thead><tr>{['Product', 'Usage', 'Per 1000sf', 'Best Price', 'Cost/App', 'Cost Source', 'Primary', 'Notes', ''].map(h => <th key={h} style={thS}>{h}</th>)}</tr></thead>
             <tbody>
               {svc.products.map(p => editingRow === p.id ? (
                 <tr key={p.id} style={{ background: `${D.teal}10` }}>
@@ -628,6 +634,7 @@ function ProtocolsTab({ showToast }) {
                   <td style={tdS}><input value={editForm.usagePer1000sf} onChange={e => setEditForm(f => ({ ...f, usagePer1000sf: e.target.value }))} type="number" step="0.001" placeholder="—" style={{ ...sInput, width: 70 }} /></td>
                   <td style={{ ...tdS, fontFamily: "'JetBrains Mono', monospace" }}>{p.bestPrice ? `$${parseFloat(p.bestPrice).toFixed(2)}` : '—'}</td>
                   <td style={{ ...tdS, fontFamily: "'JetBrains Mono', monospace", color: D.green }}>{p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : '—'}</td>
+                  <td style={{ ...tdS, fontSize: 11, color: D.muted }}>{costSourceLabel(p)}</td>
                   <td style={tdS}><input type="checkbox" checked={editForm.isPrimary} onChange={e => setEditForm(f => ({ ...f, isPrimary: e.target.checked }))} style={{ accentColor: D.teal }} /></td>
                   <td style={tdS}><input value={editForm.notes} onChange={e => setEditForm(f => ({ ...f, notes: e.target.value }))} style={{ ...sInput, width: '100%' }} /></td>
                   <td style={{ ...tdS, width: 80 }}><div style={{ display: 'flex', gap: 4 }}><button onClick={() => saveEdit(p.id)} style={{ fontSize: 10, padding: '3px 6px', borderRadius: 4, border: 'none', background: D.green, color: '#fff', cursor: 'pointer' }}>Save</button><button onClick={() => setEditingRow(null)} style={{ fontSize: 10, padding: '3px 6px', borderRadius: 4, border: `1px solid ${D.border}`, background: 'none', color: D.muted, cursor: 'pointer' }}>×</button></div></td>
@@ -639,6 +646,7 @@ function ProtocolsTab({ showToast }) {
                   <td style={{ ...tdS, fontSize: 12 }}>{p.usagePer1000sf || '—'}</td>
                   <td style={{ ...tdS, fontFamily: "'JetBrains Mono', monospace" }}>{p.bestPrice ? `$${parseFloat(p.bestPrice).toFixed(2)}` : '—'}</td>
                   <td style={{ ...tdS, fontFamily: "'JetBrains Mono', monospace", color: D.green }}>{p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : '—'}</td>
+                  <td style={{ ...tdS, fontSize: 11, color: p.costWarning ? D.amber : D.muted }} title={p.costWarning || ''}>{costSourceLabel(p)}</td>
                   <td style={{ ...tdS, fontSize: 11 }}>{p.isPrimary ? '✓' : ''}</td>
                   <td style={{ ...tdS, fontSize: 11, color: D.muted, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.notes || '—'}</td>
                   <td style={{ ...tdS, width: 80 }}><div style={{ display: 'flex', gap: 4 }}>
@@ -698,7 +706,7 @@ function MarginsTab({ showToast }) {
             <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 16, fontWeight: 700, color: D.green }}>${svc.totalCost.toFixed(2)}/app</div>
           </div>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead><tr>{['Product', 'Usage', 'Per 1000sf', 'Best Price', 'Cost/App'].map(h => <th key={h} style={thS}>{h}</th>)}</tr></thead>
+            <thead><tr>{['Product', 'Usage', 'Per 1000sf', 'Best Price', 'Cost/App', 'Cost Source'].map(h => <th key={h} style={thS}>{h}</th>)}</tr></thead>
             <tbody>{svc.products.map(p => (
               <tr key={p.id}>
                 <td style={{ ...tdS, fontWeight: 500 }}>{p.productName} {p.isPrimary && <span style={sBadge(`${D.teal}22`, D.teal)}>Primary</span>}</td>
@@ -706,6 +714,7 @@ function MarginsTab({ showToast }) {
                 <td style={{ ...tdS, fontSize: 12 }}>{p.usagePer1000sf || '—'}</td>
                 <td style={{ ...tdS, fontFamily: "'JetBrains Mono', monospace" }}>{p.bestPrice ? `$${parseFloat(p.bestPrice).toFixed(2)}` : '—'}</td>
                 <td style={{ ...tdS, fontFamily: "'JetBrains Mono', monospace", color: D.green }}>{p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : '—'}</td>
+                <td style={{ ...tdS, fontSize: 11, color: p.costWarning ? D.amber : D.muted }} title={p.costWarning || ''}>{costSourceLabel(p)}</td>
               </tr>
             ))}</tbody>
           </table>

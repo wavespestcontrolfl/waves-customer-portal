@@ -3,33 +3,9 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { costLineFromUsage } = require('../services/product-costing');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
-
-const UNIT_TO_OZ = {
-  fl_oz: 1,
-  floz: 1,
-  oz: 1,
-  ounce: 1,
-  ounces: 1,
-  gal: 128,
-  gallon: 128,
-  gallons: 128,
-  qt: 32,
-  quart: 32,
-  pt: 16,
-  pint: 16,
-  ml: 0.033814,
-  l: 33.814,
-  liter: 33.814,
-  lb: 16,
-  lbs: 16,
-  pound: 16,
-  pounds: 16,
-  g: 0.035274,
-  gram: 0.035274,
-  kg: 35.274,
-};
 
 const ESTIMATE_COST_FALLBACKS = {
   pest_control: {
@@ -75,60 +51,6 @@ const ESTIMATE_COST_FALLBACKS = {
     areaField: 'homeSqFt',
   },
 };
-
-function normalizeUnit(unit) {
-  return String(unit || '').trim().toLowerCase().replace(/\s+/g, '_').replace(/s$/, '');
-}
-
-function convertToOz(amount, unit) {
-  const n = Number(amount);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  const factor = UNIT_TO_OZ[normalizeUnit(unit)];
-  return factor ? n * factor : null;
-}
-
-function costLineFromUsage(row, areaSqFt) {
-  const usageAmount = Number(row.usage_per_1000sf || 0) > 0 && areaSqFt > 0
-    ? (Number(row.usage_per_1000sf) * areaSqFt) / 1000
-    : Number(row.usage_amount || 0);
-  if (!Number.isFinite(usageAmount) || usageAmount <= 0) {
-    return { cost: 0, warning: `Missing usage amount for ${row.product_name}` };
-  }
-
-  const usageUnit = row.usage_unit;
-  const costPerUnit = row.cost_per_unit != null ? Number(row.cost_per_unit) : null;
-  if (costPerUnit != null && Number.isFinite(costPerUnit) && costPerUnit >= 0) {
-    const costUnit = row.cost_unit || usageUnit;
-    const usageOz = convertToOz(usageAmount, usageUnit);
-    const costUnitOz = convertToOz(1, costUnit);
-    const convertedUsage = usageOz != null && costUnitOz != null
-      ? usageOz / costUnitOz
-      : usageAmount;
-    return {
-      cost: convertedUsage * costPerUnit,
-      source: 'cost_per_unit',
-    };
-  }
-
-  const bestPrice = row.best_price != null ? Number(row.best_price) : null;
-  const unitSizeOz = row.unit_size_oz != null ? Number(row.unit_size_oz) : null;
-  const usageOz = convertToOz(usageAmount, usageUnit);
-  if (
-    bestPrice != null && Number.isFinite(bestPrice) && bestPrice >= 0
-    && unitSizeOz != null && Number.isFinite(unitSizeOz) && unitSizeOz > 0
-    && usageOz != null
-  ) {
-    return {
-      cost: (usageOz / unitSizeOz) * bestPrice,
-      source: 'best_price_unit_size',
-    };
-  }
-
-  return {
-    cost: 0,
-    warning: `No normalized cost data for ${row.product_name}`,
-  };
-}
 
 async function getInventoryCostEstimate(serviceKey, dimensions) {
   const fallback = ESTIMATE_COST_FALLBACKS[serviceKey] || {

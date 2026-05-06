@@ -4,41 +4,13 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
+const {
+  calcLandedCost,
+  costLineFromUsage,
+  normalizeQuantityToOz,
+} = require('../services/product-costing');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
-
-// ── Unit normalization engine ──
-const UNIT_TO_OZ = {
-  oz: 1, fl_oz: 1, 'fl oz': 1, floz: 1,
-  gal: 128, gallon: 128,
-  qt: 32, quart: 32,
-  pt: 16, pint: 16,
-  l: 33.814, liter: 33.814,
-  ml: 0.033814,
-  lb: 16, lbs: 16, pound: 16,
-  g: 0.035274, gram: 0.035274,
-  kg: 35.274,
-  each: null, stations: null, case: null, bag: null, box: null,
-};
-
-function normalizeToOz(quantity) {
-  if (!quantity) return null;
-  const q = String(quantity).toLowerCase().trim();
-  const match = q.match(/^([\d.]+)\s*(.*)/);
-  if (!match) return null;
-  const amount = parseFloat(match[1]);
-  const unit = match[2].replace(/s$/, '').trim();
-  const factor = UNIT_TO_OZ[unit];
-  if (!factor || isNaN(amount)) return null;
-  return Math.round(amount * factor * 100) / 100;
-}
-
-function calcLandedCost(price, shipping, taxRate) {
-  const p = parseFloat(price) || 0;
-  const s = parseFloat(shipping) || 0;
-  const t = parseFloat(taxRate) || 0;
-  return Math.round((p + s) * (1 + t) * 100) / 100;
-}
 
 function numberOrNull(value) {
   if (value === '' || value == null) return null;
@@ -223,7 +195,7 @@ router.put('/:productId/pricing', async (req, res, next) => {
   try {
     const { vendorId, price, quantity, url, shippingCost, taxRate } = req.body;
     const productId = req.params.productId;
-    const sizeOz = normalizeToOz(quantity);
+    const sizeOz = normalizeQuantityToOz(quantity);
     const landed = calcLandedCost(price, shippingCost, taxRate);
     const perOz = sizeOz ? Math.round(parseFloat(price) / sizeOz * 10000) / 10000 : null;
 
@@ -537,19 +509,23 @@ router.get('/service-usage', async (req, res, next) => {
       .join('products_catalog', 'service_product_usage.product_id', 'products_catalog.id')
       .select('service_product_usage.*', 'products_catalog.name as product_name',
         'products_catalog.best_price', 'products_catalog.best_vendor',
-        'products_catalog.container_size')
+        'products_catalog.container_size', 'products_catalog.cost_per_unit',
+        'products_catalog.cost_unit', 'products_catalog.unit_size_oz')
       .orderBy('service_type');
 
     // Group by service type
     const grouped = {};
     usage.forEach(u => {
       if (!grouped[u.service_type]) grouped[u.service_type] = { serviceType: u.service_type, products: [], totalCost: 0 };
-      const cost = u.best_price && u.usage_amount ? parseFloat(u.best_price) * parseFloat(u.usage_amount) : 0;
+      const costLine = costLineFromUsage(u);
+      const cost = costLine.cost || 0;
       grouped[u.service_type].products.push({
         id: u.id, productId: u.product_id, productName: u.product_name,
         usageAmount: u.usage_amount, usageUnit: u.usage_unit,
         usagePer1000sf: u.usage_per_1000sf, isPrimary: u.is_primary,
         bestPrice: u.best_price, bestVendor: u.best_vendor,
+        costSource: costLine.source || 'missing',
+        costWarning: costLine.warning || null,
         costPerApp: cost > 0 ? Math.round(cost * 100) / 100 : null,
       });
       grouped[u.service_type].totalCost += cost;
