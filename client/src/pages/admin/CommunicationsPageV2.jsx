@@ -176,6 +176,20 @@ function StatusBadgeV2({ status }) {
   );
 }
 
+function SmsDeliveryReceiptV2({ status, readAt }) {
+  const normalized = String(status || '').toLowerCase();
+  if (readAt) {
+    return `Read internally ${formatTimestamp(readAt)}`;
+  }
+  if (!normalized) return null;
+  if (normalized === 'delivered') return 'Delivered';
+  if (normalized === 'sent') return 'Sent to carrier';
+  if (normalized === 'queued' || normalized === 'accepted') return 'Queued';
+  if (normalized === 'undelivered') return 'Undelivered';
+  if (normalized === 'failed') return 'Failed';
+  return normalized.replace(/_/g, ' ');
+}
+
 function TypeBadgeV2({ type }) {
   if (!type) return null;
   return <Badge tone="neutral">{type.replace(/_/g, ' ')}</Badge>;
@@ -334,6 +348,9 @@ function ConversationViewV2({ thread, messages, onReply, onBack, onOpenProfile }
       <div className="flex-1 md:max-h-[500px] md:overflow-y-auto flex flex-col gap-2">
         {messages.map((m) => {
           const isOut = m.direction === 'outbound';
+          const receipt = isOut
+            ? SmsDeliveryReceiptV2({ status: m.status })
+            : SmsDeliveryReceiptV2({ readAt: m.readAt });
           return (
             <div
               key={m.id}
@@ -373,6 +390,20 @@ function ConversationViewV2({ thread, messages, onReply, onBack, onOpenProfile }
                       )}
                     >
                       {m.messageType.replace(/_/g, ' ')}
+                    </span>
+                  )}
+                  {receipt && (
+                    <span
+                      className={cn(
+                        'text-11',
+                        isOut
+                          ? m.status === 'failed' || m.status === 'undelivered'
+                            ? 'text-red-200'
+                            : 'text-white/70'
+                          : 'text-ink-tertiary',
+                      )}
+                    >
+                      {receipt}
                     </span>
                   )}
                 </div>
@@ -422,12 +453,6 @@ function SmsTab() {
   // Threading
   const [smsView, setSmsView] = useState('threads');
   const [activeThread, setActiveThread] = useState(null);
-  const [threadReadAt, setThreadReadAt] = useState(() => {
-    try {
-      const raw = localStorage.getItem('waves_sms_thread_read_at');
-      return raw ? JSON.parse(raw) : {};
-    } catch { return {}; }
-  });
   const [smsSearch, setSmsSearch] = useState('');
   // PR 4 — status filter chips, reply-from lock.
   const [statusFilter, setStatusFilter] = useState('all');
@@ -454,6 +479,48 @@ function SmsTab() {
     const t = setTimeout(() => { loadData(smsSearch.trim()); }, 300);
     return () => clearTimeout(t);
   }, [smsSearch, loadData]);
+
+  const markMessagesRead = useCallback(async (thread) => {
+    const threadMessages = Array.isArray(thread?.messages)
+      ? thread.messages
+      : Array.isArray(thread?.messagesList)
+        ? thread.messagesList
+        : [];
+    const unreadIds = threadMessages
+      .filter((m) => m.direction === 'inbound' && !m.isRead)
+      .map((m) => m.id)
+      .filter(Boolean);
+    const conversationIds = [...new Set(threadMessages
+      .map((m) => m.conversationId)
+      .filter(Boolean))];
+    const readBefore = thread?.lastTimestamp || threadMessages.reduce((latest, m) => (
+      !latest || new Date(m.createdAt) > new Date(latest) ? m.createdAt : latest
+    ), null);
+    if (!unreadIds.length && !conversationIds.length) return;
+
+    const readAt = new Date().toISOString();
+    setMessages((prev) => prev.map((m) => (
+      unreadIds.includes(m.id) ? { ...m, isRead: true, readAt } : m
+    )));
+    setActiveThread((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        messages: prev.messages.map((m) => (
+          unreadIds.includes(m.id) ? { ...m, isRead: true, readAt } : m
+        )),
+      };
+    });
+
+    try {
+      await adminFetch('/admin/communications/messages/read', {
+        method: 'POST',
+        body: JSON.stringify({ messageIds: unreadIds, conversationIds, readBefore }),
+      });
+    } catch {
+      loadData(smsSearch.trim());
+    }
+  }, [loadData, smsSearch]);
 
   useEffect(() => {
     adminFetch('/admin/communications/ai-auto-reply-status')
@@ -667,20 +734,17 @@ function SmsTab() {
     const threadList = Object.values(threadMap).map((t) => {
       t.messages.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
       t.unanswered = t.lastDirection === 'inbound';
+      t.unread = t.messages.some((m) => m.direction === 'inbound' && !m.isRead);
       return t;
     });
     threadList.sort((a, b) => new Date(b.lastTimestamp) - new Date(a.lastTimestamp));
     return threadList;
   }, [messages]);
 
-  const phoneLast10 = (p) => (p || '').replace(/\D/g, '').slice(-10);
-
   const filteredThreads = threads.filter((t) => {
     // PR 4 — status filter chips (stacked on top of message-type smsFilter).
     if (statusFilter !== 'all') {
-      const key = phoneLast10(t.contactPhone);
-      const lastReadAt = threadReadAt[key];
-      const hasUnseen = t.unanswered && (!lastReadAt || new Date(t.lastTimestamp) > new Date(lastReadAt));
+      const hasUnseen = t.unread;
       if (statusFilter === 'unread' && !hasUnseen) return false;
       if (statusFilter === 'unanswered' && !t.unanswered) return false;
       if (statusFilter === 'unknown' && t.customerName) return false;
@@ -704,14 +768,12 @@ function SmsTab() {
   const chipCounts = useMemo(() => {
     let unread = 0, unanswered = 0, unknown = 0;
     threads.forEach((t) => {
-      const key = phoneLast10(t.contactPhone);
-      const lastReadAt = threadReadAt[key];
-      if (t.unanswered && (!lastReadAt || new Date(t.lastTimestamp) > new Date(lastReadAt))) unread++;
+      if (t.unread) unread++;
       if (t.unanswered) unanswered++;
       if (!t.customerName) unknown++;
     });
     return { all: threads.length, unread, unanswered, unknown };
-  }, [threads, threadReadAt]);
+  }, [threads]);
 
   const handleThreadReply = (contactPhone, ourNumber) => {
     setToNumber(contactPhone);
@@ -1192,30 +1254,22 @@ function SmsTab() {
                     ? t.lastMessage.slice(0, 60) + '…'
                     : t.lastMessage
                   : '';
-                const threadKey = t.contactPhone?.replace(/\D/g, '').slice(-10);
-                const lastReadAt = threadReadAt[threadKey];
-                const hasUnseen = t.unanswered
-                  && (!lastReadAt || new Date(t.lastTimestamp) > new Date(lastReadAt));
+                const hasUnseen = t.unread;
                 const displayName = t.customerName || t.contactPhone;
                 const initials = getInitials(t.customerName || t.contactPhone);
                 return (
                   <div
                     key={i}
                     onClick={() => {
-                      setActiveThread(t);
+                      const openedThread = { ...t };
+                      setActiveThread(openedThread);
                       setSmsView('conversation');
                       setToNumber(t.contactPhone);
                       if (t.ourNumber) {
                         setFromNumber(t.ourNumber);
                         setThreadLock({ contactPhone: t.contactPhone, ourNumber: t.ourNumber, label: NUMBER_LABEL_MAP[t.ourNumber] || t.ourNumber });
                       }
-                      setThreadReadAt((prev) => {
-                        const next = { ...prev, [threadKey]: t.lastTimestamp };
-                        try {
-                          localStorage.setItem('waves_sms_thread_read_at', JSON.stringify(next));
-                        } catch { /* ignore */ }
-                        return next;
-                      });
+                      markMessagesRead(openedThread);
                     }}
                     className={cn(
                       'w-full text-left px-3.5 py-3.5 md:py-3 border-b border-hairline border-zinc-200 flex items-center gap-3 cursor-pointer',

@@ -107,7 +107,10 @@ async function appendMessage(opts) {
     message_type: opts.messageType || null,
     ai_summary: opts.aiSummary || null,
     is_read: opts.isRead === true,
+    read_at: opts.isRead === true ? (opts.readAt || new Date()) : null,
+    read_by_admin_user_id: opts.readByAdminUserId || null,
     metadata: opts.metadata ? JSON.stringify(opts.metadata) : '{}',
+    updated_at: new Date(),
   }).returning('*');
 
   const now = new Date();

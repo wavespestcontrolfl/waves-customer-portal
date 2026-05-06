@@ -194,9 +194,9 @@ router.get('/log', async (req, res, next) => {
       .leftJoin('customers', 'conversations.customer_id', 'customers.id')
       .where('messages.channel', 'sms')
       .select(
-        'messages.id', 'messages.direction', 'messages.body',
+        'messages.id', 'messages.conversation_id', 'messages.direction', 'messages.body',
         'messages.delivery_status as status', 'messages.message_type',
-        'messages.created_at', 'messages.media',
+        'messages.created_at', 'messages.media', 'messages.is_read', 'messages.read_at',
         'conversations.customer_id', 'conversations.our_endpoint_id',
         'conversations.contact_phone',
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone'
@@ -242,15 +242,60 @@ router.get('/log', async (req, res, next) => {
       const from = m.direction === 'inbound' ? contact : ours;
       const to = m.direction === 'inbound' ? ours : contact;
       return {
-        id: m.id, direction: m.direction, from, to,
+        id: m.id, conversationId: m.conversation_id, direction: m.direction, from, to,
         body: m.body, status: m.status, messageType: m.message_type,
         customerId: m.customer_id, customerName,
         createdAt: m.created_at,
+        isRead: !!m.is_read,
+        readAt: m.read_at,
         media: await signMediaForClient(m.media),
       };
     }));
 
     res.json({ messages });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/communications/messages/read — mark inbound SMS as read
+router.post('/messages/read', async (req, res, next) => {
+  try {
+    const ids = Array.isArray(req.body?.messageIds)
+      ? req.body.messageIds.filter((id) => typeof id === 'string' && id.trim())
+      : [];
+    const conversationIds = Array.isArray(req.body?.conversationIds)
+      ? req.body.conversationIds.filter((id) => typeof id === 'string' && id.trim())
+      : [];
+    const readBefore = req.body?.readBefore ? new Date(req.body.readBefore) : null;
+    if (!ids.length && !conversationIds.length) {
+      return res.status(400).json({ error: 'messageIds or conversationIds required' });
+    }
+    if (conversationIds.length && (!readBefore || Number.isNaN(readBefore.getTime()))) {
+      return res.status(400).json({ error: 'readBefore required when marking a conversation read' });
+    }
+
+    const now = new Date();
+    let q = db('messages')
+      .where({ channel: 'sms', direction: 'inbound' })
+      .andWhere(function unreadOnly() {
+        this.where({ is_read: false }).orWhereNull('is_read');
+      });
+    q = q.andWhere(function byMessageOrConversation() {
+      if (ids.length) this.whereIn('id', ids);
+      if (conversationIds.length) {
+        this.orWhere(function visibleConversationRows() {
+          this.whereIn('conversation_id', conversationIds)
+            .where('created_at', '<=', readBefore);
+        });
+      }
+    });
+    const updated = await q.update({
+      is_read: true,
+      read_at: now,
+      read_by_admin_user_id: req.technicianId || null,
+      updated_at: now,
+    });
+
+    res.json({ success: true, updated });
   } catch (err) { next(err); }
 });
 
