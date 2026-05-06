@@ -647,6 +647,8 @@ export default function CustomersPageV2() {
   const navigate = useNavigate();
   const [customers, setCustomers] = useState([]);
   const [pipelineData, setPipelineData] = useState(null);
+  const [pipelineLoading, setPipelineLoading] = useState(false);
+  const [pipelineError, setPipelineError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [searchParams] = useSearchParams();
@@ -716,7 +718,7 @@ export default function CustomersPageV2() {
     setSavingEdit(false);
   };
 
-  const loadCustomers = (p) => {
+  function loadCustomers(p) {
     const pg = p || page;
     const seq = loadSeqRef.current + 1;
     loadSeqRef.current = seq;
@@ -751,13 +753,21 @@ export default function CustomersPageV2() {
         setError(e);
         setLoading(false);
       });
-  };
+  }
 
-  const loadPipeline = () => {
+  function loadPipeline() {
+    setPipelineLoading(true);
+    setPipelineError(null);
     adminFetch('/admin/customers/pipeline/view')
-      .then((data) => setPipelineData(data))
-      .catch(() => {});
-  };
+      .then((data) => {
+        setPipelineData(data);
+        setPipelineLoading(false);
+      })
+      .catch((e) => {
+        setPipelineError(e);
+        setPipelineLoading(false);
+      });
+  }
 
   useEffect(() => () => {
     if (loadAbortRef.current) loadAbortRef.current.abort();
@@ -854,7 +864,7 @@ export default function CustomersPageV2() {
     });
   }
 
-  if (loading && customers.length === 0) {
+  if (view !== 'pipeline' && loading && customers.length === 0) {
     return (
       <div className="p-16 text-center text-13 text-ink-secondary">
         Loading customers…
@@ -862,7 +872,7 @@ export default function CustomersPageV2() {
     );
   }
 
-  if (error && customers.length === 0) {
+  if (view !== 'pipeline' && error && customers.length === 0) {
     const rateLimited = isRateLimitError(error);
     return (
       <div className="p-16 text-center">
@@ -1422,7 +1432,20 @@ export default function CustomersPageV2() {
       {/* ======================= PIPELINE (V2 monochrome) ======================= */}
       {view === 'pipeline' && (
         <>
+          {pipelineLoading && (
+            <div className="p-6 text-center text-13 text-ink-secondary">
+              Loading pipeline…
+            </div>
+          )}
+          {pipelineError && !pipelineLoading && (
+            <div className="p-6 text-center">
+              <div className="text-14 text-alert-fg mb-3">Failed to load pipeline</div>
+              <div className="text-13 text-ink-tertiary mb-4">{pipelineError.message || String(pipelineError)}</div>
+              <Button variant="primary" onClick={() => loadPipeline()}>Retry</Button>
+            </div>
+          )}
           {/* Mobile: single selected stage, full-width */}
+          {!pipelineError && (
           <div className="sm:hidden mt-4">
             <PipelineColumnV2
               stage={STAGE_MAP[pipelineStageMobile]}
@@ -1431,7 +1454,9 @@ export default function CustomersPageV2() {
               fullWidth
             />
           </div>
+          )}
           {/* Desktop: horizontal scrolling board */}
+          {!pipelineError && (
           <div className="hidden sm:flex gap-3 overflow-x-auto pb-3 mt-4" style={{ WebkitOverflowScrolling: 'touch' }}>
             {KANBAN_STAGES.map((key) => {
               const stage = STAGE_MAP[key];
@@ -1445,6 +1470,7 @@ export default function CustomersPageV2() {
               );
             })}
           </div>
+          )}
         </>
       )}
 
