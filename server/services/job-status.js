@@ -123,9 +123,58 @@ const { autoResolveOverdueAlertsForJob } = require('./dispatch-alerts');
 const CUSTOMER_EVENT = 'customer:job_update';
 const ADMIN_EVENT = 'dispatch:job_update';
 const ADMIN_ROOM = 'dispatch:admins';
+const STALE_TECH_STATUS_MS = 5 * 60 * 1000;
+const CUSTOMER_ETA_TIMEOUT_MS = 750;
 
 function customerRoom(customerId) {
   return `customer:${customerId}`;
+}
+
+function finiteNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+async function buildCustomerEta(row, toStatus, bouncieService) {
+  if (toStatus !== 'en_route') return null;
+  const techLat = finiteNumber(row.tech_lat);
+  const techLng = finiteNumber(row.tech_lng);
+  const customerLat = finiteNumber(row.customer_latitude);
+  const customerLng = finiteNumber(row.customer_longitude);
+  if (techLat == null || techLng == null || customerLat == null || customerLng == null) {
+    return null;
+  }
+
+  const updatedAt = row.tech_status_updated_at || null;
+  const updatedMs = updatedAt ? new Date(updatedAt).getTime() : NaN;
+  if (!Number.isFinite(updatedMs) || Date.now() - updatedMs > STALE_TECH_STATUS_MS) {
+    return null;
+  }
+
+  try {
+    const svc = bouncieService || require('./bouncie');
+    const etaPromise = Promise.resolve(
+      svc.calculateETAFromCoords(techLat, techLng, customerLat, customerLng)
+    ).catch((err) => {
+      logger.warn(`[job-status] customer ETA calculation failed for ${row.job_id}: ${err.message}`);
+      return null;
+    });
+    const timeoutPromise = new Promise((resolve) => {
+      setTimeout(() => resolve(null), CUSTOMER_ETA_TIMEOUT_MS);
+    });
+    const eta = await Promise.race([etaPromise, timeoutPromise]);
+    if (!eta) return null;
+    return {
+      minutes: eta.etaMinutes ?? null,
+      distanceMiles: eta.distanceMiles ?? null,
+      source: eta.source || null,
+      techUpdatedAt: updatedAt,
+    };
+  } catch (err) {
+    logger.warn(`[job-status] customer ETA lookup failed for ${row.job_id}: ${err.message}`);
+    return null;
+  }
 }
 
 /**
@@ -144,6 +193,7 @@ async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
   const row = await trx('scheduled_services as s')
     .leftJoin('technicians as t', 's.technician_id', 't.id')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
+    .leftJoin('tech_status as ts', 's.technician_id', 'ts.tech_id')
     .where('s.id', jobId)
     .first(
       's.id as job_id',
@@ -157,7 +207,12 @@ async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
       's.internal_notes',
       's.updated_at',
       't.name as tech_full_name',
-      'c.first_name as cust_first_name'
+      'c.first_name as cust_first_name',
+      'c.latitude as customer_latitude',
+      'c.longitude as customer_longitude',
+      'ts.lat as tech_lat',
+      'ts.lng as tech_lng',
+      'ts.updated_at as tech_status_updated_at'
     );
   if (!row) throw new Error(`transitionJobStatus: job ${jobId} not found`);
 
@@ -169,10 +224,7 @@ async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
     // ── PII BOUNDARY: see file header. Strict allowlist. ─────────────
     job_id: row.job_id,
     status: toStatus,
-    eta: null, // ETA derivation lands in a future PR; field included
-               // now for forward compat with the customer tracker UI.
-               // When wired, source from BouncieService.calculateETA
-               // for status='en_route'; null for other statuses.
+    eta: await buildCustomerEta(row, toStatus),
     tech_id: row.tech_id,
     tech_first_name: techFirstName,
     updated_at: row.updated_at,
@@ -348,4 +400,7 @@ module.exports = {
   ADMIN_EVENT,
   ADMIN_ROOM,
   customerRoom,
+  _test: {
+    buildCustomerEta,
+  },
 };
