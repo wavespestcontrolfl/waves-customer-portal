@@ -8,6 +8,10 @@ const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
+const {
+  calculateBoundedTrackingEta,
+  finiteNumber,
+} = require('../services/customer-tracking-eta');
 
 router.use(authenticate);
 
@@ -51,8 +55,7 @@ function firstNameOf(fullName) {
 }
 
 function parseFiniteCoordinate(value) {
-  const num = Number(value);
-  return Number.isFinite(num) ? num : null;
+  return finiteNumber(value);
 }
 
 async function attachTechPhoto(tracker, tech) {
@@ -236,9 +239,9 @@ async function findCanonicalScheduledService(customerId, opts = {}) {
 async function enrichWithLiveMap(tracker, service, tech, customer) {
   if (!tracker || tracker.currentStep !== 3) return tracker;
   try {
-    const custLat = Number(customer?.latitude);
-    const custLng = Number(customer?.longitude);
-    if (Number.isFinite(custLat) && Number.isFinite(custLng)) {
+    const custLat = finiteNumber(customer?.latitude);
+    const custLng = finiteNumber(customer?.longitude);
+    if (custLat != null && custLng != null) {
       tracker.customerLocation = { lat: custLat, lng: custLng };
     }
 
@@ -252,18 +255,24 @@ async function enrichWithLiveMap(tracker, service, tech, customer) {
     let eta = null;
     if (tracker.customerLocation) {
       try {
-        // calculateETA() has its own fallback chain (Google → haversine
-        // → default 15min). Safe to call even without the Google key.
-        const etaData = await BouncieService.calculateETA(custLat, custLng);
+        const etaData = await calculateBoundedTrackingEta({
+          techLat: pos.lat,
+          techLng: pos.lng,
+          customerLat: custLat,
+          customerLng: custLng,
+          techUpdatedAt: pos.updatedAt,
+          bouncieService: BouncieService,
+          logPrefix: 'tracking-live-map',
+        });
         if (etaData) {
           eta = {
-            minutes: etaData.etaMinutes,
+            minutes: etaData.minutes,
             distanceMiles: etaData.distanceMiles,
             source: etaData.source,
           };
           tracker.etaSource = etaData.source ?? null;
-          if (etaData.etaMinutes && (!tracker.etaMinutes || Math.abs(tracker.etaMinutes - etaData.etaMinutes) > 2)) {
-            tracker.etaMinutes = etaData.etaMinutes;
+          if (etaData.minutes && (!tracker.etaMinutes || Math.abs(tracker.etaMinutes - etaData.minutes) > 2)) {
+            tracker.etaMinutes = etaData.minutes;
           }
         }
       } catch { /* non-fatal */ }
@@ -294,29 +303,37 @@ async function enrichWithLiveMap(tracker, service, tech, customer) {
 async function enrichScheduledWithTechStatus(tracker, service, customer) {
   if (!tracker || tracker.currentStep !== 3) return tracker;
   try {
-    const custLat = Number(customer?.latitude);
-    const custLng = Number(customer?.longitude);
-    if (Number.isFinite(custLat) && Number.isFinite(custLng)) {
+    const custLat = finiteNumber(customer?.latitude);
+    const custLng = finiteNumber(customer?.longitude);
+    if (custLat != null && custLng != null) {
       tracker.customerLocation = { lat: custLat, lng: custLng };
     }
     if (!service?.technician_id) return tracker;
     const ts = await db('tech_status')
       .where({ tech_id: service.technician_id })
       .first('lat', 'lng', 'updated_at');
-    if (!ts || ts.lat == null || ts.lng == null) return tracker;
-    const lat = Number(ts.lat);
-    const lng = Number(ts.lng);
+    if (!ts || finiteNumber(ts.lat) == null || finiteNumber(ts.lng) == null) return tracker;
+    const lat = finiteNumber(ts.lat);
+    const lng = finiteNumber(ts.lng);
     let eta = null;
     if (tracker.customerLocation) {
       const BouncieService = require('../services/bouncie');
-      const etaData = await BouncieService.calculateETAFromCoords(lat, lng, custLat, custLng).catch(() => null);
+      const etaData = await calculateBoundedTrackingEta({
+        techLat: lat,
+        techLng: lng,
+        customerLat: custLat,
+        customerLng: custLng,
+        techUpdatedAt: ts.updated_at,
+        bouncieService: BouncieService,
+        logPrefix: 'tracking-tech-status',
+      });
       if (etaData) {
         eta = {
-          minutes: etaData.etaMinutes,
+          minutes: etaData.minutes,
           distanceMiles: etaData.distanceMiles,
           source: etaData.source,
         };
-        tracker.etaMinutes = etaData.etaMinutes ?? null;
+        tracker.etaMinutes = etaData.minutes ?? null;
         tracker.etaSource = etaData.source ?? null;
       }
     }

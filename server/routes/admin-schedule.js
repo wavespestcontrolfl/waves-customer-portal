@@ -14,6 +14,7 @@ const {
   etDateString, etParts, addETDays, addETMonthsByWeekday,
   etNthWeekdayOfMonth, parseETDateTime,
 } = require('../utils/datetime-et');
+const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 
 // ─── Destructive maintenance endpoints ──────────────────────────────────────
 // Defined BEFORE the router-level auth chain so `devOnly` runs first and
@@ -115,10 +116,18 @@ async function calculateAssignedScheduleEta(serviceId, bouncieService) {
     };
   }
 
-  const eta = await bouncieService.calculateETAFromCoords(location.lat, location.lng, customerLat, customerLng);
+  const eta = await calculateBoundedTrackingEta({
+    techLat: location.lat,
+    techLng: location.lng,
+    customerLat,
+    customerLng,
+    techUpdatedAt: location.updatedAt,
+    bouncieService,
+    logPrefix: 'admin-schedule-eta',
+  });
   return {
     available: true,
-    etaMinutes: eta?.etaMinutes ?? null,
+    etaMinutes: eta?.minutes ?? null,
     distanceMiles: eta?.distanceMiles ?? null,
     source: eta?.source || null,
     techId: location.techId,
@@ -2698,6 +2707,7 @@ router._test = {
   buildAssignedScheduleEtaQuery,
   buildTechStatusQuery,
   formatAssignedVehicleLocation,
+  calculateAssignedScheduleEta,
 };
 
 module.exports = router;
