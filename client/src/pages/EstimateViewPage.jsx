@@ -287,8 +287,12 @@ function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, o
   );
 }
 
-function SuccessCard({ onboardingToken, invoiceMode }) {
-  if (invoiceMode) {
+function SuccessCard({ acceptResult }) {
+  const nextStep = acceptResult?.nextStep || (acceptResult?.invoiceMode ? 'pay_invoice' : 'confirmed');
+  const onboardingToken = acceptResult?.onboardingToken || null;
+  const bookingUrl = acceptResult?.bookingUrl || null;
+
+  if (nextStep === 'pay_invoice') {
     return (
       <div style={{
         background: COLORS.white, borderRadius: 16, padding: 28, textAlign: 'center',
@@ -298,13 +302,70 @@ function SuccessCard({ onboardingToken, invoiceMode }) {
         <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           Thanks — your invoice is on the way.
         </div>
-        <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
-          Check your phone and email for the pay link. Your service request
-          has been received and our team will confirm the schedule.
+      <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
+        Check your phone and email for the pay link. Your service request
+        has been received and our team will confirm the schedule.
+      </div>
+    </div>
+    );
+  }
+
+  if (nextStep === 'book_one_time') {
+    return (
+      <div style={{
+        background: COLORS.white, borderRadius: 16, padding: 28, textAlign: 'center',
+        borderTop: `4px solid ${COLORS.green}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
+        marginBottom: 16,
+      }}>
+        <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+          You're approved for a one-time service.
         </div>
+        <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
+          {bookingUrl
+            ? 'Check your phone for the booking link, or pick your appointment now.'
+            : 'Our team will follow up to help schedule your appointment.'}
+        </div>
+        {bookingUrl ? (
+          <a
+            href={bookingUrl}
+            style={{
+              display: 'inline-block', marginTop: 16, padding: '14px 20px',
+              background: COLORS.wavesBlue, color: COLORS.white, textDecoration: 'none',
+              borderRadius: 12, fontWeight: 600, fontSize: 15,
+            }}
+          >Pick appointment</a>
+        ) : null}
       </div>
     );
   }
+
+  if (nextStep === 'complete_onboarding') {
+    return (
+      <div style={{
+        background: COLORS.white, borderRadius: 16, padding: 28, textAlign: 'center',
+        borderTop: `4px solid ${COLORS.green}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
+        marginBottom: 16,
+      }}>
+        <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+          You're booked.
+        </div>
+        <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
+          Check your phone for the confirmation text. Finish setup to keep your appointment moving.
+        </div>
+        {onboardingToken ? (
+          <a
+            href={`/onboard/${onboardingToken}`}
+            style={{
+              display: 'inline-block', marginTop: 16, padding: '14px 20px',
+              background: COLORS.wavesBlue, color: COLORS.white, textDecoration: 'none',
+              borderRadius: 12, fontWeight: 600, fontSize: 15,
+            }}
+          >Continue to setup</a>
+        ) : null}
+      </div>
+    );
+  }
+
   return (
     <div style={{
       background: COLORS.white, borderRadius: 16, padding: 28, textAlign: 'center',
@@ -316,19 +377,8 @@ function SuccessCard({ onboardingToken, invoiceMode }) {
         You're booked.
       </div>
       <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
-        Check your phone for the confirmation text.
-        {onboardingToken ? ' We also sent you an onboarding link to finish setup.' : ''}
+        Check your phone for the confirmation text. Our team will confirm the schedule.
       </div>
-      {onboardingToken ? (
-        <a
-          href={`/onboard/${onboardingToken}`}
-          style={{
-            display: 'inline-block', marginTop: 16, padding: '14px 20px',
-            background: COLORS.wavesBlue, color: COLORS.white, textDecoration: 'none',
-            borderRadius: 12, fontWeight: 600, fontSize: 15,
-          }}
-        >Continue to setup</a>
-      ) : null}
     </div>
   );
 }
@@ -374,8 +424,7 @@ export default function EstimateViewPage() {
   const [paymentPreference, setPaymentPreference] = useState(null);
   const [ctaPhase, setCtaPhase] = useState('configure');
   const [reservation, setReservation] = useState(null);
-  const [onboardingToken, setOnboardingToken] = useState(null);
-  const [invoiceMode, setInvoiceMode] = useState(false);
+  const [acceptResult, setAcceptResult] = useState(null);
   const [error, setError] = useState(null);
   const [slotsRefreshSignal, setSlotsRefreshSignal] = useState(0);
 
@@ -544,8 +593,7 @@ export default function EstimateViewPage() {
         throw new Error(body.error || `accept failed: ${r.status}`);
       }
       const body = await r.json();
-      setOnboardingToken(body.onboardingToken || null);
-      setInvoiceMode(!!body.invoiceMode);
+      setAcceptResult(body);
       setCtaPhase('success');
       setReservation(null);
     } catch (err) {
@@ -592,7 +640,7 @@ export default function EstimateViewPage() {
     return (
       <Page>
         <Header customerFirstName={estimate.customerFirstName} address={estimate.address} />
-        <SuccessCard onboardingToken={onboardingToken} invoiceMode={invoiceMode} />
+        <SuccessCard acceptResult={acceptResult} />
         <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
       </Page>
     );
