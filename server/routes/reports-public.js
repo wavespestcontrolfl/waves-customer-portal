@@ -42,6 +42,22 @@ router.get('/project/:token/data', async (req, res, next) => {
 
     if (!project.report_viewed_at) {
       await db('projects').where({ id: project.id }).update({ report_viewed_at: db.fn.now() });
+      try {
+        const customerName = `${project.first_name || ''} ${project.last_name || ''}`.trim();
+        await db('activity_log').insert({
+          customer_id: project.customer_id,
+          action: 'project_report_viewed',
+          description: customerName
+            ? `${customerName} viewed project report for ${project.project_type}`
+            : `Project report viewed for ${project.project_type}`,
+          metadata: {
+            project_id: project.id,
+            project_type: project.project_type,
+          },
+        });
+      } catch (err) {
+        logger.warn(`[reports-public] project activity_log insert failed: ${err.message}`);
+      }
     }
 
     const photos = await db('project_photos')

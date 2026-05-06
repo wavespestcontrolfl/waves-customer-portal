@@ -129,6 +129,25 @@ function isMissingS3ObjectError(err) {
   return statusCode === 404 || ['NoSuchKey', 'NotFound'].includes(err?.name || err?.Code || err?.code);
 }
 
+async function logProjectActivity(req, project, action, description, metadata = {}) {
+  if (!project?.customer_id) return;
+  try {
+    await db('activity_log').insert({
+      admin_user_id: req?.technicianId || null,
+      customer_id: project.customer_id,
+      action,
+      description,
+      metadata: {
+        project_id: project.id,
+        project_type: project.project_type,
+        ...metadata,
+      },
+    });
+  } catch (err) {
+    logger.warn(`[projects] activity_log insert failed for ${project.id}: ${err.message}`);
+  }
+}
+
 function escapeHtml(value) {
   return String(value || '')
     .replace(/&/g, '&amp;')
@@ -518,6 +537,12 @@ router.post('/', async (req, res, next) => {
     }).returning('*');
 
     logger.info(`[projects] created ${row.id} (${project_type}) by tech ${req.technicianId}`);
+    await logProjectActivity(
+      req,
+      row,
+      'project_created',
+      `Project created: ${getProjectType(row.project_type)?.label || row.project_type}`,
+    );
     res.json({ project: row });
   } catch (err) { next(err); }
 });
@@ -568,6 +593,13 @@ router.put('/:id', async (req, res, next) => {
 
     await db('projects').where({ id: req.params.id }).update({ ...updates, updated_at: db.fn.now() });
     const updated = await db('projects').where({ id: req.params.id }).first();
+    await logProjectActivity(
+      req,
+      updated,
+      'project_updated',
+      `Project updated: ${getProjectType(updated.project_type)?.label || updated.project_type}`,
+      { fields: Object.keys(updates) },
+    );
     res.json({ project: updated });
   } catch (err) { next(err); }
 });
@@ -591,6 +623,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       : null;
 
     const token = project.report_token || crypto.randomBytes(16).toString('hex');
+    const sendAction = project.sent_at || project.status === 'sent' ? 'project_report_resent' : 'project_report_sent';
     await db('projects').where({ id: req.params.id }).update({
       status: 'sent',
       report_token: token,
@@ -725,6 +758,14 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       updated_at: db.fn.now(),
     });
 
+    await logProjectActivity(
+      req,
+      project,
+      sendAction,
+      `${sendAction === 'project_report_resent' ? 'Project report resent' : 'Project report sent'}: ${typeLabel}`,
+      { report_token: token, channels },
+    );
+
     logger.info(`[projects] sent ${project.id} token=${token} sms=${channels.sms?.ok} email=${channels.email?.ok}`);
     res.json({ project_id: project.id, report_token: token, report_url: `/report/project/${token}`, channels });
   } catch (err) { next(err); }
@@ -738,6 +779,12 @@ router.post('/:id/close', requireAdmin, async (req, res, next) => {
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) return res.status(404).json({ error: 'Project not found' });
     await db('projects').where({ id: req.params.id }).update({ status: 'closed', updated_at: db.fn.now() });
+    await logProjectActivity(
+      req,
+      project,
+      'project_closed',
+      `Project closed: ${getProjectType(project.project_type)?.label || project.project_type}`,
+    );
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
@@ -759,6 +806,12 @@ router.post('/:id/followup', async (req, res, next) => {
       updated_at: db.fn.now(),
     });
     const updated = await db('projects').where({ id: req.params.id }).first();
+    await logProjectActivity(
+      req,
+      updated,
+      'project_followup_recorded',
+      `Project follow-up recorded: ${getProjectType(updated.project_type)?.label || updated.project_type}`,
+    );
     res.json({ project: updated });
   } catch (err) { next(err); }
 });
@@ -845,6 +898,13 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
       uploaded_by_tech_id: req.technicianId,
     }).returning('*');
 
+    await logProjectActivity(
+      req,
+      project,
+      'project_photo_uploaded',
+      `Project photo uploaded: ${req.file.originalname}`,
+      { photo_id: row.id, category: row.category, visit: row.visit },
+    );
     res.json({ photo: row });
   } catch (err) { next(err); }
 });
@@ -886,6 +946,13 @@ router.delete('/:id/photos/:photoId', async (req, res, next) => {
       .where({ id: req.params.photoId, project_id: req.params.id })
       .del();
     if (!deleted) return res.status(404).json({ error: 'Photo not found' });
+    await logProjectActivity(
+      req,
+      project,
+      'project_photo_deleted',
+      `Project photo deleted: ${photo.caption || photo.category || photo.id}`,
+      { photo_id: photo.id, category: photo.category, visit: photo.visit },
+    );
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
@@ -913,6 +980,7 @@ router._private = {
   detectedImageMime,
   validateUploadedImage,
   isMissingS3ObjectError,
+  logProjectActivity,
 };
 
 module.exports = router;

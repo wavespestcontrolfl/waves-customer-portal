@@ -163,7 +163,7 @@ describe('admin projects routes', () => {
 
   test('invalid image content is rejected on upload', async () => {
     const projectRead = chain({
-      first: jest.fn().mockResolvedValue({ id: 'project-1', created_by_tech_id: 'tech-1' }),
+      first: jest.fn().mockResolvedValue({ id: 'project-1', customer_id: 'customer-1', created_by_tech_id: 'tech-1' }),
     });
     db.mockImplementation((table) => {
       if (table === 'projects') return projectRead;
@@ -184,6 +184,42 @@ describe('admin projects routes', () => {
     });
   });
 
+  test('project create writes customer activity', async () => {
+    const createdProject = {
+      id: 'project-1',
+      customer_id: 'customer-1',
+      project_type: 'pest_inspection',
+      status: 'draft',
+      created_by_tech_id: 'tech-1',
+    };
+    const projectInsert = chain({
+      returning: jest.fn().mockResolvedValue([createdProject]),
+    });
+    const activityInsert = chain();
+    db.mockImplementation((table) => {
+      if (table === 'projects') return projectInsert;
+      if (table === 'activity_log') return activityInsert;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer tech-1', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ customer_id: 'customer-1', project_type: 'pest_inspection' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.project.id).toBe('project-1');
+      expect(activityInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+        admin_user_id: 'tech-1',
+        customer_id: 'customer-1',
+        action: 'project_created',
+        metadata: expect.objectContaining({ project_id: 'project-1', project_type: 'pest_inspection' }),
+      }));
+    });
+  });
+
   test('send persists channel delivery results for later admin reloads', async () => {
     const projectRead = chain({
       first: jest.fn().mockResolvedValue({
@@ -196,6 +232,7 @@ describe('admin projects routes', () => {
     });
     const markSent = chain();
     const persistDelivery = chain();
+    const activityInsert = chain();
     const customerRead = chain({
       first: jest.fn().mockResolvedValue({
         id: 'customer-1',
@@ -209,6 +246,7 @@ describe('admin projects routes', () => {
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
       if (table === 'customers') return customerRead;
+      if (table === 'activity_log') return activityInsert;
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -224,6 +262,12 @@ describe('admin projects routes', () => {
       expect(persistDelivery.update).toHaveBeenCalledWith(expect.objectContaining({
         delivery_channels: body.channels,
         last_delivery_at: 'NOW',
+      }));
+      expect(activityInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+        admin_user_id: 'admin-1',
+        customer_id: 'customer-1',
+        action: 'project_report_sent',
+        metadata: expect.objectContaining({ project_id: 'project-1', channels: body.channels }),
       }));
     });
   });
@@ -265,7 +309,7 @@ describe('admin projects routes', () => {
 
   test('photo delete removes database row when storage object is already missing', async () => {
     const projectRead = chain({
-      first: jest.fn().mockResolvedValue({ id: 'project-1', created_by_tech_id: 'tech-1' }),
+      first: jest.fn().mockResolvedValue({ id: 'project-1', customer_id: 'customer-1', created_by_tech_id: 'tech-1' }),
     });
     const photoRead = chain({
       first: jest.fn().mockResolvedValue({
@@ -275,6 +319,7 @@ describe('admin projects routes', () => {
       }),
     });
     const photoDelete = chain();
+    const activityInsert = chain();
     const missingError = new Error('No such key');
     missingError.name = 'NoSuchKey';
     mockS3Send.mockRejectedValue(missingError);
@@ -283,6 +328,7 @@ describe('admin projects routes', () => {
     db.mockImplementation((table) => {
       if (table === 'projects') return projectRead;
       if (table === 'project_photos') return photoQueries.shift();
+      if (table === 'activity_log') return activityInsert;
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -295,6 +341,11 @@ describe('admin projects routes', () => {
       expect(res.status).toBe(200);
       expect(body.ok).toBe(true);
       expect(photoDelete.del).toHaveBeenCalledTimes(1);
+      expect(activityInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+        admin_user_id: 'tech-1',
+        action: 'project_photo_deleted',
+        metadata: expect.objectContaining({ photo_id: 'photo-1' }),
+      }));
     });
   });
 });
