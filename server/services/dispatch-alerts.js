@@ -28,11 +28,9 @@
  * lives in this module. The dispatcher UI consuming the channel
  * is the client; payload shape is type-specific.
  *
- * Resolution (POST /api/admin/alerts/:id/resolve, future PR) is NOT
- * in this module's scope. When it lands, it will likely use a
- * separate event channel (dispatch:alert_resolved) so the right-pane
- * can clean up cards in real time across multiple connected
- * dispatchers. For now this module is create-only.
+ * Resolution also lives here. Single-card and bulk clears use
+ * dispatch:alert_resolved so the right-pane can clean up cards in
+ * real time across multiple connected dispatchers.
  */
 const db = require('../models/db');
 const { getIo } = require('../sockets');
@@ -211,6 +209,71 @@ function emitResolved(row) {
   });
 }
 
+function summarizeResolvedAlerts(rows) {
+  const byKey = new Map();
+  for (const row of rows || []) {
+    const type = row.type || 'unknown';
+    const severity = row.severity || 'unknown';
+    const key = `${type}\u0000${severity}`;
+    const current = byKey.get(key) || { type, severity, count: 0 };
+    current.count += 1;
+    byKey.set(key, current);
+  }
+  return Array.from(byKey.values()).sort((a, b) => {
+    if (b.count !== a.count) return b.count - a.count;
+    if (a.type !== b.type) return a.type.localeCompare(b.type);
+    return a.severity.localeCompare(b.severity);
+  });
+}
+
+/**
+ * Mark every currently open action-queue alert resolved.
+ *
+ * This is the operational "clear current Action Queue" path. Rows are
+ * never deleted; resolved_at/resolved_by preserve the audit trail while
+ * dispatch:alert_resolved broadcasts remove cards from connected boards.
+ *
+ * @param {object} args
+ * @param {string} [args.resolvedBy] optional technicians.id of actor
+ * @param {object} [args.trx] optional Knex transaction
+ * @returns {Promise<{resolved: number, counts: Array, alerts: Array}>}
+ */
+async function resolveAllOpenAlerts({ resolvedBy, trx } = {}) {
+  async function doWrite(t) {
+    return t('dispatch_alerts')
+      .whereNull('resolved_at')
+      .update({
+        resolved_at: t.fn.now(),
+        resolved_by: resolvedBy || null,
+      })
+      .returning(['id', 'type', 'severity', 'tech_id', 'job_id', 'payload', 'created_at', 'resolved_at', 'resolved_by']);
+  }
+
+  let rows;
+  if (trx) {
+    rows = await doWrite(trx);
+    if (trx.executionPromise) {
+      trx.executionPromise.then(() => rows.forEach(emitResolved)).catch(() => {
+        // Outer rollback. Suppress emits for rows that did not commit.
+      });
+    } else {
+      logger.warn('[dispatch-alerts] trx.executionPromise missing — emitting bulk resolves inline (test harness?)');
+      rows.forEach(emitResolved);
+    }
+  } else {
+    await db.transaction(async (innerTrx) => {
+      rows = await doWrite(innerTrx);
+    });
+    rows.forEach(emitResolved);
+  }
+
+  return {
+    resolved: rows.length,
+    counts: summarizeResolvedAlerts(rows),
+    alerts: rows,
+  };
+}
+
 // Statuses where any open OVERDUE-FAMILY alert (tech_late OR
 // unassigned_overdue) for the job becomes meaningless and should
 // be auto-cleared:
@@ -282,6 +345,7 @@ async function autoResolveOverdueAlertsForJob({ jobId, resolvedBy, trx, toStatus
 module.exports = {
   createAlert,
   resolveAlert,
+  resolveAllOpenAlerts,
   autoResolveOverdueAlertsForJob,
   OVERDUE_ALERT_AUTO_RESOLVE_STATUSES,
   OVERDUE_ALERT_TYPES,

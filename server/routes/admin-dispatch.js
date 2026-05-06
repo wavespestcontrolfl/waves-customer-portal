@@ -2413,6 +2413,29 @@ router.get('/alerts', requireAdmin, async (req, res, next) => {
   }
 });
 
+// POST /api/admin/dispatch/alerts/resolve-all — clear current Action Queue.
+//
+// Bulk version of PATCH /alerts/:id/resolve. It marks every unresolved
+// dispatch_alerts row resolved, keeps rows for audit history, and emits
+// dispatch:alert_resolved for each cleared row so connected dispatch
+// boards drop the cards without a refresh.
+router.post('/alerts/resolve-all', requireAdmin, async (req, res, next) => {
+  try {
+    const { resolveAllOpenAlerts } = require('../services/dispatch-alerts');
+    const result = await resolveAllOpenAlerts({
+      resolvedBy: req.technicianId,
+    });
+    res.json({
+      resolved: result.resolved,
+      counts: result.counts,
+      alert_ids: result.alerts.map((alert) => alert.id),
+    });
+  } catch (err) {
+    logger.error(`[dispatch/alerts/resolve-all] failed: ${err.message}`);
+    next(err);
+  }
+});
+
 // PATCH /api/admin/dispatch/alerts/:id/resolve — close an action queue card.
 //
 // Sets resolved_at + resolved_by on the row and broadcasts

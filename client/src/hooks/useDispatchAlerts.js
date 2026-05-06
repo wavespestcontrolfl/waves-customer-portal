@@ -162,5 +162,19 @@ export function useDispatchAlerts() {
     return res.json();
   }, []);
 
-  return { alerts, loading, error, resolveAlert };
+  const clearAlerts = useCallback(async () => {
+    const res = await fetch(
+      `${API_BASE}/admin/dispatch/alerts/resolve-all`,
+      { method: 'POST', headers: adminAuthHeaders() }
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const clearedIds = new Set(Array.isArray(data.alert_ids) ? data.alert_ids : []);
+    setAlerts((prev) => (
+      clearedIds.size > 0 ? prev.filter((a) => !clearedIds.has(a.id)) : prev
+    ));
+    return data;
+  }, []);
+
+  return { alerts, loading, error, resolveAlert, clearAlerts };
 }
