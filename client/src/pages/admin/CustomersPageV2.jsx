@@ -43,18 +43,11 @@ import AddressAutocomplete from '../../components/AddressAutocomplete';
 import useIsMobile from '../../hooks/useIsMobile';
 import {
   CUSTOMER_TAG_OPTIONS,
+  LEAD_SOURCE_OPTIONS,
   PROPERTY_LABEL_OPTIONS,
   normalizeCustomerTag,
 } from '../../lib/customerFormOptions';
 import { CustomerHealthSection } from './CustomerHealthTabs';
-import {
-  STAGES,
-  STAGE_MAP,
-  KANBAN_STAGES,
-  LEAD_SOURCES,
-  CustomerMap,
-  CustomerIntelligenceTab,
-} from './CustomersPage';
 import {
   Button,
   Badge,
@@ -70,6 +63,50 @@ import {
 import { adminFetch, isRateLimitError } from '../../utils/admin-fetch';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+
+const STAGES = [
+  { key: 'new_lead', label: 'New Lead' },
+  { key: 'contacted', label: 'Contacted' },
+  { key: 'estimate_sent', label: 'Est. Sent' },
+  { key: 'estimate_viewed', label: 'Est. Viewed' },
+  { key: 'follow_up', label: 'Follow Up' },
+  { key: 'won', label: 'Won' },
+  { key: 'active_customer', label: 'Active' },
+  { key: 'at_risk', label: 'At Risk' },
+  { key: 'churned', label: 'Churned' },
+  { key: 'lost', label: 'Lost' },
+];
+
+const STAGE_MAP = {};
+STAGES.forEach((stage) => { STAGE_MAP[stage.key] = stage; });
+
+const KANBAN_STAGES = ['new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up', 'won', 'active_customer', 'at_risk'];
+const LEAD_SOURCES = LEAD_SOURCE_OPTIONS;
+
+function LegacyCustomersPanel({ exportName, props = {} }) {
+  const [Component, setComponent] = useState(null);
+  const [loadError, setLoadError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    import('./CustomersPage')
+      .then((mod) => {
+        if (!cancelled) setComponent(() => mod[exportName] || null);
+      })
+      .catch((err) => {
+        if (!cancelled) setLoadError(err);
+      });
+    return () => { cancelled = true; };
+  }, [exportName]);
+
+  if (loadError) {
+    return <div className="p-6 text-13 text-alert-fg">Could not load this panel: {loadError.message}</div>;
+  }
+  if (!Component) {
+    return <div className="p-6 text-13 text-ink-tertiary">Loading...</div>;
+  }
+  return <Component {...props} />;
+}
 
 // Tier badge tone mapping. V2 drops all colored tier palette — all tiers
 // render neutral. No-plan ("Bronze" default with no services) renders as
@@ -1375,7 +1412,10 @@ export default function CustomersPageV2() {
       {/* ======================= MAP ======================= */}
       {view === 'map' && (
         <div className="mt-4">
-          <CustomerMap customers={customers} onSelect={(c) => setSelected360Id(c.id)} />
+          <LegacyCustomersPanel
+            exportName="CustomerMap"
+            props={{ customers, onSelect: (c) => setSelected360Id(c.id) }}
+          />
         </div>
       )}
 
@@ -1412,7 +1452,11 @@ export default function CustomersPageV2() {
       {view === 'health' && <div className="mt-4"><CustomerHealthSection /></div>}
 
       {/* ======================= AI ADVISOR ======================= */}
-      {view === 'intelligence' && <div className="mt-4"><CustomerIntelligenceTab /></div>}
+      {view === 'intelligence' && (
+        <div className="mt-4">
+          <LegacyCustomersPanel exportName="CustomerIntelligenceTab" />
+        </div>
+      )}
 
       {/* ======================= QUICK ADD (desktop modal / mobile Square sheet) ======================= */}
       {!isMobile && (
