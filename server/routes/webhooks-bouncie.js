@@ -22,6 +22,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
+const mileageService = require('../services/bouncie-mileage');
 const { pingTechLocation } = require('../services/tech-status');
 const {
   inspectBouncieWebhook,
@@ -53,9 +54,17 @@ function extractImei(payload) {
   return (
     payload.imei ||
     payload.vehicleId ||
+    payload.vehicle_id ||
     payload.deviceId ||
+    payload.device_id ||
     (payload.vehicle && payload.vehicle.imei) ||
-    (payload.data && !Array.isArray(payload.data) && payload.data.imei) ||
+    (payload.data && !Array.isArray(payload.data) && (
+      payload.data.imei ||
+      payload.data.vehicleId ||
+      payload.data.vehicle_id ||
+      payload.data.deviceId ||
+      payload.data.device_id
+    )) ||
     ''
   );
 }
@@ -64,6 +73,42 @@ function num(v) {
   if (v === null || v === undefined || v === '') return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+function firstPresent(...values) {
+  return values.find((value) => value !== null && value !== undefined && value !== '');
+}
+
+function metersFromPayload(source) {
+  const meters = num(firstPresent(
+    source.distance_meters,
+    source.distanceMeters,
+    source.distance
+  ));
+  if (meters != null) return meters;
+
+  const miles = num(firstPresent(
+    source.distance_miles,
+    source.distanceMiles,
+    source.miles
+  ));
+  return miles != null ? miles / 0.000621371 : null;
+}
+
+function secondsFromPayload(source) {
+  const seconds = num(firstPresent(
+    source.duration_seconds,
+    source.durationSeconds,
+    source.duration
+  ));
+  if (seconds != null) return seconds;
+
+  const minutes = num(firstPresent(
+    source.duration_minutes,
+    source.durationMinutes,
+    source.minutes
+  ));
+  return minutes != null ? minutes * 60 : null;
 }
 
 function pickPoint(source) {
@@ -79,6 +124,44 @@ function pickPoint(source) {
     speed_mph: num(source.speed != null ? source.speed : source.speed_mph),
     ignition: typeof source.ignition === 'boolean' ? source.ignition : null,
     reported_at: source.timestamp || source.ts || null,
+  };
+}
+
+function normalizeTripMetricsPayload(payload, imei) {
+  const source = payload.data && !Array.isArray(payload.data) ? payload.data : payload;
+  const distance = metersFromPayload(source);
+  const duration = secondsFromPayload(source);
+  const hasTripMetric = distance != null || duration != null;
+  if (!hasTripMetric) return null;
+  const transactionId = firstPresent(
+    source.transactionId,
+    source.transaction_id,
+    source.tripId,
+    source.trip_id,
+    source.id,
+    payload.transactionId,
+    payload.transaction_id,
+    payload.tripId,
+    payload.trip_id,
+    payload.id
+  );
+  if (!transactionId) return null;
+
+  return {
+    eventType: 'tripCompleted',
+    imei,
+    data: {
+      ...source,
+      imei,
+      vehicleId: firstPresent(source.vehicleId, source.vehicle_id, payload.vehicleId, payload.vehicle_id, imei),
+      transactionId,
+      startTime: firstPresent(source.startTime, source.start_time, payload.startTime, payload.start_time, source.startedAt, source.started_at),
+      endTime: firstPresent(source.endTime, source.end_time, payload.endTime, payload.end_time, source.endedAt, source.ended_at),
+      distance: distance ?? 0,
+      duration: duration ?? 0,
+      startLocation: firstPresent(source.startLocation, source.start_location, payload.startLocation, payload.start_location),
+      endLocation: firstPresent(source.endLocation, source.end_location, payload.endLocation, payload.end_location),
+    },
   };
 }
 
@@ -155,9 +238,10 @@ async function processTrackingEvent({ logId, eventType, payload }) {
         break;
       }
       case 'trip-metrics': {
-        // TODO: persist distance/duration once the mileage consumer is ready
-        // to read from tracking events. Today the existing /api/bouncie
-        // webhook (tripCompleted) is the mileage system of record.
+        const metricsEvent = normalizeTripMetricsPayload(payload, tech.bouncie_imei);
+        if (metricsEvent) {
+          await mileageService.processTripWebhook(metricsEvent);
+        }
         break;
       }
       default: {
@@ -270,3 +354,8 @@ router.post('/', async (req, res) => {
 });
 
 module.exports = router;
+
+router._test = {
+  normalizeTripMetricsPayload,
+  processTrackingEvent,
+};
