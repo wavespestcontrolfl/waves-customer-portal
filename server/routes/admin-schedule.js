@@ -1300,19 +1300,97 @@ router.post('/:id/invoice', async (req, res, next) => {
       .first();
     if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
 
+    const toCents = (value) => Math.max(0, Math.round((Number(value) || 0) * 100));
+    const centsToDollars = (cents) => (cents / 100).toFixed(2);
+    const applyPrepaidCredit = async (invoice) => {
+      const prepaidCents = svc.prepaid_amount != null ? toCents(svc.prepaid_amount) : 0;
+      if (!(prepaidCents > 0)) {
+        return { invoice, prepaidCredit: 0 };
+      }
+
+      return db.transaction(async (trx) => {
+        const lockedInvoice = await trx('invoices')
+          .where({ id: invoice.id })
+          .forUpdate()
+          .first();
+        if (!lockedInvoice) return { invoice, prepaidCredit: 0 };
+        if (lockedInvoice.status === 'paid') return { invoice: lockedInvoice, prepaidCredit: 0 };
+
+        const invoiceTotalCents = toCents(lockedInvoice.total);
+        if (!(invoiceTotalCents > 0)) {
+          return { invoice: lockedInvoice, prepaidCredit: 0 };
+        }
+        const existingCredit = await trx('payments')
+          .where({ customer_id: svc.customer_id, status: 'paid' })
+          .whereRaw("metadata::jsonb ->> 'source' = ?", ['scheduled_service_prepaid'])
+          .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [lockedInvoice.id])
+          .whereRaw("metadata::jsonb ->> 'scheduled_service_id' = ?", [svc.id])
+          .first('id');
+        if (existingCredit) {
+          return { invoice: lockedInvoice, prepaidCredit: 0 };
+        }
+
+        const creditCents = Math.min(prepaidCents, invoiceTotalCents);
+        const remainingCents = Math.max(0, invoiceTotalCents - creditCents);
+        const prepaidCredit = centsToDollars(creditCents);
+        const remainingTotal = centsToDollars(remainingCents);
+        const stamp = etDateString();
+        const noteLine = `[${stamp}] Prepaid amount applied after tax: $${prepaidCredit}`;
+        const nextNotes = lockedInvoice.notes ? `${lockedInvoice.notes}\n${noteLine}` : noteLine;
+        const paidByPrepayment = remainingCents <= 0;
+        const [updatedInvoice] = await trx('invoices')
+          .where({ id: lockedInvoice.id })
+          .update({
+            total: remainingTotal,
+            status: paidByPrepayment ? 'paid' : lockedInvoice.status,
+            paid_at: paidByPrepayment ? trx.fn.now() : lockedInvoice.paid_at,
+            notes: nextNotes,
+            payment_method: svc.prepaid_method || lockedInvoice.payment_method || null,
+            payment_reference: svc.prepaid_note || lockedInvoice.payment_reference || null,
+            payment_recorded_at: svc.prepaid_at || trx.fn.now(),
+            updated_at: trx.fn.now(),
+          })
+          .returning('*');
+        const creditedInvoice = updatedInvoice || {
+          ...lockedInvoice,
+          total: remainingTotal,
+          status: paidByPrepayment ? 'paid' : lockedInvoice.status,
+          notes: nextNotes,
+        };
+        await trx('payments').insert({
+          customer_id: svc.customer_id,
+          amount: prepaidCredit,
+          status: 'paid',
+          description: `Prepaid credit applied to invoice ${creditedInvoice.invoice_number}`,
+          payment_date: etDateString(),
+          metadata: JSON.stringify({
+            invoice_id: lockedInvoice.id,
+            scheduled_service_id: svc.id,
+            source: 'scheduled_service_prepaid',
+            method: svc.prepaid_method || null,
+            note: svc.prepaid_note || null,
+          }),
+        });
+        return { invoice: creditedInvoice, prepaidCredit: Number(prepaidCredit) };
+      });
+    };
+
     // Reuse the existing invoice for this visit if one already exists and isn't
     // void — avoids dupes if the tech taps "Charge now" twice.
-    const existing = await db('invoices')
+    let existing = await db('invoices')
       .where({ scheduled_service_id: svc.id })
       .whereNot('status', 'void')
       .orderBy('created_at', 'desc')
       .first();
     if (existing) {
+      const applied = await applyPrepaidCredit(existing);
+      existing = applied.invoice;
       return res.json({
         success: true,
         reused: true,
         invoiceId: existing.id,
         total: Number(existing.total),
+        prepaidCredit: applied.prepaidCredit,
         token: existing.token,
         status: existing.status,
       });
@@ -1371,46 +1449,8 @@ router.post('/:id/invoice', async (req, res, next) => {
       taxRate: svc.cust_property_type === 'commercial' ? 0.07 : 0,
     });
 
-    const prepaidAmount = svc.prepaid_amount != null ? Math.max(0, Number(svc.prepaid_amount) || 0) : 0;
-    const invoiceTotal = Number(invoice.total || 0);
-    const prepaidCredit = Math.min(prepaidAmount, invoiceTotal);
-    if (prepaidCredit > 0) {
-      const remainingTotal = Math.max(0, Math.round((invoiceTotal - prepaidCredit) * 100) / 100);
-      const stamp = new Date().toISOString().slice(0, 10);
-      const noteLine = `[${stamp}] Prepaid amount applied after tax: $${prepaidCredit.toFixed(2)}`;
-      const nextNotes = invoice.notes ? `${invoice.notes}\n${noteLine}` : noteLine;
-      const paidByPrepayment = remainingTotal <= 0;
-      const [updatedInvoice] = await db('invoices')
-        .where({ id: invoice.id })
-        .update({
-          total: remainingTotal,
-          status: paidByPrepayment ? 'paid' : invoice.status,
-          paid_at: paidByPrepayment ? db.fn.now() : invoice.paid_at,
-          notes: nextNotes,
-          payment_method: svc.prepaid_method || invoice.payment_method || null,
-          payment_reference: svc.prepaid_note || invoice.payment_reference || null,
-          payment_recorded_at: svc.prepaid_at || db.fn.now(),
-          updated_at: db.fn.now(),
-        })
-        .returning('*');
-      if (updatedInvoice) invoice = updatedInvoice;
-      await db('payments').insert({
-        customer_id: svc.customer_id,
-        amount: prepaidCredit,
-        status: 'paid',
-        description: `Prepaid credit applied to invoice ${invoice.invoice_number}`,
-        payment_date: etDateString(),
-        metadata: JSON.stringify({
-          invoice_id: invoice.id,
-          scheduled_service_id: svc.id,
-          source: 'scheduled_service_prepaid',
-          method: svc.prepaid_method || null,
-          note: svc.prepaid_note || null,
-        }),
-      }).catch((err) => {
-        logger.error(`[schedule] Prepaid ledger insert failed for invoice ${invoice.invoice_number}: ${err.message}`);
-      });
-    }
+    const applied = await applyPrepaidCredit(invoice);
+    invoice = applied.invoice;
 
     logger.info(`[schedule] Pre-completion invoice ${invoice.invoice_number} minted for service ${svc.id}: $${invoice.total}`);
     res.json({
@@ -1418,7 +1458,7 @@ router.post('/:id/invoice', async (req, res, next) => {
       reused: false,
       invoiceId: invoice.id,
       total: Number(invoice.total),
-      prepaidCredit,
+      prepaidCredit: applied.prepaidCredit,
       token: invoice.token,
       status: invoice.status,
     });

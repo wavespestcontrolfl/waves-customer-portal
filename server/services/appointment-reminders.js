@@ -14,7 +14,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
-const { getServiceContact } = require('./customer-contact');
+const { getAppointmentContacts } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays } = require('../utils/datetime-et');
 
@@ -105,9 +105,13 @@ async function isLandline(customerId, phone) {
   try {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return false;
+    const primaryDigits = String(customer.phone || '').replace(/\D/g, '').slice(-10);
+    const checkedDigits = String(phone || '').replace(/\D/g, '').slice(-10);
+    const isPrimaryPhone = primaryDigits && checkedDigits && primaryDigits === checkedDigits;
 
-    // Check cached line_type
-    if (customer.line_type) {
+    // customer.line_type is a customer-primary-phone cache. Service-contact
+    // phones must not poison or inherit it.
+    if (isPrimaryPhone && customer.line_type) {
       if (customer.line_type === 'landline') {
         logger.info(`[appt-remind] Skipping SMS — cached landline for customer ${customerId}`);
         return true;
@@ -125,8 +129,11 @@ async function isLandline(customerId, phone) {
       const lookup = await client.lookups.v2.phoneNumbers(phone).fetch({ fields: 'line_type_intelligence' });
       const lineType = lookup.lineTypeIntelligence?.type || 'unknown';
 
-      // Cache on customer record
-      await db('customers').where({ id: customerId }).update({ line_type: lineType });
+      // Cache only for the customer's primary phone. Service-contact numbers
+      // can differ per property and need a phone-specific cache before reuse.
+      if (isPrimaryPhone) {
+        await db('customers').where({ id: customerId }).update({ line_type: lineType });
+      }
 
       if (lineType === 'landline') {
         logger.info(`[appt-remind] Landline detected for customer ${customerId}, skipping SMS`);
@@ -172,6 +179,22 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
   return true;
 }
 
+async function safeSendAppointment(customer, prefs, renderBody, messageType = 'appointment_reminder', purpose = 'appointment') {
+  const contacts = getAppointmentContacts(customer, prefs);
+  if (!contacts.length) {
+    logger.warn(`[appt-remind] No appointment contact for customer ${customer?.id || 'unknown'}, skipping SMS`);
+    return false;
+  }
+
+  let sentAny = false;
+  for (const contact of contacts) {
+    const body = typeof renderBody === 'function' ? await renderBody(contact) : renderBody;
+    const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose);
+    sentAny = sentAny || sent;
+  }
+  return sentAny;
+}
+
 // ── Get customer + tech info ──
 
 async function getCustomerAndTech(customerId, scheduledServiceId) {
@@ -190,6 +213,17 @@ async function getCustomerAndTech(customerId, scheduledServiceId) {
   }
 
   return { customer, techName };
+}
+
+async function getReminderPrefs(customerId) {
+  const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null);
+  return {
+    raw: prefs || {},
+    smsEnabled: prefs?.sms_enabled !== false,
+    appointmentConfirmation: prefs?.appointment_confirmation !== false,
+    serviceReminder72h: prefs?.service_reminder_72h !== false,
+    serviceReminder24h: prefs?.service_reminder_24h !== false,
+  };
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -245,21 +279,28 @@ const AppointmentReminders = {
       // Send confirmation SMS for booking_new / admin_manual
       if (sendConfirmation) {
         try {
+          const prefs = await getReminderPrefs(customerId);
+          if (!prefs.appointmentConfirmation) {
+            await db('appointment_reminders')
+              .where({ id: record.id })
+              .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
+            logger.info(`[appt-remind] Confirmation skipped by preference for customer ${customerId}`);
+            return record;
+          }
           const { customer, techName } = await getCustomerAndTech(customerId, scheduledServiceId);
-          const contact = getServiceContact(customer);
-          if (contact.phone) {
+          if (customer) {
             const day = formatDay(apptTime);
             const date = formatDate(apptTime);
             const time = formatTime(apptTime);
-            const firstName = contact.name || customer.first_name || 'there';
 
-            const body = await renderTemplate(
-              'appointment_confirmation',
-              { first_name: firstName, service_type: serviceLabel, date, time, day },
-              `Hello ${firstName}! Your ${serviceLabel} appointment has been successfully scheduled for ${date} at ${time}.\n\nPlease reply to this message if you need any assistance.`,
-            );
-
-            const sent = await safeSend(customerId, contact.phone, body, 'confirmation', 'appointment_confirmation');
+            const sent = await safeSendAppointment(customer, prefs.raw, async (contact) => {
+              const firstName = contact.name || customer.first_name || 'there';
+              return renderTemplate(
+                'appointment_confirmation',
+                { first_name: firstName, service_type: serviceLabel, date, time, day },
+                `Hello ${firstName}! Your ${serviceLabel} appointment has been successfully scheduled for ${date} at ${time}.\n\nPlease reply to this message if you need any assistance.`,
+              );
+            }, 'confirmation', 'appointment_confirmation');
 
             if (sent) {
               await db('appointment_reminders')
@@ -323,6 +364,16 @@ const AppointmentReminders = {
         // inside the upper bound as due, while leaving the 24h reminder to own
         // the final day.
         if (!r.reminder_72h_sent && hoursUntil > 24.25 && hoursUntil <= 72.25) {
+          const prefs = await getReminderPrefs(r.customer_id);
+          if (!prefs.smsEnabled || !prefs.serviceReminder72h) {
+            logger.info(`[appt-remind] Skipping 72h reminder for ${r.scheduled_service_id} — disabled by customer preference`);
+            results.skipped++;
+            await db('appointment_reminders')
+              .where({ id: r.id })
+              .update({ reminder_72h_sent: true, reminder_72h_sent_at: new Date() });
+            continue;
+          }
+
           // Skip if booked less than 72h before appointment
           if (hoursFromBookingToAppt < 72) {
             logger.info(`[appt-remind] Skipping 72h reminder for ${r.scheduled_service_id} — booked < 72h before`);
@@ -336,22 +387,21 @@ const AppointmentReminders = {
 
           try {
             const { customer } = await getCustomerAndTech(r.customer_id, r.scheduled_service_id);
-            const contact = getServiceContact(customer);
-            if (!contact.phone) { results.skipped++; continue; }
+            if (!customer) { results.skipped++; continue; }
 
-            const firstName = contact.name || customer?.first_name || 'there';
             const day = formatDay(apptTime);
             const date = formatDate(apptTime);
             const time = formatTime(apptTime);
 
             const serviceLabel = smsServiceLabelStored(r.service_type);
-            const body = await renderTemplate(
-              'reminder_72h',
-              { first_name: firstName, service_type: serviceLabel, day, date, time },
-              `Hello ${firstName}! This is a reminder from Waves that your ${serviceLabel} appointment is scheduled for ${day} at ${time}.\n\nExpect your technician to arrive within a two-hour window of your scheduled start time. Need to reschedule? Log into your Waves Customer Portal at portal.wavespestcontrol.com.\n\nIf you have any questions or need assistance, simply reply to this message.`,
-            );
-
-            await safeSend(r.customer_id, contact.phone, body);
+            await safeSendAppointment(customer, prefs.raw, async (contact) => {
+              const firstName = contact.name || customer?.first_name || 'there';
+              return renderTemplate(
+                'reminder_72h',
+                { first_name: firstName, service_type: serviceLabel, day, date, time },
+                `Hello ${firstName}! This is a reminder from Waves that your ${serviceLabel} appointment is scheduled for ${day} at ${time}.\n\nExpect your technician to arrive within a two-hour window of your scheduled start time. Need to reschedule? Log into your Waves Customer Portal at portal.wavespestcontrol.com.\n\nIf you have any questions or need assistance, simply reply to this message.`,
+              );
+            }, 'reminder_72h', 'appointment_reminder_72h');
 
             await db('appointment_reminders')
               .where({ id: r.id })
@@ -367,6 +417,16 @@ const AppointmentReminders = {
 
         // ── 24-hour reminder ──
         if (!r.reminder_24h_sent && hoursUntil > 0 && hoursUntil <= 24.25) {
+          const prefs = await getReminderPrefs(r.customer_id);
+          if (!prefs.smsEnabled || !prefs.serviceReminder24h) {
+            logger.info(`[appt-remind] Skipping 24h reminder for ${r.scheduled_service_id} — disabled by customer preference`);
+            results.skipped++;
+            await db('appointment_reminders')
+              .where({ id: r.id })
+              .update({ reminder_24h_sent: true, reminder_24h_sent_at: new Date() });
+            continue;
+          }
+
           const apptDateET = etDateString(apptTime);
           const tomorrowET = etDateString(addETDays(now, 1));
           if (apptDateET !== tomorrowET) {
@@ -390,20 +450,19 @@ const AppointmentReminders = {
 
           try {
             const { customer } = await getCustomerAndTech(r.customer_id, r.scheduled_service_id);
-            const contact = getServiceContact(customer);
-            if (!contact.phone) { results.skipped++; continue; }
+            if (!customer) { results.skipped++; continue; }
 
-            const firstName = contact.name || customer?.first_name || 'there';
             const time = formatTime(apptTime);
 
             const serviceLabel = smsServiceLabelStored(r.service_type);
-            const body = await renderTemplate(
-              'reminder_24h',
-              { first_name: firstName, service_type: serviceLabel, time },
-              `Hello ${firstName}! This is a reminder from Waves that your ${serviceLabel} appointment is scheduled for tomorrow at ${time}.\n\nExpect your technician to arrive within a two-hour window of your scheduled start time. Your tech will text you when they are 15 minutes out.\n\nIf you have any questions or need assistance, simply reply to this message.`,
-            );
-
-            await safeSend(r.customer_id, contact.phone, body);
+            await safeSendAppointment(customer, prefs.raw, async (contact) => {
+              const firstName = contact.name || customer?.first_name || 'there';
+              return renderTemplate(
+                'reminder_24h',
+                { first_name: firstName, service_type: serviceLabel, time },
+                `Hello ${firstName}! This is a reminder from Waves that your ${serviceLabel} appointment is scheduled for tomorrow at ${time}.\n\nExpect your technician to arrive within a two-hour window of your scheduled start time. Your tech will text you when they are 15 minutes out.\n\nIf you have any questions or need assistance, simply reply to this message.`,
+              );
+            }, 'appointment_reminder', 'appointment_reminder_24h');
 
             await db('appointment_reminders')
               .where({ id: r.id })
@@ -469,23 +528,23 @@ const AppointmentReminders = {
 
       // Send reschedule notice
       const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
-      const contact = getServiceContact(customer);
-      if (contact.phone) {
-        const firstName = contact.name || customer?.first_name || 'there';
+      if (customer) {
+        const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => null);
         const day = formatDay(newApptTime);
         const date = formatDate(newApptTime);
         const time = formatTime(newApptTime);
 
         const serviceLabel = smsServiceLabelStored(record.service_type);
-        const body = await renderTemplate(
-          'appointment_rescheduled',
-          { first_name: firstName, service_type: serviceLabel, day, date, time },
-          `Hello ${firstName}! Your ${serviceLabel} with Waves has been rescheduled to ${day}, ${date} at ${time}.\n\n` +
-            `Need to change it again? Log into your Waves Customer Portal at portal.wavespestcontrol.com.\n\n` +
-            `Questions or requests? Reply to this message.`,
-        );
-
-        await safeSend(record.customer_id, contact.phone, body);
+        await safeSendAppointment(customer, prefs || {}, async (contact) => {
+          const firstName = contact.name || customer?.first_name || 'there';
+          return renderTemplate(
+            'appointment_rescheduled',
+            { first_name: firstName, service_type: serviceLabel, day, date, time },
+            `Hello ${firstName}! Your ${serviceLabel} with Waves has been rescheduled to ${day}, ${date} at ${time}.\n\n` +
+              `Need to change it again? Log into your Waves Customer Portal at portal.wavespestcontrol.com.\n\n` +
+              `Questions or requests? Reply to this message.`,
+          );
+        }, 'appointment_rescheduled', 'appointment_confirmation');
         logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id} - ${record.service_type} -> ${day} ${date}`);
       }
 
@@ -522,22 +581,22 @@ const AppointmentReminders = {
 
       // Send cancellation notice
       const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
-      const contact = getServiceContact(customer);
-      if (contact.phone) {
-        const firstName = contact.name || customer?.first_name || 'there';
+      if (customer) {
+        const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => null);
         const apptTime = new Date(record.appointment_time);
         const day = formatDay(apptTime);
         const date = formatDate(apptTime);
 
         const serviceLabel = smsServiceLabelStored(record.service_type);
-        const body = await renderTemplate(
-          'appointment_cancelled',
-          { first_name: firstName, service_type: serviceLabel, day, date },
-          `Hello ${firstName}! Your ${serviceLabel} with Waves scheduled for ${day}, ${date} has been cancelled.\n\n` +
-            `Want to reschedule? Reply to this message and we'll get you back on the calendar.`,
-        );
-
-        await safeSend(record.customer_id, contact.phone, body);
+        await safeSendAppointment(customer, prefs || {}, async (contact) => {
+          const firstName = contact.name || customer?.first_name || 'there';
+          return renderTemplate(
+            'appointment_cancelled',
+            { first_name: firstName, service_type: serviceLabel, day, date },
+            `Hello ${firstName}! Your ${serviceLabel} with Waves scheduled for ${day}, ${date} has been cancelled.\n\n` +
+              `Want to reschedule? Reply to this message and we'll get you back on the calendar.`,
+          );
+        }, 'appointment_cancelled', 'appointment_cancellation');
         logger.info(`[appt-remind] Cancellation notice sent for customer ${record.customer_id} - ${record.service_type}`);
       }
 
@@ -586,19 +645,19 @@ const AppointmentReminders = {
       }
 
       const { customer } = await getCustomerAndTech(record.customer_id, representativeScheduledServiceId || record.scheduled_service_id);
-      const contact = getServiceContact(customer);
-      if (contact.phone) {
-        const firstName = contact.name || customer?.first_name || 'there';
+      if (customer) {
+        const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => null);
         const scopeText = options.scope === 'series' ? 'recurring series' : 'future recurring appointments';
         const serviceLabel = smsServiceLabelStored(options.serviceType || record.service_type);
-        const body = await renderTemplate(
-          'appointment_series_cancelled',
-          { first_name: firstName, service_type: serviceLabel, scope: scopeText },
-          `Hello ${firstName}! Your Waves ${scopeText} for ${serviceLabel} has been cancelled.\n\n` +
-            `Want to reschedule? Reply to this message and we'll get you back on the calendar.`,
-        );
-
-        await safeSend(record.customer_id, contact.phone, body, 'appointment_series_cancelled');
+        await safeSendAppointment(customer, prefs || {}, async (contact) => {
+          const firstName = contact.name || customer?.first_name || 'there';
+          return renderTemplate(
+            'appointment_series_cancelled',
+            { first_name: firstName, service_type: serviceLabel, scope: scopeText },
+            `Hello ${firstName}! Your Waves ${scopeText} for ${serviceLabel} has been cancelled.\n\n` +
+              `Want to reschedule? Reply to this message and we'll get you back on the calendar.`,
+          );
+        }, 'appointment_series_cancelled', 'appointment_cancellation');
         logger.info(`[appt-remind] Series cancellation notice sent for customer ${record.customer_id} - ${ids.length} appointment(s)`);
       }
 

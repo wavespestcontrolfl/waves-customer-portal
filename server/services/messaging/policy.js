@@ -13,8 +13,12 @@
  *
  * @typedef {(
  *   'conversational'      |   // inbound-reply / chat continuation
- *   'appointment'         |   // confirm, reminder, en-route, reschedule
+ *   'appointment'         |   // 24h reminder, en-route, reschedule
+ *   'appointment_reminder_72h' |
+ *   'appointment_reminder_24h' |
  *   'appointment_confirmation' | // booked/scheduled confirmation
+ *   'appointment_cancellation' |
+ *   'tech_en_route'      |
  *   'billing'             |   // overdue, statement, dunning
  *   'payment_receipt'     |   // paid receipt / payment confirmation
  *   'payment_failure'     |   // failed charge / retry / bank-verification action required
@@ -66,7 +70,11 @@ const MESSAGE_CHANNELS = ['sms', 'email', 'portal_chat', 'website_chat'];
 const MESSAGE_PURPOSES = [
   'conversational',
   'appointment',
+  'appointment_reminder_72h',
+  'appointment_reminder_24h',
   'appointment_confirmation',
+  'appointment_cancellation',
+  'tech_en_route',
   'billing',
   'payment_receipt',
   'payment_failure',
@@ -143,12 +151,48 @@ const PURPOSE_POLICY = {
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId'],
   },
+  appointment_reminder_72h: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 2,
+    requireConsent: 'transactional',
+    prefsColumn: 'service_reminder_72h',
+    minIdentityTrust: 'phone_matches_customer',
+    requireIds: ['customerId'],
+  },
+  appointment_reminder_24h: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 2,
+    requireConsent: 'transactional',
+    prefsColumn: 'service_reminder_24h',
+    minIdentityTrust: 'phone_matches_customer',
+    requireIds: ['customerId'],
+  },
   appointment_confirmation: {
     allowEmoji: false,
     allowExactPrice: false,
     maxSegments: 2,
     requireConsent: 'transactional',
+    prefsColumn: 'appointment_confirmation',
+    minIdentityTrust: 'phone_matches_customer',
+    requireIds: ['customerId'],
+  },
+  appointment_cancellation: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 2,
+    requireConsent: 'transactional',
     prefsColumn: null,
+    minIdentityTrust: 'phone_matches_customer',
+    requireIds: ['customerId'],
+  },
+  tech_en_route: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 2,
+    requireConsent: 'transactional',
+    prefsColumn: 'tech_en_route',
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId'],
   },

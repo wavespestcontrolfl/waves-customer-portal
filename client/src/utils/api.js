@@ -259,6 +259,17 @@ class ApiClient {
     });
   }
 
+  getPropertyNotificationPrefs() {
+    return this.request('/notifications/property-preferences');
+  }
+
+  updatePropertyNotificationPrefs(customerId, prefs) {
+    return this.request(`/notifications/property-preferences/${customerId}`, {
+      method: 'PUT',
+      body: JSON.stringify(prefs),
+    });
+  }
+
   // ---- Requests ----
   createRequest(data) {
     return this.request('/requests', {
