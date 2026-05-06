@@ -738,9 +738,6 @@ function RoofRatPhoto() {
         alt="Roof rat"
         style={{ display: 'block', width: '100%', maxHeight: 240, objectFit: 'cover' }}
       />
-      <figcaption style={{ padding: '6px 8px', fontSize: 14, color: B.grayDark, lineHeight: 1.35 }}>
-        AI-generated roof rat reference image.
-      </figcaption>
     </figure>
   );
 }
