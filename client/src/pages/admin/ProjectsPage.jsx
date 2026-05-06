@@ -498,6 +498,7 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
       } else {
         setSentLink('');
       }
+      setDelivery(d.project.delivery_channels || null);
     } catch (e) {
       setError(e.message || 'Could not load project');
       setData(null);

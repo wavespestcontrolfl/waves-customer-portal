@@ -714,6 +714,12 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       channels.email = { ok: false, error: 'No email on file' };
     }
 
+    await db('projects').where({ id: req.params.id }).update({
+      delivery_channels: channels,
+      last_delivery_at: db.fn.now(),
+      updated_at: db.fn.now(),
+    });
+
     logger.info(`[projects] sent ${project.id} token=${token} sms=${channels.sms?.ok} email=${channels.email?.ok}`);
     res.json({ project_id: project.id, report_token: token, report_url: `/report/project/${token}`, channels });
   } catch (err) { next(err); }
