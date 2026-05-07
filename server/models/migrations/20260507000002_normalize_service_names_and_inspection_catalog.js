@@ -60,9 +60,13 @@ exports.up = async function (knex) {
     .update({ name: 'Rodent Inspection Service', category: 'inspection' });
 
   // ── 3) Generic " Service" suffix for any name that lacks it ───────────
-  // Names already ending in "Service" or "Membership" (with optional trailing
-  // parenthetical) are left alone. Everything else gets " Service" appended
-  // (BEFORE any trailing parenthetical so the qualifier stays last).
+  // Skip rows that already contain Service/Membership as a word — covers
+  //   "... Service"            (ends with Service)
+  //   "... Service (Quarterly)" (ends with parenthetical qualifier)
+  //   "... Service — Heavy"     (ends with em-dash tier qualifier)
+  //   "... Re-Service"          (\m boundary matches across hyphen)
+  // Then for the remaining rows: insert " Service " BEFORE any trailing
+  // parenthetical so the qualifier stays at the end; otherwise append.
   await knex.raw(`
     UPDATE services
     SET name = CASE
@@ -70,7 +74,7 @@ exports.up = async function (knex) {
         THEN REGEXP_REPLACE(name, '\\s*(\\([^)]*\\))\\s*$', ' Service \\1')
       ELSE name || ' Service'
     END
-    WHERE name !~ '(Service|Membership)(\\s*\\([^)]*\\))?\\s*$'
+    WHERE name !~* '\\m(Service|Membership)\\M'
   `);
 
   // ── 4) Insert new services if they don't yet exist ────────────────────
