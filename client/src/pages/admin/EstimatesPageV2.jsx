@@ -182,6 +182,9 @@ function v3SortFn(a, b) {
 const V3_CHIPS = [
   { key: 'all', label: 'All' },
   { key: 'action', label: 'Action Required' },
+  { key: 'pricing_risk', label: 'Pricing Risk' },
+  { key: 'missing_cogs', label: 'Missing COGS' },
+  { key: 'low_margin', label: 'Low Margin' },
   { key: 'open', label: 'Open' },
   { key: 'closed', label: 'Closed' },
   { key: 'drafts', label: 'Drafts' },
@@ -189,6 +192,9 @@ const V3_CHIPS = [
 
 function v3ChipMatches(e, chip) {
   if (chip === 'all') return true;
+  if (chip === 'pricing_risk') return !!e.pricingRisk?.hasRisk;
+  if (chip === 'missing_cogs') return (e.pricingRisk?.missingCogsCount || 0) > 0;
+  if (chip === 'low_margin') return (e.pricingRisk?.lowMarginCount || 0) > 0;
   if (chip === 'drafts') return e.status === 'draft';
   if (chip === 'open') return e.status === 'scheduled' || e.status === 'sent' || e.status === 'viewed';
   if (chip === 'closed') return e.status === 'accepted' || e.status === 'declined';
@@ -201,6 +207,35 @@ function v3ChipMatches(e, chip) {
     return false;
   }
   return true;
+}
+
+const PRICING_RISK_FILTERS = [
+  { key: 'pricing_risk', label: 'Pricing Risk' },
+  { key: 'missing_cogs', label: 'Missing COGS' },
+  { key: 'low_margin', label: 'Low Margin' },
+];
+
+const PIPELINE_AND_RISK_FILTERS = [...PIPELINE_FILTERS, ...PRICING_RISK_FILTERS];
+
+function estimateMatchesFilter(e, filter) {
+  if (filter === 'all') return true;
+  if (filter === 'pricing_risk') return !!e.pricingRisk?.hasRisk;
+  if (filter === 'missing_cogs') return (e.pricingRisk?.missingCogsCount || 0) > 0;
+  if (filter === 'low_margin') return (e.pricingRisk?.lowMarginCount || 0) > 0;
+  return e._class === filter;
+}
+
+function PricingRiskBadges({ risk }) {
+  if (!risk?.hasRisk) return null;
+  return (
+    <>
+      {(risk.missingCogsCount || 0) > 0 && <Badge tone="alert">Missing COGS</Badge>}
+      {(risk.lowMarginCount || 0) > 0 && <Badge tone="alert">Low Margin</Badge>}
+      {risk.status === 'warning' && !(risk.missingCogsCount || risk.lowMarginCount) && (
+        <Badge tone="alert">Pricing Warning</Badge>
+      )}
+    </>
+  );
 }
 
 function v3ChipCounts(estimates) {
@@ -572,7 +607,7 @@ function EstimatePipelineViewV2() {
     // When the "Archived" filter is picked, ask the API for archived-only;
     // otherwise the default hides archived rows so closed/old work stops
     // cluttering the pipeline.
-    const qs = filter === 'archived' ? '?archived=only&limit=all' : '?limit=all';
+    const qs = filter === 'archived' ? '?archived=only&limit=all&pricingRisk=1' : '?limit=all&pricingRisk=1';
     adminFetch(`/admin/estimates${qs}`)
       .then((d) => {
         setEstimates(d.estimates || []);
@@ -714,16 +749,18 @@ function EstimatePipelineViewV2() {
       return true;
     return false;
   }).length;
+  const pricingRiskCount = estimates.filter((e) => e.pricingRisk?.hasRisk).length;
+  const missingCogsCount = estimates.filter((e) => (e.pricingRisk?.missingCogsCount || 0) > 0).length;
+  const lowMarginCount = estimates.filter((e) => (e.pricingRisk?.lowMarginCount || 0) > 0).length;
 
   // Filter counts
   const filterCounts = {};
-  for (const f of PIPELINE_FILTERS) {
+  for (const f of PIPELINE_AND_RISK_FILTERS) {
     filterCounts[f.key] =
-      f.key === 'all' ? total : classified.filter((e) => e._class === f.key).length;
+      f.key === 'all' ? total : classified.filter((e) => estimateMatchesFilter(e, f.key)).length;
   }
 
-  const filtered =
-    filter === 'all' ? sorted : sorted.filter((e) => e._class === filter);
+  const filtered = sorted.filter((e) => estimateMatchesFilter(e, filter));
 
   return (
     <div style={{ fontFamily: ROBOTO }}>
@@ -783,6 +820,12 @@ function EstimatePipelineViewV2() {
           alert={followUpOverdue > 0}
         />
         <StatCard
+          label="Pricing Risk"
+          value={pricingRiskCount}
+          sub={`${missingCogsCount} COGS · ${lowMarginCount} margin`}
+          alert={pricingRiskCount > 0}
+        />
+        <StatCard
           label="Total"
           value={total}
           sub={`${accepted} won · ${declined} lost`}
@@ -795,7 +838,7 @@ function EstimatePipelineViewV2() {
         <FilterSheetV2
           value={filter}
           onChange={setFilter}
-          options={PIPELINE_FILTERS}
+          options={PIPELINE_AND_RISK_FILTERS}
           counts={filterCounts}
         />
       </div>
@@ -805,7 +848,7 @@ function EstimatePipelineViewV2() {
         <div className="p-10 text-center text-13 text-ink-secondary">
           No estimates{' '}
           {filter !== 'all'
-            ? `in "${PIPELINE_FILTERS.find((f) => f.key === filter)?.label}"`
+            ? `in "${PIPELINE_AND_RISK_FILTERS.find((f) => f.key === filter)?.label}"`
             : 'yet'}
           . Create one using the Create Estimate tab.
         </div>
@@ -865,6 +908,7 @@ function EstimatePipelineViewV2() {
                     {e.declineReason && (
                       <Badge tone="alert">{e.declineReason}</Badge>
                     )}
+                    <PricingRiskBadges risk={e.pricingRisk} />
                     {e.confirmedAppointment && (
                       <Badge
                         tone="neutral"
@@ -1428,6 +1472,7 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
                 {estimate.viewCount}× viewed
               </span>
             )}
+            <PricingRiskBadges risk={estimate.pricingRisk} />
             {estimate.confirmedAppointment && (
               <span
                 className="text-11 text-ink-tertiary truncate"
@@ -1454,6 +1499,11 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
                 title={estimate.lastViewedAt ? `Last viewed ${timeAgo(estimate.lastViewedAt)}` : undefined}
               >
                 {estimate.viewCount}×
+              </span>
+            )}
+            {estimate.pricingRisk?.hasRisk && (
+              <span className="ml-2 text-alert-fg">
+                {estimate.pricingRisk.missingCogsCount ? 'Missing COGS' : estimate.pricingRisk.lowMarginCount ? 'Low Margin' : 'Pricing Risk'}
               </span>
             )}
             {estimate.confirmedAppointment && (
@@ -1617,13 +1667,13 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
   const [sort, setSort] = useState('newest');
 
   const refreshEstimates = useCallback(() => {
-    adminFetch('/admin/estimates?limit=all')
+    adminFetch('/admin/estimates?limit=all&pricingRisk=1')
       .then((d) => setEstimates(d.estimates || []))
       .catch(() => {});
   }, []);
 
   useEffect(() => {
-    adminFetch('/admin/estimates?limit=all')
+    adminFetch('/admin/estimates?limit=all&pricingRisk=1')
       .then((d) => { setEstimates(d.estimates || []); setLoading(false); })
       .catch(() => setLoading(false));
   }, []);
@@ -1636,7 +1686,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
     if (v3Flag) {
       list = list.filter((e) => v3ChipMatches(e, filter));
     } else if (filter !== 'all') {
-      list = list.filter((e) => e._class === filter);
+      list = list.filter((e) => estimateMatchesFilter(e, filter));
     }
     if (dateFilter !== 'all') {
       list = list.filter((e) => mobileMatchesDate(e.createdAt, dateFilter, now));
@@ -1674,9 +1724,11 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
   const filterCounts = useMemo(() => {
     if (v3Flag) return v3ChipCounts(estimates);
     const counts = { all: estimates.length };
-    for (const f of PIPELINE_FILTERS) {
+    for (const f of PIPELINE_AND_RISK_FILTERS) {
       if (f.key === 'all') continue;
-      counts[f.key] = estimates.filter((e) => classifyEstimate(e) === f.key).length;
+      counts[f.key] = estimates
+        .map((e) => ({ ...e, _class: classifyEstimate(e) }))
+        .filter((e) => estimateMatchesFilter(e, f.key)).length;
     }
     return counts;
   }, [estimates, v3Flag]);
@@ -1726,7 +1778,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
             label="Filter"
             value={filter}
             onChange={setFilter}
-            options={(v3Flag ? V3_CHIPS : PIPELINE_FILTERS).map((f) => ({
+            options={(v3Flag ? V3_CHIPS : PIPELINE_AND_RISK_FILTERS).map((f) => ({
               ...f,
               label: f.key === 'all'
                 ? `All (${filterCounts.all || 0})`
