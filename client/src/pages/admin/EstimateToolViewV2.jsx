@@ -30,6 +30,7 @@ import React, {
 } from 'react';
 import { fmt, fmtInt } from '../../lib/estimateEngine';
 import { Button, Badge, Card, cn } from '../../components/ui';
+import PestProductionDiagnosticsPanel from '../../components/admin/PestProductionDiagnosticsPanel';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const ROBOTO = "'Roboto', Arial, sans-serif";
@@ -1905,56 +1906,7 @@ export default function EstimateToolViewV2({
                       </div>
                     )}
 
-                    {E.productionDiagnostics && (
-                      <div className="mb-6">
-                        <SectionTitle>Production Burden</SectionTitle>
-                        <div className="rounded-xs border-hairline border-zinc-200 bg-zinc-50 p-3">
-                          <div className="flex items-center justify-between gap-3 mb-2">
-                            <span className="text-12 font-medium text-zinc-900">
-                              Estimated service time
-                            </span>
-                            <span className="text-13 font-semibold text-zinc-900 u-nums">
-                              {E.productionDiagnostics.estimatedMinutes} min
-                            </span>
-                          </div>
-                          <div className="flex items-center justify-between gap-3 mb-2">
-                            <span className="text-11 text-ink-secondary">Pricing confidence</span>
-                            {(() => {
-                              const confidence = String(E.productionDiagnostics.pricingConfidence || E.productionDiagnostics.confidence || 'high').toLowerCase();
-                              const label = confidence === 'low' ? 'Review required' : confidence === 'medium' ? 'Review recommended' : 'High';
-                              const tone = confidence === 'low'
-                                ? 'border-alert-fg/30 bg-alert-fg/10 text-alert-fg'
-                                : confidence === 'medium'
-                                  ? 'border-zinc-300 bg-zinc-100 text-zinc-800'
-                                  : 'border-zinc-200 bg-white text-zinc-700';
-                              return (
-                                <span className={cn('rounded-full border px-2 py-0.5 text-10 font-semibold uppercase tracking-wide', tone)}>
-                                  {label}
-                                </span>
-                              );
-                            })()}
-                          </div>
-                          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-11 text-ink-secondary">
-                            {Object.entries(E.productionDiagnostics.breakdown || {}).map(([key, value]) => (
-                              Number(value) !== 0 && (
-                                <div key={key} className="flex items-center justify-between gap-2">
-                                  <span>{key.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase())}</span>
-                                  <span className="u-nums">{Number(value) > 0 ? '+' : ''}{value} min</span>
-                                </div>
-                              )
-                            ))}
-                          </div>
-                          {E.productionDiagnostics.manualReview && (
-                            <div className="mt-2 text-11 text-alert-fg">
-                              Review: {((E.productionDiagnostics.reviewReasons || E.productionDiagnostics.manualReviewReasons || [])).join(', ').replace(/_/g, ' ')}
-                            </div>
-                          )}
-                          <div className="mt-2 text-11 text-ink-tertiary">
-                            Shadow only. These minutes do not drive price yet.
-                          </div>
-                        </div>
-                      </div>
-                    )}
+                    <PestProductionDiagnosticsPanel diagnostics={E.productionDiagnostics} />
 
                     {/* Recurring Programs */}
                     {E.hasRecurring && (

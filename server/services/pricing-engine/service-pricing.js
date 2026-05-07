@@ -56,6 +56,7 @@ function calculatePestProductionDiagnostics(property) {
   const storiesSource = String(property.storiesSource || '').toLowerCase();
   const poolCageSize = normalizePoolCageSize(f.poolCageSize, !!f.poolCage);
   const rawPoolCageSize = String(f.poolCageSize || '').trim().toLowerCase();
+  const poolCageSizeInferred = !!f.poolCage && !['small', 'medium', 'large', 'oversized'].includes(rawPoolCageSize);
   const round1 = value => Math.round(value * 10) / 10;
   const outbuildingCount = Math.max(0, Math.floor(Number(property.outbuildingCount) || 0));
 
@@ -81,7 +82,7 @@ function calculatePestProductionDiagnostics(property) {
   if (!homeSqFt || !footprint) lowConfidenceReasons.push('missing_home_sqft');
   if (!lotSqFt) lowConfidenceReasons.push('missing_lot_size');
   if (storiesSource === 'default' || storiesSource === 'estimated') manualReviewReasons.push('stories_estimated');
-  if (f.poolCage && !['small', 'medium', 'large', 'oversized'].includes(rawPoolCageSize)) manualReviewReasons.push('pool_cage_size_inferred');
+  if (poolCageSizeInferred) manualReviewReasons.push('pool_cage_size_inferred');
   if (lotSqFt > (cfg.lowConfidenceLotSqFt || 40000)) lowConfidenceReasons.push('very_large_lot');
   else if (lotSqFt > (cfg.manualReviewLotSqFt || 20000)) manualReviewReasons.push('large_lot');
   if (poolCageSize === 'oversized') lowConfidenceReasons.push('oversized_pool_cage');
@@ -98,6 +99,8 @@ function calculatePestProductionDiagnostics(property) {
     estimatedMinutes,
     breakdown,
     poolCageSize,
+    poolCageSizeSource: f.poolCage ? (poolCageSizeInferred ? 'inferred' : 'explicit') : 'none',
+    poolCageSizeInferred,
     pricingMode: 'shadow_only',
     pricingConfidence,
     confidence: pricingConfidence,
