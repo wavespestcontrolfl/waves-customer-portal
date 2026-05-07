@@ -71,6 +71,7 @@ export function calculateEstimate(inputs) {
     propertyType,
     hasPool,
     hasPoolCage,
+    poolCageSize,
     hasLargeDriveway,
     indoor,
     shrubDensity,
@@ -202,6 +203,28 @@ export function calculateEstimate(inputs) {
   /* ── pricing modifiers tracking ─────────────────────────── */
   const modifiers = [];
   const addMod = (service, label, impact, type = 'info') => modifiers.push({ service, label, impact, type });
+  const pestFootprintBrackets = [
+    { at: 800, adj: -15 }, { at: 1200, adj: -10 }, { at: 1500, adj: -5 },
+    { at: 2000, adj: 0 }, { at: 2500, adj: 3 }, { at: 3000, adj: 6 },
+    { at: 4000, adj: 10 }, { at: 5500, adj: 16 },
+  ];
+  const pestInterp = (v, b) => {
+    if (v <= b[0].at) return b[0].adj;
+    if (v >= b[b.length - 1].at) return b[b.length - 1].adj;
+    for (let i = 1; i < b.length; i++) {
+      if (v <= b[i].at) {
+        const lo = b[i - 1];
+        const hi = b[i];
+        const ratio = (v - lo.at) / (hi.at - lo.at);
+        return Math.round(lo.adj + ratio * (hi.adj - lo.adj));
+      }
+    }
+    return 0;
+  };
+  const cageSize = ['SMALL', 'MEDIUM', 'LARGE', 'OVERSIZED'].includes(String(poolCageSize || '').toUpperCase())
+    ? String(poolCageSize).toUpperCase()
+    : 'MEDIUM';
+  const cageAdjBySize = { SMALL: 5, MEDIUM: 8, LARGE: 12, OVERSIZED: 18 };
 
   // Track ALL property-level modifiers with dollar amounts
   addMod('property', `Home: ${homeSqFt.toLocaleString()} sq ft · ${stories} story`, 0, 'info');
@@ -209,42 +232,40 @@ export function calculateEstimate(inputs) {
   addMod('property', `Lot: ${lotSqFt.toLocaleString()} sq ft`, 0, 'info');
 
   // Footprint impact — based on actual chemical cost + labor data
-  const fpAdj = interpolate(footprint, [
-    { at: 800, adj: -15 }, { at: 1200, adj: -10 }, { at: 1500, adj: -5 },
-    { at: 2000, adj: 0 }, { at: 2500, adj: 8 }, { at: 3000, adj: 14 },
-    { at: 4000, adj: 22 }, { at: 5500, adj: 32 },
-  ]);
+  const fpAdj = pestInterp(footprint, pestFootprintBrackets);
   addMod('pest', `Footprint: ${footprint.toLocaleString()} sq ft → ${fpAdj >= 0 ? '+' : ''}$${fpAdj}/visit`, fpAdj, fpAdj > 0 ? 'up' : fpAdj < 0 ? 'down' : 'info');
 
 
   // Pool
-  if (hasPoolCage) addMod('pest', 'Pool cage: +$10/visit', 10, 'up');
-  else if (hasPool) addMod('pest', 'Pool (no cage): +$5/visit', 5, 'up');
+  if (hasPoolCage) addMod('pest', `Pool cage (${cageSize.toLowerCase()}): +$${cageAdjBySize[cageSize]}/visit`, cageAdjBySize[cageSize], 'up');
+  else if (hasPool) addMod('pest', 'Pool (no cage): $0/visit', 0, 'info');
   else addMod('pest', 'No pool: $0/visit', 0, 'info');
 
   // Shrubs
-  if (shrubDensity === 'HEAVY') addMod('pest', 'Heavy shrubs: +$12/visit', 12, 'up');
-  else if (shrubDensity === 'MODERATE') addMod('pest', 'Moderate shrubs: +$5/visit', 5, 'up');
-  else addMod('pest', 'No/light shrubs: $0/visit', 0, 'info');
+  if (shrubDensity === 'HEAVY') addMod('pest', 'Heavy shrubs: +$6/visit', 6, 'up');
+  else if (shrubDensity === 'MODERATE') addMod('pest', 'Moderate shrubs: $0/visit', 0, 'info');
+  else if (shrubDensity === 'LIGHT') addMod('pest', 'Light shrubs: -$5/visit', -5, 'down');
+  else addMod('pest', 'Shrubs: not specified', 0, 'info');
 
   // Trees
-  if (treeDensity === 'HEAVY') addMod('pest', 'Heavy trees: +$12/visit', 12, 'up');
-  else if (treeDensity === 'MODERATE') addMod('pest', 'Moderate trees: +$5/visit', 5, 'up');
-  else addMod('pest', 'No/light trees: $0/visit', 0, 'info');
+  if (treeDensity === 'HEAVY') addMod('pest', 'Heavy trees: +$6/visit', 6, 'up');
+  else if (treeDensity === 'MODERATE') addMod('pest', 'Moderate trees: $0/visit', 0, 'info');
+  else if (treeDensity === 'LIGHT') addMod('pest', 'Light trees: -$5/visit', -5, 'down');
+  else addMod('pest', 'Trees: not specified', 0, 'info');
 
   // Complexity
-  if (landscapeComplexity === 'COMPLEX') addMod('pest', 'Complex landscape: +$5/visit', 5, 'up');
+  if (landscapeComplexity === 'COMPLEX') addMod('pest', 'Complex landscape: +$3/visit', 3, 'up');
   else if (landscapeComplexity === 'MODERATE') addMod('pest', 'Moderate landscape: $0/visit', 0, 'info');
   else if (landscapeComplexity === 'SIMPLE') addMod('pest', 'Simple landscape: -$5/visit', -5, 'down');
   else addMod('pest', `${landscapeComplexity || 'Simple'} landscape: $0/visit`, 0, 'info');
 
   // Water proximity
-  const waterAdj = (nearWater && nearWater !== 'NONE' && nearWater !== 'NO' && nearWater !== false) ? 5 : 0;
-  if (waterAdj > 0) addMod('pest', `Near water: +$5/visit`, waterAdj, 'up');
+  const waterAdj = (nearWater && nearWater !== 'NONE' && nearWater !== 'NO' && nearWater !== false) ? 3 : 0;
+  if (waterAdj > 0) addMod('pest', `Near water: +$3/visit`, waterAdj, 'up');
   else addMod('pest', 'No water nearby: $0/visit', 0, 'info');
 
   // Driveway
-  if (hasLargeDriveway) addMod('pest', 'Large driveway: +$5/visit', 5, 'up');
+  if (hasLargeDriveway) addMod('pest', 'Large driveway: +$3/visit', 3, 'up');
   else addMod('pest', 'Standard driveway: $0/visit', 0, 'info');
 
   // Indoor treatment
@@ -269,6 +290,21 @@ export function calculateEstimate(inputs) {
     else { propTypeAdj = -18; propTypeLabel = 'Condo (ground floor)'; }
   }
   addMod('pest', `${propTypeLabel}: ${propTypeAdj >= 0 ? '+' : ''}$${propTypeAdj}/visit`, propTypeAdj, propTypeAdj < 0 ? 'down' : 'info');
+
+  const pestBaseAdjustment = (fpEff) => {
+    let adj = pestInterp(fpEff, pestFootprintBrackets);
+    if (shrubDensity === 'LIGHT') adj -= 5;
+    else if (shrubDensity === 'HEAVY') adj += 6;
+    if (hasPoolCage) adj += cageAdjBySize[cageSize];
+    if (treeDensity === 'LIGHT') adj -= 5;
+    else if (treeDensity === 'HEAVY') adj += 6;
+    if (landscapeComplexity === 'COMPLEX') adj += 3;
+    else if (landscapeComplexity === 'SIMPLE') adj -= 5;
+    if (nearWater && nearWater !== 'NONE' && nearWater !== 'NO' && nearWater !== false) adj += 3;
+    if (hasLargeDriveway) adj += 3;
+    if (indoor) adj += 15;
+    return adj + propTypeAdj;
+  };
 
   // Recurring customer
   if (isRC) addMod('one-time', 'Recurring customer: -15% one-time services', null, 'down');
@@ -347,24 +383,7 @@ export function calculateEstimate(inputs) {
   if (svcPest) {
     hasRec = true;
     const fpEff = footprint > 0 ? footprint : 2500; // default SWFL home fallback when sqft unknown
-    let adj = 0;
-    adj += interpolate(fpEff, [
-      { at: 800, adj: -15 }, { at: 1200, adj: -10 }, { at: 1500, adj: -5 },
-      { at: 2000, adj: 0 }, { at: 2500, adj: 8 }, { at: 3000, adj: 14 },
-      { at: 4000, adj: 22 }, { at: 5500, adj: 32 },
-    ]);
-    if (shrubDensity === 'MODERATE') adj += 5;
-    else if (shrubDensity === 'HEAVY') adj += 12;
-    if (hasPoolCage) adj += 10;
-    else if (hasPool) adj += 5;
-    if (treeDensity === 'MODERATE') adj += 5;
-    else if (treeDensity === 'HEAVY') adj += 12;
-    if (landscapeComplexity === 'COMPLEX') adj += 5;
-    else if (landscapeComplexity === 'SIMPLE') adj -= 5;
-    if (nearWater && nearWater !== 'NONE' && nearWater !== 'NO' && nearWater !== false) adj += 5;
-    if (hasLargeDriveway) adj += 5;
-    if (indoor) adj += 15;
-    adj += propTypeAdj; // Property type adjustment
+    const adj = pestBaseAdjustment(fpEff);
     let pp = Math.max(89, 117 + adj), rOG = 0;
     // Split roach modifier: German 25% (labor-intensive: gel bait, IGR, monitoring), Regular 10%
     if (roachMod === 'GERMAN') rOG = Math.round(pp * 0.25 * 100) / 100;
@@ -545,28 +564,7 @@ export function calculateEstimate(inputs) {
     const roachBackout = roachMod === 'GERMAN' ? 1.25 : roachMod === 'REGULAR' ? 1.10 : 1;
     let bpp = R.pest ? R.pest.pa / (R.pest.rOG > 0 ? roachBackout : 1) : 117;
     if (!R.pest) {
-      let adj = 0;
-      adj += interpolate(fpEff, [
-        { at: 800, adj: -20 }, { at: 1200, adj: -12 }, { at: 1500, adj: -6 },
-        { at: 2000, adj: 0 }, { at: 2500, adj: 12 }, { at: 3000, adj: 22 },
-        { at: 4000, adj: 35 }, { at: 5500, adj: 50 },
-      ]);
-      if (shrubDensity === 'LIGHT') adj -= 5;
-      else if (shrubDensity === 'HEAVY') adj += 25;
-      if (hasPoolCage) adj += 22;
-      else if (hasPool) adj += 5;
-      adj += interpolate(lotSqFt, [
-        { at: 3000, adj: -10 }, { at: 5000, adj: -5 }, { at: 7500, adj: 0 },
-        { at: 10000, adj: 8 }, { at: 15000, adj: 18 }, { at: 25000, adj: 30 },
-        { at: 50000, adj: 42 },
-      ]);
-      if (treeDensity === 'LIGHT') adj -= 3;
-      else if (treeDensity === 'HEAVY') adj += 15;
-      if (landscapeComplexity === 'COMPLEX') adj += 8;
-      if (nearWater && nearWater !== 'NONE' && nearWater !== 'NO') adj += 2.5;
-      if (hasLargeDriveway) adj += 2.5;
-      if (indoor) adj += 10;
-      bpp = Math.max(89, 117 + adj);
+      bpp = Math.max(89, 117 + pestBaseAdjustment(fpEff));
     }
     const fp = otP(Math.max(150, Math.round(bpp * 1.30)));
     otItems.push({ name: 'OT Pest', price: fp, detail: indoor ? 'Interior + exterior' : 'Exterior (+ interior add-on)' });
@@ -784,7 +782,8 @@ export function calculateEstimate(inputs) {
   if (svcRoach) {
     const rt = roachType;
     if (rt === 'REGULAR') {
-      let bpp = R.pest ? R.pest.pa : 117;
+      const fpEff = footprint > 0 ? footprint : 2500;
+      let bpp = R.pest ? R.pest.pa : Math.max(89, 117 + pestBaseAdjustment(fpEff));
       specItems.push({ name: 'Regular Roach', price: otP(Math.max(150, Math.round(bpp * 1.15 * 1.30))), det: 'Enhanced treatment' });
     } else {
       let gp = 450 + interpolate(footprint, [

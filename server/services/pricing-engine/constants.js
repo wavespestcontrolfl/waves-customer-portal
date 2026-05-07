@@ -90,26 +90,30 @@ const PEST = {
     { sqft: 1200, adj: -r(10) },   // Was -r(12).
     { sqft: 1500, adj: -r(5) },    // Was -r(6).
     { sqft: 2000, adj: 0 },
-    { sqft: 2500, adj: r(8) },     // Was r(6). Properties 25% larger take 15-20% longer.
-    { sqft: 3000, adj: r(14) },    // Was r(12). Consistent scaling.
-    { sqft: 4000, adj: r(21) },    // Was r(20). Minor rounding.
-    { sqft: 5500, adj: r(31) },    // Was r(28). Large homes take 30-35 min, not 20.
+    { sqft: 2500, adj: r(3) },
+    { sqft: 3000, adj: r(6) },
+    { sqft: 4000, adj: r(10) },
+    { sqft: 5500, adj: r(16) },
   ],
   additionalAdjustments: {
     indoor: r(15),              // NEW. Interior treatment adds 10-15 min + $3-5 in product.
     shrubs_light: -r(5),        // Light shrubs = sparser perimeter, less spray time. Already on the admin Pricing Logic panel; pricer was missing the branch (drift bug).
-    shrubs_moderate: r(5),
-    shrubs_heavy: r(12),        // Was r(10). Consistent with trees heavy.
+    shrubs_moderate: 0,
+    shrubs_heavy: r(6),
     poolCage: r(10),            // Was r(5). Cage is a separate treatment zone, adds 5-8 min.
-    poolNoCage: r(5),
+    poolCageSmall: r(5),
+    poolCageMedium: r(8),
+    poolCageLarge: r(12),
+    poolCageOversized: r(18),
+    poolNoCage: 0,
     trees_light: -r(5),         // Same drift fix as shrubs_light.
-    trees_moderate: r(5),
-    trees_heavy: r(12),         // Was r(10). Slight increase for canopy spray coverage.
+    trees_moderate: 0,
+    trees_heavy: r(6),
     complexity_simple: -r(5),   // Open turf, minimal beds — less perimeter to spray.
     complexity_moderate: 0,     // Baseline.
-    complexity_complex: r(5),   // Symmetric ladder with simple/moderate. Was r(8).
-    nearWater: r(5),            // Was 2.5.
-    largeDriveway: r(5),        // Was 2.5.
+    complexity_complex: r(3),
+    nearWater: r(3),
+    largeDriveway: r(3),
   },
   // Multiplicative roach modifier zeroed out (was 0.15 across the board) —
   // we now charge a one-time `pestInitialRoach` line item on visit 1 instead,
@@ -161,6 +165,41 @@ const PEST = {
   },
   frequencies: { quarterly: 4, bimonthly: 6, monthly: 12 },
   initialFee: r(99), // WaveGuard membership (waived with annual prepay)
+  productionDiagnostics: {
+    baseStopMinutes: 18,
+    footprintMinutes: [
+      { sqft: 800, minutes: -4 },
+      { sqft: 1200, minutes: -3 },
+      { sqft: 1500, minutes: -1 },
+      { sqft: 2000, minutes: 0 },
+      { sqft: 2500, minutes: 2 },
+      { sqft: 3000, minutes: 3 },
+      { sqft: 4000, minutes: 5 },
+      { sqft: 5500, minutes: 8 },
+    ],
+    lotMinutes: [
+      { sqft: 7500, minutes: 0 },
+      { sqft: 12000, minutes: 2 },
+      { sqft: 18000, minutes: 4 },
+      { sqft: 25000, minutes: 6 },
+      { sqft: 40000, minutes: 10 },
+    ],
+    poolCageMinutes: {
+      small: 5,
+      medium: 8,
+      large: 12,
+      oversized: 18,
+    },
+    poolNoCageMinutes: 2,
+    shrubMinutes: { light: -2, moderate: 0, heavy: 3 },
+    treeMinutes: { light: -2, moderate: 0, heavy: 3 },
+    complexityMinutes: { simple: -3, moderate: 0, complex: 3 },
+    largeDrivewayMinutes: 2,
+    nearWaterMinutes: 2,
+    attachedGarageMinutes: 2,
+    outbuildingMinutes: 3,
+    manualReviewLotSqFt: 40000,
+  },
 };
 
 // ============================================================

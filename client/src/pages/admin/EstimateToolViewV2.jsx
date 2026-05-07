@@ -399,7 +399,7 @@ export default function EstimateToolViewV2({
     customerEmail: initialCustomerEmail || '',
     leadServiceInterest: initialServiceInterest || '',
     homeSqFt: '', stories: '1', lotSqFt: '', propertyType: 'Single Family',
-    hasPool: 'NO', hasPoolCage: 'NO', hasLargeDriveway: 'NO',
+    hasPool: 'NO', hasPoolCage: 'NO', poolCageSize: 'MEDIUM', hasLargeDriveway: 'NO',
     shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE',
     nearWater: 'NO', urgency: 'ROUTINE', isAfterHours: 'NO', isRecurringCustomer: 'NO',
     bedArea: '', palmCount: '', treeCount: '',
@@ -619,6 +619,7 @@ export default function EstimateToolViewV2({
       }
       if (ep.pool === 'YES' || ep.pool === 'POSSIBLE') upd.hasPool = 'YES';
       if (ep.poolCage === 'YES') upd.hasPoolCage = 'YES';
+      if (ep.poolCageSize && ep.poolCageSize !== 'NONE') upd.poolCageSize = ep.poolCageSize;
       if (ep.largeDriveway) upd.hasLargeDriveway = 'YES';
       if (ep.shrubDensity) upd.shrubDensity = ep.shrubDensity;
       if (ep.treeDensity) upd.treeDensity = ep.treeDensity;
@@ -823,6 +824,7 @@ export default function EstimateToolViewV2({
       if (profile.homeSqFt) profile.footprint = Math.round(profile.homeSqFt / (profile.stories || 1));
       profile.pool = form.hasPool === 'YES' ? 'YES' : 'NO';
       profile.poolCage = form.hasPoolCage === 'YES' ? 'YES' : 'NO';
+      profile.poolCageSize = form.hasPoolCage === 'YES' ? (form.poolCageSize || 'MEDIUM') : 'NONE';
       profile.hasLargeDriveway = form.hasLargeDriveway === 'YES';
       profile.shrubDensity = form.shrubDensity || profile.shrubDensity;
       profile.treeDensity = form.treeDensity || profile.treeDensity;
@@ -857,36 +859,46 @@ export default function EstimateToolViewV2({
           if (v <= b[0].at) return b[0].adj;
           if (v >= b[b.length - 1].at) return b[b.length - 1].adj;
           for (let i = 1; i < b.length; i++) {
-            if (v <= b[i].at) return b[i - 1].adj;
+            if (v <= b[i].at) {
+              const lo = b[i - 1];
+              const hi = b[i];
+              const ratio = (v - lo.at) / (hi.at - lo.at);
+              return Math.round(lo.adj + ratio * (hi.adj - lo.adj));
+            }
           }
           return 0;
         };
         const homeSf = p.homeSqFt || p.squareFootage || 0;
         const stories = p.stories || 1;
         const fp = p.footprint || Math.round(homeSf / stories);
-        const fpAdj = interp(fp, [{ at: 800, adj: -20 }, { at: 1200, adj: -12 }, { at: 1500, adj: -6 }, { at: 2000, adj: 0 }, { at: 2500, adj: 6 }, { at: 3000, adj: 12 }, { at: 4000, adj: 20 }, { at: 5500, adj: 28 }]);
+        const fpAdj = interp(fp, [{ at: 800, adj: -15 }, { at: 1200, adj: -10 }, { at: 1500, adj: -5 }, { at: 2000, adj: 0 }, { at: 2500, adj: 3 }, { at: 3000, adj: 6 }, { at: 4000, adj: 10 }, { at: 5500, adj: 16 }]);
         add('property', `Home: ${homeSf.toLocaleString()} sq ft · ${stories} story`, 0, 'info');
         add('pest', `Footprint: ${fp.toLocaleString()} sq ft → ${fpAdj >= 0 ? '+' : ''}$${fpAdj}/visit`, fpAdj, fpAdj > 0 ? 'up' : fpAdj < 0 ? 'down' : 'info');
-        if (p.poolCage === 'YES') add('pest', 'Pool cage: +$10/visit', 10, 'up');
-        else if (p.pool === 'YES') add('pest', 'Pool (no cage): +$5/visit', 5, 'up');
+        if (p.poolCage === 'YES') {
+          const cageSize = String(p.poolCageSize || 'MEDIUM').toUpperCase();
+          const cageAdj = { SMALL: 5, MEDIUM: 8, LARGE: 12, OVERSIZED: 18 }[cageSize] || 8;
+          add('pest', `Pool cage (${cageSize.toLowerCase()}): +$${cageAdj}/visit`, cageAdj, 'up');
+        }
+        else if (p.pool === 'YES') add('pest', 'Pool (no cage): $0/visit', 0, 'info');
         else add('pest', 'No pool: $0/visit', 0, 'info');
         const sd = p.shrubDensity || p.shrubs;
-        if (sd === 'HEAVY') add('pest', 'Heavy shrubs: +$10/visit', 10, 'up');
-        else if (sd === 'MODERATE') add('pest', 'Moderate shrubs: +$5/visit', 5, 'up');
+        if (sd === 'HEAVY') add('pest', 'Heavy shrubs: +$6/visit', 6, 'up');
+        else if (sd === 'MODERATE') add('pest', 'Moderate shrubs: $0/visit', 0, 'info');
         else if (sd === 'LIGHT') add('pest', 'Light shrubs: -$5/visit', -5, 'down');
         else add('pest', 'Shrubs: not specified', 0, 'info');
         const td = p.treeDensity || p.trees;
-        if (td === 'HEAVY') add('pest', 'Heavy trees: +$10/visit', 10, 'up');
-        else if (td === 'MODERATE') add('pest', 'Moderate trees: +$5/visit', 5, 'up');
+        if (td === 'HEAVY') add('pest', 'Heavy trees: +$6/visit', 6, 'up');
+        else if (td === 'MODERATE') add('pest', 'Moderate trees: $0/visit', 0, 'info');
         else if (td === 'LIGHT') add('pest', 'Light trees: -$5/visit', -5, 'down');
         else add('pest', 'Trees: not specified', 0, 'info');
         const lc = p.landscapeComplexity || p.complexity;
-        if (lc === 'COMPLEX') add('pest', 'Complex landscape: +$5/visit', 5, 'up');
+        if (lc === 'COMPLEX') add('pest', 'Complex landscape: +$3/visit', 3, 'up');
+        else if (lc === 'SIMPLE') add('pest', 'Simple landscape: -$5/visit', -5, 'down');
         else add('pest', `${lc || 'Simple'} landscape: $0/visit`, 0, 'info');
         const nw = p.nearWater || p.waterProximity;
-        if (nw && nw !== 'NONE' && nw !== 'NO' && nw !== false) add('pest', 'Near water: +$5/visit', 5, 'up');
+        if (nw && nw !== 'NONE' && nw !== 'NO' && nw !== false) add('pest', 'Near water: +$3/visit', 3, 'up');
         else add('pest', 'No water nearby: $0/visit', 0, 'info');
-        if (p.hasLargeDriveway) add('pest', 'Large driveway: +$5/visit', 5, 'up');
+        if (p.hasLargeDriveway) add('pest', 'Large driveway: +$3/visit', 3, 'up');
         if (p.yearBuilt) add('property', `Built: ${p.yearBuilt} · ${p.constructionMaterial || 'CBS'} · ${p.foundationType || 'Slab'} · ${p.roofType || 'Shingle'}`, 0, 'info');
         result.modifiers = mods;
       }
@@ -982,7 +994,7 @@ export default function EstimateToolViewV2({
     setForm((f) => ({
       ...f,
       address: '', homeSqFt: '', stories: '1', lotSqFt: '', propertyType: 'Single Family',
-      hasPool: 'NO', hasPoolCage: 'NO', hasLargeDriveway: 'NO', nearWater: 'NO',
+      hasPool: 'NO', hasPoolCage: 'NO', poolCageSize: 'MEDIUM', hasLargeDriveway: 'NO', nearWater: 'NO',
       shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE',
       urgency: 'ROUTINE', isAfterHours: 'NO', isRecurringCustomer: 'NO',
       bedArea: '', palmCount: '', treeCount: '',
@@ -1116,7 +1128,7 @@ export default function EstimateToolViewV2({
                   onClick={() => {
                     setForm((f) => ({
                       ...f, address: '', homeSqFt: '', lotSqFt: '', stories: '1', propertyType: 'Single Family',
-                      hasPool: 'NO', hasPoolCage: 'NO', hasLargeDriveway: 'NO',
+                      hasPool: 'NO', hasPoolCage: 'NO', poolCageSize: 'MEDIUM', hasLargeDriveway: 'NO',
                       shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE',
                       nearWater: 'NO', bedArea: '', palmCount: '', treeCount: '',
                     }));
@@ -1274,6 +1286,16 @@ export default function EstimateToolViewV2({
                 <FieldV2 label="Pool Cage"><SelectV2 k="hasPoolCage" options={[{ value: 'NO', label: 'No' }, { value: 'YES', label: 'Yes' }]} /></FieldV2>
                 <FieldV2 label="Large Driveway"><SelectV2 k="hasLargeDriveway" options={[{ value: 'NO', label: 'No' }, { value: 'YES', label: 'Yes' }]} /></FieldV2>
               </div>
+              {form.hasPoolCage === 'YES' && (
+                <FieldV2 label="Pool Cage Size">
+                  <SelectV2 k="poolCageSize" options={[
+                    { value: 'SMALL', label: 'Small (+$5)' },
+                    { value: 'MEDIUM', label: 'Medium (+$8)' },
+                    { value: 'LARGE', label: 'Large (+$12)' },
+                    { value: 'OVERSIZED', label: 'Oversized (+$18)' },
+                  ]} />
+                </FieldV2>
+              )}
               <div className="grid grid-cols-3 gap-3">
                 <FieldV2 label="Shrub Density"><SelectV2 k="shrubDensity" options={[{ value: 'LIGHT', label: 'Light' }, { value: 'MODERATE', label: 'Moderate' }, { value: 'HEAVY', label: 'Heavy' }]} /></FieldV2>
                 <FieldV2 label="Tree Density"><SelectV2 k="treeDensity" options={[{ value: 'LIGHT', label: 'Light' }, { value: 'MODERATE', label: 'Moderate' }, { value: 'HEAVY', label: 'Heavy' }]} /></FieldV2>
@@ -1312,7 +1334,7 @@ export default function EstimateToolViewV2({
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   <div className="grid grid-cols-2 gap-3">
                     <FieldV2 label="Frequency"><SelectV2 k="pestFreq" options={[{ value: '4', label: 'Quarterly (4x/yr)' }, { value: '6', label: 'Bi-Monthly (6x/yr)' }, { value: '12', label: 'Monthly (12x/yr)' }]} /></FieldV2>
-                    <FieldV2 label="Cockroach Modifier"><SelectV2 k="roachModifier" options={[{ value: 'NONE', label: 'None' }, { value: 'REGULAR', label: 'Regular (+15%)' }, { value: 'GERMAN', label: 'German ($100+15%)' }]} /></FieldV2>
+                    <FieldV2 label="Cockroach Modifier"><SelectV2 k="roachModifier" options={[{ value: 'NONE', label: 'None' }, { value: 'REGULAR', label: 'Regular initial knockdown' }, { value: 'GERMAN', label: 'German initial knockdown' }]} /></FieldV2>
                   </div>
                 </div>
               )}
@@ -1775,7 +1797,7 @@ export default function EstimateToolViewV2({
                       <SectionTitle>Property Summary</SectionTitle>
                       <div className="text-13 text-ink-secondary leading-relaxed">
                         <strong className="text-zinc-900">{E.property?.type || E.property?.propertyType || 'Residential'}</strong> — {(E.property?.homeSqFt || 0).toLocaleString()} sf / {(E.property?.lotSqFt || 0).toLocaleString()} sf lot / {E.property?.stories || 1} story<br />
-                        Footprint: <strong>{(E.property?.footprint || 0).toLocaleString()} sf</strong> | Pool: {E.property?.pool === 'YES' || E.property?.pool === true ? 'Yes' : 'No'}{E.property?.poolCage === 'YES' ? ' (caged)' : ''} | Driveway: {E.property?.largeDriveway === 'YES' || E.property?.largeDriveway === true ? 'Large' : 'Normal'}<br />
+                        Footprint: <strong>{(E.property?.footprint || 0).toLocaleString()} sf</strong> | Pool: {E.property?.pool === 'YES' || E.property?.pool === true ? 'Yes' : 'No'}{E.property?.poolCage === 'YES' || E.property?.poolCage === true ? ` (caged${E.property?.poolCageSize ? `: ${String(E.property.poolCageSize).toLowerCase()}` : ''})` : ''} | Driveway: {E.property?.largeDriveway === 'YES' || E.property?.largeDriveway === true ? 'Large' : 'Normal'}<br />
                         Shrubs: {E.property?.shrubDensity || E.property?.shrubs || '--'} | Trees: {E.property?.treeDensity || E.property?.trees || '--'} | Complexity: {E.property?.landscapeComplexity || E.property?.complexity || '--'} | Water: {E.property?.nearWater && E.property.nearWater !== 'NONE' ? E.property.nearWater.replace(/_/g, ' ') : 'No'}
                         {E.property?.yearBuilt && <><br />Built: {E.property.yearBuilt} | {E.property?.constructionMaterial} | {E.property?.foundationType} foundation | {E.property?.roofType} roof</>}
                         {E.property?.estimatedValue && (
@@ -1812,6 +1834,40 @@ export default function EstimateToolViewV2({
                               </span>
                             </div>
                           ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {E.productionDiagnostics && (
+                      <div className="mb-6">
+                        <SectionTitle>Production Burden</SectionTitle>
+                        <div className="rounded-xs border-hairline border-zinc-200 bg-zinc-50 p-3">
+                          <div className="flex items-center justify-between gap-3 mb-2">
+                            <span className="text-12 font-medium text-zinc-900">
+                              Estimated service time
+                            </span>
+                            <span className="text-13 font-semibold text-zinc-900 u-nums">
+                              {E.productionDiagnostics.estimatedMinutes} min
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-11 text-ink-secondary">
+                            {Object.entries(E.productionDiagnostics.breakdown || {}).map(([key, value]) => (
+                              Number(value) !== 0 && (
+                                <div key={key} className="flex items-center justify-between gap-2">
+                                  <span>{key.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase())}</span>
+                                  <span className="u-nums">{Number(value) > 0 ? '+' : ''}{value} min</span>
+                                </div>
+                              )
+                            ))}
+                          </div>
+                          {E.productionDiagnostics.manualReview && (
+                            <div className="mt-2 text-11 text-alert-fg">
+                              Review: {(E.productionDiagnostics.manualReviewReasons || []).join(', ').replace(/_/g, ' ')}
+                            </div>
+                          )}
+                          <div className="mt-2 text-11 text-ink-tertiary">
+                            Shadow only. These minutes do not drive price yet.
+                          </div>
                         </div>
                       </div>
                     )}

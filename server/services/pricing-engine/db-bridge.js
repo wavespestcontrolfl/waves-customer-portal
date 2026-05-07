@@ -73,6 +73,10 @@ async function syncConstantsFromDB(dbInstance) {
       const f = config.pest_features;
       const adj = constants.PEST.additionalAdjustments;
       if (f.pool_cage != null) adj.poolCage = r(f.pool_cage);
+      if (f.pool_cage_small != null) adj.poolCageSmall = r(f.pool_cage_small);
+      if (f.pool_cage_medium != null) adj.poolCageMedium = r(f.pool_cage_medium);
+      if (f.pool_cage_large != null) adj.poolCageLarge = r(f.pool_cage_large);
+      if (f.pool_cage_oversized != null) adj.poolCageOversized = r(f.pool_cage_oversized);
       if (f.pool_no_cage != null) adj.poolNoCage = r(f.pool_no_cage);
       if (f.shrubs_heavy != null) adj.shrubs_heavy = r(f.shrubs_heavy);
       if (f.shrubs_moderate != null) adj.shrubs_moderate = r(f.shrubs_moderate);

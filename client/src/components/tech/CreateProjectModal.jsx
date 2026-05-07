@@ -283,7 +283,7 @@ export default function CreateProjectModal({
         params.set('search', q);
         params.set('is_active', 'true');
         params.set('limit', '10');
-        const r = await adminFetch(`/admin/services?${params}`);
+        const r = await adminFetch(`/admin/projects/service-search?${params}`);
         const d = await r.json();
         const list = (d.services || []).slice(0, 10);
         setServiceResults(list);

@@ -269,6 +269,7 @@ function mapV1ToLegacyShape(v1Result) {
     ...vp,
     pool: vf.pool ? 'YES' : 'NO',
     poolCage: vf.poolCage ? 'YES' : 'NO',
+    poolCageSize: vf.poolCageSize || (vf.poolCage ? 'medium' : 'none'),
     hasLargeDriveway: !!vf.largeDriveway,
     shrubDensity: upper(vf.shrubs),
     treeDensity: upper(vf.trees),
@@ -277,6 +278,7 @@ function mapV1ToLegacyShape(v1Result) {
 
   return {
     property: legacyProperty,
+    productionDiagnostics: pestLI?.productionDiagnostics || null,
     fieldVerify: [],
     notes: v1Result.notes || [],
     urgency: { mult: 1, label: '' },

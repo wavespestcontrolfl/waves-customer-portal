@@ -22,6 +22,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { PROJECT_TYPES, PROJECT_TYPE_KEYS, isValidProjectType, getProjectType } = require('../services/project-types');
+const serviceLibrary = require('../services/service-library');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { wrapEmail, formatDate, plainText } = require('../services/email-template');
 const { etDateString } = require('../utils/datetime-et');
@@ -266,6 +267,11 @@ function formatContextDate(value) {
   return d.toISOString().slice(0, 10);
 }
 
+function contextTimestamp(value) {
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? 0 : d.getTime();
+}
+
 async function getCustomerCommunicationContext(customerId) {
   if (!customerId) return '';
   const [calls, sms, emails] = await Promise.all([
@@ -298,21 +304,40 @@ async function getCustomerCommunicationContext(customerId) {
       }),
   ]);
 
-  const lines = [];
+  const entries = [];
   for (const call of calls) {
     const summary = compactText(call.lead_synopsis || call.notes || call.transcription);
-    if (summary) lines.push(`Call ${formatContextDate(call.created_at)} (${call.direction || 'unknown'}${call.call_outcome ? `, ${call.call_outcome}` : ''}): ${summary}`);
+    if (summary) {
+      entries.push({
+        ts: contextTimestamp(call.created_at),
+        line: `Call ${formatContextDate(call.created_at)} (${call.direction || 'unknown'}${call.call_outcome ? `, ${call.call_outcome}` : ''}): ${summary}`,
+      });
+    }
   }
   for (const msg of sms) {
     const summary = compactText(msg.message_body, 260);
-    if (summary) lines.push(`Text ${formatContextDate(msg.created_at)} (${msg.direction || 'unknown'}${msg.message_type ? `, ${msg.message_type}` : ''}): ${summary}`);
+    if (summary) {
+      entries.push({
+        ts: contextTimestamp(msg.created_at),
+        line: `Text ${formatContextDate(msg.created_at)} (${msg.direction || 'unknown'}${msg.message_type ? `, ${msg.message_type}` : ''}): ${summary}`,
+      });
+    }
   }
   for (const email of emails) {
     const summary = compactText(email.snippet || email.body_text, 260);
     const subject = compactText(email.subject, 120);
-    if (summary || subject) lines.push(`Email ${formatContextDate(email.received_at)}${subject ? ` "${subject}"` : ''}: ${summary || '[no body preview]'}`);
+    if (summary || subject) {
+      entries.push({
+        ts: contextTimestamp(email.received_at),
+        line: `Email ${formatContextDate(email.received_at)}${subject ? ` "${subject}"` : ''}: ${summary || '[no body preview]'}`,
+      });
+    }
   }
-  return lines.slice(0, 6).join('\n');
+  return entries
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, 6)
+    .map(entry => entry.line)
+    .join('\n');
 }
 
 function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, customer, tech, projectDate, photoLines, communicationContext }) {
@@ -523,6 +548,21 @@ async function draftProjectReport({ typeCfg, findings, rawRecommendations, custo
 // ---------------------------------------------------------------------------
 router.get('/types', (_req, res) => {
   res.json({ types: PROJECT_TYPES, keys: PROJECT_TYPE_KEYS });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/projects/service-search — tech-safe service title picker
+// ---------------------------------------------------------------------------
+router.get('/service-search', async (req, res, next) => {
+  try {
+    const { search, limit = 10 } = req.query;
+    const result = await serviceLibrary.getServices({
+      search,
+      isActive: 'true',
+      limit: Math.min(Number(limit) || 10, 25),
+    });
+    res.json(result);
+  } catch (err) { next(err); }
 });
 
 // ---------------------------------------------------------------------------
