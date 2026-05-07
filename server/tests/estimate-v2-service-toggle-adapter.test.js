@@ -77,6 +77,70 @@ describe('estimate v2 service toggle adapter', () => {
     }));
   });
 
+  test('labels selected mosquito program and station/dunk add-ons in legacy recurring and one-time rows', () => {
+    const input = translateV2CallToV1Input(
+      {
+        ...baseProfile(),
+        lotSqFt: 14500,
+        pool: 'YES',
+        poolCage: 'YES',
+        shrubDensity: 'HEAVY',
+        treeDensity: 'HEAVY',
+        landscapeComplexity: 'COMPLEX',
+        nearWater: 'YES',
+      },
+      ['MOSQUITO', 'OT_MOSQUITO'],
+      {
+        mosquitoProgram: 'residual_monthly',
+        mosquitoStationCount: 2,
+        mosquitoDunkCount: 4,
+      }
+    );
+
+    const mapped = mapV1ToLegacyShape(generateEstimate(input));
+    expect(mapped.recurring.services).toContainEqual(expect.objectContaining({
+      service: 'mosquito',
+      name: 'Mosquito',
+      displayName: 'Monthly Precision Barrier',
+      program: 'residual_monthly',
+      detail: expect.stringContaining('2 mosquito stations'),
+    }));
+    expect(mapped.recurring.services.find((svc) => svc.service === 'mosquito').detail)
+      .toContain('4 Bti dunk tablets');
+    expect(mapped.oneTime.items).toContainEqual(expect.objectContaining({
+      service: 'one_time_mosquito',
+      name: 'One-Time Mosquito',
+      detail: expect.stringContaining('2 mosquito stations'),
+    }));
+  });
+
+  test('uses zoned recurring mosquito add-on amounts in detail copy', () => {
+    const input = translateV2CallToV1Input(
+      {
+        ...baseProfile(),
+        serviceZone: 'D',
+        lotSqFt: 14500,
+        pool: 'YES',
+        poolCage: 'YES',
+        shrubDensity: 'HEAVY',
+        treeDensity: 'HEAVY',
+        landscapeComplexity: 'COMPLEX',
+        nearWater: 'YES',
+      },
+      ['MOSQUITO'],
+      {
+        mosquitoProgram: 'residual_monthly',
+        mosquitoStationCount: 2,
+        mosquitoDunkCount: 4,
+      }
+    );
+
+    const mapped = mapV1ToLegacyShape(generateEstimate(input));
+    const mosquito = mapped.recurring.services.find((svc) => svc.service === 'mosquito');
+    expect(mosquito.detail).toContain('2 mosquito stations (+$94/yr)');
+    expect(mosquito.detail).toContain('4 Bti dunk tablets (+$19/yr)');
+  });
+
   test('does not double-bill recurring German roach initial when standalone German roach is also selected', () => {
     const input = translateV2CallToV1Input(
       baseProfile(),
