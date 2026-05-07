@@ -304,6 +304,42 @@ router.get('/changelog', async (req, res, next) => {
   }
 });
 
+// GET /pest-calibration — compare shadow production minutes against completed job timers
+router.get('/pest-calibration', async (req, res, next) => {
+  try {
+    const hasTable = await db.schema.hasTable('pest_production_calibration_records');
+    if (!hasTable) {
+      return res.json({
+        records: [],
+        summary: { count: 0, avgDelta: 0, avgAbsDelta: 0, outlierCount: 0, byPoolCageSize: [], byLotBand: [], byConfidence: [], outliers: [] },
+        sync: { synced: 0, skipped: 0, unavailable: true },
+      });
+    }
+
+    const {
+      syncCalibrationRecords,
+      listCalibrationRecords,
+      summarizeCalibrationRecords,
+    } = require('../services/pest-production-calibration');
+
+    const requestedLimit = parseInt(req.query.limit, 10);
+    const options = {
+      startDate: req.query.startDate || null,
+      endDate: req.query.endDate || null,
+      limit: Number.isFinite(requestedLimit) && requestedLimit > 0 ? Math.min(requestedLimit, 500) : 100,
+    };
+    const sync = req.query.sync === 'false' ? { synced: 0, skipped: 0 } : await syncCalibrationRecords({ ...options, limit: 2000 });
+    const records = await listCalibrationRecords(options);
+    const summaryRecords = await listCalibrationRecords({
+      startDate: options.startDate,
+      endDate: options.endDate,
+      limit: 10000,
+      maxLimit: 10000,
+    });
+    res.json({ records, summary: summarizeCalibrationRecords(summaryRecords), sync });
+  } catch (err) { next(err); }
+});
+
 // POST /margin-check — calculate margins for a sample property across all services
 router.post('/margin-check', async (req, res) => {
   try {

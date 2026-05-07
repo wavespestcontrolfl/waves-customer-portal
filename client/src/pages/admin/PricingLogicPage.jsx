@@ -193,6 +193,141 @@ function SpecServicesPanel() {
   );
 }
 
+function fmtMin(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '0.0 min';
+  return `${n > 0 ? '+' : ''}${n.toFixed(1)} min`;
+}
+
+function PestCalibrationPanel() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  const load = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const end = new Date();
+      const start = new Date();
+      start.setDate(end.getDate() - 90);
+      const qs = new URLSearchParams({
+        startDate: start.toISOString().slice(0, 10),
+        endDate: end.toISOString().slice(0, 10),
+        limit: '150',
+      });
+      setData(await af(`/admin/pricing-config/pest-calibration?${qs.toString()}`));
+    } catch (err) {
+      setError(err.message || 'Failed to load pest calibration');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const summary = data?.summary || {};
+  const records = data?.records || [];
+  const poolRows = summary.byPoolCageSize || [];
+  const lotRows = summary.byLotBand || [];
+
+  return (
+    <div style={{ background: D.card, borderRadius: 12, border: `1px solid ${D.border}`, padding: 20, marginBottom: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, marginBottom: 16 }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: 13, fontWeight: 700, color: D.heading, fontFamily: ROBOTO }}>Pest Production Calibration</h2>
+          <div style={{ color: D.muted, fontSize: 12, marginTop: 4 }}>
+            Shadow estimator minutes compared with completed job timers from accepted estimates.
+          </div>
+        </div>
+        <button onClick={load} disabled={loading} style={{
+          padding: '7px 12px', borderRadius: 6, border: `1px solid ${D.border}`, cursor: loading ? 'default' : 'pointer',
+          background: D.input, color: D.heading, fontSize: 12, fontWeight: 600,
+        }}>{loading ? 'Syncing...' : 'Sync'}</button>
+      </div>
+
+      {error && <div style={{ color: D.red, fontSize: 12, marginBottom: 12 }}>{error}</div>}
+      {data?.sync?.unavailable && (
+        <div style={{ color: D.amber, fontSize: 12, marginBottom: 12 }}>
+          Calibration table is not migrated yet. Run database migrations before collecting samples.
+        </div>
+      )}
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginBottom: 16 }}>
+        {[
+          { label: 'Samples', value: summary.count || 0, color: D.heading },
+          { label: 'Avg miss', value: fmtMin(summary.avgDelta || 0), color: Math.abs(summary.avgDelta || 0) >= 8 ? D.amber : D.green },
+          { label: 'Avg abs miss', value: fmtMin(summary.avgAbsDelta || 0), color: (summary.avgAbsDelta || 0) >= 12 ? D.amber : D.heading },
+          { label: '15+ min outliers', value: summary.outlierCount || 0, color: (summary.outlierCount || 0) > 0 ? D.red : D.green },
+        ].map(card => (
+          <div key={card.label} style={{ background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12 }}>
+            <div style={{ fontSize: 18, fontWeight: 700, color: card.color, fontFamily: ROBOTO }}>{card.value}</div>
+            <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 3 }}>{card.label}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 14, marginBottom: 16 }}>
+        <CalibrationGroup title="By Pool Cage Size" rows={poolRows} />
+        <CalibrationGroup title="By Lot Band" rows={lotRows} />
+      </div>
+
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <thead>
+            <tr>
+              {['Date', 'Customer', 'Pool', 'Lot', 'Pred', 'Actual', 'Delta', 'Confidence'].map(h => (
+                <th key={h} style={{ textAlign: h === 'Customer' ? 'left' : 'right', padding: '8px 10px', borderBottom: `1px solid ${D.border}`, color: D.muted, fontSize: 11, fontWeight: 700 }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {records.slice(0, 10).map(row => {
+              const delta = Number(row.delta_minutes || 0);
+              return (
+                <tr key={row.id || row.scheduled_service_id} style={{ borderBottom: `1px solid ${D.border}66` }}>
+                  <td style={{ padding: '8px 10px', textAlign: 'right', color: D.text }}>{String(row.service_date || '').slice(0, 10) || '-'}</td>
+                  <td style={{ padding: '8px 10px', color: D.heading, fontWeight: 600 }}>{row.customer_name || row.address_line1 || 'Unknown'}</td>
+                  <td style={{ padding: '8px 10px', textAlign: 'right', color: D.text }}>{row.pool_cage_size || '-'}</td>
+                  <td style={{ padding: '8px 10px', textAlign: 'right', color: D.text }}>{row.lot_sqft ? Number(row.lot_sqft).toLocaleString() : '-'}</td>
+                  <td style={{ padding: '8px 10px', textAlign: 'right', color: D.text }}>{Number(row.predicted_minutes || 0).toFixed(1)}</td>
+                  <td style={{ padding: '8px 10px', textAlign: 'right', color: D.text }}>{Number(row.actual_minutes || 0).toFixed(1)}</td>
+                  <td style={{ padding: '8px 10px', textAlign: 'right', color: Math.abs(delta) >= 15 ? D.red : Math.abs(delta) >= 8 ? D.amber : D.green, fontWeight: 700 }}>{fmtMin(delta)}</td>
+                  <td style={{ padding: '8px 10px', textAlign: 'right', color: D.muted }}>{row.pricing_confidence || '-'}</td>
+                </tr>
+              );
+            })}
+            {!loading && records.length === 0 && (
+              <tr>
+                <td colSpan="8" style={{ padding: 18, textAlign: 'center', color: D.muted }}>
+                  No calibration samples yet. Completed pest jobs need an accepted estimate link and a completed job timer.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function CalibrationGroup({ title, rows }) {
+  return (
+    <div style={{ background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12 }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: D.heading, marginBottom: 8 }}>{title}</div>
+      {(rows || []).slice(0, 6).map(row => (
+        <div key={row.key} style={{ display: 'grid', gridTemplateColumns: '1fr 60px 78px 78px', gap: 8, padding: '5px 0', borderTop: `1px solid ${D.border}88`, alignItems: 'center' }}>
+          <span style={{ color: D.text, fontSize: 12, textTransform: 'capitalize' }}>{row.key}</span>
+          <span style={{ color: D.muted, fontSize: 12, textAlign: 'right' }}>{row.count}</span>
+          <span style={{ color: D.text, fontSize: 12, textAlign: 'right' }}>{fmtMin(row.avgDelta)}</span>
+          <span style={{ color: D.muted, fontSize: 12, textAlign: 'right' }}>{fmtMin(row.avgAbsDelta)}</span>
+        </div>
+      ))}
+      {(!rows || rows.length === 0) && <div style={{ color: D.muted, fontSize: 12 }}>No samples yet.</div>}
+    </div>
+  );
+}
+
 export default function PricingLogicPage() {
   const [searchParams] = useSearchParams();
   const focusedService = searchParams.get('service');
@@ -216,6 +351,7 @@ export default function PricingLogicPage() {
         )}
 
         <MarginCalculator />
+        <PestCalibrationPanel />
         <SpecServicesPanel />
         <PricingLogicPanel />
       </div>
