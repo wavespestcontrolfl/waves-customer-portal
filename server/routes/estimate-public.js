@@ -814,11 +814,11 @@ ${shellTopBar()}
     <p class="card-sub">Here are the next open times nearest your address. We will hold your pick for 15 minutes while you confirm.</p>
     <div id="slot-area" class="booking-state">Loading available times...</div>
     <div id="pay-pref-area" style="display:none">
-      <h3 style="margin:20px 0 4px">How would you like to pay?</h3>
-      <p class="card-sub" style="margin:0">Both options reserve your slot. You will not be charged today.</p>
+      <h3 id="pay-pref-heading" style="margin:20px 0 4px">How would you like to pay?</h3>
+      <p class="card-sub" id="pay-pref-subhead" style="margin:0">Both options reserve your slot. You will not be charged today.</p>
       <div class="pay-pref-grid">
-        <button type="button" class="pay-pref-btn primary" data-pay-pref="card_on_file"><span class="pay-pref-title">Save a card to lock my slot</span><span class="pay-pref-sub">Add a card on file now so your slot is reserved. We charge on the visit day, not today.</span></button>
-        <button type="button" class="pay-pref-btn" data-pay-pref="pay_at_visit"><span class="pay-pref-title">Pay at the visit</span><span class="pay-pref-sub">We will collect payment with the tech on-site. No card needed now.</span></button>
+        <button type="button" class="pay-pref-btn primary" data-pay-pref="card_on_file" data-pay-pref-card><span class="pay-pref-title">Save a card to lock my slot</span><span class="pay-pref-sub">Add a card on file now so your slot is reserved. We charge on the visit day, not today.</span></button>
+        <button type="button" class="pay-pref-btn" data-pay-pref="pay_at_visit" data-pay-pref-visit><span class="pay-pref-title" data-pay-visit-title>Pay at the visit</span><span class="pay-pref-sub" data-pay-visit-sub>We will collect payment with the tech on-site. No card needed now.</span></button>
       </div>
     </div>
     <div id="review-area" style="display:none">
@@ -970,6 +970,7 @@ ${shellQuestionsBar()}
   // include it in their bodies.
   function setServiceMode(mode) {
     if (mode !== 'recurring' && mode !== 'one_time') return;
+    const changed = bookingState.serviceMode !== mode;
     bookingState.serviceMode = mode;
     document.querySelectorAll('[data-mode-only]').forEach((el) => {
       el.hidden = el.dataset.modeOnly !== mode;
@@ -979,10 +980,46 @@ ${shellQuestionsBar()}
       btn.classList.toggle('is-active', on);
       btn.setAttribute('aria-pressed', on ? 'true' : 'false');
     });
+    syncPaymentMode();
+    if (changed && bookingState.reservation) {
+      cancelReservation();
+    } else if (changed) {
+      bookingState.pickedPref = null;
+      document.querySelectorAll('[data-pay-pref]').forEach((b) => { b.disabled = false; });
+    }
   }
   document.querySelectorAll('[data-mode-set]').forEach((btn) => {
     btn.addEventListener('click', () => setServiceMode(btn.dataset.modeSet));
   });
+
+  function syncPaymentMode() {
+    const isOneTime = bookingState.serviceMode === 'one_time';
+    const cardBtn = document.querySelector('[data-pay-pref-card]');
+    const visitBtn = document.querySelector('[data-pay-pref-visit]');
+    const heading = document.getElementById('pay-pref-heading');
+    const subhead = document.getElementById('pay-pref-subhead');
+    const visitTitle = document.querySelector('[data-pay-visit-title]');
+    const visitSub = document.querySelector('[data-pay-visit-sub]');
+    if (cardBtn) {
+      cardBtn.hidden = isOneTime;
+      cardBtn.classList.toggle('primary', !isOneTime);
+    }
+    if (visitBtn) {
+      visitBtn.classList.toggle('primary', isOneTime);
+    }
+    if (heading) heading.textContent = isOneTime ? 'Book your visit' : 'How would you like to pay?';
+    if (subhead) {
+      subhead.textContent = isOneTime
+        ? 'This books a single visit. You will not be charged today.'
+        : 'Both options reserve your slot. You will not be charged today.';
+    }
+    if (visitTitle) visitTitle.textContent = isOneTime ? 'Book + pay on service day' : 'Pay at the visit';
+    if (visitSub) {
+      visitSub.textContent = isOneTime
+        ? 'We will collect payment with the tech on-site. No card needed now.'
+        : 'We will collect payment with the tech on-site. No card needed now.';
+    }
+  }
 
   function fmtSlotDay(dateStr) {
     try {
@@ -1066,6 +1103,9 @@ ${shellQuestionsBar()}
     if (!bookingState.selectedSlotId) {
       toast('Pick a time first.');
       return;
+    }
+    if (bookingState.serviceMode === 'one_time') {
+      pref = 'pay_at_visit';
     }
     const buttons = document.querySelectorAll('[data-pay-pref]');
     buttons.forEach((b) => { b.disabled = true; });
