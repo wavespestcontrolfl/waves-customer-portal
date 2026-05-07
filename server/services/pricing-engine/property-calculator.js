@@ -100,6 +100,7 @@ function calculatePropertyProfile(input) {
     homeSqFt: input.homeSqFt,
     lotSqFt: input.lotSqFt,
     stories: input.stories || 1,
+    storiesSource: input.storiesSource || null,
     propertyType: input.propertyType || 'single_family',
     features: input.features || {},
     // v2 enriched fields — consumed by modifiers.deriveModifiers()

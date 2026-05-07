@@ -178,4 +178,47 @@ describe('estimate v2 service toggle adapter', () => {
     expect(roachLines).toHaveLength(1);
     expect(roachLines[0].price).toBe(289);
   });
+
+  test('preserves inferred pool cage size for pest pricing confidence', () => {
+    const input = translateV2CallToV1Input(
+      {
+        ...baseProfile(),
+        pool: 'YES',
+        poolCage: 'YES',
+        poolCageSize: 'MEDIUM',
+        poolCageSizeInferred: true,
+      },
+      ['PEST'],
+      { pestFreq: 4 }
+    );
+
+    expect(input.features.poolCageSize).toBeUndefined();
+
+    const estimate = generateEstimate(input);
+    const pest = estimate.lineItems.find((line) => line.service === 'pest_control');
+    expect(pest.productionDiagnostics.poolCageSize).toBe('medium');
+    expect(pest.productionDiagnostics.reviewReasons).toContain('pool_cage_size_inferred');
+  });
+
+  test('honors explicit pool cage size when inferred flag is cleared', () => {
+    const input = translateV2CallToV1Input(
+      {
+        ...baseProfile(),
+        pool: 'YES',
+        poolCage: 'YES',
+        poolCageSize: 'LARGE',
+        poolCageSizeInferred: false,
+      },
+      ['PEST'],
+      { pestFreq: 4 }
+    );
+
+    expect(input.features.poolCageSize).toBe('large');
+
+    const estimate = generateEstimate(input);
+    const pest = estimate.lineItems.find((line) => line.service === 'pest_control');
+    expect(pest.productionDiagnostics.poolCageSize).toBe('large');
+    expect(pest.productionDiagnostics.reviewReasons).toContain('large_pool_cage');
+    expect(pest.productionDiagnostics.reviewReasons).not.toContain('pool_cage_size_inferred');
+  });
 });

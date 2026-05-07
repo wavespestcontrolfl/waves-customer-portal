@@ -604,6 +604,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     pool: mergePool(rc, ai),
     poolCage: ai?.poolCage || 'UNKNOWN',
     poolCageSize: normalizePoolCageSize(ai?.poolCageSize, ai?.poolCage),
+    poolCageSizeInferred: ai?.poolCage === 'YES' && !['SMALL', 'MEDIUM', 'LARGE', 'OVERSIZED'].includes(String(ai?.poolCageSize || '').toUpperCase()),
 
     // ── LANDSCAPE (from satellite AI, with property-record cross-ref) ──
     shrubDensity: ai?.shrubDensity || 'MODERATE',
@@ -1353,10 +1354,12 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   const features = {
     pool: p.pool === 'YES',
     poolCage: p.poolCage === 'YES',
-    poolCageSize: String(p.poolCageSize || '').toUpperCase() === 'OVERSIZED' ? 'oversized'
+    poolCageSize: p.poolCageSizeInferred ? undefined
+      : String(p.poolCageSize || '').toUpperCase() === 'OVERSIZED' ? 'oversized'
       : String(p.poolCageSize || '').toUpperCase() === 'LARGE' ? 'large'
       : String(p.poolCageSize || '').toUpperCase() === 'SMALL' ? 'small'
-      : p.poolCage === 'YES' ? 'medium' : 'none',
+      : String(p.poolCageSize || '').toUpperCase() === 'MEDIUM' ? 'medium'
+      : p.poolCage === 'YES' ? undefined : 'none',
     trees: (p.treeDensity || 'LIGHT').toLowerCase(),
     shrubs: (p.shrubDensity || 'LIGHT').toLowerCase(),
     complexity: (p.landscapeComplexity || 'SIMPLE').toLowerCase(),
@@ -1369,6 +1372,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   return {
     homeSqFt,
     stories,
+    storiesSource: p.storiesSource || null,
     lotSqFt,
     propertyType: normalizePropertyType(p.propertyType),
     serviceZone: p.serviceZone,
