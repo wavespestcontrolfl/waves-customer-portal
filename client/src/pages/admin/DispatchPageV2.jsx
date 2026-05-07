@@ -69,9 +69,16 @@ const RevenuePanel = lazy(() => import('../../components/dispatch/RevenuePanelV2
 const InsightsPanel = lazy(() => import('../../components/dispatch/InsightsPanelV2'));
 
 const ACTIVE_MOBILE_COMPLETION_STATUSES = new Set(['en_route', 'on_site']);
+const PRE_SERVICE_STATUSES = new Set(['pending', 'confirmed', 'rescheduled']);
+
+function canOpenMobileCompletion(service) {
+  const status = String(service?.status || '').toLowerCase();
+  if (ACTIVE_MOBILE_COMPLETION_STATUSES.has(status)) return true;
+  return PRE_SERVICE_STATUSES.has(status);
+}
 
 function shouldOpenMobileCompletion(service) {
-  return ACTIVE_MOBILE_COMPLETION_STATUSES.has(String(service?.status || '').toLowerCase());
+  return canOpenMobileCompletion(service);
 }
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -1561,6 +1568,10 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
             }
           }}
           onSubmit={handleCompleteSubmit}
+          onViewDetails={isMobile ? (svc) => {
+            setCompletingService(null);
+            setDetailService(svc);
+          } : undefined}
         />
       )}
       {rescheduleService && (
