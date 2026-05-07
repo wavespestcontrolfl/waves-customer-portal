@@ -471,6 +471,7 @@ function CompactCategoryChips({ counts, selectedView, onChange }) {
       key: `category:${c.value}`, label: c.label, count: counts.byCategory[c.value],
     })),
     { key: 'view:waveguard', label: 'WaveGuard', count: counts.waveguard },
+    ...(counts.inactive > 0 ? [{ key: 'view:inactive', label: 'Inactive', count: counts.inactive }] : []),
   ];
   return (
     <div style={{
@@ -535,9 +536,9 @@ export default function ServiceLibraryPage() {
   if (isMobile) return <MobileServiceLibrary />;
 
   const counts = (() => {
-    const c = { all: 0, waveguard: 0, recurring: 0, onetime: 0, byCategory: {} };
+    const c = { all: 0, waveguard: 0, recurring: 0, onetime: 0, inactive: 0, byCategory: {} };
     for (const s of services) {
-      if (s.is_active === false) continue;
+      if (s.is_active === false) { c.inactive++; continue; }
       c.all++;
       if (s.is_waveguard) c.waveguard++;
       if (s.billing_type === 'recurring') c.recurring++;
@@ -554,6 +555,7 @@ export default function ServiceLibraryPage() {
     else if (selectedView === 'view:waveguard') list = list.filter(s => s.is_waveguard && s.is_active !== false);
     else if (selectedView === 'view:recurring') list = list.filter(s => s.billing_type === 'recurring' && s.is_active !== false);
     else if (selectedView === 'view:onetime') list = list.filter(s => s.billing_type === 'one_time' && s.is_active !== false);
+    else if (selectedView === 'view:inactive') list = list.filter(s => s.is_active === false);
     else if (selectedView.startsWith('category:')) {
       const cat = selectedView.slice('category:'.length);
       list = list.filter(s => (s.category || 'other') === cat && s.is_active !== false);
@@ -714,6 +716,12 @@ export default function ServiceLibraryPage() {
                 <RailItem label="WaveGuard" count={counts.waveguard} active={selectedView === 'view:waveguard'} onClick={() => { setSelectedView('view:waveguard'); setSelectedId(null); }} />
                 <RailItem label="Recurring" count={counts.recurring} active={selectedView === 'view:recurring'} onClick={() => { setSelectedView('view:recurring'); setSelectedId(null); }} />
                 <RailItem label="One-Time" count={counts.onetime} active={selectedView === 'view:onetime'} onClick={() => { setSelectedView('view:onetime'); setSelectedId(null); }} />
+                {/* Inactive only surfaces when there ARE inactive rows — keeps the
+                    rail clean per Adam's directive while leaving a recovery path
+                    for reactivating services that get deactivated. */}
+                {counts.inactive > 0 && (
+                  <RailItem label="Inactive" count={counts.inactive} active={selectedView === 'view:inactive'} onClick={() => { setSelectedView('view:inactive'); setSelectedId(null); }} />
+                )}
               </RailSection>
             </div>
 

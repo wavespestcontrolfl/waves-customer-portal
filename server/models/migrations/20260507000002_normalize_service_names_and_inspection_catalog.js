@@ -157,10 +157,17 @@ exports.up = async function (knex) {
     }
   }
 
-  // ── 7) Backfill: ensure "Rodent Inspection Service" exists somewhere ──
-  // (clean DBs that never had the rodent-category one still need it.)
-  const rodentInspect = await knex('services').where('name', 'Rodent Inspection Service').first();
-  if (!rodentInspect) {
+  // ── 7) Backfill: ensure rodent_inspection exists, keyed by service_key.
+  // (Codex review on PR #732: keying by name is unsafe because a row with
+  // service_key='rodent_inspection' may have been renamed via the UI. Check
+  // service_key first, then normalize the name + category on the existing
+  // row; only insert when the key is absent.)
+  const rodentInspect = await knex('services').where('service_key', 'rodent_inspection').first();
+  if (rodentInspect) {
+    await knex('services')
+      .where('service_key', 'rodent_inspection')
+      .update({ name: 'Rodent Inspection Service', category: 'inspection' });
+  } else {
     await knex('services').insert({
       service_key: 'rodent_inspection', name: 'Rodent Inspection Service',
       description: 'Walkthrough to identify rodent entry points, droppings, conducive conditions, and recommend exclusion + trapping plan.',
