@@ -489,7 +489,12 @@ export default function EstimateToolViewV2({
   const authHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
 
   const set = useCallback((key, val) => {
-    setForm((f) => ({ ...f, [key]: val }));
+    setForm((f) => ({
+      ...f,
+      [key]: val,
+      ...(key === 'poolCageSize' ? { _poolCageSizeEdited: true } : {}),
+      ...(key === 'stories' ? { _storiesEdited: true } : {}),
+    }));
     if (SEND_FIELDS.has(key)) return;
     if (CONTACT_FIELDS.has(key) || DELIVERY_OPTION_FIELDS.has(key)) {
       setSavedId(null);
@@ -629,7 +634,14 @@ export default function EstimateToolViewV2({
       if (ep.estimatedPalmCount) upd.palmCount = String(ep.estimatedPalmCount);
       if (ep.estimatedTreeCount) upd.treeCount = String(ep.estimatedTreeCount);
 
-      setForm((f) => ({ ...f, ...upd, _boracareAuto: true, _preslabAuto: true }));
+      setForm((f) => ({
+        ...f,
+        ...upd,
+        _boracareAuto: true,
+        _preslabAuto: true,
+        _poolCageSizeEdited: false,
+        _storiesEdited: false,
+      }));
 
       try {
         const addrSearch = address.split(',')[0].trim();
@@ -825,6 +837,8 @@ export default function EstimateToolViewV2({
       profile.pool = form.hasPool === 'YES' ? 'YES' : 'NO';
       profile.poolCage = form.hasPoolCage === 'YES' ? 'YES' : 'NO';
       profile.poolCageSize = form.hasPoolCage === 'YES' ? (form.poolCageSize || 'MEDIUM') : 'NONE';
+      profile.poolCageSizeInferred = !!baseProfile.poolCageSizeInferred && !form._poolCageSizeEdited && profile.poolCage === 'YES' && profile.poolCageSize === 'MEDIUM';
+      profile.storiesSource = form._storiesEdited ? 'manual' : baseProfile.storiesSource;
       profile.hasLargeDriveway = form.hasLargeDriveway === 'YES';
       profile.shrubDensity = form.shrubDensity || profile.shrubDensity;
       profile.treeDensity = form.treeDensity || profile.treeDensity;
@@ -1850,6 +1864,23 @@ export default function EstimateToolViewV2({
                               {E.productionDiagnostics.estimatedMinutes} min
                             </span>
                           </div>
+                          <div className="flex items-center justify-between gap-3 mb-2">
+                            <span className="text-11 text-ink-secondary">Pricing confidence</span>
+                            {(() => {
+                              const confidence = String(E.productionDiagnostics.pricingConfidence || E.productionDiagnostics.confidence || 'high').toLowerCase();
+                              const label = confidence === 'low' ? 'Review required' : confidence === 'medium' ? 'Review recommended' : 'High';
+                              const tone = confidence === 'low'
+                                ? 'border-alert-fg/30 bg-alert-fg/10 text-alert-fg'
+                                : confidence === 'medium'
+                                  ? 'border-zinc-300 bg-zinc-100 text-zinc-800'
+                                  : 'border-zinc-200 bg-white text-zinc-700';
+                              return (
+                                <span className={cn('rounded-full border px-2 py-0.5 text-10 font-semibold uppercase tracking-wide', tone)}>
+                                  {label}
+                                </span>
+                              );
+                            })()}
+                          </div>
                           <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-11 text-ink-secondary">
                             {Object.entries(E.productionDiagnostics.breakdown || {}).map(([key, value]) => (
                               Number(value) !== 0 && (
@@ -1862,7 +1893,7 @@ export default function EstimateToolViewV2({
                           </div>
                           {E.productionDiagnostics.manualReview && (
                             <div className="mt-2 text-11 text-alert-fg">
-                              Review: {(E.productionDiagnostics.manualReviewReasons || []).join(', ').replace(/_/g, ' ')}
+                              Review: {((E.productionDiagnostics.reviewReasons || E.productionDiagnostics.manualReviewReasons || [])).join(', ').replace(/_/g, ' ')}
                             </div>
                           )}
                           <div className="mt-2 text-11 text-ink-tertiary">

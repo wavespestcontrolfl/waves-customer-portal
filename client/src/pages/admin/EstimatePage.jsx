@@ -303,7 +303,12 @@ function EstimateToolView() {
   const authHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
 
   /* ── field setter ─────────────────────────────────────────── */
-  const set = useCallback((key, val) => setForm(f => ({ ...f, [key]: val })), []);
+  const set = useCallback((key, val) => setForm(f => ({
+    ...f,
+    [key]: val,
+    ...(key === 'poolCageSize' ? { _poolCageSizeEdited: true } : {}),
+    ...(key === 'stories' ? { _storiesEdited: true } : {}),
+  })), []);
   const toggle = useCallback((key) => {
     setForm(f => ({ ...f, [key]: !f[key] }));
     // Reset generated estimate so bottom preview bar updates
@@ -442,7 +447,14 @@ function EstimateToolView() {
       if (ep.estimatedPalmCount) upd.palmCount = String(ep.estimatedPalmCount);
       if (ep.estimatedTreeCount) upd.treeCount = String(ep.estimatedTreeCount);
 
-      setForm(f => ({ ...f, ...upd, _boracareAuto: true, _preslabAuto: true }));
+      setForm(f => ({
+        ...f,
+        ...upd,
+        _boracareAuto: true,
+        _preslabAuto: true,
+        _poolCageSizeEdited: false,
+        _storiesEdited: false,
+      }));
 
       // Auto-detect existing customer by address
       try {
@@ -633,6 +645,8 @@ function EstimateToolView() {
         profile.pool = form.hasPool === 'YES' ? 'YES' : 'NO';
         profile.poolCage = form.hasPoolCage === 'YES' ? 'YES' : 'NO';
         profile.poolCageSize = form.hasPoolCage === 'YES' ? (form.poolCageSize || 'MEDIUM') : 'NONE';
+        profile.poolCageSizeInferred = !!profile.poolCageSizeInferred && !form._poolCageSizeEdited && profile.poolCage === 'YES' && profile.poolCageSize === 'MEDIUM';
+        profile.storiesSource = form._storiesEdited ? 'manual' : profile.storiesSource;
         profile.hasLargeDriveway = form.hasLargeDriveway === 'YES';
         profile.shrubDensity = form.shrubDensity || profile.shrubDensity;
         profile.treeDensity = form.treeDensity || profile.treeDensity;
@@ -1443,6 +1457,30 @@ function EstimateToolView() {
                         <span>Estimated service time</span>
                         <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{E.productionDiagnostics.estimatedMinutes} min</span>
                       </div>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 8 }}>
+                        <span style={{ fontSize: 12, color: C.gray }}>Pricing confidence</span>
+                        {(() => {
+                          const confidence = String(E.productionDiagnostics.pricingConfidence || E.productionDiagnostics.confidence || 'high').toLowerCase();
+                          const color = confidence === 'low' ? C.red : confidence === 'medium' ? C.amber : C.green;
+                          return (
+                            <span style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              border: `1px solid ${color}33`,
+                              background: `${color}14`,
+                              color,
+                              borderRadius: 999,
+                              padding: '3px 8px',
+                              fontSize: 11,
+                              fontWeight: 800,
+                              textTransform: 'uppercase',
+                              letterSpacing: 0.5,
+                            }}>
+                              {confidence === 'low' ? 'Review required' : confidence === 'medium' ? 'Review recommended' : 'High'}
+                            </span>
+                          );
+                        })()}
+                      </div>
                       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', columnGap: 16, rowGap: 4, fontSize: 12, color: C.gray }}>
                         {Object.entries(E.productionDiagnostics.breakdown || {}).map(([key, value]) => (
                           Number(value) !== 0 && (
@@ -1455,7 +1493,7 @@ function EstimateToolView() {
                       </div>
                       {E.productionDiagnostics.manualReview && (
                         <div style={{ marginTop: 8, fontSize: 12, color: C.red }}>
-                          Review: {(E.productionDiagnostics.manualReviewReasons || []).join(', ').replace(/_/g, ' ')}
+                          Review: {((E.productionDiagnostics.reviewReasons || E.productionDiagnostics.manualReviewReasons || [])).join(', ').replace(/_/g, ' ')}
                         </div>
                       )}
                       <div style={{ marginTop: 8, fontSize: 11, color: C.gray }}>Shadow only. These minutes do not drive price yet.</div>

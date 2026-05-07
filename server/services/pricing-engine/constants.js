@@ -198,7 +198,10 @@ const PEST = {
     nearWaterMinutes: 2,
     attachedGarageMinutes: 2,
     outbuildingMinutes: 3,
-    manualReviewLotSqFt: 40000,
+    manualReviewLotSqFt: 20000,
+    lowConfidenceLotSqFt: 40000,
+    manualReviewMinutes: 45,
+    lowConfidenceMinutes: 60,
   },
 };
 

@@ -77,7 +77,7 @@ Single source of truth for what this engine prices, how, and with what constants
 
 **Annual prepay:** acceptance/conversion invoices annual prepay as `estimate.monthly_total × 12`, rounded to cents. This intentionally preserves the selected frequency, zone multiplier, WaveGuard bundle discount, and any recurring price adjustments already reflected in the accepted quote; it is not `basePrice × 4`.
 
-**Production diagnostics:** pest results include `productionDiagnostics` with estimated minutes and a minute breakdown. This is shadow-only and does not drive price until calibrated against Bouncie/on-site actuals.
+**Production diagnostics:** pest results include `productionDiagnostics` with estimated minutes, minute breakdown, `pricingConfidence` (`high`/`medium`/`low`), and `reviewReasons`. This is shadow-only and does not drive price until calibrated against Bouncie/on-site actuals.
 
 **Frequency discounts (v1 — currently live):** quarterly 1.00, bimonthly 0.85, monthly 0.70
 **v2 (experimental):** quarterly 1.00, bimonthly 0.88, monthly 0.78

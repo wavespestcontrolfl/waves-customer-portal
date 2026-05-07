@@ -58,6 +58,7 @@ function generateEstimate(input) {
   const property = calculatePropertyProfile({
     homeSqFt: input.homeSqFt,
     stories: input.stories,
+    storiesSource: input.storiesSource,
     lotSqFt: input.lotSqFt,
     lawnSqFt: input.lawnSqFt,
     bedArea: input.bedArea,

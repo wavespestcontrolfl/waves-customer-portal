@@ -52,7 +52,10 @@ function calculatePestProductionDiagnostics(property) {
   const f = property.features || {};
   const footprint = Number(property.footprint) || 0;
   const lotSqFt = Number(property.lotSqFt) || 0;
+  const homeSqFt = Number(property.homeSqFt) || 0;
+  const storiesSource = String(property.storiesSource || '').toLowerCase();
   const poolCageSize = normalizePoolCageSize(f.poolCageSize, !!f.poolCage);
+  const rawPoolCageSize = String(f.poolCageSize || '').trim().toLowerCase();
   const round1 = value => Math.round(value * 10) / 10;
   const outbuildingCount = Math.max(0, Math.floor(Number(property.outbuildingCount) || 0));
 
@@ -73,19 +76,34 @@ function calculatePestProductionDiagnostics(property) {
 
   const estimatedMinutes = Math.max(10, round1(Object.values(breakdown).reduce((sum, n) => sum + (Number(n) || 0), 0)));
   const manualReviewReasons = [];
-  if (lotSqFt > (cfg.manualReviewLotSqFt || 40000)) manualReviewReasons.push('large_lot');
-  if (poolCageSize === 'oversized') manualReviewReasons.push('oversized_pool_cage');
+  const lowConfidenceReasons = [];
+
+  if (!homeSqFt || !footprint) lowConfidenceReasons.push('missing_home_sqft');
+  if (!lotSqFt) lowConfidenceReasons.push('missing_lot_size');
+  if (storiesSource === 'default' || storiesSource === 'estimated') manualReviewReasons.push('stories_estimated');
+  if (f.poolCage && !['small', 'medium', 'large', 'oversized'].includes(rawPoolCageSize)) manualReviewReasons.push('pool_cage_size_inferred');
+  if (lotSqFt > (cfg.lowConfidenceLotSqFt || 40000)) lowConfidenceReasons.push('very_large_lot');
+  else if (lotSqFt > (cfg.manualReviewLotSqFt || 20000)) manualReviewReasons.push('large_lot');
+  if (poolCageSize === 'oversized') lowConfidenceReasons.push('oversized_pool_cage');
+  else if (poolCageSize === 'large') manualReviewReasons.push('large_pool_cage');
   if (f.complexity === 'complex' && (f.shrubs === 'heavy' || f.trees === 'heavy')) manualReviewReasons.push('complex_heavy_vegetation');
   if (outbuildingCount >= 2) manualReviewReasons.push('multiple_outbuildings');
+  if (estimatedMinutes >= (cfg.lowConfidenceMinutes || 60)) lowConfidenceReasons.push('estimated_service_time_60_plus');
+  else if (estimatedMinutes >= (cfg.manualReviewMinutes || 45)) manualReviewReasons.push('estimated_service_time_45_plus');
+
+  const reviewReasons = [...new Set([...lowConfidenceReasons, ...manualReviewReasons])];
+  const pricingConfidence = lowConfidenceReasons.length ? 'low' : manualReviewReasons.length ? 'medium' : 'high';
 
   return {
     estimatedMinutes,
     breakdown,
     poolCageSize,
     pricingMode: 'shadow_only',
-    confidence: manualReviewReasons.length ? 'MEDIUM' : 'HIGH',
-    manualReview: manualReviewReasons.length > 0,
-    manualReviewReasons,
+    pricingConfidence,
+    confidence: pricingConfidence,
+    manualReview: reviewReasons.length > 0,
+    reviewReasons,
+    manualReviewReasons: reviewReasons,
   };
 }
 
