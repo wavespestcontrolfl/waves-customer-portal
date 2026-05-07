@@ -115,6 +115,61 @@ const CONTACT_FIELDS = new Set(['customerId', 'customerName', 'customerPhone', '
 const SEND_FIELDS = new Set(['scheduleSend', 'scheduledAt']);
 const DELIVERY_OPTION_FIELDS = new Set(['showOneTimeOption', 'billByInvoice']);
 
+const MOSQUITO_PROTOCOL_STEPS = [
+  'Inspect shaded foliage, fence lines, lanai perimeter, pool cage edges, drains, planters, and any standing-water source before treatment.',
+  'Use a gas-powered backpack sprayer for a directed barrier application to mosquito resting zones. Keep applications off blooms and avoid pollinator activity windows.',
+  'Essential Barrier uses bifenthrin adulticide with pyriproxyfen + novaluron IGR support where breeding pressure exists.',
+  'Precision Barrier uses gamma-cyhalothrin adulticide with the same IGR support for heavier foliage, water adjacency, pool cages, and higher residual expectations.',
+  'Recommend stations or Bti dunk tablets when breeding sources cannot be fully dumped, drained, or eliminated during the visit.',
+  'Document inaccessible water, wind/rain constraints, customer source-reduction notes, and any reinspection trigger on the service record.',
+];
+
+function buildMosquitoRecommendations(form) {
+  const isMosquitoSelected = !!form.svcMosquito || !!form.svcOnetimeMosquito;
+  if (!isMosquitoSelected) return [];
+
+  const heavyVegetation = form.treeDensity === 'HEAVY' || form.shrubDensity === 'HEAVY' || form.landscapeComplexity === 'COMPLEX';
+  const waterPressure = form.nearWater === 'YES';
+  const poolPressure = form.hasPool === 'YES' || form.hasPoolCage === 'YES';
+  const lotPressure = Number(form.lotSqFt || 0) >= 12000;
+  const recommendations = [];
+
+  if (form.svcMosquito && form.mosquitoProgram !== 'residual_monthly' && (heavyVegetation || waterPressure || poolPressure || lotPressure)) {
+    const reasons = [
+      heavyVegetation ? 'heavy landscape pressure' : null,
+      waterPressure ? 'water adjacency' : null,
+      poolPressure ? 'pool or cage edges' : null,
+      lotPressure ? 'larger treatable area' : null,
+    ].filter(Boolean);
+    recommendations.push({
+      key: 'precision',
+      label: 'Use Monthly Precision Barrier',
+      detail: `Recommended for ${reasons.join(', ')}.`,
+      apply: { mosquitoProgram: 'residual_monthly' },
+    });
+  }
+
+  if ((waterPressure || poolPressure) && Number(form.mosquitoStationCount || 0) < 2) {
+    recommendations.push({
+      key: 'stations',
+      label: 'Add 2 mosquito stations',
+      detail: 'Use when breeding sources cannot be fully removed or accessed.',
+      apply: { mosquitoStationCount: '2' },
+    });
+  }
+
+  if (waterPressure && Number(form.mosquitoDunkCount || 0) < 4) {
+    recommendations.push({
+      key: 'dunks',
+      label: 'Add 4 Bti dunk tablets',
+      detail: 'Use for drains, planters, or non-potable standing water where labeled.',
+      apply: { mosquitoDunkCount: '4' },
+    });
+  }
+
+  return recommendations;
+}
+
 function validateDeliveryOptions(form, estimate) {
   const oneTimeAmount = Number(estimate?.oneTime?.total || 0);
   const recurringAmount = Math.max(
@@ -522,6 +577,13 @@ export default function EstimateToolViewV2({
   const toggle = useCallback((key) => {
     setForm((f) => ({ ...f, [key]: !f[key] }));
     if (key.startsWith('svc')) { setEstimate(null); setSavedId(null); }
+  }, []);
+
+  const mosquitoRecommendations = useMemo(() => buildMosquitoRecommendations(form), [form]);
+  const applyMosquitoRecommendation = useCallback((recommendation) => {
+    setForm((f) => ({ ...f, ...(recommendation?.apply || {}) }));
+    setEstimate(null);
+    setSavedId(null);
   }, []);
 
   const searchSendCustomers = useCallback(async (q) => {
@@ -1404,6 +1466,48 @@ export default function EstimateToolViewV2({
                       <div className="bg-white border-hairline border-zinc-200 rounded-xs p-3">
                         <div className="text-12 font-semibold text-zinc-900 mb-1">Precision Barrier</div>
                         Gamma-cyhalothrin adulticide with the same IGR support. Better fit for heavy vegetation, pool cages, water adjacency, and customers who need a stronger residual barrier.
+                      </div>
+                    </div>
+                  )}
+                  {(form.svcMosquito || form.svcOnetimeMosquito) && (
+                    <div className="mt-3 bg-white border-hairline border-zinc-200 rounded-xs p-3">
+                      <div className="flex items-center justify-between gap-3 mb-2">
+                        <div className="text-12 font-semibold text-zinc-900">Mosquito Protocol</div>
+                        <Badge variant="neutral" className="text-10">Estimate reference</Badge>
+                      </div>
+                      <div className="grid gap-2">
+                        {MOSQUITO_PROTOCOL_STEPS.map((step, index) => (
+                          <div key={step} className="flex gap-2 text-11 leading-snug text-ink-secondary">
+                            <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-zinc-300 text-10 font-semibold text-zinc-700">
+                              {index + 1}
+                            </span>
+                            <span>{step}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {mosquitoRecommendations.length > 0 && (
+                    <div className="mt-3 bg-zinc-50 border-hairline border-zinc-300 rounded-xs p-3">
+                      <div className="text-12 font-semibold text-zinc-900 mb-2">Field Recommendations</div>
+                      <div className="grid gap-2">
+                        {mosquitoRecommendations.map((recommendation) => (
+                          <div key={recommendation.key} className="flex items-start justify-between gap-3 rounded-xs bg-white border-hairline border-zinc-200 p-2.5">
+                            <div>
+                              <div className="text-12 font-semibold text-zinc-900">{recommendation.label}</div>
+                              <div className="text-11 text-ink-secondary leading-snug">{recommendation.detail}</div>
+                            </div>
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              size="sm"
+                              className="h-7 shrink-0 px-2 text-11"
+                              onClick={() => applyMosquitoRecommendation(recommendation)}
+                            >
+                              Apply
+                            </Button>
+                          </div>
+                        ))}
                       </div>
                     </div>
                   )}

@@ -999,12 +999,11 @@
       {
         "visit": 6,
         "month": "Any",
-        "primary": "Mosquito Barrier\nCyzmic CS or equivalent barrier spray to foliage, fence lines, shaded resting zones, and lanai perimeter\nTekko Pro or larvicide in drains, planters, or non-potable standing water where labeled",
-        "secondary": "Dump standing water\nFlag inaccessible breeding sources\nAvoid blooming plants and pollinator activity windows",
+        "primary": "Mosquito Barrier\nEssential Barrier: bifenthrin adulticide directed to foliage, fence lines, shaded resting zones, lanai perimeter, and pool cage edges\nPrecision Barrier: gamma-cyhalothrin adulticide for heavy vegetation, water adjacency, pool cages, and higher residual expectations\nPyriproxyfen + novaluron IGR support where breeding pressure exists",
+        "secondary": "Inspect drains, planters, saucers, bromeliads, gutters, tarps, toys, and other water-holding sites\nDump standing water where practical and document sources that cannot be removed\nUse mosquito stations or Bti dunk tablets when breeding sources cannot be fully eliminated\nAvoid blooming plants and pollinator activity windows",
         "material_cost": "inventory",
         "labor_cost": "standard",
-        "tiers": { "bronze": false, "silver": true, "enhanced": true, "premium": true },
-        "notes": "Peak pressure May-Oct. Wind, rain, and access constraints must be documented."
+        "notes": "Use gas-powered backpack sprayer for directed barrier application. Peak pressure May-Oct. Wind, rain, inaccessible water, and source-reduction notes must be documented."
       }
     ]
   },
