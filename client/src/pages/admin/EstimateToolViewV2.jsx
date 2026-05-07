@@ -578,6 +578,32 @@ export default function EstimateToolViewV2({
     setForm((f) => ({ ...f, [key]: !f[key] }));
     if (key.startsWith('svc')) { setEstimate(null); setSavedId(null); }
   }, []);
+  const applyMosquitoCustomerChoice = useCallback((choice) => {
+    setForm((f) => {
+      const next = { ...f, showOneTimeOption: true };
+      if (choice === 'one_time') next.svcOnetimeMosquito = true;
+      if (choice === 'recurring') next.svcMosquito = true;
+      if (choice === 'both') {
+        next.svcMosquito = true;
+        next.svcOnetimeMosquito = true;
+      }
+      return next;
+    });
+    setEstimate(null);
+    setSavedId(null);
+  }, []);
+  const setCustomerChoiceOption = useCallback((enabled) => {
+    setForm((f) => {
+      const next = { ...f, showOneTimeOption: enabled };
+      if (enabled) {
+        if (f.svcMosquito && !f.svcOnetimeMosquito) next.svcOnetimeMosquito = true;
+        if (f.svcOnetimeMosquito && !f.svcMosquito) next.svcMosquito = true;
+      }
+      return next;
+    });
+    setSavedId(null);
+    setEstimate(null);
+  }, []);
 
   const mosquitoRecommendations = useMemo(() => buildMosquitoRecommendations(form), [form]);
   const applyMosquitoRecommendation = useCallback((recommendation) => {
@@ -1469,6 +1495,44 @@ export default function EstimateToolViewV2({
                       </div>
                     </div>
                   )}
+                  <div className="mt-3 flex flex-wrap items-center gap-2 text-11 text-ink-secondary">
+                    {form.svcMosquito && !form.svcOnetimeMosquito && (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        className="h-7 px-2 text-11"
+                        onClick={() => applyMosquitoCustomerChoice('one_time')}
+                      >
+                        Offer one-time mosquito option
+                      </Button>
+                    )}
+                    {form.svcOnetimeMosquito && !form.svcMosquito && (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        className="h-7 px-2 text-11"
+                        onClick={() => applyMosquitoCustomerChoice('recurring')}
+                      >
+                        Offer recurring mosquito option
+                      </Button>
+                    )}
+                    {form.svcMosquito && form.svcOnetimeMosquito && !form.showOneTimeOption && (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        className="h-7 px-2 text-11"
+                        onClick={() => applyMosquitoCustomerChoice('both')}
+                      >
+                        Enable customer choice
+                      </Button>
+                    )}
+                    {form.svcMosquito && form.svcOnetimeMosquito && form.showOneTimeOption && (
+                      <span>Customer will see recurring and one-time mosquito options.</span>
+                    )}
+                  </div>
                   {(form.svcMosquito || form.svcOnetimeMosquito) && (
                     <div className="mt-3 bg-white border-hairline border-zinc-200 rounded-xs p-3">
                       <div className="flex items-center justify-between gap-3 mb-2">
@@ -1759,13 +1823,13 @@ export default function EstimateToolViewV2({
                     <input
                       type="checkbox"
                       checked={form.showOneTimeOption || false}
-                      onChange={(e) => set('showOneTimeOption', e.target.checked)}
+                      onChange={(e) => setCustomerChoiceOption(e.target.checked)}
                       className="accent-zinc-900 mt-0.5"
                     />
                     <span>
                       <span className="font-medium">Offer one-time option</span>
                       <span className="block text-11 text-ink-secondary">
-                        Customer sees a Recurring / One-time toggle and can select either.
+                        Customer sees a Recurring / One-time toggle and can select either. Mosquito adds the matching option automatically.
                       </span>
                     </span>
                   </label>
