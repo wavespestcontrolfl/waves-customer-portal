@@ -422,6 +422,23 @@ function fmtPct(value) {
   return `${Math.round(Number(value) * 100)}%`;
 }
 
+function fmtDateTime(value) {
+  if (!value) return '—';
+  try {
+    return new Date(value).toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZone: 'America/New_York',
+      timeZoneName: 'short',
+    });
+  } catch {
+    return '—';
+  }
+}
+
 // Stat card — label, big value, sub. Single alert accent reserved for
 // Follow-Up Overdue when > 0. Conversion% no longer color-codes; the
 // number alone tells the story. Centered both axes per spec.
@@ -547,6 +564,49 @@ function EstimatePricingAuditModal({ estimate, initialFocus = 'all', onClose }) 
                 <StatCard label="WaveGuard" value={audit.estimate.waveguardTier || '—'} sub={audit.estimate.pricingVersion || 'saved result'} />
               </div>
 
+              {audit.snapshot && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  <Card className="p-4">
+                    <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">Sent Snapshot</div>
+                    <div className="grid grid-cols-3 gap-3">
+                      <div>
+                        <div className="text-11 text-ink-tertiary">COGS</div>
+                        <div className="text-16 font-medium u-nums text-zinc-900">{fmtMoney(audit.snapshot.totals?.estimatedCost)}</div>
+                      </div>
+                      <div>
+                        <div className="text-11 text-ink-tertiary">Margin</div>
+                        <div className="text-16 font-medium u-nums text-zinc-900">{fmtPct(audit.snapshot.totals?.margin)}</div>
+                      </div>
+                      <div>
+                        <div className="text-11 text-ink-tertiary">Captured</div>
+                        <div className="text-12 text-zinc-900">{fmtDateTime(audit.snapshot.snapshotAt)}</div>
+                      </div>
+                    </div>
+                  </Card>
+                  <Card className="p-4">
+                    <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">Current Audit</div>
+                    <div className="grid grid-cols-3 gap-3">
+                      <div>
+                        <div className="text-11 text-ink-tertiary">COGS</div>
+                        <div className="text-16 font-medium u-nums text-zinc-900">{fmtMoney(audit.totals.estimatedCost)}</div>
+                      </div>
+                      <div>
+                        <div className="text-11 text-ink-tertiary">Margin</div>
+                        <div className="text-16 font-medium u-nums text-zinc-900">{fmtPct(audit.totals.margin)}</div>
+                      </div>
+                      <div>
+                        <div className="text-11 text-ink-tertiary">Delta</div>
+                        <div className="text-16 font-medium u-nums text-zinc-900">
+                          {audit.snapshot.totals?.margin == null || audit.totals.margin == null
+                            ? '—'
+                            : `${Math.round((audit.totals.margin - audit.snapshot.totals.margin) * 100)} pts`}
+                        </div>
+                      </div>
+                    </div>
+                  </Card>
+                </div>
+              )}
+
               <div className="flex flex-wrap items-center justify-between gap-2 border-hairline border-zinc-200 rounded-md px-3 py-2">
                 <div className="text-12 text-ink-secondary">
                   Showing <span className="font-medium text-zinc-900">{focusLabel}</span>
@@ -644,7 +704,7 @@ function EstimatePricingAuditModal({ estimate, initialFocus = 'all', onClose }) 
               </div>
 
               <div className="text-11 text-ink-tertiary">
-                Pricing is read from the saved estimate result. COGS is recalculated from current inventory product costs and service protocol mappings.
+                Pricing is read from the saved estimate result. Current COGS is recalculated from today's inventory product costs and service protocol mappings; sent snapshots preserve the audit values captured when the estimate was delivered.
               </div>
             </div>
           )}
