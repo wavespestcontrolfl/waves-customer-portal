@@ -57,8 +57,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // Greenlit 2026-04-18: enriched property features (pool/cage, shrub/tree
     // density, landscape complexity, near-water, large-driveway) flow into the
     // pricing engine so public quotes match what admin /estimate would price.
-    // Same per-visit modifiers as admin (+$10 pool cage, +$5 moderate shrubs,
-    // etc. — see constants.js PEST.additionalAdjustments). The customer still
+    // Same per-visit modifiers as admin (pool cage size defaults to medium:
+    // small +$5, medium +$8, large +$12, oversized +$18; moderate shrubs/trees
+    // are baseline $0 — see constants.js PEST.additionalAdjustments). The customer still
     // sees a ±5% range (variance_low/high below) so AI misclassification has
     // headroom. Zero retroactive impact: no quote_wizard leads existed when
     // this landed.
@@ -70,6 +71,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       features: {
         pool: ep.pool === 'YES' || ep.pool === true || ep.poolCage === 'YES',
         poolCage: ep.poolCage === 'YES' || ep.poolCage === true,
+        poolCageSize: ['small', 'medium', 'large', 'oversized'].includes(String(ep.poolCageSize || '').toLowerCase())
+          ? String(ep.poolCageSize).toLowerCase()
+          : undefined,
         shrubs: (ep.shrubDensity || ep.shrubs || '').toString().toLowerCase() || undefined,
         trees: (ep.treeDensity || ep.trees || '').toString().toLowerCase() || undefined,
         complexity: (ep.landscapeComplexity || ep.complexity || '').toString().toLowerCase() || undefined,

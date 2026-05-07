@@ -876,7 +876,9 @@ function priceOneTimePest(property, options = {}) {
   let base;
   if (recurringPestPerApp) {
     const roachMod = PEST.roachModifier[roachType] || 0;
-    base = recurringPestPerApp / (1 + roachMod); // Back out roach modifier
+    // Legacy guard: roach modifiers are currently zero, but keep the backout
+    // harmless if an old saved estimate or future config reintroduces a value.
+    base = recurringPestPerApp / (1 + roachMod);
   } else {
     const pestResult = pricePestControl(property, { frequency: 'quarterly', roachType: 'none' });
     base = pestResult.basePrice;
