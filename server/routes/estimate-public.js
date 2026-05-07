@@ -414,6 +414,13 @@ function renderPage(token, estimate, estData) {
   const savingsPerMo = Math.max(0, Math.round((baseMonthly - monthlyTotal) * 100) / 100);
   const dayPrice = Math.round((monthlyTotal / 30) * 100) / 100;
 
+  // One-time toggle — admin opted this estimate into letting the customer
+  // pick "single visit" instead of a recurring plan. Only renders when the
+  // flag is on AND we have a non-zero alternative one-time price.
+  const showOneTimeOption = !!est.showOneTimeOption;
+  const oneTimeChoicePrice = Number(est.oneTimeChoicePrice || 0);
+  const canChooseOneTime = showOneTimeOption && oneTimeChoicePrice > 0;
+
   const inputs = estData?.inputs || {};
   const homeSqFt = Number(inputs.homeSqFt) || Number(estResult?.property?.footprint * (Number(inputs.stories) || 1)) || null;
   const lotSqFt = Number(inputs.lotSqFt) || Number(estResult?.property?.lotSqFt) || null;
@@ -626,6 +633,11 @@ function renderPage(token, estimate, estData) {
   .save-pill{display:inline-block;color:${BRAND.green};font-size:13px;font-weight:600}
   .day-price{margin-top:8px;font-size:14px;color:#6B7280}
   .mini-guarantee{margin-top:10px;font-size:13px;color:#1B2C5B}
+  .mode-toggle{display:inline-flex;gap:4px;margin-top:18px;padding:4px;background:#F1F5F9;border-radius:999px;border:1px solid #E2E8F0}
+  .mode-btn{appearance:none;border:0;background:transparent;color:#475569;font:600 13px/1 Inter,system-ui,sans-serif;padding:10px 18px;border-radius:999px;cursor:pointer;letter-spacing:.02em;transition:background .15s,color .15s}
+  .mode-btn.is-active{background:#009CDE;color:#fff;box-shadow:0 1px 4px rgba(15,23,42,.12)}
+  .mode-btn:not(.is-active):hover{color:#1B2C5B}
+  .onetime-note{margin-top:14px;font-size:14px;color:#3F4A65;line-height:1.55;max-width:640px}
   .card{background:#fff;border-radius:14px;padding:24px;margin-bottom:16px;border:1px solid #E7E2D7}
   .card h2{margin:0 0 6px}
   .card h3{margin:0 0 10px}
@@ -756,16 +768,29 @@ ${shellTopBar()}
     <h1>Hey ${firstName}, here\u2019s your custom plan.</h1>
     <div class="addr">${address}</div>
     ${propertyLine ? `<div class="prop-meta">${escapeHtml(propertyLine)}</div>` : ''}
-    <div class="big-price">
+    ${canChooseOneTime ? `
+    <div class="mode-toggle" role="group" aria-label="Service plan">
+      <button type="button" class="mode-btn is-active" data-mode-set="recurring" aria-pressed="true">Recurring</button>
+      <button type="button" class="mode-btn" data-mode-set="one_time" aria-pressed="false">One-time</button>
+    </div>` : ''}
+    <div class="big-price" data-mode-only="recurring">
       ${savingsPerMo > 0 ? `<span class="anchor" id="anchor-display">${fmtMoney(baseMonthly)}/mo</span>` : ''}
       <span class="num" id="monthly-display">${fmtMoney(monthlyTotal)}</span>
       <span class="per">/mo</span>
       <span class="tier-lbl" id="tier-display">WaveGuard ${escapeHtml(tier)}</span>
     </div>
-    <div class="save-row"${savingsPerMo > 0 ? '' : ' style="display:none"'}>
+    <div class="save-row" data-mode-only="recurring"${savingsPerMo > 0 ? '' : ' style="display:none"'}>
       <span class="save-pill">You save <span id="savings-display">${fmtMoney(savingsPerMo)}</span>/mo with WaveGuard <span id="savings-tier">${escapeHtml(tier)}</span></span>
     </div>
-    <div class="day-price">That\u2019s just <span id="day-price">${fmtMoney(dayPrice)}</span>/day for complete home protection.</div>
+    <div class="day-price" data-mode-only="recurring">That\u2019s just <span id="day-price">${fmtMoney(dayPrice)}</span>/day for complete home protection.</div>
+    ${canChooseOneTime ? `
+    <div class="big-price" data-mode-only="one_time" hidden>
+      <span class="num" id="onetime-display">${fmtMoney(oneTimeChoicePrice)}</span>
+      <span class="per">one-time</span>
+    </div>
+    <div class="onetime-note" data-mode-only="one_time" hidden>
+      One visit, pay on service day. No recurring schedule, no tier discount. Most pest problems come back \u2014 if this single treatment doesn\u2019t resolve it, switch to recurring and we\u2019ll credit this visit toward your first month.
+    </div>` : ''}
     <div class="mini-guarantee">Try us risk-free \u2014 90-day money-back guarantee.</div>
   </div>
 
@@ -789,11 +814,11 @@ ${shellTopBar()}
     <p class="card-sub">Here are the next open times nearest your address. We will hold your pick for 15 minutes while you confirm.</p>
     <div id="slot-area" class="booking-state">Loading available times...</div>
     <div id="pay-pref-area" style="display:none">
-      <h3 style="margin:20px 0 4px">How would you like to pay?</h3>
-      <p class="card-sub" style="margin:0">Both options reserve your slot. You will not be charged today.</p>
+      <h3 id="pay-pref-heading" style="margin:20px 0 4px">How would you like to pay?</h3>
+      <p class="card-sub" id="pay-pref-subhead" style="margin:0">Both options reserve your slot. You will not be charged today.</p>
       <div class="pay-pref-grid">
-        <button type="button" class="pay-pref-btn primary" data-pay-pref="card_on_file"><span class="pay-pref-title">Save a card to lock my slot</span><span class="pay-pref-sub">Add a card on file now so your slot is reserved. We charge on the visit day, not today.</span></button>
-        <button type="button" class="pay-pref-btn" data-pay-pref="pay_at_visit"><span class="pay-pref-title">Pay at the visit</span><span class="pay-pref-sub">We will collect payment with the tech on-site. No card needed now.</span></button>
+        <button type="button" class="pay-pref-btn primary" data-pay-pref="card_on_file" data-pay-pref-card><span class="pay-pref-title">Save a card to lock my slot</span><span class="pay-pref-sub">Add a card on file now so your slot is reserved. We charge on the visit day, not today.</span></button>
+        <button type="button" class="pay-pref-btn" data-pay-pref="pay_at_visit" data-pay-pref-visit><span class="pay-pref-title" data-pay-visit-title>Pay at the visit</span><span class="pay-pref-sub" data-pay-visit-sub>We will collect payment with the tech on-site. No card needed now.</span></button>
       </div>
     </div>
     <div id="review-area" style="display:none">
@@ -815,7 +840,7 @@ ${shellTopBar()}
     ${hasRealOneTime ? `<p style="font-size:13px;opacity:.65;margin:12px 0 0">These are scheduled after your recurring service starts. The WaveGuard member rate includes 15% off any one-time treatment.</p>` : ''}
   </div>` : ''}
 
-  <div class="card">
+  <div class="card" data-mode-only="recurring">
     <h2>What WaveGuard members get</h2>
     <ul class="perks-list">${perksHtml}</ul>
   </div>
@@ -841,7 +866,8 @@ ${shellTopBar()}
   </div>
 
   <div class="final">
-    <h2>Ready to lock in <span data-monthly-echo>${fmtMoney(monthlyTotal)}</span>/mo?</h2>
+    <h2 data-mode-only="recurring">Ready to lock in <span data-monthly-echo>${fmtMoney(monthlyTotal)}</span>/mo?</h2>
+    ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>Ready to lock in <span data-onetime-echo>${fmtMoney(oneTimeChoicePrice)}</span> one-time?</h2>` : ''}
     <p>No surprise increases, no hidden fees.</p>
     ${locked ? '' : `<button type="button" class="cta pick-time-cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B">Pick a time and book</button>`}
     <div style="margin-top:20px;font-size:14px">
@@ -885,6 +911,11 @@ ${shellQuestionsBar()}
         if (!r.ok) throw new Error(data.error || 'Failed');
         document.getElementById('monthly-display').textContent = fmt(data.monthlyTotal);
         document.querySelectorAll('[data-monthly-echo]').forEach(el => el.textContent = fmt(data.monthlyTotal));
+        if (data.onetimeTotal != null) {
+          const oneTimeDisplay = document.getElementById('onetime-display');
+          if (oneTimeDisplay) oneTimeDisplay.textContent = fmt(data.onetimeTotal);
+          document.querySelectorAll('[data-onetime-echo]').forEach(el => el.textContent = fmt(data.onetimeTotal));
+        }
         const dayEl = document.getElementById('day-price'); if (dayEl) dayEl.textContent = fmt(Math.round((data.monthlyTotal / 30) * 100) / 100);
         if (data.tierPrices) {
           document.querySelectorAll('[data-price-for]').forEach((pel) => {
@@ -935,7 +966,65 @@ ${shellQuestionsBar()}
     pickedPref: null,
     reservation: null,
     countdownTimer: null,
+    serviceMode: 'recurring',
   };
+
+  // Recurring/one-time inline toggle. Swaps visibility of [data-mode-only]
+  // elements (hero price block, perks card, final CTA copy) and stamps
+  // bookingState.serviceMode so the next /reserve and /accept calls
+  // include it in their bodies.
+  function setServiceMode(mode) {
+    if (mode !== 'recurring' && mode !== 'one_time') return;
+    const changed = bookingState.serviceMode !== mode;
+    bookingState.serviceMode = mode;
+    document.querySelectorAll('[data-mode-only]').forEach((el) => {
+      el.hidden = el.dataset.modeOnly !== mode;
+    });
+    document.querySelectorAll('[data-mode-set]').forEach((btn) => {
+      const on = btn.dataset.modeSet === mode;
+      btn.classList.toggle('is-active', on);
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    syncPaymentMode();
+    if (changed && bookingState.reservation) {
+      cancelReservation();
+    } else if (changed) {
+      bookingState.pickedPref = null;
+      document.querySelectorAll('[data-pay-pref]').forEach((b) => { b.disabled = false; });
+    }
+  }
+  document.querySelectorAll('[data-mode-set]').forEach((btn) => {
+    btn.addEventListener('click', () => setServiceMode(btn.dataset.modeSet));
+  });
+
+  function syncPaymentMode() {
+    const isOneTime = bookingState.serviceMode === 'one_time';
+    const cardBtn = document.querySelector('[data-pay-pref-card]');
+    const visitBtn = document.querySelector('[data-pay-pref-visit]');
+    const heading = document.getElementById('pay-pref-heading');
+    const subhead = document.getElementById('pay-pref-subhead');
+    const visitTitle = document.querySelector('[data-pay-visit-title]');
+    const visitSub = document.querySelector('[data-pay-visit-sub]');
+    if (cardBtn) {
+      cardBtn.hidden = isOneTime;
+      cardBtn.classList.toggle('primary', !isOneTime);
+    }
+    if (visitBtn) {
+      visitBtn.classList.toggle('primary', isOneTime);
+    }
+    if (heading) heading.textContent = isOneTime ? 'Book your visit' : 'How would you like to pay?';
+    if (subhead) {
+      subhead.textContent = isOneTime
+        ? 'This books a single visit. You will not be charged today.'
+        : 'Both options reserve your slot. You will not be charged today.';
+    }
+    if (visitTitle) visitTitle.textContent = isOneTime ? 'Book + pay on service day' : 'Pay at the visit';
+    if (visitSub) {
+      visitSub.textContent = isOneTime
+        ? 'We will collect payment with the tech on-site. No card needed now.'
+        : 'We will collect payment with the tech on-site. No card needed now.';
+    }
+  }
 
   function fmtSlotDay(dateStr) {
     try {
@@ -1020,6 +1109,9 @@ ${shellQuestionsBar()}
       toast('Pick a time first.');
       return;
     }
+    if (bookingState.serviceMode === 'one_time') {
+      pref = 'pay_at_visit';
+    }
     const buttons = document.querySelectorAll('[data-pay-pref]');
     buttons.forEach((b) => { b.disabled = true; });
     bookingState.pickedPref = pref;
@@ -1027,7 +1119,7 @@ ${shellQuestionsBar()}
       const r = await fetch('/api/public/estimates/' + TOKEN + '/reserve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ slotId: bookingState.selectedSlotId }),
+        body: JSON.stringify({ slotId: bookingState.selectedSlotId, serviceMode: bookingState.serviceMode }),
       });
       if (r.status === 409) {
         const data = await r.json().catch(() => ({}));
@@ -1125,6 +1217,7 @@ ${shellQuestionsBar()}
         body: JSON.stringify({
           slotId: bookingState.selectedSlotId,
           paymentMethodPreference: bookingState.pickedPref,
+          serviceMode: bookingState.serviceMode,
         }),
       });
       const data = await r.json();
@@ -1295,8 +1388,10 @@ async function handleEstimateView(req, res, next) {
     // the SPA static-index fallback at server/index.js's app.get('*',...).
     // The React page owns view tracking + first-view side effects via
     // GET /:token/data; do NOT double-count them here.
+    // show_one_time_option is now handled inline by the rich server-HTML
+    // via the recurring/one-time mode toggle (see canChooseOneTime branch
+    // in renderPage). It no longer routes to the React V2 view.
     const shouldUseReactEstimateView = estimate.use_v2_view === true
-      || estimate.show_one_time_option === true
       || estimate.bill_by_invoice === true;
     if (shouldUseReactEstimateView && req.path.startsWith('/estimate/')) {
       return next();
@@ -1311,6 +1406,7 @@ async function handleEstimateView(req, res, next) {
     // Track every real view (count + last_viewed_at). Bot UAs and admin
     // IPs are filtered upstream by shouldCountView so the dashboard count
     // reflects actual customer opens.
+    const requestIp = clientIp(req);
     const countThisView = shouldCountView(req);
     if (countThisView) {
       try {
@@ -1323,19 +1419,21 @@ async function handleEstimateView(req, res, next) {
       // Per-open log (Estimates v2 spec §4) — one row per open with ip + UA.
       // Wrapped so a schema drift can't break the public estimate page.
       try {
-        const ip = clientIp(req);
         const ua = (req.get('user-agent') || '').slice(0, 1000);
         await db('estimate_views').insert({
           estimate_id: estimate.id,
           viewed_at: db.fn.now(),
-          ip: ip || null,
+          ip: requestIp || null,
           user_agent: ua || null,
         });
       } catch (e) { logger.warn(`[estimate-view] estimate_views insert skipped: ${e.message}`); }
     }
 
-    // First-view actions: set viewed_at/status, notify admin + SMS office
-    if (!estimate.viewed_at) {
+    // First-view actions: set viewed_at/status, notify admin + SMS office.
+    // Match the React data endpoint's admin-IP guard so admin previews of
+    // one-time-toggle estimates do not look like real customer opens now
+    // that show_one_time_option is handled by this rich SSR view.
+    if (!estimate.viewed_at && !isAdminIp(requestIp) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
       await db('estimates').where({ id: estimate.id }).update({ viewed_at: db.fn.now(), status: 'viewed' });
 
       try {
@@ -1352,6 +1450,19 @@ async function handleEstimateView(req, res, next) {
 
     const estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
 
+    // One-time alternative price for the inline toggle. Mirrors the
+    // resolveAcceptOneTimeTotal logic on accept so the customer sees the
+    // same number that gets committed if they pick "single visit".
+    let oneTimeChoicePrice = 0;
+    if (estimate.show_one_time_option) {
+      try {
+        const bundle = await buildPricingBundle(estimate);
+        oneTimeChoicePrice = resolveAcceptOneTimeTotal(estimate, bundle);
+      } catch (e) {
+        oneTimeChoicePrice = resolveAcceptOneTimeTotal(estimate, null);
+      }
+    }
+
     sendEstimatePage(res, req.params.token, {
       id: estimate.id,
       status: estimate.status,
@@ -1364,6 +1475,8 @@ async function handleEstimateView(req, res, next) {
       createdAt: estimate.created_at,
       expiresAt: estimate.expires_at,
       satelliteUrl: estimate.satellite_url || null,
+      showOneTimeOption: !!estimate.show_one_time_option,
+      oneTimeChoicePrice,
     }, estData);
   } catch (err) { next(err); }
 }
@@ -1407,6 +1520,14 @@ router.put('/:token/accept', async (req, res, next) => {
     // upgrade, no EstimateConverter recurring schedule creation.
     const requestedOneTime = req.body?.serviceMode === 'one_time';
     const serviceMode = requestedOneTime ? 'one_time' : 'recurring';
+    // Card-on-file is only meaningful for recurring accepts: the
+    // post-commit branch that creates the SetupIntent / onboarding session
+    // is gated on !treatAsOneTime, so accepting one-time + card_on_file
+    // would silently book the visit without ever capturing a card. Reject
+    // up front rather than fulfill the request half-way.
+    if (requestedOneTime && paymentMethodPreference === 'card_on_file') {
+      return res.status(400).json({ error: 'card_on_file is not available for one-time visits — pick pay_at_visit instead' });
+    }
     const selectedFrequencyKey = (() => {
       const raw = req.body?.selectedFrequency;
       return typeof raw === 'string' ? raw.trim() : '';
