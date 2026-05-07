@@ -76,4 +76,54 @@ describe('estimate v2 service toggle adapter', () => {
       name: 'Rodent Bundle Discount',
     }));
   });
+
+  test('does not double-bill recurring German roach initial when standalone German roach is also selected', () => {
+    const input = translateV2CallToV1Input(
+      baseProfile(),
+      ['PEST', 'ROACH'],
+      {
+        roachModifier: 'GERMAN',
+        roachType: 'GERMAN',
+        pestFreq: 4,
+      }
+    );
+
+    expect(input.services.pest).toEqual({
+      frequency: 'quarterly',
+      roachType: 'german',
+    });
+    expect(input.services.germanRoach).toEqual({});
+    expect(input.services.germanRoachInitial).toBeUndefined();
+    expect(input.services.pestInitialRoach).toBeUndefined();
+
+    const estimate = generateEstimate(input);
+    const serviceKeys = estimate.lineItems.map((line) => line.service);
+    expect(serviceKeys.filter((key) => key === 'pest_initial_roach')).toHaveLength(1);
+    expect(serviceKeys).toContain('german_roach');
+    expect(serviceKeys).not.toContain('german_roach_initial');
+  });
+
+  test('does not double-bill regular roach when recurring pest already includes regular knockdown', () => {
+    const input = translateV2CallToV1Input(
+      baseProfile(),
+      ['PEST', 'ROACH'],
+      {
+        roachModifier: 'REGULAR',
+        roachType: 'REGULAR',
+        pestFreq: 4,
+      }
+    );
+
+    expect(input.services.pest).toEqual({
+      frequency: 'quarterly',
+      roachType: 'regular',
+    });
+    expect(input.services.pestInitialRoach).toBeUndefined();
+
+    const estimate = generateEstimate(input);
+    const serviceKeys = estimate.lineItems.map((line) => line.service);
+    expect(serviceKeys.filter((key) => key === 'pest_initial_roach')).toHaveLength(1);
+    expect(serviceKeys).not.toContain('german_roach');
+    expect(serviceKeys).not.toContain('german_roach_initial');
+  });
 });

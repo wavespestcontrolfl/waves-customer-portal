@@ -1288,10 +1288,10 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   if (sel.has('RODENT_TRAP')) services.rodentTrapping = {};
   if (sel.has('WDO')) services.wdo = {};
   if (sel.has('FLEA')) services.flea = {};
-  // ROACH: manual specialty (full $450+ program) vs auto-fire (flat $100 initial).
-  // Step 2b-3: when recurring pest carries roachModifier='GERMAN', auto-add
-  // the $100 germanRoachInitial one-time (mirrors pricing-engine-v2.js:481-483).
-  // Urgency/afterHours/recurringCustomer multipliers applied inside priceGermanRoachInitial.
+  // ROACH: manual specialty (full $450+ program) vs recurring auto-fire.
+  // The modular estimate engine auto-adds pest_initial_roach when recurring
+  // pest carries any non-none roachType. Do not also inject the older
+  // germanRoachInitial service here, or German jobs get billed twice.
   //
   // Standalone Cockroach Treatment routes by the form's roachType selector:
   //   GERMAN  → priceGermanRoach (3-visit specialty, $450+)
@@ -1308,9 +1308,6 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     } else if (!(sel.has('PEST') && rawRoach === 'REGULAR')) {
       services.pestInitialRoach = { roachType: 'regular' };
     }
-  }
-  if (sel.has('PEST') && rawRoach === 'GERMAN') {
-    services.germanRoachInitial = { urgency, afterHours, isRecurringCustomer: recurringCustomer };
   }
   if (sel.has('BEDBUG')) {
     services.bedBug = {
