@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -19,7 +20,11 @@ const thS = { fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSp
 const tdS = { padding: '10px', borderBottom: `1px solid ${D.border}22`, fontSize: 13, color: D.text };
 
 export default function InventoryPage() {
-  const [tab, setTab] = useState('products');
+  const [searchParams] = useSearchParams();
+  const initialTab = ['products', 'vendors', 'approvals', 'protocols', 'margins', 'scrape'].includes(searchParams.get('tab'))
+    ? searchParams.get('tab')
+    : 'products';
+  const [tab, setTab] = useState(initialTab);
   const [stats, setStats] = useState(null);
   const [toast, setToast] = useState('');
   const [productFilter, setProductFilter] = useState('all');
@@ -99,7 +104,13 @@ export default function InventoryPage() {
       {tab === 'products' && <ProductsTab showToast={showToast} filter={productFilter} onFilterChange={setProductFilter} showAddForm={showAddForm} setShowAddForm={setShowAddForm} />}
       {tab === 'vendors' && <VendorsTab showToast={showToast} />}
       {tab === 'approvals' && <ApprovalsTab showToast={showToast} onUpdate={loadStats} />}
-      {tab === 'protocols' && <ProtocolsTab showToast={showToast} />}
+      {tab === 'protocols' && (
+        <ProtocolsTab
+          showToast={showToast}
+          initialServiceLine={searchParams.get('serviceLine') || 'all'}
+          initialAction={searchParams.get('add') ? 'add' : searchParams.get('highlight') || ''}
+        />
+      )}
       {tab === 'margins' && <MarginsTab showToast={showToast} />}
       {tab === 'scrape' && <ScrapeTab showToast={showToast} />}
 
@@ -588,19 +599,21 @@ const DEFAULT_PROTOCOL_SERVICE = {
   tree_shrub: 'Tree & Shrub',
 };
 
-function ProtocolsTab({ showToast }) {
+function ProtocolsTab({ showToast, initialServiceLine = 'all', initialAction = '' }) {
   const [services, setServices] = useState([]);
   const [products, setProducts] = useState([]);
   const [health, setHealth] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [serviceFilter, setServiceFilter] = useState('all');
-  const [costHighlightLine, setCostHighlightLine] = useState(null);
+  const normalizedInitialLine = PROTOCOL_FILTERS.some((f) => f.key === initialServiceLine) ? initialServiceLine : 'all';
+  const [serviceFilter, setServiceFilter] = useState(normalizedInitialLine);
+  const [costHighlightLine, setCostHighlightLine] = useState(initialAction === 'costs' ? normalizedInitialLine : null);
   const [editingRow, setEditingRow] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [showAdd, setShowAdd] = useState(null);
   const [newRow, setNewRow] = useState({ productId: '', usageAmount: '', usageUnit: 'oz', usagePer1000sf: '', isPrimary: false, notes: '' });
   const [newServiceType, setNewServiceType] = useState('');
   const [showNewService, setShowNewService] = useState(false);
+  const [appliedDeepLink, setAppliedDeepLink] = useState(false);
 
   const load = async () => {
     const [sData, pData, hData] = await Promise.all([
@@ -614,6 +627,19 @@ function ProtocolsTab({ showToast }) {
     setLoading(false);
   };
   useEffect(() => { load(); }, []);
+
+  useEffect(() => {
+    if (loading || appliedDeepLink || normalizedInitialLine === 'all') return;
+    setAppliedDeepLink(true);
+    if (initialAction === 'add') {
+      const existingService = services.find((svc) => protocolLineForService(svc.serviceType) === normalizedInitialLine)?.serviceType;
+      setShowAdd(existingService || DEFAULT_PROTOCOL_SERVICE[normalizedInitialLine] || normalizedInitialLine);
+      showToast(`Add a COGS product for ${PROTOCOL_FILTERS.find((f) => f.key === normalizedInitialLine)?.label || normalizedInitialLine}`);
+    } else if (initialAction === 'costs') {
+      setCostHighlightLine(normalizedInitialLine);
+      showToast(`Highlighted missing cost data for ${PROTOCOL_FILTERS.find((f) => f.key === normalizedInitialLine)?.label || normalizedInitialLine}`);
+    }
+  }, [loading, appliedDeepLink, normalizedInitialLine, initialAction, services, showToast]);
 
   const startEdit = (row) => { setEditingRow(row.id); setEditForm({ usageAmount: row.usageAmount || '', usageUnit: row.usageUnit || 'oz', usagePer1000sf: row.usagePer1000sf || '', isPrimary: row.isPrimary, notes: row.notes || '' }); };
   const saveEdit = async (id) => { try { await adminFetch(`/admin/inventory/service-usage/${id}`, { method: 'PUT', body: JSON.stringify(editForm) }); showToast('Protocol updated'); setEditingRow(null); load(); } catch (e) { showToast(`Failed: ${e.message}`); } };

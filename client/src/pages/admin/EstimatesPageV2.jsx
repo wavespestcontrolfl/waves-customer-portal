@@ -35,7 +35,7 @@ import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { Badge, Button, Card, CardBody, cn } from '../../components/ui';
 import {
   Flag, Globe, Users, Bot, Phone, MessageSquare, Send, FilePlus2, SlidersHorizontal,
-  Check, X, ArrowLeft, Plus, Trash2, CalendarCheck,
+  Check, X, ArrowLeft, Plus, Trash2, CalendarCheck, ExternalLink,
 } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -225,12 +225,40 @@ function estimateMatchesFilter(e, filter) {
   return e._class === filter;
 }
 
-function PricingRiskBadges({ risk }) {
+function serviceLineFromAuditLine(line) {
+  const value = String(line?.protocol?.serviceType || line?.serviceKey || line?.label || '').toLowerCase();
+  if (value.includes('termite') || value.includes('bora-care') || value.includes('bora care') || value.includes('termidor')) return 'termite';
+  if (value.includes('mosquito')) return 'mosquito';
+  if (value.includes('rodent')) return 'rodent';
+  if (value.includes('lawn')) return 'lawn';
+  if (value.includes('tree') || value.includes('shrub')) return 'tree_shrub';
+  return 'pest';
+}
+
+function PricingRiskBadges({ risk, onMissingCogs, onLowMargin }) {
   if (!risk?.hasRisk) return null;
   return (
     <>
-      {(risk.missingCogsCount || 0) > 0 && <Badge tone="alert">Missing COGS</Badge>}
-      {(risk.lowMarginCount || 0) > 0 && <Badge tone="alert">Low Margin</Badge>}
+      {(risk.missingCogsCount || 0) > 0 && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onMissingCogs?.(); }}
+          className="inline-flex u-focus-ring rounded-full"
+          title="Open pricing audit focused on missing inventory COGS"
+        >
+          <Badge tone="alert">Missing COGS</Badge>
+        </button>
+      )}
+      {(risk.lowMarginCount || 0) > 0 && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onLowMargin?.(); }}
+          className="inline-flex u-focus-ring rounded-full"
+          title="Open pricing audit focused on low-margin lines"
+        >
+          <Badge tone="alert">Low Margin</Badge>
+        </button>
+      )}
       {risk.status === 'warning' && !(risk.missingCogsCount || risk.lowMarginCount) && (
         <Badge tone="alert">Pricing Warning</Badge>
       )}
@@ -418,19 +446,22 @@ function StatCard({ label, value, sub, alert }) {
   );
 }
 
-function EstimatePricingAuditModal({ estimate, onClose }) {
+function EstimatePricingAuditModal({ estimate, initialFocus = 'all', onClose }) {
+  const navigate = useNavigate();
   const [audit, setAudit] = useState(null);
   const [error, setError] = useState('');
+  const [focus, setFocus] = useState(initialFocus || 'all');
 
   useEffect(() => {
     let alive = true;
     setAudit(null);
     setError('');
+    setFocus(initialFocus || 'all');
     adminFetch(`/admin/estimates/${estimate.id}/pricing-audit`)
       .then((data) => { if (alive) setAudit(data); })
       .catch((err) => { if (alive) setError(err.message); });
     return () => { alive = false; };
-  }, [estimate.id]);
+  }, [estimate.id, initialFocus]);
 
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onClose(); };
@@ -442,6 +473,32 @@ function EstimatePricingAuditModal({ estimate, onClose }) {
       document.body.style.overflow = prevOverflow;
     };
   }, [onClose]);
+
+  const lineMatchesFocus = (line) => {
+    if (focus === 'missing_cogs') return ['missing_cogs', 'unmapped'].includes(line.cogs?.status);
+    if (focus === 'low_margin') return line.margin != null && line.margin < 0.35;
+    return true;
+  };
+  const visibleLines = audit?.lines?.filter(lineMatchesFocus) || [];
+  const focusLabel = focus === 'missing_cogs' ? 'Missing COGS'
+    : focus === 'low_margin' ? 'Low Margin'
+      : 'All Lines';
+
+  const goFixSource = (line) => {
+    const serviceLine = serviceLineFromAuditLine(line);
+    if (['missing_cogs', 'unmapped'].includes(line.cogs?.status)) {
+      navigate(`/admin/inventory?tab=protocols&serviceLine=${encodeURIComponent(serviceLine)}&add=1`);
+      onClose();
+      return;
+    }
+    if (line.cogs?.status === 'warning') {
+      navigate(`/admin/inventory?tab=protocols&serviceLine=${encodeURIComponent(serviceLine)}&highlight=costs`);
+      onClose();
+      return;
+    }
+    navigate(`/admin/pricing-logic?service=${encodeURIComponent(line.serviceKey || serviceLine)}&focus=margin`);
+    onClose();
+  };
 
   return createPortal(
     <div
@@ -490,21 +547,52 @@ function EstimatePricingAuditModal({ estimate, onClose }) {
                 <StatCard label="WaveGuard" value={audit.estimate.waveguardTier || '—'} sub={audit.estimate.pricingVersion || 'saved result'} />
               </div>
 
+              <div className="flex flex-wrap items-center justify-between gap-2 border-hairline border-zinc-200 rounded-md px-3 py-2">
+                <div className="text-12 text-ink-secondary">
+                  Showing <span className="font-medium text-zinc-900">{focusLabel}</span>
+                  {focus !== 'all' ? ` (${visibleLines.length} of ${audit.lines.length})` : ''}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    { key: 'all', label: 'All' },
+                    { key: 'missing_cogs', label: 'Missing COGS' },
+                    { key: 'low_margin', label: 'Low Margin' },
+                  ].map((item) => (
+                    <button
+                      key={item.key}
+                      type="button"
+                      onClick={() => setFocus(item.key)}
+                      className={cn(
+                        'h-8 px-3 rounded-full text-11 font-medium border-hairline u-focus-ring',
+                        focus === item.key
+                          ? 'bg-zinc-900 text-white border-zinc-900'
+                          : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50',
+                      )}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <div className="border-hairline border-zinc-200 rounded-lg overflow-hidden">
-                <div className="hidden md:grid grid-cols-[1.2fr_0.9fr_0.8fr_0.8fr_0.8fr_1fr] gap-3 px-3 py-2 bg-zinc-50 text-10 uppercase tracking-label text-ink-tertiary font-medium">
+                <div className="hidden md:grid grid-cols-[1.1fr_0.85fr_0.75fr_0.65fr_0.75fr_1fr_0.65fr] gap-3 px-3 py-2 bg-zinc-50 text-10 uppercase tracking-label text-ink-tertiary font-medium">
                   <div>Line</div>
                   <div>Price Source</div>
                   <div>Protocol</div>
                   <div>Revenue</div>
                   <div>COGS</div>
                   <div>Margin / Warnings</div>
+                  <div>Fix</div>
                 </div>
-                {audit.lines.length === 0 ? (
-                  <div className="p-4 text-13 text-ink-secondary">No saved estimate lines found.</div>
-                ) : audit.lines.map((line, idx) => (
+                {visibleLines.length === 0 ? (
+                  <div className="p-4 text-13 text-ink-secondary">
+                    {audit.lines.length === 0 ? 'No saved estimate lines found.' : `No ${focusLabel.toLowerCase()} lines found.`}
+                  </div>
+                ) : visibleLines.map((line, idx) => (
                   <div
                     key={`${line.serviceKey}-${idx}`}
-                    className="grid grid-cols-1 md:grid-cols-[1.2fr_0.9fr_0.8fr_0.8fr_0.8fr_1fr] gap-3 px-3 py-3 border-t border-zinc-100 text-12"
+                    className="grid grid-cols-1 md:grid-cols-[1.1fr_0.85fr_0.75fr_0.65fr_0.75fr_1fr_0.65fr] gap-3 px-3 py-3 border-t border-zinc-100 text-12"
                   >
                     <div>
                       <div className="font-medium text-zinc-900">{line.label}</div>
@@ -534,6 +622,21 @@ function EstimatePricingAuditModal({ estimate, onClose }) {
                             <div key={i} className="text-11 text-alert-fg">{w}</div>
                           ))}
                         </div>
+                      )}
+                    </div>
+                    <div>
+                      {line.status === 'ok' ? (
+                        <span className="text-ink-tertiary">—</span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => goFixSource(line)}
+                          className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-full border-hairline border-zinc-300 text-11 font-medium text-zinc-800 hover:bg-zinc-50 u-focus-ring"
+                          title="Open the source setup for this pricing issue"
+                        >
+                          <ExternalLink size={13} strokeWidth={1.75} aria-hidden />
+                          Fix source
+                        </button>
                       )}
                     </div>
                   </div>
@@ -786,7 +889,8 @@ function EstimatePipelineViewV2() {
       )}
       {auditTarget && (
         <EstimatePricingAuditModal
-          estimate={auditTarget}
+          estimate={auditTarget.estimate || auditTarget}
+          initialFocus={auditTarget.focus || 'all'}
           onClose={() => setAuditTarget(null)}
         />
       )}
@@ -908,7 +1012,11 @@ function EstimatePipelineViewV2() {
                     {e.declineReason && (
                       <Badge tone="alert">{e.declineReason}</Badge>
                     )}
-                    <PricingRiskBadges risk={e.pricingRisk} />
+                    <PricingRiskBadges
+                      risk={e.pricingRisk}
+                      onMissingCogs={() => setAuditTarget({ estimate: e, focus: 'missing_cogs' })}
+                      onLowMargin={() => setAuditTarget({ estimate: e, focus: 'low_margin' })}
+                    />
                     {e.confirmedAppointment && (
                       <Badge
                         tone="neutral"
@@ -1119,7 +1227,7 @@ function EstimatePipelineViewV2() {
                       size="sm"
                       variant="ghost"
                       className="w-full sm:w-auto rounded-full whitespace-nowrap"
-                      onClick={() => setAuditTarget(e)}
+                      onClick={() => setAuditTarget({ estimate: e, focus: 'all' })}
                     >
                       Audit
                     </Button>
@@ -1472,7 +1580,11 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
                 {estimate.viewCount}× viewed
               </span>
             )}
-            <PricingRiskBadges risk={estimate.pricingRisk} />
+            <PricingRiskBadges
+              risk={estimate.pricingRisk}
+              onMissingCogs={() => onAudit?.(estimate, 'missing_cogs')}
+              onLowMargin={() => onAudit?.(estimate, 'low_margin')}
+            />
             {estimate.confirmedAppointment && (
               <span
                 className="text-11 text-ink-tertiary truncate"
@@ -1577,7 +1689,7 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
         type="button"
         onClick={(e) => {
           e.stopPropagation();
-          onAudit?.(estimate);
+          onAudit?.(estimate, 'all');
         }}
         aria-label={`Audit pricing for ${customerName}`}
         title="Audit pricing, protocol, COGS, and margin"
@@ -1838,7 +1950,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
               onOpenCustomerPanel={setCustomerPanelId}
               onSend={refreshEstimates}
               onDeleted={refreshEstimates}
-              onAudit={setAuditTarget}
+              onAudit={(estimate, focus = 'all') => setAuditTarget({ estimate, focus })}
               v3Flag={v3Flag}
             />
           ))}
@@ -1853,7 +1965,8 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
       )}
       {auditTarget && (
         <EstimatePricingAuditModal
-          estimate={auditTarget}
+          estimate={auditTarget.estimate || auditTarget}
+          initialFocus={auditTarget.focus || 'all'}
           onClose={() => setAuditTarget(null)}
         />
       )}
