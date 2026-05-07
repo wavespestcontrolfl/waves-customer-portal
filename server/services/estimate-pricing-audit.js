@@ -445,9 +445,55 @@ async function buildEstimatePricingRiskBatch(estimates) {
   return riskById;
 }
 
+async function saveEstimatePricingAuditSnapshot(estimate, options = {}) {
+  if (!estimate?.id || !(await db.schema.hasTable('estimate_pricing_audit_snapshots'))) return null;
+
+  const audit = await buildEstimatePricingAudit(estimate);
+  const [row] = await db('estimate_pricing_audit_snapshots').insert({
+    estimate_id: estimate.id,
+    trigger: options.trigger || 'send',
+    send_method: options.sendMethod || estimate.send_method || null,
+    pricing_version: audit.estimate?.pricingVersion || null,
+    revenue: audit.totals?.revenue ?? null,
+    estimated_cost: audit.totals?.estimatedCost ?? null,
+    gross_profit: audit.totals?.grossProfit ?? null,
+    margin: audit.totals?.margin ?? null,
+    audit: JSON.stringify(audit),
+  }).returning('*');
+
+  return row || null;
+}
+
+async function getLatestEstimatePricingAuditSnapshot(estimateId) {
+  if (!estimateId || !(await db.schema.hasTable('estimate_pricing_audit_snapshots'))) return null;
+  const row = await db('estimate_pricing_audit_snapshots')
+    .where({ estimate_id: estimateId })
+    .orderBy('snapshot_at', 'desc')
+    .first();
+  if (!row) return null;
+
+  return {
+    id: row.id,
+    estimateId: row.estimate_id,
+    snapshotAt: row.snapshot_at,
+    trigger: row.trigger,
+    sendMethod: row.send_method,
+    pricingVersion: row.pricing_version,
+    totals: {
+      revenue: money(row.revenue),
+      estimatedCost: money(row.estimated_cost),
+      grossProfit: money(row.gross_profit),
+      margin: row.margin == null ? null : Number(row.margin),
+    },
+    audit: parseJson(row.audit) || row.audit,
+  };
+}
+
 module.exports = {
   buildEstimatePricingAudit,
   buildEstimatePricingRisk,
   buildEstimatePricingRiskBatch,
+  getLatestEstimatePricingAuditSnapshot,
+  saveEstimatePricingAuditSnapshot,
   summarizePricingRisk,
 };
