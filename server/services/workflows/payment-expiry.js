@@ -1,6 +1,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
+const { renderSmsTemplate } = require('../sms-template-renderer');
 
 class PaymentExpiry {
   /**
@@ -42,11 +43,18 @@ class PaymentExpiry {
 
         const expLabel = `${String(card.exp_month).padStart(2, '0')}/${card.exp_year}`;
         const brandLabel = card.card_brand ? `${card.card_brand} ` : '';
+        const cardLabel = card.card_brand ? `${card.card_brand} card` : 'card';
 
-        const body = `Hi ${customer.first_name}, your ${brandLabel}card ending in ${card.last_four} ` +
-          `expires ${expLabel}. Please update your payment method in your customer portal ` +
-          `to avoid any interruption in service. ` +
-          `Need help? Reply to this text. - Waves Pest Control`;
+        const body = await renderSmsTemplate(
+          'payment_method_expiry',
+          {
+            first_name: customer.first_name || 'there',
+            card_brand: (card.card_brand || 'payment').trim(),
+            last_four: card.last_four,
+            exp_date: expLabel,
+          },
+          `Hello ${customer.first_name || 'there'}! Your ${cardLabel} ending in ${card.last_four} expires ${expLabel}.\n\nPlease update your payment method in your Waves Customer Portal at portal.wavespestcontrol.com to avoid any interruption in service.\n\nQuestions or requests? Reply to this message.`
+        );
 
         const sendResult = await sendCustomerMessage({
           to: customer.phone,

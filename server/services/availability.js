@@ -7,6 +7,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { renderSmsTemplate } = require('./sms-template-renderer');
 
 class AvailabilityEngine {
 
@@ -204,11 +205,24 @@ class AvailabilityEngine {
     try {
       const TwilioService = require('./twilio');
       const dateLabel = new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
+      const timeLabel = `${this.minToTime12(this.timeToMin(startTime))} - ${this.minToTime12(this.timeToMin(endTime))}`;
+      const addressLabel = `${customer.address_line1}, ${customer.city}`;
+      const body = await renderSmsTemplate(
+        'self_booking_confirmation',
+        {
+          first_name: customer.first_name || 'there',
+          date: dateLabel,
+          time: timeLabel,
+          address: addressLabel,
+          confirmation_code: confCode,
+        },
+        `Hello ${customer.first_name || 'there'}! Your Waves appointment is confirmed for ${dateLabel}, ${timeLabel} at ${addressLabel}. Confirmation: ${confCode}.\n\nNeed to change it? Reply RESCHEDULE. Questions or requests? Reply to this message.`
+      );
 
       // Customer confirmation
       const smsResult = await sendCustomerMessage({
         to: customer.phone,
-        body: `Your Waves Pest Control appointment is confirmed. Date: ${dateLabel}. Time: ${this.minToTime12(this.timeToMin(startTime))} - ${this.minToTime12(this.timeToMin(endTime))}. Address: ${customer.address_line1}, ${customer.city}. Confirmation: ${confCode}. Reply RESCHEDULE if you need to change.`,
+        body,
         channel: 'sms',
         audience: 'customer',
         purpose: 'appointment',

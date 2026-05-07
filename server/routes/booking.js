@@ -6,6 +6,7 @@ const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { renderSmsTemplate } = require('../services/sms-template-renderer');
 
 // Shared geocoder (same approach as admin-schedule-find-time.js)
 async function geocodeAddress(address) {
@@ -697,10 +698,23 @@ router.post('/confirm', async (req, res, next) => {
       });
       const startLabel = minToTime12(timeToMin(slot_start));
       const endLabel = minToTime12(endMin);
+      const timeLabel = `${startLabel} - ${endLabel}`;
+      const addressLabel = `${customer.address_line1}, ${customer.city}`;
+      const smsBody = await renderSmsTemplate(
+        'self_booking_confirmation',
+        {
+          first_name: customer.first_name || 'there',
+          date: dateLabel,
+          time: timeLabel,
+          address: addressLabel,
+          confirmation_code: confCode,
+        },
+        `Hello ${customer.first_name || 'there'}! Your Waves appointment is confirmed for ${dateLabel}, ${timeLabel} at ${addressLabel}. Confirmation: ${confCode}.\n\nNeed to change it? Reply RESCHEDULE. Questions or requests? Reply to this message.`
+      );
 
       const customerSms = await sendCustomerMessage({
         to: customer.phone,
-        body: `Your Waves appointment is confirmed for ${dateLabel}, ${startLabel} - ${endLabel} at ${customer.address_line1}, ${customer.city}. Confirmation: ${confCode}. Reply RESCHEDULE if you need to change.`,
+        body: smsBody,
         channel: 'sms',
         audience: 'customer',
         purpose: 'appointment_confirmation',

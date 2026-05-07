@@ -3,6 +3,7 @@ const logger = require('./logger');
 const { logAutopay, eventExistsRecently } = require('./autopay-log');
 const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { renderSmsTemplate } = require('./sms-template-renderer');
 
 /**
  * Autopay Notifications
@@ -49,7 +50,11 @@ async function sendPreChargeReminders() {
       if (already) { skipped++; continue; }
 
       const dateStr = target.toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' });
-      const body = `Hi ${c.first_name}, this is a friendly reminder from Waves: your WaveGuard auto-pay will process on ${dateStr}. Need to update your card or pause? Log in at your customer portal. Thank you!`;
+      const body = await renderSmsTemplate(
+        'autopay_pre_charge',
+        { first_name: c.first_name, charge_date: dateStr },
+        `Hello ${c.first_name}! This is a friendly reminder from Waves that your WaveGuard auto-pay will process on ${dateStr}.\n\nNeed to update your card or pause? Log into your Waves Customer Portal at portal.wavespestcontrol.com.\n\nQuestions or requests? Reply to this message.`
+      );
       const sendResult = await sendCustomerMessage({
         to: c.phone,
         body,
@@ -118,9 +123,19 @@ async function sendCardExpiryWarnings() {
       if (already) { skipped++; continue; }
 
       const expStr = `${String(r.exp_month).padStart(2, '0')}/${String(r.exp_year).slice(-2)}`;
-      const body = expired
-        ? `Hi ${r.first_name}, your ${r.brand || 'card'} ending in ${r.last4} on file with Waves has expired (${expStr}). Please update it in your customer portal to keep auto-pay active. Thank you!`
-        : `Hi ${r.first_name}, heads up - your ${r.brand || 'card'} ending in ${r.last4} on file with Waves expires ${expStr}. Update it in your customer portal to avoid any auto-pay disruption. Thank you!`;
+      const templateKey = expired ? 'autopay_card_expired' : 'autopay_card_expiring';
+      const body = await renderSmsTemplate(
+        templateKey,
+        {
+          first_name: r.first_name,
+          card_brand: r.brand || 'payment',
+          last_four: r.last4,
+          exp_date: expStr,
+        },
+        expired
+          ? `Hello ${r.first_name}, your ${r.brand || 'card'} card ending in ${r.last4} on file with Waves has expired (${expStr}).\n\nPlease update it in your Waves Customer Portal at portal.wavespestcontrol.com to keep auto-pay active.\n\nQuestions or requests? Reply to this message.`
+          : `Hello ${r.first_name}! Your ${r.brand || 'card'} card ending in ${r.last4} on file with Waves expires ${expStr}.\n\nPlease update it in your Waves Customer Portal at portal.wavespestcontrol.com to avoid any auto-pay disruption.\n\nQuestions or requests? Reply to this message.`
+      );
 
       const sendResult = await sendCustomerMessage({
         to: r.phone,

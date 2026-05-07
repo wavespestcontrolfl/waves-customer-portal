@@ -32,9 +32,10 @@ async function ensureTable() {
       { template_key: 'appointment_confirmation', name: 'Appointment Confirmation', category: 'service', body: 'Hi {first_name}! Your {service_type} with Waves is confirmed for {date} between {time}. Reply to reschedule.\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!', variables: JSON.stringify(['first_name','service_type','date','time']), sort_order: 1 },
       { template_key: 'reminder_72h', name: '72-Hour Reminder', category: 'service', body: 'Hello {first_name}! This is a reminder from Waves that your {service_type} appointment is scheduled for {day} at {time}. Expect your technician to arrive within a two-hour window of your scheduled start time. Need to reschedule? Log into your Waves Customer Portal at portal.wavespestcontrol.com. If you have any questions or need assistance, simply reply to this message. — Waves', variables: JSON.stringify(['first_name','service_type','day','time']), sort_order: 2 },
       { template_key: 'reminder_24h', name: '24-Hour Reminder', category: 'service', body: 'Hello {first_name}! This is a reminder from Waves that your {service_type} appointment is scheduled for tomorrow at {time}. Expect your technician to arrive within a two-hour window of your scheduled start time. Your tech will text you when they are 15 minutes out. If you have any questions or need assistance, simply reply to this message. — Waves', variables: JSON.stringify(['first_name','service_type','time']), sort_order: 3 },
-      { template_key: 'tech_en_route', name: 'Tech En Route', category: 'service', body: 'Hello {first_name}! Your Waves technician is on the way. ETA: ~{eta_minutes} minutes.', variables: JSON.stringify(['first_name','eta_minutes']), sort_order: 3 },
+      { template_key: 'tech_en_route', name: 'Tech En Route', category: 'service', body: 'Hello {first_name}! {tech_name} is on the way.\n\n{eta_line}Track live: {track_url}\n\nQuestions or requests? Reply to this message. Reply STOP to opt out.', variables: JSON.stringify(['first_name','tech_name','eta_line','track_url']), sort_order: 3 },
       { template_key: 'service_complete', name: 'Service Complete', category: 'service', body: 'Hello {first_name}! Your service report is ready. View it here: portal.wavespestcontrol.com\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!', variables: JSON.stringify(['first_name']), sort_order: 4 },
       { template_key: 'service_complete_with_invoice', name: 'Service Complete + Invoice', category: 'service', body: "Hello {first_name}! Your {service_type} service report is ready: {portal_url}\n\nInvoice for today's visit: {pay_url}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!", variables: JSON.stringify(['first_name','service_type','portal_url','pay_url']), sort_order: 5 },
+      { template_key: 'service_complete_prepaid', name: 'Service Complete + Paid', category: 'service', body: 'Hello {first_name}! Thanks for your payment today. Your {service_type} service report is ready: {portal_url}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!', variables: JSON.stringify(['first_name','service_type','portal_url']), sort_order: 5 },
       { template_key: 'missed_call', name: 'Missed Call Follow-Up', category: 'service', body: 'Hey {first_name}, this is Waves. Sorry we missed your call. How can we help? Reply or call (941) 318-7612.', variables: JSON.stringify(['first_name']), sort_order: 5 },
       { template_key: 'appointment_rescheduled', name: 'Appointment Rescheduled', category: 'service', body: 'Hello {first_name}! Your {service_type} with Waves has been rescheduled to {day}, {date} at {time}.\n\nNeed to change it again? Log into your Waves Customer Portal at portal.wavespestcontrol.com.\n\nQuestions or requests? Reply to this message.', variables: JSON.stringify(['first_name','service_type','day','date','time']), sort_order: 6 },
       { template_key: 'appointment_cancelled', name: 'Appointment Cancelled', category: 'service', body: "Hello {first_name}! Your {service_type} with Waves scheduled for {day}, {date} has been cancelled.\n\nWant to reschedule? Reply to this message and we'll get you back on the calendar.", variables: JSON.stringify(['first_name','service_type','day','date']), sort_order: 7 },
@@ -55,7 +56,23 @@ async function ensureTable() {
       { template_key: 'estimate_accepted_onetime', name: 'Estimate Accepted — One-Time Booking', category: 'estimates', body: "Hey {first_name}! Thanks for booking your {service_label} with Waves. Pick your time here — we'll show you slots when a tech will already be in your neighborhood: {booking_url}\n\nQuestions? Just reply. — Waves", variables: JSON.stringify(['first_name','service_label','booking_url']), sort_order: 22 },
       { template_key: 'review_request', name: 'Review Request', category: 'reviews', body: "Hi {first_name}! How was your service? We'd love your feedback: {review_url}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!", variables: JSON.stringify(['first_name','review_url']), sort_order: 30 },
       { template_key: 'referral_nudge', name: 'Referral Nudge', category: 'referrals', body: 'Hi {first_name}! Share your link — they get $25 off, you get $50: {referral_link}', variables: JSON.stringify(['first_name','referral_link']), sort_order: 31 },
+      { template_key: 'autopay_pre_charge', name: 'Autopay - Pre-Charge Reminder', category: 'billing', body: 'Hello {first_name}! This is a friendly reminder from Waves that your WaveGuard auto-pay will process on {charge_date}.\n\nNeed to update your card or pause? Log into your Waves Customer Portal at portal.wavespestcontrol.com.\n\nQuestions or requests? Reply to this message.', variables: JSON.stringify(['first_name','charge_date']), sort_order: 36 },
+      { template_key: 'autopay_card_expired', name: 'Autopay - Card Expired', category: 'billing', body: 'Hello {first_name}, your {card_brand} card ending in {last_four} on file with Waves has expired ({exp_date}).\n\nPlease update it in your Waves Customer Portal at portal.wavespestcontrol.com to keep auto-pay active.\n\nQuestions or requests? Reply to this message.', variables: JSON.stringify(['first_name','card_brand','last_four','exp_date']), sort_order: 37 },
+      { template_key: 'autopay_card_expiring', name: 'Autopay - Card Expiring Soon', category: 'billing', body: 'Hello {first_name}! Your {card_brand} card ending in {last_four} on file with Waves expires {exp_date}.\n\nPlease update it in your Waves Customer Portal at portal.wavespestcontrol.com to avoid any auto-pay disruption.\n\nQuestions or requests? Reply to this message.', variables: JSON.stringify(['first_name','card_brand','last_four','exp_date']), sort_order: 38 },
+      { template_key: 'payment_method_expiry', name: 'Payment Method Expiry Notice', category: 'billing', body: 'Hello {first_name}! Your {card_brand} card ending in {last_four} expires {exp_date}.\n\nPlease update your payment method in your Waves Customer Portal at portal.wavespestcontrol.com to avoid any interruption in service.\n\nQuestions or requests? Reply to this message.', variables: JSON.stringify(['first_name','card_brand','last_four','exp_date']), sort_order: 39 },
       { template_key: 'churn_save_step1', name: 'Churn Save — Step 1', category: 'retention', body: 'Hey {first_name}, this is Adam from Waves. Just checking in — anything we can do better? Reply here.', variables: JSON.stringify(['first_name']), sort_order: 40 },
+      { template_key: 'waveguard_upsell', name: 'WaveGuard Plan Recommendation', category: 'retention', body: 'Hello {first_name}! Based on your recent services, our {tier_label} WaveGuard plan may be a better fit with unlimited coverage and predictable billing.\n\nReply INFO to learn more. Questions or requests? Reply to this message.', variables: JSON.stringify(['first_name','tier_label']), sort_order: 47 },
+      { template_key: 'renewal_reminder', name: 'Renewal Reminder', category: 'retention', body: "Hello {first_name}! Your {renewal_label} {urgency}.\n\nDon't let your coverage lapse - reply RENEW or call us to take care of it. Questions or requests? Reply to this message.", variables: JSON.stringify(['first_name','renewal_label','urgency']), sort_order: 48 },
+      { template_key: 'reschedule_options_weather', name: 'Reschedule Options - Weather', category: 'service', body: 'Hello {first_name}, due to weather your {service_type} on {original_date} needs to move.\n\nWe have:\n1. {option_1}\n2. {option_2}\n\nReply 1 or 2, or suggest a day. Questions or requests? Reply to this message.', variables: JSON.stringify(['first_name','service_type','original_date','option_1','option_2']), sort_order: 8 },
+      { template_key: 'reschedule_options_access', name: 'Reschedule Options - Access Issue', category: 'service', body: 'Hello {first_name}, we stopped by for your {service_type} but {access_issue}. We can come back:\n\n1. {option_1}\n2. {option_2}\n\nReply 1 or 2. Questions or requests? Reply to this message.', variables: JSON.stringify(['first_name','service_type','access_issue','option_1','option_2']), sort_order: 9 },
+      { template_key: 'reschedule_options_general', name: 'Reschedule Options - General', category: 'service', body: 'Hello {first_name}, your {service_type} on {original_date} needs to be rescheduled.{reason_text}\n\n1. {option_1}\n2. {option_2}\n\nReply 1 or 2. Questions or requests? Reply to this message.', variables: JSON.stringify(['first_name','service_type','original_date','reason_text','option_1','option_2']), sort_order: 10 },
+      { template_key: 'reschedule_confirmed_sms_reply', name: 'Reschedule Confirmed - SMS Reply', category: 'service', body: "Confirmed! Your service is rescheduled for {date}, {time}.\n\nWe'll remind you the day before. Questions or requests? Reply to this message.", variables: JSON.stringify(['date','time']), sort_order: 11 },
+      { template_key: 'reschedule_call_requested', name: 'Reschedule - Call Requested Reply', category: 'service', body: "No problem! We'll give you a call shortly.\n\nQuestions or requests? Reply to this message.", variables: JSON.stringify([]), sort_order: 12 },
+      { template_key: 'self_booking_confirmation', name: 'Self-Booking Confirmation', category: 'service', body: 'Hello {first_name}! Your Waves appointment is confirmed for {date}, {time} at {address}. Confirmation: {confirmation_code}.\n\nNeed to change it? Reply RESCHEDULE. Questions or requests? Reply to this message.', variables: JSON.stringify(['first_name','date','time','address','confirmation_code']), sort_order: 13 },
+      { template_key: 'appointment_series_cancelled', name: 'Appointment Series Cancelled', category: 'service', body: "Hello {first_name}! Your Waves {scope} for {service_type} has been cancelled.\n\nWant to reschedule? Reply to this message and we'll get you back on the calendar.", variables: JSON.stringify(['first_name','scope','service_type']), sort_order: 14 },
+      { template_key: 'onboarding_followup_24h', name: 'Onboarding Follow-Up - 24h', category: 'service', body: 'Hello {first_name}! Thanks again for choosing Waves. Just need a few quick details to get you on the schedule: {onboarding_url}\n\nQuestions or requests? Reply to this message.', variables: JSON.stringify(['first_name','onboarding_url']), sort_order: 15 },
+      { template_key: 'onboarding_followup_72h', name: 'Onboarding Follow-Up - 72h', category: 'service', body: "Hello {first_name}! Still here whenever you're ready. Wrap up your Waves setup here and we'll confirm your first service: {onboarding_url}\n\nQuestions or requests? Reply to this message.", variables: JSON.stringify(['first_name','onboarding_url']), sort_order: 16 },
+      { template_key: 'onboarding_followup_expiring', name: 'Onboarding Follow-Up - Expiring', category: 'service', body: 'Hello {first_name}! Heads up — your Waves onboarding link expires on {expires_at}. Lock in your WaveGuard {waveguard_tier} plan and first service here: {onboarding_url}\n\nQuestions or requests? Reply to this message.', variables: JSON.stringify(['first_name','onboarding_url','expires_at','waveguard_tier']), sort_order: 17 },
       { template_key: 'admin_new_lead', name: 'New Lead Alert', category: 'internal', body: '🔔 New lead! {name} 📞 {phone} 📍 {address} 🌐 {source}', variables: JSON.stringify(['name','phone','address','source']), is_internal: true, sort_order: 60 },
   ];
   for (const t of templates) {
@@ -139,20 +156,35 @@ const MSG_TYPE_TO_TEMPLATE = {
   confirmation: 'appointment_confirmation',
   booking_confirmation: 'appointment_confirmation',
   appointment_reminder: 'reminder_24h',
+  appointment_series_cancelled: 'appointment_series_cancelled',
   en_route: 'tech_en_route',
   service_complete: 'service_complete',
+  service_complete_prepaid: 'service_complete_prepaid',
+  service_complete_with_invoice: 'service_complete_with_invoice',
   missed_call_followup: 'missed_call',
   invoice: 'invoice_sent',
-  late_payment: 'payment_failed',
-  payment_expiry: 'payment_failed',
+  receipt: 'invoice_receipt',
+  invoice_receipt: 'invoice_receipt',
+  payment_expiry: 'payment_method_expiry',
   review_request: 'review_request',
+  review_followup: 'review_request_followup',
   referral_nudge: 'referral_nudge',
   referral_invite: 'referral_nudge',
   retention: 'churn_save_step1',
   retention_outreach: 'churn_save_step1',
+  renewal: 'renewal_reminder',
+  upsell: 'waveguard_upsell',
+  autopay_pre_charge: 'autopay_pre_charge',
+  payment_method_expiry: 'payment_method_expiry',
   lead_response: 'lead_auto_reply_biz',
   auto_reply: 'lead_auto_reply_biz',
-  balance_reminder: 'invoice_sent',
+  onboarding_followup: 'onboarding_followup_24h',
+  onboarding_start: 'estimate_accepted_customer',
+  estimate_sent: 'estimate_sent',
+  estimate_accepted_onetime: 'estimate_accepted_onetime',
+  estimate_accepted_customer: 'estimate_accepted_customer',
+  estimate_auto_renewed: 'estimate_auto_renewed',
+  estimate_followup: 'estimate_followup_unviewed',
   reactivation: 'churn_save_step1',
 };
 
@@ -175,8 +207,9 @@ router.getTemplate = async function(templateKey, vars = {}) {
     if (!t || t.is_active === false) return null;
     let body = t.body;
     for (const [key, val] of Object.entries(formatSmsTemplateVars(vars))) {
-      body = body.replace(new RegExp(`\\{${key}\\}`, 'g'), val || '');
+      body = body.replace(new RegExp(`\\{${key}\\}`, 'g'), val == null ? '' : String(val));
     }
+    if (/\{[a-zA-Z][a-zA-Z0-9_]*\}/.test(body)) return null;
     return body;
   } catch { return null; }
 };

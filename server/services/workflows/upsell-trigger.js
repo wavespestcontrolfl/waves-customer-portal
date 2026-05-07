@@ -1,6 +1,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
+const { renderSmsTemplate } = require('../sms-template-renderer');
 
 const TIER_PRICING = {
   silver: { monthly: 49, label: 'Silver' },
@@ -58,7 +59,11 @@ class UpsellTrigger {
     const annualCost = tier.monthly * 12;
     const savings = Math.round(totalSpent - annualCost);
 
-    const body = `Hi ${customer.first_name}! Based on your recent services, our ${tier.label} WaveGuard plan may be a better fit with unlimited coverage and predictable billing. Reply INFO to learn more. - Waves Pest Control`;
+    const body = await renderSmsTemplate(
+      'waveguard_upsell',
+      { first_name: customer.first_name || 'there', tier_label: tier.label },
+      `Hello ${customer.first_name || 'there'}! Based on your recent services, our ${tier.label} WaveGuard plan may be a better fit with unlimited coverage and predictable billing.\n\nReply INFO to learn more. Questions or requests? Reply to this message.`
+    );
 
     const smsResult = await sendCustomerMessage({
       to: customer.phone,
