@@ -9,6 +9,7 @@ const { shortenOrPassthrough } = require('../services/short-url');
 const { wrapEmail, plainText } = require('../services/email-template');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { validateEstimateDeliveryOptions } = require('../services/estimate-delivery-options');
+const { buildEstimatePricingAudit } = require('../services/estimate-pricing-audit');
 
 async function renderTemplate(templateKey, vars, fallback) {
   try {
@@ -423,6 +424,17 @@ router.get('/', async (req, res, next) => {
         };
       }),
     });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/estimates/:id/pricing-audit — explain stored price, protocol,
+// inventory COGS, and margin by estimate line.
+router.get('/:id/pricing-audit', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    const audit = await buildEstimatePricingAudit(estimate);
+    res.json(audit);
   } catch (err) { next(err); }
 });
 

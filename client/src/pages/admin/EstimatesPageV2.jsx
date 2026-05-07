@@ -349,6 +349,16 @@ function FilterSheetV2({ value, onChange, options, counts }) {
   );
 }
 
+function fmtMoney(value) {
+  const n = Number(value || 0);
+  return `$${Math.round(n).toLocaleString()}`;
+}
+
+function fmtPct(value) {
+  if (value == null || Number.isNaN(Number(value))) return '—';
+  return `${Math.round(Number(value) * 100)}%`;
+}
+
 // Stat card — label, big value, sub. Single alert accent reserved for
 // Follow-Up Overdue when > 0. Conversion% no longer color-codes; the
 // number alone tells the story. Centered both axes per spec.
@@ -370,6 +380,140 @@ function StatCard({ label, value, sub, alert }) {
         <div className="text-11 text-ink-tertiary mt-1">{sub}</div>
       )}
     </Card>
+  );
+}
+
+function EstimatePricingAuditModal({ estimate, onClose }) {
+  const [audit, setAudit] = useState(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+    setAudit(null);
+    setError('');
+    adminFetch(`/admin/estimates/${estimate.id}/pricing-audit`)
+      .then((data) => { if (alive) setAudit(data); })
+      .catch((err) => { if (alive) setError(err.message); });
+    return () => { alive = false; };
+  }, [estimate.id]);
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [onClose]);
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[1000] bg-black/45 flex items-center justify-center p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Estimate pricing audit"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white border-hairline border-zinc-200 rounded-lg shadow-xl w-full max-w-5xl max-h-[88vh] overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="p-5 border-b border-zinc-200 flex items-start justify-between gap-4">
+          <div>
+            <div className="text-16 font-semibold text-zinc-900">Estimate Pricing Audit</div>
+            <div className="text-12 text-ink-secondary mt-1">
+              {estimate.customerName || 'Unknown'} · {estimate.address || 'No address'}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="h-9 w-9 inline-flex items-center justify-center rounded-xs border-hairline border-zinc-300 text-zinc-700 hover:bg-zinc-50"
+            aria-label="Close pricing audit"
+          >
+            <X size={16} strokeWidth={1.75} />
+          </button>
+        </div>
+
+        <div className="p-5 overflow-auto">
+          {error && (
+            <div className="border-hairline border-alert-fg bg-alert-bg text-alert-fg rounded-xs p-3 text-13">
+              {error}
+            </div>
+          )}
+          {!audit && !error && (
+            <div className="p-8 text-center text-13 text-ink-secondary">Loading audit…</div>
+          )}
+          {audit && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                <StatCard label="Annual + 1x Revenue" value={fmtMoney(audit.totals.revenue)} sub="stored estimate" />
+                <StatCard label="Inventory COGS" value={fmtMoney(audit.totals.estimatedCost)} sub="current products" />
+                <StatCard label="Gross Profit" value={fmtMoney(audit.totals.grossProfit)} sub={fmtPct(audit.totals.margin)} alert={audit.totals.margin != null && audit.totals.margin < 0.35} />
+                <StatCard label="WaveGuard" value={audit.estimate.waveguardTier || '—'} sub={audit.estimate.pricingVersion || 'saved result'} />
+              </div>
+
+              <div className="border-hairline border-zinc-200 rounded-lg overflow-hidden">
+                <div className="hidden md:grid grid-cols-[1.2fr_0.9fr_0.8fr_0.8fr_0.8fr_1fr] gap-3 px-3 py-2 bg-zinc-50 text-10 uppercase tracking-label text-ink-tertiary font-medium">
+                  <div>Line</div>
+                  <div>Price Source</div>
+                  <div>Protocol</div>
+                  <div>Revenue</div>
+                  <div>COGS</div>
+                  <div>Margin / Warnings</div>
+                </div>
+                {audit.lines.length === 0 ? (
+                  <div className="p-4 text-13 text-ink-secondary">No saved estimate lines found.</div>
+                ) : audit.lines.map((line, idx) => (
+                  <div
+                    key={`${line.serviceKey}-${idx}`}
+                    className="grid grid-cols-1 md:grid-cols-[1.2fr_0.9fr_0.8fr_0.8fr_0.8fr_1fr] gap-3 px-3 py-3 border-t border-zinc-100 text-12"
+                  >
+                    <div>
+                      <div className="font-medium text-zinc-900">{line.label}</div>
+                      <div className="text-ink-secondary">{line.cadence === 'recurring' ? `${line.monthly ? fmtMoney(line.monthly) : '—'}/mo` : 'one-time'} · {line.cogs?.visitsPerYear || 0} visit{line.cogs?.visitsPerYear === 1 ? '' : 's'}</div>
+                    </div>
+                    <div className="text-ink-secondary break-words">{line.priceSource}</div>
+                    <div>
+                      <div className="text-zinc-900">{line.protocol?.programKey || '—'}</div>
+                      <div className="text-ink-secondary">{line.protocol?.matched ? line.protocol.visitName || 'matched' : line.protocol?.reason || 'not matched'}</div>
+                    </div>
+                    <div className="u-nums font-medium text-zinc-900">{fmtMoney(line.price)}</div>
+                    <div>
+                      <div className="u-nums font-medium text-zinc-900">{fmtMoney(line.cogs?.estimatedCost)}</div>
+                      <div className="text-ink-secondary">{fmtMoney(line.cogs?.totalPerVisit)}/visit · {line.cogs?.status}</div>
+                      {line.cogs?.lines?.length > 0 && (
+                        <div className="mt-1 text-11 text-ink-tertiary">
+                          {line.cogs.lines.slice(0, 2).map((p) => p.productName).join(', ')}
+                          {line.cogs.lines.length > 2 ? ` +${line.cogs.lines.length - 2}` : ''}
+                        </div>
+                      )}
+                    </div>
+                    <div>
+                      <Badge tone={line.status === 'ok' ? 'neutral' : 'alert'}>{fmtPct(line.margin)}</Badge>
+                      {line.warnings?.length > 0 && (
+                        <div className="mt-1 space-y-1">
+                          {line.warnings.slice(0, 3).map((w, i) => (
+                            <div key={i} className="text-11 text-alert-fg">{w}</div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="text-11 text-ink-tertiary">
+                Pricing is read from the saved estimate result. COGS is recalculated from current inventory product costs and service protocol mappings.
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -421,6 +565,7 @@ function EstimatePipelineViewV2() {
   const [filter, setFilter] = useState('all');
   const [followUpTarget, setFollowUpTarget] = useState(null);
   const [declineTarget, setDeclineTarget] = useState(null);
+  const [auditTarget, setAuditTarget] = useState(null);
   const [pendingToggleKeys, setPendingToggleKeys] = useState(() => new Set());
 
   const refreshEstimates = useCallback(() => {
@@ -600,6 +745,12 @@ function EstimatePipelineViewV2() {
             setDeclineTarget(null);
             refreshEstimates();
           }}
+        />
+      )}
+      {auditTarget && (
+        <EstimatePricingAuditModal
+          estimate={auditTarget}
+          onClose={() => setAuditTarget(null)}
         />
       )}
 
@@ -920,6 +1071,15 @@ function EstimatePipelineViewV2() {
                       </Button>
                     )}
 
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                      onClick={() => setAuditTarget(e)}
+                    >
+                      Audit
+                    </Button>
+
                     {e.status === 'draft' && e.monthlyTotal > 0 && (
                       <Button
                         size="sm"
@@ -1211,7 +1371,7 @@ function mobileStatusClass(status) {
 // present. Row tap is currently a no-op — action sheet will land in a
 // follow-up PR so this PR stays scoped to the list-view redesign per
 // CLAUDE.md Rule 1/2.
-function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel, onSend, onDeleted, v3Flag = false }) {
+function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel, onSend, onDeleted, onAudit, v3Flag = false }) {
   const navigate = useNavigate();
   const cfg = STATUS_CONFIG[estimate.status] || STATUS_CONFIG.draft;
   const amount = `$${(estimate.monthlyTotal || 0).toFixed(0)}/mo`;
@@ -1363,6 +1523,18 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
           <FilePlus2 size={16} strokeWidth={1.75} />
         </button>
       )}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onAudit?.(estimate);
+        }}
+        aria-label={`Audit pricing for ${customerName}`}
+        title="Audit pricing, protocol, COGS, and margin"
+        className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+      >
+        <SlidersHorizontal size={16} strokeWidth={1.75} />
+      </button>
       {['draft', 'sent', 'viewed'].includes(estimate.status) && (
         <button
           type="button"
@@ -1441,6 +1613,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
   const [filter, setFilter] = useState('all');
   const [dateFilter, setDateFilter] = useState('all');
   const [customerPanelId, setCustomerPanelId] = useState(null);
+  const [auditTarget, setAuditTarget] = useState(null);
   const [sort, setSort] = useState('newest');
 
   const refreshEstimates = useCallback(() => {
@@ -1613,6 +1786,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
               onOpenCustomerPanel={setCustomerPanelId}
               onSend={refreshEstimates}
               onDeleted={refreshEstimates}
+              onAudit={setAuditTarget}
               v3Flag={v3Flag}
             />
           ))}
@@ -1623,6 +1797,12 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
         <CustomerEstimatesPanel
           customerId={customerPanelId}
           onClose={() => setCustomerPanelId(null)}
+        />
+      )}
+      {auditTarget && (
+        <EstimatePricingAuditModal
+          estimate={auditTarget}
+          onClose={() => setAuditTarget(null)}
         />
       )}
     </div>
