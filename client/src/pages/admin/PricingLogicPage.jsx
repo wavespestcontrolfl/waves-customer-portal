@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import PricingLogicPanel from '../../components/admin/PricingLogicPanel';
 
 const ROBOTO = "'Roboto', Arial, sans-serif";
@@ -193,6 +194,11 @@ function SpecServicesPanel() {
 }
 
 export default function PricingLogicPage() {
+  const [searchParams] = useSearchParams();
+  const focusedService = searchParams.get('service');
+  const focus = searchParams.get('focus');
+  const serviceLabel = focusedService ? focusedService.replace(/_/g, ' ') : '';
+
   return (
     <div style={{ padding: '24px 24px 60px', fontFamily: ROBOTO }}>
       <div style={{ maxWidth: 1280, margin: '0 auto' }}>
@@ -202,6 +208,12 @@ export default function PricingLogicPage() {
             <span className="hidden md:inline">Pricing</span>
           </h1>
         </div>
+
+        {focus === 'margin' && (
+          <div style={{ background: `${D.amber}14`, border: `1px solid ${D.amber}44`, borderRadius: 10, padding: 14, marginBottom: 16, color: D.text, fontSize: 13 }}>
+            Review margin rules{serviceLabel ? ` for ${serviceLabel}` : ''}. The estimate audit flagged this service below the pricing floor.
+          </div>
+        )}
 
         <MarginCalculator />
         <SpecServicesPanel />
