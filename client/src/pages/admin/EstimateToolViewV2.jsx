@@ -1940,7 +1940,7 @@ export default function EstimateToolViewV2({
                                 <TierRowV2
                                   key={i}
                                   name={t.label}
-                                  detail={`${fmt(t.pa)}/app x ${t.apps}${R.pest?.rOG > 0 ? ' (incl roach +15%)' : ''}`}
+                                  detail={`${fmt(t.pa)}/app x ${t.apps}`}
                                   price={`${fmt(t.mo)}/mo`}
                                   recommended={t.recommended}
                                   dimmed={t.dimmed}
@@ -1949,9 +1949,9 @@ export default function EstimateToolViewV2({
                                 />
                               ))}
                             </TierGridV2>
-                            {R.pest?.rOG > 0 && (
+                            {R.pestInitialRoachPrice > 0 && (
                               <div className="text-11 text-ink-secondary mt-1">
-                                Roach modifier: +{fmt(R.pest.rOG)}/visit ({R.pestRoachMod === 'GERMAN' ? 'German' : 'Regular'})
+                                {R.pestRoachMod === 'GERMAN' ? 'German' : 'Native'} roach initial is added as a one-time knockdown, not a recurring per-visit premium.
                               </div>
                             )}
                           </div>
@@ -2096,14 +2096,14 @@ export default function EstimateToolViewV2({
                               </div>
                             );
                           }
-                          const nameMap = { 'OT Pest': 'One-Time Pest', 'OT Mosquito': 'One-Time Mosquito', 'German Roach': 'German Roach Initial' };
+                          const nameMap = { 'OT Pest': 'One-Time Pest', 'OT Mosquito': 'One-Time Mosquito', 'German Roach': 'German Roach Initial', 'German Roach Initial': 'German Roach Initial', 'Native Roach Initial': 'Native Roach Initial', 'Initial German Roach Knockdown': 'Initial German Roach Knockdown', 'Initial Native Roach Knockdown': 'Initial Native Roach Knockdown' };
                           const displayName = item.lawnType ? `One-Time Lawn (${item.lawnType})` : (nameMap[item.name] || item.name);
                           return (
                             <div key={i} className="mb-6">
-                              <SectionTitle>{displayName}{E.isRecurringCustomer && <DiscBadge>-15%</DiscBadge>}</SectionTitle>
+                              <SectionTitle>{displayName}{E.isRecurringCustomer && !item.noRecurringDiscount && <DiscBadge>-15%</DiscBadge>}</SectionTitle>
                               <TierGridV2>
                                 <TierRowV2
-                                  name={item.lawnType || (item.name === 'OT Pest' ? 'Full Spray' : item.name === 'OT Mosquito' ? 'Event Spray' : item.name === 'German Roach' ? '3-Visit' : item.name === 'Trapping' ? 'Trapping' : 'Standalone')}
+                                  name={item.lawnType || (item.name === 'OT Pest' ? 'Full Spray' : item.name === 'OT Mosquito' ? 'Event Spray' : item.service === 'pest_initial_roach' || item.name === 'German Roach' || item.name === 'German Roach Initial' || item.name === 'Native Roach Initial' ? 'Initial' : item.name === 'Trapping' ? 'Trapping' : 'Standalone')}
                                   detail={item.detail}
                                   price={fmtInt(item.price)}
                                 />

@@ -31,7 +31,7 @@
  * - Bed Bug Heat: equipment cost for in-house treatments ($150 + $75/extra room)
  *
  * v1.4 changes:
- * - Split roach modifier: Regular 10%, German 25% (was both 15%)
+ * - Roach modifier: one-time initial knockdown fee, no recurring % premium
  * - Tiered hardscape marginal: 3% up to 15k, 5% above (was flat 3%)
  * - Fungicide multiplier: 1.55 (was 1.38)
  * - Margin floor check at 35% for WaveGuard tiers
@@ -305,18 +305,32 @@ export function calculateEstimate(inputs) {
     if (indoor) adj += 15;
     return adj + propTypeAdj;
   };
-  const standaloneRegularRoachPrice = (fpEff) => {
-    if (fpEff < 1500) return 202.50;
-    if (fpEff < 2501) return 239;
-    return 289;
+  const initialRoachPrice = (type, fpEff, standalone = false) => {
+    const t = String(type || '').toUpperCase();
+    if (t === 'REGULAR') {
+      if (standalone) {
+        if (fpEff < 1500) return 202.50;
+        if (fpEff < 2501) return 239;
+        return 289;
+      }
+      if (fpEff < 1500) return 119;
+      if (fpEff < 2501) return 139;
+      return 169;
+    }
+    if (t === 'GERMAN') {
+      if (fpEff < 1500) return 169;
+      if (fpEff < 2501) return 199;
+      return 249;
+    }
+    return 0;
   };
 
   // Recurring customer
   if (isRC) addMod('one-time', 'Recurring customer: -15% one-time services', null, 'down');
 
-  // Roach modifier — German is far more labor-intensive (gel bait, IGR, monitoring, callbacks)
-  if (roachMod === 'GERMAN') addMod('pest', 'Roach modifier (German): +25%/visit', null, 'up');
-  else if (roachMod === 'REGULAR') addMod('pest', 'Roach modifier (American/Smoky Brown): +10%/visit', null, 'up');
+  // Roach modifier — first-visit knockdown fee; recurring per-visit stays clean.
+  if (svcPest && roachMod === 'GERMAN') addMod('one-time', 'Initial German roach knockdown: one-time fee', null, 'up');
+  else if (svcPest && roachMod === 'REGULAR') addMod('one-time', 'Initial native roach knockdown: one-time fee', null, 'up');
 
   /* ═══════════ RECURRING ═══════════ */
   let hasRec = false;
@@ -390,9 +404,6 @@ export function calculateEstimate(inputs) {
     const fpEff = footprint > 0 ? footprint : 2500; // default SWFL home fallback when sqft unknown
     const adj = pestBaseAdjustment(fpEff);
     let pp = Math.max(89, 117 + adj), rOG = 0;
-    // Split roach modifier: German 25% (labor-intensive: gel bait, IGR, monitoring), Regular 10%
-    if (roachMod === 'GERMAN') rOG = Math.round(pp * 0.25 * 100) / 100;
-    else if (roachMod === 'REGULAR') rOG = Math.round(pp * 0.10 * 100) / 100;
     const freqTiers = [
       { f: 4, label: 'Quarterly', disc: 1.0, rec: pestFreq === 4 },
       { f: 6, label: 'Bi-Monthly', disc: 0.92, rec: pestFreq === 6 },
@@ -409,6 +420,7 @@ export function calculateEstimate(inputs) {
       }
     });
     R.pestRoachMod = roachMod;
+    R.pestInitialRoachPrice = initialRoachPrice(roachMod, fpEff, false);
     wgServices.push({ name: 'Pest (' + R.pest.label + ')', mo: R.pest.mo });
   }
 
@@ -566,11 +578,7 @@ export function calculateEstimate(inputs) {
   if (svcOnetimePest) {
     hasOT = true;
     const fpEff = footprint > 0 ? footprint : 2500;
-    const roachBackout = roachMod === 'GERMAN' ? 1.25 : roachMod === 'REGULAR' ? 1.10 : 1;
-    let bpp = R.pest ? R.pest.pa / (R.pest.rOG > 0 ? roachBackout : 1) : 117;
-    if (!R.pest) {
-      bpp = Math.max(89, 117 + pestBaseAdjustment(fpEff));
-    }
+    const bpp = R.pest ? R.pest.pa : Math.max(89, 117 + pestBaseAdjustment(fpEff));
     const fp = otP(Math.max(150, Math.round(bpp * 1.30)));
     otItems.push({ name: 'OT Pest', price: fp, detail: indoor ? 'Interior + exterior' : 'Exterior (+ interior add-on)' });
   }
@@ -725,11 +733,18 @@ export function calculateEstimate(inputs) {
     otItems.push({ name: 'Trapping', price: fp, detail: 'Setup + check visits' });
   }
 
-  /* ── German Roach Initial (from pest roach modifier) ────── */
-  if (roachMod === 'GERMAN') {
+  /* ── Initial Roach Knockdown (from pest roach modifier) ─── */
+  if (R.pest && (roachMod === 'GERMAN' || roachMod === 'REGULAR')) {
     hasOT = true;
-    const fp = otP(100);
-    otItems.push({ name: 'German Roach', price: fp, detail: 'One-time setup' });
+    const fpEff = footprint > 0 ? footprint : 2500;
+    const fp = initialRoachPrice(roachMod, fpEff, false);
+    otItems.push({
+      service: 'pest_initial_roach',
+      name: roachMod === 'GERMAN' ? 'Initial German Roach Knockdown' : 'Initial Native Roach Knockdown',
+      price: fp,
+      detail: roachMod === 'GERMAN' ? 'First-visit gel bait + IGR' : 'First-visit knockdown',
+      noRecurringDiscount: true,
+    });
   }
 
   /* ═══════════ SPECIALTY ═══════════ */
@@ -787,8 +802,10 @@ export function calculateEstimate(inputs) {
   if (svcRoach) {
     const rt = roachType;
     if (rt === 'REGULAR') {
-      const fpEff = footprint > 0 ? footprint : 2500;
-      specItems.push({ name: 'Regular Roach', price: standaloneRegularRoachPrice(fpEff), det: 'Enhanced treatment' });
+      if (R.pestRoachMod !== 'REGULAR') {
+        const fpEff = footprint > 0 ? footprint : 2500;
+        specItems.push({ name: 'Regular Roach', price: initialRoachPrice(rt, fpEff, true), det: 'Standalone knockdown' });
+      }
     } else {
       let gp = 450 + interpolate(footprint, [
         { at: 800, adj: -40 }, { at: 1200, adj: -20 }, { at: 1500, adj: -10 },
