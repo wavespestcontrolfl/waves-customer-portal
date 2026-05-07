@@ -320,6 +320,7 @@ router.get('/pest-calibration', async (req, res, next) => {
         records: [],
         summary: { count: 0, avgDelta: 0, avgAbsDelta: 0, outlierCount: 0, byPoolCageSize: [], byLotBand: [], byConfidence: [], outliers: [] },
         sync: { synced: 0, skipped: 0, unavailable: true },
+        sampleHealth: { jobsEvaluated: 0, materializedCount: 0, linkedEstimateCount: 0, fallbackMatchedCount: 0, missingEstimateLinkCount: 0, missingTimerCount: 0, missingDiagnosticsCount: 0, skippedCount: 0 },
       });
     }
 
@@ -357,7 +358,7 @@ router.get('/pest-calibration', async (req, res, next) => {
       limit: 10000,
       maxLimit: 10000,
     });
-    res.json({ records, summary: summarizeCalibrationRecords(summaryRecords), sync });
+    res.json({ records, summary: summarizeCalibrationRecords(summaryRecords), sync, sampleHealth: sync.sampleHealth || null });
   } catch (err) { next(err); }
 });
 
