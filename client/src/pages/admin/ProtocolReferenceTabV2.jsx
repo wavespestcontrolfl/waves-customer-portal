@@ -75,6 +75,7 @@ function TierDotsV2({ tiers, tier4x, tier6x }) {
       </div>
     );
   }
+  if (tier4x === undefined && tier6x === undefined) return null;
   return (
     <div className="flex items-center gap-1">
       <TierDotV2 active={tier4x} label="4x" />
