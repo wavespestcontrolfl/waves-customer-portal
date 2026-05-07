@@ -673,6 +673,7 @@ export default function EstimateToolViewV2({
       if (rc) lines.push(`${rc.formattedAddress} — ${rc.squareFootage || '?'} sf / ${rc.lotSize || '?'} sf lot / ${rc.stories || 1} story`);
       if (ep.yearBuilt) lines.push(`Built ${ep.yearBuilt} · ${ep.constructionMaterial} · ${ep.foundationType} foundation · ${ep.roofType} roof`);
       if (ep.serviceZone) lines.push(`Service Zone ${ep.serviceZone}`);
+      if (ep.propertyDataQuality) lines.push(`Property data quality: ${String(ep.propertyDataQuality.level || 'unknown').toUpperCase()} (${ep.propertyDataQuality.score || 0}/100)`);
       setLookupStatus({ type: 'ok', msg: lines.join('\n') });
 
       if (ai) {
@@ -1129,6 +1130,38 @@ export default function EstimateToolViewV2({
                 </Button>
               </div>
               <StatusLine status={satelliteStatus} />
+              {enrichedProfile?.propertyDataQuality && (
+                <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs">
+                  <div className="flex items-center justify-between gap-3 mb-1">
+                    <div className="text-11 font-semibold uppercase tracking-label text-ink-secondary">Property Data Quality</div>
+                    <div className={`text-11 font-semibold uppercase tracking-label ${
+                      enrichedProfile.propertyDataQuality.level === 'high' ? 'text-emerald-700' :
+                        enrichedProfile.propertyDataQuality.level === 'medium' ? 'text-amber-700' : 'text-alert-fg'
+                    }`}>
+                      {enrichedProfile.propertyDataQuality.level || 'unknown'} · {enrichedProfile.propertyDataQuality.score || 0}/100
+                    </div>
+                  </div>
+                  <div className="text-12 text-ink-secondary">
+                    {(enrichedProfile.propertyProviders || []).join(' + ') || 'No provider'} · {(enrichedProfile.propertyDataQuality.sourceTypes || []).join(', ') || 'no source type'} · {enrichedProfile.propertyDataQuality.verifiedCriticalFields || 0}/{enrichedProfile.propertyDataQuality.totalCriticalFields || 4} critical fields verified
+                  </div>
+                  {enrichedProfile.fieldEvidence && (
+                    <div className="mt-2 grid grid-cols-2 gap-1">
+                      {['squareFootage', 'lotSize', 'stories', 'propertyType'].map((field) => {
+                        const item = enrichedProfile.fieldEvidence[field];
+                        if (!item) return null;
+                        return (
+                          <div key={field} className="text-11 text-ink-tertiary truncate">
+                            <span className={item.fieldVerify ? 'text-alert-fg font-medium' : 'text-emerald-700 font-medium'}>
+                              {item.fieldVerify ? 'Verify' : 'Trusted'}
+                            </span>
+                            {' '}{field.replace(/([A-Z])/g, ' $1').toLowerCase()}: {item.sourceLabel || item.sourceType || 'source'}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
               {enrichedProfile?.fieldVerifyFlags?.length > 0 && (
                 <div className="mb-2.5 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs">
                   {enrichedProfile.fieldVerifyFlags.map((flag, i) => (
