@@ -1555,7 +1555,7 @@ function CPChipGroup({ label, dot, chips, onPick }) {
   );
 }
 
-export function CompletionPanel({ service, products, onClose, onSubmit }) {
+export function CompletionPanel({ service, products, onClose, onSubmit, onViewDetails }) {
   const [notes, setNotes] = useState('');
   const [selectedProducts, setSelectedProducts] = useState([]);
   const [productSearch, setProductSearch] = useState('');
@@ -2355,7 +2355,22 @@ export function CompletionPanel({ service, products, onClose, onSubmit }) {
                 {service.customerName}
               </div>
             </div>
-            <div style={{ width: 36, height: 36 }} aria-hidden />
+            {onViewDetails ? (
+              <button
+                type="button"
+                onClick={() => onViewDetails(service)}
+                style={{
+                  height: 36, minWidth: 72, borderRadius: 999,
+                  background: M.card, border: `1px solid ${M.hairline}`,
+                  color: M.ink, fontFamily: font, fontSize: 13, fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+              >
+                Details
+              </button>
+            ) : (
+              <div style={{ width: 36, height: 36 }} aria-hidden />
+            )}
           </div>
 
           <div style={{ padding: 20, maxWidth: 560, margin: '0 auto' }}>
