@@ -41,6 +41,77 @@ function monthAbbr(value) {
   return MONTH_ABBR.find((m) => m.toLowerCase() === raw) || MONTH_ABBR[etParts(new Date()).month - 1];
 }
 
+function normalizeText(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function lawnTrackFromInput(value) {
+  const text = normalizeText(value);
+  if (text.includes('bermuda')) return 'bermuda';
+  if (text.includes('zoysia')) return 'zoysia';
+  if (text.includes('bahia')) return 'bahia';
+  return 'st_augustine';
+}
+
+function actionKindForLine(line, product) {
+  const text = normalizeText(`${line?.raw || ''} ${product?.name || ''} ${product?.category || ''}`);
+  if (text.includes('pre emerg') || text.includes('prodiamine') || text.includes('stonewall')) return 'pre_emergent';
+  if (text.includes('post emerg') || text.includes('celsius') || text.includes('sedge') || text.includes('dismiss') || text.includes('speedzone') || text.includes('weed')) return 'post_emergent';
+  if (text.includes('slow release') || text.includes('polyplus') || text.includes('fert') || text.includes('nitrogen') || Number(product?.analysis_n || 0) > 0) return 'slow_release_fertilizer';
+  if (text.includes('fungicide') || text.includes('frac') || text.includes('headway') || text.includes('medallion') || text.includes('armada') || text.includes('azoxy')) return 'fungicide';
+  if (text.includes('insect') || text.includes('chinch') || text.includes('mole cricket') || text.includes('acelepryn') || text.includes('talstar') || text.includes('demand') || text.includes('alpine')) return 'insecticide';
+  if (text.includes('bait')) return 'bait';
+  if (text.includes('sweep') || text.includes('webster') || text.includes('de web')) return 'web_sweep';
+  if (text.includes('inspect') || text.includes('scout') || text.includes('audit') || text.includes('sample') || text.includes('monitor')) return 'inspection';
+  return 'service_action';
+}
+
+function actionLabel(kind, line, product) {
+  const productName = product?.name || '';
+  const raw = String(line?.raw || '').replace(/\s*\([^)]*\)\s*$/g, '').trim();
+  if (kind === 'pre_emergent') return `Applied pre-emergent${productName ? ` - ${productName}` : ''}`;
+  if (kind === 'post_emergent') return `Applied post-emergent${productName ? ` - ${productName}` : ''}`;
+  if (kind === 'slow_release_fertilizer') return `Applied slow-release fertilizer${productName ? ` - ${productName}` : ''}`;
+  if (kind === 'fungicide') return `Applied fungicide${productName ? ` - ${productName}` : ''}`;
+  if (kind === 'insecticide') return `Applied insect control${productName ? ` - ${productName}` : ''}`;
+  if (kind === 'bait') return raw || 'Placed bait';
+  if (kind === 'web_sweep') return raw || 'Completed web sweep';
+  if (kind === 'inspection') return raw || 'Completed inspection';
+  return raw || productName || 'Completed protocol item';
+}
+
+function serializeProtocolProduct(product) {
+  if (!product) return null;
+  return {
+    id: product.id,
+    name: product.name,
+    category: product.category,
+    activeIngredient: product.active_ingredient || null,
+    defaultRatePer1000: product.default_rate_per_1000 != null ? Number(product.default_rate_per_1000) : null,
+    rateUnit: product.rate_unit || null,
+    defaultUnit: product.rate_unit || null,
+    maxLabelRatePer1000: product.max_label_rate_per_1000 != null ? Number(product.max_label_rate_per_1000) : null,
+  };
+}
+
+function buildCompletionActions({ lines, products, programKey, visit }) {
+  return lines.map((line, index) => {
+    const product = matchCatalogProduct(line, products);
+    const kind = actionKindForLine(line, product);
+    const label = actionLabel(kind, line, product);
+    return {
+      id: `${programKey || 'protocol'}_${visit?.visit || 'visit'}_${index}`,
+      kind,
+      label,
+      note: label,
+      raw: line.raw,
+      role: line.role,
+      conditional: !!line.conditional,
+      product: serializeProtocolProduct(product),
+    };
+  });
+}
+
 async function getProtocolProducts() {
   return db('products_catalog')
     .where(function () {
@@ -305,6 +376,59 @@ router.get('/lawn-mix', async (req, res, next) => {
         product: products.find((p) => String(p.id) === String(item.product?.id)) || null,
       }))),
       warnings,
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/protocols/completion-actions — targeted completion chips
+// derived from the protocol program + matched product catalog rows.
+router.get('/completion-actions', async (req, res, next) => {
+  try {
+    const protocols = require('../config/protocols.json');
+    const serviceType = req.query.serviceType || req.query.service_type || '';
+    const products = await getProtocolProducts();
+    let programKey;
+    let program;
+    let visit;
+    let track = null;
+    let month = null;
+
+    if (normalizeText(serviceType).includes('lawn')) {
+      programKey = 'lawn';
+      track = lawnTrackFromInput(req.query.lawnType || req.query.grassType || req.query.track);
+      program = protocols.lawn?.[track] || protocols.lawn?.st_augustine;
+      month = monthAbbr(req.query.month);
+      visit = program?.visits?.find((v) => v.month === month) || program?.visits?.[0] || null;
+    } else {
+      const matched = matchServiceProtocol(protocols, serviceType);
+      programKey = matched.programKey;
+      program = matched.program;
+      visit = matched.matchedVisit || program?.visits?.[0] || null;
+    }
+
+    if (!program || !visit) return res.status(404).json({ error: 'Protocol actions not found' });
+
+    const baseLines = parseProtocolLines(visit.primary, 'base');
+    const conditionalLines = parseProtocolLines(visit.secondary, 'conditional');
+    const actions = buildCompletionActions({
+      lines: [...baseLines, ...conditionalLines],
+      products,
+      programKey,
+      visit,
+    });
+
+    res.json({
+      serviceType,
+      programKey,
+      track,
+      month,
+      programName: program.name,
+      visit: {
+        visit: visit.visit,
+        month: visit.month,
+        objective: visit.notes,
+      },
+      actions,
     });
   } catch (err) { next(err); }
 });

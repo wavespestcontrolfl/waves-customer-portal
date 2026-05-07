@@ -855,6 +855,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       soilMoisture,
       sendCompletionSms,
       requestReview,
+      oneTimeRecapOnly = false,
       areasTreated,
       areasServiced,
       customerInteraction,
@@ -872,6 +873,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       });
     }
     const isIncompleteVisit = visitOutcome === 'incomplete';
+    const recapReviewOnly = !!oneTimeRecapOnly && !isIncompleteVisit;
     const completionAreas = Array.isArray(areasTreated) ? areasTreated : (Array.isArray(areasServiced) ? areasServiced : []);
     const concernText = typeof customerConcernText === 'string' ? customerConcernText.trim() : '';
     const normalizedOfficeApproval = normalizeOfficeApproval(officeApproval);
@@ -1066,6 +1068,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const structuredNotes = {
             visitOutcome,
             requestReview: isIncompleteVisit ? false : requestReview !== false,
+            oneTimeRecapOnly: recapReviewOnly,
             reviewSuppression,
             incompleteReason,
             customerConcernText: concernText || null,
@@ -1393,10 +1396,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let invoice = null;
     let alreadyPaid = false;
     try {
-      const existingPaid = await db('invoices')
-        .where({ service_record_id: record.id, status: 'paid' })
-        .first();
-      if (existingPaid) alreadyPaid = true;
+      if (!recapReviewOnly) {
+        const existingPaid = await db('invoices')
+          .where({ service_record_id: record.id, status: 'paid' })
+          .first();
+        if (existingPaid) alreadyPaid = true;
+      }
     } catch (e) { /* non-blocking */ }
     let existingCompletionInvoice = null;
     try {
@@ -1421,20 +1426,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
       if (existingCompletionInvoice) {
         invoice = existingCompletionInvoice;
-        payUrl = existingCompletionInvoice.token
-          ? await shortenOrPassthrough(
-              `${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/pay/${existingCompletionInvoice.token}`,
-              {
-                kind: 'invoice',
-                entityType: 'invoices',
-                entityId: existingCompletionInvoice.id,
-                customerId: existingCompletionInvoice.customer_id,
-                codePrefix: invoiceShortCodePrefix(existingCompletionInvoice),
-              }
-            )
-          : null;
-        if (existingCompletionInvoice.status === 'paid') alreadyPaid = true;
-        else invoiceCreated = true;
+        if (!recapReviewOnly) {
+          payUrl = existingCompletionInvoice.token
+            ? await shortenOrPassthrough(
+                `${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/pay/${existingCompletionInvoice.token}`,
+                {
+                  kind: 'invoice',
+                  entityType: 'invoices',
+                  entityId: existingCompletionInvoice.id,
+                  customerId: existingCompletionInvoice.customer_id,
+                  codePrefix: invoiceShortCodePrefix(existingCompletionInvoice),
+                }
+              )
+            : null;
+          if (existingCompletionInvoice.status === 'paid') alreadyPaid = true;
+          else invoiceCreated = true;
+        }
       }
     } catch (e) { /* non-blocking */ }
     // If the admin/tech marked this visit prepaid (cash, Zelle, phone CC, etc.)
@@ -1446,13 +1453,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // (Charge now → Tap-to-Pay flow), reuse it instead of cutting a second one.
     let preMintedInvoice = null;
     try {
-      preMintedInvoice = await db('invoices')
-        .where({ scheduled_service_id: svc.id })
-        .whereNot('status', 'void')
-        .orderBy('created_at', 'desc')
-        .first();
+      if (!recapReviewOnly) {
+        preMintedInvoice = await db('invoices')
+          .where({ scheduled_service_id: svc.id })
+          .whereNot('status', 'void')
+          .orderBy('created_at', 'desc')
+          .first();
+      }
     } catch (e) { /* column may not exist pre-migration — non-blocking */ }
-    const shouldInvoice = !alreadyPaid && !prepaidCovered && !preMintedInvoice && !existingCompletionInvoice
+    const shouldInvoice = !recapReviewOnly && !alreadyPaid && !prepaidCovered && !preMintedInvoice && !existingCompletionInvoice
       && (!!svc.create_invoice_on_complete || !!svc.cust_waveguard_tier) && invoiceAmount > 0;
     // Customer-facing SMS URL must be the canonical portal domain, not
     // the raw Railway URL (CLIENT_URL is set to the Railway hostname on
@@ -1568,7 +1577,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // mint the review row now and bundle its short URL into the one completion
     // SMS instead of firing a second message 90-180 min later. Single message
     // lands higher read-rates than two.
-    const invoiceBlocksReview = !!invoice && invoice.status !== 'paid';
+    const invoiceBlocksReview = !recapReviewOnly && !!invoice && invoice.status !== 'paid';
     const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
     const effectiveRequestReview = !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview;
 
