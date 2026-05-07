@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 
 function parseMaybeJson(value) {
   if (!value) return {};
@@ -43,6 +44,62 @@ function lotBand(lotSqFt) {
   if (lot < 20000) return '10k-20k';
   if (lot < 40000) return '20k-40k';
   return '40k+';
+}
+
+function normalizeServiceDate(value) {
+  if (!value) return null;
+  if (typeof value === 'string') return value.slice(0, 10);
+  if (value instanceof Date) return etDateString(value);
+  return String(value).slice(0, 10);
+}
+
+function parseEstimateActivityDateTime(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  if (typeof value === 'string') {
+    const raw = value.trim();
+    const dateOnly = /^(\d{4}-\d{2}-\d{2})$/.exec(raw);
+    if (dateOnly) return parseETDateTime(`${dateOnly[1]}T12:00`);
+
+    const naive = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(?::(\d{2})(?:\.\d+)?)?$/.exec(raw);
+    if (naive) return parseETDateTime(`${naive[1]}T${naive[2]}:${naive[3] || '00'}`);
+  }
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function normalizeEstimateActivityDate(value) {
+  const parsed = parseEstimateActivityDateTime(value);
+  if (parsed) return etDateString(parsed);
+  return String(value).slice(0, 10);
+}
+
+function hasProductionDiagnostics(estimateData) {
+  const { diagnostics } = extractEstimatePayload(estimateData);
+  return !!(diagnostics && diagnostics.estimatedMinutes != null);
+}
+
+function estimateIncludesPestService(estimateData) {
+  const parsed = parseMaybeJson(estimateData);
+  const result = parsed.result || parsed.engineResult || parsed;
+  const inputs = parsed.inputs || parsed.engineInputs || {};
+
+  if (inputs.services?.pest || inputs.services?.pest_control || inputs.svcPest) return true;
+  if (result.results?.pest || result.recurring?.pest || result.recurring?.pest_control) return true;
+
+  const lineItems = Array.isArray(result.lineItems) ? result.lineItems : [];
+  if (lineItems.some((line) => {
+    const raw = String(line?.service || line?.key || line?.name || line?.displayName || '').toLowerCase();
+    return raw.includes('pest');
+  })) return true;
+
+  const recurringServices = Array.isArray(result.recurring?.services) ? result.recurring.services : [];
+  if (recurringServices.some((service) => {
+    const raw = String(service?.service || service?.key || service?.name || service?.serviceName || '').toLowerCase();
+    return raw.includes('pest');
+  })) return true;
+
+  return false;
 }
 
 function extractPestPrice(result = {}, pestLine = null) {
@@ -129,8 +186,36 @@ function buildCalibrationRecord(row) {
       pestPrice,
       productionDiagnostics: diagnostics,
     }),
-    source: 'estimate_time_entry',
+    source: row.source || 'estimate_time_entry',
   };
+}
+
+function calibrationReviewReasons(row) {
+  const reasons = new Set();
+  const delta = Math.abs(Number(row.delta_minutes) || 0);
+  if (delta >= 15) reasons.add('15_min_variance');
+
+  const confidence = String(row.pricing_confidence || '').toLowerCase();
+  if (confidence === 'low') reasons.add('low_confidence');
+
+  const lot = Number(row.lot_sqft) || 0;
+  if (lot >= 20000) reasons.add('large_lot');
+
+  const pool = String(row.pool_cage_size || '').toLowerCase();
+  if (pool === 'large' || pool === 'oversized') reasons.add(`${pool}_pool_cage`);
+
+  for (const reason of normalizeReasons(row.review_reasons)) {
+    if (reason === 'pool_cage_size_inferred') reasons.add('pool_cage_size_inferred');
+    if (reason === 'large_lot') reasons.add('large_lot');
+    if (reason === 'low_confidence') reasons.add('low_confidence');
+  }
+
+  const diagnostics = parseStoredJson(row.production_diagnostics, {}) || {};
+  if (diagnostics.poolCageSizeInferred || diagnostics.poolCageSizeSource === 'inferred') {
+    reasons.add('pool_cage_size_inferred');
+  }
+
+  return [...reasons];
 }
 
 function summarizeGroup(records, keyFn) {
@@ -162,6 +247,15 @@ function summarizeCalibrationRecords(records) {
     .filter(r => Math.abs(Number(r.delta_minutes) || 0) >= 15)
     .sort((a, b) => Math.abs(Number(b.delta_minutes) || 0) - Math.abs(Number(a.delta_minutes) || 0))
     .slice(0, 25);
+  const reviewQueue = rows
+    .map(row => ({ ...row, calibration_review_reasons: calibrationReviewReasons(row) }))
+    .filter(row => row.calibration_review_reasons.length > 0)
+    .sort((a, b) => {
+      const deltaDiff = Math.abs(Number(b.delta_minutes) || 0) - Math.abs(Number(a.delta_minutes) || 0);
+      if (deltaDiff) return deltaDiff;
+      return String(b.service_date || '').localeCompare(String(a.service_date || ''));
+    })
+    .slice(0, 25);
 
   return {
     count: rows.length,
@@ -172,27 +266,83 @@ function summarizeCalibrationRecords(records) {
     byLotBand: summarizeGroup(rows, r => lotBand(r.lot_sqft)),
     byConfidence: summarizeGroup(rows, r => r.pricing_confidence || 'unknown'),
     outliers,
+    reviewQueueCount: rows.filter(r => calibrationReviewReasons(r).length > 0).length,
+    reviewQueue,
   };
+}
+
+function applyPestOnlyServiceFilters(q, alias = 's') {
+  return q
+    .whereILike(`${alias}.service_type`, '%pest%')
+    .whereNot(`${alias}.service_type`, 'ilike', '%lawn%')
+    .whereNot(`${alias}.service_type`, 'ilike', '%tree%')
+    .whereNot(`${alias}.service_type`, 'ilike', '%shrub%')
+    .whereNot(`${alias}.service_type`, 'ilike', '%mosquito%')
+    .whereNot(`${alias}.service_type`, 'ilike', '%termite%')
+    .whereNot(`${alias}.service_type`, 'ilike', '%rodent%')
+    .whereNot(`${alias}.service_type`, 'ilike', '%palm%')
+    .whereNot(`${alias}.service_type`, 'ilike', '% + %');
+}
+
+function fallbackWindowForJob(row) {
+  if (!row.customer_id || !row.service_date) return null;
+  const serviceDate = normalizeServiceDate(row.service_date);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(serviceDate || '')) return null;
+  const serviceAnchor = parseETDateTime(`${serviceDate}T12:00`);
+  return {
+    customerId: row.customer_id,
+    serviceDate,
+    start: etDateString(addETDays(serviceAnchor, -120)),
+    end: etDateString(addETDays(serviceAnchor, 14)),
+  };
+}
+
+function estimateStatusRank(status) {
+  if (status === 'accepted') return 0;
+  if (status === 'viewed') return 1;
+  return 2;
+}
+
+function estimateSortTime(estimate) {
+  const values = [estimate.accepted_at, estimate.sent_at, estimate.created_at];
+  for (const value of values) {
+    const parsed = parseEstimateActivityDateTime(value);
+    if (parsed) return parsed.getTime();
+  }
+  return 0;
+}
+
+function sortFallbackEstimates(estimates = []) {
+  return [...estimates].sort((a, b) => {
+    const rankDiff = estimateStatusRank(a.status) - estimateStatusRank(b.status);
+    if (rankDiff) return rankDiff;
+    return estimateSortTime(b) - estimateSortTime(a);
+  });
+}
+
+function selectFallbackEstimateForJob(row, estimates = []) {
+  const window = fallbackWindowForJob(row);
+  if (!window) return null;
+  return sortFallbackEstimates(estimates).find((estimate) => (
+    estimate.customer_id === window.customerId
+    && estimate.status === 'accepted'
+    && (() => {
+      const acceptedDate = normalizeEstimateActivityDate(estimate.accepted_at);
+      return acceptedDate >= window.start && acceptedDate <= window.end;
+    })()
+    && hasProductionDiagnostics(estimate.estimate_data)
+    && estimateIncludesPestService(estimate.estimate_data)
+  )) || null;
 }
 
 async function fetchCompletedPestJobRows({ startDate, endDate, limit = 500 } = {}) {
   let q = db('time_entries as te')
     .join('scheduled_services as s', 'te.job_id', 's.id')
-    .join('estimates as e', 's.source_estimate_id', 'e.id')
+    .leftJoin('estimates as e', 's.source_estimate_id', 'e.id')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
     .where('te.entry_type', 'job')
     .whereIn('te.status', ['completed', 'edited'])
     .whereNotNull('te.duration_minutes')
-    .whereNotNull('s.source_estimate_id')
-    .whereILike('s.service_type', '%pest%')
-    .whereNot('s.service_type', 'ilike', '%lawn%')
-    .whereNot('s.service_type', 'ilike', '%tree%')
-    .whereNot('s.service_type', 'ilike', '%shrub%')
-    .whereNot('s.service_type', 'ilike', '%mosquito%')
-    .whereNot('s.service_type', 'ilike', '%termite%')
-    .whereNot('s.service_type', 'ilike', '%rodent%')
-    .whereNot('s.service_type', 'ilike', '%palm%')
-    .whereNot('s.service_type', 'ilike', '% + %')
     .groupBy(
       's.id', 's.source_estimate_id', 's.customer_id', 's.technician_id',
       's.scheduled_date', 's.service_type', 'e.estimate_data',
@@ -214,16 +364,123 @@ async function fetchCompletedPestJobRows({ startDate, endDate, limit = 500 } = {
     .sum({ actual_minutes: 'te.duration_minutes' })
     .orderBy('s.scheduled_date', 'desc')
     .limit(Math.min(Math.max(Number(limit) || 500, 1), 2000));
+  q = applyPestOnlyServiceFilters(q, 's');
 
   if (startDate) q = q.where('s.scheduled_date', '>=', startDate);
   if (endDate) q = q.where('s.scheduled_date', '<=', endDate);
   return q;
 }
 
+async function fetchFallbackEstimatesForJobs(rows = []) {
+  const windows = rows
+    .filter(row => !row.estimate_data)
+    .map(fallbackWindowForJob)
+    .filter(Boolean);
+  if (!windows.length) return new Map();
+
+  const customerIds = [...new Set(windows.map(window => window.customerId))];
+  const start = windows.reduce((min, window) => (window.start < min ? window.start : min), windows[0].start);
+  const end = windows.reduce((max, window) => (window.end > max ? window.end : max), windows[0].end);
+
+  const estimates = await db('estimates')
+    .whereIn('customer_id', customerIds)
+    .where('status', 'accepted')
+    .whereRaw("(accepted_at AT TIME ZONE 'America/New_York')::date BETWEEN ?::date AND ?::date", [start, end])
+    .orderByRaw(`
+      CASE
+        WHEN status = 'accepted' THEN 0
+        WHEN status = 'viewed' THEN 1
+        ELSE 2
+      END
+    `)
+    .orderBy('accepted_at', 'desc')
+    .orderBy('sent_at', 'desc')
+    .orderBy('created_at', 'desc');
+
+  const byCustomer = new Map();
+  for (const estimate of estimates) {
+    if (!hasProductionDiagnostics(estimate.estimate_data) || !estimateIncludesPestService(estimate.estimate_data)) {
+      continue;
+    }
+    if (!byCustomer.has(estimate.customer_id)) byCustomer.set(estimate.customer_id, []);
+    byCustomer.get(estimate.customer_id).push(estimate);
+  }
+  for (const [customerId, customerEstimates] of byCustomer.entries()) {
+    byCustomer.set(customerId, sortFallbackEstimates(customerEstimates));
+  }
+  return byCustomer;
+}
+
+async function hydrateJobRowsWithFallbackEstimates(rows) {
+  const fallbackEstimatesByCustomer = await fetchFallbackEstimatesForJobs(rows);
+  const hydrated = [];
+  for (const row of rows) {
+    if (row.estimate_data) {
+      hydrated.push({ ...row, source: 'estimate_time_entry' });
+      continue;
+    }
+    const match = selectFallbackEstimateForJob(
+      row,
+      fallbackEstimatesByCustomer.get(row.customer_id) || [],
+    );
+    if (match) {
+      hydrated.push({
+        ...row,
+        estimate_id: match.id,
+        estimate_data: match.estimate_data,
+        source: 'matched_customer_date',
+      });
+    } else {
+      hydrated.push({ ...row, source: 'missing_estimate_link' });
+    }
+  }
+  return hydrated;
+}
+
+async function countMissingTimerPestJobs({ startDate, endDate } = {}) {
+  let q = db('scheduled_services as s')
+    .where('s.status', 'completed')
+    .whereNotExists(function () {
+      this.select(1)
+        .from('time_entries as te')
+        .whereRaw('te.job_id = s.id')
+        .where('te.entry_type', 'job')
+        .whereIn('te.status', ['completed', 'edited'])
+        .whereNotNull('te.duration_minutes');
+    })
+    .countDistinct('s.id as count');
+  q = applyPestOnlyServiceFilters(q, 's');
+  if (startDate) q = q.where('s.scheduled_date', '>=', startDate);
+  if (endDate) q = q.where('s.scheduled_date', '<=', endDate);
+  const row = await q.first();
+  return Number(row?.count || 0);
+}
+
+function buildSampleHealth({ rows = [], hydratedRows = [], records = [], missingTimerCount = 0 } = {}) {
+  const linkedEstimateCount = rows.filter(row => !!row.estimate_data).length;
+  const missingEstimateLinkCount = rows.filter(row => !row.estimate_data).length;
+  const fallbackMatchedCount = hydratedRows.filter(row => row.source === 'matched_customer_date').length;
+  const missingDiagnosticsCount = hydratedRows.filter(row => row.estimate_data && !hasProductionDiagnostics(row.estimate_data)).length;
+  const materializedCount = records.length;
+  return {
+    jobsEvaluated: rows.length,
+    materializedCount,
+    linkedEstimateCount,
+    fallbackMatchedCount,
+    missingEstimateLinkCount,
+    missingTimerCount,
+    missingDiagnosticsCount,
+    skippedCount: rows.length - materializedCount,
+  };
+}
+
 async function syncCalibrationRecords(options = {}) {
   const rows = await fetchCompletedPestJobRows(options);
-  const records = rows.map(buildCalibrationRecord).filter(Boolean);
-  if (!records.length) return { synced: 0, skipped: rows.length };
+  const hydratedRows = await hydrateJobRowsWithFallbackEstimates(rows);
+  const records = hydratedRows.map(buildCalibrationRecord).filter(Boolean);
+  const missingTimerCount = await countMissingTimerPestJobs(options).catch(() => 0);
+  const sampleHealth = buildSampleHealth({ rows, hydratedRows, records, missingTimerCount });
+  if (!records.length) return { synced: 0, skipped: rows.length, sampleHealth };
 
   const now = new Date();
   const withTimestamps = records.map(record => ({ ...record, updated_at: now }));
@@ -238,7 +495,7 @@ async function syncCalibrationRecords(options = {}) {
       'source', 'updated_at',
     ]);
 
-  return { synced: records.length, skipped: rows.length - records.length };
+  return { synced: records.length, skipped: rows.length - records.length, sampleHealth };
 }
 
 async function listCalibrationRecords({ startDate, endDate, limit = 100, maxLimit = 500 } = {}) {
@@ -266,6 +523,7 @@ async function listCalibrationRecords({ startDate, endDate, limit = 100, maxLimi
     home_sqft: row.home_sqft == null ? null : Number(row.home_sqft),
     lot_sqft: row.lot_sqft == null ? null : Number(row.lot_sqft),
     review_reasons: normalizeReasons(row.review_reasons),
+    calibration_review_reasons: calibrationReviewReasons(row),
     customer_name: [row.first_name, row.last_name].filter(Boolean).join(' ') || null,
   }));
 }
@@ -303,6 +561,7 @@ function calibrationExportRows(records = []) {
       review_reasons: reviewReasons.join('; '),
       pool_cage_size_source: diagnostics.poolCageSizeSource || '',
       pricing_mode: diagnostics.pricingMode || '',
+      source: row.source || '',
       stories: property.stories || '',
       scheduled_service_id: row.scheduled_service_id || '',
       estimate_id: row.estimate_id || '',
@@ -338,6 +597,7 @@ function calibrationRowsToCsv(records = []) {
     'review_reasons',
     'pool_cage_size_source',
     'pricing_mode',
+    'source',
     'stories',
     'scheduled_service_id',
     'estimate_id',
@@ -355,6 +615,11 @@ module.exports = {
   listCalibrationRecords,
   calibrationExportRows,
   calibrationRowsToCsv,
+  calibrationReviewReasons,
+  buildSampleHealth,
+  hasProductionDiagnostics,
+  estimateIncludesPestService,
+  selectFallbackEstimateForJob,
   lotBand,
   isPestOnlyServiceType,
 };

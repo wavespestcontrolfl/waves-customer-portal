@@ -2,6 +2,11 @@ const {
   buildCalibrationRecord,
   calibrationRowsToCsv,
   calibrationExportRows,
+  calibrationReviewReasons,
+  buildSampleHealth,
+  hasProductionDiagnostics,
+  estimateIncludesPestService,
+  selectFallbackEstimateForJob,
   summarizeCalibrationRecords,
   lotBand,
   isPestOnlyServiceType,
@@ -50,6 +55,29 @@ describe('pest production calibration', () => {
     expect(JSON.parse(record.review_reasons)).toEqual(['large_pool_cage']);
     expect(JSON.parse(record.production_diagnostics).breakdown.poolCage).toBe(12);
     expect(JSON.parse(record.estimate_snapshot).pestPrice).toBeNull();
+  });
+
+  test('preserves fallback match source on stored calibration records', () => {
+    const record = buildCalibrationRecord({
+      scheduled_service_id: 'service-fallback',
+      estimate_id: 'estimate-fallback',
+      service_date: '2026-05-07',
+      service_type: 'Pest Control',
+      actual_minutes: 42,
+      source: 'matched_customer_date',
+      estimate_data: {
+        result: {
+          property: { homeSqFt: 2300, lotSqFt: 18000 },
+          productionDiagnostics: {
+            estimatedMinutes: 35,
+            pricingConfidence: 'medium',
+            poolCageSize: 'medium',
+          },
+        },
+      },
+    });
+
+    expect(record.source).toBe('matched_customer_date');
   });
 
   test('captures pest price when estimate payload includes recurring pest pricing', () => {
@@ -153,6 +181,161 @@ describe('pest production calibration', () => {
       key: 'medium',
       count: 2,
     }));
+    expect(summary.reviewQueueCount).toBe(2);
+    expect(summary.reviewQueue[0].calibration_review_reasons).toContain('15_min_variance');
+  });
+
+  test('flags calibration review reasons from variance, confidence, pool, lot, and inferred cage', () => {
+    const reasons = calibrationReviewReasons({
+      delta_minutes: 18,
+      pricing_confidence: 'low',
+      pool_cage_size: 'oversized',
+      lot_sqft: 26000,
+      review_reasons: ['pool_cage_size_inferred'],
+    });
+
+    expect(reasons).toEqual(expect.arrayContaining([
+      '15_min_variance',
+      'low_confidence',
+      'large_lot',
+      'oversized_pool_cage',
+      'pool_cage_size_inferred',
+    ]));
+  });
+
+  test('builds sample health counts for linked, fallback, missing, and skipped rows', () => {
+    const sampleHealth = buildSampleHealth({
+      rows: [
+        { scheduled_service_id: 'linked', estimate_data: { result: {} } },
+        { scheduled_service_id: 'missing' },
+        { scheduled_service_id: 'fallback' },
+      ],
+      hydratedRows: [
+        { scheduled_service_id: 'linked', estimate_data: { result: { productionDiagnostics: { estimatedMinutes: 30 } } }, source: 'estimate_time_entry' },
+        { scheduled_service_id: 'missing', source: 'missing_estimate_link' },
+        { scheduled_service_id: 'fallback', estimate_data: { result: {} }, source: 'matched_customer_date' },
+      ],
+      records: [{ scheduled_service_id: 'linked' }],
+      missingTimerCount: 2,
+    });
+
+    expect(sampleHealth).toMatchObject({
+      jobsEvaluated: 3,
+      materializedCount: 1,
+      linkedEstimateCount: 1,
+      fallbackMatchedCount: 1,
+      missingEstimateLinkCount: 2,
+      missingTimerCount: 2,
+      missingDiagnosticsCount: 1,
+      skippedCount: 2,
+    });
+  });
+
+  test('detects production diagnostics in supported estimate payload shapes', () => {
+    expect(hasProductionDiagnostics({
+      result: { productionDiagnostics: { estimatedMinutes: 31 } },
+    })).toBe(true);
+    expect(hasProductionDiagnostics({
+      engineResult: {
+        lineItems: [{ service: 'pest_control', productionDiagnostics: { estimatedMinutes: 28 } }],
+      },
+    })).toBe(true);
+    expect(hasProductionDiagnostics({ result: {} })).toBe(false);
+  });
+
+  test('requires a pest service signal for fallback estimate matching', () => {
+    expect(estimateIncludesPestService({
+      inputs: { services: { pest: true } },
+      result: { productionDiagnostics: { estimatedMinutes: 31 } },
+    })).toBe(true);
+    expect(estimateIncludesPestService({
+      engineResult: {
+        lineItems: [{ service: 'pest_control', productionDiagnostics: { estimatedMinutes: 28 } }],
+      },
+    })).toBe(true);
+    expect(estimateIncludesPestService({
+      result: {
+        productionDiagnostics: { estimatedMinutes: 45 },
+        lineItems: [{ service: 'lawn_care' }],
+      },
+    })).toBe(false);
+  });
+
+  test('selects fallback estimate by customer, pest signal, and per-job date window', () => {
+    const job = {
+      customer_id: 'customer-1',
+      service_date: '2026-05-07',
+    };
+    const matching = {
+      id: 'matching-estimate',
+      customer_id: 'customer-1',
+      status: 'accepted',
+      accepted_at: '2026-04-15',
+      estimate_data: {
+        inputs: { services: { pest: true } },
+        result: { productionDiagnostics: { estimatedMinutes: 31 } },
+      },
+    };
+
+    const selected = selectFallbackEstimateForJob(job, [
+      {
+        id: 'wrong-customer',
+        customer_id: 'customer-2',
+        status: 'accepted',
+        accepted_at: '2026-04-20',
+        estimate_data: matching.estimate_data,
+      },
+      {
+        id: 'out-of-window',
+        customer_id: 'customer-1',
+        status: 'accepted',
+        accepted_at: '2025-10-01',
+        estimate_data: matching.estimate_data,
+      },
+      {
+        id: 'not-accepted',
+        customer_id: 'customer-1',
+        status: 'sent',
+        sent_at: '2026-04-18',
+        estimate_data: matching.estimate_data,
+      },
+      {
+        id: 'non-pest',
+        customer_id: 'customer-1',
+        status: 'accepted',
+        accepted_at: '2026-04-18',
+        estimate_data: {
+          result: {
+            productionDiagnostics: { estimatedMinutes: 31 },
+            lineItems: [{ service: 'lawn_care' }],
+          },
+        },
+      },
+      matching,
+    ]);
+
+    expect(selected.id).toBe('matching-estimate');
+  });
+
+  test('treats naive fallback estimate timestamps as Eastern Time', () => {
+    const selected = selectFallbackEstimateForJob(
+      {
+        customer_id: 'customer-1',
+        service_date: '2026-05-07',
+      },
+      [{
+        id: 'start-boundary-estimate',
+        customer_id: 'customer-1',
+        status: 'accepted',
+        accepted_at: '2026-01-07 00:30:00',
+        estimate_data: {
+          inputs: { services: { pest: true } },
+          result: { productionDiagnostics: { estimatedMinutes: 31 } },
+        },
+      }],
+    );
+
+    expect(selected.id).toBe('start-boundary-estimate');
   });
 
   test('bands lot sizes for reporting', () => {
@@ -210,6 +393,7 @@ describe('pest production calibration', () => {
       review_reasons: 'large_lot; pool_cage_size_inferred',
       pool_cage_size_source: 'inferred',
       pricing_mode: 'shadow_only',
+      source: '',
       stories: 2,
     });
 

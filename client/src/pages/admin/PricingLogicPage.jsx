@@ -278,6 +278,8 @@ function PestCalibrationPanel() {
   const records = data?.records || [];
   const poolRows = summary.byPoolCageSize || [];
   const lotRows = summary.byLotBand || [];
+  const sampleHealth = data?.sampleHealth || {};
+  const reviewQueue = summary.reviewQueue || [];
 
   return (
     <div style={{ background: D.card, borderRadius: 12, border: `1px solid ${D.border}`, padding: 20, marginBottom: 20 }}>
@@ -337,10 +339,61 @@ function PestCalibrationPanel() {
         ))}
       </div>
 
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10, marginBottom: 16 }}>
+        {[
+          { label: 'Jobs synced', value: sampleHealth.jobsEvaluated || 0, color: D.heading },
+          { label: 'Materialized', value: sampleHealth.materializedCount || 0, color: D.green },
+          { label: 'Fallback matched', value: sampleHealth.fallbackMatchedCount || 0, color: D.heading },
+          { label: 'No est. link', value: sampleHealth.missingEstimateLinkCount || 0, color: (sampleHealth.missingEstimateLinkCount || 0) > 0 ? D.amber : D.muted },
+          { label: 'No timer', value: sampleHealth.missingTimerCount || 0, color: (sampleHealth.missingTimerCount || 0) > 0 ? D.amber : D.muted },
+          { label: 'No diagnostics', value: sampleHealth.missingDiagnosticsCount || 0, color: (sampleHealth.missingDiagnosticsCount || 0) > 0 ? D.red : D.muted },
+        ].map(card => (
+          <div key={card.label} style={{ background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, padding: 10 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: card.color, fontFamily: ROBOTO }}>{card.value}</div>
+            <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 3 }}>{card.label}</div>
+          </div>
+        ))}
+      </div>
+
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 14, marginBottom: 16 }}>
         <CalibrationGroup title="By Pool Cage Size" rows={poolRows} />
         <CalibrationGroup title="By Lot Band" rows={lotRows} />
       </div>
+
+      {reviewQueue.length > 0 && (
+        <div style={{ background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, marginBottom: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: D.heading }}>Needs Calibration Review</div>
+            <div style={{ fontSize: 11, color: D.muted }}>{summary.reviewQueueCount || reviewQueue.length} flagged</div>
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr>
+                  {['Date', 'Customer', 'Delta', 'Pool', 'Lot', 'Why'].map(h => (
+                    <th key={h} style={{ textAlign: h === 'Customer' || h === 'Why' ? 'left' : 'right', padding: '7px 8px', borderBottom: `1px solid ${D.border}`, color: D.muted, fontSize: 11, fontWeight: 700 }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {reviewQueue.slice(0, 8).map(row => {
+                  const why = Array.isArray(row.calibration_review_reasons) ? row.calibration_review_reasons.join(', ') : '';
+                  return (
+                    <tr key={`review-${row.id || row.scheduled_service_id}`} style={{ borderBottom: `1px solid ${D.border}66` }}>
+                      <td style={{ padding: '7px 8px', textAlign: 'right', color: D.text }}>{String(row.service_date || '').slice(0, 10) || '-'}</td>
+                      <td style={{ padding: '7px 8px', color: D.heading, fontWeight: 600 }}>{row.customer_name || row.address_line1 || 'Unknown'}</td>
+                      <td style={{ padding: '7px 8px', textAlign: 'right', color: D.red, fontWeight: 700 }}>{fmtMin(row.delta_minutes || 0)}</td>
+                      <td style={{ padding: '7px 8px', textAlign: 'right', color: D.text }}>{row.pool_cage_size || '-'}</td>
+                      <td style={{ padding: '7px 8px', textAlign: 'right', color: D.text }}>{row.lot_sqft ? Number(row.lot_sqft).toLocaleString() : '-'}</td>
+                      <td style={{ padding: '7px 8px', color: D.muted }}>{why || '-'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <div style={{ overflowX: 'auto' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
