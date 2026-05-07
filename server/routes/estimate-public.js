@@ -1520,6 +1520,14 @@ router.put('/:token/accept', async (req, res, next) => {
     // upgrade, no EstimateConverter recurring schedule creation.
     const requestedOneTime = req.body?.serviceMode === 'one_time';
     const serviceMode = requestedOneTime ? 'one_time' : 'recurring';
+    // Card-on-file is only meaningful for recurring accepts: the
+    // post-commit branch that creates the SetupIntent / onboarding session
+    // is gated on !treatAsOneTime, so accepting one-time + card_on_file
+    // would silently book the visit without ever capturing a card. Reject
+    // up front rather than fulfill the request half-way.
+    if (requestedOneTime && paymentMethodPreference === 'card_on_file') {
+      return res.status(400).json({ error: 'card_on_file is not available for one-time visits — pick pay_at_visit instead' });
+    }
     const selectedFrequencyKey = (() => {
       const raw = req.body?.selectedFrequency;
       return typeof raw === 'string' ? raw.trim() : '';
