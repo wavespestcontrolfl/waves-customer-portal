@@ -517,16 +517,18 @@ export function calculateEstimate(inputs) {
     else if (sz === 'HALF') pr += 0.05;
     pr = Math.min(2.0, Math.round(pr * 100) / 100);
     const bp = {
-      SMALL: 90,
-      QUARTER: 100,
-      THIRD: 110,
-      HALF: 125,
-      ACRE: 155,
+      SMALL: [105, 90, 135, 120],
+      QUARTER: [115, 100, 150, 135],
+      THIRD: [130, 115, 175, 155],
+      HALF: [155, 135, 210, 185],
+      ACRE: [195, 175, 265, 235],
     };
     const b = bp[sz] || bp.SMALL;
     const mt = [
-      { n: 'Seasonal', pv: Math.round(b * pr), v: 9 },
-      { n: 'Monthly', pv: Math.round(b * pr), v: 12 },
+      { n: 'Seasonal Essential Barrier', pv: Math.round(b[0] * pr), v: 9 },
+      { n: 'Monthly Essential Barrier', pv: Math.round(b[1] * pr), v: 12 },
+      { n: 'Seasonal Precision Barrier', pv: Math.round(b[2] * pr), v: 9 },
+      { n: 'Monthly Precision Barrier', pv: Math.round(b[3] * pr), v: 12 },
     ];
     const ri = 1;
     R.mq = [];

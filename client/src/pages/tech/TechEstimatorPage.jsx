@@ -31,8 +31,10 @@ const PEST_FREQ = [
 ];
 
 const MOSQUITO_OPTS = [
-  { label: '6 Treatments', monthly: 45 },
-  { label: '9 Treatments', monthly: 55 },
+  { label: 'Seasonal Essential Barrier', monthly: 79 },
+  { label: 'Monthly Essential Barrier', monthly: 90 },
+  { label: 'Seasonal Precision Barrier', monthly: 95 },
+  { label: 'Monthly Precision Barrier', monthly: 120 },
 ];
 
 const TS_OPTS = [
@@ -52,18 +54,19 @@ const ADDONS = [
 ];
 
 function getTier(count) {
-  if (count >= 4) return { name: 'Platinum', discount: 0.20 };
-  if (count >= 3) return { name: 'Gold', discount: 0.15 };
-  if (count >= 2) return { name: 'Silver', discount: 0.10 };
-  if (count >= 1) return { name: 'Bronze', discount: 0 };
-  return { name: 'Bronze', discount: 0 };
+  if (count >= 4) return { name: '4-service bundle', discount: 0.20 };
+  if (count >= 3) return { name: '3-service bundle', discount: 0.15 };
+  if (count >= 2) return { name: '2-service bundle', discount: 0.10 };
+  if (count >= 1) return { name: '1-service bundle', discount: 0 };
+  return { name: 'No recurring bundle', discount: 0 };
 }
 
 const TIER_COLORS = {
-  Platinum: '#E5E4E2',
-  Gold: '#FDD835',
-  Silver: '#90CAF9',
-  Bronze: '#CD7F32',
+  '4-service bundle': '#0f172a',
+  '3-service bundle': '#0ea5e9',
+  '2-service bundle': '#14b8a6',
+  '1-service bundle': '#64748b',
+  'No recurring bundle': '#64748b',
   'One-Time': '#0ea5e9',
 };
 
@@ -188,7 +191,7 @@ export default function TechEstimatorPage() {
     });
     msg += `\n`;
     if (tier.discount > 0) {
-      msg += `WaveGuard ${tier.name}: ${(tier.discount * 100).toFixed(0)}% bundle discount\n`;
+      msg += `${tier.name}: ${(tier.discount * 100).toFixed(0)}% bundle discount\n`;
       msg += `Monthly: $${discountedMonthly.toFixed(2)} (was $${monthlyTotal.toFixed(2)})\n`;
       msg += `You save: $${annualSavings.toFixed(0)}/year\n`;
     } else {
@@ -248,7 +251,7 @@ export default function TechEstimatorPage() {
               marginBottom: 16,
             }}>
               <p style={{ margin: 0, fontSize: 15, fontWeight: 700, fontFamily: "'Montserrat', sans-serif" }}>
-                WaveGuard {tier.name} - {(tier.discount * 100).toFixed(0)}% Off
+                {tier.name} - {(tier.discount * 100).toFixed(0)}% Off
               </p>
               <p style={{ margin: '4px 0 0', fontSize: 13, color: '#64748b' }}>
                 Save ${annualSavings.toFixed(0)} per year
@@ -481,7 +484,7 @@ export default function TechEstimatorPage() {
         ))}
       </div>
 
-      {/* WaveGuard Tier */}
+      {/* Bundle Discount */}
       {serviceCount >= 2 && (
         <div style={{
           background: `${TIER_COLORS[tier.name]}15`,
@@ -493,7 +496,7 @@ export default function TechEstimatorPage() {
             margin: 0, fontSize: 14, fontWeight: 700, color: TIER_COLORS[tier.name],
             fontFamily: "'Montserrat', sans-serif",
           }}>
-            WaveGuard {tier.name} - {(tier.discount * 100).toFixed(0)}% Bundle Discount
+            {tier.name} - {(tier.discount * 100).toFixed(0)}% Bundle Discount
           </p>
         </div>
       )}

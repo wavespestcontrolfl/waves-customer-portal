@@ -71,10 +71,10 @@
     "recurring": {
       "tier": "Platinum",
       "discount": 0.2,
-      "annualBeforeDiscount": 3745,
-      "annualAfterDiscount": 2996,
-      "monthlyTotal": 249.67,
-      "savings": 749,
+      "annualBeforeDiscount": 4613,
+      "annualAfterDiscount": 3690.4,
+      "monthlyTotal": 307.53,
+      "savings": 922.6,
       "serviceCount": 4
     },
     "results": {
@@ -85,36 +85,36 @@
           "name": "4x"
         },
         {
-          "mo": 45,
+          "mo": 46,
           "recommended": false,
           "name": "6x"
         },
         {
-          "mo": 59,
+          "mo": 64,
           "recommended": false,
           "name": "9x"
         },
         {
-          "mo": 84,
+          "mo": 93,
           "recommended": true,
           "name": "12x"
         }
       ],
       "pestTiers": [
         {
-          "mo": 47.33,
+          "mo": 44,
           "apps": 4,
           "recommended": true,
           "label": "Quarterly"
         },
         {
-          "mo": 60.35,
+          "mo": 56.1,
           "apps": 6,
           "recommended": false,
           "label": "Bi-Monthly"
         },
         {
-          "mo": 99.4,
+          "mo": 92.4,
           "apps": 12,
           "recommended": false,
           "label": "Monthly"
@@ -122,19 +122,27 @@
       ],
       "ts": [
         {
-          "mo": 55.75,
+          "mo": 122.42,
           "recommended": true,
           "name": "Standard"
         }
       ],
       "mq": [
         {
-          "mo": 93.75,
+          "mo": 108,
           "recommended": false
         },
         {
           "mo": 125,
           "recommended": true
+        },
+        {
+          "mo": 141,
+          "recommended": false
+        },
+        {
+          "mo": 169,
+          "recommended": false
         }
       ],
       "tmBait": null
@@ -146,8 +154,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 3095,
-      "year2": 2996
+      "year1": 3789.4,
+      "year2": 3690.4
     }
   },
   "v1adapter_boracare_attic_2000sf": {
@@ -389,9 +397,9 @@
     "recurring": {
       "tier": "Bronze",
       "discount": 0,
-      "annualBeforeDiscount": 3516,
-      "annualAfterDiscount": 3516,
-      "monthlyTotal": 293,
+      "annualBeforeDiscount": 3972,
+      "annualAfterDiscount": 3972,
+      "monthlyTotal": 331,
       "savings": 0,
       "serviceCount": 1
     },
@@ -401,12 +409,20 @@
       "ts": [],
       "mq": [
         {
-          "mo": 219.75,
+          "mo": 276.75,
           "recommended": false
         },
         {
-          "mo": 293,
+          "mo": 331,
           "recommended": true
+        },
+        {
+          "mo": 375.75,
+          "recommended": false
+        },
+        {
+          "mo": 444,
+          "recommended": false
         }
       ],
       "tmBait": null
@@ -418,8 +434,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 3516,
-      "year2": 3516
+      "year1": 3972,
+      "year2": 3972
     }
   },
   "v1adapter_termite_bait_three_systems": {

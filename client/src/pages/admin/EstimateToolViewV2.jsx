@@ -406,6 +406,7 @@ export default function EstimateToolViewV2({
     roachModifier: 'NONE', lawnFreq: '9', pestFreq: '4', plugArea: '', plugSpacing: '12',
     manualDiscountPreset: '', manualDiscountType: 'NONE', manualDiscountValue: '', manualDiscountLabel: '',
     grassType: 'st_augustine',
+    mosquitoProgram: 'monthly', mosquitoStationCount: '0', mosquitoDunkCount: '0',
     otLawnType: 'FERT',
     exclSimple: '0', exclModerate: '0', exclAdvanced: '0', exclWaive: 'NO',
     sanitationTier: 'standard', sanitationArea: '', sanitationDebris: '0', sanitationAccess: 'normal',
@@ -445,8 +446,13 @@ export default function EstimateToolViewV2({
     const recurringKeys = ['svcLawn', 'svcPest', 'svcTs', 'svcInjection', 'svcMosquito', 'svcTermiteBait', 'svcRodentBait'];
     const recurringCount = recurringKeys.filter((k) => form[k]).length;
 
-    const tierMap = { 0: { name: 'None', discount: 0 }, 1: { name: 'Bronze', discount: 0 }, 2: { name: 'Silver', discount: 0.10 }, 3: { name: 'Gold', discount: 0.15 } };
-    const tier = recurringCount >= 4 ? { name: 'Platinum', discount: 0.20 } : (tierMap[recurringCount] || tierMap[0]);
+    const tierMap = {
+      0: { name: 'No recurring bundle', discount: 0 },
+      1: { name: '1-service bundle', discount: 0 },
+      2: { name: '2-service bundle', discount: 0.10 },
+      3: { name: '3-service bundle', discount: 0.15 },
+    };
+    const tier = recurringCount >= 4 ? { name: '4-service bundle', discount: 0.20 } : (tierMap[recurringCount] || tierMap[0]);
 
     const sqft = Number(form.homeSqFt) || 2000;
     const lotSqft = Number(form.lotSqFt) || 8000;
@@ -458,7 +464,16 @@ export default function EstimateToolViewV2({
     }
     if (form.svcTs) approx.ts = Math.max(45, Math.round((Number(form.bedArea) || lotSqft * 0.15) * 0.012 + 30));
     if (form.svcInjection) approx.injection = Math.round((Number(form.palmCount) || 3) * 35 * 3 / 12);
-    if (form.svcMosquito) approx.mosquito = Math.max(40, Math.round(lotSqft * 0.005 + 15));
+    if (form.svcMosquito) {
+      const programBase = form.mosquitoProgram === 'residual_monthly'
+        ? 120
+        : form.mosquitoProgram === 'residual_seasonal'
+          ? 95
+          : form.mosquitoProgram === 'seasonal'
+            ? 79
+            : 90;
+      approx.mosquito = Math.max(programBase, Math.round(lotSqft * 0.005 + programBase));
+    }
     if (form.svcTermiteBait) approx.termiteBait = 50;
     if (form.svcRodentBait) approx.rodentBait = sqft > 2500 ? 55 : 45;
 
@@ -793,6 +808,9 @@ export default function EstimateToolViewV2({
         pestFreq: parseInt(overrides.pestFreq ?? form.pestFreq, 10) || 4,
         manualDiscount,
         roachModifier: form.roachModifier || 'NONE',
+        mosquitoProgram: form.mosquitoProgram || 'monthly',
+        mosquitoStationCount: parseInt(form.mosquitoStationCount, 10) || 0,
+        mosquitoDunkCount: parseInt(form.mosquitoDunkCount, 10) || 0,
         urgency: form.urgency || 'ROUTINE',
         afterHours: form.isAfterHours === 'YES',
         recurringCustomer: form.isRecurringCustomer === 'YES',
@@ -1202,7 +1220,7 @@ export default function EstimateToolViewV2({
                 <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
                   <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900 mr-1.5 align-middle" />
                   Existing customer: <strong>{existingCustomerMatch.firstName} {existingCustomerMatch.lastName}</strong>
-                  {existingCustomerMatch.tier && existingCustomerMatch.tier !== 'null' ? ` · WaveGuard ${existingCustomerMatch.tier}` : ' · No active plan'}
+                  {existingCustomerMatch.tier && existingCustomerMatch.tier !== 'null' ? ' · Recurring plan' : ' · No active plan'}
                   {existingCustomerMatch.tier && existingCustomerMatch.tier !== 'null' && existingCustomerMatch.monthlyRate > 0 ? ' · 15% loyalty discount applied' : ''}
                 </div>
               )}
@@ -1355,14 +1373,49 @@ export default function EstimateToolViewV2({
               <CheckboxV2 k="svcTs" label="Tree & Shrub" />
               <CheckboxV2 k="svcInjection" label="Palm Injection" />
               <CheckboxV2 k="svcMosquito" label="Mosquito Program" />
+              {(form.svcMosquito || form.svcOnetimeMosquito) && (
+                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  <div className="text-13 font-semibold text-zinc-900 mb-2">Mosquito Estimate</div>
+                  <div className={`grid ${form.svcMosquito ? 'grid-cols-3' : 'grid-cols-2'} gap-3`}>
+                    {form.svcMosquito && (
+                      <FieldV2 label="Program">
+                        <SelectV2 k="mosquitoProgram" options={[
+                          { value: 'monthly', label: 'Monthly Essential Barrier' },
+                          { value: 'seasonal', label: 'Seasonal Essential Barrier' },
+                          { value: 'residual_monthly', label: 'Monthly Precision Barrier' },
+                          { value: 'residual_seasonal', label: 'Seasonal Precision Barrier' },
+                        ]} />
+                      </FieldV2>
+                    )}
+                    <FieldV2 label="Mosquito Stations">
+                      <InputV2 k="mosquitoStationCount" type="number" min="0" placeholder="0" />
+                    </FieldV2>
+                    <FieldV2 label="Bti Dunk Tablets">
+                      <InputV2 k="mosquitoDunkCount" type="number" min="0" placeholder="0" />
+                    </FieldV2>
+                  </div>
+                  {form.svcMosquito && (
+                    <div className="grid grid-cols-2 gap-3 mt-3 text-11 text-ink-secondary">
+                      <div className="bg-white border-hairline border-zinc-200 rounded-xs p-3">
+                        <div className="text-12 font-semibold text-zinc-900 mb-1">Essential Barrier</div>
+                        Bifenthrin adulticide with pyriproxyfen + novaluron IGR support. Best fit for normal mosquito pressure, routine foliage resting sites, and budget-sensitive recurring service.
+                      </div>
+                      <div className="bg-white border-hairline border-zinc-200 rounded-xs p-3">
+                        <div className="text-12 font-semibold text-zinc-900 mb-1">Precision Barrier</div>
+                        Gamma-cyhalothrin adulticide with the same IGR support. Better fit for heavy vegetation, pool cages, water adjacency, and customers who need a stronger residual barrier.
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
               <CheckboxV2 k="svcTermiteBait" label="Termite Bait Stations" />
               <CheckboxV2 k="svcRodentBait" label="Rodent Bait Stations" />
 
               {livePreview.recurringCount > 0 && (
                 <div className="mt-3 mb-1.5 px-3 py-2 rounded-xs bg-zinc-50 border-hairline border-zinc-300 text-12 text-zinc-900">
                   {livePreview.recurringCount} service{livePreview.recurringCount > 1 ? 's' : ''} selected →{' '}
-                  <strong>WaveGuard {livePreview.tier.name}</strong>
-                  {livePreview.tier.discount > 0 ? ` (${Math.round(livePreview.tier.discount * 100)}% bundle discount)` : ' (no discount — add 1 more for Silver 10%)'}
+                  <strong>{livePreview.tier.name}</strong>
+                  {livePreview.tier.discount > 0 ? ` (${Math.round(livePreview.tier.discount * 100)}% bundle discount)` : ' (no bundle discount yet)'}
                 </div>
               )}
 
@@ -1517,7 +1570,7 @@ export default function EstimateToolViewV2({
               </div>
 
               <div className="text-11 text-ink-tertiary mt-2">
-                Applies after WaveGuard bundle discount. Re-click Generate Estimate to recalculate.
+                Applies after bundle discount. Re-click Generate Estimate to recalculate.
               </div>
             </div>
 
@@ -1757,7 +1810,7 @@ export default function EstimateToolViewV2({
                             {fmt(E.recurring.grandTotal || (E.recurring.monthlyTotal + (E.recurring.rodentBaitMo || 0) + (E.recurring.palmInjectionMo || 0)))}/mo
                           </div>
                           <div className="text-12 text-ink-secondary mt-1">
-                            Recurring monthly{E.recurring.savings > 0 ? ` (WaveGuard ${E.recurring.waveGuardTier} pricing)` : ''}
+                            Recurring monthly{E.recurring.savings > 0 ? ' (bundle pricing)' : ''}
                             {E.manualDiscount && E.manualDiscount.amount > 0 ? ' + manual discount' : ''}
                           </div>
                           <div className="flex justify-center gap-10 mt-3 flex-wrap">
@@ -1765,7 +1818,7 @@ export default function EstimateToolViewV2({
                               <div className="text-center">
                                 <div className="text-18 font-medium text-zinc-900 u-nums">{fmtInt(E.oneTime.total)}</div>
                                 <div className="text-11 text-ink-secondary uppercase tracking-label">
-                                  {E.oneTime.tmInstall > 0 ? `One-Time (incl ${fmtInt(E.oneTime.tmInstall)} install)` : 'WaveGuard Membership'}
+                                  {E.oneTime.tmInstall > 0 ? `One-Time (incl ${fmtInt(E.oneTime.tmInstall)} install)` : 'Recurring Membership'}
                                 </div>
                               </div>
                             )}
@@ -2015,7 +2068,7 @@ export default function EstimateToolViewV2({
                             <TierGridV2>
                               <TierRowV2 name="Monthly" detail={`${R.rodBaitSize} property`} price={`$${R.rodBaitMo}/mo`} recommended />
                             </TierGridV2>
-                            <div className="text-11 text-ink-secondary mt-1">Not included in WaveGuard bundle discount — priced separately</div>
+                            <div className="text-11 text-ink-secondary mt-1">Not included in bundle discount — priced separately</div>
                           </div>
                         )}
                       </>
@@ -2130,14 +2183,14 @@ export default function EstimateToolViewV2({
                       </>
                     )}
 
-                    {/* WaveGuard + Totals */}
+                    {/* Bundle + Totals */}
                     {(E.recurring.serviceCount > 0 || E.oneTime.total > 0 || E.recurring.rodentBaitMo > 0 || E.recurring.palmInjectionMo > 0) && (
                       <>
                         <div className="h-px bg-zinc-200 my-4" />
 
                         {E.recurring.serviceCount > 0 && (
                           <div className="bg-zinc-50 border-hairline border-zinc-300 rounded-sm p-5 mb-6">
-                            <div className="text-18 font-medium text-zinc-900">WaveGuard {E.recurring.waveGuardTier}</div>
+                            <div className="text-18 font-medium text-zinc-900">{E.recurring.serviceCount}-service bundle</div>
                             <div className="text-13 text-ink-secondary mt-0.5">
                               {E.recurring.serviceCount} recurring service{E.recurring.serviceCount > 1 ? 's' : ''} — {Math.round(E.recurring.discount * 100)}% bundle discount
                             </div>
@@ -2171,7 +2224,7 @@ export default function EstimateToolViewV2({
                         <div className="bg-white border-hairline border-zinc-900 rounded-sm p-5">
                           {E.recurring.serviceCount > 0 && (
                             <div className="flex justify-between items-center py-1.5 text-14">
-                              <span className="text-ink-secondary">Recurring (after WaveGuard)</span>
+                              <span className="text-ink-secondary">Recurring (after bundle)</span>
                               <span className="font-medium text-zinc-900 u-nums">{fmt(E.recurring.annualAfterDiscount)}/yr ({fmt(E.recurring.monthlyTotal)}/mo)</span>
                             </div>
                           )}

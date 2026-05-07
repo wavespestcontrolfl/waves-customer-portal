@@ -1253,7 +1253,13 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       treatmentType: 'combo',
     };
   }
-  if (sel.has('MOSQUITO')) services.mosquito = { tier: 'monthly' };
+  if (sel.has('MOSQUITO')) {
+    services.mosquito = {
+      tier: o.mosquitoProgram || 'monthly',
+      stationCount: o.mosquitoStationCount,
+      dunkCount: o.mosquitoDunkCount,
+    };
+  }
   if (sel.has('TERMITE_BAIT')) services.termite = { system: 'advance', monitoringTier: 'basic' };
   if (sel.has('RODENT_BAIT')) services.rodentBait = {};
 
@@ -1273,7 +1279,12 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       urgency, afterHours,
     };
   }
-  if (sel.has('OT_MOSQUITO')) services.oneTimeMosquito = {};
+  if (sel.has('OT_MOSQUITO')) {
+    services.oneTimeMosquito = {
+      stationCount: o.mosquitoStationCount,
+      dunkCount: o.mosquitoDunkCount,
+    };
+  }
 
   // Specialty
   if (sel.has('TRENCHING')) services.trenching = {};

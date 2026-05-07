@@ -44,7 +44,9 @@ for (const zone of ['A', 'B', 'C', 'D', 'UNKNOWN']) {
 
 function normalizeMosquitoProgram(value) {
   const raw = String(value || 'monthly').toLowerCase();
-  if (raw === 'seasonal' || raw === 'monthly') return raw;
+  if (raw === 'seasonal' || raw === 'monthly' || raw === 'residual_seasonal' || raw === 'residual_monthly') return raw;
+  if (raw === 'scion_monthly' || raw === 'scion' || raw === 'upgraded' || raw === 'upgrade') return 'residual_monthly';
+  if (raw === 'scion_seasonal' || raw === 'upgraded_seasonal' || raw === 'upgrade_seasonal') return 'residual_seasonal';
   // Migration shim only: older saved estimate inputs may still contain the
   // retired mosquito tier names. Do not expose these as product options.
   if (raw === 'bronze') return 'seasonal';
@@ -181,6 +183,8 @@ function generateEstimate(input) {
     const result = priceMosquito(property, {
       tier: normalizeMosquitoProgram(services.mosquito.tier || services.mosquito.program),
       modifiers,
+      stationCount: services.mosquito.stationCount,
+      dunkCount: services.mosquito.dunkCount,
     });
     result.annual = Math.round(result.annual * zoneMult);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
@@ -246,7 +250,10 @@ function generateEstimate(input) {
   }
 
   if (services.oneTimeMosquito) {
-    const result = priceOneTimeMosquito(property);
+    const result = priceOneTimeMosquito(property, {
+      stationCount: services.oneTimeMosquito.stationCount,
+      dunkCount: services.oneTimeMosquito.dunkCount,
+    });
     lineItems.push(result);
   }
 

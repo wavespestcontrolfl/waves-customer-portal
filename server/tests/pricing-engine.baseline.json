@@ -111,9 +111,9 @@
   },
   "edge_large_footprint_5500sf_platinum_bundle": {
     "summary": {
-      "recurringAnnualAfterDiscount": 7611.52,
-      "recurringMonthlyAfterDiscount": 634.29,
-      "year1Total": 7612
+      "recurringAnnualAfterDiscount": 7785.76,
+      "recurringMonthlyAfterDiscount": 648.81,
+      "year1Total": 7786
     },
     "waveGuard": {
       "tier": "platinum",
@@ -122,8 +122,8 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 1373.4,
-        "monthly": 114.45
+        "annual": 1243.2,
+        "monthly": 103.6
       },
       "lawn_care": {
         "annual": 1344,
@@ -134,16 +134,16 @@
         "monthly": 341.42
       },
       "mosquito": {
-        "annual": 2700,
-        "monthly": 225
+        "annual": 3048,
+        "monthly": 254
       }
     }
   },
   "mosquito_acre_waterfront_max_pressure": {
     "summary": {
-      "recurringAnnualAfterDiscount": 3516,
-      "recurringMonthlyAfterDiscount": 293,
-      "year1Total": 3516
+      "recurringAnnualAfterDiscount": 3972,
+      "recurringMonthlyAfterDiscount": 331,
+      "year1Total": 3972
     },
     "waveGuard": {
       "tier": "bronze",
@@ -152,8 +152,8 @@
     },
     "lineItems": {
       "mosquito": {
-        "annual": 3516,
-        "monthly": 293
+        "annual": 3972,
+        "monthly": 331
       }
     }
   },
@@ -177,9 +177,9 @@
   },
   "platinum_bundle_4_qualifying_services_zone_a": {
     "summary": {
-      "recurringAnnualAfterDiscount": 2853.6,
-      "recurringMonthlyAfterDiscount": 237.8,
-      "year1Total": 2854
+      "recurringAnnualAfterDiscount": 2821.6,
+      "recurringMonthlyAfterDiscount": 235.13,
+      "year1Total": 2822
     },
     "waveGuard": {
       "tier": "platinum",
@@ -188,8 +188,8 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 508,
-        "monthly": 42.33
+        "annual": 468,
+        "monthly": 39
       },
       "lawn_care": {
         "annual": 696,
