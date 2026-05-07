@@ -1,0 +1,396 @@
+const db = require('../models/db');
+const { costLineFromUsage } = require('./product-costing');
+const { matchServiceProtocol } = require('./protocol-matcher');
+
+const SERVICE_MAP = {
+  pest_control: {
+    label: 'Pest Control',
+    serviceTypes: ['Quarterly Pest Control', 'Pest Control', 'General Pest Perimeter'],
+    areaField: 'homeSqFt',
+  },
+  lawn_care: {
+    label: 'Lawn Care',
+    serviceTypes: ['Lawn Care'],
+    areaField: 'lawnSqFt',
+  },
+  tree_shrub: {
+    label: 'Tree & Shrub',
+    serviceTypes: ['Tree & Shrub'],
+    areaField: 'bedArea',
+  },
+  mosquito: {
+    label: 'Mosquito',
+    serviceTypes: ['Mosquito Treatment'],
+    areaField: 'lotSqFt',
+  },
+  termite_bait: {
+    label: 'Termite Bait',
+    serviceTypes: ['Termite Bait', 'Termite Bait Station'],
+    areaField: 'homeSqFt',
+  },
+  rodent_bait: {
+    label: 'Rodent Bait',
+    serviceTypes: ['Rodent Bait', 'Rodent Control'],
+    areaField: 'homeSqFt',
+  },
+  palm_injection: {
+    label: 'Palm Injection',
+    serviceTypes: ['Palm Injection'],
+    areaField: 'homeSqFt',
+  },
+  one_time_pest: {
+    label: 'One-Time Pest',
+    serviceTypes: ['One-Time Pest', 'Pest Control'],
+    areaField: 'homeSqFt',
+  },
+  one_time_lawn: {
+    label: 'One-Time Lawn',
+    serviceTypes: ['One-Time Lawn', 'Lawn Care'],
+    areaField: 'lawnSqFt',
+  },
+  one_time_mosquito: {
+    label: 'One-Time Mosquito',
+    serviceTypes: ['One-Time Mosquito', 'Mosquito Treatment'],
+    areaField: 'lotSqFt',
+  },
+  bora_care: {
+    label: 'Bora-Care',
+    serviceTypes: ['Bora-Care', 'Bora Care'],
+    areaField: 'homeSqFt',
+  },
+  pre_slab_termidor: {
+    label: 'Pre-Slab Termidor',
+    serviceTypes: ['Pre-Slab Termidor', 'Termidor Trench'],
+    areaField: 'homeSqFt',
+  },
+  trenching: {
+    label: 'Termidor Trench',
+    serviceTypes: ['Termidor Trench', 'Termite Trench'],
+    areaField: 'homeSqFt',
+  },
+  rodent_trapping: {
+    label: 'Rodent Trapping',
+    serviceTypes: ['Rodent Trapping', 'Rodent Control'],
+    areaField: 'homeSqFt',
+  },
+  rodent_sanitation: {
+    label: 'Rodent Sanitation',
+    serviceTypes: ['Rodent Sanitation'],
+    areaField: 'homeSqFt',
+  },
+  exclusion: {
+    label: 'Exclusion',
+    serviceTypes: ['Exclusion', 'Rodent Exclusion'],
+    areaField: 'homeSqFt',
+  },
+  flea: {
+    label: 'Flea Treatment',
+    serviceTypes: ['Flea Treatment'],
+    areaField: 'homeSqFt',
+  },
+  stinging: {
+    label: 'Stinging Insect',
+    serviceTypes: ['Stinging Insect', 'Wasp Treatment'],
+    areaField: 'homeSqFt',
+  },
+  german_roach: {
+    label: 'German Roach',
+    serviceTypes: ['German Roach', 'Roach Treatment'],
+    areaField: 'homeSqFt',
+  },
+  german_roach_initial: {
+    label: 'German Roach Initial',
+    serviceTypes: ['German Roach', 'Roach Treatment'],
+    areaField: 'homeSqFt',
+  },
+  pest_initial_roach: {
+    label: 'Initial Roach Knockdown',
+    serviceTypes: ['Roach Treatment', 'Pest Control'],
+    areaField: 'homeSqFt',
+  },
+};
+
+const NAME_TO_KEY = [
+  [/tree.*shrub/i, 'tree_shrub'],
+  [/lawn/i, 'lawn_care'],
+  [/mosquito/i, 'mosquito'],
+  [/termite|bait station/i, 'termite_bait'],
+  [/rodent.*bait/i, 'rodent_bait'],
+  [/rodent.*trap/i, 'rodent_trapping'],
+  [/sanitation/i, 'rodent_sanitation'],
+  [/exclusion/i, 'exclusion'],
+  [/palm/i, 'palm_injection'],
+  [/bora/i, 'bora_care'],
+  [/termidor|trench/i, 'trenching'],
+  [/flea/i, 'flea'],
+  [/roach/i, 'german_roach'],
+  [/stinging|wasp/i, 'stinging'],
+  [/mosquito/i, 'one_time_mosquito'],
+  [/pest/i, 'pest_control'],
+];
+
+function parseJson(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
+function money(value) {
+  const n = Number(value || 0);
+  return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0;
+}
+
+function dimensionsFrom(data) {
+  const inputs = data?.inputs || data?.engineInputs || {};
+  const result = data?.result || data?.engineResult || {};
+  const property = result.property || {};
+  const homeSqFt = Number(inputs.homeSqFt || property.homeSqFt || property.squareFootage || 0);
+  const lotSqFt = Number(inputs.lotSqFt || property.lotSqFt || 0);
+  const lawnSqFt = Number(inputs.lawnSqFt || property.estimatedTurfSf || property.estimatedTurfSqFt || inputs.estimatedTurfSf || 0);
+  const bedArea = Number(inputs.bedArea || property.estimatedBedAreaSf || property.estimatedBedSqFt || 0);
+  return { homeSqFt, lotSqFt, lawnSqFt, bedArea };
+}
+
+function keyFromName(name) {
+  const value = String(name || '');
+  for (const [pattern, key] of NAME_TO_KEY) {
+    if (pattern.test(value)) return key;
+  }
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'unknown';
+}
+
+function normalizeRecurringLines(result) {
+  const discount = Number(result?.recurring?.discount || 0);
+  const lines = [];
+  for (const svc of result?.recurring?.services || []) {
+    const monthly = Number(svc.monthly ?? svc.mo ?? 0);
+    const serviceKey = keyFromName(svc.name);
+    lines.push({
+      serviceKey,
+      label: svc.name || SERVICE_MAP[serviceKey]?.label || serviceKey,
+      cadence: 'recurring',
+      price: money(monthly * 12 * (1 - discount)),
+      monthly: money(monthly * (1 - discount)),
+      priceBeforeDiscount: money(monthly * 12),
+      discount,
+      priceSource: 'saved_estimate.result.recurring.services',
+    });
+  }
+  if (Number(result?.recurring?.rodentBaitMo || 0) > 0) {
+    lines.push({
+      serviceKey: 'rodent_bait',
+      label: 'Rodent Bait',
+      cadence: 'recurring',
+      price: money(Number(result.recurring.rodentBaitMo) * 12),
+      monthly: money(result.recurring.rodentBaitMo),
+      priceBeforeDiscount: money(Number(result.recurring.rodentBaitMo) * 12),
+      discount: 0,
+      priceSource: 'saved_estimate.result.recurring.rodentBaitMo',
+    });
+  }
+  if (Number(result?.recurring?.palmInjectionMo || 0) > 0) {
+    lines.push({
+      serviceKey: 'palm_injection',
+      label: 'Palm Injection',
+      cadence: 'recurring',
+      price: money(Number(result.recurring.palmInjectionAnn || result.recurring.palmInjectionMo * 12)),
+      monthly: money(result.recurring.palmInjectionMo),
+      priceBeforeDiscount: money(Number(result.recurring.palmInjectionAnn || result.recurring.palmInjectionMo * 12)),
+      discount: 0,
+      priceSource: 'saved_estimate.result.recurring.palmInjectionMo',
+    });
+  }
+  return lines;
+}
+
+function normalizeOneTimeLines(result) {
+  const lines = [];
+  for (const item of result?.oneTime?.items || []) {
+    const serviceKey = item.service || keyFromName(item.name);
+    lines.push({
+      serviceKey,
+      label: item.name || SERVICE_MAP[serviceKey]?.label || serviceKey,
+      cadence: 'one_time',
+      price: money(item.price),
+      monthly: null,
+      priceBeforeDiscount: money(item.price),
+      discount: 0,
+      priceSource: 'saved_estimate.result.oneTime.items',
+    });
+  }
+  for (const item of result?.oneTime?.specItems || []) {
+    const serviceKey = item.service || keyFromName(item.name);
+    lines.push({
+      serviceKey,
+      label: item.name || SERVICE_MAP[serviceKey]?.label || serviceKey,
+      cadence: 'one_time',
+      price: money(item.price),
+      monthly: null,
+      priceBeforeDiscount: money(item.price),
+      discount: 0,
+      priceSource: 'saved_estimate.result.oneTime.specItems',
+    });
+  }
+  if (Number(result?.oneTime?.membershipFee || 0) > 0) {
+    lines.push({
+      serviceKey: 'waveguard_membership',
+      label: 'WaveGuard Membership',
+      cadence: 'one_time',
+      price: money(result.oneTime.membershipFee),
+      monthly: null,
+      priceBeforeDiscount: money(result.oneTime.membershipFee),
+      discount: 0,
+      priceSource: 'saved_estimate.result.oneTime.membershipFee',
+      skipCogs: true,
+    });
+  }
+  return lines;
+}
+
+async function inventoryCostFor(serviceKey, dimensions) {
+  const map = SERVICE_MAP[serviceKey];
+  if (!map) return { status: 'unmapped', totalPerVisit: 0, annualCost: 0, lines: [], warnings: ['No service-to-inventory mapping yet'] };
+  if (!(await db.schema.hasTable('service_product_usage')) || !(await db.schema.hasTable('products_catalog'))) {
+    return { status: 'missing_cogs', totalPerVisit: 0, annualCost: 0, lines: [], warnings: ['Inventory COGS tables are unavailable'] };
+  }
+
+  const allRows = await db('service_product_usage')
+    .join('products_catalog', 'service_product_usage.product_id', 'products_catalog.id')
+    .whereIn('service_product_usage.service_type', map.serviceTypes)
+    .select(
+      'service_product_usage.service_type',
+      'service_product_usage.usage_amount',
+      'service_product_usage.usage_unit',
+      'service_product_usage.usage_per_1000sf',
+      'products_catalog.id as product_id',
+      'products_catalog.name as product_name',
+      'products_catalog.cost_per_unit',
+      'products_catalog.cost_unit',
+      'products_catalog.best_price',
+      'products_catalog.unit_size_oz',
+      'products_catalog.best_vendor',
+    );
+  const matchedServiceType = map.serviceTypes.find((serviceType) => allRows.some((row) => row.service_type === serviceType)) || null;
+  const rows = matchedServiceType ? allRows.filter((row) => row.service_type === matchedServiceType) : [];
+  if (!rows.length) return { status: 'missing_cogs', totalPerVisit: 0, annualCost: 0, lines: [], warnings: ['No inventory COGS rows mapped'] };
+
+  const areaSqFt = Number(dimensions[map.areaField] || 0);
+  const warnings = [];
+  let totalPerVisit = 0;
+  const lines = rows.map((row) => {
+    const cost = costLineFromUsage(row, areaSqFt);
+    if (cost.warning) warnings.push(cost.warning);
+    totalPerVisit += cost.cost || 0;
+    return {
+      productId: row.product_id,
+      productName: row.product_name,
+      serviceType: row.service_type,
+      cost: money(cost.cost),
+      source: cost.source || 'missing',
+      warning: cost.warning || null,
+    };
+  });
+  return {
+    status: warnings.length ? 'warning' : 'ok',
+    totalPerVisit: money(totalPerVisit),
+    matchedServiceType,
+    lines,
+    warnings,
+  };
+}
+
+function visitsFor(line, result) {
+  if (line.cadence === 'one_time') return 1;
+  const item = (result?.lineItems || []).find((i) => i.service === line.serviceKey);
+  if (item?.visits || item?.visitsPerYear) return Number(item.visits || item.visitsPerYear);
+  if (line.serviceKey === 'lawn_care') return Number(result?.results?.lawn?.find((x) => x.recommended)?.v || 9);
+  if (line.serviceKey === 'mosquito') return 12;
+  if (line.serviceKey === 'pest_control') return Number(result?.results?.pest?.apps || 4);
+  if (line.serviceKey === 'tree_shrub') return Number(result?.results?.ts?.[0]?.v || 9);
+  if (line.serviceKey === 'rodent_bait') return 4;
+  if (line.serviceKey === 'termite_bait') return 1;
+  return 1;
+}
+
+function protocolFor(line) {
+  const map = SERVICE_MAP[line.serviceKey];
+  const serviceType = map?.serviceTypes?.[0] || line.label;
+  try {
+    const protocols = require('../config/protocols.json');
+    const match = matchServiceProtocol(protocols, serviceType);
+    return {
+      serviceType,
+      programKey: match.programKey || null,
+      matched: !!match.matched,
+      visitName: match.matchedVisit?.name || match.matchedVisit?.month || null,
+      reason: match.reason || null,
+    };
+  } catch (err) {
+    return { serviceType, programKey: null, matched: false, visitName: null, reason: err.message };
+  }
+}
+
+async function buildEstimatePricingAudit(estimate) {
+  const data = parseJson(estimate.estimate_data) || {};
+  const result = data.result || data.engineResult || {};
+  const dimensions = dimensionsFrom(data);
+  const rawLines = [
+    ...normalizeRecurringLines(result),
+    ...normalizeOneTimeLines(result),
+  ];
+  const lines = [];
+
+  for (const raw of rawLines) {
+    const protocol = raw.skipCogs ? null : protocolFor(raw);
+    const cogs = raw.skipCogs
+      ? { status: 'not_applicable', totalPerVisit: 0, lines: [], warnings: [] }
+      : await inventoryCostFor(raw.serviceKey, dimensions);
+    const visits = visitsFor(raw, result);
+    const estimatedCost = money((cogs.totalPerVisit || 0) * visits);
+    const grossProfit = money(raw.price - estimatedCost);
+    const margin = raw.price > 0 ? Math.round((grossProfit / raw.price) * 1000) / 1000 : null;
+    const warnings = [
+      ...(cogs.warnings || []),
+      ...(cogs.status === 'missing_cogs' ? ['Missing inventory COGS mapping'] : []),
+      ...(margin != null && margin < 0.35 ? [`Margin below 35% floor (${Math.round(margin * 100)}%)`] : []),
+    ];
+    lines.push({
+      ...raw,
+      protocol,
+      cogs: { ...cogs, visitsPerYear: visits, estimatedCost },
+      grossProfit,
+      margin,
+      status: warnings.length ? 'warning' : 'ok',
+      warnings,
+    });
+  }
+
+  const revenue = money(Number(estimate.annual_total || 0) + Number(estimate.onetime_total || 0));
+  const estimatedCost = money(lines.reduce((sum, line) => sum + (line.cogs?.estimatedCost || 0), 0));
+  const grossProfit = money(revenue - estimatedCost);
+  return {
+    estimate: {
+      id: estimate.id,
+      customerName: estimate.customer_name,
+      address: estimate.address,
+      status: estimate.status,
+      monthlyTotal: money(estimate.monthly_total),
+      annualTotal: money(estimate.annual_total),
+      onetimeTotal: money(estimate.onetime_total),
+      waveguardTier: estimate.waveguard_tier,
+      pricingVersion: result.pricingVersion || data.pricingVersion || null,
+    },
+    dimensions,
+    totals: {
+      revenue,
+      estimatedCost,
+      grossProfit,
+      margin: revenue > 0 ? Math.round((grossProfit / revenue) * 1000) / 1000 : null,
+    },
+    lines,
+  };
+}
+
+module.exports = {
+  buildEstimatePricingAudit,
+};
