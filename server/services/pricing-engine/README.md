@@ -62,16 +62,18 @@ Single source of truth for what this engine prices, how, and with what constants
 
 ## 3. Pest Control
 
-**Formula:** `max(floor, base + footprintAdj + additionalAdj + propAdj + ageAdj) × (1 + roachMod) × freqMult × urgency`
+**Formula:** `max(floor, base + footprintAdj + additionalAdj + propAdj + ageAdj) × freqMult`
 
 - `base` $117, `floor` $89
 - `initialFee` $99 (marked "waived with annual prepay" — **copy-only; waiver not implemented in engine**)
 
-**Footprint brackets (linear interp):** 800 −$15 · 1200 −$10 · 1500 −$5 · 2000 $0 · 2500 +$8 · 3000 +$14 · 4000 +$21 · 5500 +$31
+**Footprint brackets (linear interp):** 800 −$15 · 1200 −$10 · 1500 −$5 · 2000 $0 · 2500 +$3 · 3000 +$6 · 4000 +$10 · 5500 +$16
 
-**Additional adjustments:** indoor +$15 · shrubs moderate +$5 / heavy +$12 · pool cage +$10 / pool no-cage +$5 · trees moderate +$5 / heavy +$12 · complexity complex +$8 · nearWater +$5 · largeDriveway +$5 · attached garage +$5
+**Additional adjustments:** indoor +$15 · shrubs light −$5 / moderate $0 / heavy +$6 · pool no-cage $0 · pool cage small +$5 / medium +$8 / large +$12 / oversized +$18 · trees light −$5 / moderate $0 / heavy +$6 · complexity simple −$5 / complex +$3 · nearWater +$3 · largeDriveway +$3 · attached garage +$5
 
-**Roach modifier:** german 15%, regular 15%, none 0%
+**Roach handling:** recurring roach multiplier is retired (`german`, `regular`, and `none` are all 0%). Recurring pest with regular/German roach auto-adds a one-time Initial Roach Knockdown line item; standalone regular roach uses the higher standalone knockdown scale.
+
+**Production diagnostics:** pest results include `productionDiagnostics` with estimated minutes and a minute breakdown. This is shadow-only and does not drive price until calibrated against Bouncie/on-site actuals.
 
 **Frequency discounts (v1 — currently live):** quarterly 1.00, bimonthly 0.85, monthly 0.70
 **v2 (experimental):** quarterly 1.00, bimonthly 0.88, monthly 0.78

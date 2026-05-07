@@ -417,6 +417,7 @@ You also receive public property record data for cross-reference.
 
 IMPORTANT RULES:
 - POOL DETECTION (SWFL-specific): Pool cages/screen enclosures are EXTREMELY common in Southwest Florida. They appear as rectangular screened structures attached to the back of the home, often covering both a pool and a lanai/patio. Look for: rectangular screen enclosure (lighter gray mesh visible from above), blue water visible through the screen, or a solid lanai roof extending from the main roof. If you see ANY screen enclosure attached to the home, mark poolCage=YES. Even small ones count. If public records say pool=NO but you clearly see a pool cage or blue water, override records because county/listing data can be outdated.
+- POOL CAGE SIZE: classify the visible screen enclosure service burden. SMALL is a compact lanai/cage under roughly 300 sq ft, MEDIUM is typical 300-600 sq ft, LARGE is roughly 600-900 sq ft or clearly longer/wider than a standard cage, OVERSIZED is a very large enclosure or complex cage with multiple sections. If poolCage is not YES, return NONE.
 - DRIVEWAY: "largeDriveway" means the driveway is wider than a standard 2-car width (~20ft) OR extends significantly along the side of the home OR has a circular/turnaround area. Standard SWFL driveways are 2-car width going straight to the garage — that is NOT large. Only mark YES if it's notably oversized.
 - For construction material: if the property record already identified it, confirm or note disagreement. If unknown, infer from satellite (CBS=stucco appearance, wood frame=siding visible, etc.)
 - For foundation: SWFL default is slab-on-grade. Only flag raised/crawlspace if clearly visible (house elevated, visible piers/stilts, lattice skirting).
@@ -434,6 +435,7 @@ Return a JSON object with exactly these fields:
 {
   "pool": "YES" | "NO" | "POSSIBLE",
   "poolCage": "YES" | "NO" | "POSSIBLE",
+  "poolCageSize": "NONE" | "SMALL" | "MEDIUM" | "LARGE" | "OVERSIZED",
   "poolNotes": "string — any relevant detail about pool/lanai/cage",
 
   "largeDriveway": "YES" | "NO",
@@ -601,6 +603,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     // ── POOL / LANAI ──
     pool: mergePool(rc, ai),
     poolCage: ai?.poolCage || 'UNKNOWN',
+    poolCageSize: normalizePoolCageSize(ai?.poolCageSize, ai?.poolCage),
 
     // ── LANDSCAPE (from satellite AI, with property-record cross-ref) ──
     shrubDensity: ai?.shrubDensity || 'MODERATE',
@@ -812,6 +815,12 @@ function mergePool(rc, ai) {
   if (ai?.pool === 'YES') return 'POSSIBLE'; // AI sees pool but RC doesn't — could be neighbor
   if (ai?.pool === 'POSSIBLE') return 'POSSIBLE';
   return 'NO';
+}
+
+function normalizePoolCageSize(value, poolCage) {
+  const raw = String(value || '').toUpperCase();
+  if (['SMALL', 'MEDIUM', 'LARGE', 'OVERSIZED'].includes(raw)) return raw;
+  return poolCage === 'YES' ? 'MEDIUM' : 'NONE';
 }
 
 function inferFoundation(rc, ai) {
@@ -1347,6 +1356,10 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   const features = {
     pool: p.pool === 'YES',
     poolCage: p.poolCage === 'YES',
+    poolCageSize: String(p.poolCageSize || '').toUpperCase() === 'OVERSIZED' ? 'oversized'
+      : String(p.poolCageSize || '').toUpperCase() === 'LARGE' ? 'large'
+      : String(p.poolCageSize || '').toUpperCase() === 'SMALL' ? 'small'
+      : p.poolCage === 'YES' ? 'medium' : 'none',
     trees: (p.treeDensity || 'LIGHT').toLowerCase(),
     shrubs: (p.shrubDensity || 'LIGHT').toLowerCase(),
     complexity: (p.landscapeComplexity || 'SIMPLE').toLowerCase(),
@@ -1514,7 +1527,7 @@ function mergeAiAnalyses(providerResults) {
   const merged = { ...primary.analysis };
 
   // Use higher confidence for key fields when models disagree
-  const fieldsToValidate = ['pool', 'poolCage', 'fenceType', 'shrubDensity', 'treeDensity', 'landscapeComplexity', 'nearWater', 'waterDistance', 'overallPestPressureEstimate'];
+  const fieldsToValidate = ['pool', 'poolCage', 'poolCageSize', 'fenceType', 'shrubDensity', 'treeDensity', 'landscapeComplexity', 'nearWater', 'waterDistance', 'overallPestPressureEstimate'];
 
   const divergences = [];
   for (const { provider, analysis } of sorted.slice(1)) {
@@ -1571,10 +1584,13 @@ function buildSatelliteVisionPrompt(address, propertyRecord) {
   const rcContext = propertyRecord ? `Property record: ${propertyRecord.formattedAddress || address}, ${propertyRecord.squareFootage || 'unknown'} sf, ${propertyRecord.lotSize || 'unknown'} sf lot, built ${propertyRecord.yearBuilt || 'unknown'}, ${propertyRecord.stories || 'unknown'} story, pool record: ${propertyRecord.hasPool ? 'YES' : 'NO'}, construction: ${propertyRecord.constructionMaterial || 'UNKNOWN'}, foundation: ${propertyRecord.foundationType || 'UNKNOWN'}` : 'No public property record available.';
   return `Analyze these satellite images of a Southwest Florida property at ${address}. Closest images come first and should carry the most weight. ${rcContext}
 
+For pool cages, classify the visible screen enclosure service burden. SMALL is a compact lanai/cage under roughly 300 sq ft, MEDIUM is a typical 300-600 sq ft enclosure, LARGE is roughly 600-900 sq ft or clearly larger than a standard cage, and OVERSIZED is a very large or multi-section enclosure. If poolCage is not YES, return poolCageSize as NONE.
+
 Return ONLY valid JSON with these fields:
 {
   "pool": "YES" | "NO" | "POSSIBLE",
   "poolCage": "YES" | "NO" | "POSSIBLE",
+  "poolCageSize": "NONE" | "SMALL" | "MEDIUM" | "LARGE" | "OVERSIZED",
   "poolNotes": "string",
   "largeDriveway": "YES" | "NO",
   "drivewaySurfaceType": "CONCRETE" | "PAVER" | "ASPHALT" | "GRAVEL" | "UNKNOWN",

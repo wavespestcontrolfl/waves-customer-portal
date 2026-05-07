@@ -28,6 +28,67 @@ function laborCost(onSiteMinutes) {
   return GLOBAL.LABOR_RATE * (GLOBAL.DRIVE_TIME + onSiteMinutes) / 60;
 }
 
+function normalizePoolCageSize(value, hasPoolCage = false) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (['small', 'medium', 'large', 'oversized'].includes(raw)) return raw;
+  return hasPoolCage ? 'medium' : 'none';
+}
+
+function poolCageAdjustment(features = {}) {
+  const hasPoolCage = !!features.poolCage;
+  const size = normalizePoolCageSize(features.poolCageSize, hasPoolCage);
+  if (!hasPoolCage || size === 'none') return 0;
+  const key = {
+    small: 'poolCageSmall',
+    medium: 'poolCageMedium',
+    large: 'poolCageLarge',
+    oversized: 'poolCageOversized',
+  }[size];
+  return PEST.additionalAdjustments[key] ?? PEST.additionalAdjustments.poolCage;
+}
+
+function calculatePestProductionDiagnostics(property) {
+  const cfg = PEST.productionDiagnostics || {};
+  const f = property.features || {};
+  const footprint = Number(property.footprint) || 0;
+  const lotSqFt = Number(property.lotSqFt) || 0;
+  const poolCageSize = normalizePoolCageSize(f.poolCageSize, !!f.poolCage);
+  const round1 = value => Math.round(value * 10) / 10;
+  const outbuildingCount = Math.max(0, Math.floor(Number(property.outbuildingCount) || 0));
+
+  const breakdown = {
+    baseStop: cfg.baseStopMinutes || 20,
+    footprint: round1(interpolate(footprint, cfg.footprintMinutes || [], 'sqft', 'minutes')),
+    lot: round1(interpolate(lotSqFt, cfg.lotMinutes || [], 'sqft', 'minutes')),
+    poolCage: f.poolCage ? (cfg.poolCageMinutes?.[poolCageSize] || 0) : 0,
+    pool: !f.poolCage && f.pool ? (cfg.poolNoCageMinutes || 0) : 0,
+    shrubs: cfg.shrubMinutes?.[f.shrubs] || 0,
+    trees: cfg.treeMinutes?.[f.trees] || 0,
+    complexity: cfg.complexityMinutes?.[f.complexity] || 0,
+    largeDriveway: f.largeDriveway ? (cfg.largeDrivewayMinutes || 0) : 0,
+    nearWater: f.nearWater ? (cfg.nearWaterMinutes || 0) : 0,
+    attachedGarage: property.attachedGarage ? (cfg.attachedGarageMinutes || 0) : 0,
+    outbuildings: outbuildingCount * (cfg.outbuildingMinutes || 0),
+  };
+
+  const estimatedMinutes = Math.max(10, round1(Object.values(breakdown).reduce((sum, n) => sum + (Number(n) || 0), 0)));
+  const manualReviewReasons = [];
+  if (lotSqFt > (cfg.manualReviewLotSqFt || 40000)) manualReviewReasons.push('large_lot');
+  if (poolCageSize === 'oversized') manualReviewReasons.push('oversized_pool_cage');
+  if (f.complexity === 'complex' && (f.shrubs === 'heavy' || f.trees === 'heavy')) manualReviewReasons.push('complex_heavy_vegetation');
+  if (outbuildingCount >= 2) manualReviewReasons.push('multiple_outbuildings');
+
+  return {
+    estimatedMinutes,
+    breakdown,
+    poolCageSize,
+    pricingMode: 'shadow_only',
+    confidence: manualReviewReasons.length ? 'MEDIUM' : 'HIGH',
+    manualReview: manualReviewReasons.length > 0,
+    manualReviewReasons,
+  };
+}
+
 // ── Urgency multiplier helper (matches v2 applyOT — urgency only, ────
 // not recurring-customer discount which is handled by discount-engine) ─
 function applyUrgency(price, urgency = 'ROUTINE', afterHours = false) {
@@ -60,7 +121,7 @@ function pricePestControl(property, options = {}) {
   if (f.shrubs === 'heavy') additionalAdj += PEST.additionalAdjustments.shrubs_heavy;
   else if (f.shrubs === 'moderate') additionalAdj += PEST.additionalAdjustments.shrubs_moderate;
   else if (f.shrubs === 'light') additionalAdj += (PEST.additionalAdjustments.shrubs_light || 0);
-  if (f.poolCage) additionalAdj += PEST.additionalAdjustments.poolCage;
+  if (f.poolCage) additionalAdj += poolCageAdjustment(f);
   else if (f.pool) additionalAdj += PEST.additionalAdjustments.poolNoCage;
   if (f.trees === 'heavy') additionalAdj += PEST.additionalAdjustments.trees_heavy;
   else if (f.trees === 'moderate') additionalAdj += PEST.additionalAdjustments.trees_moderate;
@@ -137,6 +198,7 @@ function pricePestControl(property, options = {}) {
     margin: Math.round(margin * 1000) / 1000,
     marginFloorOk: margin >= GLOBAL.MARGIN_FLOOR,
     initialFee: PEST.initialFee,
+    productionDiagnostics: calculatePestProductionDiagnostics(property),
   };
 }
 
