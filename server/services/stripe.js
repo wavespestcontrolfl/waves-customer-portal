@@ -773,11 +773,11 @@ const StripeService = {
         selected_method_category: 'card',
       },
     };
-    if (cardOnly) {
-      piParams.payment_method_types = ['card'];
-    } else {
-      piParams.automatic_payment_methods = { enabled: true };
-    }
+    // Keep invoice pay-page PIs on explicit method types. The
+    // /update-amount route intentionally re-locks the same PI to either
+    // card or ACH after the customer chooses a method, and Stripe rejects
+    // payment_method_types updates on PIs created with automatic methods.
+    piParams.payment_method_types = cardOnly ? ['card'] : ['card', 'us_bank_account'];
 
     if (saveCard && invoice.customer_id) {
       piParams.customer = await this.ensureStripeCustomer(invoice.customer_id);
@@ -785,9 +785,11 @@ const StripeService = {
     }
 
     try {
-      // Idempotency key includes saveCard + cardOnly so toggling either
-      // regenerates a clean PI instead of hitting the cached one.
-      const idempotencyKey = `invoice_pi_${invoiceId}_${amountCents}_${saveCard ? 'save' : 'nosave'}_${cardOnly ? 'cardonly' : 'auto'}`;
+      // Idempotency key includes saveCard + method mode so toggling either
+      // regenerates a clean PI instead of hitting the cached one. The
+      // "explicit" suffix also avoids replaying older automatic-method PIs.
+      const methodMode = cardOnly ? 'cardonly' : 'explicit_card_ach';
+      const idempotencyKey = `invoice_pi_${invoiceId}_${amountCents}_${saveCard ? 'save' : 'nosave'}_${methodMode}`;
       const paymentIntent = await stripe.paymentIntents.create(piParams, { idempotencyKey });
 
       await db('invoices')

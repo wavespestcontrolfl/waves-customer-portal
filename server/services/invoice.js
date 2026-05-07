@@ -4,7 +4,7 @@ const logger = require('./logger');
 const TaxCalculator = require('./tax-calculator');
 const DiscountEngine = require('./discount-engine');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { shortenOrPassthrough } = require('./short-url');
+const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 
 // ══════════════════════════════════════════════════════════════
 // HELPERS
@@ -572,6 +572,7 @@ const InvoiceService = {
     const longPayUrl = `${domain}/pay/${invoice.token}`;
     const payUrl = await shortenOrPassthrough(longPayUrl, {
       kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: customer.id,
+      codePrefix: invoiceShortCodePrefix(invoice),
     });
 
     const techName = invoice.tech_name || 'Our team';
@@ -826,7 +827,10 @@ const InvoiceService = {
     const domain = process.env.PORTAL_DOMAIN || 'https://portal.wavespestcontrol.com';
     const longReceiptUrl = invoice.token ? `${domain}/pay/${invoice.token}` : '';
     const receiptUrl = longReceiptUrl
-      ? await shortenOrPassthrough(longReceiptUrl, { kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: customer.id })
+      ? await shortenOrPassthrough(longReceiptUrl, {
+          kind: 'receipt', entityType: 'invoices', entityId: invoice.id, customerId: customer.id,
+          codePrefix: invoiceShortCodePrefix(invoice),
+        })
       : '';
 
     // Template body has a {card_line} placeholder that renders as e.g.

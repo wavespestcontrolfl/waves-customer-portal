@@ -18,9 +18,9 @@ const logger = require('../services/logger');
 const { resolveShortCode } = require('../services/short-url');
 const { isBotUserAgent } = require('../utils/bot-ua');
 
-// Accept lowercase alphanum only, 3-16 chars. Keeps the route from matching
+// Accept lowercase alphanum + hyphen only, 3-80 chars. Keeps the route from matching
 // unexpected paths (/l/favicon.ico etc) and short-circuits obvious bots.
-const CODE_RE = /^[a-z0-9]{3,16}$/;
+const CODE_RE = /^[a-z0-9-]{3,80}$/;
 
 router.get('/:code', async (req, res) => {
   const code = (req.params.code || '').toLowerCase();

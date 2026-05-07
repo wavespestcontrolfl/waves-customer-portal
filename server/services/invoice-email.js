@@ -12,6 +12,7 @@ const logger = require('./logger');
 const db = require('../models/db');
 const { buildInvoicePDFBuffer, buildReceiptPDFBuffer } = require('./pdf/invoice-pdf');
 const { wrapEmail, ctaButton, currency, formatDate, plainText } = require('./email-template');
+const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 
 let cachedTransporter = null;
 function getTransporter() {
@@ -42,7 +43,14 @@ async function sendInvoiceEmail(invoiceId) {
   if (!transporter) return { ok: false, error: 'Email not configured' };
 
   const domain = process.env.PORTAL_DOMAIN || 'https://portal.wavespestcontrol.com';
-  const payUrl = `${domain}/pay/${invoice.token}`;
+  const longPayUrl = `${domain}/pay/${invoice.token}`;
+  const payUrl = await shortenOrPassthrough(longPayUrl, {
+    kind: 'invoice',
+    entityType: 'invoices',
+    entityId: invoice.id,
+    customerId: customer.id,
+    codePrefix: invoiceShortCodePrefix(invoice),
+  });
   const invoiceForPdf = { ...invoice, customer, line_items: invoice.line_items || [] };
   let pdfBuffer;
   try {
@@ -132,7 +140,14 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     .catch(() => null);
 
   const domain = process.env.PORTAL_DOMAIN || 'https://portal.wavespestcontrol.com';
-  const receiptUrl = `${domain}/receipt/${invoice.token}`;
+  const longReceiptUrl = `${domain}/receipt/${invoice.token}`;
+  const receiptUrl = await shortenOrPassthrough(longReceiptUrl, {
+    kind: 'receipt',
+    entityType: 'invoices',
+    entityId: invoice.id,
+    customerId: customer.id,
+    codePrefix: invoiceShortCodePrefix(invoice),
+  });
   const invoiceForPdf = { ...invoice, customer, line_items: invoice.line_items || [] };
   let pdfBuffer;
   try {
