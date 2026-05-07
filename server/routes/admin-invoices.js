@@ -6,6 +6,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -199,9 +200,13 @@ router.post('/', async (req, res, next) => {
     });
 
     const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
+    const payUrl = await shortenOrPassthrough(`${domain}/pay/${invoice.token}`, {
+      kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: invoice.customer_id,
+      codePrefix: invoiceShortCodePrefix(invoice),
+    });
     res.status(201).json({
       ...invoice,
-      payUrl: `${domain}/pay/${invoice.token}`,
+      payUrl,
     });
   } catch (err) { next(err); }
 });
@@ -218,9 +223,13 @@ router.post('/from-service', async (req, res, next) => {
     });
 
     const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
+    const payUrl = await shortenOrPassthrough(`${domain}/pay/${invoice.token}`, {
+      kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: invoice.customer_id,
+      codePrefix: invoiceShortCodePrefix(invoice),
+    });
     res.status(201).json({
       ...invoice,
-      payUrl: `${domain}/pay/${invoice.token}`,
+      payUrl,
     });
   } catch (err) { next(err); }
 });
@@ -257,7 +266,10 @@ router.post('/batch', async (req, res, next) => {
           invoiceId: invoice.id,
           invoiceNumber: invoice.invoice_number,
           total: invoice.total,
-          payUrl: `${domain}/pay/${invoice.token}`,
+          payUrl: await shortenOrPassthrough(`${domain}/pay/${invoice.token}`, {
+            kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId,
+            codePrefix: invoiceShortCodePrefix(invoice),
+          }),
           sent: sendResult,
         });
       } catch (err) {

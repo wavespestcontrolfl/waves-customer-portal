@@ -124,7 +124,7 @@ router.post('/:token/update-amount', async (req, res, next) => {
     res.json(result);
   } catch (err) {
     logger.error(`[pay-v2] Update-amount error: ${err.message}`);
-    res.status(400).json({ error: err.message });
+    res.status(400).json({ error: 'Could not update payment total. Please refresh and try again, or call (941) 297-5749.' });
   }
 });
 

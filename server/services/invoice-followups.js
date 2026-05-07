@@ -13,7 +13,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const config = require('../config/invoice-followups');
-const { shortenOrPassthrough } = require('./short-url');
+const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 /**
@@ -234,6 +234,7 @@ async function fireStep(row) {
 
   const payUrl = await shortenOrPassthrough(`${DOMAIN}/pay/${row.token}`, {
     kind: 'invoice', entityType: 'invoices', entityId: row.invoice_id, customerId: customer.id,
+    codePrefix: invoiceShortCodePrefix(row),
   });
   const body = await resolveBody(step, {
     name: customer.first_name || 'there',
@@ -314,7 +315,13 @@ async function stopOnPayment(invoiceId) {
       const invoice = await db('invoices').where({ id: invoiceId }).first();
       if (customer?.phone) {
         const payUrl = invoice?.token
-          ? await shortenOrPassthrough(`${DOMAIN}/pay/${invoice.token}`, { kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: customer.id })
+          ? await shortenOrPassthrough(`${DOMAIN}/pay/${invoice.token}`, {
+              kind: 'invoice',
+              entityType: 'invoices',
+              entityId: invoice.id,
+              customerId: customer.id,
+              codePrefix: invoiceShortCodePrefix(invoice),
+            })
           : '';
         const body = await resolveBody(config.thankYou, {
           name: customer.first_name,

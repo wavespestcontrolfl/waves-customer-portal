@@ -1,5 +1,6 @@
 /**
  * Self-hosted URL shortener. Issues branded `portal.wavespestcontrol.com/l/k3j9`
+ * or readable invoice codes like `portal.wavespestcontrol.com/l/wpc-2026-0042-0507-k3j9`
  * links that customers see in SMS / email / PDF surfaces and that redirect to
  * the real long URL via GET /l/:code in routes/public-shortlinks.js.
  *
@@ -14,6 +15,7 @@
 const db = require('../models/db');
 const crypto = require('crypto');
 const logger = require('./logger');
+const { etParts } = require('../utils/datetime-et');
 
 // Lowercase alphanum, no ambiguous chars (0/o/1/l/i) — the code shows up in
 // SMS and occasionally gets read over the phone to support.
@@ -24,6 +26,43 @@ function generateCode(length = 5) {
   let out = '';
   for (let i = 0; i < length; i++) out += ALPHABET[bytes[i] % ALPHABET.length];
   return out;
+}
+
+function sanitizeCodePart(value, maxLength = 48) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, maxLength)
+    .replace(/-+$/g, '');
+}
+
+function codeDate(value, { dateOnly = false } = {}) {
+  if (!value) return '';
+  const ymd = typeof value === 'string' && /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (ymd) return `${ymd[2]}${ymd[3]}`;
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  if (dateOnly) {
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    return `${mm}${dd}`;
+  }
+  const { month, day } = etParts(d);
+  return `${String(month).padStart(2, '0')}${String(day).padStart(2, '0')}`;
+}
+
+function invoiceShortCodePrefix(invoice = {}) {
+  const invoiceNumber = sanitizeCodePart(invoice.invoice_number || invoice.invoiceNumber || 'invoice', 32);
+  const serviceDate = invoice.service_date || invoice.serviceDate;
+  const dueDate = invoice.due_date || invoice.dueDate;
+  const date = serviceDate
+    ? codeDate(serviceDate, { dateOnly: true })
+    : dueDate
+      ? codeDate(dueDate, { dateOnly: true })
+      : codeDate(invoice.created_at || invoice.createdAt);
+  return [invoiceNumber, date].filter(Boolean).join('-');
 }
 
 function baseUrl() {
@@ -60,9 +99,12 @@ async function createShortCode(targetUrl, opts = {}) {
   };
 
   let lastErr;
+  const prefix = sanitizeCodePart(opts.codePrefix || '', 58);
+
   for (let attempt = 0; attempt < 8; attempt++) {
     const length = attempt < 5 ? 5 : 6;
-    const code = generateCode(length);
+    const randomPart = generateCode(length);
+    const code = prefix ? `${prefix}-${randomPart}` : randomPart;
     try {
       const [inserted] = await db('short_codes')
         .insert({ ...row, code })
@@ -123,4 +165,5 @@ module.exports = {
   createShortCode,
   resolveShortCode,
   shortenOrPassthrough,
+  invoiceShortCodePrefix,
 };

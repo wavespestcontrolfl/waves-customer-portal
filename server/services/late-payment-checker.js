@@ -9,6 +9,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 
 const LatePaymentService = {
   async checkAndNotify(daysOverdue = 7) {
@@ -61,7 +62,10 @@ const LatePaymentService = {
 
       const name = customer.first_name || 'there';
       const invoiceTitle = inv.title || 'your service';
-      const payUrl = `${domain}/pay/${inv.token}`;
+      const payUrl = await shortenOrPassthrough(`${domain}/pay/${inv.token}`, {
+        kind: 'invoice', entityType: 'invoices', entityId: inv.id, customerId: customer.id,
+        codePrefix: invoiceShortCodePrefix(inv),
+      });
       const totalAmount = parseFloat(inv.total || 0);
 
       let formattedDate = '';

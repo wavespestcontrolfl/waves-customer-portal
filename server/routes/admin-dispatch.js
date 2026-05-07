@@ -17,6 +17,7 @@ const { countSegments } = require('../services/messaging/segment-counter');
 const { recordServiceProductNutrients } = require('../services/nutrient-ledger');
 const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
+const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 
 // Haversine ETA for the dispatch board tech cards. Returns a whole
 // number of minutes, or null when any input is missing or the tech is
@@ -1420,7 +1421,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
       if (existingCompletionInvoice) {
         invoice = existingCompletionInvoice;
-        payUrl = existingCompletionInvoice.token ? `${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/pay/${existingCompletionInvoice.token}` : null;
+        payUrl = existingCompletionInvoice.token
+          ? await shortenOrPassthrough(
+              `${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/pay/${existingCompletionInvoice.token}`,
+              {
+                kind: 'invoice',
+                entityType: 'invoices',
+                entityId: existingCompletionInvoice.id,
+                customerId: existingCompletionInvoice.customer_id,
+                codePrefix: invoiceShortCodePrefix(existingCompletionInvoice),
+              }
+            )
+          : null;
         if (existingCompletionInvoice.status === 'paid') alreadyPaid = true;
         else invoiceCreated = true;
       }
@@ -1524,7 +1536,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         });
         invoice = await applyPrepaidCreditToInvoice(invoice);
         invoiceCreated = true;
-        payUrl = `${portalUrl}/pay/${invoice.token}`;
+        payUrl = await shortenOrPassthrough(`${portalUrl}/pay/${invoice.token}`, {
+          kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: invoice.customer_id,
+          codePrefix: invoiceShortCodePrefix(invoice),
+        });
       } catch (invErr) {
         logger.error(`[dispatch] Auto-invoice failed (non-blocking): ${invErr.message}`);
       }
@@ -1540,7 +1555,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (e) { logger.warn(`[dispatch] Could not back-link invoice to service_record: ${e.message}`); }
       preMintedInvoice = await applyPrepaidCreditToInvoice(preMintedInvoice);
       invoice = preMintedInvoice;
-      payUrl = `${portalUrl}/pay/${invoice.token}`;
+      payUrl = await shortenOrPassthrough(`${portalUrl}/pay/${invoice.token}`, {
+        kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: invoice.customer_id,
+        codePrefix: invoiceShortCodePrefix(invoice),
+      });
       // Treat already-paid pre-mint as the same SMS branch as prepaid.
       if (invoice.status === 'paid') alreadyPaid = true;
       else invoiceCreated = true;
