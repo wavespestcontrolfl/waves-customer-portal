@@ -1619,16 +1619,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             pay_url: payUrl,
           }, fallback);
           sentSmsType = 'service_complete_with_invoice';
-          const concise = `Hello ${svc.first_name}! Report: ${portalUrl}\nInvoice: ${payUrl}\nReply with questions.`;
-          const suffix = countSegments(`${concise}${reviewSuffix}`).segmentCount <= 2 ? reviewSuffix : '';
-          const templated = `${body}${suffix}`.trim();
-          if (countSegments(templated).segmentCount <= 2) {
-            sentSmsBody = templated;
-            completionSmsWasTruncated = false;
-          } else {
-            sentSmsBody = `${concise}${suffix}`.trim();
-            completionSmsWasTruncated = true;
-          }
+          sentSmsBody = `${body}${reviewSuffix}`.trim();
+          completionSmsWasTruncated = false;
         } else if (prepaidCovered || alreadyPaid) {
           const fallback = `Hello ${svc.first_name}! Thanks for your payment today. Your ${displayServiceType} service report is ready: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = await renderTemplate('service_complete_prepaid', {
