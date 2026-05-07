@@ -272,10 +272,8 @@ async function syncConstantsFromDB(dbInstance) {
     }
 
     // ── Mosquito ─────────────────────────────────────────────
-    // Admin edits in the Pricing Logic Mosquito tab are authoritative. The
-    // current engine exposes only Seasonal/Monthly programs; until the DB row
-    // is migrated, legacy Silver per-visit pricing is the closest equivalent
-    // for both cadence-based programs.
+    // Admin edits in the Pricing Logic Mosquito tab are authoritative. Legacy
+    // rows used metal-tier keys; current rows use program keys.
     if (config.mosquito_base_prices) {
       const next = { ...constants.MOSQUITO.basePrices };
       for (const [lot, tierMap] of Object.entries(config.mosquito_base_prices)) {
@@ -284,6 +282,8 @@ async function syncConstantsFromDB(dbInstance) {
           next[lot] = [
             r(Number(tierMap.seasonal ?? legacyProgramPrice ?? constants.MOSQUITO.basePrices[lot][0])),
             r(Number(tierMap.monthly ?? legacyProgramPrice ?? constants.MOSQUITO.basePrices[lot][1])),
+            r(Number(tierMap.residual_seasonal ?? tierMap.scion_seasonal ?? tierMap.upgraded_seasonal ?? constants.MOSQUITO.basePrices[lot][2])),
+            r(Number(tierMap.residual_monthly ?? tierMap.scion_monthly ?? tierMap.scionMonthly ?? tierMap.upgraded_monthly ?? constants.MOSQUITO.basePrices[lot][3])),
           ];
         }
       }
@@ -295,6 +295,12 @@ async function syncConstantsFromDB(dbInstance) {
       }
       if (config.mosquito_visits.monthly != null) {
         constants.MOSQUITO.tierVisits.monthly = Number(config.mosquito_visits.monthly);
+      }
+      if (config.mosquito_visits.residual_seasonal != null) {
+        constants.MOSQUITO.tierVisits.residual_seasonal = Number(config.mosquito_visits.residual_seasonal);
+      }
+      if (config.mosquito_visits.residual_monthly != null || config.mosquito_visits.scion_monthly != null) {
+        constants.MOSQUITO.tierVisits.residual_monthly = Number(config.mosquito_visits.residual_monthly ?? config.mosquito_visits.scion_monthly);
       }
     }
     if (config.mosquito_lot_sizes) {

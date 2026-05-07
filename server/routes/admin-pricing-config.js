@@ -30,7 +30,7 @@ const ESTIMATE_COST_FALLBACKS = {
     areaField: 'bedArea',
   },
   mosquito: {
-    serviceTypes: ['Mosquito Treatment'],
+    serviceTypes: ['Mosquito Treatment - Essential Barrier', 'Mosquito Treatment - IGR'],
     laborMin: 15,
     materialPerVisit: 8,
     visitsPerYear: 12,
@@ -80,6 +80,7 @@ async function getInventoryCostEstimate(serviceKey, dimensions) {
         'service_product_usage.usage_amount',
         'service_product_usage.usage_unit',
         'service_product_usage.usage_per_1000sf',
+        'service_product_usage.notes',
         'products_catalog.id as product_id',
         'products_catalog.name as product_name',
         'products_catalog.cost_per_unit',

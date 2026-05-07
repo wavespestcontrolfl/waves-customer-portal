@@ -50,9 +50,14 @@ function calcLandedCost(price, shipping, taxRate) {
 }
 
 function usageAmountForArea(row, areaSqFt = 0) {
-  return Number(row.usage_per_1000sf || 0) > 0 && Number(areaSqFt || 0) > 0
+  const baseAmount = Number(row.usage_amount || 0);
+  const areaAmount = Number(row.usage_per_1000sf || 0) > 0 && Number(areaSqFt || 0) > 0
     ? (Number(row.usage_per_1000sf) * Number(areaSqFt)) / 1000
-    : Number(row.usage_amount || 0);
+    : 0;
+  const notes = String(row.notes || '');
+  if (notes.includes('[usage:base_plus_per_1000]')) return baseAmount + areaAmount;
+  if (notes.includes('[usage:max_base_or_per_1000]')) return Math.max(baseAmount, areaAmount);
+  return areaAmount > 0 ? areaAmount : baseAmount;
 }
 
 function costLineFromUsage(row, areaSqFt = 0) {

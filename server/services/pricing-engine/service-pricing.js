@@ -464,6 +464,8 @@ function priceMosquito(property, options = {}) {
   const {
     tier = 'monthly',
     modifiers = {},
+    stationCount = 0,
+    dunkCount = 0,
   } = options;
 
   const selectedProgram = tier;
@@ -495,13 +497,27 @@ function priceMosquito(property, options = {}) {
 
   const perVisit = Math.round(basePrice * pressure);
   const visits = MOSQUITO.tierVisits[selectedProgram];
-  const annual = perVisit * visits;
+  const stationQty = Math.max(0, Math.round(Number(stationCount) || 0));
+  const dunkQty = Math.max(0, Math.round(Number(dunkCount) || 0));
+  const stationAddOn = stationQty * MOSQUITO.addOns.in2CareStation.price;
+  const dunkAddOn = dunkQty * MOSQUITO.addOns.dunkTablet.price;
+  const annualAddOns = stationAddOn + dunkAddOn;
+  const annual = perVisit * visits + annualAddOns;
   const monthly = Math.round(annual / 12 * 100) / 100;
 
   // Cost estimate
-  const materialPerVisit = 18;
+  const treatableThousands = Math.max(1, (property.mosquitoTreatableSqFt || 0) / 1000);
+  const usage = MOSQUITO.productUsage;
+  const costs = MOSQUITO.productCosts;
+  const usesPrecisionAdulticide = selectedProgram === 'residual_seasonal' || selectedProgram === 'residual_monthly';
+  const adulticideCost = usesPrecisionAdulticide
+    ? (usage.scionBaseOz + usage.scionOzPer1000 * treatableThousands) * costs.scionOz
+    : Math.max(usage.bifenthrinBaseOz, usage.bifenthrinOzPer1000 * treatableThousands) * costs.bifenthrinOz;
+  const igrCost = usage.tekkoProOz * costs.tekkoProOz;
+  const materialPerVisit = Math.round((adulticideCost + igrCost) * 100) / 100;
+  const addOnCost = stationQty * costs.in2CareStation + dunkQty * costs.summitDunkTablet;
   const laborPerVisitCost = laborCost(30);
-  const annualCost = (materialPerVisit + laborPerVisitCost) * visits + GLOBAL.ADMIN_ANNUAL;
+  const annualCost = (materialPerVisit + laborPerVisitCost) * visits + addOnCost + GLOBAL.ADMIN_ANNUAL;
   const margin = annual > 0 ? (annual - annualCost) / annual : 0;
 
   const TIER_NAMES = MOSQUITO.programs;
@@ -510,14 +526,14 @@ function priceMosquito(property, options = {}) {
     const bp = basePrices[idx];
     const pv = Math.round(bp * pressure);
     const v = MOSQUITO.tierVisits[name];
-    const ann = pv * v;
+    const ann = pv * v + annualAddOns;
     return {
       tier: name,
       perVisit: pv,
       visits: v,
       annual: ann,
       monthly: Math.round(ann / 12 * 100) / 100,
-      name: name.charAt(0).toUpperCase() + name.slice(1),
+      name: MOSQUITO.programLabels[name] || name.charAt(0).toUpperCase() + name.slice(1),
       recommended: name === recommendedTier,
     };
   });
@@ -531,7 +547,21 @@ function priceMosquito(property, options = {}) {
     basePrice, pressureMultiplier: pressure,
     perVisit, visits, annual, monthly,
     tiers,
-    costs: { materialPerVisit, laborPerVisit: Math.round(laborPerVisitCost * 100) / 100, annualCost: Math.round(annualCost) },
+    addOns: {
+      stationCount: stationQty,
+      dunkCount: dunkQty,
+      stationAddOn,
+      dunkAddOn,
+      annualAddOns,
+    },
+    costs: {
+      adulticide: usesPrecisionAdulticide ? 'Gamma-cyhalothrin' : 'Bifenthrin',
+      igr: 'Pyriproxyfen + Novaluron',
+      materialPerVisit,
+      addOnCost: Math.round(addOnCost * 100) / 100,
+      laborPerVisit: Math.round(laborPerVisitCost * 100) / 100,
+      annualCost: Math.round(annualCost),
+    },
     margin: Math.round(margin * 1000) / 1000,
     marginFloorOk: margin >= GLOBAL.MARGIN_FLOOR,
     recommendedTier,
@@ -946,10 +976,21 @@ function priceOneTimeLawn(property, options = {}) {
 // ============================================================
 // ONE-TIME MOSQUITO
 // ============================================================
-function priceOneTimeMosquito(property) {
+function priceOneTimeMosquito(property, options = {}) {
   const lotCategory = property.mosquitoLotCategory || property.lotCategory;
-  const price = ONE_TIME.mosquito[lotCategory] || ONE_TIME.mosquito.SMALL;
-  return { service: 'one_time_mosquito', price, lotCategory };
+  const basePrice = ONE_TIME.mosquito[lotCategory] || ONE_TIME.mosquito.SMALL;
+  const stationCount = Math.max(0, Math.round(Number(options.stationCount) || 0));
+  const dunkCount = Math.max(0, Math.round(Number(options.dunkCount) || 0));
+  const stationAddOn = stationCount * MOSQUITO.addOns.in2CareStation.price;
+  const dunkAddOn = dunkCount * MOSQUITO.addOns.dunkTablet.price;
+  const price = basePrice + stationAddOn + dunkAddOn;
+  return {
+    service: 'one_time_mosquito',
+    price,
+    lotCategory,
+    basePrice,
+    addOns: { stationCount, dunkCount, stationAddOn, dunkAddOn },
+  };
 }
 
 // ============================================================

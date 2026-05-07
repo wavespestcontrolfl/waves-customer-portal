@@ -326,7 +326,7 @@ const PALM = {
 };
 
 // ============================================================
-// MOSQUITO (Seasonal / Monthly Programs)
+// MOSQUITO (Seasonal / Monthly / Upgraded Monthly Programs)
 // ============================================================
 const MOSQUITO = {
   lotCategories: [
@@ -337,16 +337,40 @@ const MOSQUITO = {
     { key: 'ACRE',    maxSqFt: Infinity, label: '35k+ treatable sf' },
   ],
   grossLotGuardrailMaxDrop: 1,
-  programs: ['seasonal', 'monthly'],
-  basePrices: {
-    //           Seasonal  Monthly
-    SMALL:   [r(90),  r(90)],
-    QUARTER: [r(100), r(100)],
-    THIRD:   [r(110), r(110)],
-    HALF:    [r(125), r(125)],
-    ACRE:    [r(155), r(155)],
+  programs: ['seasonal', 'monthly', 'residual_seasonal', 'residual_monthly'],
+  programLabels: {
+    seasonal: 'Seasonal Essential Barrier',
+    monthly: 'Monthly Essential Barrier',
+    residual_seasonal: 'Seasonal Precision Barrier',
+    residual_monthly: 'Monthly Precision Barrier',
   },
-  tierVisits: { seasonal: 9, monthly: 12 },
+  basePrices: {
+    //           Essential seasonal/monthly, Precision seasonal/monthly
+    SMALL:   [r(105), r(90),  r(135), r(120)],
+    QUARTER: [r(115), r(100), r(150), r(135)],
+    THIRD:   [r(130), r(115), r(175), r(155)],
+    HALF:    [r(155), r(135), r(210), r(185)],
+    ACRE:    [r(195), r(175), r(265), r(235)],
+  },
+  tierVisits: { seasonal: 9, monthly: 12, residual_seasonal: 9, residual_monthly: 12 },
+  productCosts: {
+    bifenthrinOz: 41.08 / 128,      // Bifen I/T 1 gal @ $41.08; Talak equivalent @ $41.57.
+    tekkoProOz: 52.97 / 16,         // Tekko Pro IGR 16 oz @ $52.97.
+    scionOz: 161.30 / 32,           // Scion 32 oz @ $161.30.
+    in2CareStation: 13.14,
+    summitDunkTablet: 26.88 / 20,
+  },
+  productUsage: {
+    bifenthrinBaseOz: 3,
+    bifenthrinOzPer1000: 0.5,
+    tekkoProOz: 1,
+    scionBaseOz: 0.75,
+    scionOzPer1000: 0.125,
+  },
+  addOns: {
+    in2CareStation: { price: r(39), cost: 13.14, label: 'Mosquito Station' },
+    dunkTablet: { price: r(4), cost: 26.88 / 20, label: 'Bti Dunk Tablet' },
+  },
   pressureFactors: {
     trees_heavy: 0.15, trees_moderate: 0.05,
     complexity_complex: 0.10, complexity_moderate: 0.05,
@@ -559,11 +583,11 @@ const ONE_TIME = {
     oneTimeMultiplier: 1.30,
   },
   mosquito: {
-    SMALL:   r(200),
-    QUARTER: r(250),
-    THIRD:   r(275),
-    HALF:    r(300),
-    ACRE:    r(350),
+    SMALL:   r(225),
+    QUARTER: r(275),
+    THIRD:   r(325),
+    HALF:    r(385),
+    ACRE:    r(475),
   },
 };
 

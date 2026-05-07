@@ -20,7 +20,7 @@ const SERVICE_MAP = {
   },
   mosquito: {
     label: 'Mosquito',
-    serviceTypes: ['Mosquito Treatment'],
+    serviceTypes: ['Mosquito Treatment - Essential Barrier', 'Mosquito Treatment - IGR'],
     areaField: 'lotSqFt',
   },
   termite_bait: {
@@ -50,7 +50,7 @@ const SERVICE_MAP = {
   },
   one_time_mosquito: {
     label: 'One-Time Mosquito',
-    serviceTypes: ['One-Time Mosquito', 'Mosquito Treatment'],
+    serviceTypes: ['One-Time Mosquito', 'Mosquito Treatment - Essential Barrier', 'Mosquito Treatment - IGR'],
     areaField: 'lotSqFt',
   },
   bora_care: {
@@ -159,13 +159,32 @@ function keyFromName(name) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'unknown';
 }
 
+function mosquitoCogs(program, addOns = {}) {
+  const raw = String(program || '').toLowerCase();
+  const serviceTypes = raw === 'residual_seasonal' || raw === 'residual_monthly' || raw.includes('precision') || raw.includes('scion')
+    ? ['Mosquito Treatment - Precision Barrier', 'Mosquito Treatment - IGR']
+    : ['Mosquito Treatment - Essential Barrier', 'Mosquito Treatment - IGR'];
+  const serviceTypeFixedMultipliers = {};
+  const stationCount = Number(addOns.stationCount || 0);
+  const dunkCount = Number(addOns.dunkCount || 0);
+  if (stationCount > 0) {
+    serviceTypes.push('Mosquito Treatment - Stations');
+    serviceTypeFixedMultipliers['Mosquito Treatment - Stations'] = stationCount;
+  }
+  if (dunkCount > 0) {
+    serviceTypes.push('Mosquito Treatment - Dunks');
+    serviceTypeFixedMultipliers['Mosquito Treatment - Dunks'] = dunkCount;
+  }
+  return { serviceTypes, serviceTypeFixedMultipliers };
+}
+
 function normalizeRecurringLines(result) {
   const discount = Number(result?.recurring?.discount || 0);
   const lines = [];
   for (const svc of result?.recurring?.services || []) {
     const monthly = Number(svc.monthly ?? svc.mo ?? 0);
     const serviceKey = keyFromName(svc.name);
-    lines.push({
+    const line = {
       serviceKey,
       label: svc.name || SERVICE_MAP[serviceKey]?.label || serviceKey,
       cadence: 'recurring',
@@ -174,7 +193,18 @@ function normalizeRecurringLines(result) {
       priceBeforeDiscount: money(monthly * 12),
       discount,
       priceSource: 'saved_estimate.result.recurring.services',
-    });
+    };
+    if (serviceKey === 'mosquito') {
+      const mqMeta = result?.results?.mqMeta || {};
+      const selectedMosquito = Array.isArray(result?.results?.mq)
+        ? result.results.mq[mqMeta.ri ?? 1]
+        : null;
+      const cogs = mosquitoCogs(mqMeta.program, mqMeta.addOns || {});
+      line.cogsServiceTypes = cogs.serviceTypes;
+      line.cogsServiceTypeFixedMultipliers = cogs.serviceTypeFixedMultipliers;
+      line.visitsPerYear = Number(selectedMosquito?.v || 0) || undefined;
+    }
+    lines.push(line);
   }
   if (Number(result?.recurring?.rodentBaitMo || 0) > 0) {
     lines.push({
@@ -207,7 +237,7 @@ function normalizeOneTimeLines(result) {
   const lines = [];
   for (const item of result?.oneTime?.items || []) {
     const serviceKey = item.service || keyFromName(item.name);
-    lines.push({
+    const line = {
       serviceKey,
       label: item.name || SERVICE_MAP[serviceKey]?.label || serviceKey,
       cadence: 'one_time',
@@ -216,7 +246,13 @@ function normalizeOneTimeLines(result) {
       priceBeforeDiscount: money(item.price),
       discount: 0,
       priceSource: 'saved_estimate.result.oneTime.items',
-    });
+    };
+    if (serviceKey === 'one_time_mosquito') {
+      const cogs = mosquitoCogs('monthly', item.addOns || {});
+      line.cogsServiceTypes = cogs.serviceTypes;
+      line.cogsServiceTypeFixedMultipliers = cogs.serviceTypeFixedMultipliers;
+    }
+    lines.push(line);
   }
   for (const item of result?.oneTime?.specItems || []) {
     const serviceKey = item.service || keyFromName(item.name);
@@ -258,6 +294,7 @@ async function loadInventoryCostRows() {
       'service_product_usage.usage_amount',
       'service_product_usage.usage_unit',
       'service_product_usage.usage_per_1000sf',
+      'service_product_usage.notes',
       'products_catalog.id as product_id',
       'products_catalog.name as product_name',
       'products_catalog.cost_per_unit',
@@ -269,30 +306,39 @@ async function loadInventoryCostRows() {
   return { available: true, rows };
 }
 
-function inventoryCostFromRows(serviceKey, dimensions, inventory) {
+function inventoryCostFromRows(serviceKey, dimensions, inventory, serviceTypesOverride = null, serviceTypeFixedMultipliers = {}) {
   const map = SERVICE_MAP[serviceKey];
   if (!map) return { status: 'unmapped', totalPerVisit: 0, annualCost: 0, lines: [], warnings: ['No service-to-inventory mapping yet'] };
   if (!inventory?.available) {
     return { status: 'missing_cogs', totalPerVisit: 0, annualCost: 0, lines: [], warnings: ['Inventory COGS tables are unavailable'] };
   }
 
-  const allRows = (inventory.rows || []).filter((row) => map.serviceTypes.includes(row.service_type));
-  const matchedServiceType = map.serviceTypes.find((serviceType) => allRows.some((row) => row.service_type === serviceType)) || null;
-  const rows = matchedServiceType ? allRows.filter((row) => row.service_type === matchedServiceType) : [];
+  const serviceTypes = serviceTypesOverride || map.serviceTypes;
+  const allRows = (inventory.rows || []).filter((row) => serviceTypes.includes(row.service_type));
+  const matchedServiceType = serviceTypes.find((serviceType) => allRows.some((row) => row.service_type === serviceType)) || null;
+  const rows = serviceTypesOverride
+    ? allRows
+    : (matchedServiceType ? allRows.filter((row) => row.service_type === matchedServiceType) : []);
   if (!rows.length) return { status: 'missing_cogs', totalPerVisit: 0, annualCost: 0, lines: [], warnings: ['No inventory COGS rows mapped'] };
 
   const areaSqFt = Number(dimensions[map.areaField] || 0);
   const warnings = [];
   let totalPerVisit = 0;
+  let fixedCost = 0;
   const lines = rows.map((row) => {
     const cost = costLineFromUsage(row, areaSqFt);
     if (cost.warning) warnings.push(cost.warning);
-    totalPerVisit += cost.cost || 0;
+    const multiplier = Number(serviceTypeFixedMultipliers[row.service_type] || 1);
+    const lineCost = (cost.cost || 0) * multiplier;
+    const isFixed = serviceTypeFixedMultipliers[row.service_type] != null;
+    if (isFixed) fixedCost += lineCost;
+    else totalPerVisit += lineCost;
     return {
       productId: row.product_id,
       productName: row.product_name,
       serviceType: row.service_type,
-      cost: money(cost.cost),
+      cost: money(lineCost),
+      costTiming: isFixed ? 'fixed' : 'per_visit',
       source: cost.source || 'missing',
       warning: cost.warning || null,
     };
@@ -300,6 +346,7 @@ function inventoryCostFromRows(serviceKey, dimensions, inventory) {
   return {
     status: warnings.length ? 'warning' : 'ok',
     totalPerVisit: money(totalPerVisit),
+    fixedCost: money(fixedCost),
     matchedServiceType,
     lines,
     warnings,
@@ -312,6 +359,7 @@ async function inventoryCostFor(serviceKey, dimensions) {
 
 function visitsFor(line, result) {
   if (line.cadence === 'one_time') return 1;
+  if (line.visitsPerYear) return Number(line.visitsPerYear);
   const item = (result?.lineItems || []).find((i) => i.service === line.serviceKey);
   if (item?.visits || item?.visitsPerYear) return Number(item.visits || item.visitsPerYear);
   if (line.serviceKey === 'lawn_care') return Number(result?.results?.lawn?.find((x) => x.recommended)?.v || 9);
@@ -356,9 +404,9 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     const protocol = raw.skipCogs ? null : protocolFor(raw);
     const cogs = raw.skipCogs
       ? { status: 'not_applicable', totalPerVisit: 0, lines: [], warnings: [] }
-      : inventoryCostFromRows(raw.serviceKey, dimensions, inventory);
+      : inventoryCostFromRows(raw.serviceKey, dimensions, inventory, raw.cogsServiceTypes, raw.cogsServiceTypeFixedMultipliers);
     const visits = visitsFor(raw, result);
-    const estimatedCost = money((cogs.totalPerVisit || 0) * visits);
+    const estimatedCost = money((cogs.totalPerVisit || 0) * visits + (cogs.fixedCost || 0));
     const grossProfit = money(raw.price - estimatedCost);
     const margin = raw.price > 0 ? Math.round((grossProfit / raw.price) * 1000) / 1000 : null;
     const warnings = [

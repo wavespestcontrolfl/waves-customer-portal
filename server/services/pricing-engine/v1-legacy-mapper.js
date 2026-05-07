@@ -147,6 +147,8 @@ function mapV1ToLegacyShape(v1Result) {
     R.mqMeta = {
       pr: mqLI.pressureMultiplier || 1,
       sz: mqLI.lotCategory || 'SMALL',
+      program: mqLI.tier || 'monthly',
+      addOns: mqLI.addOns || null,
       ri,
     };
   }
@@ -210,6 +212,7 @@ function mapV1ToLegacyShape(v1Result) {
       if (li.spacing !== undefined) item.spacing = li.spacing;
       if (li.lawnType !== undefined) item.lawnType = li.lawnType;
       if (li.tierName !== undefined) item.tierName = li.tierName;
+      if (li.addOns !== undefined) item.addOns = li.addOns;
       v1OtItems.push(item);
       if (li.service === 'trenching') R.trench = true;
     } else {
