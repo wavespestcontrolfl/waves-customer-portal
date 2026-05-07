@@ -3,6 +3,7 @@ import { calculateEstimate, fmt, fmtInt } from '../../lib/estimateEngine';
 import { LeadsSection } from './LeadsTabs';
 import PricingLogicPanel from '../../components/admin/PricingLogicPanel';
 import { MarginCalculator } from './PricingLogicPage';
+import PestProductionDiagnosticsPanel from '../../components/admin/PestProductionDiagnosticsPanel';
 
 class EstimateErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { error: null }; }
@@ -1444,62 +1445,7 @@ function EstimateToolView() {
                 </div>
                 )}
 
-                {E.productionDiagnostics && (
-                  <div style={{ marginBottom: 24 }}>
-                    <div style={sSectionTitle}>Production Burden</div>
-                    <div style={{
-                      border: '1px solid rgba(15,23,42,0.10)',
-                      background: 'rgba(248,250,252,0.9)',
-                      borderRadius: 8,
-                      padding: 12,
-                    }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 8, fontSize: 13, fontWeight: 700, color: C.heading }}>
-                        <span>Estimated service time</span>
-                        <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{E.productionDiagnostics.estimatedMinutes} min</span>
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 8 }}>
-                        <span style={{ fontSize: 12, color: C.gray }}>Pricing confidence</span>
-                        {(() => {
-                          const confidence = String(E.productionDiagnostics.pricingConfidence || E.productionDiagnostics.confidence || 'high').toLowerCase();
-                          const color = confidence === 'low' ? C.red : confidence === 'medium' ? C.amber : C.green;
-                          return (
-                            <span style={{
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              border: `1px solid ${color}33`,
-                              background: `${color}14`,
-                              color,
-                              borderRadius: 999,
-                              padding: '3px 8px',
-                              fontSize: 11,
-                              fontWeight: 800,
-                              textTransform: 'uppercase',
-                              letterSpacing: 0.5,
-                            }}>
-                              {confidence === 'low' ? 'Review required' : confidence === 'medium' ? 'Review recommended' : 'High'}
-                            </span>
-                          );
-                        })()}
-                      </div>
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', columnGap: 16, rowGap: 4, fontSize: 12, color: C.gray }}>
-                        {Object.entries(E.productionDiagnostics.breakdown || {}).map(([key, value]) => (
-                          Number(value) !== 0 && (
-                            <div key={key} style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                              <span>{key.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase())}</span>
-                              <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{Number(value) > 0 ? '+' : ''}{value} min</span>
-                            </div>
-                          )
-                        ))}
-                      </div>
-                      {E.productionDiagnostics.manualReview && (
-                        <div style={{ marginTop: 8, fontSize: 12, color: C.red }}>
-                          Review: {((E.productionDiagnostics.reviewReasons || E.productionDiagnostics.manualReviewReasons || [])).join(', ').replace(/_/g, ' ')}
-                        </div>
-                      )}
-                      <div style={{ marginTop: 8, fontSize: 11, color: C.gray }}>Shadow only. These minutes do not drive price yet.</div>
-                    </div>
-                  </div>
-                )}
+                <PestProductionDiagnosticsPanel diagnostics={E.productionDiagnostics} />
 
                 {/* ── Recurring Programs ────────────────── */}
                 {E.hasRecurring && (

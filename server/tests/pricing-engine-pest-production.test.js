@@ -97,6 +97,9 @@ describe('pest production burden pricing inputs', () => {
 
     expect(line.productionDiagnostics.pricingConfidence).toBe('medium');
     expect(line.productionDiagnostics.manualReview).toBe(true);
+    expect(line.productionDiagnostics.poolCageSize).toBe('medium');
+    expect(line.productionDiagnostics.poolCageSizeSource).toBe('inferred');
+    expect(line.productionDiagnostics.poolCageSizeInferred).toBe(true);
     expect(line.productionDiagnostics.reviewReasons).toEqual(expect.arrayContaining([
       'stories_estimated',
       'pool_cage_size_inferred',
@@ -122,6 +125,8 @@ describe('pest production burden pricing inputs', () => {
     });
 
     expect(line.productionDiagnostics.reviewReasons).not.toContain('stories_estimated');
+    expect(line.productionDiagnostics.poolCageSizeSource).toBe('explicit');
+    expect(line.productionDiagnostics.poolCageSizeInferred).toBe(false);
   });
 
   test('marks missing dimensions and extreme production burden as low confidence', () => {
