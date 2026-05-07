@@ -1295,9 +1295,9 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   //
   // Standalone Cockroach Treatment routes by the form's roachType selector:
   //   GERMAN  → priceGermanRoach (3-visit specialty, $450+)
-  //   REGULAR → pricePestInitialRoach('regular') — single-visit native
-  //             knockdown ($119/$139/$169 by footprint), same sliding scale
-  //             as the auto-fire alongside recurring pest.
+  //   REGULAR → pricePestInitialRoach('regular', standalone=true) —
+  //             single-visit native knockdown using the standalone scale
+  //             ($202.50/$239/$289 by footprint).
   // Skip the standalone REGULAR fire when recurring pest already auto-fires
   // the same knockdown via roachModifier='REGULAR' so the same service isn't
   // billed twice.

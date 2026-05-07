@@ -126,4 +126,56 @@ describe('estimate v2 service toggle adapter', () => {
     expect(serviceKeys).not.toContain('german_roach');
     expect(serviceKeys).not.toContain('german_roach_initial');
   });
+
+  test('prices standalone regular roach from the standalone knockdown scale', () => {
+    const input = translateV2CallToV1Input(
+      {
+        ...baseProfile(),
+        homeSqFt: 4200,
+        footprint: 4200,
+      },
+      ['ROACH'],
+      {
+        roachType: 'REGULAR',
+      }
+    );
+
+    expect(input.services.pest).toBeUndefined();
+    expect(input.services.pestInitialRoach).toEqual({ roachType: 'regular' });
+
+    const estimate = generateEstimate(input);
+    const roachLine = estimate.lineItems.find((line) => line.service === 'pest_initial_roach');
+    expect(roachLine).toEqual(expect.objectContaining({
+      label: 'Initial Native Roach Knockdown',
+      price: 289,
+      roachType: 'regular',
+    }));
+  });
+
+  test('keeps standalone regular roach scale when recurring pest has no roach modifier', () => {
+    const input = translateV2CallToV1Input(
+      {
+        ...baseProfile(),
+        homeSqFt: 4200,
+        footprint: 4200,
+      },
+      ['PEST', 'ROACH'],
+      {
+        roachModifier: 'NONE',
+        roachType: 'REGULAR',
+        pestFreq: 4,
+      }
+    );
+
+    expect(input.services.pest).toEqual({
+      frequency: 'quarterly',
+      roachType: 'none',
+    });
+    expect(input.services.pestInitialRoach).toEqual({ roachType: 'regular' });
+
+    const estimate = generateEstimate(input);
+    const roachLines = estimate.lineItems.filter((line) => line.service === 'pest_initial_roach');
+    expect(roachLines).toHaveLength(1);
+    expect(roachLines[0].price).toBe(289);
+  });
 });
