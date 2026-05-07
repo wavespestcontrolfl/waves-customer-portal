@@ -987,11 +987,15 @@ function priceOneTimeMosquito(property, options = {}) {
   const stationAddOn = stationCount * MOSQUITO.addOns.in2CareStation.price;
   const dunkAddOn = dunkCount * MOSQUITO.addOns.dunkTablet.price;
   const price = basePrice + stationAddOn + dunkAddOn;
+  const detailParts = [];
+  if (stationCount > 0) detailParts.push(`${stationCount} mosquito station${stationCount === 1 ? '' : 's'} (+$${Math.round(stationAddOn)})`);
+  if (dunkCount > 0) detailParts.push(`${dunkCount} Bti dunk tablet${dunkCount === 1 ? '' : 's'} (+$${Math.round(dunkAddOn)})`);
   return {
     service: 'one_time_mosquito',
     price,
     lotCategory,
     basePrice,
+    detail: detailParts.join(' + '),
     addOns: { stationCount, dunkCount, stationAddOn, dunkAddOn },
   };
 }

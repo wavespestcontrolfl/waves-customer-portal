@@ -2258,7 +2258,10 @@ export default function EstimateToolViewV2({
                             <div className="grid grid-cols-[1fr_auto] gap-y-1 gap-x-4 text-13 mt-3 p-3 bg-white rounded-xs border-hairline border-zinc-200">
                               {E.recurring.services.map((s, i) => (
                                 <React.Fragment key={i}>
-                                  <div className="text-ink-secondary">{s.name}</div>
+                                  <div className="text-ink-secondary">
+                                    <div>{s.displayName || s.name}</div>
+                                    {s.detail && <div className="text-11 text-ink-tertiary leading-snug mt-0.5">{s.detail}</div>}
+                                  </div>
                                   <div className="text-zinc-900 text-right u-nums">{fmt(s.mo)}/mo</div>
                                 </React.Fragment>
                               ))}
@@ -2317,8 +2320,11 @@ export default function EstimateToolViewV2({
                                 <span className="font-medium text-zinc-900 u-nums">{fmtInt(E.oneTime.otSubtotal)}</span>
                               </div>
                               {E.oneTime.items.map((item, i) => (
-                                <div key={i} className="flex justify-between items-center py-0.5 pl-4 text-13 text-ink-secondary">
-                                  <span>{item.name}{item.waivedWithPrepay ? <span className="text-11 text-ink-tertiary ml-1">waived with annual prepay</span> : ''}</span>
+                                <div key={i} className="flex justify-between items-start gap-3 py-0.5 pl-4 text-13 text-ink-secondary">
+                                  <span>
+                                    <span>{item.name}{item.waivedWithPrepay ? <span className="text-11 text-ink-tertiary ml-1">waived with annual prepay</span> : ''}</span>
+                                    {item.detail && <span className="block text-11 text-ink-tertiary leading-snug mt-0.5">{item.detail}</span>}
+                                  </span>
                                   <span className="text-13 u-nums">{fmtInt(item.price)}</span>
                                 </div>
                               ))}

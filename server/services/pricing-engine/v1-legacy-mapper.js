@@ -62,6 +62,18 @@ const SERVICE_LABEL = {
 
 const labelFor = svc => SERVICE_LABEL[svc] || svc;
 
+function describeMosquitoAddOns(addOns = {}, multiplier = 1) {
+  const parts = [];
+  const mult = Number.isFinite(Number(multiplier)) && Number(multiplier) > 0 ? Number(multiplier) : 1;
+  const stationCount = Number(addOns.stationCount || 0);
+  const dunkCount = Number(addOns.dunkCount || 0);
+  const stationAddOn = Number(addOns.stationAddOn || 0) * mult;
+  const dunkAddOn = Number(addOns.dunkAddOn || 0) * mult;
+  if (stationCount > 0) parts.push(`${stationCount} mosquito station${stationCount === 1 ? '' : 's'} (+$${Math.round(stationAddOn)}/yr)`);
+  if (dunkCount > 0) parts.push(`${dunkCount} Bti dunk tablet${dunkCount === 1 ? '' : 's'} (+$${Math.round(dunkAddOn)}/yr)`);
+  return parts.join(' + ');
+}
+
 function mapV1ToLegacyShape(v1Result) {
   const R = {};
   const lineItems = v1Result.lineItems || [];
@@ -180,15 +192,35 @@ function mapV1ToLegacyShape(v1Result) {
   // convention (see v2-legacy-mapper.js:159). Order matches v2's wg.services:
   // lawn → pest → tree_shrub → mosquito → termite_bait.
   const services = [];
-  const svcAdd = (name, li) => {
+  const svcAdd = (name, li, extra = {}) => {
     if (!li) return;
     const mo = li.monthly || 0;
-    services.push({ name, mo, monthly: mo });
+    services.push({ name, mo, monthly: mo, ...extra });
   };
   svcAdd('Lawn Care', lawnLI);
   svcAdd('Pest Control', pestLI);
   svcAdd('Tree & Shrub', tsLI);
-  svcAdd('Mosquito', mqLI);
+  if (mqLI) {
+    const selectedTier = (mqLI.tiers || []).find(t => t.tier === mqLI.tier)
+      || (mqLI.tiers || []).find(t => t.recommended)
+      || null;
+    const visits = selectedTier?.visits || mqLI.visits || 0;
+    const selectedAnnual = Number(selectedTier?.annual || 0);
+    const recurringMultiplier = selectedAnnual > 0 ? Number(mqLI.annual || selectedAnnual) / selectedAnnual : 1;
+    const addOnDetail = describeMosquitoAddOns(mqLI.addOns || {}, recurringMultiplier);
+    const detailParts = [
+      'Mosquito program',
+      visits ? `${visits} visits/yr` : null,
+      addOnDetail || null,
+    ].filter(Boolean);
+    svcAdd('Mosquito', mqLI, {
+      service: 'mosquito',
+      program: mqLI.tier || null,
+      displayName: selectedTier?.name || 'Mosquito',
+      detail: detailParts.join(' · '),
+      addOns: mqLI.addOns || null,
+    });
+  }
   svcAdd('Termite Bait', tbLI);
 
   // One-time + specialty split

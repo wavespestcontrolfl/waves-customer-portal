@@ -2926,8 +2926,8 @@ function shapeFromV1(v1, ladder, pestTier, prefs) {
   // lawn care; only pest's visit cadence changes).
   const included = v1.services.map((svc) => ({
     key: (svc?.name || '').toLowerCase().replace(/\s+/g, '_') || 'service',
-    label: svc?.name || 'Service',
-    detail: null,
+    label: svc?.displayName || svc?.name || 'Service',
+    detail: svc?.detail || null,
     includedAtThisFrequency: true,
   }));
 
