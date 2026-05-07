@@ -65,13 +65,13 @@ Single source of truth for what this engine prices, how, and with what constants
 **Formula:** `max(floor, base + footprintAdj + additionalAdj + propAdj + ageAdj) × freqMult`
 
 - `base` $117, `floor` $89
-- `initialFee` $99 (marked "waived with annual prepay" — **copy-only; waiver not implemented in engine**)
+- `initialFee` $99 WaveGuard setup/membership fee. Estimate acceptance waives it when the customer selects annual prepay.
 
 **Footprint brackets (linear interp):** 800 −$15 · 1200 −$10 · 1500 −$5 · 2000 $0 · 2500 +$3 · 3000 +$6 · 4000 +$10 · 5500 +$16
 
 **Additional adjustments:** indoor +$15 · shrubs light −$5 / moderate $0 / heavy +$6 · pool no-cage $0 · pool cage small +$5 / medium +$8 / large +$12 / oversized +$18 · trees light −$5 / moderate $0 / heavy +$6 · complexity simple −$5 / complex +$3 · nearWater +$3 · largeDriveway +$3 · attached garage +$5
 
-**Roach handling:** recurring roach multiplier is retired (`german`, `regular`, and `none` are all 0%). Recurring pest with regular/German roach auto-adds a one-time Initial Roach Knockdown line item. Standalone regular roach uses the higher native-roach knockdown scale: $202.50 under 1,500 sf, $239 from 1,500-2,500 sf, and $289 over 2,500 sf.
+**Roach handling:** recurring roach multiplier is retired (`german`, `regular`, and `none` are all 0%). Recurring pest with regular/German roach auto-adds a fixed, non-waivable, non-discounted first-visit Initial Roach Knockdown line item. Recurring native roach is $119/$139/$169 by footprint; recurring German is $169/$199/$249. Standalone regular roach uses the higher native-roach knockdown scale: $202.50 under 1,500 sf, $239 from 1,500-2,500 sf, and $289 over 2,500 sf.
 
 **Lot size:** recurring pest price currently has no lot-size dollar adder. Lot size feeds `productionDiagnostics.breakdown.lot` only, so it is visible for calibration/manual review but does not change `basePrice`, `perApp`, annual, or monthly price until the production-minute model is explicitly cut over.
 

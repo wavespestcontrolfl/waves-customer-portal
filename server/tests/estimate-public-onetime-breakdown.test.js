@@ -290,6 +290,50 @@ describe('public estimate one-time breakdown', () => {
     }));
   });
 
+  test('classifies fallback-saved native roach initial by service key', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-native-roach-service-key-test',
+      estimate_data: {
+        result: {
+          results: {
+            pestTiers: [{ label: 'Quarterly', mo: 39.67, ann: 476, pa: 119, apps: 4 }],
+          },
+          recurring: {
+            discount: 0,
+            monthlyTotal: 39.67,
+            annualAfterDiscount: 476,
+            services: [{ name: 'Pest Control', mo: 39.67 }],
+          },
+          oneTime: {
+            total: 238,
+            membershipFee: 99,
+            tmInstall: 0,
+            items: [{
+              service: 'pest_initial_roach',
+              name: 'Initial Native Roach Knockdown',
+              price: 139,
+              noRecurringDiscount: true,
+            }],
+          },
+        },
+      },
+      onetime_total: 238,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.firstVisitFees).toContainEqual(expect.objectContaining({
+      service: 'pest_initial_roach',
+      label: 'Initial Native Roach Knockdown',
+      amount: 139,
+      waivedWithPrepay: false,
+    }));
+    expect(payload.firstVisitFees).toContainEqual(expect.objectContaining({
+      service: 'waveguard_setup',
+      amount: 99,
+      waivedWithPrepay: true,
+    }));
+  });
+
   test('builds breakdown from generated engine results when only engine inputs are saved', async () => {
     const payload = await buildPricingBundle({
       id: 'estimate-public-engine-generated-breakdown-test',

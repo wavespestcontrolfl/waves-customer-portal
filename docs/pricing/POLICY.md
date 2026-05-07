@@ -236,6 +236,51 @@ this regardless of property size.
   visit cost (drive + 20 min on-site + chemical + admin allocation).
   $89 is the calculated break-even at `MARGIN_FLOOR`.
 
+### Pest roach pricing
+**Meaning.** Recurring pest no longer charges a recurring roach percentage
+premium. `PEST.roachModifier.german`, `.regular`, and `.none` are all
+`0`; the `roachType` field is retained so callers can request the correct
+first-visit line.
+
+**Current behavior.**
+- Recurring pest with regular/native roach selected auto-adds
+  `pest_initial_roach` as **Initial Native Roach Knockdown**.
+- Recurring pest with German roach selected auto-adds
+  `pest_initial_roach` as **Initial German Roach Knockdown**.
+- The initial knockdown is a fixed first-visit cost-recovery fee, not a
+  one-time service discount target. It is not waived by annual prepay and
+  is excluded from recurring-customer one-time percentage discounts.
+- Standalone regular roach uses the higher standalone native-roach scale.
+- Standalone German roach remains the separate multi-visit German roach
+  cleanout service.
+
+**Brackets.**
+- Recurring native roach initial: `$119` under 1,500 sqft, `$139` from
+  1,500-2,500 sqft, `$169` over 2,500 sqft.
+- Recurring German roach initial: `$169` under 1,500 sqft, `$199` from
+  1,500-2,500 sqft, `$249` over 2,500 sqft.
+- Standalone regular roach: `$202.50` under 1,500 sqft, `$239` from
+  1,500-2,500 sqft, `$289` over 2,500 sqft.
+
+**Rationale.** Roach work is a heavier first visit, not a clean recurring
+percentage premium. A fixed initial fee recovers the product and labor cost
+even if the customer churns before the old percentage modifier would have
+paid back the visit-1 burden.
+
+### Pest pool cage pricing
+Pool cage pest pricing is intentionally conservative while the production
+calibration report gathers actual on-site time:
+
+| Pool cage size | Per-visit pest adjustment |
+|---|---:|
+| Small | `$5` |
+| Medium/default | `$8` |
+| Large | `$12` |
+| Oversized | `$18` |
+
+These values are additive property adjustments. Production minutes remain
+shadow-only until calibrated against Bouncie/time-tracking actuals.
+
 ### Lawn brackets — `LAWN_BRACKETS`
 **Where:** `constants.js`, separately for `st_augustine`, `bermuda`,
 `zoysia`, `bahia`. Each track has 12 size brackets × 4 service tiers

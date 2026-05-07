@@ -5,6 +5,7 @@
 // ============================================================
 const constants = require('./constants');
 const r = (val) => Math.round(val * constants.PROCESSING_ADJUSTMENT);
+const money = (val) => Math.round(Number(val) * constants.PROCESSING_ADJUSTMENT * 100) / 100;
 
 let _lastSync = 0;
 const SYNC_INTERVAL = 60_000; // 1 minute cache
@@ -51,18 +52,19 @@ async function syncConstantsFromDB(dbInstance) {
       if (config.pest_base.base) constants.PEST.base = r(config.pest_base.base);
       if (config.pest_base.floor) constants.PEST.floor = r(config.pest_base.floor);
       // Initial Roach Knockdown sliding scale — DB shape mirrors the constants:
-      //   { regular: [{sqft, price}, ...], german: [{sqft, price}, ...] }
+      //   { regular: [{sqft, price}, ...], german: [{sqft, price}, ...],
+      //     regular_standalone: [{sqft, price}, ...] }
       // Stored as an object so the admin Pricing Logic panel can re-tune the
       // brackets per-species without redeploying. Replace whole-cloth (no
       // partial merge) — we want admin edits to be authoritative.
       if (config.pest_base.initial_roach && typeof config.pest_base.initial_roach === 'object') {
         const ir = config.pest_base.initial_roach;
         const next = { ...constants.PEST.pestInitialRoach };
-        for (const species of ['regular', 'german']) {
+        for (const species of ['regular', 'german', 'regular_standalone']) {
           if (Array.isArray(ir[species])) {
             next[species] = ir[species].map((b) => ({
               sqft: b.sqft === null || b.sqft === 'Infinity' ? Infinity : Number(b.sqft),
-              price: r(b.price),
+              price: money(b.price),
             }));
           }
         }

@@ -261,7 +261,7 @@ Interlude between Sessions 8 and 9. Session 9's scoping (approval-queue wire-up)
 |---|---|---|
 | `global_margin_floor` | 0.55 → 0.35 | 35% is the intended policy; 55% was not the operating benchmark. Code comments (`pc.json` notes: "At $89 floor: margin = 53% (above 35% floor)") reference 35% as the working threshold. |
 | `global_margin_target_ts` | 0.50 → 0.43 | 43% reflects T&S competitive-market reality. See Observation 1 below — this DB key turned out to be cosmetic. |
-| `pest_roach` | `german` 0.40→0.25, `regular` 0.15→0.10 | Less-aggressive roach markup. |
+| `pest_roach` | `german`/`regular` now retired to 0 in current engine | Historical reconciliation moved these down; current pricing uses fixed `pest_initial_roach` first-visit fees instead of recurring roach percentages. |
 | `waveguard_ach` | `percentage` 0.03 → 0 | Retirement completion. Code comment `// Retired. Kept at 0% so any legacy callers stay harmless.` — DB catches up. |
 
 **Orphan keys not touched:** `pest_features.trees_light` (−5), `pest_features.shrubs_light` (−5) exist in DB but not in `constants.js`. Leaving them alone was the disciplined choice (deletion could break an unexpected reader; retention is benign). Separate cleanup pass if ever needed.
@@ -375,7 +375,7 @@ Observed causes:
 
 - Pest recurring cases moved with the current DB-synced pest feature/footprint/frequency values.
 - Termite basic standard perimeter now captures Advance install at $695 plus $420 annual monitoring, producing $1,355 year 1.
-- German roach recurring captures the lower synced roach modifier on pest recurring and includes the initial roach line in year 1.
+- German roach recurring now keeps pest recurring clean and includes the fixed `pest_initial_roach` line in year 1; the old recurring percentage modifier is retired.
 
 ### v1 adapter regression changes
 

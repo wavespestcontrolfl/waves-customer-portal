@@ -127,6 +127,33 @@ describe('estimate v2 service toggle adapter', () => {
     expect(serviceKeys).not.toContain('german_roach_initial');
   });
 
+  test('regular roach modifier does not alter recurring per-app price or discount the initial', () => {
+    const noRoach = generateEstimate({
+      ...baseProfile(),
+      services: { pest: { frequency: 'quarterly', roachType: 'none' } },
+      recurringCustomer: true,
+    });
+    const regularRoach = generateEstimate({
+      ...baseProfile(),
+      services: { pest: { frequency: 'quarterly', roachType: 'regular' } },
+      recurringCustomer: true,
+    });
+
+    const noRoachPest = noRoach.lineItems.find((line) => line.service === 'pest_control');
+    const regularPest = regularRoach.lineItems.find((line) => line.service === 'pest_control');
+    const initialRoach = regularRoach.lineItems.find((line) => line.service === 'pest_initial_roach');
+
+    expect(regularPest.perApp).toBe(noRoachPest.perApp);
+    expect(regularPest.roachAddOn).toBe(0);
+    expect(initialRoach).toEqual(expect.objectContaining({
+      service: 'pest_initial_roach',
+      label: 'Initial Native Roach Knockdown',
+      price: 139,
+      roachType: 'regular',
+    }));
+    expect(regularRoach.summary.oneTimeTotal).toBe(139);
+  });
+
   test('prices standalone regular roach from the standalone knockdown scale', () => {
     const input = translateV2CallToV1Input(
       {
