@@ -400,13 +400,79 @@ async function checkAnthropic() {
   }
 }
 
-async function checkGoogle() {
-  const platform = 'google';
-  const envVarName = 'GOOGLE_API_KEY';
-  const key = process.env.GOOGLE_API_KEY;
+async function checkOpenAI() {
+  const platform = 'openai';
+  const envVarName = 'OPENAI_API_KEY';
+  const key = process.env.OPENAI_API_KEY;
 
   if (!key) {
-    const result = { platform, status: 'not_configured', lastError: 'GOOGLE_API_KEY not set', expiresAt: null };
+    const result = { platform, status: 'not_configured', lastError: 'OPENAI_API_KEY not set', expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+
+  try {
+    const res = await fetch('https://api.openai.com/v1/models', {
+      headers: { Authorization: `Bearer ${key}` },
+    });
+
+    if (res.ok) {
+      const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
+      await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+      return result;
+    }
+
+    const status = (res.status === 401 || res.status === 403) ? 'expired' : 'error';
+    const data = await res.json().catch(() => ({}));
+    const result = { platform, status, lastError: data.error?.message || `HTTP ${res.status}`, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  } catch (err) {
+    const result = { platform, status: 'error', lastError: err.message, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+}
+
+async function checkGemini() {
+  const platform = 'gemini';
+  const envVarName = 'GEMINI_API_KEY';
+  const key = process.env.GEMINI_API_KEY;
+
+  if (!key) {
+    const result = { platform, status: 'not_configured', lastError: 'GEMINI_API_KEY not set', expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+
+  try {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`);
+
+    if (res.ok) {
+      const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
+      await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+      return result;
+    }
+
+    const status = (res.status === 400 || res.status === 401 || res.status === 403) ? 'expired' : 'error';
+    const data = await res.json().catch(() => ({}));
+    const result = { platform, status, lastError: data.error?.message || `HTTP ${res.status}`, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  } catch (err) {
+    const result = { platform, status: 'error', lastError: err.message, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+}
+
+async function checkGoogle() {
+  const platform = 'google';
+  const envVarName = process.env.GOOGLE_MAPS_API_KEY ? 'GOOGLE_MAPS_API_KEY' : 'GOOGLE_API_KEY';
+  const key = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
+
+  if (!key) {
+    const result = { platform, status: 'not_configured', lastError: 'GOOGLE_MAPS_API_KEY or GOOGLE_API_KEY not set', expiresAt: null };
     await upsertResult({ ...result, tokenType: 'api_key', envVarName });
     return result;
   }
@@ -518,25 +584,6 @@ async function checkGitHub() {
   }
 }
 
-// RentCast has no cheap no-cost ping endpoint and every property call
-// burns a credit. We report 'healthy' when the API key is set, since
-// that's all the check can guarantee without spending credits.
-async function checkRentCast() {
-  const platform = 'rentcast';
-  const envVarName = 'RENTCAST_API_KEY';
-  const key = process.env.RENTCAST_API_KEY;
-
-  if (!key) {
-    const result = { platform, status: 'not_configured', lastError: 'RENTCAST_API_KEY not set', expiresAt: null };
-    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
-    return result;
-  }
-
-  const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
-  await upsertResult({ ...result, tokenType: 'api_key', envVarName });
-  return result;
-}
-
 // ── Public API ──
 
 const TokenHealthService = {
@@ -558,9 +605,10 @@ const TokenHealthService = {
       case 'stripe': return checkStripe();
       case 'twilio': return checkTwilio();
       case 'anthropic': return checkAnthropic();
+      case 'openai': return checkOpenAI();
+      case 'gemini': return checkGemini();
       case 'google': return checkGoogle();
       case 'sendgrid': return checkSendGrid();
-      case 'rentcast': return checkRentCast();
       case 'github': return checkGitHub();
       default:
         return { platform, status: 'error', lastError: `Unknown platform: ${platform}`, expiresAt: null };
@@ -589,9 +637,10 @@ const TokenHealthService = {
     results.push(await checkStripe());
     results.push(await checkTwilio());
     results.push(await checkAnthropic());
+    results.push(await checkOpenAI());
+    results.push(await checkGemini());
     results.push(await checkGoogle());
     results.push(await checkSendGrid());
-    results.push(await checkRentCast());
     results.push(await checkGitHub());
 
     const healthy = results.filter(r => r.status === 'healthy').length;
@@ -622,8 +671,8 @@ const TokenHealthService = {
         'facebook', 'instagram', 'linkedin',
         'gbp_lwr', 'gbp_parrish', 'gbp_sarasota', 'gbp_venice',
         'bouncie', 'beehiiv', 'dataforseo',
-        'stripe', 'twilio', 'anthropic', 'google',
-        'sendgrid', 'rentcast',
+        'stripe', 'twilio', 'anthropic', 'openai', 'gemini', 'google',
+        'sendgrid',
         'github',
       ]);
 

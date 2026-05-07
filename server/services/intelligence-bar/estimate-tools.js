@@ -14,14 +14,12 @@ const logger = require('../logger');
 const { generateEstimate } = require('../pricing-engine');
 const { shortenOrPassthrough } = require('../short-url');
 const { validateEstimateDeliveryOptions } = require('../estimate-delivery-options');
-
-const RENTCAST_KEY = process.env.RENTCAST_API_KEY || '6dfcb2eaa9f34bf285e101b74e1a3ef6';
-const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY || 'AIzaSyCvzQ84QWUKMby5YcbM8MhDBlEZ2oF7Bsk';
+const { performPropertyLookup } = require('../../routes/property-lookup-v2');
 
 const ESTIMATE_TOOLS = [
   {
     name: 'lookup_property',
-    description: `Enrich an address with property data (sqft, lot size, year built, beds/baths) via RentCast and a satellite image via Google. Always call this before compute_estimate when sqft/lot are not user-provided.
+    description: `Enrich an address with property data (sqft, lot size, year built, beds/baths) via AI property search plus Google satellite imagery. Always call this before compute_estimate when sqft/lot are not user-provided.
 Use for: any address-driven quote where the operator only gave a street address.`,
     input_schema: {
       type: 'object',
@@ -201,55 +199,47 @@ async function executeEstimateTool(toolName, input) {
 async function lookupProperty({ address }) {
   if (!address) return { error: 'address required' };
 
-  let property = null;
   try {
-    const rcResp = await fetch(
-      `https://api.rentcast.io/v1/properties?address=${encodeURIComponent(address)}`,
-      { headers: { 'X-Api-Key': RENTCAST_KEY, 'Accept': 'application/json' } }
-    );
-    if (rcResp.ok) {
-      const rcData = await rcResp.json();
-      const raw = Array.isArray(rcData) ? rcData[0] : rcData;
-      if (raw) {
-        property = {
-          formatted_address: raw.formattedAddress || raw.addressLine1 || address,
-          home_sqft: raw.squareFootage || null,
-          lot_sqft: raw.lotSize || null,
-          year_built: raw.yearBuilt || null,
-          bedrooms: raw.bedrooms || null,
-          bathrooms: raw.bathrooms || null,
-          property_type: raw.propertyType || null,
-          stories: raw.stories || null,
-        };
-      }
-    }
-  } catch (e) {
-    logger.error(`[estimate-tools] RentCast lookup failed: ${e.message}`);
-  }
+    const lookup = await performPropertyLookup(address);
+    const raw = lookup.propertyRecord || lookup.rentcast || null;
+    const property = raw ? {
+      formatted_address: raw.formattedAddress || raw.addressLine1 || address,
+      home_sqft: raw.squareFootage || null,
+      lot_sqft: raw.lotSize || null,
+      year_built: raw.yearBuilt || null,
+      bedrooms: raw.bedrooms || null,
+      bathrooms: raw.bathrooms || null,
+      property_type: raw.propertyType || null,
+      stories: raw.stories || null,
+      source: raw._source || 'ai',
+      provider: raw._provider || null,
+    } : null;
+    const satellite = lookup.satellite ? {
+      lat: lookup.satellite.lat,
+      lng: lookup.satellite.lng,
+      imageUrl: lookup.satellite.superCloseUrl || lookup.satellite.closeUrl,
+      microCloseUrl: lookup.satellite.microCloseUrl || null,
+      inServiceArea: lookup.satellite.inServiceArea,
+      aiSources: lookup.aiAnalysis?._sources || [],
+    } : null;
 
-  let satellite = null;
-  try {
-    const gResp = await fetch(
-      `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${GOOGLE_KEY}`
-    );
-    const gData = await gResp.json();
-    if (gData.status === 'OK' && gData.results?.length) {
-      const loc = gData.results[0].geometry.location;
-      if (loc.lat >= 24 && loc.lat <= 32 && loc.lng >= -88 && loc.lng <= -79) {
-        satellite = {
-          lat: loc.lat,
-          lng: loc.lng,
-          imageUrl: `https://maps.googleapis.com/maps/api/staticmap?center=${loc.lat},${loc.lng}&zoom=20&size=640x640&maptype=satellite&format=png&key=${GOOGLE_KEY}`,
-        };
-      } else {
-        return { error: 'Address is outside Waves service area (SW Florida).', property, satellite: null };
-      }
+    if (satellite && satellite.inServiceArea === false) {
+      return { error: 'Address is outside Waves service area (SW Florida).', property, satellite: null };
     }
+    return { property, satellite, enriched: lookup.enriched || null, errors: lookup.errors || [] };
   } catch (e) {
-    logger.error(`[estimate-tools] Geocode failed: ${e.message}`);
+    logger.error('[estimate-tools] AI property lookup failed', {
+      errorName: e?.name || 'Error',
+      errorCode: e?.code || null,
+      status: extractStatusCode(e),
+    });
+    return { error: 'AI property lookup failed' };
   }
+}
 
-  return { property, satellite };
+function extractStatusCode(err) {
+  const message = err?.message || '';
+  return message.match(/\b(\d{3})\b/)?.[1] || null;
 }
 
 async function computeEstimate(input) {

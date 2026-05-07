@@ -1,8 +1,8 @@
 /**
- * Dual-Vision Satellite Property Analyzer
+ * Trio-Vision Satellite Property Analyzer
  *
- * Runs both Claude (Anthropic) and Gemini (Google) vision in parallel
- * on a Google Static Maps satellite image. Merges results with
+ * Runs Claude (Anthropic), OpenAI, and Gemini (Google) vision in parallel
+ * on Google Static Maps satellite images. Merges results with
  * confidence weighting — where both agree, confidence is high.
  * Where they disagree, flags for field verification.
  */
@@ -15,6 +15,10 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY || '';
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
+const OPENAI_KEY = process.env.OPENAI_API_KEY || '';
+const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
+const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || process.env.OPENAI_MODEL || 'gpt-5-mini';
+const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || 'gemini-2.5-flash';
 
 const VISION_PROMPT = `Analyze this satellite/aerial image of a residential property in Southwest Florida. Estimate the following measurements and features as accurately as possible from the image.
 
@@ -45,7 +49,7 @@ Be specific with numbers. For SWFL properties, typical lot sizes range 5,000-15,
 class SatelliteAnalyzer {
 
   /**
-   * Analyze a property using both Claude and Gemini vision in parallel.
+   * Analyze a property using Claude, OpenAI, and Gemini vision in parallel.
    * Returns merged results with confidence scores.
    */
   async analyze(address, lat, lng) {
@@ -57,49 +61,62 @@ class SatelliteAnalyzer {
       lng = geo.lng;
     }
 
-    // Generate satellite image URL
+    const microCloseUrl = `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lng}&zoom=22&size=640x640&maptype=satellite&format=png&key=${GOOGLE_KEY}`;
     const imageUrl = `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lng}&zoom=20&size=640x640&maptype=satellite&format=png&key=${GOOGLE_KEY}`;
 
-    // Fetch the image as base64
-    let imageBase64;
+    let imageBase64s;
     try {
-      const imgResp = await fetch(imageUrl);
-      if (!imgResp.ok) throw new Error(`Image fetch failed: ${imgResp.status}`);
-      const buffer = await imgResp.arrayBuffer();
-      imageBase64 = Buffer.from(buffer).toString('base64');
+      imageBase64s = (await Promise.all([
+        this.fetchImageAsBase64(microCloseUrl).catch(() => null),
+        this.fetchImageAsBase64(imageUrl).catch(() => null),
+      ])).filter(Boolean);
+      if (!imageBase64s.length) throw new Error('No satellite images fetched');
     } catch (err) {
       logger.error(`Satellite image fetch failed: ${err.message}`);
-      return { error: 'Could not fetch satellite image', imageUrl };
+      return { error: 'Could not fetch satellite image', imageUrl, microCloseUrl };
     }
 
-    // Run both models in parallel
-    const [claudeResult, geminiResult] = await Promise.allSettled([
-      this.analyzeWithClaude(imageBase64),
-      this.analyzeWithGemini(imageBase64),
+    const [claudeResult, openaiResult, geminiResult] = await Promise.allSettled([
+      this.analyzeWithClaude(imageBase64s),
+      this.analyzeWithOpenAI(imageBase64s),
+      this.analyzeWithGemini(imageBase64s),
     ]);
 
     const claude = claudeResult.status === 'fulfilled' ? claudeResult.value : null;
+    const openai = openaiResult.status === 'fulfilled' ? openaiResult.value : null;
     const gemini = geminiResult.status === 'fulfilled' ? geminiResult.value : null;
 
-    if (!claude && !gemini) {
-      return { error: 'Both vision models failed', imageUrl };
+    if (!claude && !openai && !gemini) {
+      return { error: 'All vision models failed', imageUrl, microCloseUrl };
     }
 
-    // Merge results
-    const merged = this.mergeResults(claude, gemini);
+    const merged = this.mergeResults([
+      claude ? { provider: 'claude', analysis: claude } : null,
+      openai ? { provider: 'openai', analysis: openai } : null,
+      gemini ? { provider: 'gemini', analysis: gemini } : null,
+    ].filter(Boolean));
 
     return {
       ...merged,
       imageUrl,
+      microCloseUrl,
       lat, lng,
       models: {
         claude: claude ? { available: true, raw: claude } : { available: false },
+        openai: openai ? { available: true, raw: openai } : { available: false },
         gemini: gemini ? { available: true, raw: gemini } : { available: false },
       },
     };
   }
 
-  async analyzeWithClaude(imageBase64) {
+  async fetchImageAsBase64(url) {
+    const imgResp = await fetch(url);
+    if (!imgResp.ok) throw new Error(`Image fetch failed: ${imgResp.status}`);
+    const buffer = await imgResp.arrayBuffer();
+    return Buffer.from(buffer).toString('base64');
+  }
+
+  async analyzeWithClaude(imageBase64s) {
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
 
     try {
@@ -110,7 +127,7 @@ class SatelliteAnalyzer {
         messages: [{
           role: 'user',
           content: [
-            { type: 'image', source: { type: 'base64', media_type: 'image/png', data: imageBase64 } },
+            ...imageBase64s.map((imageBase64) => ({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: imageBase64 } })),
             { type: 'text', text: VISION_PROMPT },
           ],
         }],
@@ -124,11 +141,54 @@ class SatelliteAnalyzer {
     }
   }
 
-  async analyzeWithGemini(imageBase64) {
+  async analyzeWithOpenAI(imageBase64s) {
+    if (!OPENAI_KEY) return null;
+
+    try {
+      const response = await fetch(OPENAI_RESPONSES_API, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${OPENAI_KEY}`,
+        },
+        body: JSON.stringify({
+          model: OPENAI_VISION_MODEL,
+          input: [{
+            role: 'user',
+            content: [
+              { type: 'input_text', text: VISION_PROMPT },
+              ...imageBase64s.map((imageBase64) => ({
+                type: 'input_image',
+                image_url: `data:image/png;base64,${imageBase64}`,
+                detail: 'high',
+              })),
+            ],
+          }],
+        }),
+      });
+
+      if (!response.ok) {
+        logger.error(`OpenAI API ${response.status}: ${response.statusText}`);
+        return null;
+      }
+
+      const data = await response.json();
+      const text = this.extractOpenAIText(data);
+      if (!text) return null;
+      const cleaned = text.replace(/```json|```/g, '').trim();
+      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+      return JSON.parse(jsonMatch ? jsonMatch[0] : cleaned);
+    } catch (err) {
+      logger.error(`OpenAI vision failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  async analyzeWithGemini(imageBase64s) {
     if (!GEMINI_KEY) return null;
 
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_VISION_MODEL}:generateContent?key=${GEMINI_KEY}`;
 
       const response = await fetch(url, {
         method: 'POST',
@@ -136,7 +196,7 @@ class SatelliteAnalyzer {
         body: JSON.stringify({
           contents: [{
             parts: [
-              { inline_data: { mime_type: 'image/png', data: imageBase64 } },
+              ...imageBase64s.map((imageBase64) => ({ inlineData: { mimeType: 'image/png', data: imageBase64 } })),
               { text: VISION_PROMPT },
             ],
           }],
@@ -161,15 +221,16 @@ class SatelliteAnalyzer {
   }
 
   /**
-   * Merge Claude + Gemini results with confidence weighting.
+   * Merge model results with confidence weighting.
    * Where both agree (within 15%), confidence is HIGH.
    * Where they disagree, use average and flag for field verify.
    */
-  mergeResults(claude, gemini) {
-    // If only one model returned results, use it directly
-    if (!claude && !gemini) return { error: 'No results' };
-    if (!claude) return { ...gemini, confidence: 'single_model', source: 'gemini', fieldVerify: Object.keys(gemini) };
-    if (!gemini) return { ...claude, confidence: 'single_model', source: 'claude', fieldVerify: Object.keys(claude) };
+  mergeResults(providerResults) {
+    if (!providerResults.length) return { error: 'No results' };
+    if (providerResults.length === 1) {
+      const only = providerResults[0];
+      return { ...only.analysis, confidence: 'single_model', source: only.provider, fieldVerify: Object.keys(only.analysis) };
+    }
 
     const merged = {};
     const fieldVerify = [];
@@ -178,56 +239,53 @@ class SatelliteAnalyzer {
     // Numeric fields — average if within 15%, flag if > 15% apart
     const numericFields = ['lot_sqft', 'lawn_sqft', 'house_footprint_sqft', 'bed_area_sqft', 'driveway_sqft', 'palm_count', 'tree_count', 'perimeter_linear_ft'];
     for (const field of numericFields) {
-      const c = Number(claude[field]) || 0;
-      const g = Number(gemini[field]) || 0;
+      const values = providerResults.map(({ provider, analysis }) => ({ provider, value: Number(analysis[field]) || 0 })).filter((v) => v.value > 0);
 
-      if (c === 0 && g === 0) { merged[field] = 0; continue; }
-      if (c === 0) { merged[field] = g; fieldVerify.push(field); continue; }
-      if (g === 0) { merged[field] = c; fieldVerify.push(field); continue; }
+      if (!values.length) { merged[field] = 0; continue; }
+      if (values.length === 1) { merged[field] = values[0].value; fieldVerify.push(field); continue; }
 
-      const avg = Math.round((c + g) / 2);
-      const diff = Math.abs(c - g);
-      const pctDiff = diff / Math.max(c, g);
+      const avg = Math.round(values.reduce((sum, v) => sum + v.value, 0) / values.length);
+      const min = Math.min(...values.map((v) => v.value));
+      const max = Math.max(...values.map((v) => v.value));
+      const pctDiff = (max - min) / max;
 
       merged[field] = avg;
       if (pctDiff > 0.15) {
         fieldVerify.push(field);
-        confidenceDetails[field] = { claude: c, gemini: g, diff: Math.round(pctDiff * 100) + '%', status: 'disagree' };
+        confidenceDetails[field] = { values, diff: Math.round(pctDiff * 100) + '%', status: 'disagree' };
       } else {
-        confidenceDetails[field] = { claude: c, gemini: g, diff: Math.round(pctDiff * 100) + '%', status: 'agree' };
+        confidenceDetails[field] = { values, diff: Math.round(pctDiff * 100) + '%', status: 'agree' };
       }
     }
 
     // Boolean fields — agree if same, flag if different
     const boolFields = ['has_pool', 'has_pool_cage', 'has_large_driveway', 'near_water'];
     for (const field of boolFields) {
-      const c = claude[field];
-      const g = gemini[field];
-      if (c === g) {
-        merged[field] = c;
+      const values = providerResults.map(({ analysis }) => analysis[field]).filter((v) => typeof v === 'boolean');
+      const trueCount = values.filter(Boolean).length;
+      const falseCount = values.length - trueCount;
+      if (!values.length) {
+        merged[field] = false;
+      } else if (trueCount === 0 || falseCount === 0) {
+        merged[field] = trueCount > 0;
         confidenceDetails[field] = { status: 'agree' };
       } else {
-        merged[field] = c || g; // err on the side of true
+        merged[field] = true; // err on the side of true
         fieldVerify.push(field);
-        confidenceDetails[field] = { claude: c, gemini: g, status: 'disagree' };
+        confidenceDetails[field] = { values, status: 'disagree' };
       }
     }
 
-    // String fields — prefer Claude if they disagree
+    // String fields — prefer the first available provider result if they disagree
     const stringFields = ['shrub_density', 'tree_density', 'landscape_complexity', 'property_type', 'roof_condition'];
     for (const field of stringFields) {
-      const c = claude[field];
-      const g = gemini[field];
-      if (c === g) {
-        merged[field] = c;
-      } else {
-        merged[field] = c || g; // prefer Claude
-        if (c && g && c !== g) fieldVerify.push(field);
-      }
+      const values = providerResults.map(({ analysis }) => analysis[field]).filter(Boolean);
+      merged[field] = values[0] || null;
+      if (new Set(values).size > 1) fieldVerify.push(field);
     }
 
     // Notes — combine both
-    const notes = [claude.notes, gemini.notes].filter(Boolean);
+    const notes = providerResults.map(({ provider, analysis }) => analysis.notes ? `${provider}: ${analysis.notes}` : null).filter(Boolean);
     merged.notes = notes.join(' | ');
 
     // Overall confidence
@@ -239,9 +297,21 @@ class SatelliteAnalyzer {
     merged.agreementPct = agreePct;
     merged.fieldVerify = fieldVerify;
     merged.confidenceDetails = confidenceDetails;
-    merged.source = 'dual_model';
+    merged.source = providerResults.map((r) => r.provider).join('+');
 
     return merged;
+  }
+
+  extractOpenAIText(data) {
+    if (typeof data?.output_text === 'string') return data.output_text;
+    const parts = [];
+    for (const item of data?.output || []) {
+      for (const content of item?.content || []) {
+        if (content?.type === 'output_text' && content.text) parts.push(content.text);
+        if (content?.type === 'text' && content.text) parts.push(content.text);
+      }
+    }
+    return parts.join('');
   }
 
   async geocode(address) {

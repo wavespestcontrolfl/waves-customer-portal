@@ -1,18 +1,12 @@
 /**
- * AI-powered fallback for the `stories` field.
- *
- * RentCast is our primary source for structural facts, but its `features`
- * payload is inconsistent — on ~8–12% of SWFL addresses (mostly newer Parrish
- * / Lakewood Ranch builds) it returns no floor count. Without a fallback we
- * silently default those to 1, which under-prices pest control for every
- * 2-story home that slips through.
+ * AI-powered property lookup helpers.
  *
  * The previous Apify-based scraper ran but got blocked by Zillow's anti-bot.
  * This module replaces it with a Claude call that uses the web_search tool to
  * pull stories from Zillow / Realtor / county records and synthesize a
  * confidence-rated answer.
  *
- * Gated on `ANTHROPIC_API_KEY` (already required for the rest of the platform).
+ * Individual providers are gated on their own API keys.
  * Fails closed — on any error, low-confidence answer, or unparseable response
  * we return null and the orchestrator falls back to stories=1 plus the UI
  * "verify stories" nudge.
@@ -29,6 +23,9 @@ const MODELS = require('../../config/models');
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_SEARCHES = 5;
+const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
+const OPENAI_PROPERTY_MODEL = process.env.OPENAI_PROPERTY_MODEL || process.env.OPENAI_MODEL || 'gpt-5-mini';
+const GEMINI_PROPERTY_MODEL = process.env.GEMINI_PROPERTY_MODEL || 'gemini-2.5-flash';
 
 async function lookupStoriesFromAI(address, hints = {}) {
   if (!process.env.ANTHROPIC_API_KEY) {
@@ -45,7 +42,6 @@ async function lookupStoriesFromAI(address, hints = {}) {
 
   const t0 = Date.now();
   logger.info('[ai-stories] calling Claude with web_search', {
-    address: address.slice(0, 80),
     hints: Object.keys(hints).filter((k) => hints[k] != null),
     model: MODELS.WORKHORSE,
     timeoutMs,
@@ -88,7 +84,7 @@ async function lookupStoriesFromAI(address, hints = {}) {
     if (!parsed) {
       logger.warn('[ai-stories] could not parse JSON', {
         elapsedMs,
-        sample: textBlock.text.slice(0, 240),
+        textLength: textBlock.text.length,
       });
       return null;
     }
@@ -117,7 +113,7 @@ async function lookupStoriesFromAI(address, hints = {}) {
   } catch (err) {
     logger.warn('[ai-stories] errored', {
       elapsedMs: Date.now() - t0,
-      message: err?.message || String(err),
+      error: summarizeProviderError(err),
     });
     return null;
   }
@@ -132,7 +128,7 @@ function buildPrompt(address, hints = {}) {
   if (hints.yearBuilt) hintLines.push(`Year built: ${hints.yearBuilt}`);
   if (hints.propertyType) hintLines.push(`Type: ${hints.propertyType}`);
   const hintsBlock = hintLines.length
-    ? `\nKnown facts from RentCast (use these to triangulate):\n${hintLines.map((l) => `- ${l}`).join('\n')}\n`
+    ? `\nKnown property facts (use these to triangulate):\n${hintLines.map((l) => `- ${l}`).join('\n')}\n`
     : '';
 
   return `How many stories (floors above grade) does the residential property at this address have?
@@ -185,17 +181,11 @@ function parseStoriesJSON(text) {
 }
 
 // ─────────────────────────────────────────────
-// FULL PROPERTY FALLBACK — when RentCast had nothing
+// FULL PROPERTY LOOKUP
 // ─────────────────────────────────────────────
-// Same Claude+web_search pattern as lookupStoriesFromAI, but pulls every fact
-// the pricing engine cares about (sqft, lot, year built, beds, baths, stories,
-// property type, construction material). Triggered by performPropertyLookup()
-// only when the RentCast call returned no record at all — common for brand-new
-// SWFL builds and rural / RFD addresses.
-//
-// Returns a RentCast-shaped object so buildEnrichedProfile can consume it
-// without branching on data source. Stamps `_source: 'ai'` so downstream code
-// (and field-verify flags) can surface provenance.
+// Pulls every public fact the pricing engine cares about (sqft, lot, year
+// built, beds, baths, stories, property type, construction material).
+// Returns the same normalized property-record shape used by the estimator.
 async function lookupPropertyFromAI(address) {
   if (!process.env.ANTHROPIC_API_KEY) {
     logger.info('[ai-property] skipped — ANTHROPIC_API_KEY not set');
@@ -211,7 +201,6 @@ async function lookupPropertyFromAI(address) {
 
   const t0 = Date.now();
   logger.info('[ai-property] calling Claude with web_search', {
-    address: address.slice(0, 80),
     model: MODELS.WORKHORSE,
     timeoutMs,
     maxSearches,
@@ -249,7 +238,7 @@ async function lookupPropertyFromAI(address) {
     if (!parsed) {
       logger.warn('[ai-property] could not parse JSON', {
         elapsedMs,
-        sample: textBlock.text.slice(0, 240),
+        textLength: textBlock.text.length,
       });
       return null;
     }
@@ -257,9 +246,7 @@ async function lookupPropertyFromAI(address) {
     // If Claude found nothing useful (every numeric field null), bail so the
     // caller falls through to satellite-only estimation rather than building
     // an enriched profile around a meaningless object.
-    const hasAnyFact = parsed.squareFootage || parsed.lotSize || parsed.yearBuilt
-      || parsed.bedrooms || parsed.bathrooms || parsed.stories;
-    if (!hasAnyFact) {
+    if (!hasAnyPropertyFact(parsed)) {
       logger.info('[ai-property] no facts found by AI', {
         elapsedMs,
         confidence: parsed.confidence,
@@ -275,18 +262,186 @@ async function lookupPropertyFromAI(address) {
       fields: Object.keys(parsed).filter((k) => parsed[k] != null && k !== 'source' && k !== 'confidence'),
     });
 
-    return shapeAsRentCast(parsed, address);
+    return shapeAsPropertyRecord(parsed, address, 'claude');
   } catch (err) {
     logger.warn('[ai-property] errored', {
       elapsedMs: Date.now() - t0,
-      message: err?.message || String(err),
+      error: summarizeProviderError(err),
     });
     return null;
   }
 }
 
+async function lookupPropertyFromOpenAI(address) {
+  if (!process.env.OPENAI_API_KEY) {
+    logger.info('[ai-property] skipped OpenAI — OPENAI_API_KEY not set');
+    return null;
+  }
+  if (!address || typeof address !== 'string' || address.trim().length < 5) {
+    logger.warn('[ai-property] skipped OpenAI — address missing or too short');
+    return null;
+  }
+
+  const timeoutMs = Number(process.env.AI_PROPERTY_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const t0 = Date.now();
+
+  try {
+    logger.info('[ai-property] calling OpenAI with web_search', {
+      model: OPENAI_PROPERTY_MODEL,
+      timeoutMs,
+    });
+
+    const resp = await fetch(OPENAI_RESPONSES_API, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: OPENAI_PROPERTY_MODEL,
+        tools: [{
+          type: 'web_search_preview',
+          user_location: {
+            type: 'approximate',
+            country: 'US',
+            region: 'Florida',
+            timezone: 'America/New_York',
+          },
+        }],
+        tool_choice: 'auto',
+        include: ['web_search_call.action.sources'],
+        input: buildPropertyPrompt(address),
+      }),
+    });
+
+    clearTimeout(timer);
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`OpenAI ${resp.status}: ${text.slice(0, 240)}`);
+    }
+
+    const data = await resp.json();
+    const text = extractOpenAIText(data);
+    const parsed = text ? parsePropertyJSON(text) : null;
+    if (!parsed) {
+      logger.warn('[ai-property] OpenAI could not parse JSON', {
+        elapsedMs: Date.now() - t0,
+        textLength: (text || '').length,
+      });
+      return null;
+    }
+    if (!hasAnyPropertyFact(parsed)) {
+      logger.info('[ai-property] OpenAI found no usable facts', {
+        elapsedMs: Date.now() - t0,
+        confidence: parsed.confidence,
+        source: parsed.source,
+      });
+      return null;
+    }
+    const record = shapeAsPropertyRecord(parsed, address, 'openai');
+    record._aiSources = extractOpenAISources(data);
+    if (!record._aiSourceUrl && record._aiSources.length) record._aiSourceUrl = record._aiSources[0].url;
+    return record;
+  } catch (err) {
+    clearTimeout(timer);
+    logger.warn('[ai-property] OpenAI errored', {
+      elapsedMs: Date.now() - t0,
+      error: summarizeProviderError(err),
+    });
+    return null;
+  }
+}
+
+async function lookupPropertyFromGemini(address) {
+  if (!process.env.GEMINI_API_KEY) {
+    logger.info('[ai-property] skipped Gemini — GEMINI_API_KEY not set');
+    return null;
+  }
+  if (!address || typeof address !== 'string' || address.trim().length < 5) {
+    logger.warn('[ai-property] skipped Gemini — address missing or too short');
+    return null;
+  }
+
+  const timeoutMs = Number(process.env.AI_PROPERTY_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const t0 = Date.now();
+
+  try {
+    logger.info('[ai-property] calling Gemini with googleSearch', {
+      model: GEMINI_PROPERTY_MODEL,
+      timeoutMs,
+    });
+
+    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_PROPERTY_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: buildPropertyPrompt(address) }] }],
+        tools: [{ googleSearch: {} }],
+        generationConfig: {
+          temperature: 0.1,
+          maxOutputTokens: 2048,
+          responseMimeType: 'application/json',
+        },
+      }),
+    });
+
+    clearTimeout(timer);
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Gemini ${resp.status}: ${text.slice(0, 240)}`);
+    }
+
+    const data = await resp.json();
+    const text = extractGeminiText(data);
+    const parsed = text ? parsePropertyJSON(text) : null;
+    if (!parsed) {
+      logger.warn('[ai-property] Gemini could not parse JSON', {
+        elapsedMs: Date.now() - t0,
+        textLength: (text || '').length,
+      });
+      return null;
+    }
+    if (!hasAnyPropertyFact(parsed)) {
+      logger.info('[ai-property] Gemini found no usable facts', {
+        elapsedMs: Date.now() - t0,
+        confidence: parsed.confidence,
+        source: parsed.source,
+      });
+      return null;
+    }
+    return shapeAsPropertyRecord(parsed, address, 'gemini');
+  } catch (err) {
+    clearTimeout(timer);
+    logger.warn('[ai-property] Gemini errored', {
+      elapsedMs: Date.now() - t0,
+      error: summarizeProviderError(err),
+    });
+    return null;
+  }
+}
+
+async function lookupPropertyFromAITrio(address) {
+  const results = await Promise.allSettled([
+    lookupPropertyFromAI(address),
+    lookupPropertyFromOpenAI(address),
+    lookupPropertyFromGemini(address),
+  ]);
+  const records = results
+    .filter((r) => r.status === 'fulfilled' && r.value)
+    .map((r) => r.value);
+
+  if (!records.length) return null;
+  return mergePropertyRecords(records, address);
+}
+
 function buildPropertyPrompt(address) {
-  return `I need a complete property record for the residential property at this address. RentCast (the public-records API) returned no data — typical of brand-new construction or rural addresses. Find the missing facts via web search.
+  return `I need a complete property record for the residential property at this address. Find the missing facts via web search.
 
 Address: ${address}
 
@@ -369,11 +524,16 @@ function coerceEnum(raw, allowed) {
   return allowed.includes(raw) ? raw : null;
 }
 
-// Reshape AI output to match the RentCast-normalized shape buildEnrichedProfile
-// expects. Most fields are 1:1; we leave anything we don't have as the
-// existing default (0 / null / '') so the orchestrator behaves the same as it
-// would with a sparse RentCast response.
-function shapeAsRentCast(p, address) {
+function hasAnyPropertyFact(parsed) {
+  return !!(parsed?.squareFootage || parsed?.lotSize || parsed?.yearBuilt
+    || parsed?.bedrooms || parsed?.bathrooms || parsed?.stories);
+}
+
+// Reshape AI output to match the normalized property-record shape
+// buildEnrichedProfile expects. Most fields are 1:1; we leave anything we don't
+// have as the existing default (0 / null / '') so the orchestrator behaves the
+// same as it would with a sparse public-record response.
+function shapeAsPropertyRecord(p, address, provider = 'ai') {
   return {
     formattedAddress: address,
     addressLine1: '',
@@ -409,11 +569,111 @@ function shapeAsRentCast(p, address) {
     hoaFee: null,
     zoning: '',
     _rawFeatures: {},
-    _raw: { _source: 'ai', _confidence: p.confidence, _sourceUrl: p.source },
+    _raw: { _source: 'ai', _provider: provider, _confidence: p.confidence, _sourceUrl: p.source },
     _source: 'ai',
+    _provider: provider,
     _aiConfidence: p.confidence,
     _aiSourceUrl: p.source,
+    _aiSources: p.source ? [{ provider, url: p.source }] : [],
   };
 }
 
-module.exports = { lookupStoriesFromAI, lookupPropertyFromAI };
+function mergePropertyRecords(records, address) {
+  const sorted = [...records].sort((a, b) => confidenceRank(b._aiConfidence) - confidenceRank(a._aiConfidence));
+  const merged = { ...sorted[0], formattedAddress: sorted[0].formattedAddress || address };
+  const fields = [
+    'propertyType', 'squareFootage', 'lotSize', 'yearBuilt', 'bedrooms', 'bathrooms',
+    'stories', 'constructionMaterial', 'foundationType', 'roofType', 'hasPool',
+  ];
+
+  for (const record of sorted.slice(1)) {
+    for (const field of fields) {
+      if (isMissingPropertyValue(merged[field]) && !isMissingPropertyValue(record[field])) {
+        merged[field] = record[field];
+      }
+    }
+  }
+
+  const providers = [...new Set(sorted.map((r) => r._provider).filter(Boolean))];
+  const sources = sorted.flatMap((r) => r._aiSources || (r._aiSourceUrl ? [{ provider: r._provider, url: r._aiSourceUrl }] : []));
+  merged._source = 'ai';
+  merged._provider = providers.join('+') || 'ai';
+  merged._aiProviders = providers;
+  merged._aiSources = sources;
+  merged._aiSourceUrl = sources[0]?.url || sorted.find((r) => r._aiSourceUrl)?._aiSourceUrl || null;
+  merged._aiConfidence = sorted[0]._aiConfidence || null;
+  merged._raw = {
+    ...(merged._raw || {}),
+    _source: 'ai_trio',
+    _provider: merged._provider,
+    _providers: providers,
+    _sources: sources,
+  };
+  return merged;
+}
+
+function confidenceRank(confidence) {
+  if (confidence === 'high') return 3;
+  if (confidence === 'medium') return 2;
+  if (confidence === 'low') return 1;
+  return 0;
+}
+
+function isMissingPropertyValue(value) {
+  return value == null || value === '' || value === 0 || value === 'UNKNOWN';
+}
+
+function extractOpenAIText(data) {
+  if (typeof data?.output_text === 'string') return data.output_text;
+  const parts = [];
+  for (const item of data?.output || []) {
+    for (const content of item?.content || []) {
+      if (content?.type === 'output_text' && content.text) parts.push(content.text);
+      if (content?.type === 'text' && content.text) parts.push(content.text);
+    }
+  }
+  return parts.join('');
+}
+
+function extractOpenAISources(data) {
+  const sources = [];
+  for (const item of data?.output || []) {
+    const actionSources = item?.action?.sources || [];
+    for (const source of actionSources) {
+      if (source?.url) sources.push({ provider: 'openai', url: source.url, title: source.title || null });
+    }
+    for (const content of item?.content || []) {
+      for (const ann of content?.annotations || []) {
+        if (ann?.type === 'url_citation' && ann.url) {
+          sources.push({ provider: 'openai', url: ann.url, title: ann.title || null });
+        }
+      }
+    }
+  }
+  return sources;
+}
+
+function extractGeminiText(data) {
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  return parts.filter((part) => !part.thought && part.text).map((part) => part.text).join('')
+    || parts.filter((part) => part.text).map((part) => part.text).join('');
+}
+
+function summarizeProviderError(err) {
+  const message = err?.message || String(err || '');
+  const status = message.match(/\b(?:HTTP|OpenAI|Gemini|Claude)?\s*(\d{3})\b/)?.[1] || null;
+  return {
+    name: err?.name || 'Error',
+    code: err?.code || null,
+    status,
+    aborted: err?.name === 'AbortError' || err?.code === 'ABORT_ERR',
+  };
+}
+
+module.exports = {
+  lookupStoriesFromAI,
+  lookupPropertyFromAI,
+  lookupPropertyFromOpenAI,
+  lookupPropertyFromGemini,
+  lookupPropertyFromAITrio,
+};
