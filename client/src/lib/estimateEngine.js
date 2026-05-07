@@ -305,6 +305,11 @@ export function calculateEstimate(inputs) {
     if (indoor) adj += 15;
     return adj + propTypeAdj;
   };
+  const standaloneRegularRoachPrice = (fpEff) => {
+    if (fpEff < 1500) return 202.50;
+    if (fpEff < 2501) return 239;
+    return 289;
+  };
 
   // Recurring customer
   if (isRC) addMod('one-time', 'Recurring customer: -15% one-time services', null, 'down');
@@ -783,8 +788,7 @@ export function calculateEstimate(inputs) {
     const rt = roachType;
     if (rt === 'REGULAR') {
       const fpEff = footprint > 0 ? footprint : 2500;
-      let bpp = R.pest ? R.pest.pa : Math.max(89, 117 + pestBaseAdjustment(fpEff));
-      specItems.push({ name: 'Regular Roach', price: otP(Math.max(150, Math.round(bpp * 1.15 * 1.30))), det: 'Enhanced treatment' });
+      specItems.push({ name: 'Regular Roach', price: standaloneRegularRoachPrice(fpEff), det: 'Enhanced treatment' });
     } else {
       let gp = 450 + interpolate(footprint, [
         { at: 800, adj: -40 }, { at: 1200, adj: -20 }, { at: 1500, adj: -10 },
