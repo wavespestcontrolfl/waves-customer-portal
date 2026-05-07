@@ -51,7 +51,10 @@ async function performPropertyLookup(address) {
     aiAnalysis: null,
     enriched: null,
     errors: [],
-    meta: { timestamp: new Date().toISOString(), lookupMs: 0 }
+    meta: {
+      timestamp: new Date().toISOString(),
+      lookupMs: 0,
+    }
   };
 
   const t0 = Date.now();
@@ -308,6 +311,7 @@ router.post('/property-lookup', async (req, res) => {
   }
   try {
     const result = await performPropertyLookup(address);
+    result.meta.providerStatus = buildProviderStatus();
     res.json(result);
   } catch (err) {
     logger.error(`[property-lookup] ${err.message}`);
@@ -708,6 +712,10 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
 
     // ── CONFIDENCE ──
     aiConfidence: ai?.confidenceScore || 0,
+    propertyDataQuality: rc?._dataQuality || buildFallbackPropertyDataQuality(rc),
+    fieldEvidence: rc?._fieldEvidence || {},
+    propertySources: rc?._aiSources || [],
+    propertyProviders: rc?._aiProviders || [],
     analysisNotes: ai?.analysisNotes || '',
     fieldVerifyFlags: buildFieldVerifyFlags(rc, ai),
 
@@ -717,10 +725,53 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
       rentcast: !!rc,
       satellite: !!(ai),
       aiAnalysis: !!(ai?.confidenceScore),
+      fieldEvidence: !!(rc?._fieldEvidence && Object.keys(rc._fieldEvidence).length),
     }
   };
 
   return profile;
+}
+
+function buildProviderStatus() {
+  return {
+    propertySearch: {
+      claude: !!process.env.ANTHROPIC_API_KEY,
+      openai: !!process.env.OPENAI_API_KEY,
+      gemini: !!process.env.GEMINI_API_KEY,
+    },
+    satelliteVision: {
+      claude: !!process.env.ANTHROPIC_API_KEY,
+      openai: !!process.env.OPENAI_API_KEY,
+      gemini: !!process.env.GEMINI_API_KEY,
+    },
+    maps: !!(process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY),
+  };
+}
+
+function buildFallbackPropertyDataQuality(rc) {
+  if (!rc) {
+    return {
+      level: 'low',
+      score: 0,
+      providerCount: 0,
+      providers: [],
+      sourceTypes: [],
+      verifiedCriticalFields: 0,
+      totalCriticalFields: 4,
+      fieldVerifyCount: 4,
+    };
+  }
+  const critical = [rc.squareFootage, rc.lotSize, rc.stories, rc.propertyType].filter(Boolean).length;
+  return {
+    level: critical >= 3 ? 'medium' : 'low',
+    score: critical >= 3 ? 60 : 35,
+    providerCount: rc._aiProviders?.length || 1,
+    providers: rc._aiProviders || [rc._provider || rc._source || 'property'],
+    sourceTypes: rc._aiSourceTypes || [],
+    verifiedCriticalFields: critical,
+    totalCriticalFields: 4,
+    fieldVerifyCount: 4 - critical,
+  };
 }
 
 
@@ -1016,6 +1067,31 @@ function buildFieldVerifyFlags(rc, ai) {
       field: 'all',
       reason: `Property data sourced from AI web search${rc._aiSourceUrl ? ` — primary source: ${rc._aiSourceUrl}` : ''} — verify key dimensions on site`,
       priority: 'MEDIUM',
+    });
+  }
+
+  if (rc?._dataQuality?.level === 'low') {
+    flags.push({
+      field: 'propertyDataQuality',
+      reason: `Property data quality is low (${rc._dataQuality.score || 0}/100) — verify square footage, lot size, and stories before final pricing`,
+      priority: 'HIGH',
+    });
+  } else if (rc?._dataQuality?.fieldVerifyCount > 0) {
+    flags.push({
+      field: 'propertyDataQuality',
+      reason: `${rc._dataQuality.fieldVerifyCount} property field(s) have weak or conflicting source evidence`,
+      priority: 'MEDIUM',
+    });
+  }
+
+  for (const [field, evidence] of Object.entries(rc?._fieldEvidence || {})) {
+    if (!evidence?.fieldVerify) continue;
+    flags.push({
+      field,
+      reason: evidence.disagreement
+        ? `${field} has conflicting AI/source evidence — verify before pricing`
+        : `${field} came from ${evidence.sourceLabel || 'a weak source'} with ${evidence.confidence || 'low'} confidence`,
+      priority: ['squareFootage', 'lotSize', 'stories'].includes(field) ? 'HIGH' : 'MEDIUM',
     });
   }
 

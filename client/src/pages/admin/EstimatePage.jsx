@@ -483,6 +483,7 @@ function EstimateToolView() {
       if (rc) lines.push(`${rc.formattedAddress} — ${rc.squareFootage || '?'} sf / ${rc.lotSize || '?'} sf lot / ${rc.stories || 1} story`);
       if (ep.yearBuilt) lines.push(`Built ${ep.yearBuilt} · ${ep.constructionMaterial} · ${ep.foundationType} foundation · ${ep.roofType} roof`);
       if (ep.serviceZone) lines.push(`Service Zone ${ep.serviceZone}`);
+      if (ep.propertyDataQuality) lines.push(`Property data quality: ${String(ep.propertyDataQuality.level || 'unknown').toUpperCase()} (${ep.propertyDataQuality.score || 0}/100)`);
       setLookupStatus({ type: 'ok', msg: lines.join('\n') });
 
       if (ai) {
@@ -877,6 +878,19 @@ function EstimateToolView() {
               <button style={sBtnSm('transparent', C.gray)} onClick={() => { setForm(f => ({ ...f, address: '', homeSqFt: '', lotSqFt: '', stories: '1', propertyType: 'Single Family', hasPool: 'NO', hasPoolCage: 'NO', hasLargeDriveway: 'NO', shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE', nearWater: 'NO', bedArea: '', palmCount: '', treeCount: '' })); setLookupStatus({ type: '', msg: '' }); setSatelliteStatus({ type: '', msg: '' }); setSatelliteData(null); setEstimate(null); }}>Clear All</button>
             </div>
             {satelliteStatus.type && <div style={statusStyle(satelliteStatus.type)}>{satelliteStatus.msg}</div>}
+            {enrichedProfile?.propertyDataQuality && (
+              <div style={{ marginBottom: 10, padding: '10px 12px', background: '#F8FAFC', border: `1px solid ${C.border}`, borderRadius: 8 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 4 }}>
+                  <strong style={{ fontSize: 12, color: C.navy, textTransform: 'uppercase', letterSpacing: 0.5 }}>Property Data Quality</strong>
+                  <strong style={{ fontSize: 12, color: enrichedProfile.propertyDataQuality.level === 'high' ? C.green : enrichedProfile.propertyDataQuality.level === 'medium' ? C.amber : C.red, textTransform: 'uppercase' }}>
+                    {enrichedProfile.propertyDataQuality.level || 'unknown'} · {enrichedProfile.propertyDataQuality.score || 0}/100
+                  </strong>
+                </div>
+                <div style={{ fontSize: 12, color: C.gray }}>
+                  {(enrichedProfile.propertyProviders || []).join(' + ') || 'No provider'} · {(enrichedProfile.propertyDataQuality.sourceTypes || []).join(', ') || 'no source type'} · {enrichedProfile.propertyDataQuality.verifiedCriticalFields || 0}/{enrichedProfile.propertyDataQuality.totalCriticalFields || 4} critical fields verified
+                </div>
+              </div>
+            )}
             {/* AI analysis inline flags */}
             {enrichedProfile?.fieldVerifyFlags?.length > 0 && (
               <div style={{ marginBottom: 10, padding: '8px 12px', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 8 }}>

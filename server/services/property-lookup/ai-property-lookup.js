@@ -26,6 +26,30 @@ const DEFAULT_MAX_SEARCHES = 5;
 const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
 const OPENAI_PROPERTY_MODEL = process.env.OPENAI_PROPERTY_MODEL || process.env.OPENAI_MODEL || 'gpt-5-mini';
 const GEMINI_PROPERTY_MODEL = process.env.GEMINI_PROPERTY_MODEL || 'gemini-2.5-flash';
+const PROPERTY_EVIDENCE_FIELDS = [
+  'propertyType', 'squareFootage', 'lotSize', 'yearBuilt', 'bedrooms', 'bathrooms',
+  'stories', 'constructionMaterial', 'foundationType', 'roofType',
+];
+
+const SOURCE_TYPE_WEIGHTS = {
+  county: 100,
+  permit: 95,
+  builder: 85,
+  listing: 75,
+  aggregator: 55,
+  generic: 25,
+  unknown: 20,
+};
+
+const SOURCE_TYPE_LABELS = {
+  county: 'county record',
+  permit: 'permit record',
+  builder: 'builder/floorplan',
+  listing: 'listing',
+  aggregator: 'aggregator',
+  generic: 'generic web source',
+  unknown: 'unknown source',
+};
 
 async function lookupStoriesFromAI(address, hints = {}) {
   if (!process.env.ANTHROPIC_API_KEY) {
@@ -342,8 +366,12 @@ async function lookupPropertyFromOpenAI(address) {
       return null;
     }
     const record = shapeAsPropertyRecord(parsed, address, 'openai');
-    record._aiSources = extractOpenAISources(data);
+    record._aiSources = extractOpenAISources(data).map((source) => {
+      const meta = classifyPropertySource(source.url);
+      return { ...source, sourceType: meta.type, sourceQuality: meta.weight };
+    });
     if (!record._aiSourceUrl && record._aiSources.length) record._aiSourceUrl = record._aiSources[0].url;
+    refreshRecordSourceEvidence(record);
     return record;
   } catch (err) {
     clearTimeout(timer);
@@ -457,6 +485,8 @@ Output rules:
 - "stories" = number of floors above grade (1, 2, 3, 4).
 - "constructionMaterial" must be one of: "CBS" (concrete block / stucco), "WOOD_FRAME", "BRICK", "METAL", or null.
 - "propertyType" must be one of: "Single Family", "Townhome", "Condo", "Duplex", or null.
+- The "source" URL must be the exact property page, parcel page, permit page, or builder floorplan/community page used for the facts.
+- Do NOT use generic city/category pages such as apartment directories, short-term-rental lists, or broad "homes for sale in city" pages as the source.
 - Use null for any field you can't verify — DO NOT guess. A null is more useful than a wrong number.
 
 Respond with ONLY a JSON object — no preamble, no explanation, no markdown fences:
@@ -533,6 +563,8 @@ function hasAnyPropertyFact(parsed) {
 // have as the existing default (0 / null / '') so the orchestrator behaves the
 // same as it would with a sparse public-record response.
 function shapeAsPropertyRecord(p, address, provider = 'ai') {
+  const sourceMeta = classifyPropertySource(p.source);
+  const evidence = buildRecordEvidence(p, provider, sourceMeta);
   return {
     formattedAddress: address,
     addressLine1: '',
@@ -568,45 +600,78 @@ function shapeAsPropertyRecord(p, address, provider = 'ai') {
     hoaFee: null,
     zoning: '',
     _rawFeatures: {},
-    _raw: { _source: 'ai', _provider: provider, _confidence: p.confidence, _sourceUrl: p.source },
+    _raw: {
+      _source: 'ai',
+      _provider: provider,
+      _confidence: p.confidence,
+      _sourceUrl: p.source,
+      _sourceType: sourceMeta.type,
+      _sourceQuality: sourceMeta.weight,
+    },
     _source: 'ai',
     _provider: provider,
     _aiConfidence: p.confidence,
     _aiSourceUrl: p.source,
-    _aiSources: p.source ? [{ provider, url: p.source }] : [],
+    _aiSourceType: sourceMeta.type,
+    _aiSourceQuality: sourceMeta.weight,
+    _aiSources: p.source ? [{ provider, url: p.source, sourceType: sourceMeta.type, sourceQuality: sourceMeta.weight }] : [],
+    _fieldEvidence: evidence,
   };
 }
 
 function mergePropertyRecords(records, address) {
-  const sorted = [...records].sort((a, b) => confidenceRank(b._aiConfidence) - confidenceRank(a._aiConfidence));
+  const sorted = [...records].sort((a, b) => evidenceBaseScore(b) - evidenceBaseScore(a));
   const merged = { ...sorted[0], formattedAddress: sorted[0].formattedAddress || address };
-  const fields = [
-    'propertyType', 'squareFootage', 'lotSize', 'yearBuilt', 'bedrooms', 'bathrooms',
-    'stories', 'constructionMaterial', 'foundationType', 'roofType', 'hasPool',
-  ];
+  const mergedFieldEvidence = {};
 
-  for (const record of sorted.slice(1)) {
-    for (const field of fields) {
-      if (isMissingPropertyValue(merged[field]) && !isMissingPropertyValue(record[field])) {
-        merged[field] = record[field];
-      }
+  for (const field of PROPERTY_EVIDENCE_FIELDS) {
+    const candidates = sorted
+      .map((record) => fieldEvidenceFromRecord(record, field))
+      .filter(Boolean)
+      .sort((a, b) => b.score - a.score);
+
+    if (!candidates.length) continue;
+
+    const winner = candidates[0];
+    if (!isMissingPropertyValue(winner.value)) {
+      merged[field] = winner.value;
     }
+    const uniqueValues = [...new Set(candidates.map((item) => normalizeEvidenceValue(item.value)))];
+    mergedFieldEvidence[field] = {
+      value: winner.value,
+      confidence: scoreToConfidence(winner.score),
+      sourceType: winner.sourceType,
+      sourceLabel: SOURCE_TYPE_LABELS[winner.sourceType] || winner.sourceType,
+      winningSource: winner.url || null,
+      winningProvider: winner.provider,
+      score: winner.score,
+      disagreement: uniqueValues.length > 1,
+      fieldVerify: winner.score < 65 || uniqueValues.length > 1 || winner.sourceType === 'generic' || winner.sourceType === 'unknown',
+      evidence: candidates.map(({ score, ...item }) => ({ ...item, confidence: scoreToConfidence(score) })),
+    };
   }
 
   const providers = [...new Set(sorted.map((r) => r._provider).filter(Boolean))];
   const sources = sorted.flatMap((r) => r._aiSources || (r._aiSourceUrl ? [{ provider: r._provider, url: r._aiSourceUrl }] : []));
+  const sourceTypes = [...new Set(sources.map((s) => s.sourceType).filter(Boolean))];
   merged._source = 'ai';
   merged._provider = providers.join('+') || 'ai';
   merged._aiProviders = providers;
   merged._aiSources = sources;
   merged._aiSourceUrl = sources[0]?.url || sorted.find((r) => r._aiSourceUrl)?._aiSourceUrl || null;
-  merged._aiConfidence = sorted[0]._aiConfidence || null;
+  merged._aiSourceTypes = sourceTypes;
+  merged._aiConfidence = scoreToConfidence(Math.max(...Object.values(mergedFieldEvidence).map((item) => item.score), 0));
+  merged._fieldEvidence = mergedFieldEvidence;
+  merged._dataQuality = buildPropertyDataQuality(mergedFieldEvidence, providers);
   merged._raw = {
     ...(merged._raw || {}),
     _source: 'ai_trio',
     _provider: merged._provider,
     _providers: providers,
     _sources: sources,
+    _sourceTypes: sourceTypes,
+    _fieldEvidence: mergedFieldEvidence,
+    _dataQuality: merged._dataQuality,
   };
   return merged;
 }
@@ -616,6 +681,158 @@ function confidenceRank(confidence) {
   if (confidence === 'medium') return 2;
   if (confidence === 'low') return 1;
   return 0;
+}
+
+function evidenceBaseScore(record) {
+  return (record?._aiSourceQuality || SOURCE_TYPE_WEIGHTS.unknown) + (confidenceRank(record?._aiConfidence) * 10);
+}
+
+function fieldEvidenceFromRecord(record, field) {
+  if (!record || isMissingPropertyValue(record[field])) return null;
+  const existing = record._fieldEvidence?.[field]?.[0];
+  const sourceType = existing?.sourceType || record._aiSourceType || classifyPropertySource(record._aiSourceUrl).type;
+  const sourceWeight = existing?.sourceQuality || record._aiSourceQuality || SOURCE_TYPE_WEIGHTS[sourceType] || SOURCE_TYPE_WEIGHTS.unknown;
+  const confidence = existing?.providerConfidence || record._aiConfidence;
+  const score = Math.min(100, sourceWeight + confidenceRank(confidence) * 10);
+  return {
+    field,
+    value: record[field],
+    provider: existing?.provider || record._provider || 'ai',
+    url: existing?.url || record._aiSourceUrl || null,
+    sourceType,
+    sourceQuality: sourceWeight,
+    providerConfidence: confidence || null,
+    score,
+  };
+}
+
+function buildRecordEvidence(parsed, provider, sourceMeta) {
+  const evidence = {};
+  for (const field of PROPERTY_EVIDENCE_FIELDS) {
+    if (isMissingPropertyValue(parsed[field])) continue;
+    evidence[field] = [{
+      field,
+      value: parsed[field],
+      provider,
+      url: parsed.source || null,
+      sourceType: sourceMeta.type,
+      sourceQuality: sourceMeta.weight,
+      providerConfidence: parsed.confidence || null,
+    }];
+  }
+  return evidence;
+}
+
+function refreshRecordSourceEvidence(record) {
+  if (!record?._aiSourceUrl) return record;
+  const meta = classifyPropertySource(record._aiSourceUrl);
+  if (meta.weight > (record._aiSourceQuality || 0)) {
+    record._aiSourceType = meta.type;
+    record._aiSourceQuality = meta.weight;
+    record._raw = {
+      ...(record._raw || {}),
+      _sourceUrl: record._aiSourceUrl,
+      _sourceType: meta.type,
+      _sourceQuality: meta.weight,
+    };
+  }
+  for (const evidenceItems of Object.values(record._fieldEvidence || {})) {
+    for (const item of evidenceItems || []) {
+      if (!item.url) item.url = record._aiSourceUrl;
+      if (!item.sourceType || item.sourceType === 'unknown') {
+        item.sourceType = meta.type;
+        item.sourceQuality = meta.weight;
+      }
+    }
+  }
+  return record;
+}
+
+function classifyPropertySource(url) {
+  if (!url || typeof url !== 'string') return { type: 'unknown', weight: SOURCE_TYPE_WEIGHTS.unknown };
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { type: 'unknown', weight: SOURCE_TYPE_WEIGHTS.unknown };
+  }
+  const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+  const path = parsed.pathname.toLowerCase();
+
+  if (host.includes('manateepao.gov') || host.includes('sc-pa.com') || host.includes('ccappraiser.com')) {
+    return { type: 'county', weight: SOURCE_TYPE_WEIGHTS.county };
+  }
+  if (host.includes('buildzoom.com') || path.includes('permit')) {
+    return { type: 'permit', weight: SOURCE_TYPE_WEIGHTS.permit };
+  }
+  if ([
+    'drhorton.com', 'pulte.com', 'lennar.com', 'mihomes.com', 'taylormorrison.com',
+    'mattamyhomes.com', 'neal-communities.com', 'kbhome.com', 'davidweekleyhomes.com',
+    'meritagehomes.com', 'ryanhomes.com', 'richmondamerican.com', 'richmond-american.com',
+    'homesbywestbay.com',
+  ].some((domain) => host.includes(domain))) {
+    return { type: 'builder', weight: SOURCE_TYPE_WEIGHTS.builder };
+  }
+  if (['zillow.com', 'redfin.com', 'homes.com', 'realtor.com', 'trulia.com', 'compass.com'].some((domain) => host.includes(domain))) {
+    if (isGenericListingPath(path)) return { type: 'generic', weight: SOURCE_TYPE_WEIGHTS.generic };
+    return { type: 'listing', weight: SOURCE_TYPE_WEIGHTS.listing };
+  }
+  if (['apartments.com', 'era.com', 'liveinswflorida.com', 'villageshomefinder.com', 'bradentonhomelocator.com'].some((domain) => host.includes(domain))) {
+    if (isGenericListingPath(path)) return { type: 'generic', weight: SOURCE_TYPE_WEIGHTS.generic };
+    return { type: 'aggregator', weight: SOURCE_TYPE_WEIGHTS.aggregator };
+  }
+  return { type: isGenericListingPath(path) ? 'generic' : 'unknown', weight: isGenericListingPath(path) ? SOURCE_TYPE_WEIGHTS.generic : SOURCE_TYPE_WEIGHTS.unknown };
+}
+
+function isGenericListingPath(path) {
+  const normalized = String(path || '').toLowerCase();
+  return normalized === '/'
+    || normalized.includes('/short-term/')
+    || normalized.includes('/apartments/')
+    || normalized.includes('/real-estate/')
+    || normalized.includes('/homes-for-sale/')
+    || normalized.includes('/new-homes/')
+    || /^\/[a-z-]+-fl\/?$/.test(normalized)
+    || /^\/[a-z-]+-fl\/(rentals|short-term|apartments)\/?$/.test(normalized);
+}
+
+function normalizeEvidenceValue(value) {
+  if (typeof value === 'string') return value.trim().toUpperCase();
+  if (typeof value === 'number') return String(Math.round(value * 10) / 10);
+  return JSON.stringify(value);
+}
+
+function scoreToConfidence(score) {
+  if (score >= 95) return 'high';
+  if (score >= 65) return 'medium';
+  if (score > 0) return 'low';
+  return 'unknown';
+}
+
+function buildPropertyDataQuality(fieldEvidence, providers) {
+  const values = Object.values(fieldEvidence || {});
+  const criticalFields = ['squareFootage', 'lotSize', 'stories', 'propertyType'];
+  const criticalCovered = criticalFields.filter((field) => fieldEvidence?.[field] && !fieldEvidence[field].fieldVerify).length;
+  const avgScore = values.length
+    ? Math.round(values.reduce((sum, item) => sum + (item.score || 0), 0) / values.length)
+    : 0;
+  const verifyCount = values.filter((item) => item.fieldVerify).length;
+  const sourceTypes = [...new Set(values.map((item) => item.sourceType).filter(Boolean))];
+  const level = avgScore >= 85 && criticalCovered >= 3 && verifyCount === 0
+    ? 'high'
+    : avgScore >= 60 && criticalCovered >= 2
+      ? 'medium'
+      : 'low';
+  return {
+    level,
+    score: avgScore,
+    providerCount: providers?.length || 0,
+    providers: providers || [],
+    sourceTypes,
+    verifiedCriticalFields: criticalCovered,
+    totalCriticalFields: criticalFields.length,
+    fieldVerifyCount: verifyCount,
+  };
 }
 
 function isMissingPropertyValue(value) {
