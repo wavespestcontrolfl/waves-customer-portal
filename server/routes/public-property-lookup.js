@@ -6,8 +6,8 @@ const logger = require('../services/logger');
 const { performPropertyLookup } = require('./property-lookup-v2');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 
-// Aggressive rate limit — each lookup spends real RentCast + Google + Claude +
-// Gemini dollars. 5 per IP per hour is enough for a real lead to iterate on
+// Aggressive rate limit — each lookup spends real AI + Google Maps dollars.
+// 5 per IP per hour is enough for a real lead to iterate on
 // the address a couple of times, but blocks scripted abuse.
 const lookupLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
@@ -22,6 +22,16 @@ function normalizePhone(raw) {
   if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
   if (digits.length === 10) return `+1${digits}`;
   return null;
+}
+
+function publicPropertySummary(record) {
+  if (!record) return null;
+  return {
+    propertyType: record.propertyType,
+    squareFootage: record.squareFootage,
+    lotSize: record.lotSize,
+    yearBuilt: record.yearBuilt,
+  };
 }
 
 router.post('/property-lookup', lookupLimiter, async (req, res) => {
@@ -59,7 +69,13 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       }),
     }).returning(['id']);
 
+    if (!lead?.id) {
+      logger.error('[public-property-lookup] lead insert returned no id');
+      return res.status(500).json({ error: 'Property lookup failed. Please call (941) 297-5749 to speak with our team.' });
+    }
+
     const result = await performPropertyLookup(address);
+    const propertyRecord = publicPropertySummary(result.propertyRecord || result.rentcast);
 
     // Persist the enriched profile on the lead so a stale/abandoned row is
     // still useful for follow-up.
@@ -68,7 +84,8 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         extracted_data: JSON.stringify({
           stage: 'property_lookup_complete',
           enriched: result.enriched || null,
-          rentcast: result.rentcast || null,
+          propertyRecord,
+          rentcast: propertyRecord,
           avm: result.avm || null,
           ai_sources: result.aiAnalysis?._sources || null,
           utm: attr?.utm || null,
@@ -84,14 +101,11 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
     res.json({
       lead_id: lead.id,
       enriched: result.enriched,
-      rentcast: result.rentcast ? {
-        propertyType: result.rentcast.propertyType,
-        squareFootage: result.rentcast.squareFootage,
-        lotSize: result.rentcast.lotSize,
-        yearBuilt: result.rentcast.yearBuilt,
-      } : null,
+      propertyRecord,
+      rentcast: propertyRecord,
       satellite: result.satellite ? {
         closeUrl: result.satellite.closeUrl,
+        microCloseUrl: result.satellite.microCloseUrl,
         wideUrl: result.satellite.wideUrl,
         inServiceArea: result.satellite.inServiceArea,
       } : null,

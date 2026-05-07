@@ -2,6 +2,7 @@ const db = require('../models/db');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { lookupPropertyFromAITrio } = require('./property-lookup/ai-property-lookup');
 
 class AppointmentTagger {
 
@@ -27,7 +28,11 @@ class AppointmentTagger {
         case 'bed_bug': await this.triggerPestPrep(service, 'bed_bug'); break;
       }
     } catch (err) {
-      logger.error(`Appointment automation failed for ${type.tag}: ${err.message}`);
+      logger.error('[appointment-tagger] Appointment automation failed', {
+        appointmentType: type.tag,
+        serviceId: scheduledServiceId,
+        errorName: err?.name || 'Error',
+      });
     }
 
     // Check if first service for a recurring customer
@@ -55,27 +60,25 @@ class AppointmentTagger {
     return { tag: 'general', label: 'General Service' };
   }
 
-  // WDO — RentCast + AI pre-inspection brief
+  // WDO — AI property search + AI pre-inspection brief
   async triggerWDOPrep(service) {
     const address = `${service.address_line1}, ${service.city}, FL ${service.zip}`;
 
     try {
-      // Fetch RentCast data
-      const rcResp = await fetch(`https://api.rentcast.io/v1/properties?address=${encodeURIComponent(address)}`, {
-        headers: { 'X-Api-Key': process.env.RENTCAST_API_KEY || '6dfcb2eaa9f34bf285e101b74e1a3ef6', Accept: 'application/json' },
+      const propertyData = await lookupPropertyFromAITrio(address).catch((err) => {
+        logger.warn('[appointment-tagger] WDO property search failed', {
+          serviceId: service.id,
+          errorName: err?.name || 'Error',
+        });
+        return null;
       });
-      let rentcastData = null;
-      if (rcResp.ok) {
-        const d = await rcResp.json();
-        rentcastData = Array.isArray(d) ? d[0] : d;
-      }
 
       // Generate brief (simplified — uses template if no Claude API key)
       let brief;
       if (process.env.ANTHROPIC_API_KEY) {
-        brief = await this.generateWDOBriefAI(service, rentcastData);
+        brief = await this.generateWDOBriefAI(service, propertyData);
       } else {
-        brief = this.generateWDOBriefTemplate(service, rentcastData);
+        brief = this.generateWDOBriefTemplate(service, propertyData);
       }
 
       await db('scheduled_services').where({ id: service.id }).update({
@@ -90,9 +93,12 @@ class AppointmentTagger {
         body: `Risk: ${brief.risk_score}. Priorities: ${(brief.top_3_priorities || []).join(', ')}`,
       });
 
-      logger.info(`WDO brief generated for ${service.address_line1}`);
+      logger.info('[appointment-tagger] WDO brief generated', { serviceId: service.id });
     } catch (err) {
-      logger.error(`WDO prep failed: ${err.message}`);
+      logger.error('[appointment-tagger] WDO prep failed', {
+        serviceId: service.id,
+        errorName: err?.name || 'Error',
+      });
     }
   }
 
@@ -101,8 +107,8 @@ class AppointmentTagger {
     const sqft = rc?.squareFootage || 'Unknown';
     const stories = rc?.stories || 1;
     const foundation = rc?.foundationType || 'Unknown';
-    const exterior = rc?.exteriorType || 'Unknown';
-    const pool = rc?.features?.pool || false;
+    const exterior = rc?.exteriorType || rc?.constructionMaterial || 'Unknown';
+    const pool = rc?.features?.pool || rc?.hasPool || false;
     const garage = rc?.garageType || 'Unknown';
 
     const age = yearBuilt !== 'Unknown' ? new Date().getFullYear() - parseInt(yearBuilt) : null;
@@ -141,7 +147,7 @@ class AppointmentTagger {
         'Any wood fencing, pergola, or detached structures?',
         'Any areas where you\'ve noticed moisture or soft wood?',
       ],
-      rentcast_data: rc ? { yearBuilt: rc.yearBuilt, sqft: rc.squareFootage, lot: rc.lotSize, stories: rc.stories, foundation: rc.foundationType, exterior: rc.exteriorType } : null,
+      property_data: rc ? { yearBuilt: rc.yearBuilt, sqft: rc.squareFootage, lot: rc.lotSize, stories: rc.stories, foundation: rc.foundationType, exterior } : null,
     };
   }
 
@@ -152,14 +158,17 @@ class AppointmentTagger {
 
       const resp = await client.messages.create({
         model: MODELS.FLAGSHIP, max_tokens: 4000,
-        system: 'You are a pre-inspection research assistant for a Florida pest control company. Analyze RentCast data and return a JSON WDO pre-inspection brief with: risk_score (Low/Moderate/High), risk_reason, top_3_priorities, top_3_unknowns, vulnerabilities, homeowner_questions. Return VALID JSON ONLY.',
-        messages: [{ role: 'user', content: `WDO brief for ${service.address_line1}, ${service.city}, FL ${service.zip}. Client: ${service.first_name} ${service.last_name}. Date: ${service.scheduled_date}.\n\nRentCast: ${JSON.stringify(rc)}` }],
+        system: 'You are a pre-inspection research assistant for a Florida pest control company. Analyze public property data and return a JSON WDO pre-inspection brief with: risk_score (Low/Moderate/High), risk_reason, top_3_priorities, top_3_unknowns, vulnerabilities, homeowner_questions. Return VALID JSON ONLY.',
+        messages: [{ role: 'user', content: `WDO brief for ${service.address_line1}, ${service.city}, FL ${service.zip}. Client: ${service.first_name} ${service.last_name}. Date: ${service.scheduled_date}.\n\nProperty data: ${JSON.stringify(rc)}` }],
       });
 
       const text = resp.content[0].text.replace(/```json|```/g, '').trim();
       return JSON.parse(text);
     } catch (err) {
-      logger.error(`AI WDO brief failed: ${err.message}`);
+      logger.error('[appointment-tagger] AI WDO brief failed', {
+        serviceId: service.id,
+        errorName: err?.name || 'Error',
+      });
       return this.generateWDOBriefTemplate(service, rc);
     }
   }

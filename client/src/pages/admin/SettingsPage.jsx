@@ -270,14 +270,15 @@ const INTEGRATION_GROUPS = [
     title: 'AI',
     items: [
       { name: 'Anthropic (Claude)', platform: 'anthropic', keys: ['ANTHROPIC_API_KEY'], desc: 'Intelligence Bar, agents, triage' },
+      { name: 'OpenAI (ChatGPT)', platform: 'openai', keys: ['OPENAI_API_KEY'], desc: 'Property search and satellite review' },
+      { name: 'Google Gemini', platform: 'gemini', keys: ['GEMINI_API_KEY'], desc: 'Property search and satellite review' },
     ],
   },
   {
     title: 'Data & Research',
     items: [
-      { name: 'Google APIs', platform: 'google', keys: ['GOOGLE_API_KEY'], desc: 'Maps, GSC, PageSpeed, Places Autocomplete' },
+      { name: 'Google APIs', platform: 'google', keys: ['GOOGLE_API_KEY', 'GOOGLE_MAPS_API_KEY', 'GOOGLE_MAPS_BROWSER_API_KEY'], desc: 'Maps, GSC, PageSpeed, Places Autocomplete' },
       { name: 'DataForSEO', platform: 'dataforseo', gateKey: 'seoIntelligence', keys: ['DATAFORSEO_LOGIN', 'DATAFORSEO_PASSWORD'], desc: 'Rank tracking, SERP, backlinks' },
-      { name: 'RentCast', platform: 'rentcast', keys: ['RENTCAST_API_KEY'], desc: 'Property data lookup for estimates' },
     ],
   },
   {

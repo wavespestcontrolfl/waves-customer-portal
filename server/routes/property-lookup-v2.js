@@ -1,13 +1,12 @@
 /**
  * WAVES PEST CONTROL — Property Lookup API
- * Combines RentCast + Google Static Maps + Claude Vision into enriched property data.
+ * Combines AI web search + Google Static Maps + Claude/OpenAI/Gemini Vision into enriched property data.
  *
  * Express route: POST /api/property-lookup
  * Body: { address: string }
- * Returns: { rentcast, satellite, aiAnalysis, enriched }
+ * Returns: { propertyRecord, satellite, aiAnalysis, enriched }
  *
  * ENV VARS REQUIRED:
- *   RENTCAST_API_KEY
  *   GOOGLE_MAPS_API_KEY
  *   ANTHROPIC_API_KEY
  */
@@ -17,17 +16,19 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
-const { lookupStoriesFromAI, lookupPropertyFromAI } = require('../services/property-lookup/ai-property-lookup');
+const { lookupStoriesFromAI, lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 // ─────────────────────────────────────────────
 // CONFIG
 // ─────────────────────────────────────────────
-const RENTCAST_BASE = 'https://api.rentcast.io/v1';
 const GOOGLE_STATIC_MAP = 'https://maps.googleapis.com/maps/api/staticmap';
 const GOOGLE_GEOCODE = 'https://maps.googleapis.com/maps/api/geocode/json';
 const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages';
+const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
+const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || process.env.OPENAI_MODEL || 'gpt-5-mini';
+const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || 'gemini-2.5-flash';
 
 // SWFL bounding box — reject addresses outside service area
 const SWFL_BOUNDS = { latMin: 26.3, latMax: 27.8, lngMin: -82.9, lngMax: -81.5 };
@@ -35,12 +36,15 @@ const SWFL_BOUNDS = { latMin: 26.3, latMax: 27.8, lngMin: -82.9, lngMax: -81.5 }
 // ─────────────────────────────────────────────
 // CORE LOOKUP — reusable by admin + public routes
 // Extracted from the POST /property-lookup handler so server/routes/
-// public-property-lookup.js can run the same RentCast + satellite + dual
+// public-property-lookup.js can run the same AI search + satellite + trio
 // AI vision pipeline without duplicating the logic.
 // ─────────────────────────────────────────────
 async function performPropertyLookup(address) {
   const result = {
     address: String(address).trim(),
+    propertyRecord: null,
+    // Deprecated response alias kept so the existing estimator UI and public
+    // lead capture continue to work while the provider changes underneath.
     rentcast: null,
     avm: null,
     satellite: null,
@@ -52,30 +56,19 @@ async function performPropertyLookup(address) {
 
   const t0 = Date.now();
 
-  // ── STEP 1: RentCast Property + AVM Lookup (parallel) ──
-  const [rcResult, avmResult] = await Promise.allSettled([
-    fetchRentCast(address),
-    fetchRentCastAVM(address),
-  ]);
-  if (rcResult.status === 'fulfilled') result.rentcast = rcResult.value;
-  else result.errors.push({ source: 'rentcast', message: rcResult.reason?.message || String(rcResult.reason) });
-  if (avmResult.status === 'fulfilled') result.avm = avmResult.value;
-  else result.errors.push({ source: 'rentcast-avm', message: avmResult.reason?.message || String(avmResult.reason) });
-
-  // ── STEP 1.5: AI property fallback when RentCast had nothing ──
-  // Brand-new builds and rural addresses are common gaps in RentCast. When
-  // we get back null, kick a single Claude+web_search call to pull every
-  // pricing-relevant fact (sqft, lot, year built, beds, baths, stories,
-  // construction). The shaped result drops into result.rentcast as if it
-  // came from RentCast, with `_source: 'ai'` for provenance — downstream
-  // code (buildEnrichedProfile, buildFieldVerifyFlags) reads from the same
-  // shape and surfaces a different verify message based on _source.
-  if (!result.rentcast) {
-    const aiProperty = await lookupPropertyFromAI(address).catch((err) => {
-      result.errors.push({ source: 'ai-property', message: err?.message || String(err) });
-      return null;
-    });
-    if (aiProperty) result.rentcast = aiProperty;
+  // ── STEP 1: AI property search ──
+  // Pull pricing-relevant public facts (sqft, lot, year built, beds, baths,
+  // stories, construction) from listing sites, county appraisers, builder
+  // floorplans, and permit data through Claude/OpenAI/Gemini search. The shaped object
+  // intentionally matches the old normalized property-record shape so the
+  // pricing engine and field-verify logic do not need a provider branch.
+  const aiProperty = await lookupPropertyFromAITrio(address).catch((err) => {
+    result.errors.push({ source: 'ai-property', message: err?.message || String(err) });
+    return null;
+  });
+  if (aiProperty) {
+    result.propertyRecord = aiProperty;
+    result.rentcast = aiProperty;
   }
 
   // ── STEP 2: Geocode + Satellite Images ──
@@ -100,27 +93,31 @@ async function performPropertyLookup(address) {
     if (!mapsKey) {
       result.errors.push({ source: 'satellite', message: 'No GOOGLE_MAPS_API_KEY or GOOGLE_API_KEY configured' });
     } else {
+      const microCloseUrl = `${GOOGLE_STATIC_MAP}?center=${lat},${lng}&zoom=22&size=640x640&maptype=satellite&format=png&key=${mapsKey}`;
       const ultraCloseUrl = `${GOOGLE_STATIC_MAP}?center=${lat},${lng}&zoom=21&size=640x640&maptype=satellite&format=png&key=${mapsKey}`;
       const superCloseUrl = `${GOOGLE_STATIC_MAP}?center=${lat},${lng}&zoom=20&size=640x640&maptype=satellite&format=png&key=${mapsKey}`;
       const closeUrlWithKey = `${GOOGLE_STATIC_MAP}?center=${lat},${lng}&zoom=19&size=640x640&maptype=satellite&format=png&key=${mapsKey}`;
       const wideUrlWithKey = `${GOOGLE_STATIC_MAP}?center=${lat},${lng}&zoom=18&size=640x640&maptype=satellite&format=png&key=${mapsKey}`;
 
-      const [ultraCloseB64, superCloseB64, closeB64, wideB64] = await Promise.all([
+      const [microCloseB64, ultraCloseB64, superCloseB64, closeB64, wideB64] = await Promise.all([
+        fetchImageAsBase64(microCloseUrl).catch(() => null),
         fetchImageAsBase64(ultraCloseUrl).catch(() => null),
         fetchImageAsBase64(superCloseUrl).catch(() => null),
         fetchImageAsBase64(closeUrlWithKey).catch(() => null),
         fetchImageAsBase64(wideUrlWithKey).catch(() => null),
       ]);
-      console.log(`[property-lookup] Satellite images: ultra=${!!ultraCloseB64}, super=${!!superCloseB64}, close=${!!closeB64}, wide=${!!wideB64}`);
+      console.log(`[property-lookup] Satellite images: micro=${!!microCloseB64}, ultra=${!!ultraCloseB64}, super=${!!superCloseB64}, close=${!!closeB64}, wide=${!!wideB64}`);
 
       result.satellite = {
         lat, lng,
+        microCloseUrl,
         ultraCloseUrl,
         superCloseUrl,
         closeUrl: closeUrlWithKey,
         wideUrl: wideUrlWithKey,
         inServiceArea: !(lat < SWFL_BOUNDS.latMin || lat > SWFL_BOUNDS.latMax ||
                          lng < SWFL_BOUNDS.lngMin || lng > SWFL_BOUNDS.lngMax),
+        _microCloseB64: microCloseB64,
         _ultraCloseB64: ultraCloseB64,
         _superCloseB64: superCloseB64,
         _closeB64: closeB64,
@@ -131,10 +128,9 @@ async function performPropertyLookup(address) {
     result.errors.push({ source: 'satellite', message: err.message });
   }
 
-  // ── STEP 3: Dual AI Vision Analysis (Claude + Gemini) ──
+  // ── STEP 3: Trio AI Vision Analysis (Claude + OpenAI + Gemini) ──
   if (result.satellite?._closeB64 && result.satellite?._wideB64) {
-    // Run Claude and Gemini in parallel for collaborative analysis
-    const [claudeResult, geminiResult] = await Promise.allSettled([
+    const [claudeResult, openaiResult, geminiResult] = await Promise.allSettled([
       // Claude Vision
       (async () => {
         if (!process.env.ANTHROPIC_API_KEY) {
@@ -150,10 +146,11 @@ async function performPropertyLookup(address) {
           const claudeAnalysis = await analyzeWithClaude(
             result.satellite._closeB64,
             result.satellite._wideB64 || result.satellite._closeB64,
-            result.rentcast,
+            result.propertyRecord,
             address,
             result.satellite._superCloseB64,
-            result.satellite._ultraCloseB64
+            result.satellite._ultraCloseB64,
+            result.satellite._microCloseB64
           );
           console.log(`[CLAUDE DEBUG] Success! Confidence: ${claudeAnalysis?.confidenceScore || 'N/A'}%`);
           return claudeAnalysis;
@@ -162,10 +159,36 @@ async function performPropertyLookup(address) {
           throw err;
         }
       })(),
+      // OpenAI Vision
+      (async () => {
+        if (!process.env.OPENAI_API_KEY) {
+          console.log('[OPENAI DEBUG] OPENAI_API_KEY not set — skipping');
+          return null;
+        }
+        try {
+          console.log('[OPENAI DEBUG] Starting OpenAI vision analysis...');
+          const openaiAnalysis = await analyzeWithOpenAI(
+            [
+              result.satellite?._microCloseB64,
+              result.satellite?._ultraCloseB64,
+              result.satellite?._superCloseB64,
+              result.satellite?._closeB64,
+              result.satellite?._wideB64,
+            ].filter(Boolean),
+            result.propertyRecord,
+            address
+          );
+          console.log(`[OPENAI DEBUG] Success! Confidence: ${openaiAnalysis?.confidenceScore || 'N/A'}%`);
+          return openaiAnalysis;
+        } catch (openaiErr) {
+          console.error(`[OPENAI DEBUG] FAILED: ${openaiErr.message}`);
+          throw openaiErr;
+        }
+      })(),
       // Gemini Vision
       (async () => {
         const geminiKey = process.env.GEMINI_API_KEY;
-        console.log(`[GEMINI DEBUG] Key exists: ${!!geminiKey}, Key starts with: ${geminiKey ? geminiKey.substring(0, 10) : 'N/A'}`);
+        console.log(`[GEMINI DEBUG] Key exists: ${!!geminiKey}`);
         if (!geminiKey) {
           console.log('[GEMINI DEBUG] GEMINI_API_KEY not set — skipping');
           return null;
@@ -173,9 +196,14 @@ async function performPropertyLookup(address) {
         try {
           console.log('[GEMINI DEBUG] Starting Gemini vision analysis...');
           const geminiAnalysis = await analyzeWithGemini(
-            result.satellite?._superCloseB64 || result.satellite?._closeB64,
-            result.satellite?._wideB64,
-            result.rentcast,
+            [
+              result.satellite?._microCloseB64,
+              result.satellite?._ultraCloseB64,
+              result.satellite?._superCloseB64,
+              result.satellite?._closeB64,
+              result.satellite?._wideB64,
+            ].filter(Boolean),
+            result.propertyRecord,
             address,
             geminiKey
           );
@@ -189,74 +217,77 @@ async function performPropertyLookup(address) {
     ]);
 
     const claude = claudeResult.status === 'fulfilled' ? claudeResult.value : null;
+    const openai = openaiResult.status === 'fulfilled' ? openaiResult.value : null;
     const gemini = geminiResult.status === 'fulfilled' ? geminiResult.value : null;
 
     if (claudeResult.status === 'rejected') {
       result.errors.push({ source: 'claude', message: claudeResult.reason?.message || 'Claude analysis failed' });
     }
+    if (openaiResult.status === 'rejected') {
+      result.errors.push({ source: 'openai', message: openaiResult.reason?.message || 'OpenAI analysis failed' });
+    }
     if (geminiResult.status === 'rejected') {
       result.errors.push({ source: 'gemini', message: geminiResult.reason?.message || 'Gemini analysis failed' });
     }
 
-    // Merge results — Claude is primary, Gemini fills gaps and validates
-    if (claude && gemini) {
-      result.aiAnalysis = mergeAiAnalyses(claude, gemini);
-      result.aiAnalysis._sources = ['claude', 'gemini'];
-      result.aiAnalysis._claudeConfidence = claude.confidenceScore;
-      result.aiAnalysis._geminiConfidence = gemini.confidenceScore;
-      logger.info(`[property-lookup] Dual AI analysis complete. Claude: ${claude.confidenceScore}%, Gemini: ${gemini.confidenceScore}%`);
-    } else if (claude) {
-      result.aiAnalysis = claude;
-      result.aiAnalysis._sources = ['claude'];
-    } else if (gemini) {
-      result.aiAnalysis = gemini;
-      result.aiAnalysis._sources = ['gemini'];
+    const analyses = [
+      claude ? { provider: 'claude', analysis: claude } : null,
+      openai ? { provider: 'openai', analysis: openai } : null,
+      gemini ? { provider: 'gemini', analysis: gemini } : null,
+    ].filter(Boolean);
+
+    if (analyses.length) {
+      result.aiAnalysis = mergeAiAnalyses(analyses);
+      logger.info('[property-lookup] Trio AI analysis complete', {
+        sources: result.aiAnalysis._sources,
+        confidence: result.aiAnalysis.confidenceScore,
+      });
     } else {
-      result.errors.push({ source: 'ai', message: 'Both AI models failed — check API keys' });
+      result.errors.push({ source: 'ai', message: 'All AI vision models failed — check API keys' });
     }
   } else if (!result.satellite?._closeB64) {
     result.errors.push({ source: 'ai', message: 'Satellite images not available — cannot run AI analysis' });
   }
 
-  // ── STEP 3.5: Stories fallback — Claude w/ web_search when RentCast had
-  // none. Pass the RentCast facts we DO have as hints so Claude can match
+  // ── STEP 3.5: Stories fallback — Claude w/ web_search when the full
+  // property search did not find stories. Pass the public facts we DO have as hints so Claude can match
   // by subdivision + sqft against builder floorplan catalogs (the pattern
   // that catches new-construction homes the public listings haven't indexed
-  // yet). Stamp `_storiesSource` on the rentcast object so
+  // yet). Stamp `_storiesSource` on the normalized property record so
   // buildEnrichedProfile can surface provenance to the client without a
   // signature change.
-  if (result.rentcast) {
-    if (result.rentcast.stories) {
-      // Attribute to 'ai' when STEP 1.5's full-property fallback supplied the
-      // rc object; otherwise it came from RentCast.
-      result.rentcast._storiesSource = result.rentcast._source === 'ai' ? 'ai' : 'rentcast';
+  if (result.propertyRecord) {
+    if (result.propertyRecord.stories) {
+      result.propertyRecord._storiesSource = 'ai';
     } else {
       const hints = {
-        subdivision: result.rentcast._raw?.subdivision || null,
-        squareFootage: result.rentcast.squareFootage || null,
-        bedrooms: result.rentcast.bedrooms || null,
-        bathrooms: result.rentcast.bathrooms || null,
-        yearBuilt: result.rentcast.yearBuilt || null,
-        propertyType: result.rentcast.propertyType || null,
+        subdivision: result.propertyRecord._raw?.subdivision || null,
+        squareFootage: result.propertyRecord.squareFootage || null,
+        bedrooms: result.propertyRecord.bedrooms || null,
+        bathrooms: result.propertyRecord.bathrooms || null,
+        yearBuilt: result.propertyRecord.yearBuilt || null,
+        propertyType: result.propertyRecord.propertyType || null,
       };
       const aiStories = await lookupStoriesFromAI(address, hints).catch((err) => {
         result.errors.push({ source: 'ai-stories', message: err?.message || String(err) });
         return null;
       });
       if (aiStories) {
-        result.rentcast.stories = aiStories;
-        result.rentcast._storiesSource = 'ai';
+        result.propertyRecord.stories = aiStories;
+        result.propertyRecord._storiesSource = 'ai';
       } else {
-        result.rentcast._storiesSource = 'default';
+        result.propertyRecord._storiesSource = 'default';
       }
     }
+    result.rentcast = result.propertyRecord;
   }
 
   // ── STEP 4: Enrich — merge all data sources ──
-  result.enriched = buildEnrichedProfile(result.rentcast, result.aiAnalysis, lat, lng, result.avm);
+  result.enriched = buildEnrichedProfile(result.propertyRecord, result.aiAnalysis, lat, lng, result.avm);
 
   // Clean up internal fields before sending to client
   if (result.satellite) {
+    delete result.satellite._microCloseB64;
     delete result.satellite._ultraCloseB64;
     delete result.satellite._superCloseB64;
     delete result.satellite._closeB64;
@@ -284,125 +315,6 @@ router.post('/property-lookup', async (req, res) => {
   }
 });
 
-
-// ─────────────────────────────────────────────
-// RENTCAST
-// ─────────────────────────────────────────────
-async function fetchRentCastAVM(address) {
-  if (!process.env.RENTCAST_API_KEY) throw new Error('RENTCAST_API_KEY not configured');
-  const url = `${RENTCAST_BASE}/avm/value?address=${encodeURIComponent(address)}`;
-  const resp = await fetch(url, {
-    headers: { 'X-Api-Key': process.env.RENTCAST_API_KEY, 'Accept': 'application/json' },
-  });
-  if (!resp.ok) throw new Error(`RentCast AVM ${resp.status}: ${resp.statusText}`);
-  const data = await resp.json();
-  if (!data || typeof data.price !== 'number') return null;
-  return {
-    price: data.price,
-    priceRangeLow: data.priceRangeLow || null,
-    priceRangeHigh: data.priceRangeHigh || null,
-    comparables: Array.isArray(data.comparables) ? data.comparables.length : 0,
-  };
-}
-
-async function fetchRentCast(address) {
-  const url = `${RENTCAST_BASE}/properties?address=${encodeURIComponent(address)}`;
-  const resp = await fetch(url, {
-    headers: {
-      'X-Api-Key': process.env.RENTCAST_API_KEY,
-      'Accept': 'application/json'
-    }
-  });
-
-  if (!resp.ok) {
-    throw new Error(`RentCast ${resp.status}: ${resp.statusText}`);
-  }
-
-  const data = await resp.json();
-  const p = Array.isArray(data) ? data[0] : data;
-  if (!p) throw new Error('No property found');
-
-  // Extract and normalize all useful fields
-  const features = p.features || {};
-
-  return {
-    // Address
-    formattedAddress: p.formattedAddress || '',
-    addressLine1: p.addressLine1 || '',
-    city: p.city || '',
-    state: p.state || '',
-    zipCode: p.zipCode || '',
-    county: p.county || '',
-    latitude: p.latitude,
-    longitude: p.longitude,
-
-    // Core property attributes
-    propertyType: p.propertyType || '',
-    squareFootage: p.squareFootage || 0,
-    lotSize: p.lotSize || 0,
-    yearBuilt: p.yearBuilt || null,
-    bedrooms: p.bedrooms || 0,
-    bathrooms: p.bathrooms || 0,
-    // Return null (not 1) when RentCast has nothing — the orchestrator uses
-    // the null to decide whether to run the Zillow fallback lookup, and the
-    // enriched profile exposes `storiesSource` so the UI can nudge for manual
-    // verification when neither provider had data.
-    stories: features.floorCount || features.floor_count || features.floors ||
-             features.stories || p.stories || null,
-
-    // Construction & structure
-    constructionMaterial: normalizeConstruction(
-      features.exteriorType || features.exterior_type ||
-      features.wallType || features.wall_type ||
-      features.constructionType || features.construction_type || ''
-    ),
-    foundationType: normalizeFoundation(
-      features.foundationType || features.foundation_type ||
-      features.foundation || ''
-    ),
-    roofType: normalizeRoof(
-      features.roofType || features.roof_type || features.roofing || ''
-    ),
-    garageType: features.garageType || features.garage_type ||
-                features.parkingType || features.parking_type || '',
-    garageSpaces: features.garageSpaces || features.garage_spaces ||
-                  features.parkingSpaces || features.parking_spaces || 0,
-    coolingType: features.coolingType || features.cooling_type ||
-                 features.cooling || '',
-    heatingType: features.heatingType || features.heating_type ||
-                 features.heating || '',
-
-    // Pool
-    hasPool: !!(features.pool || p.pool || p.hasPool),
-
-    // Multi-unit
-    unitCount: features.unitCount || features.unit_count || p.units ||
-               p.numberOfUnits || 1,
-
-    // Owner
-    ownerType: p.owner?.type || null,        // "Individual" or "Organization"
-    ownerNames: p.owner?.names || [],
-
-    // Sale history
-    lastSaleDate: p.lastSaleDate || null,
-    lastSalePrice: p.lastSalePrice || null,
-    saleHistory: p.history || [],
-
-    // Tax & HOA
-    taxAssessments: p.taxAssessments || {},
-    propertyTaxes: p.propertyTaxes || {},
-    hoaFee: p.hoa?.fee || null,
-
-    // Zoning
-    zoning: p.zoning || '',
-
-    // Raw features object for debugging
-    _rawFeatures: features,
-
-    // All other fields
-    _raw: p
-  };
-}
 
 // ─────────────────────────────────────────────
 // NORMALIZERS
@@ -445,7 +357,9 @@ function normalizeRoof(raw) {
 // GEOCODE
 // ─────────────────────────────────────────────
 async function geocodeAddress(address) {
-  const url = `${GOOGLE_GEOCODE}?address=${encodeURIComponent(address)}&key=${process.env.GOOGLE_MAPS_API_KEY}`;
+  const mapsKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!mapsKey) throw new Error('No GOOGLE_MAPS_API_KEY or GOOGLE_API_KEY configured');
+  const url = `${GOOGLE_GEOCODE}?address=${encodeURIComponent(address)}&key=${mapsKey}`;
   const resp = await fetch(url);
   const data = await resp.json();
   if (data.status !== 'OK' || !data.results?.length) {
@@ -470,36 +384,37 @@ async function fetchImageAsBase64(url) {
 // ─────────────────────────────────────────────
 // CLAUDE VISION ANALYSIS
 // ─────────────────────────────────────────────
-async function analyzeWithClaude(closeB64, wideB64, rentcastData, address, superCloseB64, ultraCloseB64) {
-  const rcContext = rentcastData ? `
-RentCast data for this property:
-- Address: ${rentcastData.formattedAddress}
-- Type: ${rentcastData.propertyType}
-- Sq Ft: ${rentcastData.squareFootage}
-- Lot: ${rentcastData.lotSize} sf
-- Year Built: ${rentcastData.yearBuilt || 'unknown'}
-- Stories: ${rentcastData.stories}
-- Pool (per records): ${rentcastData.hasPool ? 'YES' : 'NO'}
-- Construction: ${rentcastData.constructionMaterial}
-- Foundation: ${rentcastData.foundationType}
-- Roof: ${rentcastData.roofType}
-- HOA Fee: ${rentcastData.hoaFee ? '$' + rentcastData.hoaFee + '/mo' : 'None/unknown'}
-` : `No RentCast data available for this property.`;
+async function analyzeWithClaude(closeB64, wideB64, propertyRecord, address, superCloseB64, ultraCloseB64, microCloseB64) {
+  const rcContext = propertyRecord ? `
+Property record for this address:
+- Address: ${propertyRecord.formattedAddress}
+- Type: ${propertyRecord.propertyType}
+- Sq Ft: ${propertyRecord.squareFootage}
+- Lot: ${propertyRecord.lotSize} sf
+- Year Built: ${propertyRecord.yearBuilt || 'unknown'}
+- Stories: ${propertyRecord.stories}
+- Pool (per records): ${propertyRecord.hasPool ? 'YES' : 'NO'}
+- Construction: ${propertyRecord.constructionMaterial}
+- Foundation: ${propertyRecord.foundationType}
+- Roof: ${propertyRecord.roofType}
+- HOA Fee: ${propertyRecord.hoaFee ? '$' + propertyRecord.hoaFee + '/mo' : 'None/unknown'}
+` : `No public property record available for this property.`;
 
   const systemPrompt = `You are a property analysis AI for Waves Pest Control, a pest control and lawn care company in Southwest Florida. You analyze satellite imagery to extract property features that affect pest control, lawn care, tree/shrub care, mosquito control, and termite treatment pricing.
 
-You will receive up to four satellite images (closer views carry MORE weight for feature detection):
-1. ULTRA CLOSE VIEW (zoom 21) — HIGHEST PRIORITY — shows pool cages, screen enclosures, lanai details, driveway width, individual plants. Use this for pool/cage/driveway detection.
-2. SUPER CLOSE VIEW (zoom 20) — shows fine detail: roof material, driveway surface, landscape beds
-3. CLOSE VIEW (zoom 19) — shows the full property lot boundaries and structure
-4. WIDE VIEW (zoom 18) — shows the neighborhood, water features, surrounding lots
+You will receive up to five satellite images (closer views carry MORE weight for feature detection):
+1. MICRO CLOSE VIEW (zoom 22) — HIGHEST PRIORITY when usable — closest property detail.
+2. ULTRA CLOSE VIEW (zoom 21) — shows pool cages, screen enclosures, lanai details, driveway width, individual plants.
+3. SUPER CLOSE VIEW (zoom 20) — shows fine detail: roof material, driveway surface, landscape beds.
+4. CLOSE VIEW (zoom 19) — shows the full property lot boundaries and structure.
+5. WIDE VIEW (zoom 18) — shows the neighborhood, water features, surrounding lots.
 
-You also receive RentCast property record data for cross-reference.
+You also receive public property record data for cross-reference.
 
 IMPORTANT RULES:
-- POOL DETECTION (SWFL-specific): Pool cages/screen enclosures are EXTREMELY common in Southwest Florida. They appear as rectangular screened structures attached to the back of the home, often covering both a pool and a lanai/patio. Look for: rectangular screen enclosure (lighter gray mesh visible from above), blue water visible through the screen, or a solid lanai roof extending from the main roof. If you see ANY screen enclosure attached to the home, mark poolCage=YES. Even small ones count — pool cages in SWFL range from 200-800+ sq ft. If RentCast says pool=NO but you clearly see a pool cage or blue water, override RentCast — county records are often outdated for pools added after construction.
+- POOL DETECTION (SWFL-specific): Pool cages/screen enclosures are EXTREMELY common in Southwest Florida. They appear as rectangular screened structures attached to the back of the home, often covering both a pool and a lanai/patio. Look for: rectangular screen enclosure (lighter gray mesh visible from above), blue water visible through the screen, or a solid lanai roof extending from the main roof. If you see ANY screen enclosure attached to the home, mark poolCage=YES. Even small ones count. If public records say pool=NO but you clearly see a pool cage or blue water, override records because county/listing data can be outdated.
 - DRIVEWAY: "largeDriveway" means the driveway is wider than a standard 2-car width (~20ft) OR extends significantly along the side of the home OR has a circular/turnaround area. Standard SWFL driveways are 2-car width going straight to the garage — that is NOT large. Only mark YES if it's notably oversized.
-- For construction material: if RentCast already identified it, confirm or note disagreement. If unknown, infer from satellite (CBS=stucco appearance, wood frame=siding visible, etc.)
+- For construction material: if the property record already identified it, confirm or note disagreement. If unknown, infer from satellite (CBS=stucco appearance, wood frame=siding visible, etc.)
 - For foundation: SWFL default is slab-on-grade. Only flag raised/crawlspace if clearly visible (house elevated, visible piers/stilts, lattice skirting).
 - Estimate impervious surface as a percentage of the total lot, not just what you see — account for areas under the roof line too.
 - Be aggressive about detecting features — it's better to flag "POSSIBLE" than to miss something. Pest control pricing depends on accurate property assessment.
@@ -540,7 +455,7 @@ Return a JSON object with exactly these fields:
   "possibleGrassType": "ST_AUGUSTINE" | "BERMUDA" | "BAHIA" | "ZOYSIA" | "MIXED" | "UNKNOWN",
   "shadeCoveragePercent": number (0-100, percentage of turf under tree canopy),
 
-  "imperviosSurfacePercent": number (0-100, percentage of lot that is hardscape/concrete/roof/paved),
+  "imperviousSurfacePercent": number (0-100, percentage of lot that is hardscape/concrete/roof/paved),
   "estimatedTurfSf": number (estimated treatable turf area in sq ft),
 
   "mulchBeds": "YES" | "NO" | "UNKNOWN",
@@ -584,6 +499,10 @@ Return a JSON object with exactly these fields:
       messages: [{
         role: 'user',
         content: [
+          ...(microCloseB64 ? [{
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/png', data: microCloseB64 }
+          }] : []),
           ...(ultraCloseB64 ? [{
             type: 'image',
             source: { type: 'base64', media_type: 'image/png', data: ultraCloseB64 }
@@ -634,6 +553,10 @@ Return a JSON object with exactly these fields:
 // ENRICHED PROFILE — merges all data sources
 // ─────────────────────────────────────────────
 function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
+  const imperviousSurfacePercent = ai?.imperviousSurfacePercent ?? ai?.imperviosSurfacePercent ?? 20;
+  const waterProximity = ai?.waterProximity || ai?.nearWater || 'NONE';
+  const waterDistance = ai?.waterDistance || 'NONE';
+
   const profile = {
     // ── ADDRESS ──
     address: rc?.formattedAddress || '',
@@ -652,14 +575,14 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     lotSqFt: rc?.lotSize || 0,
     stories: rc?.stories || 1,
     // Provenance for the `stories` value so the client can decide whether to
-    // amber-nudge the estimator to eyeball the photos. 'rentcast' / 'ai' =
-    // verified data source; 'default' = nobody knew, we fell back to 1.
-    storiesSource: rc?._storiesSource || (rc?.stories ? 'rentcast' : 'default'),
+    // amber-nudge the estimator to eyeball the photos. 'ai' = verified public
+    // record/search source; 'default' = nobody knew, we fell back to 1.
+    storiesSource: rc?._storiesSource || (rc?.stories ? 'ai' : 'default'),
     footprint: rc?.squareFootage
       ? Math.round(rc.squareFootage / (rc.stories || 1))
       : 0,
 
-    // ── CONSTRUCTION (merged RC + AI) ──
+    // ── CONSTRUCTION (merged property record + satellite AI) ──
     yearBuilt: rc?.yearBuilt || null,
     constructionAge: classifyAge(rc?.yearBuilt),
     constructionMaterial: mergeField(
@@ -675,7 +598,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     pool: mergePool(rc, ai),
     poolCage: ai?.poolCage || 'UNKNOWN',
 
-    // ── LANDSCAPE (from AI, with RC cross-ref) ──
+    // ── LANDSCAPE (from satellite AI, with property-record cross-ref) ──
     shrubDensity: ai?.shrubDensity || 'MODERATE',
     treeDensity: ai?.treeDensity || 'MODERATE',
     landscapeComplexity: ai?.landscapeComplexity || 'MODERATE',
@@ -685,7 +608,8 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     shadeCoveragePercent: ai?.shadeCoveragePercent || 0,
 
     // ── TURF ──
-    imperviosSurfacePercent: ai?.imperviosSurfacePercent || 20,
+    imperviousSurfacePercent,
+    imperviosSurfacePercent: imperviousSurfacePercent,
     estimatedTurfSf: ai?.estimatedTurfSf || 0,
     turfCondition: ai?.turfCondition || 'UNKNOWN',
     possibleGrassType: ai?.possibleGrassType || 'UNKNOWN',
@@ -703,8 +627,9 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     fenceType: ai?.fenceType || 'UNKNOWN',
 
     // ── WATER ──
-    nearWater: ai?.nearWater || 'NONE',
-    waterDistance: ai?.waterDistance || 'NONE',
+    nearWater: waterProximity,
+    waterProximity,
+    waterDistance,
 
     // ── ENVIRONMENT ──
     woodedAdjacency: ai?.woodedAdjacency || 'NONE',
@@ -725,7 +650,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     isNewHomeowner: isRecentPurchase(rc?.lastSaleDate, 6),
     yearsOwned: yearsFromDate(rc?.lastSaleDate),
 
-    // ── AVM (RentCast estimated value) ──
+    // ── AVM (deprecated; no valuation provider in the AI-search path) ──
     estimatedValue: avm?.price || null,
     estimatedValueLow: avm?.priceRangeLow || null,
     estimatedValueHigh: avm?.priceRangeHigh || null,
@@ -770,12 +695,12 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
       ),
       // Mosquito: water proximity severity
       mosquitoWaterMult: calcMosquitoWaterMult(
-        ai?.nearWater || 'NONE',
-        ai?.waterDistance || 'NONE'
+        waterProximity,
+        waterDistance
       ),
       // Lawn: impervious surface correction
-      turfCorrectionFactor: ai?.imperviosSurfacePercent
-        ? (100 - ai.imperviosSurfacePercent) / 100
+      turfCorrectionFactor: imperviousSurfacePercent
+        ? (100 - imperviousSurfacePercent) / 100
         : 0.80,
       // Overall pest pressure multiplier
       pestPressureMult: calcPestPressureMult(ai?.overallPestPressureEstimate),
@@ -788,6 +713,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
 
     // ── DATA SOURCE TRACKING ──
     dataSources: {
+      propertyRecord: !!rc,
       rentcast: !!rc,
       satellite: !!(ai),
       aiAnalysis: !!(ai?.confidenceScore),
@@ -823,14 +749,14 @@ function classifyAge(yearBuilt) {
 }
 
 function mergeField(rcValue, aiValue, fallback) {
-  // RentCast takes priority if it has data; AI fills gaps
+  // Property records take priority if they have data; satellite AI fills gaps.
   if (rcValue && rcValue !== 'UNKNOWN') return rcValue;
   if (aiValue && aiValue !== 'UNKNOWN') return aiValue;
   return fallback;
 }
 
 function mergePool(rc, ai) {
-  // RentCast YES is authoritative. AI can upgrade but not downgrade.
+  // Property-record YES is authoritative. Satellite AI can upgrade but not downgrade.
   if (rc?.hasPool) return 'YES';
   if (ai?.pool === 'YES') return 'POSSIBLE'; // AI sees pool but RC doesn't — could be neighbor
   if (ai?.pool === 'POSSIBLE') return 'POSSIBLE';
@@ -838,7 +764,7 @@ function mergePool(rc, ai) {
 }
 
 function inferFoundation(rc, ai) {
-  // Direct from RentCast features
+  // Direct from property-record features.
   if (rc?.foundationType && rc.foundationType !== 'UNKNOWN') return rc.foundationType;
 
   // SWFL heuristics: almost everything is slab-on-grade
@@ -1061,13 +987,13 @@ function buildFieldVerifyFlags(rc, ai) {
     if (!ai?.constructionVisible || ai.constructionVisible === 'UNKNOWN') {
       flags.push({
         field: 'constructionMaterial',
-        reason: 'Construction material not identified by RentCast or satellite',
+        reason: 'Construction material not identified by property search or satellite',
         priority: 'MEDIUM'
       });
     }
   }
 
-  // AI pool disagrees with RentCast
+  // Satellite AI pool signal disagrees with property records.
   if (rc?.hasPool === false && ai?.pool === 'YES') {
     flags.push({
       field: 'pool',
@@ -1076,20 +1002,19 @@ function buildFieldVerifyFlags(rc, ai) {
     });
   }
 
-  // No RentCast data at all. Distinguish the AI-fallback case (we DID get
-  // facts, just from web search instead of RentCast) so the operator gets a
+  // No property-record data at all. If AI search found facts, use a
   // lower-priority "verify on site" nudge rather than a "we know nothing"
   // alarm. Genuine "nothing at all" — no rc object — still HIGH.
   if (!rc) {
     flags.push({
       field: 'all',
-      reason: 'No RentCast data — all property dimensions are estimated',
+      reason: 'No property record data — all property dimensions are estimated',
       priority: 'HIGH'
     });
   } else if (rc._source === 'ai') {
     flags.push({
       field: 'all',
-      reason: `Property data sourced from AI web search (RentCast had no record)${rc._aiSourceUrl ? ` — primary source: ${rc._aiSourceUrl}` : ''} — verify key dimensions on site`,
+      reason: `Property data sourced from AI web search${rc._aiSourceUrl ? ` — primary source: ${rc._aiSourceUrl}` : ''} — verify key dimensions on site`,
       priority: 'MEDIUM',
     });
   }
@@ -1406,26 +1331,57 @@ router.post('/calculate-estimate', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
+// OPENAI VISION ANALYSIS
+// ─────────────────────────────────────────────
+async function analyzeWithOpenAI(imageB64s, propertyRecord, address) {
+  const content = [
+    { type: 'input_text', text: buildSatelliteVisionPrompt(address, propertyRecord) },
+    ...imageB64s.map((imageB64) => ({
+      type: 'input_image',
+      image_url: `data:image/png;base64,${imageB64}`,
+      detail: 'high',
+    })),
+  ];
+
+  const resp = await fetch(OPENAI_RESPONSES_API, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: OPENAI_VISION_MODEL,
+      input: [{ role: 'user', content }],
+    }),
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    throw new Error(`OpenAI API ${resp.status}: ${errText.substring(0, 200)}`);
+  }
+
+  const data = await resp.json();
+  const text = extractOpenAIText(data);
+  if (!text) throw new Error('OpenAI returned empty response');
+  const clean = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+  const jsonMatch = clean.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error('OpenAI returned no valid JSON');
+  return JSON.parse(jsonMatch[0]);
+}
+
+// ─────────────────────────────────────────────
 // GEMINI VISION ANALYSIS
 // ─────────────────────────────────────────────
-async function analyzeWithGemini(closeB64, wideB64, rentcastData, address, apiKey) {
-  const rcContext = rentcastData ? `Property: ${rentcastData.formattedAddress}, ${rentcastData.squareFootage} sf, ${rentcastData.lotSize} sf lot, built ${rentcastData.yearBuilt || 'unknown'}, ${rentcastData.stories} story, pool: ${rentcastData.hasPool ? 'YES' : 'NO'}, ${rentcastData.constructionMaterial}, ${rentcastData.foundationType} foundation` : '';
+async function analyzeWithGemini(imageB64s, propertyRecord, address, apiKey) {
+  const prompt = buildSatelliteVisionPrompt(address, propertyRecord);
 
-  const prompt = `Analyze these satellite images of a property at ${address}. ${rcContext}
-
-Return a JSON object with these fields (same format as a property analysis):
-pool, poolCage, largeDriveway, drivewaySurfaceType, fenceType, fenceNotes, roofMaterial, roofCondition, shrubDensity (LIGHT/MODERATE/HEAVY), treeDensity, landscapeComplexity (SIMPLE/MODERATE/COMPLEX), estimatedTurfSqFt, estimatedBedSqFt, estimatedImpervious, waterProximity (NONE/CANAL/POND/LAKE/RETENTION/WETLAND), vegetationOnStructure, outbuildingCount, maintenanceCondition, overallPestPressureEstimate (LOW/MODERATE/HIGH/VERY_HIGH), confidenceScore (0-100), analysisNotes.
-
-Respond ONLY with valid JSON. No markdown, no explanation.`;
-
-  const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+  const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_VISION_MODEL}:generateContent?key=${apiKey}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{
         parts: [
-          { inlineData: { mimeType: 'image/png', data: closeB64 } },
-          { inlineData: { mimeType: 'image/png', data: wideB64 } },
+          ...imageB64s.map((imageB64) => ({ inlineData: { mimeType: 'image/png', data: imageB64 } })),
           { text: prompt },
         ],
       }],
@@ -1472,42 +1428,127 @@ Respond ONLY with valid JSON. No markdown, no explanation.`;
 }
 
 // ─────────────────────────────────────────────
-// MERGE AI ANALYSES (Claude primary, Gemini validates)
+// MERGE AI ANALYSES
 // ─────────────────────────────────────────────
-function mergeAiAnalyses(claude, gemini) {
-  const merged = { ...claude };
+function mergeAiAnalyses(providerResults) {
+  const sorted = providerResults
+    .map(({ provider, analysis }) => ({ provider, analysis: normalizeSatelliteAnalysis(analysis) }))
+    .sort((a, b) => (b.analysis?.confidenceScore || 0) - (a.analysis?.confidenceScore || 0));
+  const primary = sorted[0];
+  const merged = { ...primary.analysis };
 
   // Use higher confidence for key fields when models disagree
-  const fieldsToValidate = ['pool', 'poolCage', 'fenceType', 'shrubDensity', 'treeDensity', 'landscapeComplexity', 'waterProximity', 'overallPestPressureEstimate'];
+  const fieldsToValidate = ['pool', 'poolCage', 'fenceType', 'shrubDensity', 'treeDensity', 'landscapeComplexity', 'nearWater', 'waterDistance', 'overallPestPressureEstimate'];
 
   const divergences = [];
-  for (const field of fieldsToValidate) {
-    if (gemini[field] && claude[field] && String(gemini[field]).toUpperCase() !== String(claude[field]).toUpperCase()) {
-      divergences.push({ field, claude: claude[field], gemini: gemini[field] });
-      // If Gemini has higher confidence on this analysis, use its value
-      if ((gemini.confidenceScore || 0) > (claude.confidenceScore || 0) + 10) {
-        merged[field] = gemini[field];
+  for (const { provider, analysis } of sorted.slice(1)) {
+    for (const field of fieldsToValidate) {
+      if (analysis[field] && merged[field] && String(analysis[field]).toUpperCase() !== String(merged[field]).toUpperCase()) {
+        divergences.push({ field, primary: primary.provider, [primary.provider]: merged[field], [provider]: analysis[field] });
+        if ((analysis.confidenceScore || 0) > (merged.confidenceScore || 0) + 10) {
+          merged[field] = analysis[field];
+        }
+      }
+    }
+
+    // Fill gaps from every secondary provider.
+    for (const [key, val] of Object.entries(analysis)) {
+      if ((merged[key] === null || merged[key] === undefined || merged[key] === '') && val) {
+        merged[key] = val;
       }
     }
   }
 
-  // Fill gaps — if Claude returned null/undefined, use Gemini's value
-  for (const [key, val] of Object.entries(gemini)) {
-    if ((merged[key] === null || merged[key] === undefined || merged[key] === '') && val) {
-      merged[key] = val;
-    }
+  const confidences = sorted.map((r) => Number(r.analysis?.confidenceScore)).filter(Number.isFinite);
+  if (confidences.length) {
+    merged.confidenceScore = Math.round(confidences.reduce((sum, n) => sum + n, 0) / confidences.length);
   }
-
-  // Average confidence scores
-  merged.confidenceScore = Math.round(((claude.confidenceScore || 70) + (gemini.confidenceScore || 70)) / 2);
+  merged._sources = sorted.map((r) => r.provider);
+  for (const { provider, analysis } of sorted) {
+    merged[`_${provider}Confidence`] = analysis?.confidenceScore || null;
+  }
 
   // Track divergences for field verification
   if (divergences.length) {
     merged.aiDivergences = divergences;
-    merged.analysisNotes = (merged.analysisNotes || '') + ` AI models diverged on: ${divergences.map(d => `${d.field} (Claude: ${d.claude}, Gemini: ${d.gemini})`).join(', ')}.`;
+    merged.analysisNotes = (merged.analysisNotes || '') + ` AI models diverged on: ${divergences.map(d => d.field).join(', ')}.`;
   }
 
   return merged;
+}
+
+function normalizeSatelliteAnalysis(analysis = {}) {
+  const normalized = { ...analysis };
+  if (normalized.imperviousSurfacePercent == null && normalized.imperviosSurfacePercent != null) {
+    normalized.imperviousSurfacePercent = normalized.imperviosSurfacePercent;
+  }
+  if (normalized.imperviosSurfacePercent == null && normalized.imperviousSurfacePercent != null) {
+    normalized.imperviosSurfacePercent = normalized.imperviousSurfacePercent;
+  }
+  if (!normalized.waterProximity && normalized.nearWater) normalized.waterProximity = normalized.nearWater;
+  if (!normalized.nearWater && normalized.waterProximity) normalized.nearWater = normalized.waterProximity;
+  if (!normalized.waterDistance) normalized.waterDistance = 'NONE';
+  return normalized;
+}
+
+function buildSatelliteVisionPrompt(address, propertyRecord) {
+  const rcContext = propertyRecord ? `Property record: ${propertyRecord.formattedAddress || address}, ${propertyRecord.squareFootage || 'unknown'} sf, ${propertyRecord.lotSize || 'unknown'} sf lot, built ${propertyRecord.yearBuilt || 'unknown'}, ${propertyRecord.stories || 'unknown'} story, pool record: ${propertyRecord.hasPool ? 'YES' : 'NO'}, construction: ${propertyRecord.constructionMaterial || 'UNKNOWN'}, foundation: ${propertyRecord.foundationType || 'UNKNOWN'}` : 'No public property record available.';
+  return `Analyze these satellite images of a Southwest Florida property at ${address}. Closest images come first and should carry the most weight. ${rcContext}
+
+Return ONLY valid JSON with these fields:
+{
+  "pool": "YES" | "NO" | "POSSIBLE",
+  "poolCage": "YES" | "NO" | "POSSIBLE",
+  "poolNotes": "string",
+  "largeDriveway": "YES" | "NO",
+  "drivewaySurfaceType": "CONCRETE" | "PAVER" | "ASPHALT" | "GRAVEL" | "UNKNOWN",
+  "fenceType": "NONE" | "PRIVACY_WOOD" | "PRIVACY_VINYL" | "CHAIN_LINK" | "ALUMINUM" | "PARTIAL" | "UNKNOWN",
+  "fenceNotes": "string",
+  "roofMaterial": "TILE" | "SHINGLE" | "METAL" | "FLAT" | "UNKNOWN",
+  "roofNotes": "string",
+  "constructionVisible": "CBS" | "WOOD_FRAME" | "METAL" | "BRICK" | "UNKNOWN",
+  "shrubDensity": "LIGHT" | "MODERATE" | "HEAVY",
+  "treeDensity": "LIGHT" | "MODERATE" | "HEAVY",
+  "landscapeComplexity": "SIMPLE" | "MODERATE" | "COMPLEX",
+  "estimatedPalmCount": number,
+  "estimatedTreeCount": number,
+  "estimatedBedAreaSf": number,
+  "turfCondition": "GOOD" | "FAIR" | "POOR" | "UNKNOWN",
+  "possibleGrassType": "ST_AUGUSTINE" | "BERMUDA" | "BAHIA" | "ZOYSIA" | "MIXED" | "UNKNOWN",
+  "shadeCoveragePercent": number,
+  "imperviousSurfacePercent": number,
+  "estimatedTurfSf": number,
+  "mulchBeds": "YES" | "NO" | "UNKNOWN",
+  "rockBeds": "YES" | "NO" | "UNKNOWN",
+  "bedMaterial": "MULCH" | "ROCK" | "MIXED" | "BARE" | "UNKNOWN",
+  "irrigationVisible": "YES" | "NO" | "UNKNOWN",
+  "nearWater": "NONE" | "CANAL_ADJACENT" | "POND_ON_PROPERTY" | "RETENTION_NEARBY" | "LAKE_ADJACENT" | "WETLAND_ADJACENT",
+  "waterDistance": "ON_PROPERTY" | "ADJACENT" | "WITHIN_200FT" | "WITHIN_500FT" | "NONE",
+  "woodedAdjacency": "NONE" | "PARTIAL" | "HEAVY",
+  "woodedNotes": "string",
+  "outbuildingCount": number,
+  "outbuildingNotes": "string",
+  "maintenanceCondition": "WELL_MAINTAINED" | "AVERAGE" | "DEFERRED" | "UNKNOWN",
+  "maintenanceNotes": "string",
+  "vegetationOnStructure": "NONE" | "MINOR" | "SIGNIFICANT",
+  "vegetationNotes": "string",
+  "overallPestPressureEstimate": "LOW" | "MODERATE" | "HIGH" | "VERY_HIGH",
+  "pestPressureFactors": ["string"],
+  "confidenceScore": number,
+  "analysisNotes": "string"
+}`;
+}
+
+function extractOpenAIText(data) {
+  if (typeof data?.output_text === 'string') return data.output_text;
+  const parts = [];
+  for (const item of data?.output || []) {
+    for (const content of item?.content || []) {
+      if (content?.type === 'output_text' && content.text) parts.push(content.text);
+      if (content?.type === 'text' && content.text) parts.push(content.text);
+    }
+  }
+  return parts.join('');
 }
 
 module.exports = router;

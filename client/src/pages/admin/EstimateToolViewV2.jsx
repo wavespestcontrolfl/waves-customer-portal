@@ -587,7 +587,7 @@ export default function EstimateToolViewV2({
   async function doLookup() {
     const address = form.address.trim();
     if (!address) { setLookupStatus({ type: 'err', msg: 'Enter an address' }); return; }
-    setLookupStatus({ type: 'loading', msg: 'Looking up property... (RentCast + AI Satellite Analysis)' });
+    setLookupStatus({ type: 'loading', msg: 'Looking up property... (AI property search + AI satellite analysis)' });
     setSatelliteStatus({ type: 'loading', msg: 'Running AI satellite analysis...' });
     try {
       const r = await fetch('/api/admin/estimator/property-lookup', {
@@ -657,6 +657,7 @@ export default function EstimateToolViewV2({
       if (data.satellite) {
         setSatelliteData({
           imageUrl: data.satellite.closeUrl,
+          microCloseUrl: data.satellite.microCloseUrl,
           ultraCloseUrl: data.satellite.ultraCloseUrl,
           superCloseUrl: data.satellite.superCloseUrl,
           closeUrl: data.satellite.closeUrl,
@@ -666,7 +667,7 @@ export default function EstimateToolViewV2({
         });
       }
 
-      const rc = data.rentcast;
+      const rc = data.propertyRecord || data.rentcast;
       const ai = data.aiAnalysis;
       const lines = [];
       if (rc) lines.push(`${rc.formattedAddress} — ${rc.squareFootage || '?'} sf / ${rc.lotSize || '?'} sf lot / ${rc.stories || 1} story`);
@@ -1148,7 +1149,13 @@ export default function EstimateToolViewV2({
               )}
               {satelliteData && (satelliteData.imageUrl || satelliteData.closeUrl) && (
                 <div className="mb-3">
-                  <div className="grid grid-cols-4 gap-1 mb-2">
+                  <div className="grid grid-cols-5 gap-1 mb-2">
+                    {satelliteData.microCloseUrl && (
+                      <div>
+                        <img src={satelliteData.microCloseUrl} alt="Micro close" className="w-full rounded-xs border border-zinc-900 aspect-square object-cover" />
+                        <div className="text-11 text-zinc-900 text-center mt-0.5 font-medium uppercase tracking-label">Micro</div>
+                      </div>
+                    )}
                     {satelliteData.ultraCloseUrl && (
                       <div>
                         <img src={satelliteData.ultraCloseUrl} alt="Ultra close" className="w-full rounded-xs border border-zinc-900 aspect-square object-cover" />
@@ -1174,7 +1181,7 @@ export default function EstimateToolViewV2({
                   </div>
                   {satelliteData.aiSources && (
                     <div className="text-11 text-ink-secondary mb-1">
-                      AI Analysis: {satelliteData.aiSources.join(' + ')} {satelliteData.aiSources.length > 1 ? '(dual-model)' : ''}
+                      AI Analysis: {satelliteData.aiSources.join(' + ')} {satelliteData.aiSources.length > 1 ? '(multi-model)' : ''}
                     </div>
                   )}
                   {satelliteData.fieldVerify?.length > 0 && (
@@ -1319,7 +1326,7 @@ export default function EstimateToolViewV2({
               {form.svcBoracare && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   <FieldV2 label="Attic Sq Ft (auto-estimated from home/stories)" className="mb-0">
-                    <InputV2 k="boracareSqft" type="number" placeholder="Auto from RentCast" />
+                    <InputV2 k="boracareSqft" type="number" placeholder="Auto from AI property search" />
                   </FieldV2>
                 </div>
               )}

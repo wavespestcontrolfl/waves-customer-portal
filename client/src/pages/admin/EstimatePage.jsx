@@ -359,7 +359,7 @@ function EstimateToolView() {
     setCustomers([]);
   }
 
-  /* ── v2 Property Lookup — RentCast + Satellite + Claude AI in one call ── */
+  /* ── v2 Property Lookup — AI property search + satellite review in one call ── */
   const [enrichedProfile, setEnrichedProfile] = useState(null);
   const [existingCustomerMatch, setExistingCustomerMatch] = useState(null);
 
@@ -398,7 +398,7 @@ function EstimateToolView() {
   async function doLookup() {
     const address = form.address.trim();
     if (!address) { setLookupStatus({ type: 'err', msg: 'Enter an address' }); return; }
-    setLookupStatus({ type: 'loading', msg: 'Looking up property... (RentCast + AI Satellite Analysis)' });
+    setLookupStatus({ type: 'loading', msg: 'Looking up property... (AI property search + AI satellite analysis)' });
     setSatelliteStatus({ type: 'loading', msg: 'Running AI satellite analysis...' });
     try {
       const r = await fetch('/api/admin/estimator/property-lookup', {
@@ -466,6 +466,7 @@ function EstimateToolView() {
       if (data.satellite) {
         setSatelliteData({
           imageUrl: data.satellite.closeUrl,
+          microCloseUrl: data.satellite.microCloseUrl,
           ultraCloseUrl: data.satellite.ultraCloseUrl,
           superCloseUrl: data.satellite.superCloseUrl,
           closeUrl: data.satellite.closeUrl,
@@ -476,7 +477,7 @@ function EstimateToolView() {
       }
 
       // Build status messages
-      const rc = data.rentcast;
+      const rc = data.propertyRecord || data.rentcast;
       const ai = data.aiAnalysis;
       const lines = [];
       if (rc) lines.push(`${rc.formattedAddress} — ${rc.squareFootage || '?'} sf / ${rc.lotSize || '?'} sf lot / ${rc.stories || 1} story`);
@@ -896,7 +897,13 @@ function EstimateToolView() {
             )}
             {satelliteData && (satelliteData.imageUrl || satelliteData.closeUrl) && (
               <div style={{ marginBottom: 12 }}>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4, marginBottom: 8 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 4, marginBottom: 8 }}>
+                  {satelliteData.microCloseUrl && (
+                    <div>
+                      <img src={satelliteData.microCloseUrl} alt="Micro close" style={{ width: '100%', borderRadius: 8, border: `2px solid ${C.teal}`, aspectRatio: '1', objectFit: 'cover' }} />
+                      <div style={{ fontSize: 9, color: C.teal, textAlign: 'center', marginTop: 2, fontWeight: 600 }}>Micro</div>
+                    </div>
+                  )}
                   {satelliteData.ultraCloseUrl && (
                     <div>
                       <img src={satelliteData.ultraCloseUrl} alt="Ultra close" style={{ width: '100%', borderRadius: 8, border: `2px solid ${C.teal}`, aspectRatio: '1', objectFit: 'cover' }} />
@@ -1068,7 +1075,7 @@ function EstimateToolView() {
             {form.svcBoracare && (
               <div style={sSubOpts}>
                 <Field label="Attic Sq Ft (auto-estimated from home/stories)" style={{ marginBottom: 0 }}>
-                  <Input k="boracareSqft" type="number" placeholder="Auto from RentCast" />
+                  <Input k="boracareSqft" type="number" placeholder="Auto from AI property search" />
                 </Field>
               </div>
             )}
