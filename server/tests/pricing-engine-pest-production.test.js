@@ -31,6 +31,25 @@ describe('pest production burden pricing inputs', () => {
     expect(pestLine({ ...base, features: { ...base.features, poolCageSize: 'oversized' } }).additionalAdj).toBe(18);
   });
 
+  test('lot size is shadow diagnostics only for recurring pest pricing', () => {
+    const base = {
+      homeSqFt: 2500,
+      features: {
+        pool: false,
+        poolCage: false,
+        shrubs: 'moderate',
+        trees: 'moderate',
+        complexity: 'moderate',
+      },
+    };
+    const baselineLot = pestLine({ ...base, lotSqFt: 7500 });
+    const eightThousandLot = pestLine({ ...base, lotSqFt: 8000 });
+
+    expect(eightThousandLot.basePrice).toBe(baselineLot.basePrice);
+    expect(eightThousandLot.additionalAdj).toBe(baselineLot.additionalAdj);
+    expect(eightThousandLot.productionDiagnostics.breakdown.lot).toBe(0.2);
+  });
+
   test('production diagnostics are shadow-only and scale with large pool-cage properties', () => {
     const standard = pestLine({
       homeSqFt: 2528,

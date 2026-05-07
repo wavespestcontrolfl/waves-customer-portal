@@ -71,6 +71,10 @@ function determineTier(serviceCount) {
   return { tier: 'none', discount: 0 };
 }
 
+function calculateAnnualPrepayAmount(monthlyRate) {
+  return Math.round((parseFloat(monthlyRate || 0) || 0) * 12 * 100) / 100;
+}
+
 const EstimateConverter = {
   /**
    * Convert an accepted estimate into an active customer with scheduled services.
@@ -188,7 +192,7 @@ const EstimateConverter = {
       if (monthlyRate > 0 && !skipSetupInvoice) {
         const InvoiceService = require('./invoice');
         if (billingTerm === 'prepay_annual') {
-          const annualAmount = Math.round(monthlyRate * 12 * 100) / 100;
+          const annualAmount = calculateAnnualPrepayAmount(monthlyRate);
           const inv = await InvoiceService.create({
             customerId,
             title: `WaveGuard ${tier || 'Bronze'} — Annual Prepay (12 months)`,
@@ -229,3 +233,4 @@ const EstimateConverter = {
 };
 
 module.exports = EstimateConverter;
+module.exports.calculateAnnualPrepayAmount = calculateAnnualPrepayAmount;
