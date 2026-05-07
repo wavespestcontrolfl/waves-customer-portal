@@ -1536,7 +1536,7 @@ function EstimateToolView() {
                             <TierRow
                               key={i}
                               name={t.label}
-                              detail={`${fmt(t.pa)}/app x ${t.apps}${R.pest?.rOG > 0 ? ' (incl roach +15%)' : ''}`}
+                              detail={`${fmt(t.pa)}/app x ${t.apps}`}
                               price={`${fmt(t.mo)}/mo`}
                               recommended={t.recommended}
                               dimmed={t.dimmed}
@@ -1545,7 +1545,7 @@ function EstimateToolView() {
                             />
                           ))}
                         </TierGrid>
-                        {R.pest?.rOG > 0 && <div style={sModNote}>Roach modifier: +{fmt(R.pest.rOG)}/visit ({R.pestRoachMod === 'GERMAN' ? 'German' : 'Regular'})</div>}
+                        {R.pestInitialRoachPrice > 0 && <div style={sModNote}>{R.pestRoachMod === 'GERMAN' ? 'German' : 'Native'} roach initial is added as a one-time knockdown, not a recurring per-visit premium.</div>}
                       </div>
                     )}
 
@@ -1693,13 +1693,13 @@ function EstimateToolView() {
                         );
                       }
                       // Generic one-time
-                      const nameMap = { 'OT Pest': 'One-Time Pest', 'OT Mosquito': 'One-Time Mosquito', 'German Roach': 'German Roach Initial' };
+                      const nameMap = { 'OT Pest': 'One-Time Pest', 'OT Mosquito': 'One-Time Mosquito', 'German Roach': 'German Roach Initial', 'German Roach Initial': 'German Roach Initial', 'Native Roach Initial': 'Native Roach Initial', 'Initial German Roach Knockdown': 'Initial German Roach Knockdown', 'Initial Native Roach Knockdown': 'Initial Native Roach Knockdown' };
                       const displayName = item.lawnType ? `One-Time Lawn (${item.lawnType})` : (nameMap[item.name] || item.name);
                       return (
                         <div key={i} style={{ marginBottom: 24 }}>
-                          <div style={sSectionTitle}>{displayName}{E.isRecurringCustomer && <span style={sDiscBadge}>-15%</span>}</div>
+                          <div style={sSectionTitle}>{displayName}{E.isRecurringCustomer && !item.noRecurringDiscount && <span style={sDiscBadge}>-15%</span>}</div>
                           <TierGrid>
-                            <TierRow name={item.lawnType || (item.name === 'OT Pest' ? 'Full Spray' : item.name === 'OT Mosquito' ? 'Event Spray' : item.name === 'German Roach' ? '3-Visit' : item.name === 'Trapping' ? 'Trapping' : 'Standalone')} detail={item.detail} price={fmtInt(item.price)} />
+                            <TierRow name={item.lawnType || (item.name === 'OT Pest' ? 'Full Spray' : item.name === 'OT Mosquito' ? 'Event Spray' : item.service === 'pest_initial_roach' || item.name === 'German Roach' || item.name === 'German Roach Initial' || item.name === 'Native Roach Initial' ? 'Initial' : item.name === 'Trapping' ? 'Trapping' : 'Standalone')} detail={item.detail} price={fmtInt(item.price)} />
                           </TierGrid>
                         </div>
                       );
