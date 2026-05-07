@@ -30,6 +30,7 @@ function chain(overrides = {}) {
     leftJoin: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     first: jest.fn(),
+    limit: jest.fn().mockReturnThis(),
     insert: jest.fn().mockResolvedValue(1),
     update: jest.fn().mockResolvedValue(1),
     orderBy: jest.fn().mockReturnThis(),
@@ -126,6 +127,45 @@ describe('public project reports', () => {
         action: 'project_report_viewed',
         metadata: expect.objectContaining({ project_id: 'project-1', project_type: 'pest_inspection' }),
       }));
+    });
+  });
+
+  test('resolves readable project report slug by token prefix', async () => {
+    const projectRead = chain({
+      limit: jest.fn().mockResolvedValue([
+        {
+          id: 'project-1',
+          customer_id: 'customer-1',
+          report_token: '0123456789abcdef0123456789abcdef',
+          report_viewed_at: '2026-05-02T14:00:00.000Z',
+          project_type: 'rodent_trapping',
+          status: 'sent',
+          title: 'Rodent trapping',
+          first_name: 'Georgia',
+          last_name: 'Lobban',
+          city: 'Bradenton',
+          state: 'FL',
+        },
+      ]),
+    });
+    const photosRead = chain({
+      orderBy: jest.fn().mockResolvedValue([]),
+    });
+
+    db.mockImplementation((table) => {
+      if (table === 'projects as p') return projectRead;
+      if (table === 'project_photos') return photosRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/project/georgia-lobban-0123456789ab/data`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.customerName).toBe('Georgia Lobban');
+      expect(body.projectType).toBe('rodent_trapping');
+      expect(projectRead.where).toHaveBeenCalledWith('p.report_token', 'like', '0123456789ab%');
+      expect(projectRead.limit).toHaveBeenCalledWith(2);
     });
   });
 });

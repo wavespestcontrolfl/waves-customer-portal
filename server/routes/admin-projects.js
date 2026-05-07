@@ -25,6 +25,7 @@ const { PROJECT_TYPES, PROJECT_TYPE_KEYS, isValidProjectType, getProjectType } =
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { wrapEmail, formatDate, plainText } = require('../services/email-template');
 const { etDateString } = require('../utils/datetime-et');
+const { projectReportPathForProject } = require('../services/project-report-links');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -564,13 +565,14 @@ router.get('/', async (req, res, next) => {
       .groupBy('project_id');
     const photoMap = Object.fromEntries(photoCounts.map(x => [x.project_id, Number(x.n)]));
 
-    res.json({
-      projects: rows.map(r => ({
+    const projects = await Promise.all(rows.map(async (r) => ({
         ...r,
         customer_name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
+        report_url: r.report_token ? await projectReportPathForProject(db, r, r) : null,
         photo_count: photoMap[r.id] || 0,
-      })),
-    });
+      })));
+
+    res.json({ projects });
   } catch (err) { next(err); }
 });
 
@@ -600,6 +602,7 @@ router.get('/:id', async (req, res, next) => {
       project: {
         ...project,
         customer_name: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
+        report_url: project.report_token ? await projectReportPathForProject(db, project, project) : null,
       },
       photos,
     });
@@ -757,7 +760,9 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       updated_at: db.fn.now(),
     });
 
-    const reportUrl = `https://portal.wavespestcontrol.com/report/project/${token}`;
+    const updatedProject = await db('projects').where({ id: req.params.id }).first();
+    const reportPath = await projectReportPathForProject(db, updatedProject, customer || {});
+    const reportUrl = `https://portal.wavespestcontrol.com${reportPath || `/report/project/${token}`}`;
     const typeCfg = getProjectType(project.project_type);
     const typeLabel = typeCfg?.label || 'Service';
     const firstName = customer?.first_name || 'there';
@@ -893,7 +898,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     );
 
     logger.info(`[projects] sent ${project.id} token=${token} sms=${channels.sms?.ok} email=${channels.email?.ok}`);
-    res.json({ project_id: project.id, report_token: token, report_url: `/report/project/${token}`, channels });
+    res.json({ project_id: project.id, report_token: token, report_url: reportPath || `/report/project/${token}`, channels });
   } catch (err) { next(err); }
 });
 

@@ -295,6 +295,16 @@ describe('admin projects routes', () => {
       }),
     });
     const markSent = chain();
+    const updatedProjectRead = chain({
+      first: jest.fn().mockImplementation(() => ({
+        id: 'project-1',
+        customer_id: 'customer-1',
+        project_type: 'pest_inspection',
+        report_token: String(markSent.update.mock.calls[0][0].report_token),
+        sent_at: 'NOW',
+      })),
+    });
+    const sequenceRead = chain();
     const persistDelivery = chain();
     const activityInsert = chain();
     const customerRead = chain({
@@ -306,7 +316,7 @@ describe('admin projects routes', () => {
         email: null,
       }),
     });
-    const projectQueries = [projectRead, markSent, persistDelivery];
+    const projectQueries = [projectRead, markSent, updatedProjectRead, sequenceRead, persistDelivery];
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
       if (table === 'customers') return customerRead;
@@ -321,6 +331,7 @@ describe('admin projects routes', () => {
       });
       const body = await res.json();
       expect(res.status).toBe(200);
+      expect(body.report_url).toMatch(/^\/report\/project\/van-lee-[a-f0-9]{12}$/);
       expect(body.channels.sms).toEqual({ ok: false, error: 'No phone on file' });
       expect(body.channels.email).toEqual({ ok: false, error: 'No email on file' });
       expect(persistDelivery.update).toHaveBeenCalledWith(expect.objectContaining({
