@@ -225,6 +225,13 @@ export function calculateEstimate(inputs) {
     ? String(poolCageSize).toUpperCase()
     : 'MEDIUM';
   const cageAdjBySize = { SMALL: 5, MEDIUM: 8, LARGE: 12, OVERSIZED: 18 };
+  // Deprecated client mirror of server/services/pricing-engine/constants.PEST.
+  // Keep these literals synced until this file is retired.
+  const pestFrequencyTiers = [
+    { f: 4, label: 'Quarterly', disc: 1.00, rec: pestFreq === 4 },
+    { f: 6, label: 'Bi-Monthly', disc: 0.85, rec: pestFreq === 6 },
+    { f: 12, label: 'Monthly', disc: 0.70, rec: pestFreq === 12 },
+  ];
 
   // Track ALL property-level modifiers with dollar amounts
   addMod('property', `Home: ${homeSqFt.toLocaleString()} sq ft · ${stories} story`, 0, 'info');
@@ -403,20 +410,16 @@ export function calculateEstimate(inputs) {
     hasRec = true;
     const fpEff = footprint > 0 ? footprint : 2500; // default SWFL home fallback when sqft unknown
     const adj = pestBaseAdjustment(fpEff);
-    let pp = Math.max(89, 117 + adj), rOG = 0;
-    const freqTiers = [
-      { f: 4, label: 'Quarterly', disc: 1.0, rec: pestFreq === 4 },
-      { f: 6, label: 'Bi-Monthly', disc: 0.92, rec: pestFreq === 6 },
-      { f: 12, label: 'Monthly', disc: 0.85, rec: pestFreq === 12 },
-    ];
+    const pp = Math.max(89, 117 + adj);
+    const roachAddOn = 0;
     R.pestTiers = [];
-    freqTiers.forEach(ft => {
-      const perApp = Math.round((pp * ft.disc + rOG) * 100) / 100;
+    pestFrequencyTiers.forEach(ft => {
+      const perApp = Math.round((pp * ft.disc + roachAddOn) * 100) / 100;
       const ann = Math.round(perApp * ft.f * 100) / 100;
       const mo = Math.round(ann / 12 * 100) / 100;
-      R.pestTiers.push({ pa: perApp, apps: ft.f, ann, mo, init: 99, rOG, label: ft.label, recommended: ft.rec, dimmed: !ft.rec });
+      R.pestTiers.push({ pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, recommended: ft.rec, dimmed: !ft.rec });
       if (ft.f === pestFreq) {
-        R.pest = { pa: perApp, apps: ft.f, ann, mo, init: 99, rOG, label: ft.label };
+        R.pest = { pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label };
       }
     });
     R.pestRoachMod = roachMod;
@@ -581,7 +584,7 @@ export function calculateEstimate(inputs) {
     hasOT = true;
     const fpEff = footprint > 0 ? footprint : 2500;
     const bpp = R.pest ? R.pest.pa : Math.max(89, 117 + pestBaseAdjustment(fpEff));
-    const fp = otP(Math.max(150, Math.round(bpp * 1.30)));
+    const fp = Math.max(150, otP(Math.max(150, Math.round(bpp * 1.30))));
     otItems.push({ name: 'OT Pest', price: fp, detail: indoor ? 'Interior + exterior' : 'Exterior (+ interior add-on)' });
   }
 
