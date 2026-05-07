@@ -2,6 +2,8 @@ const twilio = require('twilio');
 const config = require('../config');
 const db = require('../models/db');
 const logger = require('./logger');
+const smsTemplatesRouter = require('../routes/admin-sms-templates');
+const { shortenOrPassthrough } = require('./short-url');
 
 // Owner-SMS kill switch.
 //
@@ -346,28 +348,48 @@ const TwilioService = {
     const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
     if (!customer || !prefs?.tech_en_route || !prefs?.sms_enabled) return;
 
-    const eta = etaMinutes ? `ETA: ~${etaMinutes} minutes.\n\n` : '';
+    const etaLine = etaMinutes ? `ETA: ~${etaMinutes} minutes.\n` : '';
     const { getAppointmentContacts } = require('./customer-contact');
     const contacts = getAppointmentContacts(customer, prefs);
     if (!contacts.length) return;
 
-    const origin = process.env.CLIENT_URL
-      || process.env.PUBLIC_PORTAL_URL
+    const origin = process.env.PUBLIC_PORTAL_URL
+      || process.env.PORTAL_URL
+      || process.env.CLIENT_URL
       || 'https://portal.wavespestcontrol.com';
-    const trackUrl = trackToken ? `${origin}/track/${trackToken}` : null;
+    const longTrackUrl = trackToken ? `${origin}/track/${trackToken}` : null;
+    const trackUrl = longTrackUrl
+      ? await shortenOrPassthrough(longTrackUrl, {
+        kind: 'tracking',
+        entityType: 'scheduled_services',
+        customerId,
+        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      })
+      : null;
 
     const results = [];
     const { sendCustomerMessage } = require('./messaging/send-customer-message');
     for (const contact of contacts) {
       const firstName = contact.name || customer.first_name || '';
-      const body = trackUrl
-        ? `Hi ${firstName} — ${techName} is on the way.\n${eta}` +
-          `Track live: ${trackUrl}\n\n` +
-          `Reply STOP to opt out.`
-        : `Waves Pest Control\n\n` +
+      let body = null;
+      if (trackUrl && typeof smsTemplatesRouter.getTemplate === 'function') {
+        body = await smsTemplatesRouter.getTemplate('tech_en_route', {
+          first_name: firstName,
+          tech_name: techName,
+          eta_line: etaLine,
+          track_url: trackUrl,
+        });
+      }
+      if (!body) {
+        body = trackUrl
+          ? `Hello ${firstName}! ${techName} is on the way.\n\n${etaLine}` +
+            `Track live: ${trackUrl}\n\n` +
+            `Questions or requests? Reply to this message. Reply STOP to opt out.`
+          : `Waves Pest Control\n\n` +
           `${techName} is on the way to your property! ` +
-          `${eta}` +
-          `Please ensure gates are unlocked and pets are secured.`;
+            `${etaLine ? `${etaLine}\n` : ''}` +
+            `Please ensure gates are unlocked and pets are secured.`;
+      }
       results.push(await sendCustomerMessage({
         to: contact.phone,
         body,

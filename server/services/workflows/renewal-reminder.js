@@ -1,6 +1,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
+const { renderSmsTemplate } = require('../sms-template-renderer');
 
 class RenewalReminder {
   /**
@@ -42,9 +43,15 @@ class RenewalReminder {
               : daysOut === 15 ? 'is coming up in 2 weeks'
               : 'is approaching in 30 days';
 
-            const body = `Hi ${customer.first_name}! Your ${field.label} ${urgency}. ` +
-              `Don't let your coverage lapse — reply RENEW or call us to take care of it. ` +
-              `- Waves Pest Control`;
+            const body = await renderSmsTemplate(
+              'renewal_reminder',
+              {
+                first_name: customer.first_name || 'there',
+                renewal_label: field.label,
+                urgency,
+              },
+              `Hello ${customer.first_name || 'there'}! Your ${field.label} ${urgency}.\n\nDon't let your coverage lapse - reply RENEW or call us to take care of it. Questions or requests? Reply to this message.`
+            );
 
             const smsResult = await sendCustomerMessage({
               to: customer.phone,

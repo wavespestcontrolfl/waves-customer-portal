@@ -4,6 +4,7 @@ const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { shortenOrPassthrough } = require('../short-url');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
+const { renderSmsTemplate } = require('../sms-template-renderer');
 
 class BalanceReminder {
 
@@ -174,20 +175,34 @@ class BalanceReminder {
       const dateClause = completedOn ? ` completed on ${completedOn}` : '';
 
       let message;
+      let templateKey;
 
       if (balance.daysOverdue >= 7 && balance.daysOverdue < 14 && count === 0) {
-        message = `Hello ${customer.first_name}! This is a reminder from Waves. Your invoice for ${invoiceTitle}${dateClause} is now 7 days overdue.\n\nPlease make your payment here: ${link}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
+        templateKey = 'late_payment_7d';
       } else if (balance.daysOverdue >= 14 && balance.daysOverdue < 30 && count <= 1) {
-        message = `Hello ${customer.first_name}, this is a reminder from Waves. Your invoice for ${invoiceTitle}${dateClause} is now 14 days overdue.\n\nPlease make your payment as soon as possible at: ${link}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
+        templateKey = 'late_payment_14d';
       } else if (balance.daysOverdue >= 30 && balance.daysOverdue < 60 && count <= 2) {
-        message = `Hello ${customer.first_name}, this is a final reminder from Waves. Your invoice for ${invoiceTitle}${dateClause} is now 30 days overdue.\n\nPlease make your payment immediately at: ${link}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
+        templateKey = 'late_payment_30d';
       } else if (balance.daysOverdue >= 60 && balance.daysOverdue < 90 && count <= 3) {
-        message = `Hello ${customer.first_name}, this is an urgent notice from Waves. Your invoice for ${invoiceTitle}${dateClause} is now 60 days overdue.\n\nPlease make payment or contact us immediately to avoid further action: ${link}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
+        templateKey = 'late_payment_60d';
         await db('customers').where({ id: customer.id }).update({ pipeline_stage: 'at_risk', pipeline_stage_changed_at: new Date() });
       } else if (balance.daysOverdue >= 90 && count <= 4) {
-        message = `Hello ${customer.first_name}, your invoice from Waves for ${invoiceTitle}${dateClause} is now 90 days overdue.\n\nFinal notice: This account will be sent to collections if payment is not received today. Please pay now: ${link}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`;
+        templateKey = 'late_payment_90d';
         await db('customers').where({ id: customer.id }).update({ pipeline_stage: 'at_risk', pipeline_stage_changed_at: new Date() });
       } else continue;
+
+      if (templateKey) {
+        message = await renderSmsTemplate(
+          templateKey,
+          {
+            first_name: customer.first_name || 'there',
+            invoice_title: invoiceTitle,
+            service_date: completedOn || 'your service date',
+            pay_url: link,
+          },
+          `Hello ${customer.first_name || 'there'}, your invoice for ${invoiceTitle}${dateClause} is now ${Math.min(Math.max(balance.daysOverdue, 7), 90)} days overdue.\n\nPlease make your payment here: ${link}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!`
+        );
+      }
 
       if (message) {
         const sendResult = await sendCustomerMessage({
