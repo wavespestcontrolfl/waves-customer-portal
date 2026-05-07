@@ -500,7 +500,7 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
       setEditProjectDate(dateInputValue(d.project.project_date || d.project.created_at));
       setDirty(false);
       if (d.project.report_token) {
-        setSentLink(`${window.location.origin}/report/project/${d.project.report_token}`);
+        setSentLink(`${window.location.origin}${d.project.report_url || `/report/project/${d.project.report_token}`}`);
       } else {
         setSentLink('');
       }

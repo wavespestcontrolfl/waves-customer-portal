@@ -8,6 +8,7 @@ const PDFDocument = require('pdfkit');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
+const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
 
 // Rate-limit public report access to deter token brute-forcing.
 const reportLimiter = rateLimit({
@@ -20,26 +21,33 @@ const reportLimiter = rateLimit({
 
 router.use(reportLimiter);
 
-// Token format: 32-char lowercase hex. Reject anything else immediately.
-const TOKEN_RE = /^[a-f0-9]{32}$/;
 const ACTIVE_APPOINTMENT_STATUSES = ['pending', 'confirmed', 'rescheduled'];
+
+async function findProjectByReportSegment(segment) {
+  const lookup = extractProjectReportTokenLookup(segment);
+  if (!lookup) return null;
+  const query = db('projects as p')
+    .leftJoin('customers as c', 'p.customer_id', 'c.id')
+    .leftJoin('technicians as t', 'p.created_by_tech_id', 't.id')
+    .select(
+      'p.*',
+      'c.first_name', 'c.last_name', 'c.city', 'c.state',
+      't.name as technician_name',
+    );
+  if (lookup.type === 'full') {
+    return query.where({ 'p.report_token': lookup.value }).first();
+  }
+  const rows = await query.where('p.report_token', 'like', `${lookup.value}%`).limit(2);
+  return rows.length === 1 ? rows[0] : null;
+}
 
 // GET /api/reports/project/:token/data — project report JSON for the viewer page
 router.get('/project/:token/data', async (req, res, next) => {
-  if (!TOKEN_RE.test(req.params.token || '')) {
+  if (!extractProjectReportTokenLookup(req.params.token || '')) {
     return res.status(404).json({ error: 'Report not found' });
   }
   try {
-    const project = await db('projects as p')
-      .where({ 'p.report_token': req.params.token })
-      .leftJoin('customers as c', 'p.customer_id', 'c.id')
-      .leftJoin('technicians as t', 'p.created_by_tech_id', 't.id')
-      .select(
-        'p.*',
-        'c.first_name', 'c.last_name', 'c.city', 'c.state',
-        't.name as technician_name',
-      )
-      .first();
+    const project = await findProjectByReportSegment(req.params.token);
     if (!project) return res.status(404).json({ error: 'Report not found' });
 
     if (!project.report_viewed_at) {
@@ -137,7 +145,7 @@ router.get('/project/:token/data', async (req, res, next) => {
 
 // GET /api/reports/:token — public PDF access (no auth)
 router.get('/:token', async (req, res, next) => {
-  if (!TOKEN_RE.test(req.params.token || '')) {
+  if (!FULL_TOKEN_RE.test(req.params.token || '')) {
     return res.status(404).json({ error: 'Report not found' });
   }
   try {
@@ -186,7 +194,7 @@ router.get('/:token', async (req, res, next) => {
 
 // GET /api/reports/:token/data — JSON report data (for the branded viewer page)
 router.get('/:token/data', async (req, res, next) => {
-  if (!TOKEN_RE.test(req.params.token || '')) {
+  if (!FULL_TOKEN_RE.test(req.params.token || '')) {
     return res.status(404).json({ error: 'Report not found' });
   }
   try {
