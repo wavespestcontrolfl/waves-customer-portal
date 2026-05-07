@@ -247,16 +247,12 @@ function normalizeOneTimeLines(result) {
   return lines;
 }
 
-async function inventoryCostFor(serviceKey, dimensions) {
-  const map = SERVICE_MAP[serviceKey];
-  if (!map) return { status: 'unmapped', totalPerVisit: 0, annualCost: 0, lines: [], warnings: ['No service-to-inventory mapping yet'] };
+async function loadInventoryCostRows() {
   if (!(await db.schema.hasTable('service_product_usage')) || !(await db.schema.hasTable('products_catalog'))) {
-    return { status: 'missing_cogs', totalPerVisit: 0, annualCost: 0, lines: [], warnings: ['Inventory COGS tables are unavailable'] };
+    return { available: false, rows: [] };
   }
-
-  const allRows = await db('service_product_usage')
+  const rows = await db('service_product_usage')
     .join('products_catalog', 'service_product_usage.product_id', 'products_catalog.id')
-    .whereIn('service_product_usage.service_type', map.serviceTypes)
     .select(
       'service_product_usage.service_type',
       'service_product_usage.usage_amount',
@@ -270,6 +266,17 @@ async function inventoryCostFor(serviceKey, dimensions) {
       'products_catalog.unit_size_oz',
       'products_catalog.best_vendor',
     );
+  return { available: true, rows };
+}
+
+function inventoryCostFromRows(serviceKey, dimensions, inventory) {
+  const map = SERVICE_MAP[serviceKey];
+  if (!map) return { status: 'unmapped', totalPerVisit: 0, annualCost: 0, lines: [], warnings: ['No service-to-inventory mapping yet'] };
+  if (!inventory?.available) {
+    return { status: 'missing_cogs', totalPerVisit: 0, annualCost: 0, lines: [], warnings: ['Inventory COGS tables are unavailable'] };
+  }
+
+  const allRows = (inventory.rows || []).filter((row) => map.serviceTypes.includes(row.service_type));
   const matchedServiceType = map.serviceTypes.find((serviceType) => allRows.some((row) => row.service_type === serviceType)) || null;
   const rows = matchedServiceType ? allRows.filter((row) => row.service_type === matchedServiceType) : [];
   if (!rows.length) return { status: 'missing_cogs', totalPerVisit: 0, annualCost: 0, lines: [], warnings: ['No inventory COGS rows mapped'] };
@@ -297,6 +304,10 @@ async function inventoryCostFor(serviceKey, dimensions) {
     lines,
     warnings,
   };
+}
+
+async function inventoryCostFor(serviceKey, dimensions) {
+  return inventoryCostFromRows(serviceKey, dimensions, await loadInventoryCostRows());
 }
 
 function visitsFor(line, result) {
@@ -330,10 +341,11 @@ function protocolFor(line) {
   }
 }
 
-async function buildEstimatePricingAudit(estimate) {
+async function buildEstimatePricingAudit(estimate, context = {}) {
   const data = parseJson(estimate.estimate_data) || {};
   const result = data.result || data.engineResult || {};
   const dimensions = dimensionsFrom(data);
+  const inventory = context.inventory || await loadInventoryCostRows();
   const rawLines = [
     ...normalizeRecurringLines(result),
     ...normalizeOneTimeLines(result),
@@ -344,7 +356,7 @@ async function buildEstimatePricingAudit(estimate) {
     const protocol = raw.skipCogs ? null : protocolFor(raw);
     const cogs = raw.skipCogs
       ? { status: 'not_applicable', totalPerVisit: 0, lines: [], warnings: [] }
-      : await inventoryCostFor(raw.serviceKey, dimensions);
+      : inventoryCostFromRows(raw.serviceKey, dimensions, inventory);
     const visits = visitsFor(raw, result);
     const estimatedCost = money((cogs.totalPerVisit || 0) * visits);
     const grossProfit = money(raw.price - estimatedCost);
@@ -391,6 +403,51 @@ async function buildEstimatePricingAudit(estimate) {
   };
 }
 
+function summarizePricingRisk(audit) {
+  const lines = Array.isArray(audit?.lines) ? audit.lines : [];
+  const missingCogsLines = lines.filter((line) => ['missing_cogs', 'unmapped'].includes(line.cogs?.status));
+  const lowMarginLines = lines.filter((line) => line.margin != null && line.margin < 0.35);
+  const warningLines = lines.filter((line) => Array.isArray(line.warnings) && line.warnings.length > 0);
+  const status = missingCogsLines.length > 0
+    ? 'missing_cogs'
+    : lowMarginLines.length > 0
+      ? 'low_margin'
+      : warningLines.length > 0
+        ? 'warning'
+        : 'ok';
+
+  return {
+    status,
+    hasRisk: status !== 'ok',
+    missingCogsCount: missingCogsLines.length,
+    lowMarginCount: lowMarginLines.length,
+    warningCount: warningLines.length,
+    margin: audit?.totals?.margin ?? null,
+    estimatedCost: audit?.totals?.estimatedCost || 0,
+    labels: [
+      missingCogsLines.length > 0 ? 'Missing COGS' : null,
+      lowMarginLines.length > 0 ? 'Low Margin' : null,
+      status === 'warning' ? 'Pricing Warning' : null,
+    ].filter(Boolean),
+  };
+}
+
+async function buildEstimatePricingRisk(estimate) {
+  return summarizePricingRisk(await buildEstimatePricingAudit(estimate));
+}
+
+async function buildEstimatePricingRiskBatch(estimates) {
+  const inventory = await loadInventoryCostRows();
+  const riskById = new Map();
+  for (const estimate of estimates || []) {
+    riskById.set(estimate.id, summarizePricingRisk(await buildEstimatePricingAudit(estimate, { inventory })));
+  }
+  return riskById;
+}
+
 module.exports = {
   buildEstimatePricingAudit,
+  buildEstimatePricingRisk,
+  buildEstimatePricingRiskBatch,
+  summarizePricingRisk,
 };

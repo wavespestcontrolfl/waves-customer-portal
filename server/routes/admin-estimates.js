@@ -9,7 +9,7 @@ const { shortenOrPassthrough } = require('../services/short-url');
 const { wrapEmail, plainText } = require('../services/email-template');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { validateEstimateDeliveryOptions } = require('../services/estimate-delivery-options');
-const { buildEstimatePricingAudit } = require('../services/estimate-pricing-audit');
+const { buildEstimatePricingAudit, buildEstimatePricingRiskBatch } = require('../services/estimate-pricing-audit');
 
 async function renderTemplate(templateKey, vars, fallback) {
   try {
@@ -278,6 +278,7 @@ router.sendEstimateNow = sendEstimateNow;
 router.get('/', async (req, res, next) => {
   try {
     const { status, search, source, page = 1, limit = 50, archived: archivedRaw } = req.query;
+    const includePricingRisk = ['1', 'true', 'yes'].includes(String(req.query.pricingRisk || '').toLowerCase());
     // archived=only → archived-only view. archived=all → include both.
     // Default (unset / any other value) → hide archived.
     const archived = archivedRaw === 'only' || archivedRaw === '1' || archivedRaw === 'true'
@@ -373,6 +374,28 @@ router.get('/', async (req, res, next) => {
       }
     }
 
+    const pricingRiskById = new Map();
+    if (includePricingRisk && estimates.length) {
+      try {
+        const batch = await buildEstimatePricingRiskBatch(estimates);
+        for (const [id, risk] of batch.entries()) pricingRiskById.set(id, risk);
+      } catch (err) {
+        for (const estimate of estimates) {
+          pricingRiskById.set(estimate.id, {
+            status: 'warning',
+            hasRisk: true,
+            missingCogsCount: 0,
+            lowMarginCount: 0,
+            warningCount: 1,
+            margin: null,
+            estimatedCost: 0,
+            labels: ['Audit Unavailable'],
+            error: err.message,
+          });
+        }
+      }
+    }
+
     res.json({
       estimates: estimates.map(e => {
         let estData = e.estimate_data;
@@ -421,6 +444,7 @@ router.get('/', async (req, res, next) => {
           showOneTimeOption: e.show_one_time_option,
           billByInvoice: e.bill_by_invoice,
           confirmedAppointment,
+          pricingRisk: pricingRiskById.get(e.id) || null,
         };
       }),
     });
