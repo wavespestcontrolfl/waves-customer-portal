@@ -1565,6 +1565,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
   const [soilMoisture, setSoilMoisture] = useState('');
   const [sendSms, setSendSms] = useState(true);
   const [requestReview, setRequestReview] = useState(true);
+  const [oneTimeRecapOnly, setOneTimeRecapOnly] = useState(false);
   const [visitOutcome, setVisitOutcome] = useState('completed');
   const [customerRecap, setCustomerRecap] = useState('');
   const [recapSource, setRecapSource] = useState('template');
@@ -1592,6 +1593,10 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
   const [treatmentPlanBlocks, setTreatmentPlanBlocks] = useState([]);
   const [treatmentPlanAnnualN, setTreatmentPlanAnnualN] = useState(null);
   const [treatmentPlanError, setTreatmentPlanError] = useState('');
+  const [protocolActions, setProtocolActions] = useState([]);
+  const [protocolActionMeta, setProtocolActionMeta] = useState(null);
+  const [protocolActionError, setProtocolActionError] = useState('');
+  const [protocolActionsLoading, setProtocolActionsLoading] = useState(false);
   const [officeApprovalReasonCode, setOfficeApprovalReasonCode] = useState('');
   const [officeApprovalNote, setOfficeApprovalNote] = useState('');
   const [nLimitApprovalReasonCode, setNLimitApprovalReasonCode] = useState('');
@@ -1635,7 +1640,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
   const prepaidCovered = service.prepaidAmount != null
     && Number(service.prepaidAmount) > 0
     && Number(service.prepaidAmount) >= invoiceAmount;
-  const willInvoice = !prepaidCovered && (!!service.createInvoiceOnComplete || !!service.waveguardTier) && invoiceAmount > 0;
+  const willInvoice = !oneTimeRecapOnly && !prepaidCovered && (!!service.createInvoiceOnComplete || !!service.waveguardTier) && invoiceAmount > 0;
   const isIncompleteVisit = visitOutcome === 'incomplete';
   const reviewSuppressionReason = isIncompleteVisit
     ? 'incomplete'
@@ -1646,7 +1651,8 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
         : willInvoice
           ? 'invoice_created'
           : null;
-  const willReview = !!requestReview && !willInvoice && !reviewSuppressionReason;
+  const willReview = (oneTimeRecapOnly || !!requestReview) && !willInvoice && !reviewSuppressionReason;
+  const effectiveSendSms = !isIncompleteVisit && (oneTimeRecapOnly || sendSms);
   const smsPreview = [
     customerRecap.trim(),
     !isIncompleteVisit && willInvoice ? '[pay link inserted]' : '',
@@ -1756,11 +1762,11 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
       ? canApproveOfficeExceptions ? 'Manager Approval Required' : 'Admin Approval Required'
     : isIncompleteVisit
       ? 'Mark Visit Incomplete'
-      : !sendSms
+      : !effectiveSendSms
         ? 'Complete Service'
-        : willInvoice
-          ? 'Complete & Send Invoice'
-          : 'Complete & Send Recap';
+      : willInvoice
+        ? 'Complete & Send Invoice'
+        : 'Complete & Send Recap';
 
   useEffect(() => {
     const iv = setInterval(() => setElapsed(elapsedSince(onSiteTime)), 1000);
@@ -1774,6 +1780,43 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
         .catch(() => {});
     }
   }, [service.customerId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setProtocolActions([]);
+    setProtocolActionMeta(null);
+    setProtocolActionError('');
+    if (!service.serviceType) return () => { cancelled = true; };
+    const params = new URLSearchParams();
+    params.set('serviceType', service.serviceType);
+    if (isLawn) {
+      const track = protocolTrackForLawnType(service.lawnType);
+      if (track) params.set('track', track);
+      if (service.lawnType) params.set('lawnType', service.lawnType);
+      const serviceDate = service.scheduledDate || service.scheduled_date || service.date;
+      if (serviceDate) {
+        const dateOnly = String(serviceDate).split('T')[0];
+        const monthDate = new Date(`${dateOnly}T12:00:00`);
+        if (!Number.isNaN(monthDate.getTime())) {
+          params.set('month', monthDate.toLocaleString('en-US', { month: 'short', timeZone: 'America/New_York' }));
+        }
+      }
+    }
+    setProtocolActionsLoading(true);
+    adminFetch(`/admin/protocols/completion-actions?${params.toString()}`)
+      .then((data) => {
+        if (cancelled) return;
+        setProtocolActions(Array.isArray(data.actions) ? data.actions : []);
+        setProtocolActionMeta(data || null);
+      })
+      .catch((err) => {
+        if (!cancelled) setProtocolActionError(err.message || 'Could not load protocol actions');
+      })
+      .finally(() => {
+        if (!cancelled) setProtocolActionsLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [service.serviceType, service.lawnType, service.scheduledDate, service.scheduled_date, service.date, isLawn]);
 
   useEffect(() => {
     if (!calibrationRequired) return;
@@ -1851,6 +1894,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
       || customerInteraction
       || customerConcern.trim()
       || nextVisitNote.trim()
+      || oneTimeRecapOnly
       || tankLastProduct.trim()
       || tankCleanoutCompleted
       || tankCleanoutMethod.trim()
@@ -1870,6 +1914,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
         soilMoisture,
         sendSms,
         requestReview,
+        oneTimeRecapOnly,
         visitOutcome,
         customerRecap,
         recapSource,
@@ -1897,7 +1942,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
     return () => clearTimeout(timer);
   }, [
     service.id, showDraftPrompt, success, notes, selectedProducts, soilTemp, thatchMeasurement,
-    soilPh, soilMoisture, sendSms, requestReview, visitOutcome, customerRecap, recapSource,
+    soilPh, soilMoisture, sendSms, requestReview, oneTimeRecapOnly, visitOutcome, customerRecap, recapSource,
     areasServiced, customerInteraction, customerConcern, nextVisitNote, showNextVisitNote,
     equipmentSystemId, calibrationId,
     officeApprovalReasonCode, officeApprovalNote,
@@ -1916,6 +1961,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
     setSoilMoisture(savedDraft.soilMoisture || '');
     setSendSms(savedDraft.sendSms !== false);
     setRequestReview(savedDraft.requestReview !== false);
+    setOneTimeRecapOnly(!!savedDraft.oneTimeRecapOnly);
     setVisitOutcome(savedDraft.visitOutcome || 'completed');
     setCustomerRecap(savedDraft.customerRecap || '');
     setRecapSource(savedDraft.recapSource || 'draft');
@@ -2051,6 +2097,21 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
     const line = `[${prefix}] ${text}`;
     setNotes(prev => prev.trim() ? prev.trimEnd() + '\n' + line : line);
   }
+  function applyProtocolAction(action) {
+    if (!action) return;
+    const noteText = action.note || action.label || action.raw || 'Completed protocol item';
+    addChipNote(action.conditional ? 'Protocol optional' : 'Protocol', noteText);
+    if (action.product?.id && !selectedProducts.find(p => p.productId === action.product.id)) {
+      addProduct(action.product);
+    }
+  }
+  function handleOneTimeRecapOnlyChange(checked) {
+    setOneTimeRecapOnly(checked);
+    if (checked) {
+      setSendSms(true);
+      setRequestReview(true);
+    }
+  }
   function addProduct(product) {
     if (selectedProducts.find(p => p.productId === product.id)) return;
     const defaultUnit = product.defaultUnit || product.default_unit || product.rateUnit || product.rate_unit || 'oz';
@@ -2174,8 +2235,9 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
           totalAmount: p.totalAmount,
           amountUnit: p.amountUnit,
         })),
-        sendCompletionSms: isIncompleteVisit ? false : sendSms,
-        requestReview: willReview,
+        oneTimeRecapOnly,
+        sendCompletionSms: effectiveSendSms,
+        requestReview: oneTimeRecapOnly ? !reviewSuppressionReason : willReview,
         areasTreated: areasServiced,
         timeOnSite: elapsed,
         areasServiced,
@@ -2321,7 +2383,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
                     ? `Report saved. SMS blocked${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ''}`
                     : completionResult?.completionSmsStatus === 'failed'
                       ? `Report saved. SMS failed${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ''}`
-                      : sendSms
+                      : effectiveSendSms
                         ? 'Report saved'
                         : 'Report saved'} for {service.customerName}
               </div>
@@ -2652,8 +2714,42 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
 
             {/* Chip groups */}
             <div style={{ marginBottom: 8 }}>
-              <ChipGroup label="Actions" dot={M.info}
-                         chips={CHIP_ACTIONS} onPick={c => addChipNote('Action', c)} />
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: M.info }}/>
+                  <span style={eyebrowStyle}>Protocol actions</span>
+                </div>
+                {protocolActionMeta?.programName && (
+                  <div style={{ fontFamily: font, fontSize: 12, color: M.ink4, marginBottom: 8 }}>
+                    {protocolActionMeta.programName}{protocolActionMeta.visit?.month ? ` - ${protocolActionMeta.visit.month}` : ''}
+                  </div>
+                )}
+                {protocolActionsLoading ? (
+                  <div style={{ fontFamily: font, fontSize: 13, color: M.ink4 }}>Loading protocol actions...</div>
+                ) : protocolActions.length > 0 ? (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                    {protocolActions.map(action => {
+                      const selected = notes.includes(action.note || action.label || action.raw || '')
+                        || (action.product?.id && selectedProducts.some(p => p.productId === action.product.id));
+                      return (
+                        <Chip key={action.id} selected={selected} onClick={() => applyProtocolAction(action)}>
+                          {selected ? '✓ ' : ''}{action.label}
+                        </Chip>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <>
+                    {protocolActionError && (
+                      <div style={{ fontFamily: font, fontSize: 12, color: M.ink4, marginBottom: 8 }}>
+                        Protocol actions unavailable.
+                      </div>
+                    )}
+                    <ChipGroup label="Actions" dot={M.info}
+                               chips={CHIP_ACTIONS} onPick={c => addChipNote('Action', c)} />
+                  </>
+                )}
+              </div>
               <ChipGroup label="Observations" dot={M.warn}
                          chips={CHIP_OBSERVATIONS} onPick={c => addChipNote('Found', c)} />
               <ChipGroup label="Recommendations" dot={M.success}
@@ -2885,7 +2981,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
               </Field>
             )}
 
-            {sendSms && !isIncompleteVisit && (
+            {effectiveSendSms && (
               <Field label="Customer SMS preview">
                 <div style={{
                   background: M.card, border: `0.5px solid ${M.hairline}`, borderRadius: 12,
@@ -2970,15 +3066,29 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
             <Field label="Options">
               <label style={{
                 display: 'flex', alignItems: 'center', gap: 12, padding: '14px 16px',
+                background: M.card, border: `0.5px solid ${oneTimeRecapOnly ? M.ink : M.hairline}`, borderRadius: 12,
+                marginBottom: 8, cursor: isIncompleteVisit ? 'not-allowed' : 'pointer',
+                opacity: isIncompleteVisit ? 0.55 : 1,
+              }}>
+                <input type="checkbox" checked={oneTimeRecapOnly && !isIncompleteVisit}
+                       disabled={isIncompleteVisit}
+                       onChange={e => handleOneTimeRecapOnlyChange(e.target.checked)}
+                       style={{ width: 18, height: 18, accentColor: M.ink }} />
+                <span style={{ fontFamily: font, fontSize: 15, color: M.ink }}>
+                  One-time recap + review only (no invoice)
+                </span>
+              </label>
+              <label style={{
+                display: 'flex', alignItems: 'center', gap: 12, padding: '14px 16px',
                 background: M.card, border: `0.5px solid ${M.hairline}`, borderRadius: 12,
                 marginBottom: 8, cursor: 'pointer',
               }}>
-                <input type="checkbox" checked={sendSms && !isIncompleteVisit}
-                       disabled={isIncompleteVisit}
+                <input type="checkbox" checked={effectiveSendSms}
+                       disabled={isIncompleteVisit || oneTimeRecapOnly}
                        onChange={e => setSendSms(e.target.checked)}
                        style={{ width: 18, height: 18, accentColor: M.ink }} />
                 <span style={{ fontFamily: font, fontSize: 15, color: M.ink }}>
-                  {isIncompleteVisit ? 'Completion SMS suppressed' : 'Send completion SMS to customer'}
+                  {isIncompleteVisit ? 'Completion SMS suppressed' : oneTimeRecapOnly ? 'Completion SMS included' : 'Send completion SMS to customer'}
                 </span>
               </label>
               <label style={{
@@ -2986,12 +3096,12 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
                 background: M.card, border: `0.5px solid ${M.hairline}`, borderRadius: 12,
                 cursor: 'pointer',
               }}>
-                <input type="checkbox" checked={requestReview && !reviewSuppressionReason}
-                       disabled={!!reviewSuppressionReason}
+                <input type="checkbox" checked={willReview}
+                       disabled={!!reviewSuppressionReason || oneTimeRecapOnly}
                        onChange={e => setRequestReview(e.target.checked)}
                        style={{ width: 18, height: 18, accentColor: M.ink }} />
                 <span style={{ fontFamily: font, fontSize: 15, color: M.ink }}>
-                  {reviewSuppressionReason ? 'Review request suppressed' : 'Send review request (2hr delay)'}
+                  {reviewSuppressionReason ? 'Review request suppressed' : oneTimeRecapOnly ? 'Review request included' : 'Send review request'}
                 </span>
               </label>
             </Field>
@@ -3074,7 +3184,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
             <div style={{ fontSize: 64, marginBottom: 16, color: D.green }}>&#10003;</div>
             <div style={{ fontSize: 20, fontWeight: 700, color: D.green }}>Service Completed!</div>
             <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
-              {sendSms ? 'SMS + Report sent' : 'Report saved'} for {service.customerName}
+              {effectiveSendSms ? 'SMS + Report sent' : 'Report saved'} for {service.customerName}
             </div>
           </div>
         )}
@@ -3369,14 +3479,41 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
           <div style={{ marginTop: 10, marginBottom: 16 }}>
             {/* Action chips (blue) */}
             <div style={chipGroupStyle}>
-              <span style={{ ...chipLabelStyle, color: D.blue }}>Actions</span>
+              <span style={{ ...chipLabelStyle, color: D.blue }}>Protocol Actions</span>
+              {protocolActionMeta?.programName && (
+                <div style={{ fontSize: 11, color: D.muted, marginBottom: 6 }}>
+                  {protocolActionMeta.programName}{protocolActionMeta.visit?.month ? ` - ${protocolActionMeta.visit.month}` : ''}
+                </div>
+              )}
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-                {CHIP_ACTIONS.map(chip => (
-                  <button key={chip} onClick={() => addChipNote('Action', chip)} style={{
-                    padding: '5px 10px', borderRadius: 8, fontSize: 11, fontWeight: 600, cursor: 'pointer',
-                    background: D.blue + '18', color: D.blue, border: `1px solid ${D.blue}44`,
-                  }}>{chip}</button>
-                ))}
+                {protocolActionsLoading ? (
+                  <span style={{ fontSize: 12, color: D.muted }}>Loading protocol actions...</span>
+                ) : protocolActions.length > 0 ? (
+                  protocolActions.map(action => {
+                    const selected = notes.includes(action.note || action.label || action.raw || '')
+                      || (action.product?.id && selectedProducts.some(p => p.productId === action.product.id));
+                    return (
+                      <button key={action.id} onClick={() => applyProtocolAction(action)} style={{
+                        padding: '5px 10px', borderRadius: 8, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                        background: selected ? D.blue + '2a' : D.blue + '18',
+                        color: D.blue,
+                        border: `1px solid ${selected ? D.blue : D.blue + '44'}`,
+                      }}>{selected ? '\u2713 ' : ''}{action.label}</button>
+                    );
+                  })
+                ) : (
+                  <>
+                    {protocolActionError && (
+                      <span style={{ fontSize: 12, color: D.muted }}>Protocol actions unavailable.</span>
+                    )}
+                    {CHIP_ACTIONS.map(chip => (
+                      <button key={chip} onClick={() => addChipNote('Action', chip)} style={{
+                        padding: '5px 10px', borderRadius: 8, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                        background: D.blue + '18', color: D.blue, border: `1px solid ${D.blue}44`,
+                      }}>{chip}</button>
+                    ))}
+                  </>
+                )}
               </div>
             </div>
             {/* Observation chips (amber) */}
@@ -3507,7 +3644,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
               )}
             </>
           )}
-          {selectedProducts.length > 0 && !quickComplete && (
+          {selectedProducts.length > 0 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8, marginBottom: 20 }}>
               {selectedProducts.map(sp => (
                 <div key={sp.productId} style={{
@@ -3599,7 +3736,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
             </>
           )}
 
-          {sendSms && !isIncompleteVisit && (
+          {effectiveSendSms && (
             <div style={{ marginBottom: 20 }}>
               <label style={labelStyle}>Customer SMS Preview</label>
               <div style={{
@@ -3664,13 +3801,17 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
 
           {/* Options */}
           <label style={labelStyle}>Options</label>
-          <label style={checkboxRow}>
-            <input type="checkbox" checked={sendSms && !isIncompleteVisit} disabled={isIncompleteVisit} onChange={e => setSendSms(e.target.checked)} />
-            <span>{isIncompleteVisit ? 'Completion SMS suppressed' : 'Send completion SMS to customer'}</span>
+          <label style={{ ...checkboxRow, borderColor: oneTimeRecapOnly ? D.teal : checkboxRow.borderColor, opacity: isIncompleteVisit ? 0.55 : 1 }}>
+            <input type="checkbox" checked={oneTimeRecapOnly && !isIncompleteVisit} disabled={isIncompleteVisit} onChange={e => handleOneTimeRecapOnlyChange(e.target.checked)} />
+            <span>One-time recap + review only (no invoice)</span>
           </label>
           <label style={checkboxRow}>
-            <input type="checkbox" checked={requestReview && !reviewSuppressionReason} disabled={!!reviewSuppressionReason} onChange={e => setRequestReview(e.target.checked)} />
-            <span>{reviewSuppressionReason ? 'Review request suppressed' : 'Send review request (2hr delay)'}</span>
+            <input type="checkbox" checked={effectiveSendSms} disabled={isIncompleteVisit || oneTimeRecapOnly} onChange={e => setSendSms(e.target.checked)} />
+            <span>{isIncompleteVisit ? 'Completion SMS suppressed' : oneTimeRecapOnly ? 'Completion SMS included' : 'Send completion SMS to customer'}</span>
+          </label>
+          <label style={checkboxRow}>
+            <input type="checkbox" checked={willReview} disabled={!!reviewSuppressionReason || oneTimeRecapOnly} onChange={e => setRequestReview(e.target.checked)} />
+            <span>{reviewSuppressionReason ? 'Review request suppressed' : oneTimeRecapOnly ? 'Review request included' : 'Send review request'}</span>
           </label>
 
           {/* Next Visit Prompt */}
@@ -3714,7 +3855,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
               <>
                 <span style={{ fontSize: 15, fontWeight: 700 }}>{completionCtaLabel}</span>
                 <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.85 }}>
-                  {isIncompleteVisit ? 'Office follow-up alert will be created' : sendSms ? `SMS + Report sent to ${service.customerName}` : `Report saved for ${service.customerName}`}
+                  {isIncompleteVisit ? 'Office follow-up alert will be created' : effectiveSendSms ? `SMS + Report sent to ${service.customerName}` : `Report saved for ${service.customerName}`}
                 </span>
               </>
             )}
