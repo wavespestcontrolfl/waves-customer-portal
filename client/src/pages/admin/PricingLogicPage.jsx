@@ -24,6 +24,25 @@ const af = (p, o = {}) =>
     },
   }).then(r => r.json());
 
+function adminRawFetch(p, o = {}) {
+  return fetch(`${API_BASE}${p}`, {
+    ...o,
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
+      ...o.headers,
+    },
+  });
+}
+
+function isoDateOffset(daysBack) {
+  const d = new Date();
+  d.setDate(d.getDate() - daysBack);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 // ── Margin Calculator ──
 export function MarginCalculator() {
   const [lotSqFt, setLotSqFt] = useState(10000);
@@ -202,25 +221,54 @@ function fmtMin(value) {
 function PestCalibrationPanel() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState('');
+  const [startDate, setStartDate] = useState(() => isoDateOffset(90));
+  const [endDate, setEndDate] = useState(() => isoDateOffset(0));
+  const [limit, setLimit] = useState('150');
 
   const load = async () => {
     setLoading(true);
     setError('');
     try {
-      const end = new Date();
-      const start = new Date();
-      start.setDate(end.getDate() - 90);
       const qs = new URLSearchParams({
-        startDate: start.toISOString().slice(0, 10),
-        endDate: end.toISOString().slice(0, 10),
-        limit: '150',
+        startDate,
+        endDate,
+        limit,
       });
       setData(await af(`/admin/pricing-config/pest-calibration?${qs.toString()}`));
     } catch (err) {
       setError(err.message || 'Failed to load pest calibration');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const downloadCsv = async () => {
+    setDownloading(true);
+    setError('');
+    try {
+      const qs = new URLSearchParams({
+        startDate,
+        endDate,
+        limit: '10000',
+        format: 'csv',
+      });
+      const response = await adminRawFetch(`/admin/pricing-config/pest-calibration?${qs.toString()}`);
+      if (!response.ok) throw new Error(`CSV export failed (${response.status})`);
+      const text = await response.text();
+      const url = URL.createObjectURL(new Blob([text], { type: 'text/csv' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `pest-production-calibration-${startDate}-to-${endDate}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err.message || 'Failed to export pest calibration CSV');
+    } finally {
+      setDownloading(false);
     }
   };
 
@@ -233,17 +281,39 @@ function PestCalibrationPanel() {
 
   return (
     <div style={{ background: D.card, borderRadius: 12, border: `1px solid ${D.border}`, padding: 20, marginBottom: 20 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, marginBottom: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, marginBottom: 16, flexWrap: 'wrap' }}>
         <div>
           <h2 style={{ margin: 0, fontSize: 13, fontWeight: 700, color: D.heading, fontFamily: ROBOTO }}>Pest Production Calibration</h2>
           <div style={{ color: D.muted, fontSize: 12, marginTop: 4 }}>
             Shadow estimator minutes compared with completed job timers from accepted estimates.
           </div>
         </div>
-        <button onClick={load} disabled={loading} style={{
-          padding: '7px 12px', borderRadius: 6, border: `1px solid ${D.border}`, cursor: loading ? 'default' : 'pointer',
-          background: D.input, color: D.heading, fontSize: 12, fontWeight: 600,
-        }}>{loading ? 'Syncing...' : 'Sync'}</button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          <label style={{ display: 'grid', gap: 3, fontSize: 10, color: D.muted, fontWeight: 700, textTransform: 'uppercase' }}>
+            Start
+            <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} style={{ padding: '7px 8px', borderRadius: 6, border: `1px solid ${D.border}`, fontSize: 12, color: D.heading }} />
+          </label>
+          <label style={{ display: 'grid', gap: 3, fontSize: 10, color: D.muted, fontWeight: 700, textTransform: 'uppercase' }}>
+            End
+            <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} style={{ padding: '7px 8px', borderRadius: 6, border: `1px solid ${D.border}`, fontSize: 12, color: D.heading }} />
+          </label>
+          <label style={{ display: 'grid', gap: 3, fontSize: 10, color: D.muted, fontWeight: 700, textTransform: 'uppercase' }}>
+            Rows
+            <select value={limit} onChange={e => setLimit(e.target.value)} style={{ padding: '7px 8px', borderRadius: 6, border: `1px solid ${D.border}`, fontSize: 12, color: D.heading, background: D.input }}>
+              <option value="50">50</option>
+              <option value="150">150</option>
+              <option value="500">500</option>
+            </select>
+          </label>
+          <button onClick={load} disabled={loading} style={{
+            padding: '8px 12px', borderRadius: 6, border: `1px solid ${D.border}`, cursor: loading ? 'default' : 'pointer',
+            background: D.input, color: D.heading, fontSize: 12, fontWeight: 600, alignSelf: 'end',
+          }}>{loading ? 'Syncing...' : 'Sync'}</button>
+          <button onClick={downloadCsv} disabled={downloading || loading || data?.sync?.unavailable} style={{
+            padding: '8px 12px', borderRadius: 6, border: 'none', cursor: downloading || loading ? 'default' : 'pointer',
+            background: D.heading, color: D.white, fontSize: 12, fontWeight: 700, alignSelf: 'end', opacity: downloading || loading || data?.sync?.unavailable ? 0.55 : 1,
+          }}>{downloading ? 'Exporting...' : 'Export CSV'}</button>
+        </div>
       </div>
 
       {error && <div style={{ color: D.red, fontSize: 12, marginBottom: 12 }}>{error}</div>}
@@ -276,14 +346,15 @@ function PestCalibrationPanel() {
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
           <thead>
             <tr>
-              {['Date', 'Customer', 'Pool', 'Lot', 'Pred', 'Actual', 'Delta', 'Confidence'].map(h => (
+              {['Date', 'Customer', 'Pool', 'Lot', 'Pred', 'Actual', 'Delta', 'Confidence', 'Reasons'].map(h => (
                 <th key={h} style={{ textAlign: h === 'Customer' ? 'left' : 'right', padding: '8px 10px', borderBottom: `1px solid ${D.border}`, color: D.muted, fontSize: 11, fontWeight: 700 }}>{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {records.slice(0, 10).map(row => {
+            {records.slice(0, 50).map(row => {
               const delta = Number(row.delta_minutes || 0);
+              const reasons = Array.isArray(row.review_reasons) ? row.review_reasons.join(', ') : '';
               return (
                 <tr key={row.id || row.scheduled_service_id} style={{ borderBottom: `1px solid ${D.border}66` }}>
                   <td style={{ padding: '8px 10px', textAlign: 'right', color: D.text }}>{String(row.service_date || '').slice(0, 10) || '-'}</td>
@@ -294,12 +365,13 @@ function PestCalibrationPanel() {
                   <td style={{ padding: '8px 10px', textAlign: 'right', color: D.text }}>{Number(row.actual_minutes || 0).toFixed(1)}</td>
                   <td style={{ padding: '8px 10px', textAlign: 'right', color: Math.abs(delta) >= 15 ? D.red : Math.abs(delta) >= 8 ? D.amber : D.green, fontWeight: 700 }}>{fmtMin(delta)}</td>
                   <td style={{ padding: '8px 10px', textAlign: 'right', color: D.muted }}>{row.pricing_confidence || '-'}</td>
+                  <td style={{ padding: '8px 10px', textAlign: 'right', color: D.muted, maxWidth: 220, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={reasons}>{reasons || '-'}</td>
                 </tr>
               );
             })}
             {!loading && records.length === 0 && (
               <tr>
-                <td colSpan="8" style={{ padding: 18, textAlign: 'center', color: D.muted }}>
+                <td colSpan="9" style={{ padding: 18, textAlign: 'center', color: D.muted }}>
                   No calibration samples yet. Completed pest jobs need an accepted estimate link and a completed job timer.
                 </td>
               </tr>

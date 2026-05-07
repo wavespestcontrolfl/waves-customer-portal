@@ -310,6 +310,12 @@ router.get('/pest-calibration', async (req, res, next) => {
   try {
     const hasTable = await db.schema.hasTable('pest_production_calibration_records');
     if (!hasTable) {
+      if (String(req.query.format || '').toLowerCase() === 'csv') {
+        const { calibrationRowsToCsv } = require('../services/pest-production-calibration');
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename="pest-production-calibration-unavailable.csv"');
+        return res.send(calibrationRowsToCsv([]));
+      }
       return res.json({
         records: [],
         summary: { count: 0, avgDelta: 0, avgAbsDelta: 0, outlierCount: 0, byPoolCageSize: [], byLotBand: [], byConfidence: [], outliers: [] },
@@ -321,16 +327,30 @@ router.get('/pest-calibration', async (req, res, next) => {
       syncCalibrationRecords,
       listCalibrationRecords,
       summarizeCalibrationRecords,
+      calibrationRowsToCsv,
     } = require('../services/pest-production-calibration');
 
     const requestedLimit = parseInt(req.query.limit, 10);
+    const exportCsv = String(req.query.format || '').toLowerCase() === 'csv';
     const options = {
       startDate: req.query.startDate || null,
       endDate: req.query.endDate || null,
-      limit: Number.isFinite(requestedLimit) && requestedLimit > 0 ? Math.min(requestedLimit, 500) : 100,
+      limit: Number.isFinite(requestedLimit) && requestedLimit > 0
+        ? Math.min(requestedLimit, exportCsv ? 10000 : 500)
+        : (exportCsv ? 10000 : 100),
     };
     const sync = req.query.sync === 'false' ? { synced: 0, skipped: 0 } : await syncCalibrationRecords({ ...options, limit: 2000 });
-    const records = await listCalibrationRecords(options);
+    const records = await listCalibrationRecords({
+      ...options,
+      maxLimit: exportCsv ? 10000 : 500,
+    });
+    if (exportCsv) {
+      const start = options.startDate || 'all';
+      const end = options.endDate || 'all';
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="pest-production-calibration-${start}-to-${end}.csv"`);
+      return res.send(calibrationRowsToCsv(records));
+    }
     const summaryRecords = await listCalibrationRecords({
       startDate: options.startDate,
       endDate: options.endDate,

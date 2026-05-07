@@ -21,6 +21,21 @@ function normalizeReasons(value) {
   }
 }
 
+function parseStoredJson(value, fallback = null) {
+  if (value == null) return fallback;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch { return fallback; }
+}
+
+function firstFiniteNumber(...values) {
+  for (const value of values) {
+    if (value == null || value === '') continue;
+    const n = Number(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
 function lotBand(lotSqFt) {
   const lot = Number(lotSqFt) || 0;
   if (!lot) return 'unknown';
@@ -28,6 +43,27 @@ function lotBand(lotSqFt) {
   if (lot < 20000) return '10k-20k';
   if (lot < 40000) return '20k-40k';
   return '40k+';
+}
+
+function extractPestPrice(result = {}, pestLine = null) {
+  const recurring = result.recurring || {};
+  const pest = recurring.pest || recurring.pest_control || {};
+  const totals = result.totals || {};
+  const line = pestLine || (Array.isArray(result.lineItems)
+    ? result.lineItems.find(item => item?.service === 'pest_control' || item?.key === 'pest_control')
+    : null);
+
+  return firstFiniteNumber(
+    pest.perApp,
+    pest.per_app,
+    pest.price,
+    pest.amount,
+    line?.perApp,
+    line?.price,
+    line?.amount,
+    totals.pest_control,
+    totals.pestControl,
+  );
 }
 
 function extractEstimatePayload(estimateData) {
@@ -38,7 +74,8 @@ function extractEstimatePayload(estimateData) {
     : null;
   const diagnostics = result.productionDiagnostics || pestLine?.productionDiagnostics || null;
   const property = result.property || parsed.profile || parsed.inputs || parsed.engineInputs || {};
-  return { parsed, result, diagnostics, property };
+  const pestPrice = extractPestPrice(result, pestLine);
+  return { parsed, result, diagnostics, property, pestPrice };
 }
 
 function isPestOnlyServiceType(serviceType) {
@@ -57,7 +94,7 @@ function isPestOnlyServiceType(serviceType) {
 }
 
 function buildCalibrationRecord(row) {
-  const { parsed, result, diagnostics, property } = extractEstimatePayload(row.estimate_data);
+  const { parsed, result, diagnostics, property, pestPrice } = extractEstimatePayload(row.estimate_data);
   if (!diagnostics || diagnostics.estimatedMinutes == null) return null;
 
   const predicted = round1(diagnostics.estimatedMinutes);
@@ -89,6 +126,7 @@ function buildCalibrationRecord(row) {
     estimate_snapshot: JSON.stringify({
       recurring: result.recurring || null,
       totals: result.totals || null,
+      pestPrice,
       productionDiagnostics: diagnostics,
     }),
     source: 'estimate_time_entry',
@@ -232,11 +270,91 @@ async function listCalibrationRecords({ startDate, endDate, limit = 100, maxLimi
   }));
 }
 
+function calibrationExportRows(records = []) {
+  return (records || []).map((row) => {
+    const estimateSnapshot = parseStoredJson(row.estimate_snapshot, {}) || {};
+    const diagnostics = parseStoredJson(row.production_diagnostics, {}) || {};
+    const property = parseStoredJson(row.property_snapshot, {}) || {};
+    const reviewReasons = normalizeReasons(row.review_reasons);
+    const pestPrice = firstFiniteNumber(
+      estimateSnapshot.pestPrice,
+      estimateSnapshot.recurring?.pest?.perApp,
+      estimateSnapshot.recurring?.pest_control?.perApp,
+      estimateSnapshot.totals?.pest_control,
+      estimateSnapshot.totals?.pestControl,
+    );
+
+    return {
+      service_date: String(row.service_date || '').slice(0, 10),
+      customer_name: row.customer_name || '',
+      address_line1: row.address_line1 || '',
+      city: row.city || '',
+      technician_name: row.technician_name || '',
+      service_type: row.service_type || '',
+      predicted_minutes: Number(row.predicted_minutes || 0).toFixed(1),
+      actual_minutes: Number(row.actual_minutes || 0).toFixed(1),
+      delta_minutes: Number(row.delta_minutes || 0).toFixed(1),
+      pricing_confidence: row.pricing_confidence || '',
+      pool_cage_size: row.pool_cage_size || '',
+      home_sqft: row.home_sqft || '',
+      lot_sqft: row.lot_sqft || '',
+      lot_band: lotBand(row.lot_sqft),
+      pest_price: pestPrice == null ? '' : Number(pestPrice).toFixed(2),
+      review_reasons: reviewReasons.join('; '),
+      pool_cage_size_source: diagnostics.poolCageSizeSource || '',
+      pricing_mode: diagnostics.pricingMode || '',
+      stories: property.stories || '',
+      scheduled_service_id: row.scheduled_service_id || '',
+      estimate_id: row.estimate_id || '',
+    };
+  });
+}
+
+function csvEscape(value) {
+  const raw = value == null ? '' : String(value);
+  const neutralized = /^[\s]*[=+\-@]/.test(raw) ? `'${raw}` : raw;
+  if (!/[",\n\r]/.test(neutralized)) return neutralized;
+  return `"${neutralized.replace(/"/g, '""')}"`;
+}
+
+function calibrationRowsToCsv(records = []) {
+  const rows = calibrationExportRows(records);
+  const headers = [
+    'service_date',
+    'customer_name',
+    'address_line1',
+    'city',
+    'technician_name',
+    'service_type',
+    'predicted_minutes',
+    'actual_minutes',
+    'delta_minutes',
+    'pricing_confidence',
+    'pool_cage_size',
+    'home_sqft',
+    'lot_sqft',
+    'lot_band',
+    'pest_price',
+    'review_reasons',
+    'pool_cage_size_source',
+    'pricing_mode',
+    'stories',
+    'scheduled_service_id',
+    'estimate_id',
+  ];
+  return [
+    headers.join(','),
+    ...rows.map(row => headers.map(header => csvEscape(row[header])).join(',')),
+  ].join('\n');
+}
+
 module.exports = {
   buildCalibrationRecord,
   summarizeCalibrationRecords,
   syncCalibrationRecords,
   listCalibrationRecords,
+  calibrationExportRows,
+  calibrationRowsToCsv,
   lotBand,
   isPestOnlyServiceType,
 };
