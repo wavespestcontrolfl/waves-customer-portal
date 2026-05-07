@@ -277,12 +277,9 @@ function generateEstimate(input) {
     const result = pricePestInitialRoach(property, { roachType: roachTypeRaw, standalone: true });
     if (result) lineItems.push(result);
   }
-  // Session 11a Step 2b-3: v2-parity auto-fire for recurring pest with
-  // roachModifier='GERMAN'. Flat $100 one-time (urgency/afterHours/rc baked
-  // inside priceGermanRoachInitial via a single Math.round, matching v2's
-  // applyOT). german_roach_initial is in WAVEGUARD.excludedFromPercentDiscount
-  // so the orchestrator discount loop doesn't re-apply the rc perk on top.
-  // Separate from the full specialty germanRoach service above.
+  // Legacy explicit service for old callers. The current v2 adapter relies on
+  // the recurring pest auto-fire above (`pest_initial_roach`) and does not
+  // inject this line, which prevents duplicate German roach first-visit fees.
   if (services.germanRoachInitial) {
     const opts = typeof services.germanRoachInitial === 'object'
       ? services.germanRoachInitial

@@ -995,10 +995,9 @@ function priceGermanRoach(property) {
   };
 }
 
-// Session 11a Step 2b-3 — v2 parity for the auto-fire when recurring pest
-// carries roachModifier='GERMAN'. v2 emits a flat $100 one-time line item
-// (pricing-engine-v2.js:481-483), urgency/afterHours via applyOT. Separate
-// from priceGermanRoach (the specialty ROACH service, $450+).
+// Legacy explicit German roach initial. The current v2 adapter uses
+// pest_initial_roach for recurring German roach auto-fire; this remains for
+// older direct engine callers that still pass services.germanRoachInitial.
 function priceGermanRoachInitial(options = {}) {
   const {
     urgency = 'NONE',

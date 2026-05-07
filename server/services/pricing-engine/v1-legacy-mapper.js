@@ -19,8 +19,7 @@ const RECURRING_SERVICES = new Set([
 const ONE_TIME_SERVICES = new Set([
   'one_time_pest', 'one_time_lawn', 'one_time_mosquito',
   'top_dressing', 'dethatching', 'plugging', 'trenching',
-  // Session 11a Step 2b-3: auto-fire from recurring pest roachModifier='GERMAN'.
-  // Mirrors v2-legacy-mapper treating oneTime.germanRoachInitial as a one-time item.
+  // Legacy explicit German roach initial from older direct engine callers.
   'german_roach_initial',
   // Auto-fired by estimate-engine when recurring pest carries roachType !== 'none'.
   // Surfaces in the customer-facing estimate's first-visit-fees stack.
