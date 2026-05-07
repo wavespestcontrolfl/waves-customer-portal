@@ -1,5 +1,7 @@
 const {
   buildCalibrationRecord,
+  calibrationRowsToCsv,
+  calibrationExportRows,
   summarizeCalibrationRecords,
   lotBand,
   isPestOnlyServiceType,
@@ -47,6 +49,43 @@ describe('pest production calibration', () => {
     });
     expect(JSON.parse(record.review_reasons)).toEqual(['large_pool_cage']);
     expect(JSON.parse(record.production_diagnostics).breakdown.poolCage).toBe(12);
+    expect(JSON.parse(record.estimate_snapshot).pestPrice).toBeNull();
+  });
+
+  test('captures pest price when estimate payload includes recurring pest pricing', () => {
+    const record = buildCalibrationRecord({
+      scheduled_service_id: 'service-price',
+      estimate_id: 'estimate-price',
+      service_date: '2026-05-07',
+      service_type: 'Pest Control',
+      actual_minutes: 35,
+      estimate_data: {
+        result: {
+          property: { homeSqFt: 2100, lotSqFt: 9000 },
+          productionDiagnostics: {
+            estimatedMinutes: 31.1,
+            pricingConfidence: 'high',
+            poolCageSize: 'none',
+          },
+          recurring: {
+            pest: { perApp: 118.5 },
+          },
+        },
+      },
+    });
+
+    expect(JSON.parse(record.estimate_snapshot).pestPrice).toBe(118.5);
+  });
+
+  test('leaves missing pest price blank in export instead of coercing to zero', () => {
+    const rows = calibrationExportRows([{
+      predicted_minutes: 30,
+      actual_minutes: 40,
+      delta_minutes: 10,
+      estimate_snapshot: { pestPrice: null },
+    }]);
+
+    expect(rows[0].pest_price).toBe('');
   });
 
   test('reads production diagnostics from raw engineResult estimate data', () => {
@@ -132,5 +171,73 @@ describe('pest production calibration', () => {
     expect(isPestOnlyServiceType('Tree & Shrub')).toBe(false);
     expect(isPestOnlyServiceType('Pest Control + Lawn Care')).toBe(false);
     expect(isPestOnlyServiceType('WaveGuard Gold - Lawn Care + Pest Control')).toBe(false);
+  });
+
+  test('builds CSV export rows with property, variance, price, and review signal', () => {
+    const rows = calibrationExportRows([{
+      service_date: '2026-05-07T00:00:00.000Z',
+      customer_name: 'Ada Lovelace',
+      address_line1: '123 Screen Cage Way',
+      city: 'Parrish',
+      technician_name: 'Tech One',
+      service_type: 'Pest Control',
+      predicted_minutes: 37.3,
+      actual_minutes: 49.8,
+      delta_minutes: 12.5,
+      pricing_confidence: 'medium',
+      pool_cage_size: 'large',
+      home_sqft: 2600,
+      lot_sqft: 24000,
+      review_reasons: ['large_lot', 'pool_cage_size_inferred'],
+      production_diagnostics: {
+        poolCageSizeSource: 'inferred',
+        pricingMode: 'shadow_only',
+      },
+      property_snapshot: { stories: 2 },
+      estimate_snapshot: { pestPrice: 136 },
+      scheduled_service_id: 'service-1',
+      estimate_id: 'estimate-1',
+    }]);
+
+    expect(rows[0]).toMatchObject({
+      service_date: '2026-05-07',
+      customer_name: 'Ada Lovelace',
+      predicted_minutes: '37.3',
+      actual_minutes: '49.8',
+      delta_minutes: '12.5',
+      lot_band: '20k-40k',
+      pest_price: '136.00',
+      review_reasons: 'large_lot; pool_cage_size_inferred',
+      pool_cage_size_source: 'inferred',
+      pricing_mode: 'shadow_only',
+      stories: 2,
+    });
+
+    const csv = calibrationRowsToCsv([{
+      service_date: '2026-05-07',
+      customer_name: 'Customer, With Comma',
+      review_reasons: ['large_lot'],
+      predicted_minutes: 30,
+      actual_minutes: 40,
+      delta_minutes: 10,
+    }]);
+    expect(csv.split('\n')[0]).toContain('service_date,customer_name,address_line1');
+    expect(csv).toContain('"Customer, With Comma"');
+  });
+
+  test('neutralizes formula-like CSV cells before export', () => {
+    const csv = calibrationRowsToCsv([{
+      service_date: '2026-05-07',
+      customer_name: '=HYPERLINK("https://example.com","x")',
+      address_line1: '+123 Main St',
+      city: '@Bradenton',
+      predicted_minutes: 30,
+      actual_minutes: 40,
+      delta_minutes: 10,
+    }]);
+
+    expect(csv).toContain('\'=HYPERLINK');
+    expect(csv).toContain('\'+123 Main St');
+    expect(csv).toContain('\'@Bradenton');
   });
 });
