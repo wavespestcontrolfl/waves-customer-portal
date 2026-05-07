@@ -911,6 +911,11 @@ ${shellQuestionsBar()}
         if (!r.ok) throw new Error(data.error || 'Failed');
         document.getElementById('monthly-display').textContent = fmt(data.monthlyTotal);
         document.querySelectorAll('[data-monthly-echo]').forEach(el => el.textContent = fmt(data.monthlyTotal));
+        if (data.onetimeTotal != null) {
+          const oneTimeDisplay = document.getElementById('onetime-display');
+          if (oneTimeDisplay) oneTimeDisplay.textContent = fmt(data.onetimeTotal);
+          document.querySelectorAll('[data-onetime-echo]').forEach(el => el.textContent = fmt(data.onetimeTotal));
+        }
         const dayEl = document.getElementById('day-price'); if (dayEl) dayEl.textContent = fmt(Math.round((data.monthlyTotal / 30) * 100) / 100);
         if (data.tierPrices) {
           document.querySelectorAll('[data-price-for]').forEach((pel) => {
