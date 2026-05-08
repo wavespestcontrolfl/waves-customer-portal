@@ -2316,8 +2316,17 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     const report = msg.content?.[0]?.text || '';
     res.json({ report });
   } catch (err) {
-    logger.error(`[generate-report] AI failed: ${err.message}`);
-    res.status(500).json({ error: err.message });
+    logger.error('[generate-report] AI failed', {
+      message: err.message,
+      status: err.status,
+      type: err.error?.type || err.type,
+      stack: err.stack,
+    });
+    const status = Number.isInteger(err.status) && err.status >= 400 && err.status < 600 ? err.status : 502;
+    res.status(status).json({
+      error: err.message || 'AI request failed',
+      type: err.error?.type || err.type || 'upstream_error',
+    });
   }
 });
 

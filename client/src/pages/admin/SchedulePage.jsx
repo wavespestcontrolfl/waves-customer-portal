@@ -176,6 +176,26 @@ function adminFetch(path, options = {}) {
   });
 }
 
+async function generateAiReport(payload) {
+  const r = await fetch(`${API_BASE}/admin/schedule/generate-report`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  let body = null;
+  try { body = await r.json(); } catch { /* non-JSON body */ }
+  if (!r.ok) {
+    const detail = body?.error || `HTTP ${r.status}`;
+    const err = new Error(detail);
+    err.status = r.status;
+    throw err;
+  }
+  return body || {};
+}
+
 function googleMapsUrl(address) {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
 }
@@ -2765,17 +2785,14 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
                   setGenerating(true);
                   try {
                     const productNames = selectedProducts.map(p => p.name + (p.rate ? ` (${p.rate} ${p.rateUnit})` : '')).join(', ');
-                    const r = await adminFetch('/admin/schedule/generate-report', {
-                      method: 'POST',
-                      body: JSON.stringify({
-                        customerName: service.customerName,
-                        serviceType: service.serviceType,
-                        technicianName: service.technicianName || 'Waves Tech',
-                        serviceDate: new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }),
-                        arrivalTime: service.checkInTime ? new Date(service.checkInTime).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }) : '',
-                        serviceNotes: notes,
-                        productsApplied: productNames,
-                      }),
+                    const r = await generateAiReport({
+                      customerName: service.customerName,
+                      serviceType: service.serviceType,
+                      technicianName: service.technicianName || 'Waves Tech',
+                      serviceDate: new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }),
+                      arrivalTime: service.checkInTime ? new Date(service.checkInTime).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }) : '',
+                      serviceNotes: notes,
+                      productsApplied: productNames,
                     });
                     if (r.report) setNotes(r.report);
                   } catch (e) { alert('AI report failed: ' + e.message); }
@@ -3549,17 +3566,14 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
               setGenerating(true);
               try {
                 const productNames = selectedProducts.map(p => p.name + (p.rate ? ` (${p.rate} ${p.rateUnit})` : '')).join(', ');
-                const r = await adminFetch('/admin/schedule/generate-report', {
-                  method: 'POST',
-                  body: JSON.stringify({
-                    customerName: service.customerName,
-                    serviceType: service.serviceType,
-                    technicianName: service.technicianName || 'Waves Tech',
-                    serviceDate: new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }),
-                    arrivalTime: service.checkInTime ? new Date(service.checkInTime).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }) : '',
-                    serviceNotes: notes,
-                    productsApplied: productNames,
-                  }),
+                const r = await generateAiReport({
+                  customerName: service.customerName,
+                  serviceType: service.serviceType,
+                  technicianName: service.technicianName || 'Waves Tech',
+                  serviceDate: new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }),
+                  arrivalTime: service.checkInTime ? new Date(service.checkInTime).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }) : '',
+                  serviceNotes: notes,
+                  productsApplied: productNames,
                 });
                 if (r.report) setNotes(r.report);
               } catch (e) { alert('AI report failed: ' + e.message); }
