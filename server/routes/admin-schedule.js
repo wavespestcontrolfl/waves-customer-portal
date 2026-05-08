@@ -2168,9 +2168,15 @@ router.post('/generate-report', async (req, res) => {
     const { customerName, serviceType, technicianName, serviceDate, arrivalTime, serviceNotes, productsApplied } = req.body;
     if (!serviceNotes) return res.status(400).json({ error: 'Service notes required' });
 
+    const model = MODELS.FLAGSHIP;
+    if (!model || typeof model !== 'string') {
+      logger.error('[generate-report] Model not configured', { MODELS });
+      return res.status(500).json({ error: 'AI model not configured' });
+    }
+
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    const prompt = `# SERVICE REPORT COPY — SYSTEM PROMPT v2
+    const systemPrompt = `# SERVICE REPORT COPY — SYSTEM PROMPT v2
 
 ## CONTEXT
 
@@ -2283,16 +2289,6 @@ Your property's structural perimeter now maintains active chemical sentries that
 
 Why this is bad: military cosplay, overpromises "impenetrable" and "90 days" of guaranteed protection, sounds like ad copy, uses "fortification/fortress/sentries/vectors/advancement" in violation of constraint #1.
 
-## INPUTS
-
-Client Full Name: ${customerName}
-Service Type: ${serviceType}
-Technician Full Name: ${technicianName || 'Not specified'}
-Service Date: ${serviceDate}
-Arrival Time: ${arrivalTime || 'Not specified'}
-Service Notes: ${serviceNotes}
-Products Applied / Active Ingredients: ${productsApplied || 'Not specified'}
-
 ## OUTPUT FORMAT
 
 Output exactly this structure, plain text, no markdown formatting:
@@ -2307,10 +2303,23 @@ WHAT WE FOUND
 
 Do not include the client name as a header. Do not add greetings, sign-offs, or any text outside these two sections.`;
 
+    const userMessage = `Generate the service report copy for this visit.
+
+INPUTS
+
+Client Full Name: ${customerName || 'Not specified'}
+Service Type: ${serviceType || 'Not specified'}
+Technician Full Name: ${technicianName || 'Not specified'}
+Service Date: ${serviceDate || 'Not specified'}
+Arrival Time: ${arrivalTime || 'Not specified'}
+Service Notes: ${serviceNotes}
+Products Applied / Active Ingredients: ${productsApplied || 'Not specified'}`;
+
     const msg = await anthropic.messages.create({
-      model: MODELS.FLAGSHIP,
+      model,
       max_tokens: 800,
-      messages: [{ role: 'user', content: prompt }],
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userMessage }],
     });
 
     const report = msg.content?.[0]?.text || '';
