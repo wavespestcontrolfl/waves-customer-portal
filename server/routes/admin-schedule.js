@@ -15,6 +15,7 @@ const {
   etNthWeekdayOfMonth, parseETDateTime,
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
+const { customerOnAutopay } = require('../services/autopay-eligibility');
 
 // ─── Destructive maintenance endpoints ──────────────────────────────────────
 // Defined BEFORE the router-level auth chain so `devOnly` runs first and
@@ -372,6 +373,9 @@ router.get('/', async (req, res, next) => {
         'customers.waveguard_tier', 'customers.monthly_rate', 'customers.lawn_type',
         'customers.property_sqft', 'customers.lot_sqft', 'customers.lead_score',
         'customers.service_preferences',
+        'customers.autopay_enabled', 'customers.autopay_paused_until',
+        'customers.autopay_payment_method_id',
+        'customers.ach_status',
         'technicians.name as tech_name'
       )
       .orderByRaw('COALESCE(route_order, 999), window_start');
@@ -389,6 +393,14 @@ router.get('/', async (req, res, next) => {
       const category = detectServiceCategory(normalizedType);
 
       const cleanedNotes = (s.notes || '').trim();
+      let checkoutInvoice = null;
+      try {
+        checkoutInvoice = await db('invoices')
+          .where({ scheduled_service_id: s.id })
+          .whereNot('status', 'void')
+          .orderBy('created_at', 'desc')
+          .first('id', 'status', 'total', 'token');
+      } catch { /* scheduled_service_id may be absent before migration */ }
 
       const alerts = [];
       if (prefs?.neighborhood_gate_code) alerts.push({ type: 'gate', text: `Gate: ${prefs.neighborhood_gate_code}` });
@@ -416,6 +428,13 @@ router.get('/', async (req, res, next) => {
       }
 
       const zone = s.zone || getZone(s.city, s.zip);
+      const autopayActive = await customerOnAutopay({
+        id: s.customer_id,
+        autopay_enabled: s.autopay_enabled,
+        autopay_paused_until: s.autopay_paused_until,
+        autopay_payment_method_id: s.autopay_payment_method_id,
+        ach_status: s.ach_status,
+      });
 
       return {
         id: s.id, routeOrder: s.route_order,
@@ -425,6 +444,11 @@ router.get('/', async (req, res, next) => {
         prepaidMethod: s.prepaid_method || null,
         prepaidAt: s.prepaid_at || null,
         createInvoiceOnComplete: !!s.create_invoice_on_complete,
+        checkoutInvoiceId: checkoutInvoice?.id || null,
+        checkoutInvoiceStatus: checkoutInvoice?.status || null,
+        checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
+        autopayActive,
+        autopayEnabled: s.autopay_enabled !== false,
         customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
         customerId: s.customer_id, customerPhone: s.customer_phone,
         address: `${s.address_line1}, ${s.city}, ${s.state} ${s.zip}`,
@@ -541,40 +565,73 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.window_start', 'scheduled_services.window_end',
           'scheduled_services.estimated_duration_minutes',
           'scheduled_services.estimated_price',
+          'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method',
+          'scheduled_services.prepaid_at', 'scheduled_services.create_invoice_on_complete',
           'scheduled_services.technician_id',
           'scheduled_services.zone', 'scheduled_services.route_order',
           'scheduled_services.is_recurring',
           'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
+          'customers.monthly_rate', 'customers.autopay_enabled', 'customers.autopay_paused_until',
+          'customers.autopay_payment_method_id',
+          'customers.ach_status',
           'technicians.name as tech_name')
         .orderByRaw('COALESCE(route_order, 999)');
 
       const zones = {};
       services.forEach(s => { const z = s.zone || 'unknown'; zones[z] = (zones[z] || 0) + 1; });
 
+      const servicePayloads = await Promise.all(services.map(async (s) => {
+        const svcType = normalizeServiceType(s.service_type);
+        let checkoutInvoice = null;
+        try {
+          checkoutInvoice = await db('invoices')
+            .where({ scheduled_service_id: s.id })
+            .whereNot('status', 'void')
+            .orderBy('created_at', 'desc')
+            .first('id', 'status', 'total', 'token');
+        } catch { /* scheduled_service_id may be absent before migration */ }
+        const autopayActive = await customerOnAutopay({
+          id: s.customer_id,
+          autopay_enabled: s.autopay_enabled,
+          autopay_paused_until: s.autopay_paused_until,
+          autopay_payment_method_id: s.autopay_payment_method_id,
+          ach_status: s.ach_status,
+        });
+        return {
+          id: s.id,
+          customerId: s.customer_id,
+          customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
+          serviceType: svcType,
+          serviceCategory: detectServiceCategory(svcType),
+          status: s.status,
+          techName: s.tech_name, zone: s.zone,
+          tier: s.waveguard_tier,
+          waveguardTier: s.waveguard_tier,
+          monthlyRate: parseFloat(s.monthly_rate || 0),
+          autopayActive,
+          autopayEnabled: s.autopay_enabled !== false,
+          windowStart: s.window_start,
+          windowEnd: s.window_end,
+          estimatedDuration: s.estimated_duration_minutes,
+          estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+          prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
+          prepaidMethod: s.prepaid_method || null,
+          prepaidAt: s.prepaid_at || null,
+          createInvoiceOnComplete: !!s.create_invoice_on_complete,
+          checkoutInvoiceId: checkoutInvoice?.id || null,
+          checkoutInvoiceStatus: checkoutInvoice?.status || null,
+          checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
+          technicianId: s.technician_id,
+          technicianName: s.tech_name,
+          isRecurring: s.is_recurring,
+        };
+      }));
+
       days.push({
         date: dateStr,
         dayOfWeek: d.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' }),
         dayNum: d.getDate(),
-        services: services.map(s => {
-          const svcType = normalizeServiceType(s.service_type);
-          return {
-            id: s.id,
-            customerId: s.customer_id,
-            customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
-            serviceType: svcType,
-            serviceCategory: detectServiceCategory(svcType),
-            status: s.status,
-            techName: s.tech_name, zone: s.zone,
-            tier: s.waveguard_tier,
-            windowStart: s.window_start,
-            windowEnd: s.window_end,
-            estimatedDuration: s.estimated_duration_minutes,
-            estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
-            technicianId: s.technician_id,
-            technicianName: s.tech_name,
-            isRecurring: s.is_recurring,
-          };
-        }),
+        services: servicePayloads,
         count: services.length,
         zones,
       });
