@@ -959,13 +959,14 @@ export default function DispatchPageV2({ activeTab: controlledActiveTab, setOpen
     handleStatusChange(serviceId, 'completed');
     const invoiceWasAlreadyBundled = r?.completionSmsType === 'service_complete_with_invoice'
       && r?.completionSmsStatus === 'sent';
-    const invoiceWasAlreadyPaid = r?.invoiceStatus === 'paid' || r?.completionSmsType === 'service_complete_prepaid';
+    const invoiceWasAlreadyPaid = r?.invoiceStatus === 'paid';
     const invoiceWasAlreadySent = !!body?.invoiceAlreadySent || !!completingService?.completionInvoiceAlreadySent;
     if (
       isMobile
       && r?.invoiceId
       && r?.invoiceToken
       && Number(r?.invoiceTotal || 0) > 0
+      && r?.invoicePaymentActionRequired !== false
       && !invoiceWasAlreadyBundled
       && !invoiceWasAlreadyPaid
       && !invoiceWasAlreadySent

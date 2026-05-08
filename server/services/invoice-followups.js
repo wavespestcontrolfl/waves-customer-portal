@@ -15,6 +15,7 @@ const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const config = require('../config/invoice-followups');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { customerOnAutopay } = require('./autopay-eligibility');
 
 /**
  * Try to load the SMS body from the editable sms_templates table first.
@@ -86,45 +87,6 @@ function anchorTo10amNY(anchorDate, daysAfter, hour) {
   }).format(probe).slice(-3); // "EDT" or "EST"
   const offsetHours = tzName === 'EDT' ? 4 : 5;
   return new Date(Date.UTC(y, m, d, hour + offsetHours));
-}
-
-/**
- * Determine whether a customer is on autopay for this invoice.
- * Must have autopay_enabled AND a saved payment method that can actually be
- * charged. If ACH is suspended/needs_verification we still treat them as
- * autopay-held only if there's a card fallback — otherwise they need manual
- * reminders.
- */
-async function customerOnAutopay(customer) {
-  if (!customer) return false;
-  if (customer.autopay_enabled === false) return false;
-  if (customer.autopay_paused_until && new Date(customer.autopay_paused_until) > new Date()) {
-    return false;
-  }
-  // Need an actual payment method on file
-  const hasPM =
-    !!customer.autopay_payment_method_id ||
-    !!customer.stripe_default_payment_method_id;
-  if (!hasPM) {
-    // Fallback: check payment_methods table directly
-    try {
-      const pm = await db('payment_methods')
-        .where({ customer_id: customer.id })
-        .andWhere(function () { this.where('is_default', true).orWhere('autopay_enabled', true); })
-        .first();
-      if (!pm) return false;
-    } catch { return false; }
-  }
-  // ACH suspended/needs_verification → not autopay-eligible unless they also have a card
-  if (customer.ach_status && customer.ach_status !== 'active') {
-    try {
-      const card = await db('payment_methods')
-        .where({ customer_id: customer.id, method_type: 'card' })
-        .first();
-      if (!card) return false;
-    } catch { return false; }
-  }
-  return true;
 }
 
 /**

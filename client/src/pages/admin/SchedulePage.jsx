@@ -1654,13 +1654,24 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
 
   const svcTypeLower = (service.serviceType || '').toLowerCase();
   const isCallback = svcTypeLower.includes('re-service') || svcTypeLower.includes('callback') || service.isCallback;
-  const invoiceAmount = service.estimatedPrice != null && Number(service.estimatedPrice) > 0
+  const hasVisitPrice = service.estimatedPrice != null && Number(service.estimatedPrice) > 0;
+  const invoiceAmount = hasVisitPrice
     ? Number(service.estimatedPrice)
     : Number(service.monthlyRate || 0);
+  const autopayCoversVisit = !!service.autopayActive
+    && !hasVisitPrice
+    && !!service.waveguardTier
+    && Number(service.monthlyRate || 0) > 0;
   const prepaidCovered = service.prepaidAmount != null
     && Number(service.prepaidAmount) > 0
     && Number(service.prepaidAmount) >= invoiceAmount;
-  const willInvoice = !oneTimeRecapOnly && !prepaidCovered && (!!service.createInvoiceOnComplete || !!service.waveguardTier) && invoiceAmount > 0;
+  const invoiceAlreadyPaid = service.checkoutInvoiceStatus === 'paid' || service.invoiceStatus === 'paid';
+  const reportOnlyCompletion = prepaidCovered
+    || invoiceAlreadyPaid
+    || autopayCoversVisit
+    || !!service.completionInvoiceAlreadySent;
+  const willInvoice = !oneTimeRecapOnly && !reportOnlyCompletion && (!!service.createInvoiceOnComplete || !!service.waveguardTier) && invoiceAmount > 0;
+  const completionSmsTemplateName = willInvoice ? 'Service Complete + Invoice' : 'Service Complete';
   const isIncompleteVisit = visitOutcome === 'incomplete';
   const reviewSuppressionReason = isIncompleteVisit
     ? 'incomplete'
@@ -2999,7 +3010,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
             )}
 
             {effectiveSendSms && (
-              <Field label="Customer SMS preview">
+              <Field label={`Customer SMS preview - ${completionSmsTemplateName}`}>
                 <div style={{
                   background: M.card, border: `0.5px solid ${M.hairline}`, borderRadius: 12,
                   padding: 14, fontFamily: font, fontSize: 14, color: M.ink,
@@ -3752,7 +3763,7 @@ export function CompletionPanel({ service, products, onClose, onSubmit, onViewDe
 
           {effectiveSendSms && (
             <div style={{ marginBottom: 20 }}>
-              <label style={labelStyle}>Customer SMS Preview</label>
+              <label style={labelStyle}>Customer SMS Preview - {completionSmsTemplateName}</label>
               <div style={{
                 background: D.card, border: `1px solid ${D.border}`, borderRadius: 10,
                 padding: 12, color: D.text, fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap',
