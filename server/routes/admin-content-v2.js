@@ -1,4 +1,5 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
@@ -7,8 +8,27 @@ const BlogAuditor = require('../services/content/blog-auditor');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { normalizeSpokeSites, invalidSpokeSites } = require('../services/content-astro/spoke-sites');
 
 router.use(adminAuthenticate, requireAdmin);
+
+const aiContentLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `tech_${req.technicianId || req.ip}`,
+  message: { error: 'Too many AI content requests in the last hour. Try again later.' },
+});
+
+const CONTENT_LIMITS = {
+  bulkGenerateMax: 10,
+  ideaCountMax: 50,
+  topicMaxChars: 500,
+};
+
+const ALLOWED_CONTENT_TYPES = new Set(['blog_post', 'page_refresh', 'pest_pressure', 'gbp_post', 'service_page']);
+const ALLOWED_TARGET_CITIES = new Set(['Lakewood Ranch', 'Parrish', 'Bradenton', 'Sarasota', 'Venice', 'North Port', 'Palmetto', 'Port Charlotte']);
 
 const BLOG_UPDATE_FIELDS = new Set([
   'title',
@@ -36,6 +56,54 @@ function pickAllowedBlogUpdates(body) {
     if (BLOG_UPDATE_FIELDS.has(key)) updates[key] = value;
   }
   return updates;
+}
+
+function normalizeBlogUpdates(body) {
+  const updates = pickAllowedBlogUpdates(body);
+  if (Object.prototype.hasOwnProperty.call(updates, 'target_sites')) {
+    const invalid = invalidSpokeSites(updates.target_sites);
+    if (invalid.length > 0) {
+      throw operationalBadRequest(`target_sites contains unsupported domains: ${invalid.join(', ')}`);
+    }
+    updates.target_sites = normalizeSpokeSites(updates.target_sites);
+  }
+  return updates;
+}
+
+function operationalBadRequest(message) {
+  const err = new Error(message);
+  err.isOperational = true;
+  err.statusCode = 400;
+  return err;
+}
+
+function parseBoundedInt(value, { defaultValue, min, max, name }) {
+  const raw = value == null || value === '' ? defaultValue : value;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw operationalBadRequest(`${name} must be an integer between ${min} and ${max}`);
+  }
+  return parsed;
+}
+
+function normalizeGenerateBody(body = {}) {
+  const topic = String(body.topic || '').trim();
+  if (!topic) throw operationalBadRequest('Topic is required');
+  if (topic.length > CONTENT_LIMITS.topicMaxChars) {
+    throw operationalBadRequest(`Topic must be ${CONTENT_LIMITS.topicMaxChars} characters or fewer`);
+  }
+
+  const contentType = body.contentType || 'blog_post';
+  if (!ALLOWED_CONTENT_TYPES.has(contentType)) {
+    throw operationalBadRequest(`contentType must be one of: ${Array.from(ALLOWED_CONTENT_TYPES).join(', ')}`);
+  }
+
+  const targetCity = body.targetCity || 'Lakewood Ranch';
+  if (!ALLOWED_TARGET_CITIES.has(targetCity)) {
+    throw operationalBadRequest(`targetCity must be one of: ${Array.from(ALLOWED_TARGET_CITIES).join(', ')}`);
+  }
+
+  return { topic, contentType, targetCity };
 }
 
 // ── Gemini hero-image generator ─────────────────────────────────────
@@ -254,7 +322,7 @@ router.get('/blog/:id', async (req, res, next) => {
 // PUT /api/admin/content/blog/:id
 router.put('/blog/:id', async (req, res, next) => {
   try {
-    const updates = { ...pickAllowedBlogUpdates(req.body), updated_at: new Date() };
+    const updates = { ...normalizeBlogUpdates(req.body), updated_at: new Date() };
     if (updates.content) {
       updates.word_count = updates.content.split(/\s+/).filter(Boolean).length;
     }
@@ -276,7 +344,7 @@ router.delete('/blog/:id', async (req, res, next) => {
 // =========================================================================
 
 // POST /api/admin/content/blog/:id/generate — generate AI content for a post
-router.post('/blog/:id/generate', async (req, res, next) => {
+router.post('/blog/:id/generate', aiContentLimiter, async (req, res, next) => {
   try {
     const result = await BlogWriter.generatePost(req.params.id);
     res.json(result);
@@ -284,7 +352,7 @@ router.post('/blog/:id/generate', async (req, res, next) => {
 });
 
 // POST /api/admin/content/blog/:id/optimize — generate optimization suggestions
-router.post('/blog/:id/optimize', async (req, res, next) => {
+router.post('/blog/:id/optimize', aiContentLimiter, async (req, res, next) => {
   try {
     const result = await BlogWriter.optimizeExistingPost(req.params.id);
     res.json({ optimization: result });
@@ -297,7 +365,7 @@ router.post('/blog/:id/optimize', async (req, res, next) => {
 // fails (missing API key, Gemini safety block, network blip). This
 // lets the operator retry from the editor without re-running the
 // whole content pipeline.
-router.post('/blog/:id/regenerate-image', async (req, res) => {
+router.post('/blog/:id/regenerate-image', aiContentLimiter, async (req, res) => {
   try {
     const post = await db('blog_posts').where('id', req.params.id).first();
     if (!post) return res.status(404).json({ error: 'Post not found' });
@@ -321,9 +389,14 @@ router.post('/blog/:id/regenerate-image', async (req, res) => {
 });
 
 // POST /api/admin/content/blog/bulk-generate — generate content for next N posts
-router.post('/blog/bulk-generate', async (req, res, next) => {
+router.post('/blog/bulk-generate', aiContentLimiter, async (req, res, next) => {
   try {
-    const count = parseInt(req.body.count || 5);
+    const count = parseBoundedInt(req.body.count, {
+      defaultValue: 5,
+      min: 1,
+      max: CONTENT_LIMITS.bulkGenerateMax,
+      name: 'count',
+    });
     const posts = await db('blog_posts')
       .where('status', 'queued')
       .whereNull('content')
@@ -345,9 +418,15 @@ router.post('/blog/bulk-generate', async (req, res, next) => {
 });
 
 // POST /api/admin/content/blog/ideas — generate new ideas
-router.post('/blog/ideas', async (req, res, next) => {
+router.post('/blog/ideas', aiContentLimiter, async (req, res, next) => {
   try {
-    const ideas = await BlogWriter.generateNewIdeas(parseInt(req.body.count || 20));
+    const count = parseBoundedInt(req.body.count, {
+      defaultValue: 20,
+      min: 1,
+      max: CONTENT_LIMITS.ideaCountMax,
+      name: 'count',
+    });
+    const ideas = await BlogWriter.generateNewIdeas(count);
     res.json({ ideas, count: ideas.length });
   } catch (err) { next(err); }
 });
@@ -371,7 +450,7 @@ router.post('/blog/:id/publish-astro', async (req, res, next) => {
     res.json({ success: true, ...result });
   } catch (err) {
     logger.error(`[content] publish-astro failed: ${err.message}`);
-    res.status(500).json({ error: err.message });
+    res.status(err.code === 'BLOG_FRONTMATTER_INVALID' ? 400 : 500).json({ error: err.message, details: err.details });
   }
 });
 
@@ -491,10 +570,9 @@ router.get('/weather', async (req, res, next) => {
 });
 
 // POST /api/admin/content/generate — hyper-local content generation
-router.post('/generate', async (req, res, next) => {
+router.post('/generate', aiContentLimiter, async (req, res, next) => {
   try {
-    const { topic, contentType = 'blog_post', targetCity = 'Lakewood Ranch' } = req.body;
-    if (!topic) return res.status(400).json({ error: 'Topic is required' });
+    const { topic, contentType, targetCity } = normalizeGenerateBody(req.body);
 
     // Get voice config
     const voice = await db('blog_voice_config').where('active', true).first();
@@ -861,3 +939,7 @@ router.get('/agent/runs', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.CONTENT_LIMITS = CONTENT_LIMITS;
+module.exports.parseBoundedInt = parseBoundedInt;
+module.exports.normalizeGenerateBody = normalizeGenerateBody;
+module.exports.normalizeBlogUpdates = normalizeBlogUpdates;

@@ -7,6 +7,42 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+function parseScheduledTime(value, label) {
+  const parsed = parseETDateTime(value);
+  if (Number.isNaN(parsed.getTime())) throw new Error(`${label} is invalid`);
+  return parsed;
+}
+
+function parseCalendarStart(value) {
+  const text = String(value || '').trim();
+  return parseScheduledTime(DATE_ONLY.test(text) ? `${text}T00:00` : text, 'startDate');
+}
+
+function parseCalendarEnd(value) {
+  const text = String(value || '').trim();
+  if (!DATE_ONLY.test(text)) return parseScheduledTime(text, 'endDate');
+  const nextDay = etDateString(addETDays(parseETDateTime(`${text}T12:00`), 1));
+  return parseScheduledTime(`${nextDay}T00:00`, 'endDate');
+}
+
+function normalizeCalendarRange(startDate, endDate) {
+  const start = parseCalendarStart(startDate);
+  const end = parseCalendarEnd(endDate);
+  if (end <= start) throw new Error('endDate must be after startDate');
+  return { start, end };
+}
+
+function dateColumnKey(value) {
+  if (!value) return value;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  const text = String(value);
+  const match = /^(\d{4}-\d{2}-\d{2})/.exec(text);
+  return match ? match[1] : text;
+}
 
 async function sharePublishedBlog(blog) {
   if (!blog.auto_share_social || blog.shared_to_social) return true;
@@ -50,15 +86,22 @@ const ContentScheduler = {
    * Get all scheduled content in a date range (blog + social merged).
    */
   async getCalendar(startDate, endDate) {
+    const range = normalizeCalendarRange(startDate, endDate);
     const blogs = await db('blog_posts')
       .where(function () {
-        this.whereBetween('scheduled_publish_at', [startDate, endDate])
-          .orWhereBetween('publish_date', [startDate, endDate]);
+        this.where(function () {
+          this.where('scheduled_publish_at', '>=', range.start)
+            .where('scheduled_publish_at', '<', range.end);
+        }).orWhere(function () {
+          this.where('publish_date', '>=', range.start)
+            .where('publish_date', '<', range.end);
+        });
       })
       .select('id', 'title', 'status', 'publish_status', 'scheduled_publish_at', 'publish_date', 'tag', 'city');
 
     const socials = await db('social_media_posts')
-      .whereBetween('scheduled_for', [startDate, endDate])
+      .where('scheduled_for', '>=', range.start)
+      .where('scheduled_for', '<', range.end)
       .select('id', 'title', 'status', 'publish_status', 'scheduled_for', 'platforms_posted', 'source_type');
 
     const calendar = [];
@@ -68,7 +111,7 @@ const ContentScheduler = {
         id: b.id,
         type: 'blog',
         title: b.title,
-        scheduledDate: b.scheduled_publish_at || b.publish_date,
+        scheduledDate: b.scheduled_publish_at || dateColumnKey(b.publish_date),
         status: b.publish_status || b.status,
         platforms: ['blog'],
         tag: b.tag,
@@ -102,11 +145,12 @@ const ContentScheduler = {
   async scheduleBlogPost(blogPostId, publishAt, autoShareSocial = true) {
     const post = await db('blog_posts').where('id', blogPostId).first();
     if (!post) throw new Error('Blog post not found');
+    const scheduledAt = parseScheduledTime(publishAt, 'publishAt');
 
     const [updated] = await db('blog_posts')
       .where('id', blogPostId)
       .update({
-        scheduled_publish_at: new Date(publishAt),
+        scheduled_publish_at: scheduledAt,
         auto_share_social: autoShareSocial,
         publish_status: 'pending',
         updated_at: new Date(),
@@ -121,6 +165,7 @@ const ContentScheduler = {
    * Create a scheduled social media post.
    */
   async scheduleSocialPost({ title, description, link, platforms, scheduledFor, customContent }) {
+    const scheduledAt = parseScheduledTime(scheduledFor, 'scheduledFor');
     const [post] = await db('social_media_posts')
       .insert({
         title,
@@ -130,7 +175,7 @@ const ContentScheduler = {
         platforms_posted: JSON.stringify(platforms || []),
         status: 'scheduled',
         publish_status: 'pending',
-        scheduled_for: new Date(scheduledFor),
+        scheduled_for: scheduledAt,
         custom_content: customContent ? JSON.stringify(customContent) : null,
         created_at: new Date(),
       })
@@ -161,7 +206,7 @@ const ContentScheduler = {
             });
         }).orWhere(function () {
           this.where('publish_status', 'pending_review')
-            .whereIn('astro_status', ['merged', 'live']);
+            .where('astro_status', 'live');
         });
       })
       .whereNotNull('scheduled_publish_at')
@@ -180,7 +225,7 @@ const ContentScheduler = {
             publish_status: 'pending_review',
             updated_at: new Date(),
           });
-        } else if (['merged', 'live'].includes(blog.astro_status)) {
+        } else if (blog.astro_status === 'live') {
           const socialShared = await sharePublishedBlog(blog);
           if (!socialShared) {
             await db('blog_posts').where('id', blog.id).update({
@@ -268,3 +313,4 @@ const ContentScheduler = {
 };
 
 module.exports = ContentScheduler;
+module.exports.normalizeCalendarRange = normalizeCalendarRange;
