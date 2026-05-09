@@ -529,9 +529,8 @@ async function sendSms(input) {
 
   // Routed through the customer-message middleware. This is Virginia's
   // daily-driver send path, so the validators apply consistently:
-  // suppression list, sms_enabled, no customer-emoji, no price leak,
-  // segment cap. Operator messages still need to follow the customer
-  // voice rules.
+  // suppression list, sms_enabled, no customer-emoji, segment metadata.
+  // Operator messages still need to follow the customer voice rules.
   const { sendCustomerMessage } = require('../messaging/send-customer-message');
   const result = await sendCustomerMessage({
     to: phone,

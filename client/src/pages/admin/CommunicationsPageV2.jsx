@@ -75,8 +75,20 @@ function adminFetch(path, options = {}) {
       'Content-Type': 'application/json',
     },
     ...options,
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  }).then(async (r) => {
+    if (!r.ok) {
+      let serverMsg = '';
+      try {
+        const body = await r.clone().json();
+        serverMsg = body?.error || body?.reason || body?.message || body?.code || '';
+      } catch {
+        try { serverMsg = (await r.text()).trim(); } catch { /* ignore */ }
+      }
+      const err = new Error(serverMsg || `HTTP ${r.status}`);
+      err.status = r.status;
+      throw err;
+    }
+    if (r.status === 204) return null;
     return r.json();
   });
 }
@@ -120,6 +132,13 @@ function getInitials(nameOrPhone) {
   const first = parts[0]?.[0] || '';
   const last = parts.length > 1 ? parts[parts.length - 1][0] : '';
   return (first + last).toUpperCase() || trimmed[0].toUpperCase();
+}
+
+function getCustomerOptionName(customer) {
+  if (!customer) return 'Customer';
+  const first = customer.firstName || customer.first_name || '';
+  const last = customer.lastName || customer.last_name || '';
+  return [first, last].filter(Boolean).join(' ') || customer.name || customer.phone || 'Customer';
 }
 
 const TABS = [
@@ -280,7 +299,7 @@ function SmsLogItemV2({ msg: m, onReply }) {
             <Button
               size="sm"
               variant="primary"
-              onClick={(e) => { e.stopPropagation(); onReply(m.from, m.to); }}
+              onClick={(e) => { e.stopPropagation(); onReply(m.from, m.to, m.customerId); }}
             >
               Reply
             </Button>
@@ -289,7 +308,7 @@ function SmsLogItemV2({ msg: m, onReply }) {
             <Button
               size="sm"
               variant="primary"
-              onClick={(e) => { e.stopPropagation(); onReply(m.to, m.from); }}
+              onClick={(e) => { e.stopPropagation(); onReply(m.to, m.from, m.customerId); }}
             >
               Send Again
             </Button>
@@ -340,7 +359,7 @@ function ConversationViewV2({ thread, messages, onReply, onBack, onOpenProfile }
         <Button
           size="sm"
           variant="primary"
-          onClick={() => onReply(contactPhone, thread.ourNumber)}
+          onClick={() => onReply(contactPhone, thread.ourNumber, thread.customerId)}
         >
           Reply
         </Button>
@@ -431,6 +450,7 @@ function SmsTab() {
   const [toNumber, setToNumber] = useState('');
   const [toSearch, setToSearch] = useState('');
   const [toResults, setToResults] = useState([]);
+  const [selectedCustomerId, setSelectedCustomerId] = useState(null);
   const [fromNumber, setFromNumber] = useState('+19413187612');
   const [msgBody, setMsgBody] = useState('');
   const [sending, setSending] = useState(false);
@@ -532,7 +552,11 @@ function SmsTab() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const phone = params.get('phone');
-    if (phone) setToNumber(phone);
+    if (phone) {
+      setToNumber(phone);
+      setToSearch('');
+      setSelectedCustomerId(null);
+    }
   }, []);
 
   const toggleAiAutoReply = async () => {
@@ -557,6 +581,7 @@ function SmsTab() {
         body: JSON.stringify({
           to: toNumber.trim(),
           body: msgBody.trim(),
+          customerId: selectedCustomerId || undefined,
           messageType: 'manual',
           fromNumber,
           mediaUrls: attachments.length > 0 ? attachments.map((a) => a.url) : undefined,
@@ -565,6 +590,8 @@ function SmsTab() {
       });
       setSendResult({ ok: true, text: 'Message sent.' });
       setToNumber('');
+      setToSearch('');
+      setSelectedCustomerId(null);
       setMsgBody('');
       // Release blob preview URLs before clearing so we don't leak them.
       for (const a of attachments) {
@@ -775,8 +802,10 @@ function SmsTab() {
     return { all: threads.length, unread, unanswered, unknown };
   }, [threads]);
 
-  const handleThreadReply = (contactPhone, ourNumber) => {
+  const handleThreadReply = (contactPhone, ourNumber, customerId = null) => {
     setToNumber(contactPhone);
+    setToSearch('');
+    setSelectedCustomerId(customerId || null);
     if (ourNumber) {
       setFromNumber(ourNumber);
       setThreadLock({ contactPhone, ourNumber, label: NUMBER_LABEL_MAP[ourNumber] || ourNumber });
@@ -938,11 +967,13 @@ function SmsTab() {
             const val = e.target.value;
             if (/^[\d\s()\-+]+$/.test(val)) {
               setToNumber(val);
+              setSelectedCustomerId(null);
               setToSearch('');
               setToResults([]);
             } else {
               setToSearch(val);
               setToNumber('');
+              setSelectedCustomerId(null);
               if (val.length >= 2) {
                 try {
                   const r = await fetch(
@@ -971,13 +1002,15 @@ function SmsTab() {
               <div
                 key={c.id}
                 onClick={() => {
+                  const name = getCustomerOptionName(c);
                   setToNumber(c.phone || '');
-                  setToSearch(`${c.firstName} ${c.lastName} — ${c.phone || ''}`);
+                  setSelectedCustomerId(c.id || null);
+                  setToSearch(`${name} — ${c.phone || ''}`);
                   setToResults([]);
                 }}
                 className="px-3 py-2 cursor-pointer border-b border-hairline border-zinc-200 text-13 text-zinc-900 hover:bg-zinc-50"
               >
-                <span className="font-medium">{c.firstName} {c.lastName}</span>
+                <span className="font-medium">{getCustomerOptionName(c)}</span>
                 <span className="text-ink-secondary ml-2 font-mono">
                   {c.phone || 'no phone'}
                 </span>
@@ -1265,6 +1298,8 @@ function SmsTab() {
                       setActiveThread(openedThread);
                       setSmsView('conversation');
                       setToNumber(t.contactPhone);
+                      setToSearch('');
+                      setSelectedCustomerId(t.customerId || null);
                       if (t.ourNumber) {
                         setFromNumber(t.ourNumber);
                         setThreadLock({ contactPhone: t.contactPhone, ourNumber: t.ourNumber, label: NUMBER_LABEL_MAP[t.ourNumber] || t.ourNumber });
@@ -1376,8 +1411,10 @@ function SmsTab() {
                 <SmsLogItemV2
                   key={m.id}
                   msg={m}
-                  onReply={(phone, from) => {
+                  onReply={(phone, from, customerId) => {
                     setToNumber(phone);
+                    setToSearch('');
+                    setSelectedCustomerId(customerId || null);
                     setFromNumber(from);
                     window.scrollTo({ top: 0, behavior: 'smooth' });
                   }}

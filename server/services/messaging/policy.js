@@ -117,8 +117,9 @@ const TRUST_RANK = {
  *   - allowEmoji              Customer/lead audiences are NEVER allowed emoji,
  *                             regardless of purpose. Internal BI is the only
  *                             audience where emoji is permitted (see internal_briefing).
- *   - allowExactPrice         Customer/lead audiences are NEVER allowed exact dollar
- *                             amounts in outbound SMS. Internal/admin can quote.
+ *   - allowExactPrice         Legacy/no-op policy field retained for older
+ *                             tests/config readers. Exact dollar amounts are
+ *                             allowed in SMS; suppression/consent still gate.
  *   - maxSegments             Advisory SMS segment target for UI/audit only.
  *                             The send pipeline does not block on length.
  *   - requireConsent          Which consent shape the validator must see.
@@ -314,11 +315,11 @@ const PURPOSE_POLICY = {
  * audience-level overrides on top of the per-purpose row.
  *
  * Audience overrides:
- *   - audience 'customer' or 'lead' force allowEmoji=false and
- *     allowExactPrice=false regardless of purpose default.
- *   - audience 'internal' allows emoji + exact prices.
- *   - audience 'admin' allows exact prices but not emoji to a customer-
- *     facing channel; for sms/email to an admin operator we treat the
+ *   - audience 'customer' or 'lead' force allowEmoji=false regardless of
+ *     purpose default.
+ *   - audience 'internal' allows emoji.
+ *   - audience 'admin' should never emoji a customer-facing message; for
+ *     sms/email to an admin operator we treat the
  *     admin as audience 'internal' upstream — keep this rule defensive.
  */
 function resolvePolicy(audience, purpose) {
@@ -329,13 +330,12 @@ function resolvePolicy(audience, purpose) {
   const policy = { ...base };
   if (audience === 'customer' || audience === 'lead') {
     policy.allowEmoji = false;
-    policy.allowExactPrice = false;
   } else if (audience === 'internal') {
     // BI / operator surfaces — keep purpose default.
   } else if (audience === 'admin') {
-    // Admin-to-admin staffing notes can quote prices but should never emoji
-    // a customer-facing message — only relevant if the route uses 'admin' on
-    // a non-internal purpose.
+    // Admin-to-admin staffing notes should never emoji a customer-facing
+    // message — only relevant if the route uses 'admin' on a non-internal
+    // purpose.
     policy.allowEmoji = base.allowEmoji && purpose === 'internal_briefing';
   }
   return policy;

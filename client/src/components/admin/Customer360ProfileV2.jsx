@@ -58,7 +58,22 @@ function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
     ...options,
-  }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
+  }).then(async (r) => {
+    if (!r.ok) {
+      let serverMsg = '';
+      try {
+        const body = await r.clone().json();
+        serverMsg = body?.error || body?.reason || body?.message || body?.code || '';
+      } catch {
+        try { serverMsg = (await r.text()).trim(); } catch { /* ignore */ }
+      }
+      const err = new Error(serverMsg || `HTTP ${r.status}`);
+      err.status = r.status;
+      throw err;
+    }
+    if (r.status === 204) return null;
+    return r.json();
+  });
 }
 
 function timeAgo(dateStr) {
