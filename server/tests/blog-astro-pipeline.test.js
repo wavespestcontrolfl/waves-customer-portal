@@ -236,11 +236,16 @@ describe('Content scheduler scheduling timezone handling', () => {
   });
 
   test('expands date-only calendar ranges to an exclusive next ET day', async () => {
-    const blogQuery = calendarQuery([]);
+    const blogQuery = calendarQuery([{
+      id: 'date-blog',
+      title: 'Date-only blog',
+      status: 'draft',
+      publish_date: new Date('2026-05-01T00:00:00.000Z'),
+    }]);
     const socialQuery = calendarQuery([]);
     db.mockImplementation((table) => (table === 'blog_posts' ? blogQuery : socialQuery));
 
-    await ContentScheduler.getCalendar('2026-04-01', '2026-04-30');
+    const calendar = await ContentScheduler.getCalendar('2026-04-01', '2026-04-30');
 
     const blogEnd = blogQuery.calls.find((call) => call[1] === 'scheduled_publish_at' && call[2] === '<')?.[3];
     const socialEnd = socialQuery.calls.find((call) => call[1] === 'scheduled_for' && call[2] === '<')?.[3];
@@ -251,6 +256,7 @@ describe('Content scheduler scheduling timezone handling', () => {
     });
     expect(blogEnd.toISOString()).toBe('2026-05-01T04:00:00.000Z');
     expect(socialEnd.toISOString()).toBe('2026-05-01T04:00:00.000Z');
+    expect(calendar[0].scheduledDate).toBe('2026-05-01');
   });
 
   test('stores naive blog schedule times as Eastern Time instants', async () => {

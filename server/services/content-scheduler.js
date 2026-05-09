@@ -36,6 +36,14 @@ function normalizeCalendarRange(startDate, endDate) {
   return { start, end };
 }
 
+function dateColumnKey(value) {
+  if (!value) return value;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  const text = String(value);
+  const match = /^(\d{4}-\d{2}-\d{2})/.exec(text);
+  return match ? match[1] : text;
+}
+
 async function sharePublishedBlog(blog) {
   if (!blog.auto_share_social || blog.shared_to_social) return true;
 
@@ -103,7 +111,7 @@ const ContentScheduler = {
         id: b.id,
         type: 'blog',
         title: b.title,
-        scheduledDate: b.scheduled_publish_at || b.publish_date,
+        scheduledDate: b.scheduled_publish_at || dateColumnKey(b.publish_date),
         status: b.publish_status || b.status,
         platforms: ['blog'],
         tag: b.tag,
