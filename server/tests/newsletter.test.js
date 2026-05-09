@@ -20,7 +20,7 @@ const { buildSubscriberQuery } = require('../services/newsletter-sender');
 const publicRouter = require('../routes/public-newsletter');
 const sendgridWebhook = require('../routes/webhooks-sendgrid');
 const { EMAIL_RE, escapeHtml } = publicRouter;
-const { computeNewsletterEventUpdates } = sendgridWebhook;
+const { computeNewsletterEventUpdates, isFreshTimestamp } = sendgridWebhook;
 
 describe('newsletter buildSubscriberQuery', () => {
   // Knex .toSQL() returns { sql, bindings } from the query builder
@@ -144,6 +144,7 @@ describe('newsletter computeNewsletterEventUpdates', () => {
     opened_at: null,
     clicked_at: null,
     complained_at: null,
+    unsubscribed_at: null,
     ...overrides,
   });
 
@@ -229,13 +230,24 @@ describe('newsletter computeNewsletterEventUpdates', () => {
   });
 
   describe('unsubscribe / group_unsubscribe', () => {
-    test.each(['unsubscribe', 'group_unsubscribe'])('%s increments unsubscribed_count + conditional unsub', (e) => {
+    test.each(['unsubscribe', 'group_unsubscribe'])('%s stamps unsubscribe + increments + conditional unsub', (e) => {
       const u = computeNewsletterEventUpdates({ event: e }, fresh(), now);
+      expect(u.delivery).toEqual({ unsubscribed_at: now, updated_at: now });
       expect(u.sendIncrement).toBe('unsubscribed_count');
       expect(u.subscriberAction).toBe('unsubscribe_if_active');
-      // No delivery-row write — unsub doesn't change the delivery state,
-      // it only flips the subscriber.
-      expect(u.delivery).toBeUndefined();
+    });
+    test('idempotent — already-unsubscribed delivery row is a no-op', () => {
+      expect(computeNewsletterEventUpdates({ event: 'unsubscribe' }, fresh({ unsubscribed_at: now }), now)).toBeNull();
+    });
+  });
+
+  describe('webhook timestamp freshness', () => {
+    test('accepts timestamps inside the replay window', () => {
+      expect(isFreshTimestamp('1772380800', Date.parse('2026-03-01T16:02:00Z'))).toBe(true);
+    });
+
+    test('rejects stale timestamps outside the replay window', () => {
+      expect(isFreshTimestamp('1772380800', Date.parse('2026-03-01T16:10:01Z'))).toBe(false);
     });
   });
 

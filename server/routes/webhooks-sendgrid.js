@@ -24,6 +24,7 @@ const logger = require('../services/logger');
 
 const SIG_HEADER = 'x-twilio-email-event-webhook-signature';
 const TS_HEADER = 'x-twilio-email-event-webhook-timestamp';
+const WEBHOOK_MAX_AGE_SECONDS = 5 * 60;
 
 // Convert SendGrid's base64 SPKI public key to a Node KeyObject.
 // Cached — key is static env input.
@@ -56,6 +57,20 @@ function verifySignature(rawBody, timestamp, signature) {
   }
 }
 
+function isFreshTimestamp(timestamp, nowMs = Date.now()) {
+  const n = Number(timestamp);
+  if (!Number.isFinite(n)) return false;
+  const tsMs = n > 1e12 ? n : n * 1000;
+  return Math.abs(nowMs - tsMs) <= WEBHOOK_MAX_AGE_SECONDS * 1000;
+}
+
+function redactEmail(value) {
+  if (!value || typeof value !== 'string') return '';
+  const [local, domain] = value.split('@');
+  if (!domain) return '[redacted]';
+  return `${local.slice(0, 2)}***@${domain}`;
+}
+
 router.post('/events', express.raw({ type: '*/*' }), async (req, res) => {
   // Fail closed unless the public key is configured — we don't want anyone
   // POSTing fake bounces to suppress recipients.
@@ -64,11 +79,15 @@ router.post('/events', express.raw({ type: '*/*' }), async (req, res) => {
     return res.status(500).send('Webhook public key not configured');
   }
 
-  const sig = req.headers[SIG_HEADER];
-  const ts = req.headers[TS_HEADER];
+  const sig = Array.isArray(req.headers[SIG_HEADER]) ? req.headers[SIG_HEADER][0] : req.headers[SIG_HEADER];
+  const ts = Array.isArray(req.headers[TS_HEADER]) ? req.headers[TS_HEADER][0] : req.headers[TS_HEADER];
   if (!sig || !ts) {
     logger.warn('[sendgrid-webhook] Missing signature headers — rejecting');
     return res.status(400).send('Missing signature headers');
+  }
+  if (!isFreshTimestamp(ts)) {
+    logger.warn('[sendgrid-webhook] Stale signature timestamp — rejecting');
+    return res.status(403).send('Stale signature timestamp');
   }
   if (!verifySignature(req.body, ts, sig)) {
     logger.warn('[sendgrid-webhook] Signature verification failed — rejecting');
@@ -102,6 +121,8 @@ async function handleEvent(ev) {
   const messageId = ev.sg_message_id ? ev.sg_message_id.split('.')[0] : null;
   if (!messageId) return;
   const email = ev.email || null;
+  const claimed = await claimWebhookEvent(ev, messageId, email);
+  if (!claimed) return;
 
   // Events can belong to a newsletter broadcast delivery, an automation
   // step send, or neither (transactional sends we don't track). Try each
@@ -129,6 +150,25 @@ async function handleEvent(ev) {
   }
   // Untracked send (transactional invoices, receipts, etc.) — ignore.
   return;
+}
+
+async function claimWebhookEvent(ev, messageId, email) {
+  const eventId = ev.sg_event_id ? String(ev.sg_event_id) : null;
+  if (!eventId) return true;
+
+  const inserted = await db('sendgrid_webhook_events')
+    .insert({
+      event_id: eventId,
+      event_type: ev.event || null,
+      message_id: messageId,
+      email: email || null,
+      processed_at: new Date(),
+    })
+    .onConflict('event_id')
+    .ignore()
+    .returning('event_id');
+
+  return inserted.length > 0;
 }
 
 /**
@@ -206,7 +246,9 @@ function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
       // initiated unsubs (rare — we disable subscription_tracking). Only
       // flip if not already unsubbed so the unsubscribed_at timestamp
       // captures the FIRST unsub, not subsequent re-fires.
+      if (delivery.unsubscribed_at) return null;
       return {
+        delivery: { unsubscribed_at: now, updated_at: now },
         sendIncrement: 'unsubscribed_count',
         subscriberAction: delivery.subscriber_id ? 'unsubscribe_if_active' : null,
         subscriberAt: now,
@@ -268,6 +310,7 @@ async function handleNewsletterEvent(ev, delivery) {
  */
 async function handleAutomationEvent(ev, sendRow) {
   const now = new Date();
+  const newsletterUnsubscribe = () => unsubscribeNewsletterSubscriber(ev.email, now);
 
   switch (ev.event) {
     case 'delivered':
@@ -319,14 +362,13 @@ async function handleAutomationEvent(ev, sendRow) {
       });
       // Complaint → cancel everything + mark newsletter sub unsubscribed.
       await cancelActiveEnrollments({ email: ev.email, reason: 'spam_report' });
-      await db('newsletter_subscribers').where({ email: ev.email }).whereNot({ status: 'unsubscribed' }).update({
-        status: 'unsubscribed', unsubscribed_at: now, updated_at: now,
-      });
+      await newsletterUnsubscribe();
       break;
 
     case 'unsubscribe':
       // Global unsub — cancel every active enrollment for this email.
       await cancelActiveEnrollments({ email: ev.email, reason: 'unsubscribe' });
+      await newsletterUnsubscribe();
       break;
 
     case 'group_unsubscribe': {
@@ -341,6 +383,7 @@ async function handleAutomationEvent(ev, sendRow) {
       else if (gid && gid === serviceGid) asmGroupToCancel = 'service';
       if (asmGroupToCancel) {
         await cancelActiveEnrollments({ email: ev.email, reason: 'group_unsubscribe', asmGroup: asmGroupToCancel });
+        if (asmGroupToCancel === 'newsletter') await newsletterUnsubscribe();
       }
       break;
     }
@@ -353,11 +396,25 @@ async function handleAutomationEvent(ev, sendRow) {
   }
 }
 
+async function unsubscribeNewsletterSubscriber(email, at) {
+  if (!email) return;
+  const lc = String(email).trim().toLowerCase();
+  await db('newsletter_subscribers')
+    .whereRaw('LOWER(email) = ?', [lc])
+    .whereNot({ status: 'unsubscribed' })
+    .update({
+      status: 'unsubscribed',
+      unsubscribed_at: at,
+      updated_at: at,
+    });
+}
+
 async function cancelActiveEnrollments({ email, reason, asmGroup }) {
   if (!email) return;
+  const lc = String(email).trim().toLowerCase();
   let q = db('automation_enrollments as e')
     .join('automation_templates as t', 't.key', 'e.template_key')
-    .where('e.email', email)
+    .whereRaw('LOWER(e.email) = ?', [lc])
     .where('e.status', 'active');
   if (asmGroup) q = q.where('t.asm_group', asmGroup);
 
@@ -372,10 +429,11 @@ async function cancelActiveEnrollments({ email, reason, asmGroup }) {
     metadata: db.raw("jsonb_set(COALESCE(metadata,'{}'::jsonb), '{cancel_reason}', ?::jsonb, true)", [JSON.stringify(reason)]),
     updated_at: new Date(),
   });
-  logger.info(`[sendgrid-webhook] cancelled ${rows.length} enrollment(s) for ${email} reason=${reason}${asmGroup ? ` group=${asmGroup}` : ''}`);
+  logger.info(`[sendgrid-webhook] cancelled ${rows.length} enrollment(s) for ${redactEmail(email)} reason=${reason}${asmGroup ? ` group=${asmGroup}` : ''}`);
 }
 
 // Default export is the Express router; the pure event-mapping function
 // is hung off as a property so the test suite can exercise it directly.
 module.exports = router;
 module.exports.computeNewsletterEventUpdates = computeNewsletterEventUpdates;
+module.exports.isFreshTimestamp = isFreshTimestamp;

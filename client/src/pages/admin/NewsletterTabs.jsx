@@ -26,6 +26,18 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const INPUT_CLS = 'w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900';
 const TEXTAREA_CLS = `${INPUT_CLS} font-mono leading-relaxed`;
 const PANEL_CLS = 'bg-white border-hairline border-zinc-200 rounded-sm';
+const SOURCE_SEGMENTS = [
+  { value: 'footer', label: 'Footer' },
+  { value: 'newsletter_landing', label: 'Landing' },
+  { value: 'newsletter_archive', label: 'Archive' },
+  { value: 'portal_learn', label: 'Portal Learn' },
+  { value: 'quote_wizard', label: 'Quote Wizard' },
+  { value: 'quote_wizard_deferred', label: 'Quote Deferred' },
+  { value: 'public_form', label: 'Public Form' },
+  { value: 'admin_manual', label: 'Manual' },
+  { value: 'beehiiv_import', label: 'Beehiiv Import' },
+  { value: 'website', label: 'Website Legacy' },
+];
 
 function FieldLabel({ children }) {
   return <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">{children}</label>;
@@ -590,20 +602,20 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComple
           </div>
           {segmentMode === 'custom' && (
             <div className="flex flex-wrap gap-1.5">
-              {['website', 'booking', 'checkout', 'quote', 'import', 'manual', 'footer', 'portal_learn'].map((src) => {
-                const on = segmentSources.includes(src);
+              {SOURCE_SEGMENTS.map((src) => {
+                const on = segmentSources.includes(src.value);
                 return (
                   <button
-                    key={src}
+                    key={src.value}
                     type="button"
-                    onClick={() => setSegmentSources((cur) => on ? cur.filter((x) => x !== src) : [...cur, src])}
+                    onClick={() => setSegmentSources((cur) => on ? cur.filter((x) => x !== src.value) : [...cur, src.value])}
                     className={cn(
                       'h-7 px-2.5 text-11 rounded-full border-hairline u-focus-ring',
                       on
                         ? 'bg-zinc-900 text-white border-zinc-900'
                         : 'bg-white text-ink-secondary border-zinc-300 hover:border-zinc-900',
                     )}
-                  >{src}</button>
+                  >{src.label}</button>
                 );
               })}
             </div>
@@ -1338,7 +1350,9 @@ export function SubscribersView() {
         {['active', 'unsubscribed', 'bounced', 'all'].map((f) => {
           const active = filter === f;
           const count = f === 'all'
-            ? Object.values(counts).reduce((a, b) => a + b, 0)
+            ? counts.all ?? Object.entries(counts)
+              .filter(([key]) => !['all', 'bounced'].includes(key))
+              .reduce((sum, [, value]) => sum + Number(value || 0), 0)
             : counts[f] || 0;
           return (
             <button

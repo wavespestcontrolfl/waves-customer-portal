@@ -15,6 +15,7 @@ const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
 const { subscribeOrResubscribe, lookupByToken, confirmByToken, EMAIL_RE } = require('../services/newsletter-subscribers');
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
+const AutomationRunner = require('../services/automation-runner');
 
 // Per-IP rate limiter on POST /subscribe. The global /api/ limiter in
 // index.js is shared across every public endpoint, so a subscribe-spam
@@ -34,6 +35,26 @@ function escapeHtml(s) {
   return String(s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+const QUOTE_AUTOMATION_SOURCES = new Set(['quote_wizard', 'quote_wizard_deferred']);
+
+async function maybeEnrollConfirmedQuoteLead(subscriber) {
+  if (!subscriber || !QUOTE_AUTOMATION_SOURCES.has(subscriber.source)) return;
+  try {
+    const result = await AutomationRunner.enrollCustomer({
+      templateKey: 'new_lead',
+      customer: {
+        id: subscriber.customer_id || null,
+        email: subscriber.email,
+        first_name: subscriber.first_name || null,
+        last_name: subscriber.last_name || null,
+      },
+    });
+    logger.info(`[newsletter] confirmed quote subscriber id=${subscriber.id}; new_lead ${result.enrolled ? 'queued' : 'skipped'}`);
+  } catch (err) {
+    logger.error(`[newsletter] confirmed quote subscriber id=${subscriber.id} new_lead failed: ${err.message}`);
+  }
 }
 
 // POST /api/public/newsletter/unsubscribe/:token
@@ -268,6 +289,7 @@ router.post('/confirm/:token', async (req, res) => {
 
     if (result.action === 'confirmed') {
       logger.info(`[newsletter] Confirmed subscriber id=${result.subscriber.id}`);
+      await maybeEnrollConfirmedQuoteLead(result.subscriber);
     }
 
     // Detect a form submission via Content-Type — that's the
