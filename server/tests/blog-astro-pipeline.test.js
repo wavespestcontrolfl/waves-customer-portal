@@ -150,6 +150,29 @@ describe('blog Astro frontmatter validation', () => {
     expect(result.errors.join('\n')).toMatch(/category must be one of/);
     expect(result.errors.join('\n')).toMatch(/post_type must be one of/);
   });
+
+  test('maps pest-family legacy tags to the required pest-control category', async () => {
+    const data = await AstroPublisher.buildFrontmatter({
+      title: 'Ant Pressure in Palmetto',
+      slug: 'ant-pressure-palmetto',
+      meta_description: 'A short guide to ant pressure around Palmetto homes.',
+      keyword: 'ant control Palmetto',
+      tag: 'Ants',
+      featured_image_url: '/images/blog/ant-pressure-palmetto/hero.png',
+      hero_image_alt: 'Ant trail near a Palmetto patio',
+      content: 'Ant trails around patios often start with moisture and food access.',
+    });
+
+    expect(data.category).toBe('pest-control');
+  });
+
+  test('does not build live URLs from unsupported target_sites hosts', () => {
+    expect(AstroPublisher.liveUrlForPost({
+      title: 'Bad host',
+      slug: 'bad-host',
+      target_sites: ['https://example.com/blog'],
+    })).toBe('https://www.wavespestcontrol.com/bad-host/');
+  });
 });
 
 describe('Pages poll merged-to-live transition', () => {

@@ -28,6 +28,7 @@ const authorService = require('./author-service');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { assertValidBlogFrontmatter } = require('./schema-validator');
+const { normalizeSpokeSites } = require('./spoke-sites');
 
 const ASTRO_BLOG_DIR = 'src/content/blog';
 const ASTRO_HERO_DIR = 'public/images/blog';
@@ -93,7 +94,7 @@ async function buildFrontmatter(post) {
   const technicallyReviewedDate = dateOnly(post.technically_reviewed_at);
   const factCheckedDate = dateOnly(post.fact_checked_at);
   const serviceAreas = normalizeServiceAreas(post.service_areas_tag, post.city);
-  const targetSites = normalizeArray(post.target_sites);
+  const targetSites = normalizeTargetSites(post.target_sites);
   const relatedServices = normalizeArray(post.related_services);
   const domains = targetSites.length > 0 ? targetSites : undefined;
 
@@ -175,6 +176,16 @@ function normalizeCategory(category, tag) {
   if (tagText.includes('termite') || tagText.includes('wdo')) return 'termite';
   if (tagText.includes('mosquito')) return 'mosquito';
   if (tagText.includes('tree') || tagText.includes('shrub')) return 'tree-shrub';
+  if (tagText.includes('pest')
+    || tagText.includes('ant')
+    || tagText.includes('roach')
+    || tagText.includes('rodent')
+    || tagText.includes('bed bug')
+    || tagText.includes('bedbug')
+    || tagText.includes('spider')
+    || tagText.includes('flea')
+    || tagText.includes('tick')
+    || tagText.includes('wasp')) return 'pest-control';
   return raw ? undefined : undefined;
 }
 
@@ -190,6 +201,12 @@ function normalizeServiceAreas(value, city) {
   if (areas.length > 0) return areas;
   if (SERVICE_AREAS.has(city)) return [city];
   return [];
+}
+
+function normalizeTargetSites(value) {
+  const sites = normalizeSpokeSites(value);
+  if (sites.length > 0) return sites;
+  return normalizeArray(value).length > 0 ? ['wavespestcontrol.com'] : [];
 }
 
 function estimateReadingTime(text) {
@@ -503,7 +520,7 @@ function cloudflarePreviewUrl(branch) {
 
 function liveUrlForPost(post) {
   const slug = post.slug || slugify(post.title);
-  const targets = normalizeArray(post.target_sites);
+  const targets = normalizeTargetSites(post.target_sites);
   const firstTarget = targets[0] || 'wavespestcontrol.com';
   const origin = firstTarget === 'wavespestcontrol.com'
     ? (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com')

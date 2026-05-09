@@ -8,6 +8,7 @@ const BlogAuditor = require('../services/content/blog-auditor');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { normalizeSpokeSites, invalidSpokeSites } = require('../services/content-astro/spoke-sites');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -53,6 +54,18 @@ function pickAllowedBlogUpdates(body) {
   const updates = {};
   for (const [key, value] of Object.entries(body || {})) {
     if (BLOG_UPDATE_FIELDS.has(key)) updates[key] = value;
+  }
+  return updates;
+}
+
+function normalizeBlogUpdates(body) {
+  const updates = pickAllowedBlogUpdates(body);
+  if (Object.prototype.hasOwnProperty.call(updates, 'target_sites')) {
+    const invalid = invalidSpokeSites(updates.target_sites);
+    if (invalid.length > 0) {
+      throw operationalBadRequest(`target_sites contains unsupported domains: ${invalid.join(', ')}`);
+    }
+    updates.target_sites = normalizeSpokeSites(updates.target_sites);
   }
   return updates;
 }
@@ -309,7 +322,7 @@ router.get('/blog/:id', async (req, res, next) => {
 // PUT /api/admin/content/blog/:id
 router.put('/blog/:id', async (req, res, next) => {
   try {
-    const updates = { ...pickAllowedBlogUpdates(req.body), updated_at: new Date() };
+    const updates = { ...normalizeBlogUpdates(req.body), updated_at: new Date() };
     if (updates.content) {
       updates.word_count = updates.content.split(/\s+/).filter(Boolean).length;
     }
@@ -929,3 +942,4 @@ module.exports = router;
 module.exports.CONTENT_LIMITS = CONTENT_LIMITS;
 module.exports.parseBoundedInt = parseBoundedInt;
 module.exports.normalizeGenerateBody = normalizeGenerateBody;
+module.exports.normalizeBlogUpdates = normalizeBlogUpdates;
