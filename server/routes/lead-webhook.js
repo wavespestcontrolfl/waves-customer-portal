@@ -431,7 +431,7 @@ router.post('/', async (req, res) => {
           templateKey: 'new_lead',
           customer: { email, first_name: firstName, last_name: lastName, id: customer?.id || null },
         });
-        logger.info(`[lead-webhook] enrolled ${email} in new_lead: ${JSON.stringify(r)}`);
+        logger.info(`[lead-webhook] enrolled customer ${customer?.id || 'unlinked'} in new_lead: ${JSON.stringify(r)}`);
       }
     } catch (e) { logger.error(`Lead enroll failed: ${e.message}`); }
 

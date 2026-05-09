@@ -12,7 +12,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const sendgrid = require('../services/sendgrid-mail');
 const NewsletterSender = require('../services/newsletter-sender');
@@ -23,7 +23,7 @@ const MODELS = require('../config/models');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 // Per-admin rate limiter on /draft-ai. Each call hits Anthropic with up
 // to 2k output tokens on the FLAGSHIP/WORKHORSE model — without a cap a
@@ -86,6 +86,7 @@ router.get('/subscribers', async (req, res, next) => {
       .count('* as count')
       .groupBy('status');
     const byStatus = Object.fromEntries(counts.map((r) => [r.status, Number(r.count)]));
+    byStatus.all = counts.reduce((sum, r) => sum + Number(r.count), 0);
     // Synthetic 'bounced' tally — see filter above.
     const bouncedRow = await db('newsletter_subscribers')
       .where('bounce_count', '>', 0)

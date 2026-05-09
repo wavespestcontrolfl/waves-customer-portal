@@ -42,9 +42,8 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
  * `requireConfirmation` (default false): when true, new and resubscribe
  * paths land at status='pending' and the caller is expected to send the
  * confirmation email keyed off subscriber.confirmation_token. When
- * false, paths land directly at status='active' (admin add + quote-
- * wizard dual-write — both are trusted/transactional contexts where the
- * email is already in use).
+ * false, paths land directly at status='active' (admin add only; public
+ * website and quote-wizard signups must pass requireConfirmation=true).
  */
 async function subscribeOrResubscribe({
   email,
@@ -80,11 +79,13 @@ async function subscribeOrResubscribe({
     // Pending → still mid-DOI. Resend the confirmation email if the
     // caller is requesting one (the user re-submitted the form because
     // they didn't see the original); auto-promote if the caller is
-    // trusted (admin add or quote-wizard signup of a previously
-    // public-form-pending row).
+    // trusted (admin add) on a previously public-form-pending row.
     if (existing.status === 'pending') {
       if (requireConfirmation) {
         await db('newsletter_subscribers').where({ id: existing.id }).update({
+          source,
+          first_name: firstName !== null ? firstName : existing.first_name,
+          last_name: lastName !== null ? lastName : existing.last_name,
           confirmation_sent_at: new Date(),
           updated_at: new Date(),
         });
@@ -105,6 +106,9 @@ async function subscribeOrResubscribe({
 
     if (existing.status === 'unsubscribed') {
       const updates = {
+        source,
+        first_name: firstName !== null ? firstName : existing.first_name,
+        last_name: lastName !== null ? lastName : existing.last_name,
         resubscribed_at: new Date(),
         unsubscribed_at: null,
         updated_at: new Date(),
