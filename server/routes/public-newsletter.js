@@ -37,10 +37,8 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-const QUOTE_AUTOMATION_SOURCES = new Set(['quote_wizard', 'quote_wizard_deferred']);
-
 async function maybeEnrollConfirmedQuoteLead(subscriber) {
-  if (!subscriber || !QUOTE_AUTOMATION_SOURCES.has(subscriber.source)) return;
+  if (!subscriber?.quote_lead_automation_pending) return;
   try {
     const result = await AutomationRunner.enrollCustomer({
       templateKey: 'new_lead',
@@ -50,6 +48,10 @@ async function maybeEnrollConfirmedQuoteLead(subscriber) {
         first_name: subscriber.first_name || null,
         last_name: subscriber.last_name || null,
       },
+    });
+    await db('newsletter_subscribers').where({ id: subscriber.id }).update({
+      quote_lead_automation_pending: false,
+      updated_at: new Date(),
     });
     logger.info(`[newsletter] confirmed quote subscriber id=${subscriber.id}; new_lead ${result.enrolled ? 'queued' : 'skipped'}`);
   } catch (err) {

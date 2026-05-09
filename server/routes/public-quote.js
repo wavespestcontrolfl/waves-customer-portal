@@ -394,6 +394,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           requireConfirmation: true,
         });
         if (result.action === 'confirmation_sent' || result.action === 'confirmation_resent') {
+          await db('newsletter_subscribers').where({ id: result.subscriber.id }).update({
+            quote_lead_automation_pending: true,
+            updated_at: new Date(),
+          });
           try {
             await sendConfirmationEmail(result.subscriber);
           } catch (e) {

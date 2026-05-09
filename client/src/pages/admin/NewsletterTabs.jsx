@@ -35,7 +35,9 @@ const SOURCE_SEGMENTS = [
   { value: 'quote_wizard_deferred', label: 'Quote Deferred' },
   { value: 'public_form', label: 'Public Form' },
   { value: 'admin_manual', label: 'Manual' },
-  { value: 'beehiiv_import', label: 'Beehiiv Import' },
+  { value: 'beehiiv_import', label: 'Admin Import' },
+  { value: 'beehiiv_migration', label: 'Beehiiv Migration' },
+  { value: 'beehiiv_migration_orphan', label: 'Beehiiv Orphans' },
   { value: 'website', label: 'Website Legacy' },
 ];
 
