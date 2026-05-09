@@ -121,8 +121,6 @@ async function handleEvent(ev) {
   const messageId = ev.sg_message_id ? ev.sg_message_id.split('.')[0] : null;
   if (!messageId) return;
   const email = ev.email || null;
-  const claimed = await claimWebhookEvent(ev, messageId, email);
-  if (!claimed) return;
 
   // Events can belong to a newsletter broadcast delivery, an automation
   // step send, or neither (transactional sends we don't track). Try each
@@ -141,34 +139,48 @@ async function handleEvent(ev) {
     .first() : null;
 
   if (newsletterDelivery) {
-    await handleNewsletterEvent(ev, newsletterDelivery);
+    await processWebhookEvent(ev, messageId, email, (trx) => handleNewsletterEvent(ev, newsletterDelivery, trx));
     return;
   }
   if (automationSend) {
-    await handleAutomationEvent(ev, automationSend);
+    await processWebhookEvent(ev, messageId, email, (trx) => handleAutomationEvent(ev, automationSend, trx));
     return;
   }
   // Untracked send (transactional invoices, receipts, etc.) — ignore.
   return;
 }
 
-async function claimWebhookEvent(ev, messageId, email) {
+async function processWebhookEvent(ev, messageId, email, handler) {
   const eventId = ev.sg_event_id ? String(ev.sg_event_id) : null;
-  if (!eventId) return true;
+  if (!eventId) {
+    await handler(db);
+    return;
+  }
 
-  const inserted = await db('sendgrid_webhook_events')
-    .insert({
-      event_id: eventId,
-      event_type: ev.event || null,
-      message_id: messageId,
-      email: email || null,
-      processed_at: new Date(),
-    })
-    .onConflict('event_id')
-    .ignore()
-    .returning('event_id');
+  await db.transaction(async (trx) => {
+    const inserted = await trx('sendgrid_webhook_events')
+      .insert({
+        event_id: eventId,
+        event_type: ev.event || null,
+        message_id: messageId,
+        email: email || null,
+        status: 'processing',
+      })
+      .onConflict('event_id')
+      .ignore()
+      .returning('event_id');
 
-  return inserted.length > 0;
+    if (!inserted.length) return;
+
+    await handler(trx);
+    await trx('sendgrid_webhook_events')
+      .where({ event_id: eventId })
+      .update({
+        status: 'processed',
+        processed_at: new Date(),
+        updated_at: new Date(),
+      });
+  });
 }
 
 /**
@@ -265,32 +277,32 @@ function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
   }
 }
 
-async function handleNewsletterEvent(ev, delivery) {
+async function handleNewsletterEvent(ev, delivery, client = db) {
   const updates = computeNewsletterEventUpdates(ev, delivery);
   if (!updates) return;
 
   if (updates.delivery) {
-    await db('newsletter_send_deliveries').where({ id: delivery.id }).update(updates.delivery);
+    await client('newsletter_send_deliveries').where({ id: delivery.id }).update(updates.delivery);
   }
   if (updates.sendIncrement) {
-    await db('newsletter_sends').where({ id: delivery.send_id }).increment(updates.sendIncrement, 1);
+    await client('newsletter_sends').where({ id: delivery.send_id }).increment(updates.sendIncrement, 1);
   }
   if (updates.subscriberAction && delivery.subscriber_id) {
     const at = updates.subscriberAt;
     if (updates.subscriberAction === 'bounce_increment') {
-      await db('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
-        bounce_count: db.raw('COALESCE(bounce_count,0) + 1'),
+      await client('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
+        bounce_count: client.raw('COALESCE(bounce_count,0) + 1'),
         last_bounced_at: at,
         updated_at: at,
       });
     } else if (updates.subscriberAction === 'force_unsubscribe') {
-      await db('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
+      await client('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
         status: 'unsubscribed',
         unsubscribed_at: at,
         updated_at: at,
       });
     } else if (updates.subscriberAction === 'unsubscribe_if_active') {
-      await db('newsletter_subscribers')
+      await client('newsletter_subscribers')
         .where({ id: delivery.subscriber_id })
         .whereNot({ status: 'unsubscribed' })
         .update({
@@ -308,14 +320,14 @@ async function handleNewsletterEvent(ev, delivery) {
  * enrollment for that email so the sequence doesn't keep ticking. Group
  * unsubscribes only cancel enrollments whose template's asm_group matches.
  */
-async function handleAutomationEvent(ev, sendRow) {
+async function handleAutomationEvent(ev, sendRow, client = db) {
   const now = new Date();
-  const newsletterUnsubscribe = () => unsubscribeNewsletterSubscriber(ev.email, now);
+  const newsletterUnsubscribe = () => unsubscribeNewsletterSubscriber(ev.email, now, client);
 
   switch (ev.event) {
     case 'delivered':
       if (!sendRow.delivered_at) {
-        await db('automation_step_sends').where({ id: sendRow.id }).update({
+        await client('automation_step_sends').where({ id: sendRow.id }).update({
           status: 'delivered', delivered_at: now, updated_at: now,
         });
       }
@@ -323,7 +335,7 @@ async function handleAutomationEvent(ev, sendRow) {
 
     case 'open':
       if (!sendRow.opened_at) {
-        await db('automation_step_sends').where({ id: sendRow.id }).update({
+        await client('automation_step_sends').where({ id: sendRow.id }).update({
           opened_at: now, updated_at: now,
         });
       }
@@ -331,7 +343,7 @@ async function handleAutomationEvent(ev, sendRow) {
 
     case 'click':
       if (!sendRow.clicked_at) {
-        await db('automation_step_sends').where({ id: sendRow.id }).update({
+        await client('automation_step_sends').where({ id: sendRow.id }).update({
           clicked_at: now, updated_at: now,
         });
       }
@@ -340,7 +352,7 @@ async function handleAutomationEvent(ev, sendRow) {
     case 'bounce':
     case 'blocked':
     case 'dropped':
-      await db('automation_step_sends').where({ id: sendRow.id }).update({
+      await client('automation_step_sends').where({ id: sendRow.id }).update({
         status: 'bounced',
         failure_reason: (ev.reason || ev.response || ev.type || '').toString().slice(0, 500),
         updated_at: now,
@@ -352,22 +364,22 @@ async function handleAutomationEvent(ev, sendRow) {
       // bad, just that we already knew. Cancelling on either was destructive
       // since enrollment.status='cancelled' is terminal.
       if (ev.type === 'bounce') {
-        await cancelActiveEnrollments({ email: ev.email, reason: 'hard_bounce' });
+        await cancelActiveEnrollments({ email: ev.email, reason: 'hard_bounce' }, client);
       }
       break;
 
     case 'spamreport':
-      await db('automation_step_sends').where({ id: sendRow.id }).update({
+      await client('automation_step_sends').where({ id: sendRow.id }).update({
         status: 'complained', updated_at: now,
       });
       // Complaint → cancel everything + mark newsletter sub unsubscribed.
-      await cancelActiveEnrollments({ email: ev.email, reason: 'spam_report' });
+      await cancelActiveEnrollments({ email: ev.email, reason: 'spam_report' }, client);
       await newsletterUnsubscribe();
       break;
 
     case 'unsubscribe':
       // Global unsub — cancel every active enrollment for this email.
-      await cancelActiveEnrollments({ email: ev.email, reason: 'unsubscribe' });
+      await cancelActiveEnrollments({ email: ev.email, reason: 'unsubscribe' }, client);
       await newsletterUnsubscribe();
       break;
 
@@ -382,7 +394,7 @@ async function handleAutomationEvent(ev, sendRow) {
       if (gid && gid === newsletterGid) asmGroupToCancel = 'newsletter';
       else if (gid && gid === serviceGid) asmGroupToCancel = 'service';
       if (asmGroupToCancel) {
-        await cancelActiveEnrollments({ email: ev.email, reason: 'group_unsubscribe', asmGroup: asmGroupToCancel });
+        await cancelActiveEnrollments({ email: ev.email, reason: 'group_unsubscribe', asmGroup: asmGroupToCancel }, client);
         if (asmGroupToCancel === 'newsletter') await newsletterUnsubscribe();
       }
       break;
@@ -396,10 +408,10 @@ async function handleAutomationEvent(ev, sendRow) {
   }
 }
 
-async function unsubscribeNewsletterSubscriber(email, at) {
+async function unsubscribeNewsletterSubscriber(email, at, client = db) {
   if (!email) return;
   const lc = String(email).trim().toLowerCase();
-  await db('newsletter_subscribers')
+  await client('newsletter_subscribers')
     .whereRaw('LOWER(email) = ?', [lc])
     .whereNot({ status: 'unsubscribed' })
     .update({
@@ -409,10 +421,10 @@ async function unsubscribeNewsletterSubscriber(email, at) {
     });
 }
 
-async function cancelActiveEnrollments({ email, reason, asmGroup }) {
+async function cancelActiveEnrollments({ email, reason, asmGroup }, client = db) {
   if (!email) return;
   const lc = String(email).trim().toLowerCase();
-  let q = db('automation_enrollments as e')
+  let q = client('automation_enrollments as e')
     .join('automation_templates as t', 't.key', 'e.template_key')
     .whereRaw('LOWER(e.email) = ?', [lc])
     .where('e.status', 'active');
@@ -422,11 +434,11 @@ async function cancelActiveEnrollments({ email, reason, asmGroup }) {
   if (!rows.length) return;
 
   const ids = rows.map((r) => r.id);
-  await db('automation_enrollments').whereIn('id', ids).update({
+  await client('automation_enrollments').whereIn('id', ids).update({
     status: 'cancelled',
     next_send_at: null,
     completed_at: new Date(),
-    metadata: db.raw("jsonb_set(COALESCE(metadata,'{}'::jsonb), '{cancel_reason}', ?::jsonb, true)", [JSON.stringify(reason)]),
+    metadata: client.raw("jsonb_set(COALESCE(metadata,'{}'::jsonb), '{cancel_reason}', ?::jsonb, true)", [JSON.stringify(reason)]),
     updated_at: new Date(),
   });
   logger.info(`[sendgrid-webhook] cancelled ${rows.length} enrollment(s) for ${redactEmail(email)} reason=${reason}${asmGroup ? ` group=${asmGroup}` : ''}`);

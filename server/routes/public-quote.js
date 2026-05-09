@@ -8,6 +8,7 @@ const TwilioService = require('../services/twilio');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { subscribeOrResubscribe } = require('../services/newsletter-subscribers');
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
+const AutomationRunner = require('../services/automation-runner');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -400,7 +401,20 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           }
           logger.info(`[public-quote] newsletter confirmation queued for lead ${lead.id} subscriber id=${result.subscriber?.id}`);
         } else if (result.action === 'already_active') {
-          logger.info(`[public-quote] quote opt-in from existing subscriber id=${result.subscriber?.id}`);
+          try {
+            const r = await AutomationRunner.enrollCustomer({
+              templateKey: 'new_lead',
+              customer: {
+                id: result.subscriber?.customer_id || customerId || null,
+                email: emailLc,
+                first_name: firstName || null,
+                last_name: lastName || null,
+              },
+            });
+            logger.info(`[public-quote] existing subscriber id=${result.subscriber?.id} new_lead ${r.enrolled ? 'queued' : 'skipped'}`);
+          } catch (e) {
+            logger.error(`[public-quote] existing subscriber id=${result.subscriber?.id} new_lead failed: ${e.message}`);
+          }
         }
       } catch (e) { logger.error(`[public-quote] newsletter_subscribers dual-write failed: ${e.message}`); }
     }

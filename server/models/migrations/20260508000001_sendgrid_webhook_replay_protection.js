@@ -16,6 +16,7 @@ exports.up = async function (knex) {
       t.string('event_type', 64);
       t.string('message_id');
       t.string('email');
+      t.string('status', 32).notNullable().defaultTo('processed');
       t.timestamp('processed_at').defaultTo(knex.fn.now());
       t.timestamps(true, true);
       t.index(['message_id', 'email']);
