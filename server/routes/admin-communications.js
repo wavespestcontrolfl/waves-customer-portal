@@ -59,6 +59,7 @@ router.post('/sms', async (req, res, next) => {
       purpose: 'conversational',
       customerId: trustedCustomerId || undefined,
       identityTrustLevel: trustedCustomerId ? 'phone_matches_customer' : 'phone_provided_unverified',
+      entryPoint: 'admin_communications_manual_sms',
       metadata: {
         original_message_type: messageType || 'manual',
         adminUserId: req.technicianId,
@@ -68,7 +69,10 @@ router.post('/sms', async (req, res, next) => {
       },
     });
     if (result.blocked || result.sent === false) {
-      return res.status(422).json(result);
+      return res.status(422).json({
+        ...result,
+        error: result.reason || result.code || 'SMS send blocked/failed',
+      });
     }
 
     res.json(result);
