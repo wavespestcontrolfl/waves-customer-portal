@@ -70,6 +70,25 @@ function mockCloudflareDeploymentList(deployments) {
   });
 }
 
+function calendarQuery(result = []) {
+  const calls = [];
+  const builder = {
+    calls,
+    where: jest.fn(function (...args) {
+      calls.push(['where', ...args]);
+      if (typeof args[0] === 'function') args[0].call(builder);
+      return builder;
+    }),
+    orWhere: jest.fn(function (...args) {
+      calls.push(['orWhere', ...args]);
+      if (typeof args[0] === 'function') args[0].call(builder);
+      return builder;
+    }),
+    select: jest.fn().mockResolvedValue(result),
+  };
+  return builder;
+}
+
 function validFrontmatter(overrides = {}) {
   return {
     title: 'Ant Trails in Bradenton',
@@ -214,6 +233,24 @@ describe('Pages poll merged-to-live transition', () => {
 describe('Content scheduler scheduling timezone handling', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+  });
+
+  test('expands date-only calendar ranges to an exclusive next ET day', async () => {
+    const blogQuery = calendarQuery([]);
+    const socialQuery = calendarQuery([]);
+    db.mockImplementation((table) => (table === 'blog_posts' ? blogQuery : socialQuery));
+
+    await ContentScheduler.getCalendar('2026-04-01', '2026-04-30');
+
+    const blogEnd = blogQuery.calls.find((call) => call[1] === 'scheduled_publish_at' && call[2] === '<')?.[3];
+    const socialEnd = socialQuery.calls.find((call) => call[1] === 'scheduled_for' && call[2] === '<')?.[3];
+
+    expect(ContentScheduler.normalizeCalendarRange('2026-04-01', '2026-04-30')).toMatchObject({
+      start: expect.any(Date),
+      end: expect.any(Date),
+    });
+    expect(blogEnd.toISOString()).toBe('2026-05-01T04:00:00.000Z');
+    expect(socialEnd.toISOString()).toBe('2026-05-01T04:00:00.000Z');
   });
 
   test('stores naive blog schedule times as Eastern Time instants', async () => {

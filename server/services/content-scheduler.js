@@ -7,12 +7,33 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { parseETDateTime } = require('../utils/datetime-et');
+const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
 function parseScheduledTime(value, label) {
   const parsed = parseETDateTime(value);
   if (Number.isNaN(parsed.getTime())) throw new Error(`${label} is invalid`);
   return parsed;
+}
+
+function parseCalendarStart(value) {
+  const text = String(value || '').trim();
+  return parseScheduledTime(DATE_ONLY.test(text) ? `${text}T00:00` : text, 'startDate');
+}
+
+function parseCalendarEnd(value) {
+  const text = String(value || '').trim();
+  if (!DATE_ONLY.test(text)) return parseScheduledTime(text, 'endDate');
+  const nextDay = etDateString(addETDays(parseETDateTime(`${text}T12:00`), 1));
+  return parseScheduledTime(`${nextDay}T00:00`, 'endDate');
+}
+
+function normalizeCalendarRange(startDate, endDate) {
+  const start = parseCalendarStart(startDate);
+  const end = parseCalendarEnd(endDate);
+  if (end <= start) throw new Error('endDate must be after startDate');
+  return { start, end };
 }
 
 async function sharePublishedBlog(blog) {
@@ -57,15 +78,22 @@ const ContentScheduler = {
    * Get all scheduled content in a date range (blog + social merged).
    */
   async getCalendar(startDate, endDate) {
+    const range = normalizeCalendarRange(startDate, endDate);
     const blogs = await db('blog_posts')
       .where(function () {
-        this.whereBetween('scheduled_publish_at', [startDate, endDate])
-          .orWhereBetween('publish_date', [startDate, endDate]);
+        this.where(function () {
+          this.where('scheduled_publish_at', '>=', range.start)
+            .where('scheduled_publish_at', '<', range.end);
+        }).orWhere(function () {
+          this.where('publish_date', '>=', range.start)
+            .where('publish_date', '<', range.end);
+        });
       })
       .select('id', 'title', 'status', 'publish_status', 'scheduled_publish_at', 'publish_date', 'tag', 'city');
 
     const socials = await db('social_media_posts')
-      .whereBetween('scheduled_for', [startDate, endDate])
+      .where('scheduled_for', '>=', range.start)
+      .where('scheduled_for', '<', range.end)
       .select('id', 'title', 'status', 'publish_status', 'scheduled_for', 'platforms_posted', 'source_type');
 
     const calendar = [];
@@ -277,3 +305,4 @@ const ContentScheduler = {
 };
 
 module.exports = ContentScheduler;
+module.exports.normalizeCalendarRange = normalizeCalendarRange;

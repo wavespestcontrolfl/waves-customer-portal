@@ -17,6 +17,15 @@ function adminFetch(path, options = {}) {
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const TYPE_COLORS = { blog: '#18181B', social: '#71717A', rss: '#15803D' };
 const TYPE_ICONS = { blog: '📝', social: '📲', rss: '📡' };
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+function calendarDateKey(value) {
+  if (!value) return '';
+  const text = String(value);
+  if (DATE_ONLY.test(text)) return text;
+  const parsed = new Date(text);
+  return Number.isNaN(parsed.getTime()) ? '' : etDateString(parsed);
+}
 
 export default function ContentCalendar() {
   const [month, setMonth] = useState(() => { const d = new Date(); return { year: d.getFullYear(), month: d.getMonth() }; });
@@ -76,7 +85,7 @@ export default function ContentCalendar() {
   const getItemsForDay = (day) => {
     if (!day) return [];
     const dateStr = `${month.year}-${String(month.month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-    return items.filter(i => (i.scheduledDate || i.date || '').startsWith(dateStr));
+    return items.filter(i => calendarDateKey(i.scheduledDate || i.date) === dateStr);
   };
 
   const today = new Date();
