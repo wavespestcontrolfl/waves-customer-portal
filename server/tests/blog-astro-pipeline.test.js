@@ -24,17 +24,50 @@ const authorService = require('../services/content-astro/author-service');
 const { validateBlogFrontmatter } = require('../services/content-astro/schema-validator');
 const PagesPoll = require('../services/content-astro/pages-poll');
 const AstroPublisher = require('../services/content-astro/astro-publisher');
+const ContentScheduler = require('../services/content-scheduler');
 
 function chain(overrides = {}) {
   return {
+    insert: jest.fn().mockReturnThis(),
     where: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
     whereNotNull: jest.fn().mockReturnThis(),
     select: jest.fn().mockResolvedValue([]),
     first: jest.fn(),
     update: jest.fn().mockResolvedValue(1),
+    returning: jest.fn().mockResolvedValue([]),
     ...overrides,
   };
+}
+
+function productionDeployment(overrides = {}) {
+  return {
+    environment: 'production',
+    url: 'https://prod.wavespestcontrol-astro.pages.dev',
+    created_on: '2026-05-08T13:05:00.000Z',
+    latest_stage: { name: 'deploy', status: 'success' },
+    stages: [{ name: 'deploy', status: 'success' }],
+    deployment_trigger: {
+      metadata: {
+        branch: 'main',
+        commit_hash: 'merge-sha',
+      },
+    },
+    ...overrides,
+  };
+}
+
+function mockCloudflareDeploymentList(deployments) {
+  global.fetch = jest.fn().mockImplementation(async (url) => {
+    if (String(url).includes('api.cloudflare.com')) {
+      return {
+        ok: true,
+        json: async () => ({ result: deployments }),
+        text: async () => '',
+      };
+    }
+    return { status: 200 };
+  });
 }
 
 function validFrontmatter(overrides = {}) {
@@ -101,16 +134,29 @@ describe('blog Astro frontmatter validation', () => {
 });
 
 describe('Pages poll merged-to-live transition', () => {
+  const originalEnv = {
+    CF_API_TOKEN: process.env.CF_API_TOKEN,
+    CF_ACCOUNT_ID: process.env.CF_ACCOUNT_ID,
+    CF_PAGES_PROJECT: process.env.CF_PAGES_PROJECT,
+  };
+
   beforeEach(() => {
     jest.clearAllMocks();
-    global.fetch = jest.fn().mockResolvedValue({ status: 200 });
+    process.env.CF_API_TOKEN = 'test-token';
+    process.env.CF_ACCOUNT_ID = 'test-account';
+    process.env.CF_PAGES_PROJECT = 'test-project';
+    mockCloudflareDeploymentList([productionDeployment()]);
   });
 
   afterEach(() => {
     delete global.fetch;
+    for (const [key, value] of Object.entries(originalEnv)) {
+      if (value == null) delete process.env[key];
+      else process.env[key] = value;
+    }
   });
 
-  test('marks merged posts live when the expected live URL responds', async () => {
+  test('marks merged posts live when the production deployment and expected live URL are ready', async () => {
     const update = chain();
     db.mockReturnValue(update);
 
@@ -120,6 +166,8 @@ describe('Pages poll merged-to-live transition', () => {
       astro_status: 'merged',
       astro_live_url: 'https://www.wavespestcontrol.com/ant-trails-bradenton/',
       publish_status: 'pending_review',
+      astro_merged_at: '2026-05-08T13:00:00.000Z',
+      astro_commit_sha: 'merge-sha',
       astro_published_at: null,
     });
 
@@ -130,6 +178,80 @@ describe('Pages poll merged-to-live transition', () => {
       status: 'published',
       astro_live_url: 'https://www.wavespestcontrol.com/ant-trails-bradenton/',
     }));
+  });
+
+  test('does not mark an existing URL live before the matching production deployment finishes', async () => {
+    const update = chain();
+    db.mockReturnValue(update);
+    mockCloudflareDeploymentList([
+      productionDeployment({
+        created_on: '2026-05-08T12:00:00.000Z',
+        deployment_trigger: { metadata: { branch: 'main', commit_hash: 'old-sha' } },
+      }),
+    ]);
+
+    const result = await PagesPoll.pollPost({
+      id: 'post-1',
+      slug: 'ant-trails-bradenton',
+      astro_status: 'merged',
+      astro_live_url: 'https://www.wavespestcontrol.com/ant-trails-bradenton/',
+      publish_status: 'pending_review',
+      astro_merged_at: '2026-05-08T13:00:00.000Z',
+      astro_commit_sha: 'merge-sha',
+      astro_published_at: null,
+    });
+
+    expect(result).toMatchObject({
+      pending: true,
+      url: 'https://www.wavespestcontrol.com/ant-trails-bradenton/',
+      reason: 'production deployment pending',
+    });
+    expect(update.update).not.toHaveBeenCalled();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Content scheduler scheduling timezone handling', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('stores naive blog schedule times as Eastern Time instants', async () => {
+    const read = chain({ first: jest.fn().mockResolvedValue({ id: 'post-1' }) });
+    const write = chain({
+      update: jest.fn().mockReturnThis(),
+      returning: jest.fn().mockResolvedValue([{ id: 'post-1', title: 'Scheduled blog' }]),
+    });
+    const queries = [read, write];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await ContentScheduler.scheduleBlogPost('post-1', '2026-07-01T09:00:00', true);
+
+    expect(write.update).toHaveBeenCalledWith(expect.objectContaining({
+      scheduled_publish_at: expect.any(Date),
+    }));
+    expect(write.update.mock.calls[0][0].scheduled_publish_at.toISOString()).toBe('2026-07-01T13:00:00.000Z');
+  });
+
+  test('stores naive social schedule times as Eastern Time instants', async () => {
+    const write = chain({
+      insert: jest.fn().mockReturnThis(),
+      returning: jest.fn().mockResolvedValue([{ id: 'social-1', title: 'Scheduled social' }]),
+    });
+    db.mockReturnValue(write);
+
+    await ContentScheduler.scheduleSocialPost({
+      title: 'Scheduled social',
+      description: 'Post body',
+      link: 'https://www.wavespestcontrol.com/blog/',
+      platforms: ['facebook'],
+      scheduledFor: '2026-07-01T09:00:00',
+    });
+
+    expect(write.insert).toHaveBeenCalledWith(expect.objectContaining({
+      scheduled_for: expect.any(Date),
+    }));
+    expect(write.insert.mock.calls[0][0].scheduled_for.toISOString()).toBe('2026-07-01T13:00:00.000Z');
   });
 });
 

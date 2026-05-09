@@ -7,6 +7,13 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { parseETDateTime } = require('../utils/datetime-et');
+
+function parseScheduledTime(value, label) {
+  const parsed = parseETDateTime(value);
+  if (Number.isNaN(parsed.getTime())) throw new Error(`${label} is invalid`);
+  return parsed;
+}
 
 async function sharePublishedBlog(blog) {
   if (!blog.auto_share_social || blog.shared_to_social) return true;
@@ -102,11 +109,12 @@ const ContentScheduler = {
   async scheduleBlogPost(blogPostId, publishAt, autoShareSocial = true) {
     const post = await db('blog_posts').where('id', blogPostId).first();
     if (!post) throw new Error('Blog post not found');
+    const scheduledAt = parseScheduledTime(publishAt, 'publishAt');
 
     const [updated] = await db('blog_posts')
       .where('id', blogPostId)
       .update({
-        scheduled_publish_at: new Date(publishAt),
+        scheduled_publish_at: scheduledAt,
         auto_share_social: autoShareSocial,
         publish_status: 'pending',
         updated_at: new Date(),
@@ -121,6 +129,7 @@ const ContentScheduler = {
    * Create a scheduled social media post.
    */
   async scheduleSocialPost({ title, description, link, platforms, scheduledFor, customContent }) {
+    const scheduledAt = parseScheduledTime(scheduledFor, 'scheduledFor');
     const [post] = await db('social_media_posts')
       .insert({
         title,
@@ -130,7 +139,7 @@ const ContentScheduler = {
         platforms_posted: JSON.stringify(platforms || []),
         status: 'scheduled',
         publish_status: 'pending',
-        scheduled_for: new Date(scheduledFor),
+        scheduled_for: scheduledAt,
         custom_content: customContent ? JSON.stringify(customContent) : null,
         created_at: new Date(),
       })

@@ -53,6 +53,13 @@ async function latestDeploymentForBranch(branch) {
   return list.find((d) => d?.deployment_trigger?.metadata?.branch === branch) || null;
 }
 
+async function latestProductionDeploymentForPost(post) {
+  const { project } = cfEnv();
+  const res = await cfFetch(`/pages/projects/${encodeURIComponent(project)}/deployments?env=production&per_page=25`);
+  const list = Array.isArray(res?.result) ? res.result : [];
+  return list.find((deploy) => deploymentMatchesMergedPost(deploy, post)) || null;
+}
+
 function extractStatus(deploy) {
   // CF Pages deployments have a list of stages (queued → initialize →
   // clone_repo → build → deploy). The last stage's `status` tells us
@@ -61,10 +68,55 @@ function extractStatus(deploy) {
   const last = stages[stages.length - 1];
   return {
     stage: last?.name || null,
-    status: last?.status || null,
+    status: deploy?.latest_stage?.status || last?.status || null,
     url: deploy?.url || null,
     error: deploy?.latest_stage?.status === 'failure' ? (deploy?.latest_stage?.name || 'build failed') : null,
   };
+}
+
+function deploymentMatchesMergedPost(deploy, post) {
+  const { status } = extractStatus(deploy);
+  if (deploy?.environment && deploy.environment !== 'production') return false;
+  if (status !== 'success') return false;
+
+  const wantedSha = normalizeSha(post.astro_commit_sha);
+  const deployedSha = normalizeSha(deploymentCommitSha(deploy));
+  if (wantedSha && deployedSha) return wantedSha === deployedSha;
+
+  const mergedAt = timestampMs(post.astro_merged_at);
+  const deployedAt = deploymentTimestampMs(deploy);
+  return mergedAt != null && deployedAt != null && deployedAt >= mergedAt - 120000;
+}
+
+function deploymentCommitSha(deploy) {
+  const metadata = deploy?.deployment_trigger?.metadata || {};
+  return metadata.commit_hash
+    || metadata.commit_sha
+    || metadata.commit
+    || deploy?.source?.config?.commit_hash
+    || deploy?.source?.config?.commit_sha
+    || deploy?.source?.commit_hash
+    || deploy?.source?.commit_sha
+    || null;
+}
+
+function deploymentTimestampMs(deploy) {
+  const metadata = deploy?.deployment_trigger?.metadata || {};
+  return timestampMs(deploy?.modified_on)
+    ?? timestampMs(deploy?.created_on)
+    ?? timestampMs(metadata.committed_on)
+    ?? timestampMs(metadata.commit_time);
+}
+
+function timestampMs(value) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  const ms = date.getTime();
+  return Number.isNaN(ms) ? null : ms;
+}
+
+function normalizeSha(value) {
+  return typeof value === 'string' && value.trim() ? value.trim().toLowerCase() : null;
 }
 
 async function pollPost(post) {
@@ -105,6 +157,9 @@ async function pollLivePost(post) {
   if (!url) return { skipped: true, reason: 'no live url' };
 
   try {
+    const deploy = await latestProductionDeploymentForPost(post);
+    if (!deploy) return { pending: true, url, reason: 'production deployment pending' };
+
     const seen = await liveUrlResponds(url);
     if (!seen) return { pending: true, url };
 
@@ -117,7 +172,7 @@ async function pollLivePost(post) {
     };
 
     await db('blog_posts').where({ id: post.id }).update(updates);
-    return { live: true, url };
+    return { live: true, url, deployment_url: deploy.url || null };
   } catch (err) {
     logger.warn(`[pages-poll] live check failed for ${url}: ${err.message}`);
     return { pending: true, url, error: err.message };
@@ -152,19 +207,17 @@ async function fetchWithTimeout(url, options = {}) {
 }
 
 async function pollPending() {
-  let previewEnabled = true;
   try {
     cfEnv(); // throws early if unconfigured
   } catch (err) {
-    previewEnabled = false;
-    logger.warn(`[pages-poll] preview checks skipped: ${err.message}`);
+    logger.warn(`[pages-poll] checks skipped: ${err.message}`);
+    return { count: 0, skipped: true, reason: err.message };
   }
 
-  const statuses = previewEnabled ? ['pr_open', 'build_failed', 'merged'] : ['merged'];
   const pending = await db('blog_posts')
-    .whereIn('astro_status', statuses)
+    .whereIn('astro_status', ['pr_open', 'build_failed', 'merged'])
     .whereNotNull('astro_branch_name')
-    .select('id', 'slug', 'target_sites', 'publish_status', 'astro_branch_name', 'astro_preview_url', 'astro_live_url', 'astro_status', 'astro_published_at');
+    .select('id', 'slug', 'target_sites', 'publish_status', 'astro_branch_name', 'astro_preview_url', 'astro_live_url', 'astro_status', 'astro_merged_at', 'astro_published_at', 'astro_commit_sha');
 
   const results = [];
   for (const post of pending) {
@@ -174,4 +227,10 @@ async function pollPending() {
   return { count: results.length, results };
 }
 
-module.exports = { pollPost, pollPending, pollLivePost, liveUrlResponds };
+module.exports = {
+  pollPost,
+  pollPending,
+  pollLivePost,
+  liveUrlResponds,
+  deploymentMatchesMergedPost,
+};

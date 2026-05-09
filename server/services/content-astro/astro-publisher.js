@@ -354,7 +354,7 @@ async function mergeAstro(postId) {
   try {
     const pr = await gh.getPr(post.astro_pr_number);
     if (pr.merged) {
-      await applyMergeEffect(postId, post, pr.merged_at ? new Date(pr.merged_at) : new Date(), isUnpublish, null);
+      await applyMergeEffect(postId, post, pr.merged_at ? new Date(pr.merged_at) : new Date(), isUnpublish, pr.merge_commit_sha || null);
       return { already_merged: true, pr_number: pr.number, live_url: isUnpublish ? null : liveUrlForPost(post) };
     }
     if (pr.state !== 'open') {
