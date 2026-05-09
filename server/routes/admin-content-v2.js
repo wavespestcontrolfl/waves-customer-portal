@@ -27,7 +27,7 @@ const CONTENT_LIMITS = {
 };
 
 const ALLOWED_CONTENT_TYPES = new Set(['blog_post', 'page_refresh', 'pest_pressure', 'gbp_post', 'service_page']);
-const ALLOWED_TARGET_CITIES = new Set(['Lakewood Ranch', 'Parrish', 'Bradenton', 'Sarasota', 'Venice', 'North Port', 'Port Charlotte']);
+const ALLOWED_TARGET_CITIES = new Set(['Lakewood Ranch', 'Parrish', 'Bradenton', 'Sarasota', 'Venice', 'North Port', 'Palmetto', 'Port Charlotte']);
 
 const BLOG_UPDATE_FIELDS = new Set([
   'title',
