@@ -24,7 +24,9 @@ export default function ContentCalendar() {
   const [loading, setLoading] = useState(true);
   const [selectedDay, setSelectedDay] = useState(null);
   const [showSchedule, setShowSchedule] = useState(false);
-  const [scheduleForm, setScheduleForm] = useState({ type: 'blog', title: '', date: '', time: '09:00', autoShare: true });
+  const [scheduleForm, setScheduleForm] = useState({ type: 'blog', blogPostId: '', title: '', date: '', time: '09:00', autoShare: true });
+  const [draftPosts, setDraftPosts] = useState([]);
+  const [loadingDrafts, setLoadingDrafts] = useState(false);
   const [toast, setToast] = useState('');
 
   const loadCalendar = useCallback(async () => {
@@ -39,6 +41,15 @@ export default function ContentCalendar() {
 
   useEffect(() => { loadCalendar(); }, [loadCalendar]);
   const showToast = (m) => { setToast(m); setTimeout(() => setToast(''), 3500); };
+
+  useEffect(() => {
+    if (!showSchedule || scheduleForm.type !== 'blog') return;
+    setLoadingDrafts(true);
+    adminFetch('/admin/content/blog?status=draft&limit=100&sort=updated_at&order=desc')
+      .then((data) => setDraftPosts(data.posts || []))
+      .catch(() => setDraftPosts([]))
+      .finally(() => setLoadingDrafts(false));
+  }, [showSchedule, scheduleForm.type]);
 
   const shiftMonth = (dir) => {
     setMonth(prev => {
@@ -72,13 +83,29 @@ export default function ContentCalendar() {
   const isToday = (day) => day && today.getFullYear() === month.year && today.getMonth() === month.month && today.getDate() === day;
   const monthName = new Date(month.year, month.month).toLocaleString('en-US', { month: 'long', year: 'numeric' });
 
+  const openSchedule = (type = 'blog', day = selectedDay) => {
+    const date = day
+      ? etDateString(new Date(month.year, month.month, day, 12))
+      : etDateString(new Date());
+    setScheduleForm(prev => ({ ...prev, type, date, blogPostId: '', title: '' }));
+    setShowSchedule(true);
+  };
+
   const handleSchedule = async () => {
     if (!scheduleForm.date) { showToast('Pick a date'); return; }
     const publishAt = `${scheduleForm.date}T${scheduleForm.time}:00`;
     try {
-      if (scheduleForm.type === 'social') {
+      if (scheduleForm.type === 'blog') {
+        if (!scheduleForm.blogPostId) { showToast('Pick a blog draft'); return; }
+        await adminFetch(`/admin/content/schedule-blog/${scheduleForm.blogPostId}`, {
+          method: 'POST',
+          body: JSON.stringify({ publishAt, autoShareSocial: scheduleForm.autoShare }),
+        });
+      } else {
+        if (!scheduleForm.title.trim()) { showToast('Add a title'); return; }
         await adminFetch('/admin/content/schedule-social', {
-          method: 'POST', body: JSON.stringify({ title: scheduleForm.title, description: '', link: '', scheduledFor: publishAt }),
+          method: 'POST',
+          body: JSON.stringify({ title: scheduleForm.title.trim(), description: '', link: '', scheduledFor: publishAt, platforms: [] }),
         });
       }
       showToast('Scheduled!');
@@ -101,6 +128,10 @@ export default function ContentCalendar() {
           <span><span style={{ color: D.purple }}>●</span> Social</span>
           <span><span style={{ color: D.green }}>●</span> RSS Auto</span>
           <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{items.length} posts this month</span>
+          <button type="button" onClick={() => openSchedule('blog')} style={{
+            padding: '4px 10px', borderRadius: 6, border: `1px solid ${D.border}`,
+            background: D.card, color: D.heading, cursor: 'pointer', fontSize: 11, fontWeight: 700,
+          }}>Schedule</button>
         </div>
       </div>
 
@@ -153,6 +184,16 @@ export default function ContentCalendar() {
           <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>
             {new Date(month.year, month.month, selectedDay).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
           </div>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+            <button type="button" onClick={() => openSchedule('blog', selectedDay)} style={{
+              padding: '6px 10px', borderRadius: 6, border: `1px solid ${D.border}`,
+              background: D.bg, color: D.heading, cursor: 'pointer', fontSize: 12, fontWeight: 600,
+            }}>Schedule Blog</button>
+            <button type="button" onClick={() => openSchedule('social', selectedDay)} style={{
+              padding: '6px 10px', borderRadius: 6, border: `1px solid ${D.border}`,
+              background: D.bg, color: D.heading, cursor: 'pointer', fontSize: 12, fontWeight: 600,
+            }}>Schedule Social</button>
+          </div>
           {getItemsForDay(selectedDay).length === 0 ? (
             <div style={{ fontSize: 13, color: D.muted }}>No content scheduled for this day</div>
           ) : getItemsForDay(selectedDay).map((item, i) => (
@@ -165,6 +206,95 @@ export default function ContentCalendar() {
               <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: `${TYPE_COLORS[item.type]}22`, color: TYPE_COLORS[item.type] }}>{item.status}</span>
             </div>
           ))}
+        </div>
+      )}
+
+      {showSchedule && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(24,24,27,0.42)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 250,
+          padding: 16,
+        }}>
+          <div style={{
+            width: '100%', maxWidth: 460, background: D.card, border: `1px solid ${D.border}`,
+            borderRadius: 10, padding: 18, boxShadow: '0 18px 50px rgba(0,0,0,.22)',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>Schedule Content</div>
+              <button type="button" onClick={() => setShowSchedule(false)} style={{
+                border: 'none', background: 'transparent', color: D.muted, cursor: 'pointer', fontSize: 18,
+              }}>×</button>
+            </div>
+
+            <div style={{ display: 'grid', gap: 10 }}>
+              <label style={{ fontSize: 11, color: D.muted }}>
+                Type
+                <select value={scheduleForm.type} onChange={e => setScheduleForm(prev => ({ ...prev, type: e.target.value, blogPostId: '', title: '' }))} style={{
+                  width: '100%', marginTop: 4, padding: '8px 10px', borderRadius: 6,
+                  border: `1px solid ${D.inputBorder}`, background: D.input, color: D.text,
+                }}>
+                  <option value="blog">Blog Draft</option>
+                  <option value="social">Social Post</option>
+                </select>
+              </label>
+
+              {scheduleForm.type === 'blog' ? (
+                <label style={{ fontSize: 11, color: D.muted }}>
+                  Draft
+                  <select value={scheduleForm.blogPostId} onChange={e => setScheduleForm(prev => ({ ...prev, blogPostId: e.target.value }))} style={{
+                    width: '100%', marginTop: 4, padding: '8px 10px', borderRadius: 6,
+                    border: `1px solid ${D.inputBorder}`, background: D.input, color: D.text,
+                  }}>
+                    <option value="">{loadingDrafts ? 'Loading drafts...' : 'Select draft...'}</option>
+                    {draftPosts.map(p => <option key={p.id} value={p.id}>{p.title}</option>)}
+                  </select>
+                </label>
+              ) : (
+                <label style={{ fontSize: 11, color: D.muted }}>
+                  Title
+                  <input value={scheduleForm.title} onChange={e => setScheduleForm(prev => ({ ...prev, title: e.target.value }))} style={{
+                    width: '100%', marginTop: 4, padding: '8px 10px', borderRadius: 6,
+                    border: `1px solid ${D.inputBorder}`, background: D.input, color: D.text,
+                  }} />
+                </label>
+              )}
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 120px', gap: 10 }}>
+                <label style={{ fontSize: 11, color: D.muted }}>
+                  Date
+                  <input type="date" value={scheduleForm.date} onChange={e => setScheduleForm(prev => ({ ...prev, date: e.target.value }))} style={{
+                    width: '100%', marginTop: 4, padding: '8px 10px', borderRadius: 6,
+                    border: `1px solid ${D.inputBorder}`, background: D.input, color: D.text,
+                  }} />
+                </label>
+                <label style={{ fontSize: 11, color: D.muted }}>
+                  Time
+                  <input type="time" value={scheduleForm.time} onChange={e => setScheduleForm(prev => ({ ...prev, time: e.target.value }))} style={{
+                    width: '100%', marginTop: 4, padding: '8px 10px', borderRadius: 6,
+                    border: `1px solid ${D.inputBorder}`, background: D.input, color: D.text,
+                  }} />
+                </label>
+              </div>
+
+              {scheduleForm.type === 'blog' && (
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: D.text }}>
+                  <input type="checkbox" checked={scheduleForm.autoShare} onChange={e => setScheduleForm(prev => ({ ...prev, autoShare: e.target.checked }))} />
+                  Share to social after the post is live
+                </label>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+              <button type="button" onClick={() => setShowSchedule(false)} style={{
+                padding: '8px 12px', borderRadius: 6, border: `1px solid ${D.border}`,
+                background: 'transparent', color: D.muted, cursor: 'pointer',
+              }}>Cancel</button>
+              <button type="button" onClick={handleSchedule} style={{
+                padding: '8px 12px', borderRadius: 6, border: 'none',
+                background: D.teal, color: D.white, cursor: 'pointer', fontWeight: 700,
+              }}>Schedule</button>
+            </div>
+          </div>
         </div>
       )}
 

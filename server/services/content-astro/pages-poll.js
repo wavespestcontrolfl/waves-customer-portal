@@ -18,6 +18,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { liveUrlForPost } = require('./astro-publisher');
 
 function cfEnv() {
   const token = process.env.CF_API_TOKEN;
@@ -67,6 +68,7 @@ function extractStatus(deploy) {
 }
 
 async function pollPost(post) {
+  if (post.astro_status === 'merged') return pollLivePost(post);
   if (!post.astro_branch_name) return { skipped: true, reason: 'no branch' };
   try {
     const deploy = await latestDeploymentForBranch(post.astro_branch_name);
@@ -98,25 +100,78 @@ async function pollPost(post) {
   }
 }
 
+async function pollLivePost(post) {
+  const url = post.astro_live_url || liveUrlForPost(post);
+  if (!url) return { skipped: true, reason: 'no live url' };
+
+  try {
+    const seen = await liveUrlResponds(url);
+    if (!seen) return { pending: true, url };
+
+    const updates = {
+      astro_status: 'live',
+      astro_live_url: url,
+      astro_published_at: post.astro_published_at || new Date(),
+      status: 'published',
+      updated_at: new Date(),
+    };
+
+    await db('blog_posts').where({ id: post.id }).update(updates);
+    return { live: true, url };
+  } catch (err) {
+    logger.warn(`[pages-poll] live check failed for ${url}: ${err.message}`);
+    return { pending: true, url, error: err.message };
+  }
+}
+
+async function liveUrlResponds(url) {
+  const head = await fetchWithTimeout(url, { method: 'HEAD' });
+  if (head.status === 405 || head.status === 403) {
+    const get = await fetchWithTimeout(url, { method: 'GET' });
+    return get.status >= 200 && get.status < 400;
+  }
+  return head.status >= 200 && head.status < 400;
+}
+
+async function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    return await fetch(url, {
+      redirect: 'follow',
+      ...options,
+      headers: {
+        'Cache-Control': 'no-cache',
+        ...(options.headers || {}),
+      },
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function pollPending() {
+  let previewEnabled = true;
   try {
     cfEnv(); // throws early if unconfigured
   } catch (err) {
-    logger.warn(`[pages-poll] skipped: ${err.message}`);
-    return { skipped: true, reason: err.message };
+    previewEnabled = false;
+    logger.warn(`[pages-poll] preview checks skipped: ${err.message}`);
   }
 
+  const statuses = previewEnabled ? ['pr_open', 'build_failed', 'merged'] : ['merged'];
   const pending = await db('blog_posts')
-    .whereIn('astro_status', ['pr_open', 'build_failed'])
+    .whereIn('astro_status', statuses)
     .whereNotNull('astro_branch_name')
-    .select('id', 'astro_branch_name', 'astro_preview_url', 'astro_status');
+    .select('id', 'slug', 'target_sites', 'publish_status', 'astro_branch_name', 'astro_preview_url', 'astro_live_url', 'astro_status', 'astro_published_at');
 
   const results = [];
   for (const post of pending) {
     results.push({ id: post.id, branch: post.astro_branch_name, ...(await pollPost(post)) });
   }
-  logger.info(`[pages-poll] polled ${results.length} open builds`);
+  logger.info(`[pages-poll] polled ${results.length} blog publish states`);
   return { count: results.length, results };
 }
 
-module.exports = { pollPost, pollPending };
+module.exports = { pollPost, pollPending, pollLivePost, liveUrlResponds };

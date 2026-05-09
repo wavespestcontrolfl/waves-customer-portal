@@ -161,7 +161,7 @@ const ContentScheduler = {
             });
         }).orWhere(function () {
           this.where('publish_status', 'pending_review')
-            .whereIn('astro_status', ['merged', 'live']);
+            .where('astro_status', 'live');
         });
       })
       .whereNotNull('scheduled_publish_at')
@@ -180,7 +180,7 @@ const ContentScheduler = {
             publish_status: 'pending_review',
             updated_at: new Date(),
           });
-        } else if (['merged', 'live'].includes(blog.astro_status)) {
+        } else if (blog.astro_status === 'live') {
           const socialShared = await sharePublishedBlog(blog);
           if (!socialShared) {
             await db('blog_posts').where('id', blog.id).update({

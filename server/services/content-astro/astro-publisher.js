@@ -27,9 +27,38 @@ const fm = require('./frontmatter');
 const authorService = require('./author-service');
 const db = require('../../models/db');
 const logger = require('../logger');
+const { assertValidBlogFrontmatter } = require('./schema-validator');
 
 const ASTRO_BLOG_DIR = 'src/content/blog';
 const ASTRO_HERO_DIR = 'public/images/blog';
+const ASTRO_HERO_PUBLIC_BASE = '/images/blog';
+
+const POST_CATEGORIES = new Set(['pest-control', 'lawn-care', 'termite', 'mosquito', 'tree-shrub', 'seasonal']);
+const POST_TYPES = new Set(['diagnostic', 'seasonal', 'by-grass-type', 'protocol', 'cost', 'comparison', 'case-study', 'location', 'decision']);
+const SERVICE_AREAS = new Set(['Bradenton', 'Lakewood Ranch', 'Sarasota', 'Venice', 'North Port', 'Palmetto', 'Parrish', 'Port Charlotte']);
+
+const CATEGORY_ALIASES = {
+  pest: 'pest-control',
+  'pest control': 'pest-control',
+  lawn: 'lawn-care',
+  'lawn care': 'lawn-care',
+  termite: 'termite',
+  termites: 'termite',
+  mosquito: 'mosquito',
+  mosquitoes: 'mosquito',
+  rodent: 'pest-control',
+  rodents: 'pest-control',
+  commercial: 'pest-control',
+  'bed-bug': 'pest-control',
+  'bed bugs': 'pest-control',
+};
+
+const POST_TYPE_ALIASES = {
+  article: 'location',
+  checklist: 'location',
+  'how-to': 'protocol',
+  howto: 'protocol',
+};
 
 function shortId(n = 6) {
   return Math.random().toString(36).slice(2, 2 + n);
@@ -53,7 +82,7 @@ async function buildFrontmatter(post) {
   const reviewer = post.reviewer_slug ? await authorService.getAuthor(post.reviewer_slug) : null;
 
   const today = (post.publish_date ? new Date(post.publish_date) : new Date()).toISOString().slice(0, 10);
-  const hub = process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com';
+  const hub = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
   const canonical = `${hub}/${slug}/`;
 
   const heroRef = post.featured_image_url
@@ -63,20 +92,22 @@ async function buildFrontmatter(post) {
     : null;
   const technicallyReviewedDate = dateOnly(post.technically_reviewed_at);
   const factCheckedDate = dateOnly(post.fact_checked_at);
+  const serviceAreas = normalizeServiceAreas(post.service_areas_tag, post.city);
+  const targetSites = normalizeArray(post.target_sites);
+  const relatedServices = normalizeArray(post.related_services);
+  const domains = targetSites.length > 0 ? targetSites : undefined;
 
   const data = {
-    schemaVersion: 2,
     title: post.title,
     slug: `/${slug}/`,
     meta_description: post.meta_description || '',
     primary_keyword: post.keyword || undefined,
-    secondary_keywords: undefined,
-    category: post.category || undefined,
-    post_type: post.post_type || 'article',
-    service_areas_tag: Array.isArray(post.service_areas_tag) ? post.service_areas_tag
-      : (post.service_areas_tag ? safeJson(post.service_areas_tag, []) : undefined),
-    related_services: Array.isArray(post.related_services) ? post.related_services
-      : (post.related_services ? safeJson(post.related_services, []) : undefined),
+    secondary_keywords: normalizeArray(post.secondary_keywords),
+    category: normalizeCategory(post.category, post.tag),
+    post_type: normalizePostType(post.post_type),
+    service_areas_tag: serviceAreas.length > 0 ? serviceAreas : undefined,
+    related_services: relatedServices,
+    spoke_links: normalizeArray(post.spoke_links),
     // Per-post spoke targeting. Written as `domains` to match the existing
     // Astro convention — src/pages/[...slug].astro already has a
     // `domainMatches()` filter that reads this field. Absent/empty keeps
@@ -84,11 +115,7 @@ async function buildFrontmatter(post) {
     // never set target_sites keep their current behavior on the detail
     // route. The list route (src/pages/blog.astro) is being updated in a
     // matching commit in the astro repo to honor `domains` too.
-    domains: Array.isArray(post.target_sites) && post.target_sites.length > 0
-      ? post.target_sites
-      : (post.target_sites
-          ? (safeJson(post.target_sites, []).length > 0 ? safeJson(post.target_sites, []) : undefined)
-          : undefined),
+    domains,
     author: author ? {
       name: author.name,
       role: author.role,
@@ -117,6 +144,7 @@ async function buildFrontmatter(post) {
     canonical,
     schema_types: ['Article'],
     disclosure: { type: 'pricing-transparency' },
+    tracking: domains ? { domains } : undefined,
   };
 
   // Drop undefined keys so YAML output stays clean.
@@ -131,13 +159,44 @@ function safeJson(v, fallback) {
   return fallback;
 }
 
+function normalizeArray(v) {
+  const arr = safeJson(v, []);
+  return Array.isArray(arr) ? arr.filter((item) => item != null && String(item).trim() !== '') : [];
+}
+
+function normalizeCategory(category, tag) {
+  const raw = String(category || '').trim();
+  if (POST_CATEGORIES.has(raw)) return raw;
+  const mapped = CATEGORY_ALIASES[raw.toLowerCase()];
+  if (mapped) return mapped;
+
+  const tagText = String(tag || '').toLowerCase();
+  if (tagText.includes('lawn')) return 'lawn-care';
+  if (tagText.includes('termite') || tagText.includes('wdo')) return 'termite';
+  if (tagText.includes('mosquito')) return 'mosquito';
+  if (tagText.includes('tree') || tagText.includes('shrub')) return 'tree-shrub';
+  return raw ? undefined : undefined;
+}
+
+function normalizePostType(postType) {
+  const raw = String(postType || '').trim();
+  if (POST_TYPES.has(raw)) return raw;
+  const mapped = POST_TYPE_ALIASES[raw.toLowerCase()];
+  return mapped || 'location';
+}
+
+function normalizeServiceAreas(value, city) {
+  const areas = normalizeArray(value).filter((area) => SERVICE_AREAS.has(area));
+  if (areas.length > 0) return areas;
+  if (SERVICE_AREAS.has(city)) return [city];
+  return [];
+}
+
 function estimateReadingTime(text) {
   if (!text) return 3;
   const words = String(text).split(/\s+/).length;
   return Math.max(1, Math.round(words / 220));
 }
-
-const ASTRO_HERO_PUBLIC_BASE = '/images/blog';
 
 function dateOnly(value) {
   if (!value) return null;
@@ -202,29 +261,38 @@ async function publishAstro(postId) {
   const branch = `content/blog-${slug}-${shortId()}`;
 
   try {
-    await gh.createBranch(branch);
-
-    // 1. Hero image (optional) — only commit when the source isn't already in-repo.
+    // 1. Hero image (required by the Astro schema). Fetch before branch
+    // creation so validation/fetch failures do not leave orphan branches.
     let heroImageExt = imageExtFromSource(post.featured_image_url);
+    let heroImage = null;
     if (post.featured_image_url && !post.featured_image_url.startsWith('/images/blog/')) {
-      const image = await fetchImageBuffer(post.featured_image_url);
-      if (image?.buffer) {
-        heroImageExt = image.ext || heroImageExt;
-        await gh.putBinary({
-          path: `${ASTRO_HERO_DIR}/${slug}/hero.${heroImageExt}`,
-          buffer: image.buffer,
-          message: `chore(blog): add hero image for ${slug}`,
-          branch,
-        });
-      }
+      heroImage = await fetchImageBuffer(post.featured_image_url);
+      if (!heroImage?.buffer) throw new Error('featured image could not be fetched for Astro publish');
+      heroImageExt = heroImage.ext || heroImageExt;
     }
 
-    // 2. Markdown file
+    // 2. Markdown frontmatter/body validation
     const data = await buildFrontmatter({ ...post, slug, hero_image_ext: heroImageExt });
+    assertValidBlogFrontmatter(data);
     const body = (post.content || '').trim();
     const markdown = fm.stringify(data, body + '\n');
     const filePath = `${ASTRO_BLOG_DIR}/${slug}.md`;
 
+    await gh.createBranch(branch);
+
+    if (heroImage?.buffer) {
+      const heroPath = `${ASTRO_HERO_DIR}/${slug}/hero.${heroImageExt}`;
+      const existingHero = await gh.getFile(heroPath);
+      await gh.putBinary({
+        path: heroPath,
+        buffer: heroImage.buffer,
+        message: `chore(blog): add hero image for ${slug}`,
+        branch,
+        sha: existingHero ? existingHero.sha : undefined,
+      });
+    }
+
+    // 3. Markdown file
     // If the file already exists on main (republish), pass its SHA so the
     // branch commit is an update instead of a conflict.
     const existing = await gh.getFile(filePath);
@@ -236,7 +304,7 @@ async function publishAstro(postId) {
       sha: existing ? existing.sha : undefined,
     });
 
-    // 3. PR
+    // 4. PR
     const prBody = buildPrBody({ post, slug, branch, content: body });
     const pr = await gh.createPr({
       head: branch,
@@ -287,7 +355,7 @@ async function mergeAstro(postId) {
     const pr = await gh.getPr(post.astro_pr_number);
     if (pr.merged) {
       await applyMergeEffect(postId, post, pr.merged_at ? new Date(pr.merged_at) : new Date(), isUnpublish, null);
-      return { already_merged: true, pr_number: pr.number };
+      return { already_merged: true, pr_number: pr.number, live_url: isUnpublish ? null : liveUrlForPost(post) };
     }
     if (pr.state !== 'open') {
       throw new Error(`PR #${pr.number} is ${pr.state}, cannot merge`);
@@ -301,7 +369,7 @@ async function mergeAstro(postId) {
     await applyMergeEffect(postId, post, new Date(), isUnpublish, result?.sha);
 
     logger.info(`[astro-publisher] merged PR #${post.astro_pr_number} for post ${postId}${isUnpublish ? ' (unpublish)' : ''}`);
-    return { merged: true, pr_number: post.astro_pr_number, sha: result?.sha, unpublished: isUnpublish };
+    return { merged: true, pr_number: post.astro_pr_number, sha: result?.sha, unpublished: isUnpublish, live_url: isUnpublish ? null : liveUrlForPost(post) };
   } catch (err) {
     logger.error(`[astro-publisher] merge failed for ${postId}: ${err.message}`);
     await db('blog_posts').where({ id: postId }).update({
@@ -334,8 +402,8 @@ async function applyMergeEffect(postId, post, mergedAt, isUnpublish, sha) {
     astro_merged_at: mergedAt,
     astro_commit_sha: sha || post.astro_commit_sha,
     status: 'published',
-    astro_live_url: `${process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com'}/${post.slug || slugify(post.title)}/`,
-    astro_published_at: new Date(),
+    astro_live_url: liveUrlForPost(post),
+    astro_published_at: null,
     updated_at: new Date(),
   });
 }
@@ -433,6 +501,16 @@ function cloudflarePreviewUrl(branch) {
   return `https://${safeBranch}.${project}.pages.dev`;
 }
 
+function liveUrlForPost(post) {
+  const slug = post.slug || slugify(post.title);
+  const targets = normalizeArray(post.target_sites);
+  const firstTarget = targets[0] || 'wavespestcontrol.com';
+  const origin = firstTarget === 'wavespestcontrol.com'
+    ? (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com')
+    : `https://${firstTarget}`;
+  return `${origin.replace(/\/$/, '')}/${slug}/`;
+}
+
 function buildPrBody({ post, slug, branch, content }) {
   const wordCount = content ? content.split(/\s+/).filter(Boolean).length : 0;
   return [
@@ -457,4 +535,4 @@ function formatList(v) {
   return arr.length ? arr.join(', ') : '—';
 }
 
-module.exports = { publishAstro, mergeAstro, unpublishAstro, buildFrontmatter };
+module.exports = { publishAstro, mergeAstro, unpublishAstro, buildFrontmatter, liveUrlForPost };
