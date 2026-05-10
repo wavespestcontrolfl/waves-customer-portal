@@ -152,7 +152,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   const [syncingAmount, setSyncingAmount] = useState(false);
   const [amountSyncError, setAmountSyncError] = useState(false);
 
-  const syncAmountForMethod = useCallback(async (methodCategory, saveCardOverride) => {
+  const syncAmountForMethod = useCallback(async (methodCategory, saveCardOverride, options = {}) => {
     if (!paymentIntentId || !token) return;
     setSyncingAmount(true);
     setAmountSyncError(false);
@@ -169,6 +169,12 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         throw new Error(data.error || 'Could not update payment total');
+      }
+      if (!options.skipFetchUpdates && elementsRef.current?.fetchUpdates) {
+        const { error: fetchError } = await elementsRef.current.fetchUpdates();
+        if (fetchError) {
+          throw new Error(fetchError.message || 'Could not refresh the payment form');
+        }
       }
       setDisplayedBase(data.base);
       setDisplayedSurcharge(data.surcharge);
@@ -267,7 +273,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           if (cancelled) return;
           // Surcharge wallets = card-family × 1.0399. Pre-apply now so the
           // wallet sheet shows the right total instead of the base amount.
-          try { await syncAmountForMethod('card', saveCard); } catch { /* non-fatal */ }
+          try { await syncAmountForMethod('card', saveCard, { skipFetchUpdates: true }); } catch { /* non-fatal */ }
         });
 
         express.on('confirm', async () => {
@@ -398,6 +404,9 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         <SaveCardConsent
           checked={!!saveCard}
           onChange={(v) => onSaveCardChange?.(v)}
+          headline={selectedMethod === 'us_bank_account'
+            ? 'Save this bank account on file with Waves Pest Control'
+            : 'Save this payment method on file with Waves Pest Control'}
         />
       </div>
 
@@ -497,16 +506,16 @@ export default function PayPageV2() {
     }
   }, [navigate, token]);
 
-  // Already paid → redirect to receipt page (no ?fresh=1 — this is a return visit)
+  // Already paid / ACH pending → redirect to receipt page (no ?fresh=1 — this is a return visit)
   useEffect(() => {
-    if (data?.invoice?.status === 'paid') {
+    if (data?.invoice?.status === 'paid' || data?.invoice?.status === 'processing') {
       navigate(`/receipt/${token}`, { replace: true });
     }
   }, [data, navigate, token]);
 
   // Create Stripe PaymentIntent once invoice data loads
   useEffect(() => {
-    if (!data || data.invoice.status === 'paid') return;
+    if (!data || data.invoice.status === 'paid' || data.invoice.status === 'processing') return;
     if (!data.stripe?.available || !data.stripe?.publishableKey) {
       setPaymentError('Payment processing is temporarily unavailable. Please call (941) 297-5749.');
       return;

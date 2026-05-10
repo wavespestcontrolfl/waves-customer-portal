@@ -16,7 +16,7 @@ export default function SaveCardConsent({
   checked,
   onChange,
   locked = false,
-  headline = 'Save this card on file with Waves Pest Control',
+  headline = 'Save this payment method on file with Waves Pest Control',
   style,
 }) {
   const isChecked = locked ? true : !!checked;

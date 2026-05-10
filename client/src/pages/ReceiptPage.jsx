@@ -156,12 +156,16 @@ export default function ReceiptPage() {
   const { invoice, service, customer, payment } = data;
   const visibleLineItems = (invoice.lineItems || []).filter(item => !isDiscountLineItem(item));
   const paid = invoice.status === 'paid';
+  const processing = invoice.status === 'processing' || payment?.state === 'processing';
   const paidAt = invoice.paidAt || payment?.paymentDate;
+  const invoiceMethod = String(invoice.paymentMethod || '').toLowerCase();
   const methodDisplay = payment?.cardBrand && payment?.cardLastFour
     ? `${payment.cardBrand.toUpperCase()} ···· ${payment.cardLastFour}`
-    : (invoice.cardBrand && invoice.cardLastFour
-      ? `${invoice.cardBrand.toUpperCase()} ···· ${invoice.cardLastFour}`
-      : null);
+    : (invoiceMethod === 'us_bank_account' && invoice.cardLastFour
+      ? `Bank account ···· ${invoice.cardLastFour}`
+      : (invoice.cardBrand && invoice.cardLastFour
+        ? `${invoice.cardBrand.toUpperCase()} ···· ${invoice.cardLastFour}`
+        : null));
 
   return (
     <WavesShell variant="customer" topBar="solid">
@@ -212,10 +216,12 @@ export default function ReceiptPage() {
               color: 'var(--text)',
               lineHeight: 1.2,
             }}>
-              Payment received
+              {processing ? 'Bank payment submitted' : 'Payment received'}
             </div>
             <div style={{ fontSize: 14, color: 'var(--text-muted)' }}>
-              Thanks, {customer.firstName || 'there'} — a receipt is on its way to you.
+              {processing
+                ? `Thanks, ${customer.firstName || 'there'} — your bank payment is processing.`
+                : `Thanks, ${customer.firstName || 'there'} — a receipt is on its way to you.`}
             </div>
           </div>
         )}
@@ -260,7 +266,7 @@ export default function ReceiptPage() {
         <BrandCard className="waves-print-card" padding={32} style={{ marginBottom: 20 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
             <div style={{ fontSize: 12, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase' }}>
-              Receipt · Invoice {invoice.invoiceNumber}
+              {processing ? 'Payment pending' : 'Receipt'} · Invoice {invoice.invoiceNumber}
             </div>
             {paid && !refundState && (
               <span style={{
@@ -307,11 +313,31 @@ export default function ReceiptPage() {
                 Partial refund
               </span>
             )}
+            {processing && (
+              <span style={{
+                display: 'inline-block',
+                padding: '4px 10px',
+                borderRadius: 999,
+                background: 'rgba(0,156,222,0.1)',
+                color: '#065A8C',
+                fontSize: 12,
+                fontWeight: 600,
+                letterSpacing: '0.08em',
+                textTransform: 'uppercase',
+              }}>
+                Processing
+              </span>
+            )}
           </div>
 
           <SerifHeading style={{ marginBottom: 4 }}>
-            {paid ? 'Payment received' : 'Receipt'}
+            {processing ? 'Bank payment submitted' : paid ? 'Payment received' : 'Receipt'}
           </SerifHeading>
+          {processing && (
+            <p style={{ margin: '0 0 18px', fontSize: 15, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+              Bank payments usually take 3–5 business days to clear. We will send the final receipt after the payment settles.
+            </p>
+          )}
           <p style={{ margin: '0 0 24px', fontSize: 16, color: 'var(--text-muted)', lineHeight: 1.5 }}>
             {invoice.title || service.type || 'Service'}
             {service.date ? ` · ${fmtDate(service.date)}` : ''}
@@ -346,7 +372,7 @@ export default function ReceiptPage() {
               </div>
               {paidAt && (
                 <div>
-                  <span style={{ color: 'var(--text-muted)' }}>Paid: </span>
+                  <span style={{ color: 'var(--text-muted)' }}>{processing ? 'Submitted: ' : 'Paid: '}</span>
                   {fmtDate(paidAt)}
                 </div>
               )}
@@ -449,7 +475,7 @@ export default function ReceiptPage() {
               color: 'var(--text)',
             }}>
               <span style={{ fontFamily: FONTS.body, letterSpacing: '0.06em', textTransform: 'uppercase', fontSize: 14 }}>
-                Total charged
+                {processing ? 'Total submitted' : 'Total charged'}
               </span>
               <span>{fmtCurrency(payment?.amount || invoice.total)}</span>
             </div>
@@ -494,12 +520,18 @@ export default function ReceiptPage() {
           )}
 
           <div className="waves-no-print" style={{ marginTop: 24, display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 14 }}>
-            <a
-              href={`${API_BASE}/receipt/${token}/pdf`}
-              style={{ color: 'var(--brand)', textDecoration: 'underline', textUnderlineOffset: 3 }}
-            >
-              Download receipt PDF
-            </a>
+            {paid ? (
+              <a
+                href={`${API_BASE}/receipt/${token}/pdf`}
+                style={{ color: 'var(--brand)', textDecoration: 'underline', textUnderlineOffset: 3 }}
+              >
+                Download receipt PDF
+              </a>
+            ) : processing ? (
+              <span style={{ color: 'var(--text-muted)' }}>
+                Receipt PDF available after bank payment clears
+              </span>
+            ) : null}
             <button
               type="button"
               onClick={() => window.print()}

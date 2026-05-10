@@ -96,7 +96,7 @@ function anchorTo10amNY(anchorDate, daysAfter, hour) {
 async function scheduleForInvoice(invoiceId) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return null;
-  if (['paid', 'void', 'draft'].includes(invoice.status)) return null;
+  if (['paid', 'void', 'draft', 'processing'].includes(invoice.status)) return null;
 
   const customer = await db('customers').where({ id: invoice.customer_id }).first();
   const onAutopay = await customerOnAutopay(customer);
@@ -142,7 +142,7 @@ async function runPending() {
     .join('invoices as i', 's.invoice_id', 'i.id')
     .where('s.status', 'active')
     .where('s.next_touch_at', '<=', now)
-    .whereNotIn('i.status', ['paid', 'void'])
+    .whereNotIn('i.status', ['paid', 'void', 'processing'])
     .select(
       's.*',
       'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.status as invoice_status',

@@ -34,6 +34,10 @@ const {
   classifyExistingWebhookEvent,
   STALE_CLAIM_WINDOW_MS,
 } = require('../routes/stripe-webhook-helpers');
+const {
+  invoicePaymentStatusForIntent,
+  nextInvoiceStatusAfterFailedPayment,
+} = require('../services/stripe-invoice-state');
 
 describe('stripe computeChargeAmount', () => {
   test('ACH (us_bank_account) pays the quoted amount with no surcharge', () => {
@@ -248,5 +252,59 @@ describe('invoice assertInvoiceVoidable', () => {
     for (const s of ['draft', 'sent', 'viewed', 'overdue', 'void']) {
       expect(() => assertInvoiceVoidable(s)).not.toThrow();
     }
+  });
+});
+
+describe('stripe invoice ACH state helpers', () => {
+  test('ACH processing PaymentIntent maps to processing, not an error', () => {
+    expect(invoicePaymentStatusForIntent({
+      status: 'processing',
+      payment_method_types: ['us_bank_account'],
+      metadata: { selected_method_category: 'us_bank_account' },
+    })).toBe('processing');
+  });
+
+  test('card processing PaymentIntent is not accepted as settled', () => {
+    expect(() => invoicePaymentStatusForIntent({
+      status: 'processing',
+      payment_method_types: ['card'],
+      metadata: { selected_method_category: 'card' },
+    })).toThrow(/expected "succeeded"/);
+  });
+
+  test('mixed card/ACH PaymentIntent selected as card is not treated as ACH', () => {
+    expect(() => invoicePaymentStatusForIntent({
+      status: 'processing',
+      payment_method_types: ['card', 'us_bank_account'],
+      metadata: { selected_method_category: 'card' },
+    }, 'card')).toThrow(/expected "succeeded"/);
+  });
+
+  test('succeeded PaymentIntent maps to paid regardless of method', () => {
+    expect(invoicePaymentStatusForIntent({
+      status: 'succeeded',
+      payment_method_types: ['card'],
+    })).toBe('paid');
+  });
+
+  test('failed ACH resets viewed invoice back to viewed', () => {
+    expect(nextInvoiceStatusAfterFailedPayment({
+      viewed_at: '2026-05-10T12:00:00Z',
+      due_date: '2026-05-20',
+    }, new Date('2026-05-10T12:00:00Z'))).toBe('viewed');
+  });
+
+  test('failed overdue ACH resets invoice to overdue', () => {
+    expect(nextInvoiceStatusAfterFailedPayment({
+      viewed_at: '2026-05-01T12:00:00Z',
+      due_date: '2026-05-01',
+    }, new Date('2026-05-10T12:00:00Z'))).toBe('overdue');
+  });
+
+  test('failed ACH compares due date against current ET day', () => {
+    expect(nextInvoiceStatusAfterFailedPayment({
+      viewed_at: '2026-05-10T12:00:00Z',
+      due_date: '2026-05-10',
+    }, new Date('2026-05-11T03:30:00Z'))).toBe('viewed');
   });
 });
