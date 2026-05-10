@@ -58,6 +58,7 @@ router.get('/:token', async (req, res, next) => {
         total: parseFloat(data.total),
         dueDate: data.due_date,
         paidAt: data.paid_at,
+        paymentMethod: data.payment_method,
         cardBrand: data.card_brand,
         cardLastFour: data.card_last_four,
         stripeReceiptUrl: data.receipt_url,

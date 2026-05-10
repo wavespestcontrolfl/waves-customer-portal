@@ -31,6 +31,7 @@ const {
   isCardMethodType,
   computeChargeAmount,
 } = require('./stripe-pricing');
+const { invoicePaymentStatusForIntent } = require('./stripe-invoice-state');
 
 const StripeService = {
   // =========================================================================
@@ -513,6 +514,7 @@ const StripeService = {
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
     if (invoice.status === 'paid') throw new Error('Invoice already paid');
+    if (invoice.status === 'processing') throw new Error('Bank payment is already processing');
 
     const card = await db('payment_methods').where({ id: paymentMethodId }).first();
     if (!card) throw new Error('Payment method not found');
@@ -525,95 +527,147 @@ const StripeService = {
 
     const stripeCustomerId = await this.ensureStripeCustomer(invoice.customer_id);
 
-    const { base, surcharge, total } = computeChargeAmount(parseFloat(invoice.total), card.method_type);
-    const amountCents = Math.round(total * 100);
-
-    let paymentIntent;
-    try {
-      // Idempotency-Key bound to invoice + amount + pm + 60-second
-      // bucket. The bucket dedupes a double-click within the same
-      // minute (we'd reuse the existing PI instead of charging twice)
-      // but lets a deliberate admin retry a minute later get a fresh
-      // attempt — Stripe replays cached responses for ~24 h on reused
-      // keys, including failures, so a deterministic key would freeze
-      // the admin "Charge card on file" flow on a transient decline
-      // until the cache TTL expired (Codex P2 #490). Amount + pm
-      // components mean re-totaling the invoice or switching cards
-      // also yields a fresh key as expected.
-      const minuteBucket = Math.floor(Date.now() / 60_000);
-      const idempotencyKey = `inv_card_on_file_${invoiceId}_${amountCents}_${card.id}_${minuteBucket}`;
-      paymentIntent = await stripe.paymentIntents.create({
-        amount: amountCents,
-        currency: 'usd',
-        customer: stripeCustomerId,
-        payment_method: card.stripe_payment_method_id,
-        off_session: true,
-        confirm: true,
-        description: `Invoice ${invoice.invoice_number} — card on file`,
-        metadata: {
-          waves_invoice_id: invoiceId,
-          invoice_number: invoice.invoice_number,
-          waves_customer_id: invoice.customer_id,
-          base_amount: String(base),
-          card_surcharge: String(surcharge),
-          source: 'admin_card_on_file',
-        },
-      }, { idempotencyKey });
-    } catch (err) {
-      logger.error(`[stripe] chargeInvoiceWithSavedCard failed for invoice ${invoice.invoice_number}: ${err.message}`);
-      // Record failure for audit
-      try {
-        await db('payments').insert({
-          customer_id: invoice.customer_id,
-          payment_method_id: card.id,
-          processor: 'stripe',
-          payment_date: etDateString(),
-          amount: total,
-          status: 'failed',
-          description: `Invoice ${invoice.invoice_number} — card on file (FAILED)`,
-          failure_reason: err.message,
-        });
-      } catch { /* non-fatal */ }
-      throw new Error(err.message || 'Card charge failed');
-    }
-
     // Link the PI to the invoice + write the payments-table ledger row.
     // BOTH writes happen after Stripe has already accepted the charge,
     // so a DB failure here leaves a Stripe-collected payment with no
-    // local record (orphan PI). Wrap in try/catch + record into
-    // stripe_orphan_charges + throw STRIPE_CHARGED_DB_FAILED so the
-    // caller (admin Card-on-File flow) sees a clear "charged but
-    // unrecorded" error instead of a generic 500.
-    const status = paymentIntent.status === 'succeeded' ? 'paid' : 'processing';
+    // local record (orphan PI). Keep the invoice row locked through the
+    // Stripe call so ACH processing cannot race in and make this a second
+    // collection path for the same invoice.
+    let paymentIntent;
+    let status;
     let paymentRecord;
+    let base;
+    let surcharge;
+    let total;
     try {
-      await db('invoices')
-        .where({ id: invoiceId })
-        .update({
+      await db.transaction(async (trx) => {
+        const lockedInvoice = await trx('invoices')
+          .where({ id: invoiceId })
+          .forUpdate()
+          .first();
+        if (!lockedInvoice) throw new Error('Invoice not found');
+        if (lockedInvoice.status === 'paid') throw new Error('Invoice already paid');
+        if (lockedInvoice.status === 'processing') throw new Error('Bank payment is already processing');
+        if (lockedInvoice.stripe_payment_intent_id) {
+          const activePayment = await trx('payments')
+            .where({ stripe_payment_intent_id: lockedInvoice.stripe_payment_intent_id })
+            .first();
+          const terminalStatuses = ['failed', 'canceled', 'cancelled', 'refunded'];
+          if (activePayment && !terminalStatuses.includes(activePayment.status)) {
+            throw new Error('Invoice has a different active payment');
+          }
+          if (!activePayment) {
+            const activeIntent = await stripe.paymentIntents.retrieve(lockedInvoice.stripe_payment_intent_id);
+            const cancellableStatuses = ['requires_payment_method', 'requires_confirmation', 'canceled'];
+            if (!cancellableStatuses.includes(activeIntent.status)) {
+              throw new Error('Invoice has a different active payment');
+            }
+            if (activeIntent.status !== 'canceled') {
+              await stripe.paymentIntents.cancel(activeIntent.id);
+            }
+          }
+        }
+
+        const charge = computeChargeAmount(parseFloat(lockedInvoice.total), card.method_type);
+        base = charge.base;
+        surcharge = charge.surcharge;
+        total = charge.total;
+        const amountCents = Math.round(total * 100);
+
+        // Idempotency-Key bound to invoice + amount + pm + 60-second
+        // bucket. The bucket dedupes a double-click within the same
+        // minute (we'd reuse the existing PI instead of charging twice)
+        // but lets a deliberate admin retry a minute later get a fresh
+        // attempt — Stripe replays cached responses for ~24 h on reused
+        // keys, including failures, so a deterministic key would freeze
+        // the admin "Charge card on file" flow on a transient decline
+        // until the cache TTL expired (Codex P2 #490). Amount + pm
+        // components mean re-totaling the invoice or switching cards
+        // also yields a fresh key as expected.
+        const minuteBucket = Math.floor(Date.now() / 60_000);
+        const idempotencyKey = `inv_card_on_file_${invoiceId}_${amountCents}_${card.id}_${minuteBucket}`;
+        paymentIntent = await stripe.paymentIntents.create({
+          amount: amountCents,
+          currency: 'usd',
+          customer: stripeCustomerId,
+          payment_method: card.stripe_payment_method_id,
+          off_session: true,
+          confirm: true,
+          description: `Invoice ${invoice.invoice_number} — card on file`,
+          metadata: {
+            waves_invoice_id: invoiceId,
+            invoice_number: invoice.invoice_number,
+            waves_customer_id: invoice.customer_id,
+            base_amount: String(base),
+            card_surcharge: String(surcharge),
+            source: 'admin_card_on_file',
+          },
+        }, { idempotencyKey });
+
+        status = paymentIntent.status === 'succeeded' ? 'paid' : 'processing';
+
+        const invoiceRowsUpdated = await trx('invoices')
+          .where({ id: invoiceId })
+          .whereNotIn('status', ['paid', 'processing'])
+          .update({
+            status,
+            paid_at: status === 'paid' ? new Date().toISOString() : null,
+            processor: 'stripe',
+            stripe_payment_intent_id: paymentIntent.id,
+            stripe_charge_id: paymentIntent.latest_charge || null,
+            payment_method: 'card',
+            card_brand: card.card_brand || null,
+            card_last_four: card.last_four || null,
+            total,
+          });
+        if (!invoiceRowsUpdated) throw new Error('Invoice is no longer collectible');
+
+        [paymentRecord] = await trx('payments').insert({
+          customer_id: invoice.customer_id,
+          payment_method_id: card.id,
           processor: 'stripe',
           stripe_payment_intent_id: paymentIntent.id,
-        });
+          stripe_charge_id: paymentIntent.latest_charge || null,
+          payment_date: etDateString(),
+          amount: total,
+          status,
+          description: surcharge > 0
+            ? `Invoice ${invoice.invoice_number} — card on file (includes $${surcharge.toFixed(2)} fee)`
+            : `Invoice ${invoice.invoice_number} — card on file`,
+          metadata: JSON.stringify({
+            base_amount: base,
+            card_surcharge: surcharge,
+            source: 'admin_card_on_file',
+          }),
+        }).returning('*');
+      });
+    } catch (err) {
+      if (!paymentIntent) {
+        if ([
+          'Invoice not found',
+          'Invoice already paid',
+          'Bank payment is already processing',
+          'Invoice has a different active payment',
+        ].includes(err.message)) {
+          throw err;
+        }
+        logger.error(`[stripe] chargeInvoiceWithSavedCard failed for invoice ${invoice.invoice_number}: ${err.message}`);
+        try {
+          await db('payments').insert({
+            customer_id: invoice.customer_id,
+            payment_method_id: card.id,
+            processor: 'stripe',
+            payment_date: etDateString(),
+            amount: total,
+            status: 'failed',
+            description: `Invoice ${invoice.invoice_number} — card on file (FAILED)`,
+            failure_reason: err.message,
+          });
+        } catch { /* non-fatal */ }
+        throw new Error(err.message || 'Card charge failed');
+      }
 
-      [paymentRecord] = await db('payments').insert({
-        customer_id: invoice.customer_id,
-        payment_method_id: card.id,
-        processor: 'stripe',
-        stripe_payment_intent_id: paymentIntent.id,
-        stripe_charge_id: paymentIntent.latest_charge || null,
-        payment_date: etDateString(),
-        amount: total,
-        status,
-        description: surcharge > 0
-          ? `Invoice ${invoice.invoice_number} — card on file (includes $${surcharge.toFixed(2)} fee)`
-          : `Invoice ${invoice.invoice_number} — card on file`,
-        metadata: JSON.stringify({
-          base_amount: base,
-          card_surcharge: surcharge,
-          source: 'admin_card_on_file',
-        }),
-      }).returning('*');
-    } catch (dbErr) {
-      logger.error(`[stripe] CRITICAL: chargeInvoiceWithSavedCard succeeded at Stripe (PI ${paymentIntent.id}) but DB write failed: ${dbErr.message}`);
+      logger.error(`[stripe] CRITICAL: chargeInvoiceWithSavedCard succeeded at Stripe (PI ${paymentIntent.id}) but DB write failed: ${err.message}`);
       try {
         await db('stripe_orphan_charges').insert({
           stripe_payment_intent_id: paymentIntent.id,
@@ -622,19 +676,39 @@ const StripeService = {
           invoice_id: invoiceId,
           amount: total,
           source: 'invoice_card_on_file',
-          original_db_error: String(dbErr.message).slice(0, 1000),
+          original_db_error: String(err.message).slice(0, 1000),
         });
       } catch (orphanErr) {
         logger.error(`[stripe] DOUBLE FAILURE: orphan-charges insert also failed for PI ${paymentIntent.id}: ${orphanErr.message}`);
       }
-      const err = new Error(`Stripe charge ${paymentIntent.id} succeeded but DB write failed for invoice ${invoice.invoice_number}`);
-      err.code = 'STRIPE_CHARGED_DB_FAILED';
-      err.stripePaymentIntentId = paymentIntent.id;
-      err.amount = total;
-      throw err;
+      const chargedErr = new Error(`Stripe charge ${paymentIntent.id} succeeded but DB write failed for invoice ${invoice.invoice_number}`);
+      chargedErr.code = 'STRIPE_CHARGED_DB_FAILED';
+      chargedErr.stripePaymentIntentId = paymentIntent.id;
+      chargedErr.amount = total;
+      throw chargedErr;
     }
 
     logger.info(`[stripe] Card-on-file charge succeeded: $${total} for invoice ${invoice.invoice_number}, PI ${paymentIntent.id}`);
+    if (status === 'paid') {
+      try {
+        await require('./invoice-followups').stopOnPayment(invoiceId);
+      } catch (err) {
+        logger.error(`[invoice-followups] stopOnPayment failed for card-on-file invoice ${invoiceId}: ${err.message}`);
+      }
+
+      setImmediate(async () => {
+        try {
+          const InvoiceService = require('./invoice');
+          const result = await InvoiceService.sendReceipt(invoiceId);
+          if (result?.sent === false && result.reason !== 'already-sent') {
+            logger.warn(`[stripe] Card-on-file receipt not sent for invoice ${invoice.invoice_number}: ${result.reason}`);
+          }
+        } catch (err) {
+          logger.error(`[stripe] Card-on-file receipt failed for invoice ${invoice.invoice_number}: ${err.message}`);
+        }
+      });
+    }
+
     return {
       paymentId: paymentRecord.id,
       paymentIntentId: paymentIntent.id,
@@ -750,54 +824,91 @@ const StripeService = {
 
     const saveCard = !!opts.saveCard;
     const cardOnly = !!opts.cardOnly;
-    const baseAmount = parseFloat(invoice.total);
-    // The pay page defaults to card/wallet, so mint the first PI with the
-    // card-family surcharge already applied. ACH selection still calls
-    // /update-amount and drops the PI back to the base invoice total.
-    const { base: cardBase, surcharge: cardSurcharge, total: cardTotal } = cardOnly
-      ? computeChargeAmount(baseAmount, 'card')
-      : computeChargeAmount(baseAmount, 'card');
-    const amountCents = Math.round(cardTotal * 100);
+    const stripeCustomerId = saveCard && invoice.customer_id
+      ? await this.ensureStripeCustomer(invoice.customer_id)
+      : null;
 
-    const piParams = {
-      amount: amountCents,
-      currency: 'usd',
-      description: `Invoice ${invoice.invoice_number} — ${invoice.title || 'Waves Pest Control'}`,
-      metadata: {
-        waves_invoice_id: invoiceId,
-        invoice_number: invoice.invoice_number,
-        waves_customer_id: invoice.customer_id,
-        base_amount: String(cardBase),
-        card_surcharge: String(cardSurcharge),
-        save_card_opt_in: saveCard ? 'true' : 'false',
-        selected_method_category: 'card',
-      },
-    };
-    // Keep invoice pay-page PIs on explicit method types. The
-    // /update-amount route intentionally re-locks the same PI to either
-    // card or ACH after the customer chooses a method, and Stripe rejects
-    // payment_method_types updates on PIs created with automatic methods.
-    piParams.payment_method_types = cardOnly ? ['card'] : ['card', 'us_bank_account'];
-
-    if (saveCard && invoice.customer_id) {
-      piParams.customer = await this.ensureStripeCustomer(invoice.customer_id);
-      piParams.setup_future_usage = 'off_session';
-    }
-
+    let paymentIntent;
+    let baseAmount;
+    let cardSurcharge;
+    let cardTotal;
     try {
-      // Idempotency key includes saveCard + method mode so toggling either
-      // regenerates a clean PI instead of hitting the cached one. The
-      // "explicit" suffix also avoids replaying older automatic-method PIs.
       const methodMode = cardOnly ? 'cardonly' : 'explicit_card_ach';
-      const idempotencyKey = `invoice_pi_${invoiceId}_${amountCents}_${saveCard ? 'save' : 'nosave'}_${methodMode}`;
-      const paymentIntent = await stripe.paymentIntents.create(piParams, { idempotencyKey });
+      await db.transaction(async (trx) => {
+        const lockedInvoice = await trx('invoices')
+          .where({ id: invoiceId })
+          .forUpdate()
+          .first();
+        if (!lockedInvoice) throw new Error('Invoice not found');
+        if (lockedInvoice.status === 'paid') throw new Error('Invoice already paid');
+        if (lockedInvoice.status === 'processing') throw new Error('Bank payment is already processing');
 
-      await db('invoices')
-        .where({ id: invoiceId })
-        .update({
+        if (lockedInvoice.stripe_payment_intent_id) {
+          const activePayment = await trx('payments')
+            .where({ stripe_payment_intent_id: lockedInvoice.stripe_payment_intent_id })
+            .first();
+          const terminalStatuses = ['failed', 'canceled', 'cancelled', 'refunded'];
+          if (activePayment && !terminalStatuses.includes(activePayment.status)) {
+            throw new Error('Invoice has a different active payment');
+          }
+          if (!activePayment) {
+            const activeIntent = await stripe.paymentIntents.retrieve(lockedInvoice.stripe_payment_intent_id);
+            const cancellableStatuses = ['requires_payment_method', 'requires_confirmation', 'canceled'];
+            if (!cancellableStatuses.includes(activeIntent.status)) {
+              throw new Error('Invoice has a different active payment');
+            }
+            if (activeIntent.status !== 'canceled') {
+              await stripe.paymentIntents.cancel(activeIntent.id);
+            }
+          }
+        }
+
+        baseAmount = parseFloat(lockedInvoice.total);
+        // The pay page defaults to card/wallet, so mint the first PI with the
+        // card-family surcharge already applied. ACH selection still calls
+        // /update-amount and drops the PI back to the base invoice total.
+        const cardCharge = computeChargeAmount(baseAmount, 'card');
+        const cardBase = cardCharge.base;
+        cardSurcharge = cardCharge.surcharge;
+        cardTotal = cardCharge.total;
+        const amountCents = Math.round(cardTotal * 100);
+
+        const piParams = {
+          amount: amountCents,
+          currency: 'usd',
+          description: `Invoice ${lockedInvoice.invoice_number} — ${lockedInvoice.title || 'Waves Pest Control'}`,
+          metadata: {
+            waves_invoice_id: invoiceId,
+            invoice_number: lockedInvoice.invoice_number,
+            waves_customer_id: lockedInvoice.customer_id,
+            base_amount: String(cardBase),
+            card_surcharge: String(cardSurcharge),
+            save_card_opt_in: saveCard ? 'true' : 'false',
+            selected_method_category: 'card',
+          },
+          payment_method_types: cardOnly ? ['card'] : ['card', 'us_bank_account'],
+        };
+
+        if (stripeCustomerId) {
+          piParams.customer = stripeCustomerId;
+          piParams.setup_future_usage = 'off_session';
+        }
+
+        // Idempotency key includes saveCard + method mode so toggling either
+        // regenerates a clean PI instead of hitting the cached one. The
+        // "explicit" suffix also avoids replaying older automatic-method PIs.
+        const idempotencyKey = `invoice_pi_${invoiceId}_${amountCents}_${saveCard ? 'save' : 'nosave'}_${methodMode}`;
+        paymentIntent = await stripe.paymentIntents.create(piParams, { idempotencyKey });
+
+        const invoiceUpdated = await trx('invoices')
+          .where({ id: invoiceId })
+          .whereNotIn('status', ['paid', 'processing'])
+          .update({
           processor: 'stripe',
           stripe_payment_intent_id: paymentIntent.id,
         });
+        if (!invoiceUpdated) throw new Error('Invoice is no longer collectible');
+      });
 
       logger.info(`[stripe] Invoice PaymentIntent created: ${paymentIntent.id} for invoice ${invoice.invoice_number} (base=$${baseAmount})`);
       return {
@@ -808,7 +919,17 @@ const StripeService = {
         cardSurchargeRate: CARD_SURCHARGE_RATE,
       };
     } catch (err) {
-      logger.error(`[stripe] Invoice PaymentIntent failed for invoice ${invoiceId} (amount=${amountCents}): ${err.type || 'Error'} — ${err.message}${err.code ? ` [code=${err.code}]` : ''}${err.param ? ` [param=${err.param}]` : ''}`);
+      if (paymentIntent?.id) {
+        try {
+          const currentInvoice = await db('invoices').where({ id: invoiceId }).first();
+          if (String(currentInvoice?.stripe_payment_intent_id || '') !== String(paymentIntent.id)) {
+            await stripe.paymentIntents.cancel(paymentIntent.id);
+          }
+        } catch (cancelErr) {
+          logger.warn(`[stripe] Could not cancel unlinked invoice PI ${paymentIntent.id}: ${cancelErr.message}`);
+        }
+      }
+      logger.error(`[stripe] Invoice PaymentIntent failed for invoice ${invoiceId}: ${err.type || 'Error'} — ${err.message}${err.code ? ` [code=${err.code}]` : ''}${err.param ? ` [param=${err.param}]` : ''}`);
       throw new Error(`Failed to create payment intent for invoice: ${err.message}`);
     }
   },
@@ -906,15 +1027,26 @@ const StripeService = {
 
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
-    if (invoice.status === 'paid') throw new Error('Invoice already paid');
+    if (invoice.status === 'paid') {
+      const existingPayment = await db('payments')
+        .where({ stripe_payment_intent_id: paymentIntentId })
+        .orderBy('created_at', 'desc')
+        .first();
+      if (existingPayment) return existingPayment;
+      throw new Error('Invoice already paid');
+    }
+    if (invoice.status === 'processing'
+      && String(invoice.stripe_payment_intent_id || '') !== String(paymentIntentId)) {
+      throw new Error('Bank payment is already processing');
+    }
+    if (invoice.stripe_payment_intent_id
+      && String(invoice.stripe_payment_intent_id) !== String(paymentIntentId)) {
+      throw new Error('Invoice has a different active payment');
+    }
 
     try {
       // Retrieve the PI to verify it succeeded
       const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
-
-      if (pi.status !== 'succeeded') {
-        throw new Error(`PaymentIntent status is "${pi.status}", expected "succeeded"`);
-      }
 
       // Bind PI ↔ invoice via the metadata that createInvoicePaymentIntent
       // wrote at mint time. Without this check, a caller who knows another
@@ -968,6 +1100,33 @@ const StripeService = {
         }
       }
 
+      // ACH PaymentIntents commonly move to `processing` after the customer
+      // completes bank-account confirmation. There is no charge receipt yet,
+      // but the PaymentMethod can still give us tender type + last four.
+      if (!pmdType && pi.payment_method) {
+        try {
+          const pm = typeof pi.payment_method === 'string'
+            ? await stripe.paymentMethods.retrieve(pi.payment_method)
+            : pi.payment_method;
+          pmdType = pm?.type || null;
+          if (pm?.card) {
+            resolvedPaymentMethod = 'card';
+            cardBrand = pm.card.brand?.toUpperCase();
+            cardLastFour = pm.card.last4;
+          } else if (pm?.us_bank_account) {
+            resolvedPaymentMethod = 'us_bank_account';
+            bankLastFour = pm.us_bank_account.last4 || null;
+          } else if (pm?.type) {
+            resolvedPaymentMethod = pm.type;
+          }
+        } catch {
+          // Non-critical — status classification can still use PI metadata.
+        }
+      }
+
+      const paymentStatus = invoicePaymentStatusForIntent(pi, pmdType || resolvedPaymentMethod);
+      const invoiceStatus = paymentStatus === 'paid' ? 'paid' : 'processing';
+
       // Defense-in-depth surcharge-bypass detection. The
       // payment_method_types lock at /update-amount time is the primary
       // defense — Stripe rejects a confirm with the wrong method family.
@@ -976,7 +1135,7 @@ const StripeService = {
       // a flow we haven't anticipated), the charge is already settled
       // and we can't unwind it cheaply. Log critical + create a health
       // alert so an operator can decide whether to follow up.
-      if (pmdType) {
+      if (paymentStatus === 'paid' && pmdType) {
         const expected = computeChargeAmount(parseFloat(invoice.total), pmdType);
         const expectedCents = Math.round(expected.total * 100);
         const actualCents = Number(pi.amount) || 0;
@@ -1016,33 +1175,91 @@ const StripeService = {
 
       // Update invoice + record payment atomically
       const paymentRecord = await db.transaction(async trx => {
-        await trx('invoices')
-          .where({ id: invoiceId })
-          .update({
-            status: 'paid',
-            paid_at: new Date().toISOString(),
-            processor: 'stripe',
-            stripe_payment_intent_id: paymentIntentId,
-            stripe_charge_id: typeof charge === 'string' ? charge : null,
-            payment_method: resolvedPaymentMethod,
-            card_brand: cardBrand,
-            // For card payments this is the card last4; for ACH we store
-            // the bank-account last4 in the same column so the receipt
-            // template can render "Bank •1234" via {card_line}.
-            card_last_four: cardLastFour || bankLastFour,
-            receipt_url: receiptUrl,
-            total: chargedTotal,
-          });
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['stripe.pi.payment', String(paymentIntentId)],
+        );
 
-        const [record] = await trx('payments').insert({
+        const lockedInvoice = await trx('invoices')
+          .where({ id: invoiceId })
+          .forUpdate()
+          .first();
+        if (!lockedInvoice) throw new Error('Invoice not found');
+        if (lockedInvoice.status === 'paid') {
+          const existingPayment = await trx('payments')
+            .where({ stripe_payment_intent_id: paymentIntentId })
+            .orderBy('created_at', 'desc')
+            .first();
+          if (existingPayment) return existingPayment;
+          throw new Error('Invoice already paid');
+        }
+        if (lockedInvoice.status === 'processing'
+          && String(lockedInvoice.stripe_payment_intent_id || '') !== String(paymentIntentId)) {
+          throw new Error('Bank payment is already processing');
+        }
+        if (lockedInvoice.stripe_payment_intent_id
+          && String(lockedInvoice.stripe_payment_intent_id) !== String(paymentIntentId)) {
+          throw new Error('Invoice has a different active payment');
+        }
+        if (paymentStatus === 'processing') {
+          const expected = computeChargeAmount(parseFloat(lockedInvoice.total), resolvedPaymentMethod);
+          const expectedCents = Math.round(expected.total * 100);
+          const actualCents = Number(pi.amount_received || pi.amount || 0);
+          if (actualCents !== expectedCents) {
+            logger.error(
+              `[stripe] ACH processing amount mismatch on PI ${paymentIntentId}. ` +
+              `Expected ${expectedCents}c from invoice ${lockedInvoice.id}; got ${actualCents}c.`,
+            );
+            try {
+              await stripe.paymentIntents.cancel(paymentIntentId);
+            } catch (cancelErr) {
+              logger.warn(`[stripe] Could not cancel mismatched processing PI ${paymentIntentId}: ${cancelErr.message}`);
+            }
+            throw new Error('Payment amount no longer matches this invoice. Please refresh and try again.');
+          }
+        }
+
+        const invoiceUpdates = {
+          status: invoiceStatus,
+          processor: 'stripe',
+          stripe_payment_intent_id: paymentIntentId,
+          stripe_charge_id: typeof charge === 'string' ? charge : null,
+          payment_method: resolvedPaymentMethod,
+          card_brand: cardBrand,
+          // For card payments this is the card last4; for ACH we store
+          // the bank-account last4 in the same column so the receipt
+          // template can render "Bank •1234" via {card_line}.
+          card_last_four: cardLastFour || bankLastFour,
+          receipt_url: receiptUrl,
+          total: chargedTotal,
+        };
+        if (paymentStatus === 'paid') {
+          invoiceUpdates.paid_at = new Date().toISOString();
+        }
+
+        const invoiceRowsUpdated = await trx('invoices')
+          .where({ id: invoiceId })
+          .whereNot({ status: 'paid' })
+          .where(function activePaymentIntentGuard() {
+            this.whereNull('stripe_payment_intent_id')
+              .orWhere({ stripe_payment_intent_id: paymentIntentId });
+          })
+          .update(invoiceUpdates);
+        if (!invoiceRowsUpdated) {
+          throw new Error('Invoice has a different active payment');
+        }
+
+        const paymentPayload = {
           customer_id: invoice.customer_id,
           processor: 'stripe',
           stripe_payment_intent_id: paymentIntentId,
           stripe_charge_id: typeof charge === 'string' ? charge : null,
           payment_date: etDateString(),
           amount: chargedTotal,
-          status: 'paid',
-          description: metadataCardSurcharge > 0
+          status: paymentStatus,
+          description: paymentStatus === 'processing'
+            ? `Invoice ${invoice.invoice_number} (bank payment pending)`
+            : metadataCardSurcharge > 0
             ? `Invoice ${invoice.invoice_number} (includes $${metadataCardSurcharge.toFixed(2)} card processing fee)`
             : `Invoice ${invoice.invoice_number}`,
           metadata: JSON.stringify({
@@ -1051,19 +1268,41 @@ const StripeService = {
             base_amount: metadataBaseAmount,
             card_surcharge: metadataCardSurcharge,
             charged_amount: chargedTotal,
+            payment_method: resolvedPaymentMethod,
+            payment_state: paymentStatus,
           }),
-        }).returning('*');
+        };
+
+        if (receiptUrl) paymentPayload.receipt_url = receiptUrl;
+        if (cardBrand) paymentPayload.card_brand = cardBrand;
+        if (cardLastFour || bankLastFour) paymentPayload.card_last_four = cardLastFour || bankLastFour;
+
+        const existingPayment = await trx('payments')
+          .where({ stripe_payment_intent_id: paymentIntentId })
+          .orderBy('created_at', 'desc')
+          .first();
+        if (existingPayment) {
+          const [record] = await trx('payments')
+            .where({ id: existingPayment.id })
+            .update(paymentPayload)
+            .returning('*');
+          return record;
+        }
+
+        const [record] = await trx('payments').insert(paymentPayload).returning('*');
 
         return record;
       });
 
-      logger.info(`[stripe] Invoice ${invoice.invoice_number} paid via Stripe PI: ${paymentIntentId}`);
+      logger.info(`[stripe] Invoice ${invoice.invoice_number} ${paymentStatus} via Stripe PI: ${paymentIntentId}`);
 
       // Stop the automated follow-up sequence + send thank-you if we nagged.
-      try {
-        await require('./invoice-followups').stopOnPayment(invoiceId);
-      } catch (e) {
-        logger.error(`[invoice-followups] stopOnPayment (stripe confirm) failed: ${e.message}`);
+      if (paymentStatus === 'paid') {
+        try {
+          await require('./invoice-followups').stopOnPayment(invoiceId);
+        } catch (e) {
+          logger.error(`[invoice-followups] stopOnPayment (stripe confirm) failed: ${e.message}`);
+        }
       }
 
       return paymentRecord;
