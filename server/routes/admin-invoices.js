@@ -1,12 +1,13 @@
 const express = require('express');
 const router = express.Router();
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const InvoiceService = require('../services/invoice');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
+const { assertInvoiceCollectible } = require('../services/invoice-helpers');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -72,7 +73,18 @@ router.get('/stats', async (req, res, next) => {
 // GET / — list invoices
 router.get('/', async (req, res, next) => {
   try {
-    const { status, customer_id, limit = 50, page = 1, archived: archivedRaw } = req.query;
+    const {
+      status,
+      customer_id,
+      customerId,
+      limit = 50,
+      page = 1,
+      archived: archivedRaw,
+      search,
+      from,
+      to,
+      sort,
+    } = req.query;
     // archived=only → archived-only view; archived=all → include both.
     // Default (any other value or unset) = hide archived.
     const archived = archivedRaw === 'only' || archivedRaw === '1' || archivedRaw === 'true'
@@ -80,11 +92,21 @@ router.get('/', async (req, res, next) => {
       : archivedRaw === 'all'
       ? 'all'
       : 'hide';
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const limitNum = parseInt(limit, 10) || 50;
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const offset = (pageNum - 1) * limitNum;
     const { invoices, total } = await InvoiceService.list({
-      status, customerId: customer_id, limit: parseInt(limit), offset, archived,
+      status,
+      customerId: customer_id || customerId,
+      limit: limitNum,
+      offset,
+      archived,
+      search,
+      from,
+      to,
+      sort,
     });
-    res.json({ invoices, total, page: parseInt(page) });
+    res.json({ invoices, total, page: pageNum });
   } catch (err) { next(err); }
 });
 
@@ -121,7 +143,7 @@ router.get('/service-records/:customerId', async (req, res, next) => {
 });
 
 // POST /notes/ai — draft customer-facing invoice notes from tech input.
-router.post('/notes/ai', async (req, res, next) => {
+router.post('/notes/ai', requireAdmin, async (req, res, next) => {
   try {
     if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
 
@@ -186,7 +208,7 @@ router.get('/:id', async (req, res, next) => {
 });
 
 // POST / — create invoice manually
-router.post('/', async (req, res, next) => {
+router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const { customerId, serviceRecordId, title, lineItems, notes, dueDate, taxRate, discountIds, serviceDate } = req.body;
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
@@ -212,7 +234,7 @@ router.post('/', async (req, res, next) => {
 });
 
 // POST /from-service — create from service record (convenience)
-router.post('/from-service', async (req, res, next) => {
+router.post('/from-service', requireAdmin, async (req, res, next) => {
   try {
     const { serviceRecordId, amount, description, taxRate } = req.body;
     if (!serviceRecordId) return res.status(400).json({ error: 'serviceRecordId required' });
@@ -236,7 +258,7 @@ router.post('/from-service', async (req, res, next) => {
 
 // POST /batch — create identical invoice for multiple customers
 // Body: { customerIds: string[], title, lineItems, notes?, dueDate?, taxRate?, sendImmediately?: boolean }
-router.post('/batch', async (req, res, next) => {
+router.post('/batch', requireAdmin, async (req, res, next) => {
   try {
     const { customerIds, title, lineItems, notes, dueDate, taxRate, sendImmediately } = req.body || {};
     if (!Array.isArray(customerIds) || customerIds.length === 0) {
@@ -290,38 +312,34 @@ router.post('/batch', async (req, res, next) => {
 
 // POST /batch/send — send multiple existing invoices via SMS + email
 // Body: { invoiceIds: string[] }
-router.post('/batch/send', async (req, res, next) => {
+router.post('/batch/send', requireAdmin, async (req, res, next) => {
   try {
     const { invoiceIds } = req.body || {};
     if (!Array.isArray(invoiceIds) || invoiceIds.length === 0) {
       return res.status(400).json({ error: 'invoiceIds[] required' });
     }
 
-    const { sendInvoiceEmail } = require('../services/invoice-email');
     const sent = [];
     const failed = [];
 
     for (const invoiceId of invoiceIds) {
-      const ok = { sms: false, email: false };
-      const errs = [];
       try {
-        await InvoiceService.sendViaSMS(invoiceId);
-        ok.sms = true;
+        const result = await InvoiceService.sendViaSMSAndEmail(invoiceId);
+        if (result.ok) {
+          sent.push({
+            invoiceId,
+            channels: { sms: Boolean(result.sms?.ok), email: Boolean(result.email?.ok) },
+          });
+        } else {
+          const error = [result.sms?.error && `sms: ${result.sms.error}`, result.email?.error && `email: ${result.email.error}`]
+            .filter(Boolean)
+            .join(' | ') || 'no channel succeeded';
+          logger.error(`[admin-invoices:batch-send] ${invoiceId}: ${error}`);
+          failed.push({ invoiceId, error });
+        }
       } catch (err) {
-        errs.push(`sms: ${err.message}`);
-      }
-      try {
-        const r = await sendInvoiceEmail(invoiceId);
-        if (r?.ok) ok.email = true;
-        else if (r?.error) errs.push(`email: ${r.error}`);
-      } catch (err) {
-        errs.push(`email: ${err.message}`);
-      }
-      if (ok.sms || ok.email) {
-        sent.push({ invoiceId, channels: ok });
-      } else {
-        logger.error(`[admin-invoices:batch-send] ${invoiceId}: ${errs.join(' | ')}`);
-        failed.push({ invoiceId, error: errs.join(' | ') });
+        logger.error(`[admin-invoices:batch-send] ${invoiceId}: ${err.message}`);
+        failed.push({ invoiceId, error: err.message });
       }
     }
 
@@ -341,7 +359,7 @@ router.post('/batch/send', async (req, res, next) => {
 // the Needs-receipt filter. Each invoice goes through the same email +
 // SMS pipeline as /:id/send-receipt so behavior matches single-send.
 const BATCH_RECEIPT_MAX = 25;
-router.post('/batch/send-receipts', async (req, res, next) => {
+router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
   try {
     const { invoiceIds } = req.body || {};
     if (!Array.isArray(invoiceIds) || invoiceIds.length === 0) {
@@ -417,7 +435,7 @@ router.post('/batch/send-receipts', async (req, res, next) => {
 });
 
 // PUT /:id — update invoice
-router.put('/:id', async (req, res, next) => {
+router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
     const invoice = await InvoiceService.update(req.params.id, req.body);
     if (!invoice) return res.status(404).json({ error: 'Not found' });
@@ -431,7 +449,7 @@ router.put('/:id', async (req, res, next) => {
 // Either channel failing alone doesn't abort the other — returns per-
 // channel status so the UI can toast accordingly. Missing phone / email
 // on the customer record is treated as "channel skipped", not an error.
-router.post('/:id/send', async (req, res, next) => {
+router.post('/:id/send', requireAdmin, async (req, res, next) => {
   try {
     const { id } = req.params;
     const { requestReview } = req.body || {};
@@ -439,14 +457,19 @@ router.post('/:id/send', async (req, res, next) => {
 
     const result = await InvoiceService.sendViaSMSAndEmail(id, { requestReview, reviewDelayMinutes });
     if (!result.ok) {
-      return res.status(500).json(result);
+      return res.status(400).json(result);
     }
     res.json(result);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (/already paid|paid invoice|voided|processing|already in progress|not sendable/i.test(err.message)) {
+      return res.status(/processing|already in progress/i.test(err.message) ? 409 : 400).json({ error: err.message });
+    }
+    next(err);
+  }
 });
 
 // POST /:id/schedule-send — send invoice later via the scheduler.
-router.post('/:id/schedule-send', async (req, res, next) => {
+router.post('/:id/schedule-send', requireAdmin, async (req, res, next) => {
   try {
     const { scheduledFor, requestReview } = req.body || {};
     if (!scheduledFor) return res.status(400).json({ error: 'scheduledFor required' });
@@ -492,7 +515,7 @@ router.post('/:id/charge-card', async (req, res, next) => {
 });
 
 // POST /:id/void — void invoice
-router.post('/:id/void', async (req, res, next) => {
+router.post('/:id/void', requireAdmin, async (req, res, next) => {
   try {
     const invoice = await InvoiceService.voidInvoice(req.params.id);
     res.json(invoice);
@@ -503,7 +526,7 @@ router.post('/:id/void', async (req, res, next) => {
 // Void-only precondition: refusing paid/sent/draft because "archive" is
 // meaningful only as a final shelving step on a row that has no activity
 // left. Returns the updated row so the UI can update in place.
-router.post('/:id/archive', async (req, res, next) => {
+router.post('/:id/archive', requireAdmin, async (req, res, next) => {
   try {
     const invoice = await db('invoices').where({ id: req.params.id }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
@@ -520,7 +543,7 @@ router.post('/:id/archive', async (req, res, next) => {
 });
 
 // POST /:id/unarchive — pulls an archived invoice back into the default view.
-router.post('/:id/unarchive', async (req, res, next) => {
+router.post('/:id/unarchive', requireAdmin, async (req, res, next) => {
   try {
     const invoice = await db('invoices').where({ id: req.params.id }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
@@ -537,7 +560,7 @@ router.post('/:id/unarchive', async (req, res, next) => {
 // invoice. Hits the branded email + the invoice_receipt SMS template, then
 // stamps invoices.receipt_sent_at so the UI can mark the service closed.
 // Body: { memo?: string (≤400 chars), via?: 'email'|'sms'|'both' (default 'both') }
-router.post('/:id/send-receipt', async (req, res, next) => {
+router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
   try {
     const { id } = req.params;
     const { memo, via = 'both' } = req.body || {};
@@ -618,7 +641,7 @@ router.post('/:id/send-receipt', async (req, res, next) => {
 // their card_brand/card_last_four; manual payments leave those NULL so
 // timeline rendering can distinguish.
 const VALID_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'other'];
-router.post('/:id/record-payment', async (req, res, next) => {
+router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
   try {
     const { id } = req.params;
     const {
@@ -642,24 +665,12 @@ router.post('/:id/record-payment', async (req, res, next) => {
 
     const invoice = await db('invoices').where({ id }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
-    // Voided invoices can never be marked paid — short-circuit early so
-    // we surface the right error message instead of a generic race loss.
-    if (invoice.status === 'void') {
-      return res.status(400).json({ error: 'Cannot record payment on a voided invoice' });
-    }
-    if (invoice.status === 'paid') {
-      return res.status(400).json({ error: 'Invoice is already paid' });
-    }
-    // ACH PIs sit at status='processing' for 3–5 business days while
-    // the bank transfer clears. Recording a manual cash/check/Zelle
-    // payment in that window double-collects: Stripe later succeeds
-    // and the webhook flips the invoice paid against the ACH PI.
-    // Make the operator wait for the ACH to settle (or fail) before
-    // recording a manual payment.
-    if (invoice.status === 'processing') {
-      return res.status(409).json({
-        error: 'Invoice has a payment in flight (ACH clearing) — wait for it to settle before recording a manual payment',
-      });
+    // Terminal or in-flight invoices can never be manually marked paid.
+    // This shares the same transition guard as Stripe collection paths.
+    try {
+      assertInvoiceCollectible(invoice.status);
+    } catch (err) {
+      return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
     }
     // Refuse to mark a $0 invoice paid — surfaces upstream creation bugs
     // instead of silently producing "$0.00 PAID" rows that misreport revenue.
@@ -685,7 +696,7 @@ router.post('/:id/record-payment', async (req, res, next) => {
     // run a second time.
     const [updatedInvoice] = await db('invoices')
       .where({ id })
-      .whereNotIn('status', ['paid', 'void', 'processing'])
+      .whereNotIn('status', ['paid', 'void', 'processing', 'refunded', 'canceled', 'cancelled'])
       .update({
         status: 'paid',
         paid_at: db.fn.now(),
@@ -810,7 +821,7 @@ router.get('/:id/followup', async (req, res, next) => {
 });
 
 // POST /:id/followup/pause
-router.post('/:id/followup/pause', async (req, res, next) => {
+router.post('/:id/followup/pause', requireAdmin, async (req, res, next) => {
   try {
     const { reason, until } = req.body || {};
     await FollowUps.pauseSequence(req.params.id, {
@@ -821,7 +832,7 @@ router.post('/:id/followup/pause', async (req, res, next) => {
 });
 
 // POST /:id/followup/resume
-router.post('/:id/followup/resume', async (req, res, next) => {
+router.post('/:id/followup/resume', requireAdmin, async (req, res, next) => {
   try {
     await FollowUps.resumeSequence(req.params.id);
     res.json({ ok: true });
@@ -829,7 +840,7 @@ router.post('/:id/followup/resume', async (req, res, next) => {
 });
 
 // POST /:id/followup/stop
-router.post('/:id/followup/stop', async (req, res, next) => {
+router.post('/:id/followup/stop', requireAdmin, async (req, res, next) => {
   try {
     const { reason } = req.body || {};
     await FollowUps.stopSequence(req.params.id, {
@@ -840,7 +851,7 @@ router.post('/:id/followup/stop', async (req, res, next) => {
 });
 
 // POST /:id/followup/send-now — fires the next touch immediately
-router.post('/:id/followup/send-now', async (req, res, next) => {
+router.post('/:id/followup/send-now', requireAdmin, async (req, res, next) => {
   try {
     await FollowUps.sendNextTouchNow(req.params.id);
     res.json({ ok: true });

@@ -9,7 +9,8 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 // ══════════════════════════════════════════════════════════════
 // HELPERS
 // ══════════════════════════════════════════════════════════════
-const SEND_FINALIZABLE_STATUSES = ['draft', 'scheduled', 'sending', 'sent', 'viewed', 'overdue'];
+const SEND_CLAIMABLE_STATUSES = ['draft', 'scheduled', 'sent', 'viewed', 'overdue'];
+const SEND_FINALIZABLE_STATUSES = [...SEND_CLAIMABLE_STATUSES, 'sending'];
 
 function generateToken() {
   // 32 random bytes → 64 hex chars. Unguessable. Legacy short tokens still resolve via DB lookup.
@@ -171,7 +172,53 @@ async function calculateUpdateFinancials({ lineItems, customer, invoice, taxRate
 // Fallback map only used if discount-engine import fails
 const TIER_DISCOUNTS_FALLBACK = { 'One-Time': 0, Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
 
-const { INVOICE_UPDATE_ALLOWED_FIELDS, assertInvoiceVoidable } = require('./invoice-helpers');
+const {
+  INVOICE_UPDATE_ALLOWED_FIELDS,
+  assertInvoiceVoidable,
+} = require('./invoice-helpers');
+
+function invoiceNotSendableError(invoice) {
+  if (!invoice) return new Error('Invoice not found');
+  if (invoice.status === 'sending') return new Error('Invoice send already in progress');
+  if (invoice.status === 'paid') return new Error('Cannot send a paid invoice');
+  if (invoice.status === 'processing') return new Error('Cannot send an invoice while payment is processing');
+  if (invoice.status === 'void') return new Error('Cannot send a voided invoice');
+  return new Error(`Invoice is not sendable (status: ${invoice.status || 'unknown'})`);
+}
+
+async function claimInvoiceForSend(invoiceId, { allowClaimed = false } = {}) {
+  const current = await db('invoices').where({ id: invoiceId }).first();
+  if (!current) throw invoiceNotSendableError(current);
+
+  if (allowClaimed) {
+    if (!SEND_FINALIZABLE_STATUSES.includes(current.status)) {
+      throw invoiceNotSendableError(current);
+    }
+    return { invoice: current, previousStatus: current.status, claimed: false };
+  }
+
+  if (!SEND_CLAIMABLE_STATUSES.includes(current.status)) {
+    throw invoiceNotSendableError(current);
+  }
+
+  const [invoice] = await db('invoices')
+    .where({ id: invoiceId, status: current.status })
+    .update({ status: 'sending', updated_at: new Date() })
+    .returning('*');
+  if (!invoice) {
+    const latest = await db('invoices').where({ id: invoiceId }).first();
+    throw invoiceNotSendableError(latest);
+  }
+  return { invoice, previousStatus: current.status, claimed: true };
+}
+
+async function restoreSendClaim(invoiceId, previousStatus, claimed) {
+  if (!claimed || !previousStatus) return;
+  await db('invoices')
+    .where({ id: invoiceId, status: 'sending' })
+    .update({ status: previousStatus, updated_at: new Date() })
+    .catch((err) => logger.warn(`[invoice] Could not restore send claim for ${invoiceId}: ${err.message}`));
+}
 
 // ══════════════════════════════════════════════════════════════
 // INVOICE SERVICE
@@ -191,9 +238,14 @@ const InvoiceService = {
     if (serviceRecordId) {
       const sr = await db('service_records')
         .where({ 'service_records.id': serviceRecordId })
+        .andWhere({ 'service_records.customer_id': customerId })
         .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
         .select('service_records.*', 'technicians.name as tech_name')
         .first();
+
+      if (!sr) {
+        throw new Error('Service record not found for customer');
+      }
 
       if (sr) {
         const products = await db('service_products')
@@ -426,26 +478,41 @@ const InvoiceService = {
     const total = Math.round((afterDiscount + taxAmount) * 100) / 100;
 
     const token = generateToken();
-    const invoiceNumber = await nextInvoiceNumber();
-
-    const [invoice] = await db('invoices').insert({
-      token,
-      invoice_number: invoiceNumber,
-      customer_id: customerId,
-      title,
-      line_items: JSON.stringify(items),
-      subtotal,
-      discount_amount: discountAmount,
-      discount_label: discountLabel,
-      tax_rate: rate,
-      tax_amount: taxAmount,
-      total,
-      notes: notes || null,
-      due_date: dueDate || etDateString(addETDays(new Date(), 30)),
-      status: 'draft',
-      ...(scheduledServiceId ? { scheduled_service_id: scheduledServiceId } : {}),
-      ...serviceData,
-    }).returning('*');
+    let invoice = null;
+    let invoiceNumber = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      invoiceNumber = await nextInvoiceNumber();
+      try {
+        [invoice] = await db('invoices').insert({
+          token,
+          invoice_number: invoiceNumber,
+          customer_id: customerId,
+          title,
+          line_items: JSON.stringify(items),
+          subtotal,
+          discount_amount: discountAmount,
+          discount_label: discountLabel,
+          tax_rate: rate,
+          tax_amount: taxAmount,
+          total,
+          notes: notes || null,
+          due_date: dueDate || etDateString(addETDays(new Date(), 30)),
+          status: 'draft',
+          ...(scheduledServiceId ? { scheduled_service_id: scheduledServiceId } : {}),
+          ...serviceData,
+        }).returning('*');
+        break;
+      } catch (err) {
+        const uniqueInvoiceNumberCollision = err.code === '23505'
+          && `${err.constraint || ''} ${err.detail || ''}`.includes('invoice_number');
+        if (uniqueInvoiceNumberCollision) {
+          logger.warn(`[invoice] Invoice number collision on ${invoiceNumber}; retrying`);
+          continue;
+        }
+        throw err;
+      }
+    }
+    if (!invoice) throw new Error('Could not allocate invoice number');
 
     // Record applied discounts in invoice_discounts table
     try {
@@ -545,7 +612,7 @@ const InvoiceService = {
     const customer = await db('customers')
       .where({ id: invoice.customer_id })
       .select('first_name', 'last_name', 'email', 'phone', 'address_line1',
-        'city', 'state', 'zip', 'waveguard_tier', 'property_sqft')
+        'city', 'state', 'zip', 'waveguard_tier', 'property_sqft', 'property_type')
       .first();
 
     return {
@@ -561,12 +628,15 @@ const InvoiceService = {
   /**
    * Send invoice via Twilio SMS — the unified service recap + invoice message.
    */
-  async sendViaSMS(invoiceId) {
-    const invoice = await db('invoices').where({ id: invoiceId }).first();
-    if (!invoice) throw new Error('Invoice not found');
+  async sendViaSMS(invoiceId, { allowClaimed = false } = {}) {
+    const claim = await claimInvoiceForSend(invoiceId, { allowClaimed });
+    const { invoice, previousStatus, claimed } = claim;
 
     const customer = await db('customers').where({ id: invoice.customer_id }).first();
-    if (!customer?.phone) throw new Error('Customer has no phone number');
+    if (!customer?.phone) {
+      await restoreSendClaim(invoiceId, previousStatus, claimed);
+      throw new Error('Customer has no phone number');
+    }
 
     const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
     const longPayUrl = `${domain}/pay/${invoice.token}`;
@@ -684,18 +754,21 @@ const InvoiceService = {
       logger.info(`[invoice] SMS sent for ${invoice.invoice_number} to ${customer.phone}`);
       return { sent: true, payUrl };
     } catch (err) {
+      await restoreSendClaim(invoiceId, previousStatus, claimed);
       logger.error(`[invoice] SMS failed for ${invoice.invoice_number}: ${err.message}`);
       throw err;
     }
   },
 
-  async sendViaSMSAndEmail(invoiceId, { requestReview = false, reviewDelayMinutes = null } = {}) {
+  async sendViaSMSAndEmail(invoiceId, { requestReview = false, reviewDelayMinutes = null, allowClaimed = false } = {}) {
+    const claim = await claimInvoiceForSend(invoiceId, { allowClaimed });
+    const { previousStatus, claimed } = claim;
     const { sendInvoiceEmail } = require('./invoice-email');
     const sms = { ok: false };
     const email = { ok: false };
 
     try {
-      await this.sendViaSMS(invoiceId);
+      await this.sendViaSMS(invoiceId, { allowClaimed: true });
       sms.ok = true;
     } catch (err) {
       sms.error = err.message;
@@ -740,6 +813,8 @@ const InvoiceService = {
           scheduled_review_delay_minutes: null,
           updated_at: new Date(),
         });
+    } else {
+      await restoreSendClaim(invoiceId, previousStatus, claimed);
     }
     return { ok, sms, email };
   },
@@ -778,6 +853,7 @@ const InvoiceService = {
       const result = await this.sendViaSMSAndEmail(claimed.id, {
         requestReview: Boolean(claimed.scheduled_request_review),
         reviewDelayMinutes: claimed.scheduled_review_delay_minutes,
+        allowClaimed: true,
       });
       if (result.ok) {
         sent += 1;
@@ -903,19 +979,71 @@ const InvoiceService = {
     return { ...invoice, customer };
   },
 
-  async list({ status, customerId, limit = 50, offset = 0, archived = 'hide' } = {}) {
+  async list({
+    status,
+    customerId,
+    limit = 50,
+    offset = 0,
+    archived = 'hide',
+    search,
+    from,
+    to,
+    sort = 'newest',
+  } = {}) {
+    const today = etDateString();
+    const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
+    const safeOffset = Math.max(parseInt(offset, 10) || 0, 0);
+    const dateColumn = 'COALESCE(invoices.service_date, invoices.created_at::date)';
+    const invoiceDate = db.raw(dateColumn);
+    const validDate = (value) => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
+    const normalizedStatus = String(status || '').trim().toLowerCase();
+    const directStatuses = new Set(['draft', 'scheduled', 'sending', 'sent', 'viewed', 'paid', 'processing', 'void', 'refunded', 'canceled', 'cancelled']);
+
     // archived semantics:
     //   'hide' (default) — WHERE archived_at IS NULL
     //   'only'            — WHERE archived_at IS NOT NULL
     //   'all'             — no filter
-    const applyArchived = (q) => {
-      if (archived === 'only') return q.whereNotNull('invoices.archived_at');
-      if (archived === 'all') return q;
-      return q.whereNull('invoices.archived_at');
+    const applyFilters = (q) => {
+      if (archived === 'only') q.whereNotNull('invoices.archived_at');
+      else if (archived !== 'all') q.whereNull('invoices.archived_at');
+
+      if (customerId) q.where('invoices.customer_id', customerId);
+
+      if (normalizedStatus === 'overdue') {
+        q.whereNotIn('invoices.status', ['paid', 'void', 'processing'])
+          .andWhere(function () {
+            this.where('invoices.status', 'overdue')
+              .orWhere('invoices.due_date', '<', today);
+          });
+      } else if (normalizedStatus === 'unpaid') {
+        q.whereNotIn('invoices.status', ['paid', 'void', 'processing']);
+      } else if (normalizedStatus === 'needs_receipt') {
+        q.where('invoices.status', 'paid').whereNull('invoices.receipt_sent_at');
+      } else if (directStatuses.has(normalizedStatus)) {
+        q.where('invoices.status', normalizedStatus);
+      }
+
+      if (validDate(from)) q.where(invoiceDate, '>=', from);
+      if (validDate(to)) q.where(invoiceDate, '<=', to);
+
+      const term = String(search || '').trim();
+      if (term) {
+        const like = `%${term}%`;
+        q.andWhere(function () {
+          this.whereRaw('invoices.invoice_number ILIKE ?', [like])
+            .orWhereRaw('COALESCE(invoices.title, \'\') ILIKE ?', [like])
+            .orWhereRaw('COALESCE(customers.first_name, \'\') ILIKE ?', [like])
+            .orWhereRaw('COALESCE(customers.last_name, \'\') ILIKE ?', [like])
+            .orWhereRaw('COALESCE(customers.phone, \'\') ILIKE ?', [like])
+            .orWhereRaw('COALESCE(customers.email, \'\') ILIKE ?', [like])
+            .orWhereRaw("CONCAT_WS(' ', customers.first_name, customers.last_name) ILIKE ?", [like]);
+        });
+      }
+
+      return q;
     };
 
-    let query = db('invoices')
-      .leftJoin('customers', 'invoices.customer_id', 'customers.id')
+    const query = applyFilters(db('invoices').leftJoin('customers', 'invoices.customer_id', 'customers.id'))
       .select(
         'invoices.*',
         'customers.first_name',
@@ -930,19 +1058,23 @@ const InvoiceService = {
           LIMIT 1
         ) AS card_on_file`)
       );
-    if (status) query = query.where('invoices.status', status);
-    if (customerId) query = query.where('invoices.customer_id', customerId);
-    query = applyArchived(query);
-    query = query.orderBy('invoices.created_at', 'desc').limit(limit).offset(offset);
-    const invoices = await query;
 
-    let countQuery = db('invoices');
-    if (status) countQuery = countQuery.where({ status });
-    if (customerId) countQuery = countQuery.where({ customer_id: customerId });
-    countQuery = applyArchived(countQuery);
-    const [{ count }] = await countQuery.count('* as count');
+    if (sort === 'oldest') {
+      query.orderByRaw(`${dateColumn} ASC NULLS LAST`).orderBy('invoices.created_at', 'asc');
+    } else if (sort === 'amount_high') {
+      query.orderBy('invoices.total', 'desc').orderByRaw(`${dateColumn} DESC NULLS LAST`);
+    } else if (sort === 'amount_low') {
+      query.orderBy('invoices.total', 'asc').orderByRaw(`${dateColumn} DESC NULLS LAST`);
+    } else {
+      query.orderByRaw(`${dateColumn} DESC NULLS LAST`).orderBy('invoices.created_at', 'desc');
+    }
 
-    return { invoices, total: parseInt(count) };
+    const invoices = await query.limit(safeLimit).offset(safeOffset);
+    const [{ count }] = await applyFilters(
+      db('invoices').leftJoin('customers', 'invoices.customer_id', 'customers.id')
+    ).countDistinct('invoices.id as count');
+
+    return { invoices, total: parseInt(count, 10) };
   },
 
   async update(id, updates) {
@@ -997,14 +1129,15 @@ const InvoiceService = {
   },
 
   async getStats() {
+    const today = etDateString();
     const [totals] = await db('invoices').select(
       db.raw("COUNT(*) as total"),
       db.raw("COUNT(*) FILTER (WHERE status = 'paid') as paid"),
-      db.raw("COUNT(*) FILTER (WHERE status IN ('sent', 'viewed')) as outstanding"),
-      db.raw("COUNT(*) FILTER (WHERE status = 'overdue') as overdue"),
+      db.raw("COUNT(*) FILTER (WHERE status NOT IN ('paid', 'void', 'processing')) as outstanding"),
+      db.raw("COUNT(*) FILTER (WHERE status NOT IN ('paid', 'void', 'processing') AND (status = 'overdue' OR due_date < ?)) as overdue", [today]),
       db.raw("COALESCE(SUM(total) FILTER (WHERE status = 'paid'), 0) as total_collected"),
-      db.raw("COALESCE(SUM(total) FILTER (WHERE status IN ('sent', 'viewed', 'overdue')), 0) as total_outstanding"),
-    );
+      db.raw("COALESCE(SUM(total) FILTER (WHERE status NOT IN ('paid', 'void', 'processing')), 0) as total_outstanding"),
+    ).whereNull('archived_at');
     return {
       total: parseInt(totals.total),
       paid: parseInt(totals.paid),

@@ -32,6 +32,7 @@ const {
   computeChargeAmount,
 } = require('./stripe-pricing');
 const { invoicePaymentStatusForIntent } = require('./stripe-invoice-state');
+const { assertInvoiceCollectible } = require('./invoice-helpers');
 
 const StripeService = {
   // =========================================================================
@@ -513,8 +514,7 @@ const StripeService = {
 
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
-    if (invoice.status === 'paid') throw new Error('Invoice already paid');
-    if (invoice.status === 'processing') throw new Error('Bank payment is already processing');
+    assertInvoiceCollectible(invoice.status);
 
     const card = await db('payment_methods').where({ id: paymentMethodId }).first();
     if (!card) throw new Error('Payment method not found');
@@ -546,8 +546,7 @@ const StripeService = {
           .forUpdate()
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
-        if (lockedInvoice.status === 'paid') throw new Error('Invoice already paid');
-        if (lockedInvoice.status === 'processing') throw new Error('Bank payment is already processing');
+        assertInvoiceCollectible(lockedInvoice.status);
         if (lockedInvoice.stripe_payment_intent_id) {
           const activePayment = await trx('payments')
             .where({ stripe_payment_intent_id: lockedInvoice.stripe_payment_intent_id })
@@ -647,6 +646,9 @@ const StripeService = {
           'Invoice not found',
           'Invoice already paid',
           'Bank payment is already processing',
+          'Invoice is void and cannot be paid',
+          'Invoice has been refunded and cannot be paid',
+          'Invoice is canceled and cannot be paid',
           'Invoice has a different active payment',
         ].includes(err.message)) {
           throw err;
@@ -820,7 +822,7 @@ const StripeService = {
 
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
-    if (invoice.status === 'paid') throw new Error('Invoice already paid');
+    assertInvoiceCollectible(invoice.status);
 
     const saveCard = !!opts.saveCard;
     const cardOnly = !!opts.cardOnly;
@@ -840,8 +842,7 @@ const StripeService = {
           .forUpdate()
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
-        if (lockedInvoice.status === 'paid') throw new Error('Invoice already paid');
-        if (lockedInvoice.status === 'processing') throw new Error('Bank payment is already processing');
+        assertInvoiceCollectible(lockedInvoice.status);
 
         if (lockedInvoice.stripe_payment_intent_id) {
           const activePayment = await trx('payments')
@@ -902,7 +903,7 @@ const StripeService = {
 
         const invoiceUpdated = await trx('invoices')
           .where({ id: invoiceId })
-          .whereNotIn('status', ['paid', 'processing'])
+          .whereNotIn('status', ['paid', 'processing', 'void', 'refunded', 'canceled', 'cancelled'])
           .update({
           processor: 'stripe',
           stripe_payment_intent_id: paymentIntent.id,
@@ -952,7 +953,7 @@ const StripeService = {
 
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
-    if (invoice.status === 'paid') throw new Error('Invoice already paid');
+    assertInvoiceCollectible(invoice.status);
 
     const saveCard = !!opts.saveCard;
     const { base, surcharge, total } = computeChargeAmount(parseFloat(invoice.total), methodCategory);
@@ -1027,6 +1028,9 @@ const StripeService = {
 
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
+    if (['void', 'refunded', 'canceled', 'cancelled'].includes(String(invoice.status || '').toLowerCase())) {
+      assertInvoiceCollectible(invoice.status);
+    }
     if (invoice.status === 'paid') {
       const existingPayment = await db('payments')
         .where({ stripe_payment_intent_id: paymentIntentId })
@@ -1185,6 +1189,9 @@ const StripeService = {
           .forUpdate()
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
+        if (['void', 'refunded', 'canceled', 'cancelled'].includes(String(lockedInvoice.status || '').toLowerCase())) {
+          assertInvoiceCollectible(lockedInvoice.status);
+        }
         if (lockedInvoice.status === 'paid') {
           const existingPayment = await trx('payments')
             .where({ stripe_payment_intent_id: paymentIntentId })
@@ -1239,7 +1246,7 @@ const StripeService = {
 
         const invoiceRowsUpdated = await trx('invoices')
           .where({ id: invoiceId })
-          .whereNot({ status: 'paid' })
+          .whereNotIn('status', ['paid', 'void', 'refunded', 'canceled', 'cancelled'])
           .where(function activePaymentIntentGuard() {
             this.whereNull('stripe_payment_intent_id')
               .orWhere({ stripe_payment_intent_id: paymentIntentId });

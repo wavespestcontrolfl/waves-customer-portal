@@ -28,7 +28,10 @@ const { computeChargeAmount, isCardMethodType, CARD_SURCHARGE_RATE } = require('
 const { isBillingDayMatch } = require('../services/billing-helpers');
 const {
   INVOICE_UPDATE_ALLOWED_FIELDS,
+  INVOICE_UNCOLLECTIBLE_STATUSES,
+  assertInvoiceCollectible,
   assertInvoiceVoidable,
+  isInvoiceCollectibleStatus,
 } = require('../services/invoice-helpers');
 const {
   classifyExistingWebhookEvent,
@@ -251,6 +254,25 @@ describe('invoice assertInvoiceVoidable', () => {
   test('draft / sent / viewed / overdue / void — voidable (no throw)', () => {
     for (const s of ['draft', 'sent', 'viewed', 'overdue', 'void']) {
       expect(() => assertInvoiceVoidable(s)).not.toThrow();
+    }
+  });
+});
+
+describe('invoice assertInvoiceCollectible', () => {
+  test('paid / processing / void / refunded / canceled cannot be collected', () => {
+    expect([...INVOICE_UNCOLLECTIBLE_STATUSES]).toEqual(
+      ['paid', 'processing', 'void', 'refunded', 'canceled', 'cancelled'],
+    );
+    for (const s of INVOICE_UNCOLLECTIBLE_STATUSES) {
+      expect(isInvoiceCollectibleStatus(s)).toBe(false);
+      expect(() => assertInvoiceCollectible(s)).toThrow(/paid|processing|void|refunded|canceled/);
+    }
+  });
+
+  test('open invoice statuses remain collectible', () => {
+    for (const s of ['draft', 'scheduled', 'sent', 'viewed', 'overdue', 'sending']) {
+      expect(isInvoiceCollectibleStatus(s)).toBe(true);
+      expect(() => assertInvoiceCollectible(s)).not.toThrow();
     }
   });
 });

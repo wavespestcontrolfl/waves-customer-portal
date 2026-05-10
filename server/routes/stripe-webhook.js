@@ -13,6 +13,8 @@ const {
   nextInvoiceStatusAfterFailedPayment,
 } = require('../services/stripe-invoice-state');
 const { computeChargeAmount } = require('../services/stripe-pricing');
+const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('../services/invoice-helpers');
+const INVOICE_TERMINAL_PAYMENT_STATUSES = INVOICE_UNCOLLECTIBLE_STATUSES.filter(s => s !== 'processing');
 
 // Build a "First Last" string from a customer row, falling back to phone
 // then a generic 'customer'. Used to fill the body of the bell + push
@@ -441,7 +443,7 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       const activePi = lockedInvoice.stripe_payment_intent_id
         ? String(lockedInvoice.stripe_payment_intent_id)
         : '';
-      if (lockedInvoice.status === 'paid'
+      if (INVOICE_TERMINAL_PAYMENT_STATUSES.includes(String(lockedInvoice.status || '').toLowerCase())
         || (lockedInvoice.status === 'processing' && activePi !== String(piId))
         || (activePi && activePi !== String(piId))) {
         logger.warn(
@@ -466,7 +468,7 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
 
       const invoiceLinked = await trx('invoices')
         .where({ id: lockedInvoice.id })
-        .whereNot({ status: 'paid' })
+        .whereNotIn('status', INVOICE_TERMINAL_PAYMENT_STATUSES)
         .where(function activePaidIntentGuard() {
           this.whereNull('stripe_payment_intent_id')
             .orWhere({ stripe_payment_intent_id: piId });
@@ -520,7 +522,7 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
   if (details.receiptUrl) invoiceUpdates.receipt_url = details.receiptUrl;
   let invoiceUpdated = await db('invoices')
     .where({ stripe_payment_intent_id: piId })
-    .whereNot({ status: 'paid' })
+    .whereNotIn('status', INVOICE_TERMINAL_PAYMENT_STATUSES)
     .update(invoiceUpdates);
   if (fallbackLinkedInvoiceId && invoiceUpdated === 0) {
     invoiceUpdated = 1;
@@ -1161,8 +1163,8 @@ async function handlePaymentIntentProcessing(paymentIntent) {
       .first();
 
     if (!lockedInvoice) return;
-    if (lockedInvoice.status === 'paid') {
-      logger.info(`[stripe-webhook] Skipping processing event for paid invoice ${invoice.id} on PI: ${piId}`);
+    if (INVOICE_TERMINAL_PAYMENT_STATUSES.includes(String(lockedInvoice.status || '').toLowerCase())) {
+      logger.info(`[stripe-webhook] Skipping processing event for terminal invoice ${invoice.id} status=${lockedInvoice.status} on PI: ${piId}`);
       return;
     }
 
@@ -1230,7 +1232,7 @@ async function handlePaymentIntentProcessing(paymentIntent) {
 
     await trx('invoices')
       .where({ id: lockedInvoice.id })
-      .whereNot({ status: 'paid' })
+      .whereNotIn('status', INVOICE_TERMINAL_PAYMENT_STATUSES)
       .where(function activeProcessingIntentGuard() {
         this.whereNull('stripe_payment_intent_id')
           .orWhere({ stripe_payment_intent_id: piId });
