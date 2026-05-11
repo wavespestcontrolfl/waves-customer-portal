@@ -4,6 +4,7 @@
  * `status = sent` should mean at least one customer notification channel
  * succeeded. `delivery_status` records the most recent attempt, including
  * failures where a report link was generated but no customer channel worked.
+ * Historical rows sent before channel-level evidence use `legacy_sent`.
  */
 
 exports.up = async function (knex) {
@@ -43,6 +44,8 @@ exports.up = async function (knex) {
         THEN 'partial'
       WHEN s.sms_ok OR s.email_ok THEN 'sent'
       WHEN s.sms_available OR s.email_available OR p.last_delivery_at IS NOT NULL THEN 'failed'
+      WHEN p.status = 'sent' OR p.sent_at IS NOT NULL THEN 'legacy_sent'
+      WHEN p.status = 'closed' AND p.report_token IS NOT NULL THEN 'legacy_sent'
       ELSE 'not_sent'
     END
     FROM status_eval s
