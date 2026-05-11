@@ -45,6 +45,10 @@ function minutesToLabelMonth(min) {
   return m === 0 ? `${h12} ${ap}` : `${h12}:${String(m).padStart(2, '0')} ${ap}`;
 }
 
+function serviceDisplayName(service) {
+  return service?.serviceTypeDisplay || service?.serviceType || '';
+}
+
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 function adminFetch(path, options = {}) {
@@ -286,7 +290,7 @@ function MonthServiceChip({ service, onViewCustomer }) {
         transform: transform ? `translate3d(${transform.x}px, ${transform.y}px, 0)` : undefined,
         zIndex: isDragging ? 50 : undefined,
       }}
-      title={`${service.customerName} · ${service.serviceType || ''} · ${service.windowStart || ''}${service.techName ? ' · ' + service.techName : ''}`}
+      title={`${service.customerName} · ${serviceDisplayName(service)} · ${service.windowStart || ''}${service.techName ? ' · ' + service.techName : ''}`}
       onClick={(e) => {
         e.stopPropagation();
         const customerId = service.customerId || service.customer_id;

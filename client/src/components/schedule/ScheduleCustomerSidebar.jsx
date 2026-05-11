@@ -145,6 +145,17 @@ export default function ScheduleCustomerSidebar({
   const basePrice = service?.estimatedPrice != null
     ? Number(service.estimatedPrice)
     : Number(service?.monthlyRate || c.monthlyRate || 0);
+  const appointmentAddons = Array.isArray(service?.serviceAddons) ? service.serviceAddons : [];
+  const appointmentAddonTotal = Math.round(
+    appointmentAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100
+  ) / 100;
+  const splitAppointmentAddons = appointmentAddons.length > 0 && appointmentAddonTotal > 0 && appointmentAddonTotal < basePrice;
+  const baseServicePrice = splitAppointmentAddons
+    ? Math.max(0, Math.round((basePrice - appointmentAddonTotal) * 100) / 100)
+    : basePrice;
+  const baseServiceLabel = splitAppointmentAddons
+    ? (service?.serviceType || 'Service')
+    : (service?.serviceTypeDisplay || service?.serviceType || 'Service');
   const discount = Math.round(basePrice * discountPct * 100) / 100;
   const total = Math.max(0, basePrice - discount);
   const timeWindow = fmtWindow(service);
@@ -340,11 +351,20 @@ export default function ScheduleCustomerSidebar({
           <Section title="Services and items">
             <div className="flex items-start justify-between gap-3 pb-3 border-b border-hairline border-zinc-100">
               <div className="min-w-0">
-                <div className="text-15 text-zinc-900">{service.serviceType || 'Service'}</div>
+                <div className="text-15 text-zinc-900">{baseServiceLabel}</div>
                 <div className="text-13 text-ink-secondary mt-1">{[fmtTime(service.windowStart), duration].filter(Boolean).join(' · ')}</div>
               </div>
-              <div className="u-nums text-14 text-zinc-900">{money(basePrice)}</div>
+              <div className="u-nums text-14 text-zinc-900">{money(baseServicePrice)}</div>
             </div>
+            {splitAppointmentAddons && appointmentAddons.map((addon) => (
+              <div key={addon.id || addon.serviceId || addon.serviceName} className="flex items-start justify-between gap-3 py-3 border-b border-hairline border-zinc-100">
+                <div className="min-w-0">
+                  <div className="text-14 text-zinc-900">{addon.serviceName || 'Service add-on'}</div>
+                  <div className="text-13 text-ink-secondary mt-1">Add-on service</div>
+                </div>
+                <div className="u-nums text-14 text-zinc-900">{money(Number(addon.estimatedPrice || 0))}</div>
+              </div>
+            ))}
             {discountPct > 0 && (
               <div className="flex items-center justify-between gap-3 py-3 border-b border-hairline border-zinc-100">
                 <div className="text-14 text-zinc-900">WaveGuard {tierLabel(tier)} discount</div>

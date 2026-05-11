@@ -31,6 +31,10 @@ const METHODS = [
   { value: 'other', label: 'Other' },
 ];
 
+function serviceDisplayName(service) {
+  return service?.serviceTypeDisplay || service?.serviceType || 'Service';
+}
+
 export default function MarkPrepaidModal({ service, onClose, onSaved }) {
   const [amount, setAmount] = useState(() => {
     const p = service?.estimatedPrice;
@@ -87,7 +91,7 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
               className="text-ink-secondary"
               style={{ fontSize: 13, marginTop: 2 }}
             >
-              {service.customerName} — {service.serviceType || 'Service'}
+              {service.customerName} — {serviceDisplayName(service)}
             </div>
           </div>
           <button

@@ -58,7 +58,22 @@ function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
     ...options,
-  }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
+  }).then(async (r) => {
+    if (!r.ok) {
+      let serverMsg = '';
+      try {
+        const body = await r.clone().json();
+        serverMsg = body?.error || body?.reason || body?.message || body?.code || '';
+      } catch {
+        try { serverMsg = (await r.text()).trim(); } catch { /* ignore */ }
+      }
+      const err = new Error(serverMsg || `HTTP ${r.status}`);
+      err.status = r.status;
+      throw err;
+    }
+    if (r.status === 204) return null;
+    return r.json();
+  });
 }
 
 function timeAgo(dateStr) {
@@ -80,6 +95,10 @@ function fmtDate(d) {
 }
 
 function fmtCurrency(v) { return '$' + parseFloat(v || 0).toFixed(2); }
+function getAdminRole() {
+  try { return JSON.parse(localStorage.getItem('waves_admin_user') || '{}')?.role || null; }
+  catch { return null; }
+}
 function fmtNumber(v, digits = 3) {
   const n = Number(v);
   if (!Number.isFinite(n)) return '0';
@@ -319,7 +338,7 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
 }
 
 // ─── Autopay panel ───────────────────────────────────────────────
-function AdminAutopayPanelV2({ customerId, monthlyRate, customerName }) {
+function AdminAutopayPanelV2({ customerId, monthlyRate, customerName, canCharge = false }) {
   const [state, setState] = useState(null);
   const [charging, setCharging] = useState(false);
   const [err, setErr] = useState('');
@@ -375,9 +394,11 @@ function AdminAutopayPanelV2({ customerId, monthlyRate, customerName }) {
               </div>
             )}
           </div>
-          <Button onClick={chargeNow} disabled={charging} size="md">
-            {charging ? 'Charging…' : `Charge now${monthlyRate ? ` ($${parseFloat(monthlyRate).toFixed(2)})` : ''}`}
-          </Button>
+          {canCharge && (
+            <Button onClick={chargeNow} disabled={charging} size="md">
+              {charging ? 'Charging…' : `Charge now${monthlyRate ? ` ($${parseFloat(monthlyRate).toFixed(2)})` : ''}`}
+            </Button>
+          )}
         </div>
         {msg && <div className="mt-2.5 px-2 py-1.5 bg-zinc-100 text-zinc-900 rounded-xs text-12">{msg}</div>}
         {err && <div className="mt-2.5 px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">{err}</div>}
@@ -424,6 +445,7 @@ export default function Customer360ProfileV2({ customerId, onClose, onSelectCust
   const menuRef = useRef(null);
   const commsSeqRef = useRef(0);
   const commsAbortRef = useRef(null);
+  const isAdmin = getAdminRole() === 'admin';
 
   const reloadCustomer = () =>
     adminFetch(`/admin/customers/${customerId}`).then(setData).catch(() => {});
@@ -513,7 +535,7 @@ export default function Customer360ProfileV2({ customerId, onClose, onSelectCust
   const c = data.customer;
   const prefs = data.preferences || {};
   const hs = data.healthScore || {};
-  const score = hs.health_score ?? hs.score ?? null;
+  const score = hs.overall_score ?? hs.health_score ?? hs.score ?? null;
   const invoices = data.invoices || [];
   const cards = data.cards || [];
   const photos = data.photos || [];
@@ -693,32 +715,36 @@ export default function Customer360ProfileV2({ customerId, onClose, onSelectCust
                 className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Book Appt</a>
               <a href={`/admin/invoices?customer=${customerId}`}
                 className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Invoice</a>
-              <button
-                type="button"
-                onClick={() => onAddProperty?.(c)}
-                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Add Property</button>
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={() => onAddProperty?.(c)}
+                  className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Add Property</button>
+              )}
               <button onClick={() => setActiveTab('comms')}
                 className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Add Note</button>
-              <button
-                onClick={() => {
-                  setEditForm({
-                    firstName: c.firstName || '',
-                    lastName: c.lastName || '',
-                    email: c.email || '',
-                    phone: c.phone || '',
-                    profileLabel: c.profileLabel || '',
-                    addressLine1: c.address?.line1 || '',
-                    city: c.address?.city || '',
-                    state: c.address?.state || '',
-                    zip: c.address?.zip || '',
-                    monthlyRate: c.monthlyRate ?? '',
-                    tier: c.tier || '',
-                    pipelineStage: c.pipelineStage || 'new_lead',
-                  });
-                  setEditErr('');
-                  setEditOpen(true);
-                }}
-                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Edit</button>
+              {isAdmin && (
+                <button
+                  onClick={() => {
+                    setEditForm({
+                      firstName: c.firstName || '',
+                      lastName: c.lastName || '',
+                      email: c.email || '',
+                      phone: c.phone || '',
+                      profileLabel: c.profileLabel || '',
+                      addressLine1: c.address?.line1 || '',
+                      city: c.address?.city || '',
+                      state: c.address?.state || '',
+                      zip: c.address?.zip || '',
+                      monthlyRate: c.monthlyRate ?? '',
+                      tier: c.tier || '',
+                      pipelineStage: c.pipelineStage || 'new_lead',
+                    });
+                    setEditErr('');
+                    setEditOpen(true);
+                  }}
+                  className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Edit</button>
+              )}
             </div>
           </div>
 
@@ -765,30 +791,32 @@ export default function Customer360ProfileV2({ customerId, onClose, onSelectCust
                       role="menu"
                       className="absolute right-0 top-[calc(100%+4px)] z-20 min-w-[180px] rounded-sm border-hairline border-zinc-300 bg-white shadow-md py-1"
                     >
-                      <button
-                        role="menuitem"
-                        onClick={() => {
-                          setEditForm({
-                            firstName: c.firstName || '',
-                            lastName: c.lastName || '',
-                            email: c.email || '',
-                            phone: c.phone || '',
-                            addressLine1: c.address?.line1 || '',
-                            city: c.address?.city || '',
-                            state: c.address?.state || '',
-                            zip: c.address?.zip || '',
-                            monthlyRate: c.monthlyRate ?? '',
-                            tier: c.tier || '',
-                            pipelineStage: c.pipelineStage || 'new_lead',
-                          });
-                          setEditErr('');
-                          setEditOpen(true);
-                          setMenuOpen(false);
-                        }}
-                        className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
-                      >
-                        Edit customer
-                      </button>
+                      {isAdmin && (
+                        <button
+                          role="menuitem"
+                          onClick={() => {
+                            setEditForm({
+                              firstName: c.firstName || '',
+                              lastName: c.lastName || '',
+                              email: c.email || '',
+                              phone: c.phone || '',
+                              addressLine1: c.address?.line1 || '',
+                              city: c.address?.city || '',
+                              state: c.address?.state || '',
+                              zip: c.address?.zip || '',
+                              monthlyRate: c.monthlyRate ?? '',
+                              tier: c.tier || '',
+                              pipelineStage: c.pipelineStage || 'new_lead',
+                            });
+                            setEditErr('');
+                            setEditOpen(true);
+                            setMenuOpen(false);
+                          }}
+                          className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                        >
+                          Edit customer
+                        </button>
+                      )}
                       <button
                         role="menuitem"
                         onClick={() => { setActiveTab('comms'); setMenuOpen(false); }}
@@ -1011,7 +1039,7 @@ export default function Customer360ProfileV2({ customerId, onClose, onSelectCust
                 {score != null && (
                   <div className="text-center text-12 text-ink-secondary mt-1">
                     Score: <span className="font-medium" style={{ color: score >= 70 ? '#10B981' : score >= 40 ? '#F59E0B' : '#C8312F' }}>{score}/100</span>
-                    {hs.churn_risk_level && <span> · {hs.churn_risk_level}</span>}
+                    {(hs.churn_risk_level || hs.churn_risk) && <span> · {hs.churn_risk_level || hs.churn_risk}</span>}
                   </div>
                 )}
                 {referral && (
@@ -1092,7 +1120,7 @@ export default function Customer360ProfileV2({ customerId, onClose, onSelectCust
                 <StatCardV2 label="Lifetime Revenue" value={fmtCurrency(c.lifetimeRevenue)} />
               </div>
 
-              <AdminAutopayPanelV2 customerId={c.id} monthlyRate={c.monthlyRate} customerName={`${c.firstName} ${c.lastName}`} />
+              <AdminAutopayPanelV2 customerId={c.id} monthlyRate={c.monthlyRate} customerName={`${c.firstName} ${c.lastName}`} canCharge={isAdmin} />
 
               <SectionTitle>Invoices ({invoices.length})</SectionTitle>
               {invoices.length > 0 ? (
@@ -1129,7 +1157,7 @@ export default function Customer360ProfileV2({ customerId, onClose, onSelectCust
                     <Badge tone={isRefund || isFailed ? 'alert' : 'neutral'}>
                       {isRefund ? 'Refunded' : (p.status || '').toUpperCase()}
                     </Badge>
-                    {p.processor === 'stripe' && p.status === 'paid' && !isRefund && (
+                    {isAdmin && p.processor === 'stripe' && p.status === 'paid' && !isRefund && (
                       <Button
                         size="sm"
                         variant="danger"

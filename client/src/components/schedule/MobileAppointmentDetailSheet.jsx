@@ -142,6 +142,17 @@ export default function MobileAppointmentDetailSheet({
   const pct = tier && TIER_DISCOUNT[tier] != null ? TIER_DISCOUNT[tier] : 0;
   const rawPrice = service.estimatedPrice != null ? Number(service.estimatedPrice) : null;
   const price = rawPrice != null ? rawPrice : Number(service.monthlyRate || 0);
+  const appointmentAddons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
+  const appointmentAddonTotal = Math.round(
+    appointmentAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100
+  ) / 100;
+  const splitAppointmentAddons = appointmentAddons.length > 0 && appointmentAddonTotal > 0 && appointmentAddonTotal < price;
+  const baseServicePrice = splitAppointmentAddons
+    ? Math.max(0, Math.round((price - appointmentAddonTotal) * 100) / 100)
+    : price;
+  const baseServiceLabel = splitAppointmentAddons
+    ? (service.serviceType || 'Service')
+    : (service.serviceTypeDisplay || service.serviceType || 'Service');
   const discount = Math.round(price * pct * 100) / 100;
   const total = Math.max(0, price - discount);
   const timeWindow = formatWindow(service);
@@ -329,7 +340,7 @@ export default function MobileAppointmentDetailSheet({
           <div className="py-3 border-b border-hairline border-zinc-200 flex items-start justify-between gap-3">
             <div className="flex-1 min-w-0">
               <div className="text-zinc-900" style={{ fontSize: 15 }}>
-                {service.serviceType || '—'}
+                {baseServiceLabel}
               </div>
               <div className="text-ink-secondary" style={{ fontSize: 13, marginTop: 2 }}>
                 {timeWindow}
@@ -337,9 +348,28 @@ export default function MobileAppointmentDetailSheet({
               </div>
             </div>
             <div className="u-nums text-zinc-900" style={{ fontSize: 15 }}>
-              ${price.toFixed(2)}
+              ${baseServicePrice.toFixed(2)}
             </div>
           </div>
+
+          {splitAppointmentAddons && appointmentAddons.map((addon) => (
+            <div
+              key={addon.id || addon.serviceId || addon.serviceName}
+              className="py-3 border-b border-hairline border-zinc-200 flex items-start justify-between gap-3"
+            >
+              <div className="flex-1 min-w-0">
+                <div className="text-zinc-900" style={{ fontSize: 15 }}>
+                  {addon.serviceName || 'Service add-on'}
+                </div>
+                <div className="text-ink-secondary" style={{ fontSize: 13, marginTop: 2 }}>
+                  Add-on service
+                </div>
+              </div>
+              <div className="u-nums text-zinc-900" style={{ fontSize: 15 }}>
+                ${Number(addon.estimatedPrice || 0).toFixed(2)}
+              </div>
+            </div>
+          ))}
 
           {pct > 0 && (
             <div className="py-3 border-b border-hairline border-zinc-200 flex items-center justify-between">

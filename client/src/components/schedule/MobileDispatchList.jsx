@@ -27,6 +27,10 @@ function adminFetch(path) {
   });
 }
 
+function serviceDisplayName(service) {
+  return service?.serviceTypeDisplay || service?.serviceType || '';
+}
+
 // Monday of the ET week that contains `dateStr` ('YYYY-MM-DD'). Returned
 // as the same 'YYYY-MM-DD' shape so it can go straight into the API call.
 function mondayOfETWeek(dateStr) {
@@ -139,12 +143,12 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
             </span>
             {service.tier && <Badge tone="neutral">{service.tier}</Badge>}
           </span>
-          {service.serviceType && (
+          {serviceDisplayName(service) && (
             <span
               className="block truncate text-ink-secondary"
               style={{ fontSize: 13, marginTop: 1 }}
             >
-              {service.serviceType}
+              {serviceDisplayName(service)}
             </span>
           )}
           <span

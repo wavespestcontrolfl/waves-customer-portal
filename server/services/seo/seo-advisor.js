@@ -15,7 +15,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const SearchConsole = require('./search-console');
+const SearchConsole = require('./search-console-v2');
 const MODELS = require('../../config/models');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 

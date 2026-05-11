@@ -41,6 +41,10 @@ function isLawnService(service) {
   return String(service?.serviceType || '').toLowerCase().includes('lawn');
 }
 
+function serviceDisplayName(service) {
+  return service?.serviceTypeDisplay || service?.serviceType || '';
+}
+
 function parseISODate(iso) {
   if (!iso || typeof iso !== 'string') return null;
   const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -348,7 +352,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
         borderLeft: accent ? `3px solid ${accent}` : undefined,
         ...dragStyle,
       }}
-      title={`${service.customerName || 'Unassigned'} · ${service.serviceType || ''} · ${service.windowDisplay || ''}\nShift+click to select for bulk actions`}
+      title={`${service.customerName || 'Unassigned'} · ${serviceDisplayName(service)} · ${service.windowDisplay || ''}\nShift+click to select for bulk actions`}
     >
       {routeOrder != null && (
         <div
@@ -432,7 +436,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
         {service.customerName || 'Unassigned'}
       </button>
       {effectiveHeight > SLOT_HEIGHT && (
-        <div className="opacity-80 truncate">{service.serviceType || ''}</div>
+        <div className="opacity-80 truncate">{serviceDisplayName(service)}</div>
       )}
       {service.address && effectiveHeight > SLOT_HEIGHT * 2 && (
         <div className="opacity-70 truncate">{service.address}</div>
@@ -641,7 +645,7 @@ function AllDayStrip({ services, onEdit, onProtocol, onTreatmentPlan, onViewAudi
             style={{ background: svc.status === 'completed' ? '#E4E4E7' : '#3B82F6', color: svc.status === 'completed' ? '#71717A' : '#FFFFFF', border: `1px solid ${svc.status === 'completed' ? '#E4E4E7' : '#3B82F6'}` }}
             title={(svc.customerId || svc.customer_id) && onViewCustomer ? 'Open customer profile' : undefined}
           >
-            {svc.customerName || 'Unassigned'} · {svc.serviceType || ''}
+            {svc.customerName || 'Unassigned'} · {serviceDisplayName(svc)}
           </button>
           {isLawnService(svc) && onTreatmentPlan && (
             <button
@@ -716,7 +720,7 @@ function RailItem({ service, onEdit, onProtocol, onTreatmentPlan, onViewAudit, o
         isSelected && !isDragging && 'ring-2 ring-zinc-900',
       )}
       style={{ background: statusBlockFill(service.status) || undefined, border: `1px solid ${statusBlockFill(service.status) || '#E4E4E7'}`, ...dragStyle }}
-      title={`${service.customerName || 'Unassigned'} · ${service.serviceType || ''} · ${service.windowDisplay || timeLabel}\nShift+click to select for bulk actions`}
+      title={`${service.customerName || 'Unassigned'} · ${serviceDisplayName(service)} · ${service.windowDisplay || timeLabel}\nShift+click to select for bulk actions`}
     >
       <div className="u-nums text-10 opacity-90 mb-0.5">{timeLabel}</div>
       <button
@@ -735,8 +739,8 @@ function RailItem({ service, onEdit, onProtocol, onTreatmentPlan, onViewAudit, o
       >
         {service.customerName || 'Unassigned'}
       </button>
-      {service.serviceType && (
-        <div className="truncate opacity-90">{service.serviceType}</div>
+      {serviceDisplayName(service) && (
+        <div className="truncate opacity-90">{serviceDisplayName(service)}</div>
       )}
       {isLawnService(service) && onTreatmentPlan && (
         <button

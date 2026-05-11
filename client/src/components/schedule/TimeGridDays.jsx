@@ -128,6 +128,10 @@ function isLawnService(service) {
   return String(service?.serviceType || '').toLowerCase().includes('lawn');
 }
 
+function serviceDisplayName(service) {
+  return service?.serviceTypeDisplay || service?.serviceType || '';
+}
+
 // Greedy interval-scheduling lane layout: overlapping services share a
 // cluster; within a cluster each goes into the first lane whose last
 // assigned service ends at or before this one starts.
@@ -205,7 +209,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
         background: statusBlockFill(service.status) || undefined,
         ...dragStyle,
       }}
-      title={`${service.customerName || 'Unassigned'} · ${service.serviceType || ''} · ${service.windowStart || ''}${service.technicianName ? ' · ' + service.technicianName : ''}`}
+      title={`${service.customerName || 'Unassigned'} · ${serviceDisplayName(service)} · ${service.windowStart || ''}${service.technicianName ? ' · ' + service.technicianName : ''}`}
     >
       <div className="opacity-90 truncate text-10">
         {(() => {
@@ -246,7 +250,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
       )}
       {height > SLOT_HEIGHT && (
         <div className="opacity-80 truncate text-10">
-          {service.serviceType || ''}{service.technicianName ? ` · ${service.technicianName}` : ''}
+          {serviceDisplayName(service)}{service.technicianName ? ` · ${service.technicianName}` : ''}
         </div>
       )}
     </div>
@@ -473,7 +477,7 @@ function RailItem({ service, dayLabel, onEdit, onTreatmentPlan, onViewCustomer }
         isDragging && 'opacity-90 z-50 shadow-2xl ring-2 ring-zinc-900',
       )}
       style={{ background: statusBlockFill(service.status) || undefined, border: `1px solid ${statusBlockFill(service.status) || '#E4E4E7'}`, ...dragStyle }}
-      title={`${service.customerName || 'Unassigned'} · ${service.serviceType || ''} · ${dayLabel} ${timeLabel}`}
+      title={`${service.customerName || 'Unassigned'} · ${serviceDisplayName(service)} · ${dayLabel} ${timeLabel}`}
     >
       <div className="u-nums text-10 opacity-90 mb-0.5">
         {dayLabel} · {timeLabel}
@@ -494,8 +498,8 @@ function RailItem({ service, dayLabel, onEdit, onTreatmentPlan, onViewCustomer }
       >
         {service.customerName || 'Unassigned'}
       </button>
-      {service.serviceType && (
-        <div className="truncate opacity-90">{service.serviceType}</div>
+      {serviceDisplayName(service) && (
+        <div className="truncate opacity-90">{serviceDisplayName(service)}</div>
       )}
       {isLawnService(service) && onTreatmentPlan && (
         <button

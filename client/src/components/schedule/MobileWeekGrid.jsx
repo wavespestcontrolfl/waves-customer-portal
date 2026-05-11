@@ -40,6 +40,10 @@ function readZoom() {
   return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, raw));
 }
 
+function serviceDisplayName(service) {
+  return service?.serviceTypeDisplay || service?.serviceType || '';
+}
+
 function writeZoom(v) {
   try { window.localStorage.setItem(ZOOM_STORAGE_KEY, String(v)); } catch {}
 }
@@ -196,14 +200,14 @@ function MobileBlock({ service, top, height, laneIdx, laneCount, onEdit }) {
         touchAction: 'none',
         ...dragStyle,
       }}
-      title={`${service.customerName} · ${service.serviceType || ''} · ${service.windowStart || ''}`}
+      title={`${service.customerName} · ${serviceDisplayName(service)} · ${service.windowStart || ''}`}
     >
       <div style={{ fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         {firstName}
       </div>
-      {!tooSmall && service.serviceType && (
+      {!tooSmall && serviceDisplayName(service) && (
         <div style={{ opacity: 0.85, fontSize: 10, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          {service.serviceType}
+          {serviceDisplayName(service)}
         </div>
       )}
     </div>

@@ -7,6 +7,8 @@ const { generateEstimate } = require('../services/pricing-engine');
 const TwilioService = require('../services/twilio');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { subscribeOrResubscribe } = require('../services/newsletter-subscribers');
+const { sendConfirmationEmail } = require('../services/newsletter-confirm');
+const AutomationRunner = require('../services/automation-runner');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -371,41 +373,52 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     }
 
     // Newsletter enrollment — gated on explicit opt-in checkbox from the quote
-    // wizard (QuotePage.jsx). Same consent bit drives both systems:
-    //   - beehiiv lead drip (new_lead automation — promotional, per ASM classification)
-    //   - SendGrid newsletter_subscribers table (ongoing monthly broadcast)
-    // Without the checkbox: no email enrollment of any kind. User gets the quote,
-    // the admin alert, and their customer-SMS booking link — nothing else.
+    // wizard (QuotePage.jsx). Public quote emails are user-provided and
+    // unverified, so they go through the same double-opt-in path as the
+    // public newsletter form. The promotional new_lead automation is queued
+    // only after the subscriber confirms.
     const newsletterOptIn = req.body.newsletter_opt_in === true;
     const emailLc = email ? email.toLowerCase().trim() : '';
 
     if (newsletterOptIn && emailLc) {
-      try {
-        const AutomationRunner = require('../services/automation-runner');
-        const r = await AutomationRunner.enrollCustomer({
-          templateKey: 'new_lead',
-          customer: { email: emailLc, first_name: firstName, last_name: lastName, id: null },
-        });
-        logger.info(`[public-quote] enrolled ${emailLc} in new_lead: ${JSON.stringify(r)}`);
-      } catch (e) { logger.error(`[public-quote] new_lead enroll failed: ${e.message}`); }
-
       // SendGrid side: dual-write into newsletter_subscribers via the
       // shared helper (audit §9.3 — single source of truth for the
-      // resub/insert/customer-link flow). strict=false because the quote
-      // form's own validation already gated the email shape; we don't
-      // want to block a quote on a subtle regex difference.
+      // resub/insert/customer-link flow).
       try {
         const result = await subscribeOrResubscribe({
           email: emailLc,
           firstName: firstName || null,
           lastName: lastName || null,
           source: 'quote_wizard',
-          strict: false,
+          strict: true,
+          requireConfirmation: true,
         });
-        if (result.action === 'resubscribed') {
-          logger.info(`[public-quote] SendGrid: resubscribed ${emailLc} via quote wizard`);
-        } else if (result.action === 'created') {
-          logger.info(`[public-quote] SendGrid: subscribed ${emailLc} via quote wizard`);
+        if (result.action === 'confirmation_sent' || result.action === 'confirmation_resent') {
+          await db('newsletter_subscribers').where({ id: result.subscriber.id }).update({
+            quote_lead_automation_pending: true,
+            updated_at: new Date(),
+          });
+          try {
+            await sendConfirmationEmail(result.subscriber);
+          } catch (e) {
+            logger.error(`[public-quote] confirmation email failed for subscriber id=${result.subscriber?.id}: ${e.message}`);
+          }
+          logger.info(`[public-quote] newsletter confirmation queued for lead ${lead.id} subscriber id=${result.subscriber?.id}`);
+        } else if (result.action === 'already_active') {
+          try {
+            const r = await AutomationRunner.enrollCustomer({
+              templateKey: 'new_lead',
+              customer: {
+                id: result.subscriber?.customer_id || customerId || null,
+                email: emailLc,
+                first_name: firstName || null,
+                last_name: lastName || null,
+              },
+            });
+            logger.info(`[public-quote] existing subscriber id=${result.subscriber?.id} new_lead ${r.enrolled ? 'queued' : 'skipped'}`);
+          } catch (e) {
+            logger.error(`[public-quote] existing subscriber id=${result.subscriber?.id} new_lead failed: ${e.message}`);
+          }
         }
       } catch (e) { logger.error(`[public-quote] newsletter_subscribers dual-write failed: ${e.message}`); }
     }

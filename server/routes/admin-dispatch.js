@@ -18,6 +18,7 @@ const { recordServiceProductNutrients } = require('../services/nutrient-ledger')
 const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
+const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const {
   recordTrackTransitionFailure,
@@ -534,6 +535,9 @@ router.get('/:date?', async (req, res, next) => {
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone',
         'customers.address_line1', 'customers.city', 'customers.state', 'customers.zip',
         'customers.waveguard_tier', 'customers.monthly_rate', 'customers.lawn_type',
+        'customers.autopay_enabled', 'customers.autopay_paused_until',
+        'customers.autopay_payment_method_id',
+        'customers.ach_status',
         'technicians.name as tech_name'
       )
       .orderByRaw('COALESCE(route_order, 999), window_start');
@@ -548,6 +552,21 @@ router.get('/:date?', async (req, res, next) => {
         .where({ job_id: s.id })
         .orderBy('transitioned_at')
         .select('to_status as status', 'transitioned_at as at', 'notes');
+      let checkoutInvoice = null;
+      try {
+        checkoutInvoice = await db('invoices')
+          .where({ scheduled_service_id: s.id })
+          .whereNot('status', 'void')
+          .orderBy('created_at', 'desc')
+          .first('id', 'status', 'total', 'token');
+      } catch { /* scheduled_service_id may be absent before migration */ }
+      const autopayActive = await customerOnAutopay({
+        id: s.customer_id,
+        autopay_enabled: s.autopay_enabled,
+        autopay_paused_until: s.autopay_paused_until,
+        autopay_payment_method_id: s.autopay_payment_method_id,
+        ach_status: s.ach_status,
+      });
 
       // Build property notes
       const alerts = [];
@@ -578,9 +597,14 @@ router.get('/:date?', async (req, res, next) => {
         customerConfirmed: s.customer_confirmed,
         waveguardTier: s.waveguard_tier,
         monthlyRate: parseFloat(s.monthly_rate || 0),
+        autopayActive,
+        autopayEnabled: s.autopay_enabled !== false,
         estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
         createInvoiceOnComplete: !!s.create_invoice_on_complete,
+        checkoutInvoiceId: checkoutInvoice?.id || null,
+        checkoutInvoiceStatus: checkoutInvoice?.status || null,
+        checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
         isRecurring: !!s.is_recurring,
         lawnType: s.lawn_type,
         propertyAlerts: alerts,
@@ -951,7 +975,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
-      .select('scheduled_services.*', 'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone', 'customers.city', 'customers.property_type', 'customers.monthly_rate as cust_monthly_rate', 'customers.waveguard_tier as cust_waveguard_tier', 'technicians.name as tech_name')
+      .select(
+        'scheduled_services.*',
+        'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone',
+        'customers.city', 'customers.property_type',
+        'customers.monthly_rate as cust_monthly_rate',
+        'customers.waveguard_tier as cust_waveguard_tier',
+        'customers.autopay_enabled as cust_autopay_enabled',
+        'customers.autopay_paused_until as cust_autopay_paused_until',
+        'customers.autopay_payment_method_id as cust_autopay_payment_method_id',
+        'customers.ach_status as cust_ach_status',
+        'technicians.name as tech_name'
+      )
       .first();
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
@@ -1459,11 +1494,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Invoice + completion SMS:
     //   - If the appointment was flagged `create_invoice_on_complete` (scheduler's
     //     "Create invoice" checkbox) OR the customer is WaveGuard with a monthly_rate,
-    //     generate an invoice and send a single combined SMS (report + pay link).
+    //     generate an invoice and send a single combined SMS (report + pay link),
+    //     unless the visit is already covered by prepay/paid invoice/autopay.
     //   - Otherwise send the plain service-complete SMS (report link only).
-    const invoiceAmount = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
+    const hasVisitPrice = svc.estimated_price != null && Number(svc.estimated_price) > 0;
+    const invoiceAmount = hasVisitPrice
       ? Number(svc.estimated_price)
       : (svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
+    const customerAutopayActive = await customerOnAutopay({
+      id: svc.customer_id,
+      autopay_enabled: svc.cust_autopay_enabled,
+      autopay_paused_until: svc.cust_autopay_paused_until,
+      autopay_payment_method_id: svc.cust_autopay_payment_method_id,
+      ach_status: svc.cust_ach_status,
+    });
+    const autopayCoversVisit = customerAutopayActive
+      && !hasVisitPrice
+      && !!svc.cust_waveguard_tier
+      && Number(svc.cust_monthly_rate || 0) > 0;
     // Skip invoice creation if a paid invoice already exists for this service record
     // (covers the "customer paid prior to service report" case)
     let invoiceCreated = false;
@@ -1536,7 +1584,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           .first();
       }
     } catch (e) { /* column may not exist pre-migration — non-blocking */ }
-    const shouldInvoice = !recapReviewOnly && !alreadyPaid && !prepaidCovered && !preMintedInvoice && !existingCompletionInvoice
+    const shouldInvoice = !recapReviewOnly && !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice
       && (!!svc.create_invoice_on_complete || !!svc.cust_waveguard_tier) && invoiceAmount > 0;
     // Customer-facing SMS URL must be the canonical portal domain, not
     // the raw Railway URL (CLIENT_URL is set to the Railway hostname on
@@ -1694,7 +1742,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         let sentSmsBody = null;
         let completionSmsWasTruncated = false;
         let sentSmsType = null;
-        if (invoiceCreated && payUrl && !suppressCompletionInvoiceLink) {
+        const allowCompletionInvoiceLink = !suppressCompletionInvoiceLink
+          && !prepaidCovered
+          && !alreadyPaid
+          && !autopayCoversVisit;
+        if (invoiceCreated && payUrl && allowCompletionInvoiceLink) {
           const fallback = `Hello ${svc.first_name}! Your ${displayServiceType} service report is ready: ${portalUrl}\n\nInvoice for today's visit: ${payUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = await renderTemplate('service_complete_with_invoice', {
             first_name: svc.first_name || '',
@@ -1705,16 +1757,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           sentSmsType = 'service_complete_with_invoice';
           sentSmsBody = `${body}${reviewSuffix}`.trim();
           completionSmsWasTruncated = false;
-        } else if (prepaidCovered || alreadyPaid) {
-          const fallback = `Hello ${svc.first_name}! Thanks for your payment today. Your ${displayServiceType} service report is ready: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
-          const body = await renderTemplate('service_complete_prepaid', {
-            first_name: svc.first_name || '',
-            service_type: displayServiceType,
-            portal_url: portalUrl,
-          }, fallback);
-          sentSmsType = 'service_complete_prepaid';
-          const concise = `Hello ${svc.first_name}! Report: ${portalUrl}\nReply with questions.`;
-          ({ body: sentSmsBody, truncated: completionSmsWasTruncated } = withRecap(body, concise));
         } else {
           const fallback = `Hello ${svc.first_name}! Your service report is ready. View it here: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = await renderTemplate('service_complete', { first_name: svc.first_name || '' }, fallback);
@@ -1843,6 +1885,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const finalRecordNotes = parseJsonObject(record.structured_notes);
     const completionSmsStatus = finalRecordNotes.completionSmsStatus
       || (sendCompletionSms ? (svc.cust_phone ? 'not_sent' : 'no_phone') : 'not_requested');
+    const completionSmsType = finalRecordNotes.completionSmsType || finalRecordNotes.sentSmsType || null;
+    const invoicePaymentActionRequired = !!invoice
+      && invoice.status !== 'paid'
+      && !prepaidCovered
+      && !alreadyPaid
+      && !autopayCoversVisit
+      && !suppressCompletionInvoiceLink
+      && completionSmsType !== 'service_complete';
     const responsePayload = {
       success: true,
       serviceRecordId: record.id,
@@ -1850,9 +1900,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       invoiceTotal: invoice?.total != null ? Number(invoice.total) : null,
       invoiceToken: invoice?.token || null,
       invoiceStatus: invoice?.status || null,
+      invoicePaymentActionRequired,
       completionSmsStatus,
       completionSmsError: finalRecordNotes.completionSmsError || null,
-      completionSmsType: finalRecordNotes.completionSmsType || finalRecordNotes.sentSmsType || null,
+      completionSmsType,
       completionSmsTruncated: !!finalRecordNotes.completionSmsTruncated,
     };
     // Refresh the stored response with the final invoice info — this is an

@@ -2,12 +2,27 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
-const SearchConsole = require('../services/seo/search-console');
+const SearchConsole = require('../services/seo/search-console-v2');
 const SEOAdvisor = require('../services/seo/seo-advisor');
 const logger = require('../services/logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+function normalizeDomain(value) {
+  if (!value) return null;
+  return String(value)
+    .trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/^www\./i, '')
+    .replace(/\/.*$/, '')
+    .toLowerCase();
+}
+
+function applyDomainFilter(query, domain) {
+  const normalized = normalizeDomain(domain);
+  return normalized ? query.where('domain', normalized) : query;
+}
 
 // =========================================================================
 // GSC DASHBOARD — sitewide metrics
@@ -30,23 +45,24 @@ router.get('/dashboard', async (req, res, next) => {
 // GET /api/admin/seo/queries?period=28&branded=false&service=pest&city=bradenton
 router.get('/queries', async (req, res, next) => {
   try {
-    const { period = 28, branded, service, city, device, sort = 'clicks', limit = 100 } = req.query;
+    const { period = 28, branded, service, city, domain, sort = 'clicks', limit = 100 } = req.query;
     const since = etDateString(addETDays(new Date(), -parseInt(period)));
 
-    let query = db('gsc_queries')
+    let query = applyDomainFilter(db('gsc_queries')
       .where('date', '>=', since)
       .select('query', 'is_branded', 'service_category', 'city_target', 'intent_type')
       .sum('clicks as clicks')
       .sum('impressions as impressions')
       .avg('position as avg_position')
-      .groupBy('query', 'is_branded', 'service_category', 'city_target', 'intent_type');
+      .groupBy('query', 'is_branded', 'service_category', 'city_target', 'intent_type'), domain);
 
     if (branded === 'true') query = query.where('is_branded', true);
     if (branded === 'false') query = query.where('is_branded', false);
     if (service) query = query.where('service_category', service);
     if (city) query = query.where('city_target', city);
 
-    const rows = await query.orderBy(sort === 'position' ? 'avg_position' : sort, sort === 'position' ? 'asc' : 'desc').limit(parseInt(limit));
+    const safeSort = ['clicks', 'impressions', 'position'].includes(sort) ? sort : 'clicks';
+    const rows = await query.orderBy(safeSort === 'position' ? 'avg_position' : safeSort, safeSort === 'position' ? 'asc' : 'desc').limit(parseInt(limit));
 
     res.json({
       queries: rows.map(r => ({
@@ -67,22 +83,23 @@ router.get('/queries', async (req, res, next) => {
 // GET /api/admin/seo/pages?period=28&type=city
 router.get('/pages', async (req, res, next) => {
   try {
-    const { period = 28, type, service, city, sort = 'clicks', limit = 50 } = req.query;
+    const { period = 28, type, service, city, domain, sort = 'clicks', limit = 50 } = req.query;
     const since = etDateString(addETDays(new Date(), -parseInt(period)));
 
-    let query = db('gsc_pages')
+    let query = applyDomainFilter(db('gsc_pages')
       .where('date', '>=', since)
       .select('page_url', 'page_type', 'service_category', 'city_target')
       .sum('clicks as clicks')
       .sum('impressions as impressions')
       .avg('position as avg_position')
-      .groupBy('page_url', 'page_type', 'service_category', 'city_target');
+      .groupBy('page_url', 'page_type', 'service_category', 'city_target'), domain);
 
     if (type) query = query.where('page_type', type);
     if (service) query = query.where('service_category', service);
     if (city) query = query.where('city_target', city);
 
-    const rows = await query.orderBy(sort === 'position' ? 'avg_position' : sort, sort === 'position' ? 'asc' : 'desc').limit(parseInt(limit));
+    const safeSort = ['clicks', 'impressions', 'position'].includes(sort) ? sort : 'clicks';
+    const rows = await query.orderBy(safeSort === 'position' ? 'avg_position' : safeSort, safeSort === 'position' ? 'asc' : 'desc').limit(parseInt(limit));
 
     res.json({
       pages: rows.map(r => ({
@@ -185,6 +202,82 @@ router.get('/gbp', async (req, res, next) => {
 // SEO ADVISOR
 // =========================================================================
 
+// GET /api/admin/seo/sync-health — diagnostics for Advisor/GSC/GBP data.
+router.get('/sync-health', async (req, res, next) => {
+  try {
+    let WAVES_LOCATIONS = [];
+    try {
+      ({ WAVES_LOCATIONS } = require('../config/locations'));
+    } catch (err) {
+      logger.warn(`[seo] Could not load locations for sync health: ${err.message}`);
+    }
+
+    const probe = async (table, dateCol = 'date') => {
+      try {
+        const [{ count }] = await db(table).count('* as count');
+        const latest = await db(table).max(`${dateCol} as max`).first();
+        return { ok: true, count: parseInt(count || 0, 10), lastDate: latest?.max || null };
+      } catch (e) {
+        return { ok: false, count: 0, lastDate: null, error: e.message };
+      }
+    };
+
+    const gscDaily = await probe('gsc_performance_daily', 'date');
+    const gscQueries = await probe('gsc_queries', 'date');
+    const gbpDaily = await probe('gbp_performance_daily', 'date');
+
+    const gbpLocations = await Promise.all(WAVES_LOCATIONS.map(async (loc) => {
+      const envVar = loc.googleRefreshTokenEnv;
+      const configured = !!(envVar && process.env[envVar]);
+      let lastDate = null;
+      let rowCount = 0;
+      if (gbpDaily.ok) {
+        try {
+          const row = await db('gbp_performance_daily')
+            .where({ location_id: loc.googleLocationId })
+            .max('date as max')
+            .first();
+          lastDate = row?.max || null;
+          const [{ count }] = await db('gbp_performance_daily')
+            .where({ location_id: loc.googleLocationId })
+            .count('* as count');
+          rowCount = parseInt(count || 0, 10);
+        } catch { /* keep default health values */ }
+      }
+      return {
+        id: loc.id,
+        name: loc.name,
+        envVar,
+        configured,
+        rowCount,
+        lastDate,
+      };
+    }));
+
+    const staleDays = (dateStr) => {
+      if (!dateStr) return null;
+      const d = new Date(dateStr);
+      if (Number.isNaN(d.getTime())) return null;
+      return Math.floor((Date.now() - d.getTime()) / 86400000);
+    };
+
+    res.json({
+      gsc: {
+        configured: !!process.env.GOOGLE_SERVICE_ACCOUNT_JSON,
+        daily: gscDaily,
+        queries: gscQueries,
+        staleDays: staleDays(gscDaily.lastDate),
+      },
+      gbp: {
+        daily: gbpDaily,
+        locations: gbpLocations,
+        anyConfigured: gbpLocations.some((l) => l.configured),
+      },
+      checkedAt: new Date().toISOString(),
+    });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/seo/advisor — latest report
 router.get('/advisor', async (req, res, next) => {
   try {
@@ -231,6 +324,15 @@ router.post('/sync', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/seo/sync-gbp — manually trigger GBP performance sync
+router.post('/sync-gbp', async (req, res, next) => {
+  try {
+    const GoogleBusiness = require('../services/google-business');
+    const result = await GoogleBusiness.syncPerformanceDaily(req.body.daysBack || 30);
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
 // =========================================================================
 // PAGE 2 OPPORTUNITIES — queries in positions 4–15
 // =========================================================================
@@ -239,11 +341,12 @@ router.post('/sync', async (req, res, next) => {
 router.get('/opportunities', async (req, res, next) => {
   try {
     const period = parseInt(req.query.period || 28);
+    const domain = req.query.domain || null;
     const since = etDateString(addETDays(new Date(), -period));
 
-    const rows = await db('gsc_queries')
+    const rows = await applyDomainFilter(db('gsc_queries')
       .where('date', '>=', since)
-      .where('is_branded', false)
+      .where('is_branded', false), domain)
       .select('query', 'service_category', 'city_target')
       .sum('clicks as clicks')
       .sum('impressions as impressions')

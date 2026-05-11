@@ -7,6 +7,7 @@ const stripeConfig = require('../config/stripe-config');
 const { generateInvoicePDF } = require('../services/pdf/invoice-pdf');
 const ConsentService = require('../services/payment-method-consents');
 const logger = require('../services/logger');
+const { assertInvoiceCollectible } = require('../services/invoice-helpers');
 
 /**
  * Public pay routes — no auth required.
@@ -83,7 +84,11 @@ router.post('/:token/setup', async (req, res, next) => {
     const { saveCard, cardOnly } = req.body || {};
     const invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
-    if (invoice.status === 'paid') return res.status(400).json({ error: 'Invoice already paid' });
+    try {
+      assertInvoiceCollectible(invoice.status);
+    } catch (err) {
+      return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
+    }
 
     const result = await StripeService.createInvoicePaymentIntent(invoice.id, { saveCard: !!saveCard, cardOnly: !!cardOnly });
 
@@ -112,7 +117,11 @@ router.post('/:token/update-amount', async (req, res, next) => {
 
     const invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
-    if (invoice.status === 'paid') return res.status(400).json({ error: 'Invoice already paid' });
+    try {
+      assertInvoiceCollectible(invoice.status);
+    } catch (err) {
+      return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
+    }
 
     const result = await StripeService.updateInvoicePaymentIntentMethod(
       invoice.id,
@@ -138,14 +147,29 @@ router.post('/:token/confirm', async (req, res, next) => {
 
     const invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    if (['void', 'refunded', 'canceled', 'cancelled'].includes(String(invoice.status || '').toLowerCase())) {
+      try {
+        assertInvoiceCollectible(invoice.status);
+      } catch (err) {
+        return res.status(400).json({ error: err.message });
+      }
+    }
     if (invoice.status === 'paid') return res.status(400).json({ error: 'Invoice already paid' });
+    if (invoice.stripe_payment_intent_id
+      && String(invoice.stripe_payment_intent_id) !== String(paymentIntentId)) {
+      return res.status(409).json({ error: 'Invoice has a different active payment' });
+    }
 
     const paymentRecord = await StripeService.confirmInvoicePayment(invoice.id, paymentIntentId);
 
-    // Send receipt SMS in the background
-    InvoiceService.sendReceipt(invoice.id).catch(err => {
-      logger.error(`[pay-v2] Receipt send failed: ${err.message}`);
-    });
+    // Card payments are paid immediately. ACH bank payments sit in
+    // `processing` until Stripe emits payment_intent.succeeded, so the
+    // webhook sends the receipt after funds clear.
+    if (paymentRecord.status === 'paid') {
+      InvoiceService.sendReceipt(invoice.id).catch(err => {
+        logger.error(`[pay-v2] Receipt send failed: ${err.message}`);
+      });
+    }
 
     res.json({
       success: true,

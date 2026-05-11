@@ -16,6 +16,42 @@ const INVOICE_UPDATE_ALLOWED_FIELDS = Object.freeze([
   'title', 'notes', 'due_date', 'line_items', 'tax_rate',
 ]);
 
+const INVOICE_UNCOLLECTIBLE_STATUSES = Object.freeze([
+  'paid',
+  'processing',
+  'void',
+  'refunded',
+  'canceled',
+  'cancelled',
+]);
+
+function invoiceStatusKey(status) {
+  return String(status || '').trim().toLowerCase();
+}
+
+function isInvoiceCollectibleStatus(status) {
+  return !INVOICE_UNCOLLECTIBLE_STATUSES.includes(invoiceStatusKey(status));
+}
+
+function assertInvoiceCollectible(currentStatus) {
+  const status = invoiceStatusKey(currentStatus);
+  if (status === 'paid') {
+    throw new Error('Invoice already paid');
+  }
+  if (status === 'processing') {
+    throw new Error('Bank payment is already processing');
+  }
+  if (status === 'void') {
+    throw new Error('Invoice is void and cannot be paid');
+  }
+  if (status === 'refunded') {
+    throw new Error('Invoice has been refunded and cannot be paid');
+  }
+  if (status === 'canceled' || status === 'cancelled') {
+    throw new Error('Invoice is canceled and cannot be paid');
+  }
+}
+
 function assertInvoiceVoidable(currentStatus) {
   if (currentStatus === 'paid') {
     throw new Error('Cannot void a paid invoice — issue a refund instead');
@@ -25,4 +61,10 @@ function assertInvoiceVoidable(currentStatus) {
   }
 }
 
-module.exports = { INVOICE_UPDATE_ALLOWED_FIELDS, assertInvoiceVoidable };
+module.exports = {
+  INVOICE_UPDATE_ALLOWED_FIELDS,
+  INVOICE_UNCOLLECTIBLE_STATUSES,
+  assertInvoiceCollectible,
+  assertInvoiceVoidable,
+  isInvoiceCollectibleStatus,
+};

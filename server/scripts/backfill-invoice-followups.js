@@ -21,38 +21,9 @@
 
 const db = require('../models/db');
 const config = require('../config/invoice-followups');
+const { customerOnAutopay } = require('../services/autopay-eligibility');
 
 const MAX_OVERDUE_DAYS = 60; // anything older is in collections territory
-
-// customerOnAutopay() is engine-internal; replicate the logic here so the
-// backfill doesn't require requiring the full engine module (which would also
-// be fine — this is just isolation to keep the script auditable).
-async function customerOnAutopay(customer) {
-  if (!customer) return false;
-  if (customer.autopay_enabled === false) return false;
-  if (customer.autopay_paused_until && new Date(customer.autopay_paused_until) > new Date()) return false;
-
-  const hasPM = !!customer.autopay_payment_method_id || !!customer.stripe_default_payment_method_id;
-  if (!hasPM) {
-    try {
-      const pm = await db('payment_methods')
-        .where({ customer_id: customer.id })
-        .andWhere(function () { this.where('is_default', true).orWhere('autopay_enabled', true); })
-        .first();
-      if (!pm) return false;
-    } catch { return false; }
-  }
-
-  if (customer.ach_status && customer.ach_status !== 'active') {
-    try {
-      const card = await db('payment_methods')
-        .where({ customer_id: customer.id, method_type: 'card' })
-        .first();
-      if (!card) return false;
-    } catch { return false; }
-  }
-  return true;
-}
 
 function computeTouchAt(dueDate, stepIndex) {
   const step = config.steps[stepIndex];

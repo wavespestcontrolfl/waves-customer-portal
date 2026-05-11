@@ -49,7 +49,7 @@ function assignAbVariant() {
  *   pre-flight) and the rare race where the segment empties between
  *   pre-flight and dispatch.
  *
- * Returns { recipients, delivered, failed }.
+ * Returns { recipients, accepted, failed }.
  */
 async function sendCampaign(sendId, opts = {}) {
   if (!sendgrid.isConfigured()) throw new Error('SendGrid not configured (SENDGRID_API_KEY missing)');
@@ -113,7 +113,7 @@ async function sendCampaign(sendId, opts = {}) {
     preheader: send.preview_text || undefined,
   });
 
-  let delivered = 0, failed = 0;
+  let accepted = 0, failed = 0;
 
   // O(1) variant lookup per subscriber. The previous .filter().find() was
   // O(n²) — at 5k subscribers that's 25M comparisons before the first
@@ -161,9 +161,9 @@ async function sendCampaign(sendId, opts = {}) {
         });
 
         // Single bulk UPDATE per chunk instead of N per-row updates. Knex
-        // returns the affected row count so the delivered tally stays
-        // accurate. The (send_id, subscriber_id) unique constraint
-        // guarantees one row per subscriber.
+        // returns the affected row count so the SendGrid-accepted tally
+        // stays accurate. True delivery is counted only from provider
+        // webhooks after mailbox acceptance.
         const updated = await db('newsletter_send_deliveries')
           .where({ send_id: send.id })
           .whereIn('subscriber_id', subscriberIds)
@@ -173,7 +173,7 @@ async function sendCampaign(sendId, opts = {}) {
             sent_at: new Date(),
             updated_at: new Date(),
           });
-        delivered += updated;
+        accepted += updated;
 
         // Customer touchpoints in parallel — one per linked customer in
         // the chunk. Promise.allSettled so a single touchpoint failure
@@ -217,12 +217,11 @@ async function sendCampaign(sendId, opts = {}) {
   await db('newsletter_sends').where({ id: send.id }).update({
     status: failed === subscribers.length && subscribers.length > 0 ? 'failed' : 'sent',
     recipient_count: subscribers.length,
-    delivered_count: delivered,
     sent_at: new Date(),
     updated_at: new Date(),
   });
 
-  return { recipients: subscribers.length, delivered, failed };
+  return { recipients: subscribers.length, accepted, failed };
 }
 
 /**

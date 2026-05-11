@@ -239,7 +239,7 @@ const ReviewService = {
     // complaint, no unresolved billing, opted in, no recent ask in
     // cooldown). Here we just make sure the channel is permitted at
     // send time — sms_enabled, suppression list, segment count, no
-    // emoji / price leak.
+    // emoji / customer voice policy.
     try {
       const { sendCustomerMessage } = require('./messaging/send-customer-message');
       const result = await sendCustomerMessage({

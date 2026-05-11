@@ -1,15 +1,12 @@
 /**
  * Customer-voice validators.
  *
- * Two hard rules for any audience='customer' or 'lead' message:
+ * Hard customer/lead-facing voice rule:
  *   - validateNoCustomerEmoji      Customer/lead messages MUST NOT contain emoji.
  *                                  Internal BI is allowed via policy.allowEmoji.
- *   - validateNoPriceLeak          Customer/lead messages MUST NOT contain exact
- *                                  dollar amounts ("$123", "$1,234.56", "123/mo",
- *                                  "123 per month"). Internal/admin can quote.
  *
- * These are policy-aware: they read the resolved policy.allowEmoji /
- * policy.allowExactPrice flags rather than hardcoding the audience check.
+ * This is policy-aware: it reads the resolved policy.allowEmoji
+ * rather than hardcoding the audience check.
  * That keeps the rule-of-thumb in one place (policy.js) and lets the
  * BI internal_briefing purpose continue to use the 📊 emoji + dollar
  * amounts in its Monday SMS.
@@ -61,80 +58,10 @@ function validateNoCustomerEmoji(input, policy) {
   return { ok: true };
 }
 
-/**
- * Patterns that indicate an exact-price leak. These match aggressively
- * because the policy is explicit: customer/lead-facing messages NEVER
- * type a dollar figure. Operators link to a portal/estimate page instead.
- *
- * Allowed phrasings:
- *   - "the totals shown on your estimate"
- *   - "your portal has the current estimate"
- *   - "the secure payment link"
- *   - "tap-to-pay link"
- *
- * Disallowed (any of):
- *   - $123 or $1,234.56 (with or without commas)
- *   - 123/mo, 123/month, 123 per month, 123 monthly
- *   - "monthly total is 99", "annual total is 1188"
- *   - bare integer with /yr, /year, per year, annually
- */
-const PRICE_PATTERNS = [
-  // $-prefixed amounts (with or without thousands separators / decimals)
-  /\$\s?\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?/,
-  /\$\s?\d+(?:\.\d{1,2})?/,
-  // Bare number followed by per-month / monthly / /mo
-  /\b\d{1,5}(?:\.\d{1,2})?\s*(?:\/\s?(?:mo|month|yr|year)\b|per\s+month\b|per\s+year\b|monthly\b|annually\b|a\s+month\b|a\s+year\b)/i,
-  // "monthly total is N", "annual total is N", "your bill is N"
-  /\b(?:monthly|annual|quarterly)\s+total\s+is\s+\d/i,
-  /\bthe\s+(?:monthly|annual|quarterly)\s+(?:rate|charge|amount|cost|price)\s+is\s+\d/i,
-  /\byour\s+(?:bill|balance|invoice|total)\s+is\s+\$?\d/i,
-  // "It costs $X" / "for $X" / "at $X"
-  /\b(?:costs?|for|at|just)\s+\$\s?\d/i,
-];
-
-/**
- * Detect exact-price phrasing in the body.
- * @param {string} body
- * @returns {{ found: boolean, pattern: string | null, sample: string | null }}
- */
-function findPriceLeak(body) {
-  if (!body) return { found: false, pattern: null, sample: null };
-  for (let i = 0; i < PRICE_PATTERNS.length; i++) {
-    const re = PRICE_PATTERNS[i];
-    const m = body.match(re);
-    if (m) {
-      return { found: true, pattern: String(re), sample: m[0] };
-    }
-  }
-  return { found: false, pattern: null, sample: null };
-}
-
-/**
- * Validator entry — price leak.
- * @param {import('../policy').SendCustomerMessageInput} input
- * @param {Object} policy
- * @returns {{ ok: boolean, code?: string, reason?: string }}
- */
-function validateNoPriceLeak(input, policy) {
-  if (policy.allowExactPrice) return { ok: true };
-  const { found, sample } = findPriceLeak(input.body);
-  if (found) {
-    return {
-      ok: false,
-      code: 'PRICE_LEAK',
-      reason: `Body contains an exact price "${sample}" but audience="${input.audience}" / purpose="${input.purpose}" forbids it. Refer to "the totals shown on your estimate" or link to the portal/payment URL instead.`,
-    };
-  }
-  return { ok: true };
-}
-
 module.exports = {
   validateNoCustomerEmoji,
-  validateNoPriceLeak,
   // Exposed for tests
   _internals: {
     findEmoji,
-    findPriceLeak,
-    PRICE_PATTERNS,
   },
 };

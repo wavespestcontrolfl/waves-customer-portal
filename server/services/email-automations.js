@@ -297,7 +297,7 @@ const EmailAutomationService = {
       status: (localResult?.error || smsResult?.error) ? 'partial' : 'success',
     });
 
-    logger.info(`[email-auto] ${key} sent for ${customer.first_name} ${customer.last_name} (${email})`);
+    logger.info(`[email-auto] ${key} sent for customer ${customer.id}`);
     return { success: true, local: localResult, sms: smsResult };
   },
 
