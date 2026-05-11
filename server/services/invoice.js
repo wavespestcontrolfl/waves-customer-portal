@@ -46,12 +46,62 @@ function roundMoney(value) {
   return Math.round((Number(value) || 0) * 100) / 100;
 }
 
+function hasNumericValue(value) {
+  if (value === null || value === undefined || value === '') return false;
+  return Number.isFinite(Number(value));
+}
+
 function firstPositiveNumber(...values) {
   for (const value of values) {
     const parsed = Number(value);
     if (Number.isFinite(parsed) && parsed > 0) return parsed;
   }
   return 0;
+}
+
+function isStoredDiscountLineItem(item, trustedSources = new Set(['scheduled_service'])) {
+  return trustedSources.has(item?.stored_discount_source) && hasNumericValue(item?.discount_dollars);
+}
+
+function resolveStoredDiscountLineItem(item, row) {
+  const dollars = Math.max(0, roundMoney(
+    hasNumericValue(item.discount_dollars)
+      ? item.discount_dollars
+      : Math.abs(Number(item.amount) || 0)
+  ));
+  item.quantity = 1;
+  item.unit_price = -dollars;
+  item.amount = -dollars;
+  return {
+    id: row?.id || item.discount_id || null,
+    row: row || null,
+    name: item.description || row?.name || 'Stored discount',
+    discount_type: item.discount_type || row?.discount_type || 'fixed_amount',
+    amount: hasNumericValue(item.discount_amount)
+      ? roundMoney(item.discount_amount)
+      : roundMoney(hasNumericValue(row?.amount) ? row.amount : dollars),
+    dollars,
+  };
+}
+
+const WAVEGUARD_TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum'];
+
+function assertDiscountEligibleForCustomer(discount, customer) {
+  if (!discount) return;
+  const requiredTier = discount.requires_waveguard_tier;
+  if (!requiredTier) return;
+  const customerTier = customer?.waveguard_tier;
+  if (discount.is_waveguard_tier_discount) {
+    if (customerTier !== requiredTier) {
+      throw new Error('Selected WaveGuard tier discount is not available for this customer');
+    }
+    return;
+  }
+  const requiredIdx = WAVEGUARD_TIER_ORDER.indexOf(requiredTier);
+  const customerIdx = WAVEGUARD_TIER_ORDER.indexOf(customerTier);
+  if (requiredIdx >= 0 && customerIdx < requiredIdx) {
+    throw new Error('Selected discount is not available for this customer tier');
+  }
 }
 
 function resolveLineItemDiscount(row, item, parentAmount) {
@@ -92,6 +142,183 @@ function resolveLineItemDiscount(row, item, parentAmount) {
   return { amount: roundMoney(amount), dollars };
 }
 
+async function loadInvoiceDiscountRows(ids = []) {
+  const uniqueIds = [...new Set((ids || []).filter(Boolean).map(String))];
+  if (!uniqueIds.length) return [];
+  return db('discounts')
+    .whereIn('id', uniqueIds)
+    .where({ is_active: true, show_in_invoices: true });
+}
+
+function buildDiscountLineItem({
+  parentClientId,
+  discountId,
+  discountName,
+  discountType,
+  discountAmount,
+  discountDollars,
+}) {
+  if (!hasNumericValue(discountDollars)) return null;
+  const dollars = roundMoney(discountDollars);
+  if (!(dollars > 0)) return null;
+  const scope = parentClientId || 'appointment';
+  return {
+    client_id: `discount_${discountId || 'custom'}_${scope}`,
+    _kind: 'discount',
+    discount_id: discountId || null,
+    discount_for: parentClientId || null,
+    description: discountName || 'Line item discount',
+    quantity: 1,
+    unit_price: -dollars,
+    amount: -dollars,
+    discount_amount: discountAmount != null ? Number(discountAmount) : undefined,
+    discount_type: discountType || undefined,
+    discount_dollars: dollars,
+    use_stored_discount: true,
+    stored_discount_source: 'scheduled_service',
+  };
+}
+
+async function buildScheduledServiceInvoiceLines(scheduledServiceId, {
+  fallbackAmount = 0,
+  fallbackDescription = 'Service visit',
+  extraLineItems = [],
+} = {}) {
+  if (!scheduledServiceId) {
+    return {
+      lineItems: Number(fallbackAmount) > 0 ? [{
+        description: fallbackDescription,
+        quantity: 1,
+        unit_price: Number(fallbackAmount),
+        amount: Number(fallbackAmount),
+        category: fallbackDescription,
+      }] : [],
+      discountIds: [],
+    };
+  }
+
+  const scheduled = await db('scheduled_services').where({ id: scheduledServiceId }).first().catch(() => null);
+  if (!scheduled) {
+    return {
+      lineItems: Number(fallbackAmount) > 0 ? [{
+        description: fallbackDescription,
+        quantity: 1,
+        unit_price: Number(fallbackAmount),
+        amount: Number(fallbackAmount),
+        category: fallbackDescription,
+      }] : [],
+      discountIds: [],
+    };
+  }
+
+  const addons = await db('scheduled_service_addons')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .orderBy('created_at', 'asc')
+    .catch(() => []);
+  const primaryBaseKnown = hasNumericValue(scheduled.primary_line_price);
+  const appointmentGrossKnown = primaryBaseKnown && addons.every(addon => hasNumericValue(addon.base_price));
+
+  const addonBaseTotal = addons.reduce((sum, addon) => (
+    sum + firstPositiveNumber(addon.base_price, addon.estimated_price)
+  ), 0);
+  const scheduledAmount = firstPositiveNumber(fallbackAmount, scheduled.estimated_price);
+  const primaryBase = primaryBaseKnown
+    ? Math.max(0, roundMoney(scheduled.primary_line_price))
+    : Math.max(0, roundMoney(addonBaseTotal > 0 ? scheduledAmount - addonBaseTotal : scheduledAmount));
+
+  const lineItems = [];
+  const discountIds = [];
+  const primaryClientId = `scheduled_${scheduledServiceId}_primary`;
+  if (primaryBase > 0) {
+    lineItems.push({
+      client_id: primaryClientId,
+      description: scheduled.service_type || fallbackDescription,
+      quantity: 1,
+      unit_price: roundMoney(primaryBase),
+      amount: roundMoney(primaryBase),
+      category: scheduled.service_type || fallbackDescription,
+    });
+    const lineDiscount = primaryBaseKnown
+      ? buildDiscountLineItem({
+          parentClientId: primaryClientId,
+          discountId: scheduled.line_discount_id,
+          discountName: scheduled.line_discount_name,
+          discountType: scheduled.line_discount_type,
+          discountAmount: scheduled.line_discount_amount,
+          discountDollars: scheduled.line_discount_dollars,
+        })
+      : null;
+    if (lineDiscount) lineItems.push(lineDiscount);
+  }
+
+  for (const addon of addons) {
+    const addonBaseKnown = hasNumericValue(addon.base_price);
+    const addonBase = addonBaseKnown
+      ? Math.max(0, roundMoney(addon.base_price))
+      : firstPositiveNumber(addon.estimated_price);
+    if (!(addonBase > 0)) continue;
+    const clientId = `scheduled_${scheduledServiceId}_addon_${addon.id || lineItems.length}`;
+    lineItems.push({
+      client_id: clientId,
+      description: addon.service_name || 'Service add-on',
+      quantity: 1,
+      unit_price: roundMoney(addonBase),
+      amount: roundMoney(addonBase),
+      category: addon.service_name || null,
+    });
+    const addonDiscount = addonBaseKnown
+      ? buildDiscountLineItem({
+          parentClientId: clientId,
+          discountId: addon.discount_id,
+          discountName: addon.discount_name,
+          discountType: addon.discount_type,
+          discountAmount: addon.discount_amount,
+          discountDollars: addon.discount_dollars,
+        })
+      : null;
+    if (addonDiscount) lineItems.push(addonDiscount);
+  }
+
+  const appointmentDiscount = appointmentGrossKnown
+    ? buildDiscountLineItem({
+        discountId: scheduled.discount_id,
+        discountName: scheduled.discount_name,
+        discountType: scheduled.discount_type,
+        discountAmount: scheduled.discount_amount,
+        discountDollars: scheduled.discount_dollars,
+      })
+    : null;
+  if (appointmentDiscount) lineItems.push(appointmentDiscount);
+
+  const storedNetAmount = hasNumericValue(scheduled.estimated_price)
+    ? roundMoney(scheduled.estimated_price)
+    : roundMoney(fallbackAmount);
+  const replayNetAmount = roundMoney(lineItems.reduce((sum, item) => sum + (Number(item.amount) || 0), 0));
+  if (hasNumericValue(storedNetAmount) && replayNetAmount > storedNetAmount) {
+    const adjustment = roundMoney(replayNetAmount - storedNetAmount);
+    lineItems.push({
+      client_id: `discount_scheduled_price_${scheduledServiceId}`,
+      _kind: 'discount',
+      discount_id: null,
+      discount_for: null,
+      description: 'Scheduled price adjustment',
+      quantity: 1,
+      unit_price: -adjustment,
+      amount: -adjustment,
+      discount_type: 'fixed_amount',
+      discount_amount: adjustment,
+      discount_dollars: adjustment,
+      use_stored_discount: true,
+      stored_discount_source: 'scheduled_service',
+    });
+  }
+
+  return {
+    lineItems: [...lineItems, ...extraLineItems],
+    discountIds,
+  };
+}
+
 async function calculateUpdateFinancials({ lineItems, customer, invoice, taxRate }) {
   const items = normalizeInvoiceLineItems(lineItems);
   const subtotal = Math.round(items.reduce((sum, item) => {
@@ -104,30 +331,24 @@ async function calculateUpdateFinancials({ lineItems, customer, invoice, taxRate
       .map(item => [String(item.client_id), item])
   );
 
-  let tierDiscount;
-  try {
-    tierDiscount = await DiscountEngine.getDiscountForTier(customer?.waveguard_tier);
-  } catch {
-    tierDiscount = TIER_DISCOUNTS_FALLBACK[customer?.waveguard_tier] || 0;
-  }
-  const tierDiscountAmount = Math.round(subtotal * tierDiscount * 100) / 100;
-  const tierDiscountLabel = tierDiscount > 0
-    ? `${customer.waveguard_tier} WaveGuard — ${Math.round(tierDiscount * 100)}% off`
-    : null;
-
   const lineItemDiscountIds = items
     .filter(item => Number(item.amount) < 0 && item.discount_id)
     .map(item => item.discount_id);
-  const lineItemDiscountRows = lineItemDiscountIds.length
-    ? await db('discounts')
-        .whereIn('id', lineItemDiscountIds)
-        .where({ is_active: true, show_in_invoices: true, is_waveguard_tier_discount: false })
-    : [];
+  const lineItemDiscountRows = await loadInvoiceDiscountRows(lineItemDiscountIds);
+  const trustedStoredDiscountIds = new Set(items
+    .filter(item => Number(item.amount) < 0 && item.discount_id && isStoredDiscountLineItem(item))
+    .map(item => String(item.discount_id)));
+  lineItemDiscountRows.forEach((row) => {
+    if (!trustedStoredDiscountIds.has(String(row.id))) assertDiscountEligibleForCustomer(row, customer);
+  });
   const lineItemDiscountRowById = new Map(lineItemDiscountRows.map(row => [String(row.id), row]));
   const lineItemDiscountAmount = items
     .filter(item => Number(item.amount) < 0)
     .reduce((sum, item) => {
       const row = item.discount_id ? lineItemDiscountRowById.get(String(item.discount_id)) : null;
+      if (isStoredDiscountLineItem(item)) {
+        return sum + resolveStoredDiscountLineItem(item, row).dollars;
+      }
       const parent = item.discount_for ? serviceLineByClientId.get(String(item.discount_for)) : null;
       if (!row || !parent) {
         if (item.discount_id || item.discount_for) throw new Error('Invalid line-item discount');
@@ -142,7 +363,7 @@ async function calculateUpdateFinancials({ lineItems, customer, invoice, taxRate
       return sum + dollars;
     }, 0);
 
-  const discountAmount = Math.min(subtotal, Math.round((tierDiscountAmount + lineItemDiscountAmount) * 100) / 100);
+  const discountAmount = Math.min(subtotal, Math.round(lineItemDiscountAmount * 100) / 100);
   const afterDiscount = subtotal - discountAmount;
   const isCommercial = customer?.property_type === 'commercial' || customer?.property_type === 'business';
   let rate = 0;
@@ -153,7 +374,6 @@ async function calculateUpdateFinancials({ lineItems, customer, invoice, taxRate
     taxAmount = Math.round(afterDiscount * rate * 100) / 100;
   }
   const labelParts = [
-    tierDiscountLabel,
     lineItemDiscountAmount > 0 ? 'Line-item discounts' : null,
   ].filter(Boolean);
 
@@ -167,10 +387,6 @@ async function calculateUpdateFinancials({ lineItems, customer, invoice, taxRate
     total: Math.round((afterDiscount + taxAmount) * 100) / 100,
   };
 }
-
-// WaveGuard tier discount percentages — now loaded from discount engine DB
-// Fallback map only used if discount-engine import fails
-const TIER_DISCOUNTS_FALLBACK = { 'One-Time': 0, Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
 
 const {
   INVOICE_UPDATE_ALLOWED_FIELDS,
@@ -225,13 +441,30 @@ async function restoreSendClaim(invoiceId, previousStatus, claimed) {
 // ══════════════════════════════════════════════════════════════
 const InvoiceService = {
 
+  async buildLineItemsForScheduledService(scheduledServiceId, options = {}) {
+    return buildScheduledServiceInvoiceLines(scheduledServiceId, options);
+  },
+
   /**
    * Create an invoice — optionally linked to a service record.
    * If serviceRecordId is provided, pulls products, photos, tech info automatically.
    */
-  async create({ customerId, serviceRecordId, scheduledServiceId, title, lineItems, notes, dueDate, taxRate, discountIds, serviceDate }) {
+  async create({
+    customerId,
+    serviceRecordId,
+    scheduledServiceId,
+    title,
+    lineItems,
+    notes,
+    dueDate,
+    taxRate,
+    discountIds,
+    serviceDate,
+    trustedStoredDiscountSources = [],
+  }) {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) throw new Error('Customer not found');
+    const trustedStoredSources = new Set(trustedStoredDiscountSources);
 
     // Pull service record context if linked
     let serviceData = serviceDate ? { service_date: serviceDate } : {};
@@ -302,26 +535,13 @@ const InvoiceService = {
         .map(item => [String(item.client_id), item])
     );
 
-    // Apply WaveGuard tier discount via discount engine
-    let tierDiscount;
-    try {
-      tierDiscount = await DiscountEngine.getDiscountForTier(customer.waveguard_tier);
-    } catch {
-      tierDiscount = TIER_DISCOUNTS_FALLBACK[customer.waveguard_tier] || 0;
-    }
-    const tierDiscountAmount = Math.round(subtotal * tierDiscount * 100) / 100;
-    const tierDiscountLabel = tierDiscount > 0
-      ? `${customer.waveguard_tier} WaveGuard — ${Math.round(tierDiscount * 100)}% off`
-      : null;
-
     // Manually-selected discounts from the invoice form. Mirrors discount-engine math
-    // so the stored total matches what the admin previewed. Server-side filters mirror
-    // the client picker so a crafted request can't apply hidden or tier discounts.
+    // so the stored total matches what the admin previewed. WaveGuard tier rows are
+    // valid choices here, but customer tier never applies a hidden discount.
     const manualDiscountRows = Array.isArray(discountIds) && discountIds.length
-      ? await db('discounts')
-          .whereIn('id', discountIds)
-          .where({ is_active: true, show_in_invoices: true, is_waveguard_tier_discount: false })
+      ? await loadInvoiceDiscountRows(discountIds)
       : [];
+    manualDiscountRows.forEach(row => assertDiscountEligibleForCustomer(row, customer));
     const manualDiscounts = manualDiscountRows.map(d => {
       const amt = Number(d.amount) || 0;
       let dollars = 0;
@@ -338,22 +558,28 @@ const InvoiceService = {
     const lineItemDiscountIds = items
       .filter(item => Number(item.amount) < 0 && item.discount_id)
       .map(item => item.discount_id);
-    const lineItemDiscountRows = lineItemDiscountIds.length
-      ? await db('discounts')
-          .whereIn('id', lineItemDiscountIds)
-          .where({ is_active: true, show_in_invoices: true, is_waveguard_tier_discount: false })
-      : [];
+    const lineItemDiscountRows = await loadInvoiceDiscountRows(lineItemDiscountIds);
+    const trustedStoredDiscountIds = new Set(items
+      .filter(item => Number(item.amount) < 0 && item.discount_id && isStoredDiscountLineItem(item, trustedStoredSources))
+      .map(item => String(item.discount_id)));
+    lineItemDiscountRows.forEach((row) => {
+      if (!trustedStoredDiscountIds.has(String(row.id))) assertDiscountEligibleForCustomer(row, customer);
+    });
     const lineItemDiscountRowById = new Map(lineItemDiscountRows.map(row => [String(row.id), row]));
     const lineItemDiscounts = items
       .filter(item => Number(item.amount) < 0)
       .map(item => {
         const row = item.discount_id ? lineItemDiscountRowById.get(String(item.discount_id)) : null;
+        if (isStoredDiscountLineItem(item, trustedStoredSources)) {
+          return resolveStoredDiscountLineItem(item, row);
+        }
         const parent = item.discount_for ? serviceLineByClientId.get(String(item.discount_for)) : null;
         if (!row || !parent) {
           if (item.discount_id || item.discount_for) {
             throw new Error('Invalid line-item discount');
           }
           return {
+            id: null,
             row: null,
             name: item.description || 'Line item discount',
             discount_type: 'fixed_amount',
@@ -368,6 +594,7 @@ const InvoiceService = {
         item.unit_price = -dollars;
         item.amount = -dollars;
         return {
+          id: row.id,
           row,
           name: row.name,
           discount_type: row.discount_type,
@@ -384,14 +611,12 @@ const InvoiceService = {
     // audit rows in invoice_discounts sum to invoices.discount_amount exactly —
     // otherwise discounts.total_discount_given (rolled up from invoice_discounts)
     // overstates what was actually applied.
-    const uncappedDiscount = Math.round((tierDiscountAmount + manualDiscountAmount) * 100) / 100;
-    let scaledTierDiscountAmount = tierDiscountAmount;
+    const uncappedDiscount = Math.round(manualDiscountAmount * 100) / 100;
     let scaledManualDiscounts = manualDiscounts;
     let scaledLineItemDiscounts = lineItemDiscounts;
     let discountAmount = uncappedDiscount;
     if (uncappedDiscount > subtotal && uncappedDiscount > 0) {
       const factor = subtotal / uncappedDiscount;
-      scaledTierDiscountAmount = Math.round(tierDiscountAmount * factor * 100) / 100;
       scaledManualDiscounts = manualDiscounts.map(m => ({
         ...m,
         dollars: Math.round(m.dollars * factor * 100) / 100,
@@ -407,25 +632,22 @@ const InvoiceService = {
       // DiscountEngine.recordInvoiceDiscounts.
       const scaledSum = Math.round(
         (
-          scaledTierDiscountAmount
-          + scaledManualDiscounts.reduce((s, m) => s + m.dollars, 0)
+          scaledManualDiscounts.reduce((s, m) => s + m.dollars, 0)
           + scaledLineItemDiscounts.reduce((s, m) => s + m.dollars, 0)
         ) * 100
       ) / 100;
       const remainder = Math.round((subtotal - scaledSum) * 100) / 100;
       if (remainder !== 0) {
-        let targetIdx = -1; // -1 = tier slot, >=0 = manual index
+        let targetIdx = -1;
         let targetGroup = 'manual';
-        let targetDollars = scaledTierDiscountAmount;
+        let targetDollars = 0;
         scaledManualDiscounts.forEach((m, i) => {
           if (m.dollars > targetDollars) { targetIdx = i; targetGroup = 'manual'; targetDollars = m.dollars; }
         });
         scaledLineItemDiscounts.forEach((m, i) => {
           if (m.dollars > targetDollars) { targetIdx = i; targetGroup = 'line'; targetDollars = m.dollars; }
         });
-        if (targetIdx === -1) {
-          scaledTierDiscountAmount = Math.round((scaledTierDiscountAmount + remainder) * 100) / 100;
-        } else if (targetGroup === 'manual') {
+        if (targetIdx !== -1 && targetGroup === 'manual') {
           const m = scaledManualDiscounts[targetIdx];
           scaledManualDiscounts[targetIdx] = {
             ...m,
@@ -443,7 +665,6 @@ const InvoiceService = {
     }
 
     const labelParts = [
-      tierDiscountLabel,
       ...manualDiscounts.map(m => m.row.name),
       lineItemDiscountAmount > 0 ? 'Line-item discounts' : null,
     ].filter(Boolean);
@@ -517,18 +738,6 @@ const InvoiceService = {
     // Record applied discounts in invoice_discounts table
     try {
       const auditRows = [];
-      if (scaledTierDiscountAmount > 0) {
-        const tierDiscountRow = await db('discounts')
-          .where({ is_waveguard_tier_discount: true, requires_waveguard_tier: customer.waveguard_tier, is_active: true })
-          .first();
-        auditRows.push({
-          id: tierDiscountRow?.id || null,
-          name: tierDiscountLabel,
-          discount_type: 'percentage',
-          amount: tierDiscount * 100,
-          discount_dollars: scaledTierDiscountAmount,
-        });
-      }
       for (const m of scaledManualDiscounts) {
         auditRows.push({
           id: m.row.id,
@@ -540,7 +749,7 @@ const InvoiceService = {
       }
       for (const m of scaledLineItemDiscounts) {
         auditRows.push({
-          id: m.row?.id || null,
+          id: m.id || m.row?.id || null,
           name: m.name,
           discount_type: m.discount_type,
           amount: m.amount,
@@ -549,17 +758,6 @@ const InvoiceService = {
       }
       if (auditRows.length > 0) {
         await DiscountEngine.recordInvoiceDiscounts(invoice.id, auditRows, 'system');
-      }
-      // Also record any non-tier discounts auto-applied or assigned to this customer
-      // (kept for backwards compatibility — these don't reduce the invoice total).
-      const manualIds = new Set([
-        ...manualDiscounts.map(m => m.row.id),
-        ...scaledLineItemDiscounts.map(m => m.row?.id).filter(Boolean),
-      ]);
-      const extraResult = await DiscountEngine.calculateDiscounts(customerId, { subtotal, isEstimate: false });
-      const extraToRecord = extraResult.discounts.filter(d => !manualIds.has(d.id));
-      if (extraToRecord.length > 0) {
-        await DiscountEngine.recordInvoiceDiscounts(invoice.id, extraToRecord, 'system');
       }
     } catch (err) {
       logger.warn(`[invoice] Could not record invoice_discounts: ${err.message}`);
@@ -573,24 +771,35 @@ const InvoiceService = {
    * Create an invoice directly from a service record + simple amount.
    * Convenience method for post-service flow.
    */
-  async createFromService(serviceRecordId, { amount, description, taxRate }) {
+  async createFromService(serviceRecordId, { amount, description, taxRate, useScheduledReplay = false }) {
     const sr = await db('service_records').where({ id: serviceRecordId }).first();
     if (!sr) throw new Error('Service record not found');
 
-    const lineItems = [{
-      description: description || sr.service_type,
-      quantity: 1,
-      unit_price: amount,
-      amount,
-      category: sr.service_type,
-    }];
+    const hasExplicitAmount = amount !== undefined && amount !== null && Number(amount) > 0;
+    const scheduledInvoice = (useScheduledReplay || !hasExplicitAmount) && sr.scheduled_service_id
+      ? await buildScheduledServiceInvoiceLines(sr.scheduled_service_id, {
+          fallbackAmount: amount,
+          fallbackDescription: description || sr.service_type,
+        })
+      : null;
+    const lineItems = scheduledInvoice?.lineItems?.length
+      ? scheduledInvoice.lineItems
+      : [{
+          description: description || sr.service_type,
+          quantity: 1,
+          unit_price: amount,
+          amount,
+          category: sr.service_type,
+        }];
 
     return this.create({
       customerId: sr.customer_id,
       serviceRecordId,
       scheduledServiceId: sr.scheduled_service_id || undefined,
       lineItems,
+      discountIds: scheduledInvoice?.discountIds || undefined,
       taxRate,
+      trustedStoredDiscountSources: scheduledInvoice ? ['scheduled_service'] : [],
     });
   },
 

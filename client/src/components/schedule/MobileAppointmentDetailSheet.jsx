@@ -31,12 +31,6 @@ function adminFetch(path, options = {}) {
   }).then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 }
 
-// WaveGuard tier → discount fraction. Source of truth:
-// server/services/pricing-engine/constants.js WAVEGUARD.tiers
-// (see docs/pricing/POLICY.md). Hardcoded here because the client bundle
-// can't import server constants directly — keep aligned on every change.
-const TIER_DISCOUNT = { bronze: 0, silver: 0.10, gold: 0.15, platinum: 0.20 };
-
 function tierLabel(t) {
   if (!t) return '';
   const s = String(t).toLowerCase();
@@ -139,7 +133,6 @@ export default function MobileAppointmentDetailSheet({
   if (!service) return null;
 
   const tier = service.waveguardTier ? String(service.waveguardTier).toLowerCase() : null;
-  const pct = tier && TIER_DISCOUNT[tier] != null ? TIER_DISCOUNT[tier] : 0;
   const rawPrice = service.estimatedPrice != null ? Number(service.estimatedPrice) : null;
   const price = rawPrice != null ? rawPrice : Number(service.monthlyRate || 0);
   const appointmentAddons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
@@ -153,8 +146,7 @@ export default function MobileAppointmentDetailSheet({
   const baseServiceLabel = splitAppointmentAddons
     ? (service.serviceType || 'Service')
     : (service.serviceTypeDisplay || service.serviceType || 'Service');
-  const discount = Math.round(price * pct * 100) / 100;
-  const total = Math.max(0, price - discount);
+  const total = Math.max(0, price);
   const timeWindow = formatWindow(service);
   const hrs = durationHrs(service);
 
@@ -370,17 +362,6 @@ export default function MobileAppointmentDetailSheet({
               </div>
             </div>
           ))}
-
-          {pct > 0 && (
-            <div className="py-3 border-b border-hairline border-zinc-200 flex items-center justify-between">
-              <span className="text-zinc-900" style={{ fontSize: 14 }}>
-                WaveGuard {tierLabel(tier)} Discount ({Math.round(pct * 100)}%)
-              </span>
-              <span className="u-nums text-zinc-900" style={{ fontSize: 14 }}>
-                −${discount.toFixed(2)}
-              </span>
-            </div>
-          )}
 
           <div className="py-3 flex items-center justify-between">
             <span className="text-zinc-900" style={{ fontSize: 16 }}>

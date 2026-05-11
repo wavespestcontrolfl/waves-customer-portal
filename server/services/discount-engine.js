@@ -92,7 +92,8 @@ const DiscountEngine = {
     // Filter eligible discounts
     const eligible = [];
     for (const disc of allDiscounts) {
-      // Skip tier discounts here — they're handled separately in invoice/pricing engine
+      // Skip tier discounts here. Invoices only apply them when the operator
+      // selects the tier discount row manually.
       if (disc.is_waveguard_tier_discount) continue;
 
       // Promo code discounts only apply if assigned to customer

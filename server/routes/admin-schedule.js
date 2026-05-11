@@ -316,6 +316,7 @@ function applyDiscount(price, type, amount) {
 
 function copyLineDiscountFields(target, source, cols) {
   if (!target || !source || !cols) return;
+  if (cols.primary_line_price && source.primary_line_price != null) target.primary_line_price = source.primary_line_price;
   if (cols.line_discount_id && source.line_discount_id) target.line_discount_id = source.line_discount_id;
   if (cols.line_discount_name && source.line_discount_name) target.line_discount_name = source.line_discount_name;
   if (cols.line_discount_type && source.line_discount_type) target.line_discount_type = source.line_discount_type;
@@ -323,8 +324,18 @@ function copyLineDiscountFields(target, source, cols) {
   if (cols.line_discount_dollars && source.line_discount_dollars != null) target.line_discount_dollars = source.line_discount_dollars;
 }
 
+function copyAppointmentDiscountFields(target, source, cols) {
+  if (!target || !source || !cols) return;
+  if (cols.discount_id && source.discount_id) target.discount_id = source.discount_id;
+  if (cols.discount_name && source.discount_name) target.discount_name = source.discount_name;
+  if (cols.discount_type && source.discount_type) target.discount_type = source.discount_type;
+  if (cols.discount_amount && source.discount_amount != null) target.discount_amount = source.discount_amount;
+  if (cols.discount_dollars && source.discount_dollars != null) target.discount_dollars = source.discount_dollars;
+}
+
 function copyAddonDiscountFields(target, source, cols) {
   if (!target || !source || !cols) return;
+  if (cols.base_price && source.base_price != null) target.base_price = source.base_price;
   if (cols.discount_id && source.discount_id) target.discount_id = source.discount_id;
   if (cols.discount_name && source.discount_name) target.discount_name = source.discount_name;
   if (cols.discount_type && source.discount_type) target.discount_type = source.discount_type;
@@ -377,16 +388,34 @@ function calculateDiscountDollars(row, baseAmount, clientAmount) {
 async function loadInvoiceDiscount(discountId) {
   if (!discountId) return null;
   const discount = await db('discounts')
-    .where({ id: discountId, is_active: true, show_in_invoices: true, is_waveguard_tier_discount: false })
+    .where({ id: discountId, is_active: true, show_in_invoices: true })
     .first();
   if (!discount) throw httpError(400, 'Selected discount is not available for invoices');
   return discount;
 }
 
-async function resolveLineDiscount(input, baseAmount) {
+const WAVEGUARD_TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum'];
+
+function assertDiscountEligibleForCustomer(discount, customer) {
+  if (!discount?.requires_waveguard_tier) return;
+  if (discount.is_waveguard_tier_discount) {
+    if (customer?.waveguard_tier !== discount.requires_waveguard_tier) {
+      throw httpError(400, 'Selected WaveGuard tier discount is not available for this customer');
+    }
+    return;
+  }
+  const requiredIdx = WAVEGUARD_TIER_ORDER.indexOf(discount.requires_waveguard_tier);
+  const customerIdx = WAVEGUARD_TIER_ORDER.indexOf(customer?.waveguard_tier);
+  if (requiredIdx >= 0 && customerIdx < requiredIdx) {
+    throw httpError(400, 'Selected discount is not available for this customer tier');
+  }
+}
+
+async function resolveLineDiscount(input, baseAmount, customer) {
   const discountId = input?.discountId || input?.id || null;
   if (!discountId) return null;
   const row = await loadInvoiceDiscount(discountId);
+  assertDiscountEligibleForCustomer(row, customer);
   const resolved = calculateDiscountDollars(row, baseAmount, input?.discountAmount ?? input?.amount);
   if (!(resolved.dollars > 0)) return null;
   return {
@@ -398,14 +427,14 @@ async function resolveLineDiscount(input, baseAmount) {
   };
 }
 
-async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount }) {
+async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer }) {
   if (discountType && !discountId) {
     throw httpError(400, 'discountId is required for appointment-level discounts');
   }
 
   const primaryBaseFallback = serviceRecord?.base_price != null ? serviceRecord.base_price : estimatedPrice;
   const primaryBase = parseMoneyInput(primaryLinePrice ?? primaryBaseFallback, 'primaryLinePrice');
-  const primaryDiscount = await resolveLineDiscount(primaryLineDiscount, primaryBase || 0);
+  const primaryDiscount = await resolveLineDiscount(primaryLineDiscount, primaryBase || 0, customer);
   const primaryNet = primaryBase == null
     ? null
     : Math.max(0, Math.round((primaryBase - (primaryDiscount?.discountDollars || 0)) * 100) / 100);
@@ -413,13 +442,14 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   const addonLines = [];
   for (const addon of Array.isArray(serviceAddons) ? serviceAddons : []) {
     const base = parseMoneyInput(addon.basePrice ?? addon.grossPrice ?? addon.price, `price for ${addon.name || addon.serviceName || 'add-on'}`);
-    const lineDiscount = await resolveLineDiscount(addon, base || 0);
+    const lineDiscount = await resolveLineDiscount(addon, base || 0, customer);
     const net = base == null
       ? null
       : Math.max(0, Math.round((base - (lineDiscount?.discountDollars || 0)) * 100) / 100);
     addonLines.push({
       serviceId: addon.serviceId || null,
       serviceName: addon.name || addon.serviceName,
+      base,
       price: net,
       discount: lineDiscount,
     });
@@ -430,23 +460,29 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   if (hasAnyPrice) {
     const subtotal = (primaryNet || 0) + addonLines.reduce((sum, line) => sum + (line.price || 0), 0);
     const appointmentDiscount = await loadInvoiceDiscount(discountId);
+    assertDiscountEligibleForCustomer(appointmentDiscount, customer);
     const resolvedAppointmentDiscount = appointmentDiscount
       ? calculateDiscountDollars(appointmentDiscount, subtotal, discountAmount)
       : null;
     finalPrice = Math.max(0, Math.round((subtotal - (resolvedAppointmentDiscount?.dollars || 0)) * 100) / 100);
     return {
       finalPrice,
+      primaryBase,
       primaryDiscount,
       addonLines,
       appointmentDiscount: appointmentDiscount ? {
+        discountId: appointmentDiscount.id,
+        discountName: appointmentDiscount.name,
         discountType: appointmentDiscount.discount_type,
         discountAmount: resolvedAppointmentDiscount.amount,
+        discountDollars: resolvedAppointmentDiscount.dollars,
       } : null,
     };
   }
 
   return {
     finalPrice,
+    primaryBase,
     primaryDiscount,
     addonLines,
     appointmentDiscount: null,
@@ -462,6 +498,7 @@ async function insertScheduledServiceAddons(trx, scheduledServiceId, addonLines,
       service_name: addon.serviceName,
       estimated_price: addon.price != null ? addon.price : null,
     };
+    if (addonCols.base_price && addon.base != null) addonData.base_price = addon.base;
     const discount = addon.discount;
     if (discount && addonCols.discount_id && discount.discountId) addonData.discount_id = discount.discountId;
     if (discount && addonCols.discount_name && discount.discountName) addonData.discount_name = String(discount.discountName).slice(0, 200);
@@ -484,6 +521,7 @@ function mapAddonRow(row) {
     id: row.id,
     serviceId: row.service_id || null,
     serviceName: row.service_name,
+    basePrice: row.base_price != null ? Number(row.base_price) : null,
     estimatedPrice: row.estimated_price != null ? Number(row.estimated_price) : null,
     discountId: row.discount_id || null,
     discountName: row.discount_name || null,
@@ -1063,6 +1101,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       discountId,
       discountType,
       discountAmount,
+      customer,
     });
 
     let finalPrice = pricing.finalPrice;
@@ -1089,6 +1128,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // Add new workflow columns (safe — migration may not have run yet)
       if (cols.service_id && serviceId) insertData.service_id = serviceId;
       if (cols.estimated_price && finalPrice != null) insertData.estimated_price = finalPrice;
+      if (cols.primary_line_price && pricing.primaryBase != null) insertData.primary_line_price = pricing.primaryBase;
       if (cols.urgency) insertData.urgency = urgency || 'routine';
       if (cols.internal_notes && internalNotes) insertData.internal_notes = internalNotes;
       if (cols.is_callback) insertData.is_callback = isCallback || false;
@@ -1105,8 +1145,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (cleaned.length > 0) insertData.booster_months = JSON.stringify(cleaned);
         }
       }
+      if (pricing.appointmentDiscount && cols.discount_id && pricing.appointmentDiscount.discountId) insertData.discount_id = pricing.appointmentDiscount.discountId;
+      if (pricing.appointmentDiscount && cols.discount_name && pricing.appointmentDiscount.discountName) insertData.discount_name = String(pricing.appointmentDiscount.discountName).slice(0, 200);
       if (cols.discount_type && appointmentDiscountType) insertData.discount_type = appointmentDiscountType;
       if (cols.discount_amount && appointmentDiscountAmount != null) insertData.discount_amount = Number(appointmentDiscountAmount);
+      if (pricing.appointmentDiscount && cols.discount_dollars && pricing.appointmentDiscount.discountDollars != null) insertData.discount_dollars = Number(pricing.appointmentDiscount.discountDollars);
       if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) insertData.line_discount_id = pricing.primaryDiscount.discountId;
       if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) insertData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
       if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) insertData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
@@ -1164,8 +1207,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (cols.skip_weekends) childData.skip_weekends = !!skipWeekends;
         if (cols.weekend_shift && skipWeekends) childData.weekend_shift = shiftDir;
         if (cols.estimated_price && finalPrice != null) childData.estimated_price = finalPrice;
+        if (cols.primary_line_price && pricing.primaryBase != null) childData.primary_line_price = pricing.primaryBase;
+        if (pricing.appointmentDiscount && cols.discount_id && pricing.appointmentDiscount.discountId) childData.discount_id = pricing.appointmentDiscount.discountId;
+        if (pricing.appointmentDiscount && cols.discount_name && pricing.appointmentDiscount.discountName) childData.discount_name = String(pricing.appointmentDiscount.discountName).slice(0, 200);
         if (cols.discount_type && appointmentDiscountType) childData.discount_type = appointmentDiscountType;
         if (cols.discount_amount && appointmentDiscountAmount != null) childData.discount_amount = Number(appointmentDiscountAmount);
+        if (pricing.appointmentDiscount && cols.discount_dollars && pricing.appointmentDiscount.discountDollars != null) childData.discount_dollars = Number(pricing.appointmentDiscount.discountDollars);
         if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) childData.line_discount_id = pricing.primaryDiscount.discountId;
         if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) childData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
         if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) childData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
@@ -1211,12 +1258,16 @@ router.post('/', requireAdmin, async (req, res, next) => {
           };
           if (cols.service_id && serviceId) boosterData.service_id = serviceId;
           if (cols.estimated_price && finalPrice != null) boosterData.estimated_price = finalPrice;
+          if (cols.primary_line_price && pricing.primaryBase != null) boosterData.primary_line_price = pricing.primaryBase;
           if (cols.urgency) boosterData.urgency = urgency || 'routine';
           if (cols.internal_notes && internalNotes) boosterData.internal_notes = internalNotes;
           if (cols.skip_weekends) boosterData.skip_weekends = !!skipWeekends;
           if (cols.weekend_shift && skipWeekends) boosterData.weekend_shift = shiftDir;
+          if (pricing.appointmentDiscount && cols.discount_id && pricing.appointmentDiscount.discountId) boosterData.discount_id = pricing.appointmentDiscount.discountId;
+          if (pricing.appointmentDiscount && cols.discount_name && pricing.appointmentDiscount.discountName) boosterData.discount_name = String(pricing.appointmentDiscount.discountName).slice(0, 200);
           if (cols.discount_type && appointmentDiscountType) boosterData.discount_type = appointmentDiscountType;
           if (cols.discount_amount && appointmentDiscountAmount != null) boosterData.discount_amount = Number(appointmentDiscountAmount);
+          if (pricing.appointmentDiscount && cols.discount_dollars && pricing.appointmentDiscount.discountDollars != null) boosterData.discount_dollars = Number(pricing.appointmentDiscount.discountDollars);
           if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) boosterData.line_discount_id = pricing.primaryDiscount.discountId;
           if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) boosterData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
           if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) boosterData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
@@ -1299,6 +1350,7 @@ router.put('/:id/update-details', async (req, res, next) => {
       createInvoice,
     } = req.body;
     const updates = {};
+    let clearAddonDiscountsOnPriceEdit = false;
     if (serviceType !== undefined) updates.service_type = serviceType;
     if (estimatedDuration !== undefined && estimatedDuration !== '') updates.estimated_duration_minutes = parseInt(estimatedDuration);
     if (scheduledDate !== undefined && scheduledDate !== '') updates.scheduled_date = scheduledDate;
@@ -1361,14 +1413,63 @@ router.put('/:id/update-details', async (req, res, next) => {
     if (estimatedPrice !== undefined && estimatedPrice !== '' && !isNaN(Number(estimatedPrice))) {
       try {
         const cols = await db('scheduled_services').columnInfo();
-        let finalPrice = Number(estimatedPrice);
+        const basePrice = Number(estimatedPrice);
+        const existingPrice = await db('scheduled_services')
+          .where({ id: req.params.id })
+          .first('estimated_price', 'discount_type', 'discount_amount')
+          .catch(() => null);
+        const existingEstimatedPrice = Number(existingPrice?.estimated_price);
+        const priceChanged = !Number.isFinite(existingEstimatedPrice)
+          || Math.abs(existingEstimatedPrice - basePrice) >= 0.005;
+        const discountTypeChanged = discountType !== undefined
+          && (discountType || null) !== (existingPrice?.discount_type || null);
+        const nextDiscountAmount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
+        const existingDiscountAmount = (existingPrice?.discount_amount != null && existingPrice.discount_amount !== '')
+          ? Number(existingPrice.discount_amount)
+          : null;
+        const discountAmountChanged = discountAmount !== undefined
+          && Math.abs((nextDiscountAmount || 0) - (existingDiscountAmount || 0)) >= 0.005;
+        const shouldRebaseStoredDiscounts = priceChanged || discountTypeChanged || discountAmountChanged;
+        if (!shouldRebaseStoredDiscounts) {
+          if (cols.estimated_price) updates.estimated_price = basePrice;
+          throw new Error('noop-price-save');
+        }
+        let finalPrice = basePrice;
         if (discountType && discountAmount != null && discountAmount !== '') {
           finalPrice = applyDiscount(finalPrice, discountType, discountAmount);
         }
+        const addonRows = cols.primary_line_price
+          ? await db('scheduled_service_addons')
+              .where({ scheduled_service_id: req.params.id })
+              .catch(() => [])
+          : [];
+        const addonBaseTotal = addonRows.reduce((sum, addon) => {
+          const value = Number(addon.base_price != null ? addon.base_price : addon.estimated_price);
+          return Number.isFinite(value) && value > 0 ? sum + value : sum;
+        }, 0);
+        const primaryGross = Math.max(0, Math.round((basePrice - addonBaseTotal) * 100) / 100);
+        const replayGross = Math.round((primaryGross + addonBaseTotal) * 100) / 100;
+        const replayDiscountDollars = Math.max(0, Math.round((replayGross - finalPrice) * 100) / 100);
         if (cols.estimated_price) updates.estimated_price = finalPrice;
-        if (cols.discount_type) updates.discount_type = discountType || null;
-        if (cols.discount_amount) updates.discount_amount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
-      } catch {}
+        if (cols.primary_line_price) updates.primary_line_price = primaryGross;
+        if (cols.discount_id) updates.discount_id = null;
+        if (cols.discount_name) updates.discount_name = null;
+        if (cols.discount_type) updates.discount_type = discountType || (replayDiscountDollars > 0 ? 'fixed_amount' : null);
+        if (cols.discount_amount) {
+          updates.discount_amount = (discountAmount != null && discountAmount !== '')
+            ? Number(discountAmount)
+            : (replayDiscountDollars > 0 ? replayDiscountDollars : null);
+        }
+        if (cols.discount_dollars) updates.discount_dollars = replayDiscountDollars > 0 ? replayDiscountDollars : null;
+        if (cols.line_discount_id) updates.line_discount_id = null;
+        if (cols.line_discount_name) updates.line_discount_name = null;
+        if (cols.line_discount_type) updates.line_discount_type = null;
+        if (cols.line_discount_amount) updates.line_discount_amount = null;
+        if (cols.line_discount_dollars) updates.line_discount_dollars = null;
+        clearAddonDiscountsOnPriceEdit = true;
+      } catch (err) {
+        if (err?.message !== 'noop-price-save') throw err;
+      }
     } else if (!isRecurring && (discountType !== undefined || discountAmount !== undefined)) {
       try {
         const cols = await db('scheduled_services').columnInfo();
@@ -1394,6 +1495,20 @@ router.put('/:id/update-details', async (req, res, next) => {
 
       if (detailsChanged) {
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
+      }
+      if (clearAddonDiscountsOnPriceEdit) {
+        const addonCols = await trx('scheduled_service_addons').columnInfo().catch(() => ({}));
+        const addonUpdates = {};
+        if (addonCols.discount_id) addonUpdates.discount_id = null;
+        if (addonCols.discount_name) addonUpdates.discount_name = null;
+        if (addonCols.discount_type) addonUpdates.discount_type = null;
+        if (addonCols.discount_amount) addonUpdates.discount_amount = null;
+        if (addonCols.discount_dollars) addonUpdates.discount_dollars = null;
+        if (Object.keys(addonUpdates).length > 0) {
+          await trx('scheduled_service_addons')
+            .where({ scheduled_service_id: req.params.id })
+            .update(addonUpdates);
+        }
       }
 
       // Spawn recurring children if requested (Ongoing seeds 4; Fixed uses recurringCount)
@@ -1465,6 +1580,7 @@ router.put('/:id/update-details', async (req, res, next) => {
               // parent.estimated_price is already discounted at save time — copy as-is to children
               if (cols.estimated_price && parent.estimated_price != null) childData.estimated_price = parent.estimated_price;
               copyLineDiscountFields(childData, parent, cols);
+              copyAppointmentDiscountFields(childData, parent, cols);
               if (cols.discount_type && dType) childData.discount_type = dType;
               if (cols.discount_amount && dAmt != null && dAmt !== '') childData.discount_amount = Number(dAmt);
               const inv = createInvoice !== undefined ? !!createInvoice : !!parent.create_invoice_on_complete;
@@ -1579,7 +1695,8 @@ router.post('/:id/invoice', async (req, res, next) => {
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .select('scheduled_services.*',
         'customers.monthly_rate as cust_monthly_rate',
-        'customers.property_type as cust_property_type')
+        'customers.property_type as cust_property_type',
+        'customers.waveguard_tier as cust_waveguard_tier')
       .first();
     if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
 
@@ -1682,14 +1799,6 @@ router.post('/:id/invoice', async (req, res, next) => {
     const amount = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
       ? Number(svc.estimated_price)
       : (svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
-    const persistedAddons = (await loadAddonsByServiceId([svc.id])).get(svc.id) || [];
-    const persistedAddonTotal = Math.round(
-      persistedAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100
-    ) / 100;
-    const splitPersistedAddons = amount > 0 && persistedAddonTotal > 0 && persistedAddonTotal < amount;
-    const baseAmount = splitPersistedAddons
-      ? Math.max(0, Math.round((amount - persistedAddonTotal) * 100) / 100)
-      : amount;
 
     // Mobile checkout sheet can append extra services + discount lines before
     // minting. Each extra is { description, quantity, unit_price, amount,
@@ -1715,40 +1824,60 @@ router.post('/:id/invoice', async (req, res, next) => {
           unit_price,
           amount,
           category: e?.category ? String(e.category).slice(0, 100) : null,
+          discount_id: e?.discount_id ? String(e.discount_id) : null,
         };
       })
       .filter((e) => e.description && Number.isFinite(e.unit_price));
+    const invoiceExtraLines = [];
+    const extraServicesSubtotal = extraLines
+      .filter((e) => Number(e.amount) > 0)
+      .reduce((sum, e) => sum + Number(e.amount), 0);
+    const extraDiscountBase = Math.max(0, amount + extraServicesSubtotal);
+    for (const e of extraLines) {
+      if (Number(e.amount) < 0 && e.discount_id) {
+        const discount = await loadInvoiceDiscount(e.discount_id);
+        assertDiscountEligibleForCustomer(discount, { waveguard_tier: svc.cust_waveguard_tier });
+        const resolved = calculateDiscountDollars(discount, extraDiscountBase, discount.amount);
+        const submittedDollars = Math.round(Math.abs(Number(e.amount) || 0) * 100) / 100;
+        const dollars = Math.min(submittedDollars, resolved.dollars);
+        if (!(dollars > 0)) continue;
+        invoiceExtraLines.push({
+          description: e.description || discount.name || 'Discount',
+          quantity: 1,
+          unit_price: -dollars,
+          amount: -dollars,
+          category: e.category,
+          discount_id: discount.id,
+          discount_type: discount.discount_type,
+          discount_amount: Number(discount.amount) || 0,
+          discount_dollars: dollars,
+          use_stored_discount: true,
+          stored_discount_source: 'validated_checkout',
+        });
+      } else {
+        invoiceExtraLines.push(e);
+      }
+    }
 
-    const extrasTotal = extraLines.reduce((s, e) => s + e.amount, 0);
+    const extrasTotal = invoiceExtraLines.reduce((s, e) => s + e.amount, 0);
     if (!(amount > 0) && extrasTotal <= 0) {
       return res.status(400).json({ error: 'No chargeable amount — estimated price is 0' });
     }
 
     const InvoiceService = require('../services/invoice');
-    const baseLine = baseAmount > 0 ? [{
-      description: svc.service_type || 'Service visit',
-      quantity: 1,
-      unit_price: baseAmount,
-      amount: baseAmount,
-      category: svc.service_type || null,
-    }] : [];
-    const addonLines = splitPersistedAddons
-      ? persistedAddons
-        .filter((addon) => Number(addon.estimatedPrice) > 0)
-        .map((addon) => ({
-          description: addon.serviceName || 'Service add-on',
-          quantity: 1,
-          unit_price: Number(addon.estimatedPrice),
-          amount: Number(addon.estimatedPrice),
-          category: addon.serviceName || null,
-        }))
-      : [];
+    const scheduledInvoice = await InvoiceService.buildLineItemsForScheduledService(svc.id, {
+      fallbackAmount: amount,
+      fallbackDescription: svc.service_type || 'Service visit',
+      extraLineItems: invoiceExtraLines,
+    });
     let invoice = await InvoiceService.create({
       customerId: svc.customer_id,
       scheduledServiceId: svc.id,
-      title: formatServiceDisplay(svc.service_type, splitPersistedAddons ? persistedAddons : []),
-      lineItems: [...baseLine, ...addonLines, ...extraLines],
+      title: formatServiceDisplay(svc.service_type, []),
+      lineItems: scheduledInvoice.lineItems,
+      discountIds: scheduledInvoice.discountIds || [],
       taxRate: svc.cust_property_type === 'commercial' ? 0.07 : 0,
+      trustedStoredDiscountSources: ['scheduled_service', 'validated_checkout'],
     });
 
     const applied = await applyPrepaidCredit(invoice);
@@ -2074,6 +2203,7 @@ router.put('/:id/status', async (req, res, next) => {
                 if (cols.service_id && parent.service_id) nextData.service_id = parent.service_id;
                 if (cols.estimated_price && parent.estimated_price != null) nextData.estimated_price = parent.estimated_price;
                 copyLineDiscountFields(nextData, parent, cols);
+                copyAppointmentDiscountFields(nextData, parent, cols);
                 const [autoExtRow] = await db('scheduled_services').insert(nextData).returning('*');
                 // Mirror parent's add-on lines onto the auto-extended visit
                 // so a multi-service ongoing series keeps its full scope
@@ -3032,6 +3162,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
         if (cols.estimated_price && parent.estimated_price != null) data.estimated_price = parent.estimated_price;
         copyLineDiscountFields(data, parent, cols);
+        copyAppointmentDiscountFields(data, parent, cols);
         if (cols.skip_weekends) data.skip_weekends = skipParent;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await db('scheduled_services').insert(data).returning('*');
@@ -3079,6 +3210,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
         if (cols.estimated_price && parent.estimated_price != null) data.estimated_price = parent.estimated_price;
         copyLineDiscountFields(data, parent, cols);
+        copyAppointmentDiscountFields(data, parent, cols);
         if (cols.skip_weekends) data.skip_weekends = skipParent;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await db('scheduled_services').insert(data).returning('*');
