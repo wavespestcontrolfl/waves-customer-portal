@@ -67,8 +67,14 @@ export function useFeatureFlagReady(key, defaultValue = false) {
     ready: cache !== null,
   }));
   useEffect(() => {
-    if (cache !== null) return undefined;
     let mounted = true;
+    if (cache !== null) {
+      setState({
+        enabled: Object.prototype.hasOwnProperty.call(cache, key) ? !!cache[key] : defaultValue,
+        ready: true,
+      });
+      return undefined;
+    }
     loadFlags().then((flags) => {
       if (!mounted) return;
       setState({
