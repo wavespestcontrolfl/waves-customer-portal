@@ -303,8 +303,9 @@ function applyDiscount(price, type, amount) {
   if (price == null || !type || amount == null || amount === '' || isNaN(Number(amount))) return price;
   const p = Number(price);
   const a = Number(amount);
-  if (type === 'percentage') return Math.max(0, +(p * (1 - a / 100)).toFixed(2));
-  if (type === 'fixed_amount') return Math.max(0, +(p - a).toFixed(2));
+  if (type === 'percentage' || type === 'variable_percentage') return Math.max(0, +(p * (1 - a / 100)).toFixed(2));
+  if (type === 'fixed_amount' || type === 'variable_amount') return Math.max(0, +(p - a).toFixed(2));
+  if (type === 'free_service') return 0;
   return price;
 }
 
@@ -324,6 +325,187 @@ function copyAddonDiscountFields(target, source, cols) {
   if (cols.discount_type && source.discount_type) target.discount_type = source.discount_type;
   if (cols.discount_amount && source.discount_amount != null) target.discount_amount = source.discount_amount;
   if (cols.discount_dollars && source.discount_dollars != null) target.discount_dollars = source.discount_dollars;
+}
+
+function httpError(status, message) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
+}
+
+function parseMoneyInput(value, fieldName) {
+  if (value === null || value === undefined || value === '') return null;
+  const num = Number(value);
+  if (!Number.isFinite(num) || num < 0) {
+    throw httpError(400, `${fieldName} must be a non-negative number`);
+  }
+  return Math.round(num * 100) / 100;
+}
+
+function normalizeDiscountAmount(row, clientAmount) {
+  const isVariable = row?.discount_type === 'variable_amount' || row?.discount_type === 'variable_percentage';
+  const raw = isVariable && clientAmount !== null && clientAmount !== undefined && clientAmount !== ''
+    ? clientAmount
+    : row?.amount;
+  const num = Number(raw);
+  return Number.isFinite(num) ? num : 0;
+}
+
+function calculateDiscountDollars(row, baseAmount, clientAmount) {
+  if (!row || !(baseAmount > 0)) return { amount: 0, dollars: 0 };
+  const amount = normalizeDiscountAmount(row, clientAmount);
+  let dollars = 0;
+  if (row.discount_type === 'percentage' || row.discount_type === 'variable_percentage') {
+    dollars = baseAmount * (amount / 100);
+    if (row.max_discount_dollars) dollars = Math.min(dollars, Number(row.max_discount_dollars));
+  } else if (row.discount_type === 'fixed_amount' || row.discount_type === 'variable_amount') {
+    dollars = amount;
+  } else if (row.discount_type === 'free_service') {
+    dollars = baseAmount;
+  } else {
+    throw httpError(400, `Unsupported discount type: ${row.discount_type}`);
+  }
+  dollars = Math.min(baseAmount, Math.max(0, Math.round(dollars * 100) / 100));
+  return { amount: Math.round(amount * 100) / 100, dollars };
+}
+
+async function loadInvoiceDiscount(discountId) {
+  if (!discountId) return null;
+  const discount = await db('discounts')
+    .where({ id: discountId, is_active: true, show_in_invoices: true, is_waveguard_tier_discount: false })
+    .first();
+  if (!discount) throw httpError(400, 'Selected discount is not available for invoices');
+  return discount;
+}
+
+async function resolveLineDiscount(input, baseAmount) {
+  const discountId = input?.discountId || input?.id || null;
+  if (!discountId) return null;
+  const row = await loadInvoiceDiscount(discountId);
+  const resolved = calculateDiscountDollars(row, baseAmount, input?.discountAmount ?? input?.amount);
+  if (!(resolved.dollars > 0)) return null;
+  return {
+    discountId: row.id,
+    discountName: row.name,
+    discountType: row.discount_type,
+    discountAmount: resolved.amount,
+    discountDollars: resolved.dollars,
+  };
+}
+
+async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount }) {
+  if (discountType && !discountId) {
+    throw httpError(400, 'discountId is required for appointment-level discounts');
+  }
+
+  const primaryBaseFallback = serviceRecord?.base_price != null ? serviceRecord.base_price : estimatedPrice;
+  const primaryBase = parseMoneyInput(primaryLinePrice ?? primaryBaseFallback, 'primaryLinePrice');
+  const primaryDiscount = await resolveLineDiscount(primaryLineDiscount, primaryBase || 0);
+  const primaryNet = primaryBase == null
+    ? null
+    : Math.max(0, Math.round((primaryBase - (primaryDiscount?.discountDollars || 0)) * 100) / 100);
+
+  const addonLines = [];
+  for (const addon of Array.isArray(serviceAddons) ? serviceAddons : []) {
+    const base = parseMoneyInput(addon.basePrice ?? addon.grossPrice ?? addon.price, `price for ${addon.name || addon.serviceName || 'add-on'}`);
+    const lineDiscount = await resolveLineDiscount(addon, base || 0);
+    const net = base == null
+      ? null
+      : Math.max(0, Math.round((base - (lineDiscount?.discountDollars || 0)) * 100) / 100);
+    addonLines.push({
+      serviceId: addon.serviceId || null,
+      serviceName: addon.name || addon.serviceName,
+      price: net,
+      discount: lineDiscount,
+    });
+  }
+
+  const hasAnyPrice = primaryBase != null || addonLines.some((line) => line.price != null);
+  let finalPrice = null;
+  if (hasAnyPrice) {
+    const subtotal = (primaryNet || 0) + addonLines.reduce((sum, line) => sum + (line.price || 0), 0);
+    const appointmentDiscount = await loadInvoiceDiscount(discountId);
+    const resolvedAppointmentDiscount = appointmentDiscount
+      ? calculateDiscountDollars(appointmentDiscount, subtotal, discountAmount)
+      : null;
+    finalPrice = Math.max(0, Math.round((subtotal - (resolvedAppointmentDiscount?.dollars || 0)) * 100) / 100);
+    return {
+      finalPrice,
+      primaryDiscount,
+      addonLines,
+      appointmentDiscount: appointmentDiscount ? {
+        discountType: appointmentDiscount.discount_type,
+        discountAmount: resolvedAppointmentDiscount.amount,
+      } : null,
+    };
+  }
+
+  return {
+    finalPrice,
+    primaryDiscount,
+    addonLines,
+    appointmentDiscount: null,
+  };
+}
+
+async function insertScheduledServiceAddons(trx, scheduledServiceId, addonLines, addonCols) {
+  if (!Array.isArray(addonLines) || addonLines.length === 0) return;
+  for (const addon of addonLines) {
+    const addonData = {
+      scheduled_service_id: scheduledServiceId,
+      service_id: addon.serviceId || null,
+      service_name: addon.serviceName,
+      estimated_price: addon.price != null ? addon.price : null,
+    };
+    const discount = addon.discount;
+    if (discount && addonCols.discount_id && discount.discountId) addonData.discount_id = discount.discountId;
+    if (discount && addonCols.discount_name && discount.discountName) addonData.discount_name = String(discount.discountName).slice(0, 200);
+    if (discount && addonCols.discount_type && discount.discountType) addonData.discount_type = String(discount.discountType).slice(0, 30);
+    if (discount && addonCols.discount_amount && discount.discountAmount != null) addonData.discount_amount = Number(discount.discountAmount);
+    if (discount && addonCols.discount_dollars && discount.discountDollars != null) addonData.discount_dollars = Number(discount.discountDollars);
+    await trx('scheduled_service_addons').insert(addonData);
+  }
+}
+
+function formatServiceDisplay(primaryType, addons = []) {
+  const names = [primaryType, ...addons.map((a) => a.serviceName || a.service_name)].filter(Boolean);
+  if (names.length <= 1) return names[0] || primaryType || 'Service';
+  if (names.length === 2) return `${names[0]} + ${names[1]}`;
+  return `${names[0]} + ${names.length - 1} more`;
+}
+
+function mapAddonRow(row) {
+  return {
+    id: row.id,
+    serviceId: row.service_id || null,
+    serviceName: row.service_name,
+    estimatedPrice: row.estimated_price != null ? Number(row.estimated_price) : null,
+    discountId: row.discount_id || null,
+    discountName: row.discount_name || null,
+    discountType: row.discount_type || null,
+    discountAmount: row.discount_amount != null ? Number(row.discount_amount) : null,
+    discountDollars: row.discount_dollars != null ? Number(row.discount_dollars) : null,
+  };
+}
+
+async function loadAddonsByServiceId(serviceIds) {
+  const ids = (serviceIds || []).filter(Boolean);
+  if (!ids.length) return new Map();
+  try {
+    const rows = await db('scheduled_service_addons')
+      .whereIn('scheduled_service_id', ids)
+      .orderBy('created_at', 'asc');
+    const map = new Map();
+    for (const row of rows) {
+      const key = row.scheduled_service_id;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(mapAddonRow(row));
+    }
+    return map;
+  } catch (e) {
+    logger.warn(`[schedule] Addon lookup failed: ${e.message}`);
+    return new Map();
+  }
 }
 
 function getZone(city, zip) {
@@ -380,6 +562,8 @@ router.get('/', async (req, res, next) => {
       )
       .orderByRaw('COALESCE(route_order, 999), window_start');
 
+    const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
+
     // Enrich with property prefs and last service
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
@@ -391,6 +575,8 @@ router.get('/', async (req, res, next) => {
 
       const normalizedType = normalizeServiceType(s.service_type);
       const category = detectServiceCategory(normalizedType);
+      const serviceAddons = addonsByServiceId.get(s.id) || [];
+      const serviceTypeDisplay = formatServiceDisplay(normalizedType, serviceAddons);
 
       const cleanedNotes = (s.notes || '').trim();
       let checkoutInvoice = null;
@@ -454,6 +640,9 @@ router.get('/', async (req, res, next) => {
         address: `${s.address_line1}, ${s.city}, ${s.state} ${s.zip}`,
         city: s.city,
         serviceType: normalizedType,                    // FIX #2: clean label
+        serviceTypeDisplay,
+        serviceAddons,
+        extraServiceTypes: serviceAddons.map((a) => a.serviceName).filter(Boolean),
         serviceTypeRaw: s.service_type,                 // Keep raw for debugging
         serviceCategory: category,                      // pest, lawn, mosquito, etc.
         serviceIcon: serviceIcon(category),
@@ -579,9 +768,12 @@ router.get('/week', async (req, res, next) => {
 
       const zones = {};
       services.forEach(s => { const z = s.zone || 'unknown'; zones[z] = (zones[z] || 0) + 1; });
+      const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
 
       const servicePayloads = await Promise.all(services.map(async (s) => {
         const svcType = normalizeServiceType(s.service_type);
+        const serviceAddons = addonsByServiceId.get(s.id) || [];
+        const serviceTypeDisplay = formatServiceDisplay(svcType, serviceAddons);
         let checkoutInvoice = null;
         try {
           checkoutInvoice = await db('invoices')
@@ -602,6 +794,9 @@ router.get('/week', async (req, res, next) => {
           customerId: s.customer_id,
           customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
           serviceType: svcType,
+          serviceTypeDisplay,
+          serviceAddons,
+          extraServiceTypes: serviceAddons.map((a) => a.serviceName).filter(Boolean),
           serviceCategory: detectServiceCategory(svcType),
           status: s.status,
           techName: s.tech_name, zone: s.zone,
@@ -684,6 +879,8 @@ router.get('/month', async (req, res, next) => {
       .orderBy('scheduled_services.scheduled_date')
       .orderByRaw('COALESCE(scheduled_services.route_order, 999)');
 
+    const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
+
     // Group by date
     const byDate = {};
     services.forEach(s => {
@@ -693,11 +890,15 @@ router.get('/month', async (req, res, next) => {
       if (!byDate[d]) byDate[d] = [];
       const svcType = normalizeServiceType(s.service_type);
       const category = detectServiceCategory(svcType);
+      const serviceAddons = addonsByServiceId.get(s.id) || [];
       byDate[d].push({
         id: s.id,
         customerId: s.customer_id,
         customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim(),
         serviceType: svcType,
+        serviceTypeDisplay: formatServiceDisplay(svcType, serviceAddons),
+        serviceAddons,
+        extraServiceTypes: serviceAddons.map((a) => a.serviceName).filter(Boolean),
         serviceCategory: category,
         status: s.status,
         techName: s.tech_name,
@@ -781,7 +982,7 @@ router.get('/month', async (req, res, next) => {
 });
 
 // POST /api/admin/schedule — create new service
-router.post('/', async (req, res, next) => {
+router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const {
       customerId, technicianId, scheduledDate, windowStart, windowEnd,
@@ -789,16 +990,17 @@ router.post('/', async (req, res, next) => {
       recurringNth, recurringWeekday, recurringIntervalDays,
       skipWeekends, weekendShift,
       boosterMonths,
-      discountType, discountAmount,
+      discountId, discountType, discountAmount,
       createInvoice,
       sendConfirmation, serviceId, serviceAddons, assignmentMode, primaryLineDiscount,
-      estimatedPrice, estimatedDuration, urgency, internalNotes, customerNotes, isCallback,
+      primaryLinePrice, estimatedPrice, estimatedDuration, urgency, internalNotes, customerNotes, isCallback,
       parentServiceId, sendConfirmationSms, sendTechNotification,
     } = req.body;
 
     if (!customerId || !scheduledDate || !serviceType) return res.status(400).json({ error: 'customerId, scheduledDate, serviceType required' });
 
     const customer = await db('customers').where({ id: customerId }).first();
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
     const zone = getZone(customer?.city, customer?.zip);
     let duration = estimateDuration(serviceType, customer?.property_sqft, customer?.lot_sqft);
 
@@ -839,33 +1041,47 @@ router.post('/', async (req, res, next) => {
       resolvedTechId = null;
     }
 
-    // WaveGuard callback: free if customer has tier
-    let finalPrice = estimatedPrice != null ? estimatedPrice : (serviceRecord?.base_price || null);
-    if (isCallback && customer?.waveguard_tier) {
-      finalPrice = 0;
-    }
-    // Apply recurring discount (if any)
-    if (finalPrice != null && discountType && discountAmount != null && discountAmount !== '') {
-      finalPrice = applyDiscount(finalPrice, discountType, discountAmount);
-    }
-
     // Merge notes
     const combinedNotes = [notes, customerNotes].filter(Boolean).join('\n') || null;
     const monthAnchorOpts = (isRecurring && MONTH_RECURRENCE_INTERVALS[recurringPattern])
       ? recurrenceOrdinalOptions(scheduledDate, { nth: recurringNth, weekday: recurringWeekday })
       : { nth: recurringNth, weekday: recurringWeekday };
 
-    const insertData = {
-      customer_id: customerId, technician_id: resolvedTechId,
-      scheduled_date: scheduledDate, window_start: windowStart, window_end: computedEnd,
-      service_type: serviceType, status: 'pending',
-      time_window: timeWindow, zone, estimated_duration_minutes: duration,
-      notes: combinedNotes, is_recurring: isRecurring || false, recurring_pattern: recurringPattern,
-    };
+    const pricing = await buildAppointmentPricing({
+      serviceRecord,
+      serviceType,
+      serviceId,
+      estimatedPrice,
+      primaryLinePrice,
+      primaryLineDiscount,
+      serviceAddons,
+      discountId,
+      discountType,
+      discountAmount,
+    });
 
-    // Add new workflow columns (safe — migration may not have run yet)
-    try {
-      const cols = await db('scheduled_services').columnInfo();
+    let finalPrice = pricing.finalPrice;
+    if (isCallback && customer?.waveguard_tier) finalPrice = 0;
+    const appointmentDiscountType = pricing.appointmentDiscount?.discountType || null;
+    const appointmentDiscountAmount = pricing.appointmentDiscount?.discountAmount ?? null;
+    const createdAppointments = [];
+    let svc;
+
+    const cols = await db('scheduled_services').columnInfo();
+    const addonCols = pricing.addonLines.length > 0
+      ? await db('scheduled_service_addons').columnInfo()
+      : {};
+
+    await db.transaction(async (trx) => {
+      const insertData = {
+        customer_id: customerId, technician_id: resolvedTechId,
+        scheduled_date: scheduledDate, window_start: windowStart, window_end: computedEnd,
+        service_type: serviceType, status: 'pending',
+        time_window: timeWindow, zone, estimated_duration_minutes: duration,
+        notes: combinedNotes, is_recurring: isRecurring || false, recurring_pattern: recurringPattern,
+      };
+
+      // Add new workflow columns (safe — migration may not have run yet)
       if (cols.service_id && serviceId) insertData.service_id = serviceId;
       if (cols.estimated_price && finalPrice != null) insertData.estimated_price = finalPrice;
       if (cols.urgency) insertData.urgency = urgency || 'routine';
@@ -884,52 +1100,33 @@ router.post('/', async (req, res, next) => {
           if (cleaned.length > 0) insertData.booster_months = JSON.stringify(cleaned);
         }
       }
-      if (cols.discount_type && discountType) insertData.discount_type = discountType;
-      if (cols.discount_amount && discountAmount != null && discountAmount !== '') insertData.discount_amount = Number(discountAmount);
-      if (primaryLineDiscount && cols.line_discount_id && primaryLineDiscount.discountId) insertData.line_discount_id = primaryLineDiscount.discountId;
-      if (primaryLineDiscount && cols.line_discount_name && primaryLineDiscount.discountName) insertData.line_discount_name = String(primaryLineDiscount.discountName).slice(0, 200);
-      if (primaryLineDiscount && cols.line_discount_type && primaryLineDiscount.discountType) insertData.line_discount_type = String(primaryLineDiscount.discountType).slice(0, 30);
-      if (primaryLineDiscount && cols.line_discount_amount && primaryLineDiscount.discountAmount != null) insertData.line_discount_amount = Number(primaryLineDiscount.discountAmount);
-      if (primaryLineDiscount && cols.line_discount_dollars && primaryLineDiscount.discountDollars != null) insertData.line_discount_dollars = Number(primaryLineDiscount.discountDollars);
+      if (cols.discount_type && appointmentDiscountType) insertData.discount_type = appointmentDiscountType;
+      if (cols.discount_amount && appointmentDiscountAmount != null) insertData.discount_amount = Number(appointmentDiscountAmount);
+      if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) insertData.line_discount_id = pricing.primaryDiscount.discountId;
+      if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) insertData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
+      if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) insertData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
+      if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) insertData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
+      if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) insertData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
       if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = !!createInvoice;
-    } catch (e) { logger.warn(`[schedule] Column check failed (non-blocking): ${e.message}`); }
 
-    const [svc] = await db('scheduled_services').insert(insertData).returning('*');
+      [svc] = await trx('scheduled_services').insert(insertData).returning('*');
+      await insertScheduledServiceAddons(trx, svc.id, pricing.addonLines, addonCols);
+      createdAppointments.push({ id: svc.id, date: scheduledDate, confirmation: sendConfirmationSms === undefined ? true : !!sendConfirmationSms });
 
-    // Create addon entries
-    if (serviceAddons && serviceAddons.length > 0) {
-      try {
-        const addonCols = await db('scheduled_service_addons').columnInfo();
-        for (const addon of serviceAddons) {
-          const addonData = {
-            scheduled_service_id: svc.id,
-            service_id: addon.serviceId || null,
-            service_name: addon.name || addon.serviceName,
-            estimated_price: addon.price || null,
-          };
-          if (addonCols.discount_id && addon.discountId) addonData.discount_id = addon.discountId;
-          if (addonCols.discount_name && addon.discountName) addonData.discount_name = String(addon.discountName).slice(0, 200);
-          if (addonCols.discount_type && addon.discountType) addonData.discount_type = String(addon.discountType).slice(0, 30);
-          if (addonCols.discount_amount && addon.discountAmount != null) addonData.discount_amount = Number(addon.discountAmount);
-          if (addonCols.discount_dollars && addon.discountDollars != null) addonData.discount_dollars = Number(addon.discountDollars);
-          await db('scheduled_service_addons').insert(addonData);
-        }
-      } catch (e) { logger.warn(`[schedule] Addon insert failed (non-blocking): ${e.message}`); }
-    }
+      // Track all scheduled_date strings created for this parent series
+      // (parent itself, recurring children, AND boosters). Hoisted so the
+      // booster spawn block below can dedupe against base-series dates —
+      // certain cadence/month combos (e.g. monthly Jan 15 + April booster
+      // → Apr 15 already on the calendar) would otherwise double-book.
+      const seriesDates = new Set();
+      seriesDates.add(String(scheduledDate || '').split('T')[0]);
 
-    // Track all scheduled_date strings created for this parent series
-    // (parent itself, recurring children, AND boosters). Hoisted so the
-    // booster spawn block below can dedupe against base-series dates —
-    // certain cadence/month combos (e.g. monthly Jan 15 + April booster
-    // → Apr 15 already on the calendar) would otherwise double-book.
-    const seriesDates = new Set();
-    seriesDates.add(String(scheduledDate || '').split('T')[0]);
-
-    // Create recurring instances (Ongoing mode still pre-seeds a 4-visit rolling window for UX)
-    const plannedCount = isRecurring ? (recurringOngoing ? 4 : (recurringCount || 4)) : 0;
-    if (isRecurring && recurringPattern && plannedCount > 1) {
-     try {
-      const cols = await db('scheduled_services').columnInfo();
+      // Create recurring instances (Ongoing mode still pre-seeds a 4-visit rolling window for UX)
+      const parsedRecurringCount = Number.parseInt(recurringCount, 10);
+      const plannedCount = isRecurring
+        ? (recurringOngoing ? 4 : (Number.isInteger(parsedRecurringCount) && parsedRecurringCount > 1 ? parsedRecurringCount : 4))
+        : 0;
+      if (isRecurring && recurringPattern && plannedCount > 1) {
       const rOpts = { ...monthAnchorOpts, intervalDays: recurringIntervalDays };
       const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
       // Iterate by inserts, not by attempts: when skip-weekends collapses
@@ -962,52 +1159,31 @@ router.post('/', async (req, res, next) => {
         if (cols.skip_weekends) childData.skip_weekends = !!skipWeekends;
         if (cols.weekend_shift && skipWeekends) childData.weekend_shift = shiftDir;
         if (cols.estimated_price && finalPrice != null) childData.estimated_price = finalPrice;
-        if (cols.discount_type && discountType) childData.discount_type = discountType;
-        if (cols.discount_amount && discountAmount != null && discountAmount !== '') childData.discount_amount = Number(discountAmount);
-        if (primaryLineDiscount && cols.line_discount_id && primaryLineDiscount.discountId) childData.line_discount_id = primaryLineDiscount.discountId;
-        if (primaryLineDiscount && cols.line_discount_name && primaryLineDiscount.discountName) childData.line_discount_name = String(primaryLineDiscount.discountName).slice(0, 200);
-        if (primaryLineDiscount && cols.line_discount_type && primaryLineDiscount.discountType) childData.line_discount_type = String(primaryLineDiscount.discountType).slice(0, 30);
-        if (primaryLineDiscount && cols.line_discount_amount && primaryLineDiscount.discountAmount != null) childData.line_discount_amount = Number(primaryLineDiscount.discountAmount);
-        if (primaryLineDiscount && cols.line_discount_dollars && primaryLineDiscount.discountDollars != null) childData.line_discount_dollars = Number(primaryLineDiscount.discountDollars);
+        if (cols.discount_type && appointmentDiscountType) childData.discount_type = appointmentDiscountType;
+        if (cols.discount_amount && appointmentDiscountAmount != null) childData.discount_amount = Number(appointmentDiscountAmount);
+        if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) childData.line_discount_id = pricing.primaryDiscount.discountId;
+        if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) childData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
+        if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) childData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
+        if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) childData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
+        if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) childData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
         if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = !!createInvoice;
-        const [childRow] = await db('scheduled_services').insert(childData).returning('*');
+        const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
         // Mirror the parent's add-on lines onto each recurring child so a
         // pest+rodent quarterly series carries rodent on every visit, not
-        // just the first. Non-blocking — if it fails the child still
-        // exists and dispatch can re-add the line manually.
-        if (Array.isArray(serviceAddons) && serviceAddons.length > 0 && childRow?.id) {
-          try {
-            const addonCols = await db('scheduled_service_addons').columnInfo();
-            for (const addon of serviceAddons) {
-              const addonData = {
-                scheduled_service_id: childRow.id,
-                service_id: addon.serviceId || null,
-                service_name: addon.name || addon.serviceName,
-                estimated_price: addon.price || null,
-              };
-              if (addonCols.discount_id && addon.discountId) addonData.discount_id = addon.discountId;
-              if (addonCols.discount_name && addon.discountName) addonData.discount_name = String(addon.discountName).slice(0, 200);
-              if (addonCols.discount_type && addon.discountType) addonData.discount_type = String(addon.discountType).slice(0, 30);
-              if (addonCols.discount_amount && addon.discountAmount != null) addonData.discount_amount = Number(addon.discountAmount);
-              if (addonCols.discount_dollars && addon.discountDollars != null) addonData.discount_dollars = Number(addon.discountDollars);
-              await db('scheduled_service_addons').insert(addonData);
-            }
-          } catch (e) { logger.warn(`[schedule] Recurring child addon insert failed (non-blocking): ${e.message}`); }
-        }
+        // just the first.
+        if (childRow?.id) await insertScheduledServiceAddons(trx, childRow.id, pricing.addonLines, addonCols);
+        createdAppointments.push({ id: childRow.id, date: nextDateStr, confirmation: false });
         inserted++;
       }
-     } catch (e) { logger.error(`[schedule] Recurring spawn failed (non-blocking): ${e.message}`); }
-    }
+      }
 
-    // Booster months — extra one-off visits on top of the base series
-    // (e.g. quarterly pest + summer-month boosters). Pre-seed the next 12
-    // months from the initial date; boosters share recurring_parent_id but
-    // are themselves is_recurring=false so the auto-extend path leaves
-    // them alone. A future cron can refresh year-2 boosters from
-    // parent.booster_months.
-    if (isRecurring && Array.isArray(boosterMonths) && boosterMonths.length > 0) {
-      try {
-        const cols = await db('scheduled_services').columnInfo();
+      // Booster months — extra one-off visits on top of the base series
+      // (e.g. quarterly pest + summer-month boosters). Pre-seed the next 12
+      // months from the initial date; boosters share recurring_parent_id but
+      // are themselves is_recurring=false so the auto-extend path leaves
+      // them alone. A future cron can refresh year-2 boosters from
+      // parent.booster_months.
+      if (isRecurring && Array.isArray(boosterMonths) && boosterMonths.length > 0) {
         const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
         const cleaned = Array.from(new Set(boosterMonths.map((m) => parseInt(m)).filter((m) => m >= 1 && m <= 12))).sort((a, b) => a - b);
         const dates = computeBoosterDates(scheduledDate, cleaned, 12);
@@ -1034,41 +1210,23 @@ router.post('/', async (req, res, next) => {
           if (cols.internal_notes && internalNotes) boosterData.internal_notes = internalNotes;
           if (cols.skip_weekends) boosterData.skip_weekends = !!skipWeekends;
           if (cols.weekend_shift && skipWeekends) boosterData.weekend_shift = shiftDir;
-          if (cols.discount_type && discountType) boosterData.discount_type = discountType;
-          if (cols.discount_amount && discountAmount != null && discountAmount !== '') boosterData.discount_amount = Number(discountAmount);
-          if (primaryLineDiscount && cols.line_discount_id && primaryLineDiscount.discountId) boosterData.line_discount_id = primaryLineDiscount.discountId;
-          if (primaryLineDiscount && cols.line_discount_name && primaryLineDiscount.discountName) boosterData.line_discount_name = String(primaryLineDiscount.discountName).slice(0, 200);
-          if (primaryLineDiscount && cols.line_discount_type && primaryLineDiscount.discountType) boosterData.line_discount_type = String(primaryLineDiscount.discountType).slice(0, 30);
-          if (primaryLineDiscount && cols.line_discount_amount && primaryLineDiscount.discountAmount != null) boosterData.line_discount_amount = Number(primaryLineDiscount.discountAmount);
-          if (primaryLineDiscount && cols.line_discount_dollars && primaryLineDiscount.discountDollars != null) boosterData.line_discount_dollars = Number(primaryLineDiscount.discountDollars);
+          if (cols.discount_type && appointmentDiscountType) boosterData.discount_type = appointmentDiscountType;
+          if (cols.discount_amount && appointmentDiscountAmount != null) boosterData.discount_amount = Number(appointmentDiscountAmount);
+          if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) boosterData.line_discount_id = pricing.primaryDiscount.discountId;
+          if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) boosterData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
+          if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) boosterData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
+          if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) boosterData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
+          if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) boosterData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
           if (cols.create_invoice_on_complete) boosterData.create_invoice_on_complete = !!createInvoice;
-          const [boosterRow] = await db('scheduled_services').insert(boosterData).returning('*');
+          const [boosterRow] = await trx('scheduled_services').insert(boosterData).returning('*');
 
           // Mirror the parent's add-ons onto the booster visit so a
-          // pest+rodent group's June booster also carries the rodent
-          // line. Non-blocking — if it fails the booster still exists.
-          if (Array.isArray(serviceAddons) && serviceAddons.length > 0 && boosterRow?.id) {
-            try {
-              const addonCols = await db('scheduled_service_addons').columnInfo();
-              for (const addon of serviceAddons) {
-                const addonData = {
-                  scheduled_service_id: boosterRow.id,
-                  service_id: addon.serviceId || null,
-                  service_name: addon.name || addon.serviceName,
-                  estimated_price: addon.price || null,
-                };
-                if (addonCols.discount_id && addon.discountId) addonData.discount_id = addon.discountId;
-                if (addonCols.discount_name && addon.discountName) addonData.discount_name = String(addon.discountName).slice(0, 200);
-                if (addonCols.discount_type && addon.discountType) addonData.discount_type = String(addon.discountType).slice(0, 30);
-                if (addonCols.discount_amount && addon.discountAmount != null) addonData.discount_amount = Number(addon.discountAmount);
-                if (addonCols.discount_dollars && addon.discountDollars != null) addonData.discount_dollars = Number(addon.discountDollars);
-                await db('scheduled_service_addons').insert(addonData);
-              }
-            } catch (e) { logger.warn(`[schedule] Booster addon insert failed (non-blocking): ${e.message}`); }
-          }
+          // pest+rodent group's June booster also carries the rodent line.
+          if (boosterRow?.id) await insertScheduledServiceAddons(trx, boosterRow.id, pricing.addonLines, addonCols);
+          createdAppointments.push({ id: boosterRow.id, date: boosterDate, confirmation: false });
         }
-      } catch (e) { logger.error(`[schedule] Booster spawn failed (non-blocking): ${e.message}`); }
-    }
+      }
+    });
 
     // Register for appointment reminders.
     //  - Honors the "Send confirmation SMS" checkbox: admin_manual defaults to true,
@@ -1076,13 +1234,18 @@ router.post('/', async (req, res, next) => {
     //    is still inserted so 72h/24h reminders fire).
     try {
       const AppointmentReminders = require('../services/appointment-reminders');
-      const wantConfirmation = sendConfirmationSms === undefined ? true : !!sendConfirmationSms;
-      await AppointmentReminders.registerAppointment(
-        svc.id, customerId,
-        scheduledDate + 'T' + (windowStart || '08:00'),
-        serviceType, 'admin_manual',
-        { sendConfirmation: wantConfirmation }
-      );
+      for (const appt of createdAppointments) {
+        try {
+          await AppointmentReminders.registerAppointment(
+            appt.id, customerId,
+            `${appt.date}T${windowStart || '08:00'}`,
+            serviceType, 'admin_manual',
+            { sendConfirmation: !!appt.confirmation }
+          );
+        } catch (e) {
+          logger.error(`Appointment reminder registration failed for ${appt.id}: ${e.message}`);
+        }
+      }
     } catch (e) { logger.error(`Appointment reminder registration failed: ${e.message}`); }
 
     // Optional: push an in-app notification to the assigned tech's PWA queue
@@ -1456,6 +1619,14 @@ router.post('/:id/invoice', async (req, res, next) => {
     const amount = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
       ? Number(svc.estimated_price)
       : (svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
+    const persistedAddons = (await loadAddonsByServiceId([svc.id])).get(svc.id) || [];
+    const persistedAddonTotal = Math.round(
+      persistedAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100
+    ) / 100;
+    const splitPersistedAddons = amount > 0 && persistedAddonTotal > 0 && persistedAddonTotal < amount;
+    const baseAmount = splitPersistedAddons
+      ? Math.max(0, Math.round((amount - persistedAddonTotal) * 100) / 100)
+      : amount;
 
     // Mobile checkout sheet can append extra services + discount lines before
     // minting. Each extra is { description, quantity, unit_price, amount,
@@ -1491,18 +1662,29 @@ router.post('/:id/invoice', async (req, res, next) => {
     }
 
     const InvoiceService = require('../services/invoice');
-    const baseLine = amount > 0 ? [{
+    const baseLine = baseAmount > 0 ? [{
       description: svc.service_type || 'Service visit',
       quantity: 1,
-      unit_price: amount,
-      amount,
+      unit_price: baseAmount,
+      amount: baseAmount,
       category: svc.service_type || null,
     }] : [];
+    const addonLines = splitPersistedAddons
+      ? persistedAddons
+        .filter((addon) => Number(addon.estimatedPrice) > 0)
+        .map((addon) => ({
+          description: addon.serviceName || 'Service add-on',
+          quantity: 1,
+          unit_price: Number(addon.estimatedPrice),
+          amount: Number(addon.estimatedPrice),
+          category: addon.serviceName || null,
+        }))
+      : [];
     let invoice = await InvoiceService.create({
       customerId: svc.customer_id,
       scheduledServiceId: svc.id,
-      title: svc.service_type || 'Service visit',
-      lineItems: [...baseLine, ...extraLines],
+      title: formatServiceDisplay(svc.service_type, splitPersistedAddons ? persistedAddons : []),
+      lineItems: [...baseLine, ...addonLines, ...extraLines],
       taxRate: svc.cust_property_type === 'commercial' ? 0.07 : 0,
     });
 
