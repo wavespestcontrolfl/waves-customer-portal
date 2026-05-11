@@ -125,8 +125,9 @@ function isDiscountLineItem(item) {
 
 function fmtDate(d) {
   if (!d) return '';
-  const dt = typeof d === 'string'
-    ? new Date(d.length === 10 ? d + 'T12:00:00' : d)
+  const dateOnly = typeof d === 'string' ? d.match(/^(\d{4}-\d{2}-\d{2})/) : null;
+  const dt = dateOnly
+    ? new Date(`${dateOnly[1]}T12:00:00Z`)
     : new Date(d);
   if (Number.isNaN(dt.getTime())) return '';
   return dt.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
