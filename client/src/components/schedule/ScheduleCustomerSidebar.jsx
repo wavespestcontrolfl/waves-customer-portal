@@ -4,14 +4,6 @@ import { adminFetch } from '../../lib/adminFetch';
 import { TIMEZONE } from '../../lib/timezone';
 import CallBridgeLink from '../admin/CallBridgeLink';
 
-const TIER_DISCOUNT = { bronze: 0, silver: 0.10, gold: 0.15, platinum: 0.20 };
-
-function tierLabel(t) {
-  if (!t) return '';
-  const s = String(t).toLowerCase();
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
-
 function money(value) {
   const n = Number(value || 0);
   return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -140,8 +132,6 @@ export default function ScheduleCustomerSidebar({
   const payments = data?.payments || [];
   const cards = data?.cards || [];
 
-  const tier = String(service?.waveguardTier || c.tier || '').toLowerCase();
-  const discountPct = TIER_DISCOUNT[tier] || 0;
   const basePrice = service?.estimatedPrice != null
     ? Number(service.estimatedPrice)
     : Number(service?.monthlyRate || c.monthlyRate || 0);
@@ -156,8 +146,7 @@ export default function ScheduleCustomerSidebar({
   const baseServiceLabel = splitAppointmentAddons
     ? (service?.serviceType || 'Service')
     : (service?.serviceTypeDisplay || service?.serviceType || 'Service');
-  const discount = Math.round(basePrice * discountPct * 100) / 100;
-  const total = Math.max(0, basePrice - discount);
+  const total = Math.max(0, basePrice);
   const timeWindow = fmtWindow(service);
   const duration = fmtDuration(service);
   const address = addressText(c, service?.address);
@@ -365,12 +354,6 @@ export default function ScheduleCustomerSidebar({
                 <div className="u-nums text-14 text-zinc-900">{money(Number(addon.estimatedPrice || 0))}</div>
               </div>
             ))}
-            {discountPct > 0 && (
-              <div className="flex items-center justify-between gap-3 py-3 border-b border-hairline border-zinc-100">
-                <div className="text-14 text-zinc-900">WaveGuard {tierLabel(tier)} discount</div>
-                <div className="u-nums text-14 text-zinc-900">({money(discount)})</div>
-              </div>
-            )}
             <div className="flex items-center justify-between gap-3 pt-3">
               <div className="text-15 font-medium text-zinc-900">Total</div>
               <div className="u-nums text-15 font-medium text-zinc-900">{money(total)}</div>

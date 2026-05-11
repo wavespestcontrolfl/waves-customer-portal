@@ -250,7 +250,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     return discountPresets.filter((d) => (
       d.is_active
       && d.show_in_invoices
-      && !d.is_waveguard_tier_discount
     ));
   }, [discountPresets]);
   const appointmentDiscountPresets = lineDiscountPresets;

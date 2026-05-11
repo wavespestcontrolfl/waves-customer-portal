@@ -1665,6 +1665,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           amount: invoiceAmount,
           description: svc.service_type,
           taxRate: svc.property_type === 'commercial' ? 0.07 : 0,
+          useScheduledReplay: true,
         });
         invoice = await applyPrepaidCreditToInvoice(invoice);
         invoiceCreated = true;

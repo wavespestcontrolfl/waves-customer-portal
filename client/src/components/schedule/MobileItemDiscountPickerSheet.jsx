@@ -72,6 +72,7 @@ export default function MobileItemDiscountPickerSheet({ onClose, onSelect }) {
   const q = query.trim().toLowerCase();
   const activeDiscounts = discounts
     .filter((d) => d.is_active !== false)
+    .filter((d) => d.show_in_invoices !== false)
     .filter((d) => !q || (d.name || '').toLowerCase().includes(q));
 
   const QuickRow = ({ icon, label, onClick, disabled }) => (

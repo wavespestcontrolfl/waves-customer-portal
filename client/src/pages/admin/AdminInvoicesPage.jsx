@@ -27,7 +27,7 @@
 //   server/services/pdf/invoice-pdf.js      (PDF generation)
 //   server/routes/admin-payments-reconcile.js  (Tap to Pay reconcile)
 //   server/routes/admin-billing-health.js   (charge-now + manual refund)
-//   server/services/discount-engine.js      (WaveGuard tier %)
+//   server/services/discount-engine.js      (discount catalog + audit rows)
 //   server/services/tax-calculator.js       (per-county sales tax)
 //
 // Audit focus:
@@ -1096,8 +1096,8 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const [discountQueries, setDiscountQueries] = useState({});
   const [aiNotesLoading, setAiNotesLoading] = useState(false);
 
-  // Load active, invoice-visible, non-tier discounts once. Tier discount is auto-applied
-  // server-side from the customer's WaveGuard tier, so we exclude it from the picker.
+  // Load active, invoice-visible discounts once. Tier discounts are included here
+  // for explicit line-level selection; customer tier never applies a hidden discount.
   useEffect(() => {
     adminFetch('/admin/discounts')
       .then(d => {
@@ -1105,7 +1105,6 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
           .filter(x => (
             x.is_active
             && x.show_in_invoices
-            && !x.is_waveguard_tier_discount
           ));
         setAvailableDiscounts(list);
       })
@@ -1237,11 +1236,13 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
       client_id: `li_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       _kind: 'discount',
       discount_id: discount.id,
+      discount_key: discount.discount_key || null,
       discount_for: parent.client_id,
       description: `${discount.name} (${parent.description || 'line item'})`,
       quantity: 1,
       unit_price: -dollars,
       amount: -dollars,
+      is_waveguard_tier_discount: !!discount.is_waveguard_tier_discount,
       ...(custom?.custom_discount_amount ? { custom_discount_amount: custom.custom_discount_amount } : {}),
       ...(custom?.custom_discount_percentage ? { custom_discount_percentage: custom.custom_discount_percentage } : {}),
     };
@@ -1272,10 +1273,6 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const lineDiscountAmt = Math.abs(lineItems
     .filter(i => i._kind === 'discount')
     .reduce((sum, i) => sum + Math.min(0, lineAmount(i)), 0));
-  // WaveGuard tier discounts — keep aligned with server/services/pricing-engine/constants.js
-  // WAVEGUARD.tiers (see docs/pricing/POLICY.md).
-  const tierDiscount = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 }[selectedCustomer?.waveguard_tier] || 0;
-  const discountAmt = subtotal * tierDiscount;
 
   // Mirror server discount-engine math so the preview matches stored totals.
   const previewDiscount = (disc, baseAmount) => {
@@ -1289,7 +1286,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
     if (disc.discount_type === 'free_service') return baseAmount;
     return 0;
   };
-  const totalDiscountAmt = Math.min(subtotal, discountAmt + lineDiscountAmt);
+  const totalDiscountAmt = Math.min(subtotal, lineDiscountAmt);
 
   const afterDiscount = subtotal - totalDiscountAmt;
   const isCommercial = selectedCustomer?.property_type === 'commercial' || selectedCustomer?.property_type === 'business';
@@ -1795,11 +1792,6 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             <div style={summaryRowStyle()}>
               <span style={summaryLabelStyle}>Subtotal</span><span style={summaryAmountStyle}>${subtotal.toFixed(2)}</span>
             </div>
-            {discountAmt > 0 && (
-              <div style={summaryRowStyle()}>
-                <span style={summaryLabelStyle}>{selectedCustomer?.waveguard_tier} -{Math.round(tierDiscount * 100)}%</span><span style={summaryAmountStyle}>-${discountAmt.toFixed(2)}</span>
-              </div>
-            )}
             {lineDiscountAmt > 0 && (
               <div style={summaryRowStyle()}>
                 <span style={summaryLabelStyle}>Line-item discounts</span><span style={summaryAmountStyle}>-${lineDiscountAmt.toFixed(2)}</span>
