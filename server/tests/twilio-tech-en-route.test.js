@@ -79,4 +79,26 @@ describe('TwilioService.sendTechEnRoute', () => {
     }));
     expect(result.success).toBe(true);
   });
+
+  test('sendTechArrived uses arrival copy instead of en-route copy', async () => {
+    db
+      .mockReturnValueOnce(firstQuery({ id: 'cust-1', first_name: 'Sam', phone: '+15551112222' }))
+      .mockReturnValueOnce(firstQuery({ tech_en_route: true, sms_enabled: true }));
+
+    getAppointmentContacts.mockReturnValue([
+      { phone: '+15551112222', name: 'Sam', role: 'primary' },
+    ]);
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+
+    const result = await TwilioService.sendTechArrived('cust-1', 'Bryan');
+
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      to: '+15551112222',
+      body: expect.stringContaining('has arrived and is servicing your property'),
+      purpose: 'tech_en_route',
+      metadata: { original_message_type: 'tech_arrived' },
+    }));
+    expect(sendCustomerMessage.mock.calls[0][0].body).not.toContain('on the way');
+    expect(result.success).toBe(true);
+  });
 });

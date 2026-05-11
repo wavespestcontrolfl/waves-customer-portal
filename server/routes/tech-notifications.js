@@ -95,8 +95,8 @@ router.post('/:id/confirm-start', async (req, res, next) => {
         try {
           const tech = await db('technicians').where({ id: req.technicianId }).first();
           const twilio = require('../services/twilio');
-          if (twilio && twilio.sendTechEnRoute && customerId) {
-            await twilio.sendTechEnRoute(customerId, tech ? tech.name : 'Your tech', 0);
+          if (twilio && twilio.sendTechArrived && customerId) {
+            await twilio.sendTechArrived(customerId, tech ? tech.name : 'Your tech');
           }
         } catch (err) {
           logger.warn(`[tech-notifications] arrival SMS failed: ${err.message}`);

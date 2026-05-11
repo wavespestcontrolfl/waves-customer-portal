@@ -50,11 +50,30 @@ function streetOnly(fullAddress) {
   return idx === -1 ? fullAddress : fullAddress.slice(0, idx);
 }
 
+function gpsAgeLabel(updatedAt) {
+  if (!updatedAt) return 'GPS unavailable';
+  const ms = new Date(updatedAt).getTime();
+  if (!Number.isFinite(ms)) return 'GPS unavailable';
+  const diffMin = Math.max(0, Math.floor((Date.now() - ms) / 60000));
+  if (diffMin < 1) return 'GPS now';
+  if (diffMin < 60) return diffMin > 5 ? `GPS stale ${diffMin}m` : `GPS ${diffMin}m`;
+  const diffHr = Math.floor(diffMin / 60);
+  return diffHr >= 24 ? 'GPS stale' : `GPS stale ${diffHr}h`;
+}
+
+function gpsAgeTone(updatedAt) {
+  const ms = new Date(updatedAt).getTime();
+  if (!Number.isFinite(ms)) return 'text-alert-fg';
+  return Date.now() - ms > 5 * 60 * 1000 ? 'text-alert-fg' : 'text-ink-tertiary';
+}
+
 function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
   const currentJob = tech.current_job_id ? jobs.get(tech.current_job_id) : null;
   const addressLine = currentJob ? truncate(streetOnly(currentJob.address), 28) : '—';
   const dotColor = STATUS_DOT[tech.status] || STATUS_DOT.idle;
   const statusTextColor = STATUS_TEXT[tech.status] || STATUS_TEXT.idle;
+  const gpsLabel = gpsAgeLabel(tech.location_updated_at);
+  const gpsTone = gpsAgeTone(tech.location_updated_at);
   // ETA: backend computes via haversine when status is en_route or
   // driving + tech has a current_job + both have lat/lng. Null in
   // every other case — render nothing rather than a fake number.
@@ -138,8 +157,12 @@ function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
         >
           {addressLine}
         </div>
-        <div className="px-3 pt-1 pb-3 text-12 text-ink-tertiary">
-          {tech.today_completed} / {tech.today_total} jobs
+        <div className="px-3 pt-1 pb-3 text-12 text-ink-tertiary flex items-center gap-1.5 min-w-0">
+          <span className="flex-shrink-0">{tech.today_completed} / {tech.today_total} jobs</span>
+          <span aria-hidden className="text-zinc-300">·</span>
+          <span className={cn('truncate', gpsTone)} title={tech.location_updated_at || ''}>
+            {gpsLabel}
+          </span>
         </div>
       </Card>
     </button>

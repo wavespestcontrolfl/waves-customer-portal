@@ -408,6 +408,44 @@ const TwilioService = {
   },
 
   /**
+   * Send "tech arrived/on property" notification.
+   *
+   * Uses the same customer preference gate as en-route notifications
+   * (`notification_prefs.tech_en_route`) because this is the same
+   * appointment-progress class, but the copy must not say "on the way".
+   */
+  async sendTechArrived(customerId, techName) {
+    const customer = await db('customers').where({ id: customerId }).first();
+    const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
+    if (!customer || !prefs?.tech_en_route || !prefs?.sms_enabled) return;
+
+    const { getAppointmentContacts } = require('./customer-contact');
+    const contacts = getAppointmentContacts(customer, prefs);
+    if (!contacts.length) return;
+
+    const results = [];
+    const { sendCustomerMessage } = require('./messaging/send-customer-message');
+    for (const contact of contacts) {
+      const firstName = contact.name || customer.first_name || '';
+      const body = `Hello ${firstName}! ${techName || 'Your Waves technician'} has arrived and is servicing your property.\n\nQuestions or requests? Reply to this message. Reply STOP to opt out.`;
+      results.push(await sendCustomerMessage({
+        to: contact.phone,
+        body,
+        channel: 'sms',
+        audience: 'customer',
+        purpose: 'tech_en_route',
+        customerId,
+        identityTrustLevel: contact.role === 'service_contact'
+          ? 'service_contact_authorized'
+          : 'phone_matches_customer',
+        metadata: { original_message_type: 'tech_arrived' },
+      }));
+    }
+
+    return { success: results.some(r => r?.sent), results };
+  },
+
+  /**
    * Send service completion summary
    * Called after tech completes service and submits notes
    */

@@ -15,6 +15,8 @@ const {
   etNthWeekdayOfMonth, parseETDateTime,
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
+const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
+const { recordTrackTransitionFailure } = require('../services/track-transition-alerts');
 
 // ─── Destructive maintenance endpoints ──────────────────────────────────────
 // Defined BEFORE the router-level auth chain so `devOnly` runs first and
@@ -1049,6 +1051,14 @@ router.post('/', async (req, res, next) => {
       await AppointmentTagger.onServiceScheduled(svc.id);
     } catch (e) { logger.error(`Appointment tagger failed: ${e.message}`); }
 
+    // Keep the live dispatch board in sync when a same-day job is created
+    // while dispatchers already have the Board tab open.
+    try {
+      await emitDispatchJobUpdate({ jobId: svc.id, actorId: req.technicianId });
+    } catch (e) {
+      logger.error(`[schedule] dispatch board create broadcast failed: ${e.message}`);
+    }
+
     res.status(201).json({ id: svc.id, recurringCreated: isRecurring ? (recurringCount || 4) : 1 });
   } catch (err) { next(err); }
 });
@@ -1071,10 +1081,20 @@ router.put('/:id/update-details', async (req, res, next) => {
     if (scheduledDate !== undefined && scheduledDate !== '') updates.scheduled_date = scheduledDate;
     if (windowStart !== undefined) updates.window_start = windowStart || null;
     if (windowEnd !== undefined) updates.window_end = windowEnd || null;
-    if (technicianId !== undefined) updates.technician_id = technicianId || null;
     if (notes !== undefined) updates.notes = notes;
     if (routeOrder !== undefined && routeOrder !== '') updates.route_order = parseInt(routeOrder);
     if (zone !== undefined) updates.zone = zone;
+    let assignmentChanged = false;
+    if (technicianId !== undefined) {
+      if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+      const assignment = await assignDispatchJob({
+        jobId: req.params.id,
+        technicianId: technicianId || null,
+        actorId: req.technicianId,
+        emit: false,
+      });
+      assignmentChanged = !!assignment.changed;
+    }
     let editAnchorDate = scheduledDate;
     if (isRecurring && MONTH_RECURRENCE_INTERVALS[recurringPattern] && !editAnchorDate) {
       const existingService = await db('scheduled_services')
@@ -1130,6 +1150,13 @@ router.put('/:id/update-details', async (req, res, next) => {
     }
     if (Object.keys(updates).length) {
       await db('scheduled_services').where({ id: req.params.id }).update(updates);
+    }
+    if (assignmentChanged || Object.keys(updates).length) {
+      try {
+        await emitDispatchJobUpdate({ jobId: req.params.id, actorId: req.technicianId });
+      } catch (e) {
+        logger.error(`[schedule/update-details] dispatch board broadcast failed: ${e.message}`);
+      }
     }
 
     // Spawn recurring children if requested (Ongoing seeds 4; Fixed uses recurringCount)
@@ -1230,23 +1257,34 @@ router.put('/:id/update-details', async (req, res, next) => {
     }
 
     res.json({ success: true, recurringCreated });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
 });
 
 // PUT /api/admin/schedule/:id/assign — assign technician
-router.put('/:id/assign', async (req, res, next) => {
+router.put('/:id/assign', requireAdmin, async (req, res, next) => {
   try {
-    const { technicianId } = req.body;
-    if (technicianId === undefined) return res.status(400).json({ error: 'technicianId required' });
-    await db('scheduled_services').where({ id: req.params.id }).update({ technician_id: technicianId });
-    if (technicianId === null) {
+    const result = await assignDispatchJob({
+      jobId: req.params.id,
+      technicianId: req.body ? req.body.technicianId : undefined,
+      actorId: req.technicianId,
+    });
+    if (result.job.technician_id === null) {
       logger.info(`[schedule] Unassigned service ${req.params.id}`);
-      return res.json({ success: true, technicianName: null });
+    } else {
+      logger.info(`[schedule] Assigned service ${req.params.id} to ${result.technicianName || result.job.technician_id}`);
     }
-    const tech = await db('technicians').where({ id: technicianId }).first();
-    logger.info(`[schedule] Assigned service ${req.params.id} to ${tech?.name || technicianId}`);
-    res.json({ success: true, technicianName: tech?.name });
-  } catch (err) { next(err); }
+    res.json({
+      success: true,
+      technicianName: result.technicianName,
+      job: result.job,
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
 });
 
 // POST /api/admin/schedule/:id/prepaid — record payment taken in advance
@@ -1590,7 +1628,15 @@ router.put('/:id/status', async (req, res, next) => {
           actorType: 'admin',
           actorId: req.technicianId,
         });
-      } catch (e) { logger.error(`[en-route] markEnRoute failed: ${e.message}`); }
+      } catch (e) {
+        logger.error(`[en-route] markEnRoute failed: ${e.message}`);
+        await recordTrackTransitionFailure({
+          jobId: svc.id,
+          action: 'mark_en_route',
+          actorId: req.technicianId,
+          error: e,
+        });
+      }
 
       try {
         const NotificationService = require('../services/notification-service');
@@ -1848,7 +1894,9 @@ router.post('/optimize', async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
-        'customers.lat', 'customers.lng', 'customers.city', 'customers.zip',
+        db.raw('COALESCE(scheduled_services.lat, customers.latitude) as lat'),
+        db.raw('COALESCE(scheduled_services.lng, customers.longitude) as lng'),
+        'customers.city', 'customers.zip',
         db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name")
       );
 
@@ -1937,7 +1985,9 @@ router.post('/optimize-route', async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
-        'customers.lat', 'customers.lng', 'customers.city', 'customers.zip',
+        db.raw('COALESCE(scheduled_services.lat, customers.latitude) as lat'),
+        db.raw('COALESCE(scheduled_services.lng, customers.longitude) as lng'),
+        'customers.city', 'customers.zip',
         db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name")
       );
 

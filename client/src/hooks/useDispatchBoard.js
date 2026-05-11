@@ -17,14 +17,14 @@
  * job.id and the per-pin color recomputes from the new tech_id.
  *
  * dispatch:job_update merge rules:
- *   - Match by id; if the job isn't in today's board, skip (the
- *     broadcast carries no address / lat / lng — we can't materialize
- *     a renderable pin from it, and the row likely isn't for today).
+ *   - Match by id; if the job isn't in today's board but the broadcast
+ *     carries board_visible + address/coords, add it as a new same-day
+ *     pin. Otherwise skip it.
  *   - Update fields the broadcast carries: technician_id, status,
  *     service_type, scheduled_date, window_start, window_end.
- *   - Preserve fields the broadcast does NOT carry: customer_name,
- *     address, lat, lng. Those don't change with a status flip or
- *     reassignment.
+ *   - Preserve fields the broadcast does NOT carry. Assignment/status
+ *     broadcasts may be narrow; create/edit broadcasts carry richer
+ *     board fields.
  *
  * Cleanup contract: the useEffect that wires the socket MUST return
  * a function that calls socket.off for BOTH events AND
@@ -44,6 +44,7 @@ import { io } from 'socket.io-client';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const DISPATCH_LOCATION_FRESH_MS = 24 * 60 * 60 * 1000;
+const BOARD_HIDDEN_STATUSES = new Set(['cancelled', 'rescheduled']);
 
 function adminAuthHeaders() {
   const token = localStorage.getItem('waves_admin_token');
@@ -76,6 +77,31 @@ function hasFreshDispatchLocation(payload) {
   if (payload?.lat == null || payload?.lng == null || !payload?.location_updated_at) return false;
   const updatedMs = new Date(payload.location_updated_at).getTime();
   return Number.isFinite(updatedMs) && Date.now() - updatedMs <= DISPATCH_LOCATION_FRESH_MS;
+}
+
+function boardJobFromPayload(payload) {
+  if (!payload?.job_id || !payload.board_visible) return null;
+  const hasBoardFields = (
+    'address' in payload ||
+    'customer_name' in payload ||
+    'lat' in payload ||
+    'lng' in payload
+  );
+  if (!hasBoardFields) return null;
+  return {
+    id: payload.job_id,
+    technician_id: payload.tech_id || null,
+    customer_id: payload.customer_id || null,
+    customer_name: payload.customer_name || payload.cust_first_name || 'Customer',
+    address: payload.address || '',
+    lat: payload.lat == null ? null : Number(payload.lat),
+    lng: payload.lng == null ? null : Number(payload.lng),
+    status: payload.status,
+    service_type: payload.service_type || null,
+    scheduled_date: payload.scheduled_date || null,
+    window_start: payload.window_start || null,
+    window_end: payload.window_end || null,
+  };
 }
 
 export function useDispatchBoard() {
@@ -189,14 +215,16 @@ export function useDispatchBoard() {
 
     function handleJobUpdate(payload) {
       if (!payload || !payload.job_id) return;
-      // Skip jobs not in today's board. The broadcast doesn't carry
-      // the geocoded address (`address` / `lat` / `lng` / `customer_name`)
-      // that the board needs to render a pin, so we can't synthesize a
-      // valid stub from it. Worst case: a job created mid-session
-      // doesn't appear until the next /board fetch on remount.
+      if (BOARD_HIDDEN_STATUSES.has(payload.status) || payload.board_visible === false) {
+        setJobs((prev) => prev.filter((j) => j.id !== payload.job_id));
+        return;
+      }
       setJobs((prev) => {
         const idx = prev.findIndex((j) => j.id === payload.job_id);
-        if (idx === -1) return prev;
+        if (idx === -1) {
+          const created = boardJobFromPayload(payload);
+          return created ? [...prev, created] : prev;
+        }
         const next = prev.slice();
         // Property-presence merge for nullable fields. `??` would drop
         // an explicit `null` from the broadcast (e.g., a window
@@ -221,9 +249,11 @@ export function useDispatchBoard() {
           scheduled_date: pick('scheduled_date'),
           window_start: pick('window_start'),
           window_end: pick('window_end'),
-          // Preserved from prev: customer_name, address, lat, lng,
-          // customer_id, id. The broadcast doesn't carry them; they
-          // don't change on a status/assign flip.
+          customer_name: pick('customer_name'),
+          address: pick('address'),
+          lat: pick('lat'),
+          lng: pick('lng'),
+          customer_id: pick('customer_id'),
         };
         return next;
       });
