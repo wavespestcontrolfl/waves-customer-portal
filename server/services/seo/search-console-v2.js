@@ -34,6 +34,24 @@ const NETWORK_DOMAINS = [
   'bradentonfllawncare.com', 'parrishfllawncare.com', 'sarasotafllawncare.com', 'venicelawncare.com',
 ];
 
+function normalizeDomain(value) {
+  return String(value || DEFAULT_SITE_URL)
+    .trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/^www\./i, '')
+    .replace(/\/.*$/, '')
+    .toLowerCase();
+}
+
+function siteUrlForDomain(domain) {
+  if (!domain) return DEFAULT_SITE_URL;
+  return `https://${normalizeDomain(domain)}`;
+}
+
+function applyDomainFilter(query, domain) {
+  return domain ? query.where('domain', normalizeDomain(domain)) : query;
+}
+
 // Branded query patterns for Waves
 const BRANDED_PATTERNS = [
   /waves/i, /waveguard/i, /wave guard/i, /waves pest/i, /waves lawn/i,
@@ -68,7 +86,8 @@ class SearchConsoleService {
 
   async init() {
     if (this.webmasters) return true;
-    if (!google) {
+    const g = getGoogle();
+    if (!g) {
       logger.warn('googleapis not installed — GSC sync disabled');
       return false;
     }
@@ -97,8 +116,6 @@ class SearchConsoleService {
         };
       }
 
-      const g = getGoogle();
-      if (!g) { logger.error('[GSC] googleapis not installed'); return false; }
       this.auth = new g.auth.GoogleAuth(authOptions);
 
       this.webmasters = g.searchconsole({ version: 'v1', auth: this.auth });
@@ -120,7 +137,8 @@ class SearchConsoleService {
       return { synced: false };
     }
 
-    const siteUrl = domain ? `https://${domain}` : DEFAULT_SITE_URL;
+    const siteUrl = siteUrlForDomain(domain);
+    const normalizedDomain = normalizeDomain(siteUrl);
 
     const endDate = new Date(Date.now() - 2 * 86400000); // GSC data has 2-day lag
     const startDate = new Date(endDate - daysBack * 86400000);
@@ -143,7 +161,7 @@ class SearchConsoleService {
       await this.syncSitewideTotals(startStr, endStr, siteUrl);
 
       logger.info(`GSC sync complete for ${siteUrl}`);
-      return { synced: true, period: { start: startStr, end: endStr }, domain: siteUrl };
+      return { synced: true, period: { start: startStr, end: endStr }, domain: normalizedDomain, siteUrl };
     } catch (err) {
       logger.error(`GSC sync failed for ${siteUrl}: ${err.message}`);
       return { synced: false, error: err.message };
@@ -167,7 +185,7 @@ class SearchConsoleService {
   }
 
   async syncQueries(startDate, endDate, siteUrl = DEFAULT_SITE_URL) {
-    const domain = siteUrl.replace(/^https?:\/\//, '');
+    const domain = normalizeDomain(siteUrl);
     const response = await this.webmasters.searchanalytics.query({
       siteUrl,
       requestBody: {
@@ -199,7 +217,7 @@ class SearchConsoleService {
           intent_type: this.classifyIntent(query),
           domain,
         })
-        .onConflict(db.raw('(query, date, COALESCE(domain, \'\'))'))
+        .onConflict(['query', 'date', 'domain'])
         .merge();
     }
 
@@ -207,7 +225,7 @@ class SearchConsoleService {
   }
 
   async syncPages(startDate, endDate, siteUrl = DEFAULT_SITE_URL) {
-    const domain = siteUrl.replace(/^https?:\/\//, '');
+    const domain = normalizeDomain(siteUrl);
     const response = await this.webmasters.searchanalytics.query({
       siteUrl,
       requestBody: {
@@ -237,7 +255,7 @@ class SearchConsoleService {
           city_target: this.classifyPageCity(pageUrl),
           domain,
         })
-        .onConflict(db.raw('(page_url, date)'))
+        .onConflict(['page_url', 'date', 'domain'])
         .merge();
     }
 
@@ -245,7 +263,7 @@ class SearchConsoleService {
   }
 
   async syncDeviceBreakdown(startDate, endDate, siteUrl = DEFAULT_SITE_URL) {
-    const domain = siteUrl.replace(/^https?:\/\//, '');
+    const domain = normalizeDomain(siteUrl);
     const response = await this.webmasters.searchanalytics.query({
       siteUrl,
       requestBody: {
@@ -261,35 +279,34 @@ class SearchConsoleService {
       const device = row.keys[0].toLowerCase(); // MOBILE, DESKTOP, TABLET
       const date = row.keys[1];
 
-      // Upsert into gsc_performance_daily
-      const existing = await db('gsc_performance_daily').where({ date, device }).first();
-      if (existing) {
-        await db('gsc_performance_daily').where({ id: existing.id }).update({
-          clicks: row.clicks,
-          impressions: row.impressions,
-          ctr: row.ctr,
-          avg_position: row.position,
-          updated_at: new Date(),
-        });
-      } else {
-        await db('gsc_performance_daily').insert({
+      await db('gsc_performance_daily')
+        .insert({
           date,
           device,
           clicks: row.clicks,
           impressions: row.impressions,
           ctr: row.ctr,
           avg_position: row.position,
+          domain,
+        })
+        .onConflict(['date', 'device', 'domain'])
+        .merge({
+          clicks: row.clicks,
+          impressions: row.impressions,
+          ctr: row.ctr,
+          avg_position: row.position,
+          updated_at: new Date(),
         });
-      }
     }
   }
 
   async syncSitewideTotals(startDate, endDate, siteUrl = DEFAULT_SITE_URL) {
-    const domain = siteUrl.replace(/^https?:\/\//, '');
+    const domain = normalizeDomain(siteUrl);
     // Get sitewide totals with branded breakdown
     const queries = await db('gsc_queries')
       .where('date', '>=', startDate)
-      .where('date', '<=', endDate);
+      .where('date', '<=', endDate)
+      .where('domain', domain);
 
     // Group by date
     const byDate = {};
@@ -306,7 +323,6 @@ class SearchConsoleService {
     }
 
     for (const [date, data] of Object.entries(byDate)) {
-      const existing = await db('gsc_performance_daily').where({ date, device: 'all' }).first();
       const totalClicks = data.branded_clicks + data.nonbrand_clicks;
       const totalImpressions = data.branded_impressions + data.nonbrand_impressions;
 
@@ -320,11 +336,10 @@ class SearchConsoleService {
         nonbrand_impressions: data.nonbrand_impressions,
       };
 
-      if (existing) {
-        await db('gsc_performance_daily').where({ id: existing.id }).update({ ...record, updated_at: new Date() });
-      } else {
-        await db('gsc_performance_daily').insert({ date, device: 'all', ...record });
-      }
+      await db('gsc_performance_daily')
+        .insert({ date, device: 'all', domain, ...record })
+        .onConflict(['date', 'device', 'domain'])
+        .merge({ ...record, updated_at: new Date() });
     }
   }
 
@@ -354,7 +369,7 @@ class SearchConsoleService {
   }
 
   classifyPageType(url) {
-    const path = new URL(url).pathname.toLowerCase();
+    const path = new URL(url, DEFAULT_SITE_URL).pathname.toLowerCase();
     if (path === '/' || path === '') return 'homepage';
     if (/blog|article|news/i.test(path)) return 'blog';
     for (const [, pattern] of Object.entries(CITY_PATTERNS)) {
@@ -367,7 +382,7 @@ class SearchConsoleService {
   }
 
   classifyPageService(url) {
-    const path = new URL(url).pathname.toLowerCase();
+    const path = new URL(url, DEFAULT_SITE_URL).pathname.toLowerCase();
     for (const [cat, pattern] of Object.entries(SERVICE_PATTERNS)) {
       if (pattern.test(path)) return cat;
     }
@@ -375,7 +390,7 @@ class SearchConsoleService {
   }
 
   classifyPageCity(url) {
-    const path = new URL(url).pathname.toLowerCase();
+    const path = new URL(url, DEFAULT_SITE_URL).pathname.toLowerCase();
     for (const [city, pattern] of Object.entries(CITY_PATTERNS)) {
       if (pattern.test(path)) return city;
     }
@@ -392,14 +407,14 @@ class SearchConsoleService {
     const prevSince = etDateString(addETDays(new Date(), -periodDays * 2));
 
     // Current period sitewide
-    const current = await db('gsc_performance_daily')
+    const current = await applyDomainFilter(db('gsc_performance_daily')
       .where('date', '>=', since)
-      .where('device', 'all');
+      .where('device', 'all'), domain);
 
-    const previous = await db('gsc_performance_daily')
+    const previous = await applyDomainFilter(db('gsc_performance_daily')
       .where('date', '>=', prevSince)
       .where('date', '<', since)
-      .where('device', 'all');
+      .where('device', 'all'), domain);
 
     const sum = (rows) => ({
       clicks: rows.reduce((s, r) => s + (r.clicks || 0), 0),
@@ -417,8 +432,8 @@ class SearchConsoleService {
     prev.ctr = prev.impressions > 0 ? prev.clicks / prev.impressions : 0;
 
     // Top queries
-    const topQueries = await db('gsc_queries')
-      .where('date', '>=', since)
+    const topQueries = await applyDomainFilter(db('gsc_queries')
+      .where('date', '>=', since), domain)
       .select('query', 'is_branded', 'service_category', 'city_target')
       .sum('clicks as clicks')
       .sum('impressions as impressions')
@@ -428,8 +443,8 @@ class SearchConsoleService {
       .limit(50);
 
     // Top pages
-    const topPages = await db('gsc_pages')
-      .where('date', '>=', since)
+    const topPages = await applyDomainFilter(db('gsc_pages')
+      .where('date', '>=', since), domain)
       .select('page_url', 'page_type', 'service_category', 'city_target')
       .sum('clicks as clicks')
       .sum('impressions as impressions')
@@ -439,8 +454,8 @@ class SearchConsoleService {
       .limit(30);
 
     // Device breakdown
-    const devices = await db('gsc_performance_daily')
-      .where('date', '>=', since)
+    const devices = await applyDomainFilter(db('gsc_performance_daily')
+      .where('date', '>=', since), domain)
       .whereNot('device', 'all')
       .select('device')
       .sum('clicks as clicks')
@@ -448,8 +463,8 @@ class SearchConsoleService {
       .groupBy('device');
 
     // Page 2 opportunities (positions 4-15)
-    const opportunities = await db('gsc_queries')
-      .where('date', '>=', since)
+    const opportunities = await applyDomainFilter(db('gsc_queries')
+      .where('date', '>=', since), domain)
       .where('is_branded', false)
       .select('query', 'service_category', 'city_target')
       .sum('clicks as clicks')
@@ -461,9 +476,9 @@ class SearchConsoleService {
       .limit(20);
 
     // Queries losing clicks (compare periods)
-    const prevQueries = await db('gsc_queries')
+    const prevQueries = await applyDomainFilter(db('gsc_queries')
       .where('date', '>=', prevSince)
-      .where('date', '<', since)
+      .where('date', '<', since), domain)
       .select('query')
       .sum('clicks as clicks')
       .groupBy('query');

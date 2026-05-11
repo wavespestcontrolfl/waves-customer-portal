@@ -18,6 +18,9 @@ class ContentQA {
     const city = (post.city || '').toLowerCase();
     const wordCount = post.word_count || content.split(/\s+/).filter(Boolean).length;
     const lower = content.toLowerCase();
+    const images = html.match(/<img\b[^>]*>/gi) || [];
+    const missingAltCount = images.filter(img => !/\salt\s*=\s*["'][^"']+["']/i.test(img)).length;
+    const internalLinkCount = (html.match(/href=["'](?:https?:\/\/(?:www\.)?wavespestcontrol\.com|\/(?!\/))/gi) || []).length;
 
     const checks = {};
 
@@ -29,7 +32,7 @@ class ContentQA {
     checks.single_h1 = { passed: (html.match(/<h1/gi) || []).length <= 1, note: `${(html.match(/<h1/gi) || []).length} H1s` };
     checks.clean_slug = { passed: post.slug && !/[A-Z_\s]/.test(post.slug), note: post.slug || 'no slug' };
     checks.schema_present = { passed: /LocalBusiness|Service|FAQPage/i.test(html), note: 'schema types' };
-    checks.image_alt_text = { passed: !/<img[^>]*(?!alt=)[^>]*>/i.test(html) || !html.includes('<img'), note: 'all images have alt' };
+    checks.image_alt_text = { passed: missingAltCount === 0, note: `${missingAltCount}/${images.length} images missing alt` };
     checks.no_broken_links = { passed: true, note: 'assumed (needs crawl)' };
     checks.not_orphaned = { passed: true, note: 'assumed (needs link graph)' };
     checks.in_sitemap = { passed: true, note: 'assumed' };
@@ -42,7 +45,7 @@ class ContentQA {
     checks.keyword_early = { passed: keyword && first100.includes(keyword), note: 'keyword in first 100 words' };
     checks.word_count_range = { passed: wordCount >= 800 && wordCount <= 2500, note: `${wordCount} words` };
     checks.heading_hierarchy = { passed: (html.match(/<h2/gi) || []).length >= 2, note: `${(html.match(/<h2/gi) || []).length} H2s` };
-    checks.internal_links = { passed: (html.match(/href="https?:\/\/wavespestcontrol\.com/gi) || []).length >= 2, note: 'internal links' };
+    checks.internal_links = { passed: internalLinkCount >= 2, note: `${internalLinkCount} internal links` };
     checks.external_authority = { passed: /ifas|ufl\.edu|epa\.gov/i.test(content), note: 'UF/IFAS or EPA cited' };
     checks.cta_placement = { passed: /call|schedule|contact|waveguard/i.test(content), note: 'CTA present' };
     checks.faq_section = { passed: /faq|frequently asked|common question/i.test(lower), note: 'FAQ section' };
@@ -110,7 +113,12 @@ class ContentQA {
       recommendation,
     };
 
-    await db('seo_content_qa_scores').insert(record);
+    const existing = await db('seo_content_qa_scores').where({ blog_post_id: blogPostId }).first();
+    if (existing) {
+      await db('seo_content_qa_scores').where({ id: existing.id }).update({ ...record, updated_at: new Date() });
+    } else {
+      await db('seo_content_qa_scores').insert(record);
+    }
     return { ...record, checklist_results: checks };
   }
 
@@ -129,7 +137,13 @@ class ContentQA {
   }
 
   async getDashboard() {
-    const scores = await db('seo_content_qa_scores').orderBy('created_at', 'desc');
+    const rows = await db('seo_content_qa_scores').orderBy('created_at', 'desc');
+    const latestByContent = new Map();
+    for (const row of rows) {
+      const key = row.blog_post_id || row.url || row.id;
+      if (!latestByContent.has(key)) latestByContent.set(key, row);
+    }
+    const scores = Array.from(latestByContent.values());
     const gradeDistribution = { A: 0, B: 0, C: 0, D: 0, F: 0 };
     scores.forEach(s => { if (gradeDistribution[s.grade] !== undefined) gradeDistribution[s.grade]++; });
 

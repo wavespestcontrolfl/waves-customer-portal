@@ -18,6 +18,93 @@ const NAP_PHONE = /(941).*318.*7612|9413187612/;
 const NAP_NAME = /waves pest control/i;
 
 class SiteAuditor {
+  async discoverUrlsFromSitemaps(siteUrl) {
+    const roots = [
+      new URL('/sitemap.xml', siteUrl).toString(),
+      new URL('/sitemap_index.xml', siteUrl).toString(),
+    ];
+    const visited = new Set();
+    const pages = new Set();
+    const maxSitemaps = 25;
+
+    const crawlSitemap = async (url) => {
+      if (visited.has(url) || visited.size >= maxSitemaps) return;
+      visited.add(url);
+      try {
+        const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(10000) });
+        if (!res.ok) return;
+        const xml = await res.text();
+        const locs = [...xml.matchAll(/<loc>\s*([^<]+)\s*<\/loc>/gi)]
+          .map(m => this.decodeXml(m[1].trim()))
+          .filter(Boolean);
+
+        for (const loc of locs) {
+          if (/\.xml(\?.*)?$/i.test(loc)) await crawlSitemap(loc);
+          else if (this.isSameOrigin(loc, siteUrl)) pages.add(loc);
+        }
+      } catch (err) {
+        logger.warn(`[site-audit] Sitemap fetch failed for ${url}: ${err.message}`);
+      }
+    };
+
+    for (const root of roots) await crawlSitemap(root);
+    return Array.from(pages);
+  }
+
+  decodeXml(value) {
+    return value
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'");
+  }
+
+  isSameOrigin(url, siteUrl) {
+    try {
+      return new URL(url).hostname.replace(/^www\./, '') === new URL(siteUrl).hostname.replace(/^www\./, '');
+    } catch {
+      return false;
+    }
+  }
+
+  classifyUrlType(url) {
+    try {
+      const path = new URL(url).pathname.toLowerCase();
+      if (path === '/' || path.includes('pest-control') || path.includes('lawn-care') || path.includes('mosquito') || path.includes('termite') || path.includes('rodent') || path.includes('tree-and-shrub')) {
+        return 'service_page';
+      }
+      if (path.includes('blog') || path.split('/').filter(Boolean).length >= 1) return 'blog';
+    } catch { /* ignore */ }
+    return 'landing';
+  }
+
+  getAttribute(tag, name) {
+    const match = tag.match(new RegExp(`\\s${name}\\s*=\\s*["']([^"']*)["']`, 'i'));
+    return match?.[1] || null;
+  }
+
+  getMetaContent(html, attrName, attrValue) {
+    const tags = html.match(/<meta\b[^>]*>/gi) || [];
+    for (const tag of tags) {
+      const attr = this.getAttribute(tag, attrName);
+      if (attr && attr.toLowerCase() === attrValue.toLowerCase()) {
+        return this.getAttribute(tag, 'content');
+      }
+    }
+    return null;
+  }
+
+  getCanonicalUrl(html) {
+    const tags = html.match(/<link\b[^>]*>/gi) || [];
+    for (const tag of tags) {
+      const rel = this.getAttribute(tag, 'rel');
+      if (rel && rel.toLowerCase().split(/\s+/).includes('canonical')) {
+        return this.getAttribute(tag, 'href');
+      }
+    }
+    return null;
+  }
 
   /**
    * Full site audit — crawl all known pages, audit each, aggregate.
@@ -31,39 +118,48 @@ class SiteAuditor {
     }).returning('*');
 
     try {
-      // Get pages — from blog_posts + known service pages
+      // Get pages from sitemap first, with DB/known-page fallbacks for local or
+      // newly staged content not yet present in sitemap.xml.
       const blogPages = await db('blog_posts').whereIn('status', ['published']).select('id', 'title', 'slug', 'content', 'content_html', 'keyword', 'city');
       const servicePages = [
         '/pest-control-bradenton-fl/', '/pest-control-sarasota-fl/', '/lawn-care/', '/mosquito-control/',
         '/termite-control/', '/rodent-control/', '/tree-and-shrub/', '/',
       ];
 
-      const allPages = [
-        ...servicePages.map(p => ({ url: `${SITE_URL}${p}`, type: 'service_page', keyword: null, city: null })),
-        ...blogPages.map(p => ({ url: `${SITE_URL}/${p.slug}/`, type: 'blog', keyword: p.keyword, city: p.city, content: p.content, html: p.content_html, blogPostId: p.id })),
-      ];
+      const pageMap = new Map();
+      const addPage = (page) => {
+        if (!page.url || pageMap.has(page.url)) return;
+        pageMap.set(page.url, page);
+      };
+
+      const sitemapUrls = await this.discoverUrlsFromSitemaps(SITE_URL);
+      sitemapUrls.forEach((url) => addPage({ url, type: this.classifyUrlType(url), keyword: null, city: null }));
+      servicePages.forEach(p => addPage({ url: new URL(p, SITE_URL).toString(), type: 'service_page', keyword: null, city: null }));
+      blogPages.forEach(p => {
+        if (!p.slug) return;
+        addPage({ url: new URL(`/${p.slug.replace(/^\/+|\/+$/g, '')}/`, SITE_URL).toString(), type: 'blog', keyword: p.keyword, city: p.city, blogPostId: p.id });
+      });
+
+      const maxPages = parseInt(process.env.SEO_SITE_AUDIT_MAX_PAGES || '250', 10);
+      const allPages = Array.from(pageMap.values()).slice(0, maxPages);
 
       const auditResults = [];
 
       for (const page of allPages) {
         try {
-          let html = page.html || page.content || '';
+          let html = '';
           let statusCode = 200;
           let responseTime = 0;
 
-          // Fetch live page for service pages (blog content already available)
-          if (page.type === 'service_page' || !html) {
-            try {
-              const start = Date.now();
-              const res = await fetch(page.url, { redirect: 'follow', signal: AbortSignal.timeout(10000) });
-              responseTime = Date.now() - start;
-              statusCode = res.status;
-              html = await res.text();
-            } catch (fetchErr) {
-              statusCode = 0;
-              html = '';
-              logger.warn(`Fetch failed for ${page.url}: ${fetchErr.message}`);
-            }
+          try {
+            const start = Date.now();
+            const res = await fetch(page.url, { redirect: 'follow', signal: AbortSignal.timeout(10000) });
+            responseTime = Date.now() - start;
+            statusCode = res.status;
+            html = await res.text();
+          } catch (fetchErr) {
+            statusCode = 0;
+            logger.warn(`Fetch failed for ${page.url}: ${fetchErr.message}`);
           }
 
           const audit = await this.auditPage(page.url, html, statusCode, responseTime, page.keyword, page.city, page.type);
@@ -159,10 +255,11 @@ class SiteAuditor {
     // Meta
     const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
     const metaTitle = titleMatch?.[1]?.trim() || '';
-    const descMatch = html.match(/<meta\s+name=["']description["']\s+content=["']([^"']+)["']/i);
-    const metaDesc = descMatch?.[1]?.trim() || '';
-    const ogImage = html.match(/<meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i)?.[1] || null;
+    const metaDesc = this.getMetaContent(html, 'name', 'description')?.trim() || '';
+    const ogImage = this.getMetaContent(html, 'property', 'og:image') || null;
 
+    if (statusCode === 0 || statusCode >= 500) issues.push({ category: 'crawl', type: 'fetch_failed', severity: 'critical', recommendation: 'Page could not be fetched for audit' });
+    else if (statusCode >= 400) issues.push({ category: 'crawl', type: 'http_error', severity: 'critical', recommendation: `Page returned HTTP ${statusCode}` });
     if (!metaTitle) issues.push({ category: 'meta', type: 'missing_title', severity: 'critical', recommendation: 'Add a title tag' });
     else if (metaTitle.length > 60) issues.push({ category: 'meta', type: 'title_too_long', severity: 'warning', recommendation: `Title is ${metaTitle.length} chars, keep under 60` });
     if (!metaDesc) issues.push({ category: 'meta', type: 'missing_description', severity: 'warning', recommendation: 'Add a meta description' });
@@ -184,7 +281,7 @@ class SiteAuditor {
 
     // Images
     const imgs = html.match(/<img[^>]+>/gi) || [];
-    const missingAlt = imgs.filter(i => !i.includes('alt=')).length;
+    const missingAlt = imgs.filter(i => !/\salt\s*=\s*["'][^"']+["']/i.test(i)).length;
     if (missingAlt > 3) issues.push({ category: 'images', type: 'missing_alt', severity: 'warning', recommendation: `${missingAlt} images missing alt text` });
 
     // Schema
@@ -217,9 +314,10 @@ class SiteAuditor {
     const flSpecific = FL_PESTS.test(bodyText) || FL_CONTEXT.test(bodyText);
 
     // Canonical
-    const canonicalMatch = html.match(/<link\s+rel=["']canonical["']\s+href=["']([^"']+)["']/i);
-    const canonicalUrl = canonicalMatch?.[1] || null;
+    const canonicalUrl = this.getCanonicalUrl(html);
     const canonicalSelf = canonicalUrl ? canonicalUrl.replace(/\/$/, '') === url.replace(/\/$/, '') : false;
+    const internalLinks = (html.match(/href=["'](?:https?:\/\/(?:www\.)?wavespestcontrol\.com|\/(?!\/))/gi) || []);
+    const externalLinks = (html.match(/href=["']https?:\/\/(?!www\.wavespestcontrol\.com|wavespestcontrol\.com)/gi) || []);
 
     // Score
     const criticalCount = issues.filter(i => i.severity === 'critical').length;
@@ -234,7 +332,7 @@ class SiteAuditor {
       url,
       status_code: statusCode,
       response_time_ms: responseTime,
-      robots_meta: html.match(/<meta\s+name=["']robots["']\s+content=["']([^"']+)["']/i)?.[1] || null,
+      robots_meta: this.getMetaContent(html, 'name', 'robots'),
       canonical_url: canonicalUrl,
       canonical_self_referencing: canonicalSelf,
       canonical_mismatch: canonicalUrl && !canonicalSelf,
@@ -260,8 +358,8 @@ class SiteAuditor {
       total_images: imgs.length,
       images_missing_alt: missingAlt,
       images_over_200kb: 0, // Would need image size checking
-      internal_links_count: (html.match(/href=["']https?:\/\/wavespestcontrol\.com/gi) || []).length,
-      external_links_count: (html.match(/href=["']https?:\/\/(?!wavespestcontrol)/gi) || []).length,
+      internal_links_count: internalLinks.length,
+      external_links_count: externalLinks.length,
       broken_links: JSON.stringify([]),
       broken_links_count: 0,
       schema_types_found: JSON.stringify(schemaTypes),

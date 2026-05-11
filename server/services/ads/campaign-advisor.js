@@ -11,7 +11,7 @@ let TwilioService;
 try { TwilioService = require('../twilio'); } catch { TwilioService = null; }
 
 let SearchConsole;
-try { SearchConsole = require('../seo/search-console'); } catch { SearchConsole = null; }
+try { SearchConsole = require('../seo/search-console-v2'); } catch { SearchConsole = null; }
 
 class CampaignAdvisor {
   async generateDailyAdvice() {
