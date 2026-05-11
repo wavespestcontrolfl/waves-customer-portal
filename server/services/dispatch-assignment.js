@@ -109,15 +109,16 @@ async function emitDispatchJobUpdate({ jobId, actorId }) {
   return payload;
 }
 
-async function assignDispatchJob({ jobId, technicianId, actorId, emit = true } = {}) {
+async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, trx = null } = {}) {
   if (!jobId) throw httpError(400, 'jobId is required');
   if (technicianId === undefined) throw httpError(400, 'technicianId required');
   if (technicianId !== null && typeof technicianId !== 'string') {
     throw httpError(400, 'technicianId must be a UUID string or null');
   }
   const newTechId = technicianId || null;
+  const conn = trx || db;
 
-  const job = await db('scheduled_services').where({ id: jobId }).first();
+  const job = await conn('scheduled_services').where({ id: jobId }).first();
   if (!job) throw httpError(404, 'Job not found');
   if (TERMINAL_STATUSES.includes(job.status)) {
     throw httpError(409, `Cannot reassign a ${job.status} job`);
@@ -125,7 +126,7 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true } =
 
   let tech = null;
   if (newTechId) {
-    tech = await db('technicians').where({ id: newTechId }).first();
+    tech = await conn('technicians').where({ id: newTechId }).first();
     if (!tech) throw httpError(400, 'Unknown technician');
     if (!tech.active) throw httpError(400, 'Technician is inactive');
   }
@@ -140,29 +141,32 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true } =
 
   const fromTechId = job.technician_id || null;
   let updatedRow;
-  try {
-    await db.transaction(async (trx) => {
-      const rows = await trx('scheduled_services')
-        .where({ id: jobId })
-        .whereNotIn('status', TERMINAL_STATUSES)
-        .update({ technician_id: newTechId, updated_at: trx.fn.now() })
-        .returning('*');
-      if (rows.length === 0) {
-        throw Object.assign(new Error('terminal status race'), { code: TERMINAL_RACE });
-      }
-      updatedRow = rows[0];
+  const applyAssignment = async (assignmentTrx) => {
+    const rows = await assignmentTrx('scheduled_services')
+      .where({ id: jobId })
+      .whereNotIn('status', TERMINAL_STATUSES)
+      .update({ technician_id: newTechId, updated_at: assignmentTrx.fn.now() })
+      .returning('*');
+    if (rows.length === 0) {
+      throw Object.assign(new Error('terminal status race'), { code: TERMINAL_RACE });
+    }
+    updatedRow = rows[0];
 
-      if (!fromTechId && newTechId) {
-        const { resolveAlert } = require('./dispatch-alerts');
-        const openAlerts = await trx('dispatch_alerts')
-          .where({ type: 'unassigned_overdue', job_id: jobId })
-          .whereNull('resolved_at')
-          .select('id');
-        for (const { id } of openAlerts) {
-          await resolveAlert({ id, resolvedBy: actorId, trx });
-        }
+    if (!fromTechId && newTechId) {
+      const { resolveAlert } = require('./dispatch-alerts');
+      const openAlerts = await assignmentTrx('dispatch_alerts')
+        .where({ type: 'unassigned_overdue', job_id: jobId })
+        .whereNull('resolved_at')
+        .select('id');
+      for (const { id } of openAlerts) {
+        await resolveAlert({ id, resolvedBy: actorId, trx: assignmentTrx });
       }
-    });
+    }
+  };
+
+  try {
+    if (trx) await applyAssignment(trx);
+    else await db.transaction(applyAssignment);
   } catch (err) {
     if (err && err.code === TERMINAL_RACE) {
       throw httpError(409, 'Cannot reassign - job transitioned to a terminal state concurrently');
@@ -171,10 +175,14 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true } =
   }
 
   if (emit) {
-    try {
-      await emitDispatchJobUpdate({ jobId, actorId });
-    } catch (err) {
-      logger.error(`[dispatch-assignment] broadcast failed for ${jobId}: ${err.message}`);
+    const emitUpdate = () => emitDispatchJobUpdate({ jobId, actorId })
+      .catch((err) => logger.error(`[dispatch-assignment] broadcast failed for ${jobId}: ${err.message}`));
+    if (trx?.executionPromise) {
+      trx.executionPromise.then(emitUpdate).catch((err) => {
+        logger.error(`[dispatch-assignment] transaction failed before broadcast for ${jobId}: ${err.message}`);
+      });
+    } else {
+      await emitUpdate();
     }
   }
 
