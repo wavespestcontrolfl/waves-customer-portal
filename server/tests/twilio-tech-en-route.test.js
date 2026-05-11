@@ -96,7 +96,10 @@ describe('TwilioService.sendTechEnRoute', () => {
       to: '+15551112222',
       body: expect.stringContaining('has arrived and is servicing your property'),
       purpose: 'tech_en_route',
-      metadata: { original_message_type: 'tech_arrived' },
+      metadata: {
+        original_message_type: 'tech_en_route',
+        appointment_progress_event: 'tech_arrived',
+      },
     }));
     expect(sendCustomerMessage.mock.calls[0][0].body).not.toContain('on the way');
     expect(result.success).toBe(true);

@@ -438,7 +438,10 @@ const TwilioService = {
         identityTrustLevel: contact.role === 'service_contact'
           ? 'service_contact_authorized'
           : 'phone_matches_customer',
-        metadata: { original_message_type: 'tech_arrived' },
+        metadata: {
+          original_message_type: 'tech_en_route',
+          appointment_progress_event: 'tech_arrived',
+        },
       }));
     }
 
