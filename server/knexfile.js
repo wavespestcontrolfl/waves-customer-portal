@@ -1,15 +1,33 @@
 // Load .env for local dev — on Railway, env vars are injected directly
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 
+function hasUsableDatabaseUrl(value) {
+  const url = String(value || '').trim();
+  return !!url && url !== 'undefined' && url !== 'null';
+}
+
+function databaseUrlFromPgVars() {
+  const { PGDATABASE, PGUSER, PGPASSWORD, PGHOST, PGPORT } = process.env;
+  if (!PGDATABASE || !PGUSER || !PGHOST) return null;
+
+  const user = encodeURIComponent(PGUSER);
+  const password = PGPASSWORD ? `:${encodeURIComponent(PGPASSWORD)}` : '';
+  const database = encodeURIComponent(PGDATABASE);
+  return `postgresql://${user}${password}@${PGHOST}:${PGPORT || 5432}/${database}`;
+}
+
 // Railway may provide the database URL under different variable names
-if (!process.env.DATABASE_URL) {
-  process.env.DATABASE_URL = process.env.DATABASE_PRIVATE_URL
+if (!hasUsableDatabaseUrl(process.env.DATABASE_URL)) {
+  delete process.env.DATABASE_URL;
+  const resolvedDatabaseUrl = process.env.DATABASE_PRIVATE_URL
     || process.env.DATABASE_PUBLIC_URL
     || process.env.POSTGRES_URL
     || process.env.POSTGRES_PRIVATE_URL
-    || process.env.PGDATABASE && `postgresql://${process.env.PGUSER}:${process.env.PGPASSWORD}@${process.env.PGHOST}:${process.env.PGPORT || 5432}/${process.env.PGDATABASE}`
-    || undefined;
-  if (process.env.DATABASE_URL) console.log('[knexfile] Resolved DATABASE_URL from Railway Postgres vars');
+    || databaseUrlFromPgVars();
+  if (resolvedDatabaseUrl) {
+    process.env.DATABASE_URL = resolvedDatabaseUrl;
+    console.log('[knexfile] Resolved DATABASE_URL from Railway Postgres vars');
+  }
 }
 
 const development = {
