@@ -10,7 +10,7 @@
  * surface, zinc ramp, font weights 400/500 only, text-14 minimum.
  * No D palette. See AGENTS.md / CLAUDE.md for the V2 contract.
  */
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Card, cn } from '../ui';
 
 // Status → color token mapping. Kept narrow: only the dot color
@@ -50,30 +50,37 @@ function streetOnly(fullAddress) {
   return idx === -1 ? fullAddress : fullAddress.slice(0, idx);
 }
 
-function gpsAgeLabel(updatedAt) {
+function gpsAgeLabel(updatedAt, now) {
   if (!updatedAt) return 'GPS unavailable';
   const ms = new Date(updatedAt).getTime();
   if (!Number.isFinite(ms)) return 'GPS unavailable';
-  const diffMin = Math.max(0, Math.floor((Date.now() - ms) / 60000));
+  const diffMin = Math.max(0, Math.floor((now - ms) / 60000));
   if (diffMin < 1) return 'GPS now';
   if (diffMin < 60) return diffMin > 5 ? `GPS stale ${diffMin}m` : `GPS ${diffMin}m`;
   const diffHr = Math.floor(diffMin / 60);
   return diffHr >= 24 ? 'GPS stale' : `GPS stale ${diffHr}h`;
 }
 
-function gpsAgeTone(updatedAt) {
+function gpsAgeTone(updatedAt, now) {
   const ms = new Date(updatedAt).getTime();
   if (!Number.isFinite(ms)) return 'text-alert-fg';
-  return Date.now() - ms > 5 * 60 * 1000 ? 'text-alert-fg' : 'text-ink-tertiary';
+  return now - ms > 5 * 60 * 1000 ? 'text-alert-fg' : 'text-ink-tertiary';
 }
 
 function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 60 * 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
   const currentJob = tech.current_job_id ? jobs.get(tech.current_job_id) : null;
   const addressLine = currentJob ? truncate(streetOnly(currentJob.address), 28) : '—';
   const dotColor = STATUS_DOT[tech.status] || STATUS_DOT.idle;
   const statusTextColor = STATUS_TEXT[tech.status] || STATUS_TEXT.idle;
-  const gpsLabel = gpsAgeLabel(tech.location_updated_at);
-  const gpsTone = gpsAgeTone(tech.location_updated_at);
+  const gpsLabel = gpsAgeLabel(tech.location_updated_at, now);
+  const gpsTone = gpsAgeTone(tech.location_updated_at, now);
   // ETA: backend computes via haversine when status is en_route or
   // driving + tech has a current_job + both have lat/lng. Null in
   // every other case — render nothing rather than a fake number.

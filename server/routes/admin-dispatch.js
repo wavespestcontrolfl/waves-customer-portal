@@ -2146,6 +2146,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         FROM scheduled_services
         WHERE scheduled_date = ?
           AND technician_id IS NOT NULL
+          AND status NOT IN ('cancelled', 'rescheduled')
         GROUP BY technician_id
       ) today_agg ON today_agg.technician_id = t.id
       WHERE t.role IN ('admin','technician')
