@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 
 const API = import.meta.env.VITE_API_URL || '/api';
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
-// TYPE_COLORS bg/c pairs converted to V2 pastels (mirrors DiscountsPage).
+// TYPE_COLORS bg/c pairs converted to V2 pastels.
 const D = { bg: '#F4F4F5', card: '#FFFFFF', border: '#E4E4E7', teal: '#18181B', green: '#15803D', amber: '#A16207', red: '#991B1B', purple: '#18181B', text: '#27272A', muted: '#71717A', white: '#FFFFFF', input: '#FFFFFF', heading: '#09090B', inputBorder: '#D4D4D8' };
 
 function af(path, opts = {}) {
@@ -24,8 +24,28 @@ const TYPE_COLORS = { percentage: { bg: '#F4F4F5', c: '#18181B' }, fixed_amount:
 const TYPE_LABELS = { percentage: 'Percentage (%)', fixed_amount: 'Amount ($)', variable_amount: 'Variable ($)', variable_percentage: 'Variable (%)', free_service: 'Free Service' };
 const EMPTY = { discount_key: '', name: '', description: '', discount_type: 'percentage', amount: 0, max_discount_dollars: '', applies_to: 'all', service_category_filter: '', service_key_filter: '', requires_waveguard_tier: '', is_waveguard_tier_discount: false, requires_military: false, requires_senior: false, requires_referral: false, requires_new_customer: false, requires_multi_home: false, requires_prepayment: false, min_service_count: '', min_subtotal: '', is_stackable: true, stack_group: '', priority: 100, promo_code: '', promo_code_expiry: '', promo_code_max_uses: '', is_active: true, is_auto_apply: false, show_in_estimates: true, show_in_invoices: true, show_in_scheduling: false, sort_order: '', color: '#18181B', icon: '' };
 
+function toETDateTimeLocal(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  const part = (type) => parts.find(p => p.type === type)?.value || '';
+  const hour = part('hour') === '24' ? '00' : part('hour');
+  return `${part('year')}-${part('month')}-${part('day')}T${hour}:${part('minute')}`;
+}
+
 function DiscountsSection() {
   const [discounts, setDiscounts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [tab, setTab] = useState('catalog');
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({ ...EMPTY });
@@ -37,7 +57,17 @@ function DiscountsSection() {
   const [customers, setCustomers] = useState([]);
   const [custSearch, setCustSearch] = useState('');
 
-  const load = useCallback(() => { af('/admin/discounts').then(setDiscounts).catch(() => {}); }, []);
+  const load = useCallback(() => {
+    setLoading(true);
+    setLoadError('');
+    return af('/admin/discounts')
+      .then((data) => setDiscounts(Array.isArray(data) ? data : []))
+      .catch((err) => {
+        setDiscounts([]);
+        setLoadError(err?.message || 'Failed to load discounts');
+      })
+      .finally(() => setLoading(false));
+  }, []);
   useEffect(() => { load(); }, [load]);
 
   const show = (m) => { setToast(m); setTimeout(() => setToast(''), 3000); };
@@ -66,7 +96,7 @@ function DiscountsSection() {
   const startEdit = (d) => {
     const f = { ...EMPTY };
     Object.keys(EMPTY).forEach(k => { if (d[k] !== null && d[k] !== undefined) f[k] = d[k]; });
-    if (f.promo_code_expiry) f.promo_code_expiry = f.promo_code_expiry.slice(0, 16);
+    if (f.promo_code_expiry) f.promo_code_expiry = toETDateTimeLocal(f.promo_code_expiry);
     setForm(f); setEditing(d.id); setTab('form');
   };
 
@@ -118,7 +148,18 @@ function DiscountsSection() {
       </div>
 
       {tab === 'catalog' && (
-        sortedDiscounts.length === 0 ? (
+        loading ? (
+          <div style={{ ...sTableWrap, padding: '40px 20px', textAlign: 'center', color: D.muted, fontSize: 13 }}>
+            Loading discounts...
+          </div>
+        ) : loadError ? (
+          <div style={{ ...sTableWrap, padding: '32px 20px', textAlign: 'center', color: D.red, fontSize: 13 }}>
+            {loadError}
+            <div style={{ marginTop: 12 }}>
+              <button type="button" style={sBtn(D.teal, D.white)} onClick={load}>Retry</button>
+            </div>
+          </div>
+        ) : sortedDiscounts.length === 0 ? (
           <div style={{ ...sTableWrap, padding: '40px 20px', textAlign: 'center', color: D.muted, fontSize: 13 }}>
             No discounts yet. Click <strong>+ New Discount</strong> to add your first one.
           </div>
