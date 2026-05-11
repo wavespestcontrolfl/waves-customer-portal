@@ -1085,8 +1085,20 @@ router.put('/:id/update-details', async (req, res, next) => {
     if (routeOrder !== undefined && routeOrder !== '') updates.route_order = parseInt(routeOrder);
     if (zone !== undefined) updates.zone = zone;
     const hasTechnicianIdUpdate = technicianId !== undefined;
+    const requestedTechnicianId = hasTechnicianIdUpdate ? (technicianId || null) : undefined;
+    let assignmentNeedsChange = false;
     if (hasTechnicianIdUpdate) {
-      if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+      if (technicianId !== null && typeof technicianId !== 'string') {
+        return res.status(400).json({ error: 'technicianId must be a UUID string or null' });
+      }
+      const existingAssignment = await db('scheduled_services')
+        .where({ id: req.params.id })
+        .first('id', 'technician_id');
+      if (!existingAssignment) return res.status(404).json({ error: 'Service not found' });
+      assignmentNeedsChange = (existingAssignment.technician_id || null) !== requestedTechnicianId;
+      if (assignmentNeedsChange && req.techRole !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required' });
+      }
     }
     let editAnchorDate = scheduledDate;
     if (isRecurring && MONTH_RECURRENCE_INTERVALS[recurringPattern] && !editAnchorDate) {
@@ -1146,10 +1158,10 @@ router.put('/:id/update-details', async (req, res, next) => {
     let recurringCreated = 0;
 
     await db.transaction(async (trx) => {
-      if (hasTechnicianIdUpdate) {
+      if (assignmentNeedsChange) {
         const assignment = await assignDispatchJob({
           jobId: req.params.id,
-          technicianId: technicianId || null,
+          technicianId: requestedTechnicianId,
           actorId: req.technicianId,
           emit: false,
           trx,
