@@ -694,14 +694,25 @@ router.post('/:id/activity', async (req, res, next) => {
 router.post('/:id/convert', async (req, res, next) => {
   try {
     const { customer_id, monthly_value, initial_service_value, waveguard_tier } = req.body;
+    const customerId = typeof customer_id === 'string' ? customer_id.trim() : customer_id;
+    if (!customerId) {
+      return res.status(400).json({ error: 'customer_id is required to convert a lead' });
+    }
+
+    const lead = await db('leads').where('id', req.params.id).first();
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+
+    const customer = await db('customers').where('id', customerId).first();
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
     await leadAttribution.markConverted(req.params.id, {
-      customerId: customer_id,
+      customerId,
       monthlyValue: monthly_value,
       initialServiceValue: initial_service_value,
       waveguardTier: waveguard_tier,
     });
-    const lead = await db('leads').where('id', req.params.id).first();
-    res.json({ lead });
+    const updatedLead = await db('leads').where('id', req.params.id).first();
+    res.json({ lead: updatedLead });
   } catch (err) { next(err); }
 });
 
