@@ -27,17 +27,28 @@ const serviceLibrary = require('../services/service-library');
 const trackTransitions = require('../services/track-transitions');
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { ipFromReq, uaFromReq } = require('../services/audit-log');
 
 router.use(adminAuthenticate, requireAdmin);
+
+function auditFromReq(req) {
+  return {
+    actorId: req.technicianId || req.technician?.id || null,
+    ipAddress: ipFromReq(req),
+    userAgent: uaFromReq(req),
+  };
+}
 
 // GET / — paginated list with filters
 router.get('/', async (req, res, next) => {
   try {
-    const { category, billing_type, is_active, search, limit, offset } = req.query;
+    const { category, billing_type, is_active, is_archived, include_archived, search, limit, offset } = req.query;
     const result = await serviceLibrary.getServices({
       category,
       billingType: billing_type,
       isActive: is_active,
+      isArchived: is_archived,
+      includeArchived: include_archived,
       search,
       limit: limit ? parseInt(limit) : undefined,
       offset: offset ? parseInt(offset) : undefined,
@@ -74,11 +85,12 @@ router.get('/:id', async (req, res, next) => {
 // POST / — create service
 router.post('/', async (req, res, next) => {
   try {
-    const service = await serviceLibrary.createService(req.body);
+    const service = await serviceLibrary.createService(req.body, { audit: auditFromReq(req) });
     res.status(201).json(service);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Service key already exists' });
     if (err.status === 400) return res.status(400).json({ error: err.message });
+    if (err.status === 409) return res.status(409).json({ error: err.message, references: err.references });
     res.status(500).json({ error: err.message || 'Failed to create service' });
   }
 });
@@ -95,11 +107,12 @@ router.put('/packages/:id', async (req, res, next) => {
 // PUT /:id — update service
 router.put('/:id', async (req, res, next) => {
   try {
-    const service = await serviceLibrary.updateService(req.params.id, req.body);
+    const service = await serviceLibrary.updateService(req.params.id, req.body, { audit: auditFromReq(req) });
     if (!service) return res.status(404).json({ error: 'Service not found' });
     res.json(service);
   } catch (err) {
     if (err.status === 400) return res.status(400).json({ error: err.message });
+    if (err.status === 409) return res.status(409).json({ error: err.message, references: err.references });
     if (err.code === '23505') return res.status(409).json({ error: 'Service key already exists' });
     res.status(500).json({ error: err.message || 'Failed to update service' });
   }
@@ -108,10 +121,13 @@ router.put('/:id', async (req, res, next) => {
 // DELETE /:id — soft delete (deactivate + archive)
 router.delete('/:id', async (req, res, next) => {
   try {
-    const service = await serviceLibrary.deactivateService(req.params.id);
+    const service = await serviceLibrary.deactivateService(req.params.id, { audit: auditFromReq(req) });
     if (!service) return res.status(404).json({ error: 'Service not found' });
     res.json({ success: true, service });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.status === 409) return res.status(409).json({ error: err.message, references: err.references });
+    next(err);
+  }
 });
 
 // =============================================================================

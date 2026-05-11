@@ -120,9 +120,11 @@ const DiscountEngine = {
         continue;
       }
 
-      // Service filter
-      if (disc.service_key_filter && serviceKey && disc.service_key_filter !== serviceKey) continue;
-      if (disc.service_category_filter && serviceCategory && disc.service_category_filter !== serviceCategory) continue;
+      // Service filters are restrictive. If a discount is scoped to a service
+      // key/category and the caller did not provide that context, the discount
+      // is not eligible for generic invoice/customer calculations.
+      if (disc.service_key_filter && disc.service_key_filter !== serviceKey) continue;
+      if (disc.service_category_filter && disc.service_category_filter !== serviceCategory) continue;
 
       // Payment method condition (ACH discount only applies when paying via bank)
       if (disc.payment_method_condition && disc.payment_method_condition !== paymentMethod) continue;

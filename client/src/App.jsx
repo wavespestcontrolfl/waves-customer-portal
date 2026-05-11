@@ -132,7 +132,6 @@ const ProjectsPage = lazyWithRetry(() => import('./pages/admin/ProjectsPage'));
 const CredentialsPage = lazyWithRetry(() => import('./pages/admin/CredentialsPage'));
 const GeofenceEventsPage = lazyWithRetry(() => import('./pages/admin/GeofenceEventsPage'));
 const NewsletterPage = lazyWithRetry(() => import('./pages/admin/NewsletterPage'));
-const DiscountsPage = lazyWithRetry(() => import('./pages/admin/DiscountsPage'));
 const CompliancePage = lazyWithRetry(() => import('./pages/admin/CompliancePage'));
 const PricingLogicPage = lazyWithRetry(() => import('./pages/admin/PricingLogicPage'));
 const DesignSystemPage = lazyWithRetry(() => import('./pages/admin/_DesignSystemPage'));
