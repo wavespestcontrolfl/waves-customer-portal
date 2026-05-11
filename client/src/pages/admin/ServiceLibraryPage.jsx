@@ -299,7 +299,7 @@ function ServiceListRow({ svc, selected, onSelect }) {
 function DetailPane({ svc, creating, onSaveNew, onCancelNew, onUpdated, onDeleted }) {
   if (creating) {
     return (
-      <div style={{ overflow: 'auto', height: '100%' }}>
+      <div style={{ overflowY: 'auto', height: '100%', minHeight: 0, WebkitOverflowScrolling: 'touch' }}>
         <div style={{
           position: 'sticky', top: 0, zIndex: 1,
           background: D.card, borderBottom: `1px solid ${D.border}`,
@@ -365,7 +365,7 @@ function DetailPane({ svc, creating, onSaveNew, onCancelNew, onUpdated, onDelete
   };
 
   return (
-    <div style={{ overflow: 'auto', height: '100%' }} key={svc.id}>
+    <div style={{ overflowY: 'auto', height: '100%', minHeight: 0, WebkitOverflowScrolling: 'touch' }} key={svc.id}>
       {/* Sticky summary header */}
       <div style={{
         position: 'sticky', top: 0, zIndex: 1,
@@ -736,8 +736,9 @@ export default function ServiceLibraryPage() {
           <div style={{
             display: 'grid',
             gridTemplateColumns: '210px 360px 1fr',
-            height: 'calc(100vh - 240px)',
-            minHeight: 600,
+            height: 'clamp(420px, calc(100dvh - 240px), 760px)',
+            minHeight: 0,
+            minWidth: 0,
             background: D.card,
             border: `1px solid ${D.border}`,
             borderRadius: 12,
@@ -748,6 +749,7 @@ export default function ServiceLibraryPage() {
               borderRight: `1px solid ${D.border}`,
               padding: '12px 8px',
               overflowY: 'auto',
+              minHeight: 0,
               background: D.railBg,
             }}>
               <RailSection title="Catalog">
@@ -785,6 +787,7 @@ export default function ServiceLibraryPage() {
               borderRight: `1px solid ${D.border}`,
               display: 'flex', flexDirection: 'column',
               minWidth: 0,
+              minHeight: 0,
             }}>
               <div style={{ padding: 12, borderBottom: `1px solid ${D.border}` }}>
                 <input
@@ -797,7 +800,7 @@ export default function ServiceLibraryPage() {
                   {viewFiltered.length} {viewFiltered.length === 1 ? 'service' : 'services'}
                 </div>
               </div>
-              <div style={{ flex: 1, overflowY: 'auto' }}>
+              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
                 {viewFiltered.length === 0 ? (
                   <div style={{ padding: 32, textAlign: 'center', color: D.muted, fontSize: 13 }}>
                     No services found
@@ -816,7 +819,7 @@ export default function ServiceLibraryPage() {
             </div>
 
             {/* DETAIL */}
-            <div style={{ minWidth: 0, background: D.card }}>
+            <div style={{ minWidth: 0, minHeight: 0, height: '100%', background: D.card }}>
               <DetailPane
                 svc={showNew ? null : selectedSvc}
                 creating={showNew}

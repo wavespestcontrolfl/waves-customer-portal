@@ -187,7 +187,10 @@ export default function AdminLayoutV2() {
       className="admin-shell-v2"
       style={{
         display: 'flex',
+        height: '100vh',
         minHeight: '100vh',
+        overflow: 'hidden',
+        boxSizing: 'border-box',
         background: 'var(--surface-page)',
         color: 'var(--text-primary)',
       }}
@@ -535,7 +538,11 @@ export default function AdminLayoutV2() {
           paddingBottom: isMobile ? 'calc(56px + env(safe-area-inset-bottom) + 16px)' : 24,
           paddingLeft: isMobile ? 16 : 28,
           paddingRight: isMobile ? 16 : 28,
+          height: '100vh',
           minHeight: '100vh',
+          boxSizing: 'border-box',
+          overflowY: 'auto',
+          WebkitOverflowScrolling: 'touch',
           background: 'var(--surface-page)',
         }}
         className="admin-main"
