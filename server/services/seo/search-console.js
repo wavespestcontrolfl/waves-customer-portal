@@ -58,7 +58,8 @@ class SearchConsoleService {
 
   async init() {
     if (this.webmasters) return true;
-    if (!google) {
+    const g = getGoogle();
+    if (!g) {
       logger.warn('googleapis not installed — GSC sync disabled');
       return false;
     }
@@ -93,8 +94,6 @@ class SearchConsoleService {
         };
       }
 
-      const g = getGoogle();
-      if (!g) { logger.error('[GSC] googleapis not installed'); return false; }
       this.auth = new g.auth.GoogleAuth(authOptions);
 
       this.webmasters = g.searchconsole({ version: 'v1', auth: this.auth });
