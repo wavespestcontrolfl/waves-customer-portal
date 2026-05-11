@@ -91,6 +91,7 @@ import {
 } from '../components/brand';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import { computeCardTotal } from '../lib/cardSurcharge';
+import { formatInvoiceDate, isInvoiceDueDateOverdue } from '../lib/invoiceDates';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -124,13 +125,7 @@ function isDiscountLineItem(item) {
 }
 
 function fmtDate(d) {
-  if (!d) return '';
-  const dateOnly = typeof d === 'string' ? d.match(/^(\d{4}-\d{2}-\d{2})/) : null;
-  const dt = dateOnly
-    ? new Date(`${dateOnly[1]}T12:00:00Z`)
-    : new Date(d);
-  if (Number.isNaN(dt.getTime())) return '';
-  return dt.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
+  return formatInvoiceDate(d);
 }
 
 // ── Stripe Payment Element wrapper ─────────────────────────────────
@@ -152,9 +147,19 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   const [displayedTotal, setDisplayedTotal] = useState(initialCharge.total);
   const [syncingAmount, setSyncingAmount] = useState(false);
   const [amountSyncError, setAmountSyncError] = useState(false);
+  const selectedMethodRef = useRef('card');
+  const syncingAmountRef = useRef(false);
+  const amountSyncSeqRef = useRef(0);
+
+  useEffect(() => {
+    selectedMethodRef.current = selectedMethod;
+  }, [selectedMethod]);
 
   const syncAmountForMethod = useCallback(async (methodCategory, saveCardOverride, options = {}) => {
     if (!paymentIntentId || !token) return;
+    const syncSeq = amountSyncSeqRef.current + 1;
+    amountSyncSeqRef.current = syncSeq;
+    syncingAmountRef.current = true;
     setSyncingAmount(true);
     setAmountSyncError(false);
     try {
@@ -177,6 +182,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           throw new Error(fetchError.message || 'Could not refresh the payment form');
         }
       }
+      if (syncSeq !== amountSyncSeqRef.current || selectedMethodRef.current !== methodCategory) return;
       setDisplayedBase(data.base);
       setDisplayedSurcharge(data.surcharge);
       setDisplayedTotal(data.total);
@@ -185,7 +191,10 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       const methodLabel = methodCategory === 'us_bank_account' ? 'bank-transfer' : 'card';
       setElementError(err.message || `Could not update the ${methodLabel} total. Select another method or try again.`);
     } finally {
-      setSyncingAmount(false);
+      if (syncSeq === amountSyncSeqRef.current) {
+        syncingAmountRef.current = false;
+        setSyncingAmount(false);
+      }
     }
   }, [paymentIntentId, token, saveCard]);
 
@@ -268,13 +277,15 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           buttonType:  { applePay: 'buy',   googlePay: 'buy' },
           buttonHeight: 52,
           paymentMethodOrder: ['applePay', 'googlePay', 'link'],
+          paymentMethods: { googlePay: 'always' },
         });
 
         express.on('ready', async () => {
           if (cancelled) return;
           // Surcharge wallets = card-family × 1.0399. Pre-apply now so the
           // wallet sheet shows the right total instead of the base amount.
-          try { await syncAmountForMethod('card', saveCard, { skipFetchUpdates: true }); } catch { /* non-fatal */ }
+          if (selectedMethodRef.current !== 'card') return;
+          try { await syncAmountForMethod('card', saveCard); } catch { /* non-fatal */ }
         });
 
         express.on('confirm', async () => {
@@ -304,8 +315,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         // ── Payment Element — manual card + ACH
         //
         // Wallets moved into the Express Checkout Element above, so we
-        // hide them here (wallets: 'never') and drop them from the
-        // method order. The accordion now shows only card + ACH.
+        // hide them here to avoid duplicate wallet buttons. ACH stays in
+        // the accordion below.
         const paymentElement = elements.create('payment', {
           layout: {
             type: 'accordion',
@@ -322,8 +333,9 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           if (cancelled) return;
           setElementError(event.error?.message || null);
           const nextMethod = event.value?.type || null;
-          if (nextMethod) {
+          if (nextMethod && nextMethod !== selectedMethodRef.current) {
             if (nextMethod !== 'us_bank_account') setAmountSyncError(false);
+            selectedMethodRef.current = nextMethod;
             setSelectedMethod(nextMethod);
             syncAmountForMethod(nextMethod);
           }
@@ -342,6 +354,13 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   const isCardFamily = selectedMethod !== 'us_bank_account';
   const pct = (((cardSurchargeRate || 0.0399) * 100).toFixed(2)).replace(/\.?0+$/, '');
   const buttonAmount = isCardFamily ? displayedTotal : displayedBase;
+
+  const selectPaymentMethod = (methodCategory) => {
+    if (!ready || processing || syncingAmount || syncingAmountRef.current || methodCategory === selectedMethod) return;
+    selectedMethodRef.current = methodCategory;
+    setSelectedMethod(methodCategory);
+    syncAmountForMethod(methodCategory);
+  };
 
   const handleSubmit = async () => {
     if (!stripeRef.current || !elementsRef.current || processing) return;
@@ -392,12 +411,59 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         </span>
       </div>
 
+      <div style={{ marginBottom: 16 }}>
+        <div style={{
+          fontSize: 12,
+          color: 'var(--text-muted)',
+          letterSpacing: '0.08em',
+          textTransform: 'uppercase',
+          marginBottom: 8,
+        }}>
+          Payment method
+        </div>
+        <div role="group" aria-label="Payment method" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          {[
+            { value: 'card', title: 'Card / wallet', detail: `${pct}% fee` },
+            { value: 'us_bank_account', title: 'Bank account', detail: 'No added fee' },
+          ].map((method) => {
+            const active = selectedMethod === method.value;
+            return (
+              <button
+                key={method.value}
+                type="button"
+                aria-pressed={active}
+                onClick={() => selectPaymentMethod(method.value)}
+                disabled={!ready || processing || syncingAmount}
+                style={{
+                  minHeight: 62,
+                  borderRadius: 'var(--radius-md)',
+                  border: active ? `2px solid ${COLORS.blueDeeper}` : '1px solid var(--border)',
+                  background: active ? 'rgba(0,156,222,0.08)' : COLORS.white,
+                  color: 'var(--text)',
+                  padding: '10px 12px',
+                  textAlign: 'left',
+                  cursor: !ready || processing || syncingAmount ? 'not-allowed' : 'pointer',
+                  opacity: !ready || processing || syncingAmount ? 0.72 : 1,
+                }}
+              >
+                <span style={{ display: 'block', fontWeight: 700, fontSize: 14, marginBottom: 3 }}>
+                  {method.title}
+                </span>
+                <span style={{ display: 'block', fontSize: 12, color: 'var(--text-muted)' }}>
+                  {method.detail}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {/* Express wallet button (Google Pay / Apple Pay / Link) —
           Stripe only renders one on browser + device combos where the
           customer actually has a wallet set up, so this div will be
           empty for most desktop Chrome users without a Google Pay card
           on file. That's the Stripe-recommended behavior. */}
-      <div ref={expressMountRef} style={{ marginBottom: 16 }} />
+      <div ref={expressMountRef} style={{ marginBottom: isCardFamily ? 16 : 0, display: isCardFamily ? 'block' : 'none' }} />
       <div ref={mountRef} style={{ minHeight: 90, marginBottom: 16 }} />
 
       {/* Save-card opt-in */}
@@ -598,8 +664,7 @@ export default function PayPageV2() {
   const { invoice, service, customer } = data;
   const visibleLineItems = (invoice.lineItems || []).filter(item => !isDiscountLineItem(item));
   const isOverdue = invoice.status !== 'paid'
-    && invoice.dueDate
-    && new Date(invoice.dueDate).getTime() < Date.now();
+    && isInvoiceDueDateOverdue(invoice.dueDate);
 
   return (
     <WavesShell variant="customer" topBar="solid">

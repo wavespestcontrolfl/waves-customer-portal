@@ -38,7 +38,9 @@ const {
   STALE_CLAIM_WINDOW_MS,
 } = require('../routes/stripe-webhook-helpers');
 const {
+  assertInvoicePaymentIntentTenderMatches,
   invoicePaymentStatusForIntent,
+  isTerminalInvoicePaymentIntent,
   nextInvoiceStatusAfterFailedPayment,
 } = require('../services/stripe-invoice-state');
 
@@ -278,6 +280,60 @@ describe('invoice assertInvoiceCollectible', () => {
 });
 
 describe('stripe invoice ACH state helpers', () => {
+  test('card-priced invoice PaymentIntent accepts a real card settlement', () => {
+    expect(() => assertInvoicePaymentIntentTenderMatches({
+      amount: 7799,
+      payment_method_types: ['card', 'us_bank_account'],
+      metadata: { selected_method_category: 'card', base_amount: '75' },
+    }, 'card', 75)).not.toThrow();
+  });
+
+  test('card-priced invoice PaymentIntent rejects a real ACH settlement', () => {
+    expect(() => assertInvoicePaymentIntentTenderMatches({
+      amount_received: 7799,
+      payment_method_types: ['card', 'us_bank_account'],
+      metadata: { selected_method_category: 'card', base_amount: '75' },
+    }, 'us_bank_account', 75)).toThrow(/Payment method changed/);
+  });
+
+  test('mixed-method invoice PaymentIntent rejects ACH at the card total even without selected metadata', () => {
+    expect(() => assertInvoicePaymentIntentTenderMatches({
+      amount_received: 7799,
+      payment_method_types: ['card', 'us_bank_account'],
+      metadata: { base_amount: '75' },
+    }, 'us_bank_account', 75)).toThrow(/Payment amount does not match/);
+  });
+
+  test('ACH-priced invoice PaymentIntent rejects a real card settlement', () => {
+    expect(() => assertInvoicePaymentIntentTenderMatches({
+      amount_received: 7500,
+      payment_method_types: ['us_bank_account'],
+      metadata: { selected_method_category: 'us_bank_account', base_amount: '75' },
+    }, 'card', 75)).toThrow(/Payment method changed|Payment amount does not match/);
+  });
+
+  test('ACH-priced invoice PaymentIntent accepts a real ACH settlement', () => {
+    expect(() => assertInvoicePaymentIntentTenderMatches({
+      amount_received: 7500,
+      payment_method_types: ['us_bank_account'],
+      metadata: { selected_method_category: 'us_bank_account', base_amount: '75' },
+    }, 'us_bank_account', 75)).not.toThrow();
+  });
+
+  test('Tap to Pay invoice PaymentIntents are identified as terminal-priced', () => {
+    expect(isTerminalInvoicePaymentIntent({
+      amount_received: 7500,
+      payment_method_types: ['card_present'],
+      metadata: { source: 'tap_to_pay' },
+    }, 'card_present')).toBe(true);
+
+    expect(isTerminalInvoicePaymentIntent({
+      amount_received: 7799,
+      payment_method_types: ['card', 'us_bank_account'],
+      metadata: { selected_method_category: 'card' },
+    }, 'card')).toBe(false);
+  });
+
   test('ACH processing PaymentIntent maps to processing, not an error', () => {
     expect(invoicePaymentStatusForIntent({
       status: 'processing',

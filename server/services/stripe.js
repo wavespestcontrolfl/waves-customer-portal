@@ -31,7 +31,10 @@ const {
   isCardMethodType,
   computeChargeAmount,
 } = require('./stripe-pricing');
-const { invoicePaymentStatusForIntent } = require('./stripe-invoice-state');
+const {
+  assertInvoicePaymentIntentTenderMatches,
+  invoicePaymentStatusForIntent,
+} = require('./stripe-invoice-state');
 const { assertInvoiceCollectible } = require('./invoice-helpers');
 
 const StripeService = {
@@ -814,7 +817,7 @@ const StripeService = {
    * explicitly opted in on the pay page.
    *
    * @param {string} invoiceId
-   * @param {{ saveCard?: boolean, cardOnly?: boolean }} [opts]
+   * @param {{ saveCard?: boolean }} [opts]
    */
   async createInvoicePaymentIntent(invoiceId, opts = {}) {
     const stripe = getStripe();
@@ -825,7 +828,6 @@ const StripeService = {
     assertInvoiceCollectible(invoice.status);
 
     const saveCard = !!opts.saveCard;
-    const cardOnly = !!opts.cardOnly;
     const stripeCustomerId = saveCard && invoice.customer_id
       ? await this.ensureStripeCustomer(invoice.customer_id)
       : null;
@@ -835,7 +837,7 @@ const StripeService = {
     let cardSurcharge;
     let cardTotal;
     try {
-      const methodMode = cardOnly ? 'cardonly' : 'explicit_card_ach';
+      const methodMode = 'cardonly';
       await db.transaction(async (trx) => {
         const lockedInvoice = await trx('invoices')
           .where({ id: invoiceId })
@@ -887,7 +889,7 @@ const StripeService = {
             save_card_opt_in: saveCard ? 'true' : 'false',
             selected_method_category: 'card',
           },
-          payment_method_types: cardOnly ? ['card'] : ['card', 'us_bank_account'],
+          payment_method_types: ['card'],
         };
 
         if (stripeCustomerId) {
@@ -964,32 +966,32 @@ const StripeService = {
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
     assertInvoiceCollectible(invoice.status);
+    if (!invoice.stripe_payment_intent_id
+      || String(invoice.stripe_payment_intent_id) !== String(paymentIntentId)) {
+      throw new Error('PaymentIntent does not belong to this invoice');
+    }
 
     const saveCard = !!opts.saveCard;
-    const { base, surcharge, total } = computeChargeAmount(parseFloat(invoice.total), methodCategory);
+    const selectedMethodCategory = methodCategory || 'card';
+    const { base, surcharge, total } = computeChargeAmount(parseFloat(invoice.total), selectedMethodCategory);
     const amountCents = Math.round(total * 100);
 
-    // Lock the PI's payment_method_types to the claimed family. Without
-    // this, the PI was created with automatic_payment_methods=enabled
-    // and the client could call /update-amount with
-    // methodCategory='us_bank_account' (no surcharge) and then confirm
-    // the PI with a card on the Payment Element — paying base price,
-    // skipping the 3.99% surcharge that compensates Waves for Stripe's
-    // card fee. Restricting to one type at the time of amount update
-    // means Stripe rejects a confirm with the wrong method, and a
-    // method switch must round-trip through this endpoint and recompute
-    // the surcharge.
-    const restrictedTypes = isCardMethodType(methodCategory) ? ['card'] : ['us_bank_account'];
+    // Lock the PI to the selected tender family before Stripe can confirm.
+    // The pay page exposes Card/ACH with its own selector; Stripe Elements
+    // then refreshes to the one tender family that matches this amount.
+    const paymentMethodTypes = isCardMethodType(selectedMethodCategory)
+      ? ['card']
+      : ['us_bank_account'];
 
     const updateParams = {
       amount: amountCents,
-      payment_method_types: restrictedTypes,
+      payment_method_types: paymentMethodTypes,
       metadata: {
         waves_invoice_id: invoiceId,
         invoice_number: invoice.invoice_number,
         base_amount: String(base),
         card_surcharge: String(surcharge),
-        selected_method_category: String(methodCategory || 'unknown'),
+        selected_method_category: String(selectedMethodCategory),
         save_card_opt_in: saveCard ? 'true' : 'false',
       },
     };
@@ -1007,7 +1009,7 @@ const StripeService = {
 
     try {
       const paymentIntent = await stripe.paymentIntents.update(paymentIntentId, updateParams);
-      logger.info(`[stripe] PI ${paymentIntentId} updated → base=$${base} surcharge=$${surcharge} total=$${total} (method=${methodCategory})`);
+      logger.info(`[stripe] PI ${paymentIntentId} updated → base=$${base} surcharge=$${surcharge} total=$${total} (method=${selectedMethodCategory})`);
       return {
         paymentIntentId: paymentIntent.id,
         base,
@@ -1138,7 +1140,11 @@ const StripeService = {
         }
       }
 
-      const paymentStatus = invoicePaymentStatusForIntent(pi, pmdType || resolvedPaymentMethod);
+      const actualMethodType = pmdType || resolvedPaymentMethod;
+      const invoiceBaseAmount = Number(invoice.total);
+      assertInvoicePaymentIntentTenderMatches(pi, actualMethodType, invoiceBaseAmount);
+
+      const paymentStatus = invoicePaymentStatusForIntent(pi, actualMethodType);
       const invoiceStatus = paymentStatus === 'paid' ? 'paid' : 'processing';
 
       // Defense-in-depth surcharge-bypass detection. The
