@@ -97,6 +97,7 @@ export default function NewsletterSignup({
   }[state];
 
   const locked = state === 'pending' || state === 'resent' || state === 'already';
+  const emailInputId = `newsletter-email-${source}`;
 
   return (
     <div style={{
@@ -139,6 +140,8 @@ export default function NewsletterSignup({
         <label style={{ display: 'none' }} aria-hidden="true">
           Company
           <input
+            id={`newsletter-company-${source}`}
+            name="company"
             type="text"
             tabIndex={-1}
             autoComplete="off"
@@ -148,6 +151,8 @@ export default function NewsletterSignup({
         </label>
 
         <input
+          id={emailInputId}
+          name="email"
           type="email"
           required
           autoComplete="email"

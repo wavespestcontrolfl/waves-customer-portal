@@ -167,6 +167,108 @@ function normalizeDateOnly(value) {
   return date.toISOString().slice(0, 10);
 }
 
+function hasMeaningfulValue(value) {
+  return value !== null && value !== undefined && String(value).trim() !== '';
+}
+
+function normalizeFindings(value) {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+function evaluateProjectSendReadiness({ project, customer, photoCount = 0 }) {
+  const typeCfg = getProjectType(project?.project_type);
+  const findings = normalizeFindings(project?.findings);
+  const required = [
+    { key: 'project_date', label: 'Inspection date', ok: hasMeaningfulValue(project?.project_date) },
+    { key: 'customer', label: 'Customer', ok: Boolean(customer?.id || project?.customer_id) },
+    { key: 'project_type', label: 'Report title or type', ok: hasMeaningfulValue(project?.title) || Boolean(typeCfg) },
+    { key: 'findings', label: 'Findings captured', ok: Object.values(findings).some(hasMeaningfulValue) },
+    { key: 'recommendations', label: 'Recommendation / notes', ok: hasMeaningfulValue(project?.recommendations) },
+    { key: 'photos', label: 'Photos attached', ok: Number(photoCount) > 0 },
+  ];
+
+  if (project?.project_type === 'wdo_inspection') {
+    required.push(
+      { key: 'wdo_property_address', label: 'Property inspected', ok: hasMeaningfulValue(findings.property_address) },
+      { key: 'wdo_finding', label: 'FDACS finding selected', ok: hasMeaningfulValue(findings.wdo_finding) },
+      { key: 'wdo_inspection_scope', label: 'Visible/access scope', ok: hasMeaningfulValue(findings.inspection_scope) },
+    );
+  }
+
+  return {
+    required,
+    missing: required.filter(item => !item.ok).map(({ key, label }) => ({ key, label })),
+  };
+}
+
+async function countProjectPhotos(projectId) {
+  const row = await db('project_photos').where({ project_id: projectId }).count('* as count').first();
+  return Number(row?.count || row?.n || 0);
+}
+
+async function validateProjectCreateScope(req, { customer_id, service_record_id, scheduled_service_id }) {
+  const customer = await db('customers').where({ id: customer_id }).whereNull('deleted_at').first('id');
+  if (!customer) {
+    const err = new Error('Customer not found');
+    err.status = 404;
+    throw err;
+  }
+
+  let linkedAssignedToTech = false;
+
+  if (service_record_id) {
+    const service = await db('service_records')
+      .where({ id: service_record_id })
+      .first('id', 'customer_id', 'technician_id');
+    if (!service) {
+      const err = new Error('Service record not found');
+      err.status = 400;
+      throw err;
+    }
+    if (String(service.customer_id) !== String(customer_id)) {
+      const err = new Error('Service record does not belong to the selected customer');
+      err.status = 400;
+      throw err;
+    }
+    if (String(service.technician_id || '') === String(req.technicianId || '')) linkedAssignedToTech = true;
+  }
+
+  if (scheduled_service_id) {
+    const scheduled = await db('scheduled_services')
+      .where({ id: scheduled_service_id })
+      .first('id', 'customer_id', 'technician_id');
+    if (!scheduled) {
+      const err = new Error('Scheduled service not found');
+      err.status = 400;
+      throw err;
+    }
+    if (String(scheduled.customer_id) !== String(customer_id)) {
+      const err = new Error('Scheduled service does not belong to the selected customer');
+      err.status = 400;
+      throw err;
+    }
+    if (String(scheduled.technician_id || '') === String(req.technicianId || '')) linkedAssignedToTech = true;
+  }
+
+  if (!isAdmin(req) && !linkedAssignedToTech) {
+    const err = new Error('Technician projects must be linked to an assigned visit');
+    err.status = 403;
+    throw err;
+  }
+
+  return customer;
+}
+
 async function resolveProjectDate({ project_date, service_record_id, scheduled_service_id }) {
   const explicit = normalizeDateOnly(project_date);
   if (explicit) return explicit;
@@ -688,6 +790,7 @@ router.post('/', async (req, res, next) => {
 
     if (!customer_id) return res.status(400).json({ error: 'customer_id required' });
     if (!isValidProjectType(project_type)) return res.status(400).json({ error: 'Invalid project_type' });
+    await validateProjectCreateScope(req, { customer_id, service_record_id, scheduled_service_id });
     const projectDate = await resolveProjectDate({ project_date, service_record_id, scheduled_service_id });
 
     const [row] = await db('projects').insert({
@@ -721,13 +824,18 @@ router.post('/ai-write-preview', requireAdmin, async (req, res, next) => {
   try {
     if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
 
-    const { project_type, findings, recommendations, customer_id, project_date } = req.body;
+    const {
+      project_type, findings, recommendations, customer_id, project_date,
+      include_communications = true,
+    } = req.body;
     if (!isValidProjectType(project_type)) return res.status(400).json({ error: 'Invalid project_type' });
 
     const typeCfg = getProjectType(project_type);
     const customer = customer_id ? await db('customers').where({ id: customer_id }).first() : null;
     const tech = req.technicianId ? await db('technicians').where({ id: req.technicianId }).first() : null;
-    const communicationContext = await getCustomerCommunicationContext(customer_id);
+    const communicationContext = include_communications === false
+      ? ''
+      : await getCustomerCommunicationContext(customer_id);
     const report = await draftProjectReport({
       typeCfg,
       findings: findings || {},
@@ -778,9 +886,8 @@ router.put('/:id', async (req, res, next) => {
 // Admin-only (prevents accidental send by tech before review).
 //
 // Notifies the customer via SMS (Twilio) and email (SendGrid) with the
-// public report link. Failures on either channel are reported back but
-// do not block the status transition — the report is still viewable
-// at the public URL.
+// public report link. The public token can be generated before delivery,
+// but status only moves to 'sent' after at least one customer channel works.
 // ---------------------------------------------------------------------------
 router.post('/:id/send', requireAdmin, async (req, res, next) => {
   try {
@@ -791,12 +898,20 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       ? await db('customers').where({ id: project.customer_id }).first()
       : null;
 
+    const photoCount = await countProjectPhotos(project.id);
+    const readiness = evaluateProjectSendReadiness({ project, customer, photoCount });
+    const overrideReason = String(req.body?.override_reason || '').trim();
+    const hasReadinessOverride = readiness.missing.length > 0 && overrideReason.length > 0;
+    if (readiness.missing.length > 0 && !hasReadinessOverride) {
+      return res.status(422).json({
+        error: 'Project report is missing required details',
+        missing: readiness.missing,
+      });
+    }
+
     const token = project.report_token || crypto.randomBytes(16).toString('hex');
-    const sendAction = project.sent_at || project.status === 'sent' ? 'project_report_resent' : 'project_report_sent';
     await db('projects').where({ id: req.params.id }).update({
-      status: 'sent',
       report_token: token,
-      sent_at: project.sent_at || db.fn.now(),
       updated_at: db.fn.now(),
     });
 
@@ -923,22 +1038,61 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       channels.email = { ok: false, error: 'No email on file' };
     }
 
-    await db('projects').where({ id: req.params.id }).update({
+    const availableChannels = [
+      customer?.phone ? 'sms' : null,
+      customer?.email ? 'email' : null,
+    ].filter(Boolean);
+    const successfulChannelCount = availableChannels.filter(channel => channels[channel]?.ok).length;
+    const deliveryStatus = successfulChannelCount === 0
+      ? 'failed'
+      : successfulChannelCount < availableChannels.length ? 'partial' : 'sent';
+    const delivered = successfulChannelCount > 0;
+    const deliveryUpdate = {
       delivery_channels: channels,
+      delivery_status: deliveryStatus,
       last_delivery_at: db.fn.now(),
       updated_at: db.fn.now(),
-    });
+    };
+    if (delivered) {
+      deliveryUpdate.status = 'sent';
+      deliveryUpdate.sent_at = project.sent_at || db.fn.now();
+    }
 
+    await db('projects').where({ id: req.params.id }).update(deliveryUpdate);
+
+    const sendAction = delivered
+      ? (project.sent_at || project.status === 'sent' ? 'project_report_resent' : 'project_report_sent')
+      : 'project_report_delivery_failed';
     await logProjectActivity(
       req,
       project,
       sendAction,
-      `${sendAction === 'project_report_resent' ? 'Project report resent' : 'Project report sent'}: ${typeLabel}`,
-      { report_token: token, channels },
+      delivered
+        ? `${sendAction === 'project_report_resent' ? 'Project report resent' : 'Project report sent'}: ${typeLabel}`
+        : `Project report delivery failed: ${typeLabel}`,
+      {
+        report_token: token,
+        channels,
+        delivery_status: deliveryStatus,
+        ...(hasReadinessOverride ? {
+          readiness_override: {
+            reason: overrideReason,
+            missing: readiness.missing,
+          },
+        } : {}),
+      },
     );
 
-    logger.info(`[projects] sent ${project.id} token=${token} sms=${channels.sms?.ok} email=${channels.email?.ok}`);
-    res.json({ project_id: project.id, report_token: token, report_url: reportPath || `/report/project/${token}`, channels });
+    logger.info(`[projects] delivery ${project.id} token=${token} status=${deliveryStatus} sms=${channels.sms?.ok} email=${channels.email?.ok}`);
+    res.json({
+      project_id: project.id,
+      report_token: token,
+      report_url: reportPath || `/report/project/${token}`,
+      channels,
+      delivery_status: deliveryStatus,
+      sent: delivered,
+      ...(readiness.missing.length > 0 ? { readiness_override: hasReadinessOverride } : {}),
+    });
   } catch (err) { next(err); }
 });
 
@@ -1016,11 +1170,17 @@ router.post('/:id/ai-write', requireAdmin, async (req, res, next) => {
     const tech = project.created_by_tech_id
       ? await db('technicians').where({ id: project.created_by_tech_id }).first()
       : null;
-    const communicationContext = await getCustomerCommunicationContext(project.customer_id);
-    const photos = await db('project_photos')
-      .where({ project_id: project.id })
-      .orderBy(['visit', 'sort_order', 'created_at'])
-      .limit(AI_PHOTO_LIMIT);
+    const includeCommunications = req.body.include_communications !== false;
+    const includePhotos = req.body.include_photos !== false;
+    const communicationContext = includeCommunications
+      ? await getCustomerCommunicationContext(project.customer_id)
+      : '';
+    const photos = includePhotos
+      ? await db('project_photos')
+        .where({ project_id: project.id })
+        .orderBy(['visit', 'sort_order', 'created_at'])
+        .limit(AI_PHOTO_LIMIT)
+      : [];
 
     const report = await draftProjectReport({
       typeCfg,

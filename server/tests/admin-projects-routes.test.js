@@ -59,11 +59,13 @@ function chain(overrides = {}) {
   return {
     where: jest.fn().mockReturnThis(),
     whereRaw: jest.fn().mockReturnThis(),
+    whereNull: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
     whereNotNull: jest.fn().mockReturnThis(),
     leftJoin: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
+    orderByRaw: jest.fn().mockReturnThis(),
     limit: jest.fn().mockReturnThis(),
     count: jest.fn().mockReturnThis(),
     groupBy: jest.fn().mockReturnThis(),
@@ -254,15 +256,46 @@ describe('admin projects routes', () => {
       customer_id: 'customer-1',
       project_type: 'pest_inspection',
       status: 'draft',
-      created_by_tech_id: 'tech-1',
+      created_by_tech_id: 'admin-1',
     };
+    const customerRead = chain({
+      first: jest.fn().mockResolvedValue({ id: 'customer-1' }),
+    });
     const projectInsert = chain({
       returning: jest.fn().mockResolvedValue([createdProject]),
     });
     const activityInsert = chain();
     db.mockImplementation((table) => {
+      if (table === 'customers') return customerRead;
       if (table === 'projects') return projectInsert;
       if (table === 'activity_log') return activityInsert;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ customer_id: 'customer-1', project_type: 'pest_inspection' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.project.id).toBe('project-1');
+      expect(activityInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+        admin_user_id: 'admin-1',
+        customer_id: 'customer-1',
+        action: 'project_created',
+        metadata: expect.objectContaining({ project_id: 'project-1', project_type: 'pest_inspection' }),
+      }));
+    });
+  });
+
+  test('technician cannot create an ad hoc project without an assigned visit link', async () => {
+    const customerRead = chain({
+      first: jest.fn().mockResolvedValue({ id: 'customer-1' }),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'customers') return customerRead;
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -273,14 +306,37 @@ describe('admin projects routes', () => {
         body: JSON.stringify({ customer_id: 'customer-1', project_type: 'pest_inspection' }),
       });
       const body = await res.json();
-      expect(res.status).toBe(200);
-      expect(body.project.id).toBe('project-1');
-      expect(activityInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
-        admin_user_id: 'tech-1',
-        customer_id: 'customer-1',
-        action: 'project_created',
-        metadata: expect.objectContaining({ project_id: 'project-1', project_type: 'pest_inspection' }),
-      }));
+      expect(res.status).toBe(403);
+      expect(body.error).toMatch(/assigned visit/);
+    });
+  });
+
+  test('project create rejects service links for a different customer', async () => {
+    const customerRead = chain({
+      first: jest.fn().mockResolvedValue({ id: 'customer-1' }),
+    });
+    const serviceRead = chain({
+      first: jest.fn().mockResolvedValue({ id: 'service-1', customer_id: 'customer-2', technician_id: 'tech-1' }),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'customers') return customerRead;
+      if (table === 'service_records') return serviceRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          customer_id: 'customer-1',
+          project_type: 'pest_inspection',
+          service_record_id: 'service-1',
+        }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(400);
+      expect(body.error).toMatch(/does not belong/);
     });
   });
 
@@ -290,6 +346,10 @@ describe('admin projects routes', () => {
         id: 'project-1',
         customer_id: 'customer-1',
         project_type: 'pest_inspection',
+        project_date: '2026-05-06',
+        title: 'Inspection report',
+        findings: { areas_inspected: 'Kitchen' },
+        recommendations: 'Treat the documented pest activity and follow up if activity continues.',
         report_token: null,
         sent_at: null,
       }),
@@ -300,12 +360,19 @@ describe('admin projects routes', () => {
         id: 'project-1',
         customer_id: 'customer-1',
         project_type: 'pest_inspection',
+        project_date: '2026-05-06',
+        title: 'Inspection report',
+        findings: { areas_inspected: 'Kitchen' },
+        recommendations: 'Treat the documented pest activity and follow up if activity continues.',
         report_token: String(markSent.update.mock.calls[0][0].report_token),
         sent_at: 'NOW',
       })),
     });
     const sequenceRead = chain();
     const persistDelivery = chain();
+    const photoCount = chain({
+      first: jest.fn().mockResolvedValue({ count: '1' }),
+    });
     const activityInsert = chain();
     const customerRead = chain({
       first: jest.fn().mockResolvedValue({
@@ -320,6 +387,7 @@ describe('admin projects routes', () => {
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
       if (table === 'customers') return customerRead;
+      if (table === 'project_photos') return photoCount;
       if (table === 'activity_log') return activityInsert;
       throw new Error(`Unexpected table query: ${table}`);
     });
@@ -334,16 +402,66 @@ describe('admin projects routes', () => {
       expect(body.report_url).toMatch(/^\/report\/project\/van-lee-[a-f0-9]{12}$/);
       expect(body.channels.sms).toEqual({ ok: false, error: 'No phone on file' });
       expect(body.channels.email).toEqual({ ok: false, error: 'No email on file' });
+      expect(body.sent).toBe(false);
+      expect(body.delivery_status).toBe('failed');
       expect(persistDelivery.update).toHaveBeenCalledWith(expect.objectContaining({
         delivery_channels: body.channels,
+        delivery_status: 'failed',
         last_delivery_at: 'NOW',
       }));
+      expect(persistDelivery.update.mock.calls[0][0]).not.toHaveProperty('status', 'sent');
       expect(activityInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
         admin_user_id: 'admin-1',
         customer_id: 'customer-1',
-        action: 'project_report_sent',
-        metadata: expect.objectContaining({ project_id: 'project-1', channels: body.channels }),
+        action: 'project_report_delivery_failed',
+        metadata: expect.objectContaining({ project_id: 'project-1', channels: body.channels, delivery_status: 'failed' }),
       }));
+    });
+  });
+
+  test('send blocks incomplete reports unless an override reason is supplied', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-1',
+        customer_id: 'customer-1',
+        project_type: 'wdo_inspection',
+        project_date: null,
+        findings: { wdo_finding: 'No visible signs of WDO observed' },
+        recommendations: null,
+        report_token: null,
+        sent_at: null,
+      }),
+    });
+    const customerRead = chain({
+      first: jest.fn().mockResolvedValue({ id: 'customer-1', first_name: 'Van', last_name: 'Lee' }),
+    });
+    const photoCount = chain({
+      first: jest.fn().mockResolvedValue({ count: '0' }),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'projects') return projectRead;
+      if (table === 'customers') return customerRead;
+      if (table === 'project_photos') return photoCount;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.error).toMatch(/missing required details/);
+      expect(body.missing.map(item => item.key)).toEqual(expect.arrayContaining([
+        'project_date',
+        'recommendations',
+        'photos',
+        'wdo_property_address',
+        'wdo_inspection_scope',
+      ]));
+      expect(projectRead.update).not.toHaveBeenCalled();
     });
   });
 

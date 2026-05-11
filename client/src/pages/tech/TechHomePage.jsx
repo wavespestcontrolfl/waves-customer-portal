@@ -101,6 +101,8 @@ export default function TechHomePage() {
   const [schedule, setSchedule] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showCreateProject, setShowCreateProject] = useState(false);
+  const [showProjectPicker, setShowProjectPicker] = useState(false);
+  const [projectDefaults, setProjectDefaults] = useState(null);
   const [photoTarget, setPhotoTarget] = useState(null); // { id, customerName }
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const techName = localStorage.getItem('techName') || localStorage.getItem('adminName') || 'Tech';
@@ -231,6 +233,22 @@ export default function TechHomePage() {
   // server's PRE_EN_ROUTE gate rejects those.
   const TERMINAL_STATUSES = new Set(['completed', 'skipped', 'cancelled']);
   const nextStop = myServices.find((s) => !TERMINAL_STATUSES.has(s.status));
+  const openProjectForService = useCallback((service) => {
+    setProjectDefaults(service ? {
+      customerId: service.customer_id || service.customerId || '',
+      customerLabel: service.customer_name || service.customerName || '',
+      scheduledServiceId: service.id || '',
+      projectDate: service.scheduled_date || etDateString(),
+    } : {});
+    setShowCreateProject(true);
+  }, []);
+  const handleProjectQuickAction = useCallback(() => {
+    if (myServices.length === 1) {
+      openProjectForService(myServices[0]);
+      return;
+    }
+    setShowProjectPicker(true);
+  }, [myServices, openProjectForService]);
 
   return (
     <div style={{ maxWidth: 480, margin: '0 auto' }}>
@@ -273,7 +291,9 @@ export default function TechHomePage() {
           <button
             key={action.label}
             onClick={() => {
-              if (action.action === 'create-project') setShowCreateProject(true);
+              if (action.action === 'create-project') {
+                handleProjectQuickAction();
+              }
               else if (action.path) navigate(action.path);
             }}
             style={{
@@ -386,6 +406,7 @@ export default function TechHomePage() {
               <ServiceRow
                 key={s.id}
                 service={s}
+                onProject={() => openProjectForService(s)}
                 onPhotos={() => setPhotoTarget({
                   id: s.id,
                   customerName: s.customer_name || s.customerName || 'Customer',
@@ -400,8 +421,23 @@ export default function TechHomePage() {
 
       {showCreateProject && (
         <CreateProjectModal
-          onClose={() => setShowCreateProject(false)}
-          onCreated={() => setShowCreateProject(false)}
+          defaultCustomerId={projectDefaults?.customerId || ''}
+          defaultCustomerLabel={projectDefaults?.customerLabel || ''}
+          defaultScheduledServiceId={projectDefaults?.scheduledServiceId || ''}
+          defaultProjectDate={projectDefaults?.projectDate || ''}
+          onClose={() => { setShowCreateProject(false); setProjectDefaults(null); }}
+          onCreated={() => { setShowCreateProject(false); setProjectDefaults(null); }}
+        />
+      )}
+
+      {showProjectPicker && (
+        <ProjectServicePicker
+          services={myServices}
+          onClose={() => setShowProjectPicker(false)}
+          onSelect={(service) => {
+            setShowProjectPicker(false);
+            openProjectForService(service);
+          }}
         />
       )}
 
@@ -412,6 +448,87 @@ export default function TechHomePage() {
           onClose={() => setPhotoTarget(null)}
         />
       )}
+    </div>
+  );
+}
+
+function ProjectServicePicker({ services, onClose, onSelect }) {
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      style={{
+        position: 'fixed', inset: 0, zIndex: 200, background: 'rgba(0,0,0,0.6)',
+        display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+        overflowY: 'auto', padding: '16px 0',
+      }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose?.(); }}
+    >
+      <div style={{
+        width: '100%', maxWidth: 460, margin: '0 12px',
+        background: DARK.card, border: `1px solid ${DARK.border}`,
+        borderRadius: 12, padding: 14,
+      }}>
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          marginBottom: 12,
+        }}>
+          <div>
+            <div style={{
+              fontSize: 16, fontWeight: 800, color: DARK.text,
+              fontFamily: "'Montserrat', sans-serif",
+            }}>
+              Select service
+            </div>
+            <div style={{ fontSize: 12, color: DARK.muted, marginTop: 2 }}>
+              Link the report to the visit it documents.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            style={{
+              background: 'transparent', border: 'none', color: DARK.muted,
+              fontSize: 24, cursor: 'pointer', padding: '4px 10px',
+            }}
+          >×</button>
+        </div>
+        {services.length === 0 ? (
+          <div style={{
+            padding: 16, border: `1px solid ${DARK.border}`, borderRadius: 8,
+            color: DARK.muted, fontSize: 13,
+          }}>
+            No services scheduled today.
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {services.map((service) => {
+              const status = service.status || 'pending';
+              return (
+                <button
+                  key={service.id}
+                  type="button"
+                  onClick={() => onSelect(service)}
+                  style={{
+                    textAlign: 'left', padding: '10px 12px', borderRadius: 8,
+                    border: `1px solid ${DARK.border}`, background: DARK.bg,
+                    color: DARK.text, cursor: 'pointer',
+                  }}
+                >
+                  <div style={{ fontSize: 14, fontWeight: 700 }}>
+                    {service.customer_name || service.customerName || 'Customer'}
+                  </div>
+                  <div style={{ fontSize: 12, color: DARK.muted, marginTop: 3 }}>
+                    {status.replace(/_/g, ' ')}
+                    {service.scheduled_time ? ` · ${service.scheduled_time}` : ''}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -573,7 +690,7 @@ function TimecardSignoffCard({ techName }) {
   );
 }
 
-function ServiceRow({ service, onPhotos }) {
+function ServiceRow({ service, onPhotos, onProject }) {
   const status = service.status || 'pending';
   const statusColor = {
     completed: '#22c55e',
@@ -599,13 +716,22 @@ function ServiceRow({ service, onPhotos }) {
           {service.scheduled_time && <span style={{ color: DARK.muted }}> · {service.scheduled_time}</span>}
         </p>
       </div>
-      <button onClick={onPhotos} style={{
-        padding: '6px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
-        border: `1px solid ${DARK.border}`, background: 'transparent',
-        color: DARK.teal, cursor: 'pointer',
-      }}>
-        📷 Photos
-      </button>
+      <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+        <button onClick={onProject} style={{
+          padding: '6px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+          border: `1px solid ${DARK.border}`, background: 'transparent',
+          color: DARK.teal, cursor: 'pointer',
+        }}>
+          🗂️ Report
+        </button>
+        <button onClick={onPhotos} style={{
+          padding: '6px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+          border: `1px solid ${DARK.border}`, background: 'transparent',
+          color: DARK.teal, cursor: 'pointer',
+        }}>
+          📷 Photos
+        </button>
+      </div>
     </div>
   );
 }

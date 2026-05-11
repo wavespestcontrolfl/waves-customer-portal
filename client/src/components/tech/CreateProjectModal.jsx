@@ -198,6 +198,7 @@ function todayDateInput() {
 export default function CreateProjectModal({
   onClose, onCreated,
   defaultCustomerId, defaultServiceRecordId, defaultScheduledServiceId,
+  defaultCustomerLabel,
   defaultProjectDate,
   defaultProjectType = '',
   allowedProjectTypes = null,
@@ -231,7 +232,7 @@ export default function CreateProjectModal({
   const [customerId, setCustomerId] = useState(defaultCustomerId || '');
   const [customerQuery, setCustomerQuery] = useState('');
   const [customerResults, setCustomerResults] = useState([]);
-  const [customerLabel, setCustomerLabel] = useState('');
+  const [customerLabel, setCustomerLabel] = useState(defaultCustomerLabel || '');
   const [projectDate, setProjectDate] = useState(
     defaultProjectDate || (defaultServiceRecordId || defaultScheduledServiceId ? '' : todayDateInput())
   );
@@ -243,6 +244,7 @@ export default function CreateProjectModal({
   const [recommendations, setRecommendations] = useState('');
   const [saving, setSaving] = useState(false);
   const [aiWriting, setAiWriting] = useState(false);
+  const [aiUseComms, setAiUseComms] = useState(true);
   const [error, setError] = useState(null);
   const [createdProject, setCreatedProject] = useState(null);
 
@@ -334,6 +336,7 @@ export default function CreateProjectModal({
           project_date: projectDate || null,
           findings,
           recommendations,
+          include_communications: aiUseComms,
         },
       });
       const data = await d.json();
@@ -356,6 +359,9 @@ export default function CreateProjectModal({
     setSaving(true);
     setError(null);
     try {
+      const usingDefaultCustomerLink = defaultCustomerId && customerId === defaultCustomerId;
+      const serviceRecordId = usingDefaultCustomerLink ? defaultServiceRecordId || null : null;
+      const scheduledServiceId = usingDefaultCustomerLink ? defaultScheduledServiceId || null : null;
       let data = createdProject ? { project: createdProject } : null;
       if (!data) {
         const r = await adminFetch('/admin/projects', {
@@ -367,8 +373,8 @@ export default function CreateProjectModal({
             title: title || null,
             findings,
             recommendations: recommendations || null,
-            service_record_id: defaultServiceRecordId || null,
-            scheduled_service_id: defaultScheduledServiceId || null,
+            service_record_id: serviceRecordId,
+            scheduled_service_id: scheduledServiceId,
           },
         });
         data = await r.json();
@@ -695,6 +701,24 @@ export default function CreateProjectModal({
                     </button>
                   )}
                 </div>
+                {allowAiDraft && (
+                  <label style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    margin: '0 0 8px',
+                    fontSize: 11,
+                    color: P.muted,
+                  }}>
+                    <input
+                      name="ai_include_communications"
+                      type="checkbox"
+                      checked={aiUseComms}
+                      onChange={(e) => setAiUseComms(e.target.checked)}
+                    />
+                    Include recent customer calls/texts/emails in AI draft
+                  </label>
+                )}
                 <textarea
                   value={recommendations}
                   onChange={(e) => setRecommendations(e.target.value)}

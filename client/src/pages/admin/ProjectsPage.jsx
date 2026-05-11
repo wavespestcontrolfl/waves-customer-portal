@@ -62,6 +62,11 @@ const TECHNICAL_SNIPPETS = [
   },
 ];
 
+function getAdminRole() {
+  try { return JSON.parse(localStorage.getItem('waves_admin_user') || '{}')?.role || null; }
+  catch { return null; }
+}
+
 function mergeProjectsUnique(...lists) {
   const byId = new Map();
   lists.flat().forEach(p => {
@@ -170,31 +175,25 @@ export default function ProjectsPage() {
   const [typesRegistry, setTypesRegistry] = useState(null);
   const [createMode, setCreateMode] = useState(null);
   const [error, setError] = useState('');
+  const isAdmin = getAdminRole() === 'admin';
 
   const loadProjects = useCallback(async () => {
     setLoading(true);
     setError('');
     const qs = new URLSearchParams();
+    qs.set('limit', '500');
     if (filterStatus) qs.set('status', filterStatus);
     if (filterType) qs.set('project_type', filterType);
     try {
+      const requests = [adminFetch(`/admin/projects?${qs.toString()}`)];
       if (!filterType) {
         const wdoQs = new URLSearchParams(qs);
         wdoQs.set('project_type', WDO_TYPE);
-        const [generalRes, wdoRes] = await Promise.all([
-          adminFetch(`/admin/projects?${qs.toString()}`),
-          adminFetch(`/admin/projects?${wdoQs.toString()}`),
-        ]);
-        const [generalData, wdoData] = await Promise.all([
-          readJsonResponse(generalRes, 'Could not load projects'),
-          readJsonResponse(wdoRes, 'Could not load WDO reports'),
-        ]);
-        setProjects(mergeProjectsUnique(generalData.projects || [], wdoData.projects || []));
-      } else {
-        const res = await adminFetch(`/admin/projects?${qs.toString()}`);
-        const data = await readJsonResponse(res, 'Could not load projects');
-        setProjects(data.projects || []);
+        requests.push(adminFetch(`/admin/projects?${wdoQs.toString()}`));
       }
+      const responses = await Promise.all(requests);
+      const payloads = await Promise.all(responses.map(res => readJsonResponse(res, 'Could not load projects')));
+      setProjects(mergeProjectsUnique(payloads.flatMap(data => data.projects || [])));
     } catch (e) {
       setError(e.message || 'Could not load projects');
       setProjects([]);
@@ -310,6 +309,7 @@ export default function ProjectsPage() {
             typesRegistry={typesRegistry}
             onClose={() => setSelectedId(null)}
             onChanged={loadProjects}
+            canAdminActions={isAdmin}
           />
         )}
       </div>
@@ -467,7 +467,7 @@ function ProjectRow({ project, active, onSelect, compactType }) {
   );
 }
 
-function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
+function ProjectDetail({ projectId, typesRegistry, onClose, onChanged, canAdminActions = false }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -481,6 +481,8 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [delivery, setDelivery] = useState(null);
+  const [aiUseComms, setAiUseComms] = useState(true);
+  const [aiUsePhotos, setAiUsePhotos] = useState(true);
 
   async function load() {
     setLoading(true);
@@ -538,6 +540,10 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
   }
 
   async function handleSend() {
+    if (!canAdminActions) {
+      setError('Admin access required to send project reports.');
+      return;
+    }
     const readiness = evaluateProjectReadiness({
       project: { ...project, title: editTitle },
       typeCfg,
@@ -553,6 +559,11 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
       ];
       if (!confirm(`This report has items to review before sending:\n\n${lines.join('\n')}\n\nSend anyway?`)) return;
     }
+    let overrideReason = '';
+    if (readiness.missing.length) {
+      overrideReason = window.prompt('Enter the admin override reason for sending this incomplete report:')?.trim() || '';
+      if (!overrideReason) return;
+    }
     const actionLabel = project.status === 'sent' ? 'Resend report to customer?' : 'Send report to customer? This generates a public link and marks the project as Sent.';
     if (!confirm(actionLabel)) return;
     setSaving(true);
@@ -560,8 +571,8 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
     setNotice('');
     try {
       // Persist any dirty edits (including an AI-drafted Recommendations block)
-      // before we flip the project to Sent — otherwise the customer sees the
-      // pre-edit version at the public link.
+      // before delivery runs — otherwise the customer sees the pre-edit version
+      // at the public link.
       if (dirty) {
         const saveRes = await adminFetch(`/admin/projects/${projectId}`, {
           method: 'PUT',
@@ -570,11 +581,18 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
         await readJsonResponse(saveRes, 'Could not save project before sending');
         setDirty(false);
       }
-      const r = await adminFetch(`/admin/projects/${projectId}/send`, { method: 'POST' });
+      const r = await adminFetch(`/admin/projects/${projectId}/send`, {
+        method: 'POST',
+        body: overrideReason ? { override_reason: overrideReason } : {},
+      });
       const d = await readJsonResponse(r, 'Could not send report');
       if (d.report_url) setSentLink(`${window.location.origin}${d.report_url}`);
       setDelivery(d.channels || null);
-      setNotice(`Report link ready. ${deliverySummary(d.channels)}`.trim());
+      if (d.sent === false || d.delivery_status === 'failed') {
+        setError(`Delivery failed; project remains in review. ${deliverySummary(d.channels)}`.trim());
+      } else {
+        setNotice(`Report delivered. ${deliverySummary(d.channels)}`.trim());
+      }
       await load();
       onChanged?.();
     } catch (e) {
@@ -584,6 +602,10 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
   }
 
   async function handleAiWrite() {
+    if (!canAdminActions) {
+      setError('Admin access required to draft project reports with AI.');
+      return;
+    }
     // Drafts into the Recommendations field. Replaces existing content so the
     // admin can tell what came from AI vs. what they kept by-hand; if the
     // admin liked prior text, Cmd-Z restores it before save.
@@ -594,7 +616,13 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
     try {
       const r = await adminFetch(`/admin/projects/${projectId}/ai-write`, {
         method: 'POST',
-        body: { findings: editFindings, recommendations: editRecs, project_date: editProjectDate || null },
+        body: {
+          findings: editFindings,
+          recommendations: editRecs,
+          project_date: editProjectDate || null,
+          include_communications: aiUseComms,
+          include_photos: aiUsePhotos,
+        },
       });
       const d = await readJsonResponse(r, 'AI draft failed');
       if (d.report) {
@@ -626,6 +654,10 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
   }
 
   async function handleClose() {
+    if (!canAdminActions) {
+      setError('Admin access required to close projects.');
+      return;
+    }
     if (!confirm('Close this project? It stays accessible but is filtered out of Sent view.')) return;
     setSaving(true);
     setError('');
@@ -697,6 +729,8 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
   }
 
   const status = STATUS_STYLES[project.status] || STATUS_STYLES.draft;
+  const idPrefix = `project-${projectId}`;
+  const fieldInputId = (key) => `${idPrefix}-finding-${key}`;
   const readiness = evaluateProjectReadiness({
     project: { ...project, title: editTitle },
     typeCfg,
@@ -746,7 +780,7 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
       <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 18 }}>
         {error && <Alert tone="error">{error}</Alert>}
         {notice && <Alert tone="success">{notice}</Alert>}
-        {delivery && <DeliveryPanel channels={delivery} />}
+        {delivery && <DeliveryPanel channels={delivery} status={project.delivery_status} />}
 
         {sentLink && (
           <div style={{
@@ -800,8 +834,10 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
 
         {/* Title */}
         <div>
-          <Label>Report title</Label>
+          <Label htmlFor={`${idPrefix}-title`}>Report title</Label>
           <input
+            id={`${idPrefix}-title`}
+            name="title"
             type="text"
             value={editTitle}
             onChange={(e) => { setEditTitle(e.target.value); setDirty(true); }}
@@ -811,8 +847,10 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
         </div>
 
         <div>
-          <Label>Inspection / project date</Label>
+          <Label htmlFor={`${idPrefix}-project-date`}>Inspection / project date</Label>
           <input
+            id={`${idPrefix}-project-date`}
+            name="project_date"
             type="date"
             value={editProjectDate}
             onChange={(e) => { setEditProjectDate(e.target.value); setDirty(true); }}
@@ -823,9 +861,11 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
         {/* Type-specific findings */}
         {typeCfg?.findingsFields?.map(field => (
           <div key={field.key}>
-            <Label>{field.label}</Label>
+            <Label htmlFor={fieldInputId(field.key)}>{field.label}</Label>
             {field.type === 'select' ? (
               <select
+                id={fieldInputId(field.key)}
+                name={`findings.${field.key}`}
                 value={editFindings[field.key] || ''}
                 onChange={(e) => { setEditFindings(f => ({ ...f, [field.key]: e.target.value })); setDirty(true); }}
                 style={inputStyle}
@@ -835,6 +875,8 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
               </select>
             ) : field.type === 'textarea' ? (
               <textarea
+                id={fieldInputId(field.key)}
+                name={`findings.${field.key}`}
                 value={editFindings[field.key] || ''}
                 onChange={(e) => { setEditFindings(f => ({ ...f, [field.key]: e.target.value })); setDirty(true); }}
                 rows={3}
@@ -842,6 +884,8 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
               />
             ) : (
               <input
+                id={fieldInputId(field.key)}
+                name={`findings.${field.key}`}
                 type="text"
                 value={editFindings[field.key] || ''}
                 onChange={(e) => { setEditFindings(f => ({ ...f, [field.key]: e.target.value })); setDirty(true); }}
@@ -854,25 +898,53 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
         {/* Recommendations */}
         <div>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-            <Label style={{ margin: 0 }}>Recommendations / notes</Label>
-            <button
-              type="button"
-              onClick={handleAiWrite}
-              disabled={aiWriting || saving}
-              title="Claude drafts Customer Concern, What We Inspected, What We Found, What We Did, and What We Recommend from available context."
-              style={{
-                padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700,
-                background: aiWriting ? D.muted : D.card, color: D.heading,
-                border: `1px solid ${D.inputBorder}`,
-                cursor: (aiWriting || saving) ? 'default' : 'pointer',
-                display: 'inline-flex', alignItems: 'center', gap: 6,
-              }}
-            >
-              <span aria-hidden="true">✨</span>
-              {aiWriting ? 'Drafting…' : 'Write with AI'}
-            </button>
+            <Label htmlFor={`${idPrefix}-recommendations`} style={{ margin: 0 }}>Recommendations / notes</Label>
+            {canAdminActions && (
+              <button
+                type="button"
+                onClick={handleAiWrite}
+                disabled={aiWriting || saving}
+                title="Claude drafts Customer Concern, What We Inspected, What We Found, What We Did, and What We Recommend from selected context."
+                style={{
+                  padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700,
+                  background: aiWriting ? D.muted : D.card, color: D.heading,
+                  border: `1px solid ${D.inputBorder}`,
+                  cursor: (aiWriting || saving) ? 'default' : 'pointer',
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                }}
+              >
+                <span aria-hidden="true">✨</span>
+                {aiWriting ? 'Drafting…' : 'Write with AI'}
+              </button>
+            )}
           </div>
+          {canAdminActions && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, margin: '0 0 8px', fontSize: 11, color: D.muted }}>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                <input
+                  id={`${idPrefix}-ai-comms`}
+                  name="ai_include_communications"
+                  type="checkbox"
+                  checked={aiUseComms}
+                  onChange={(e) => setAiUseComms(e.target.checked)}
+                />
+                Include recent calls/texts/emails
+              </label>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                <input
+                  id={`${idPrefix}-ai-photos`}
+                  name="ai_include_photos"
+                  type="checkbox"
+                  checked={aiUsePhotos}
+                  onChange={(e) => setAiUsePhotos(e.target.checked)}
+                />
+                Include photos
+              </label>
+            </div>
+          )}
           <textarea
+            id={`${idPrefix}-recommendations`}
+            name="recommendations"
             value={editRecs}
             onChange={(e) => { setEditRecs(e.target.value); setDirty(true); }}
             rows={8}
@@ -912,7 +984,15 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
               background: D.accent, color: '#fff', cursor: 'pointer',
             }}>
               + Upload
-              <input type="file" accept="image/*" multiple onChange={handlePhotoUpload} style={{ display: 'none' }} />
+              <input
+                id={`${idPrefix}-photos`}
+                name="project_photos"
+                type="file"
+                accept="image/*"
+                multiple
+                onChange={handlePhotoUpload}
+                style={{ display: 'none' }}
+              />
             </label>
           </div>
           {data.photos?.length > 0 ? (
@@ -934,7 +1014,7 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
         padding: '12px 16px', borderTop: `1px solid ${D.border}`,
         display: 'flex', gap: 10, justifyContent: 'flex-end', alignItems: 'center',
       }}>
-        {project.status !== 'closed' && (
+        {canAdminActions && project.status !== 'closed' && (
           <button
             type="button"
             onClick={handleClose}
@@ -948,7 +1028,7 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
           disabled={saving || !dirty}
           style={{ ...btnSecondary, opacity: (saving || !dirty) ? 0.4 : 1 }}
         >{saving ? 'Saving…' : 'Save changes'}</button>
-        {project.status === 'sent' && project.status !== 'closed' && (
+        {canAdminActions && project.status === 'sent' && project.status !== 'closed' && (
           <button
             type="button"
             onClick={handleSend}
@@ -956,7 +1036,7 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged }) {
             style={{ ...btnPrimary, opacity: saving ? 0.5 : 1 }}
           >Resend report</button>
         )}
-        {project.status !== 'sent' && project.status !== 'closed' && (
+        {canAdminActions && project.status !== 'sent' && project.status !== 'closed' && (
           <button
             type="button"
             onClick={handleSend}
@@ -1166,7 +1246,7 @@ function Alert({ tone = 'success', children }) {
   );
 }
 
-function DeliveryPanel({ channels }) {
+function DeliveryPanel({ channels, status }) {
   const entries = Object.entries(channels || {});
   if (!entries.length) return null;
   return (
@@ -1176,7 +1256,9 @@ function DeliveryPanel({ channels }) {
       border: `1px solid ${D.border}`,
       borderRadius: 8,
     }}>
-      <div style={{ fontSize: 12, fontWeight: 800, color: D.heading, marginBottom: 8 }}>Delivery status</div>
+      <div style={{ fontSize: 12, fontWeight: 800, color: D.heading, marginBottom: 8 }}>
+        Delivery status{status ? `: ${String(status).replace(/_/g, ' ')}` : ''}
+      </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {entries.map(([channel, result]) => (
           <div key={channel} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 12 }}>
@@ -1191,13 +1273,14 @@ function DeliveryPanel({ channels }) {
   );
 }
 
-function Label({ children, style }) {
+function Label({ children, style, htmlFor }) {
   return (
-    <div style={{
+    <label htmlFor={htmlFor} style={{
       fontSize: 11, fontWeight: 700, color: D.muted,
       textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6,
+      display: 'block',
       ...(style || {}),
-    }}>{children}</div>
+    }}>{children}</label>
   );
 }
 
