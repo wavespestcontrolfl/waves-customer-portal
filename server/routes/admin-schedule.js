@@ -16,7 +16,10 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
-const { recordTrackTransitionFailure } = require('../services/track-transition-alerts');
+const {
+  recordTrackTransitionFailure,
+  recordTrackTransitionResultFailure,
+} = require('../services/track-transition-alerts');
 
 // ─── Destructive maintenance endpoints ──────────────────────────────────────
 // Defined BEFORE the router-level auth chain so `devOnly` runs first and
@@ -1646,9 +1649,15 @@ router.put('/:id/status', async (req, res, next) => {
     // SMS guard on track_sms_sent_at), so a retry from any path is safe.
     if (toStatus === 'en_route') {
       try {
-        await trackTransitions.markEnRoute(svc.id, {
+        const result = await trackTransitions.markEnRoute(svc.id, {
           actorType: 'admin',
           actorId: req.technicianId,
+        });
+        await recordTrackTransitionResultFailure({
+          jobId: svc.id,
+          action: 'mark_en_route',
+          actorId: req.technicianId,
+          result,
         });
       } catch (e) {
         logger.error(`[en-route] markEnRoute failed: ${e.message}`);

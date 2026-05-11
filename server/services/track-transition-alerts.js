@@ -20,4 +20,18 @@ async function recordTrackTransitionFailure({ jobId, action, actorId, error }) {
   }
 }
 
-module.exports = { recordTrackTransitionFailure };
+async function recordTrackTransitionResultFailure({ jobId, action, actorId, result }) {
+  if (!result || result.ok !== false) return false;
+  await recordTrackTransitionFailure({
+    jobId,
+    action,
+    actorId,
+    error: new Error(result.reason || 'track transition returned ok=false'),
+  });
+  return true;
+}
+
+module.exports = {
+  recordTrackTransitionFailure,
+  recordTrackTransitionResultFailure,
+};

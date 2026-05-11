@@ -19,7 +19,10 @@ const { buildPlanForService, isDateInWindow } = require('../services/waveguard-p
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
-const { recordTrackTransitionFailure } = require('../services/track-transition-alerts');
+const {
+  recordTrackTransitionFailure,
+  recordTrackTransitionResultFailure,
+} = require('../services/track-transition-alerts');
 
 // Haversine ETA for the dispatch board tech cards. Returns a whole
 // number of minutes, or null when any input is missing or the tech is
@@ -722,9 +725,15 @@ router.put('/:serviceId/status', async (req, res, next) => {
 
       for (const target of targets) {
         try {
-          await trackTransitions.cancel(target.id, {
+          const result = await trackTransitions.cancel(target.id, {
             reason: notes || null,
             actorId: req.technicianId,
+          });
+          await recordTrackTransitionResultFailure({
+            jobId: target.id,
+            action: 'cancel',
+            actorId: req.technicianId,
+            result,
           });
         } catch (e) {
           logger.error(`[admin-dispatch] series cancel track transition failed for ${target.id}: ${e.message}`);
@@ -804,9 +813,15 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // timestamps for the customer tracker, and the en-route SMS fire.
     if (toStatus === 'en_route') {
       try {
-        await trackTransitions.markEnRoute(svc.id, {
+        const result = await trackTransitions.markEnRoute(svc.id, {
           actorType: 'admin',
           actorId: req.technicianId,
+        });
+        await recordTrackTransitionResultFailure({
+          jobId: svc.id,
+          action: 'mark_en_route',
+          actorId: req.technicianId,
+          result,
         });
       } catch (e) {
         logger.error(`[admin-dispatch] markEnRoute failed: ${e.message}`);
@@ -819,9 +834,15 @@ router.put('/:serviceId/status', async (req, res, next) => {
       }
     } else if (toStatus === 'completed') {
       try {
-        await trackTransitions.markComplete(svc.id, {
+        const result = await trackTransitions.markComplete(svc.id, {
           actorType: 'admin',
           actorId: req.technicianId,
+        });
+        await recordTrackTransitionResultFailure({
+          jobId: svc.id,
+          action: 'mark_complete',
+          actorId: req.technicianId,
+          result,
         });
       } catch (e) {
         logger.error(`[admin-dispatch] markComplete failed: ${e.message}`);
@@ -841,9 +862,15 @@ router.put('/:serviceId/status', async (req, res, next) => {
       } catch (e) { logger.error(`[admin-dispatch] cancellation reminder handling failed: ${e.message}`); }
 
       try {
-        await trackTransitions.cancel(svc.id, {
+        const result = await trackTransitions.cancel(svc.id, {
           reason: notes || null,
           actorId: req.technicianId,
+        });
+        await recordTrackTransitionResultFailure({
+          jobId: svc.id,
+          action: 'cancel',
+          actorId: req.technicianId,
+          result,
         });
       } catch (e) {
         logger.error(`[admin-dispatch] cancel failed: ${e.message}`);
@@ -1396,9 +1423,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // terminal public tracker state.
     if (!resumingCommittedCompletion) {
       try {
-        await trackTransitions.markComplete(svc.id, {
+        const result = await trackTransitions.markComplete(svc.id, {
           actorType: 'admin',
           actorId: req.technicianId,
+        });
+        await recordTrackTransitionResultFailure({
+          jobId: svc.id,
+          action: 'mark_complete',
+          actorId: req.technicianId,
+          result,
         });
       } catch (e) {
         logger.error(`[admin-dispatch] markComplete failed: ${e.message}`);
