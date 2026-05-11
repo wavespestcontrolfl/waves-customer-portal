@@ -82,6 +82,17 @@ export default function MobileCheckoutSheet({
   const pct = tier && TIER_DISCOUNT[tier] != null ? TIER_DISCOUNT[tier] : 0;
   const rawPrice = service.estimatedPrice != null ? Number(service.estimatedPrice) : null;
   const price = rawPrice != null ? rawPrice : Number(service.monthlyRate || 0);
+  const appointmentAddons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
+  const appointmentAddonTotal = Math.round(
+    appointmentAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100
+  ) / 100;
+  const splitAppointmentAddons = appointmentAddons.length > 0 && appointmentAddonTotal > 0 && appointmentAddonTotal < price;
+  const baseServicePrice = splitAppointmentAddons
+    ? Math.max(0, Math.round((price - appointmentAddonTotal) * 100) / 100)
+    : price;
+  const baseServiceLabel = splitAppointmentAddons
+    ? (service.serviceType || 'General Service')
+    : (service.serviceTypeDisplay || service.serviceType || 'General Service');
 
   // Separate extras: positive-amount services vs negative-amount discounts.
   // Tier discount applies only to services subtotal (base + positive extras)
@@ -248,7 +259,7 @@ export default function MobileCheckoutSheet({
             <div className="flex-1 min-w-0 pr-2">
               <div className="flex items-center gap-1.5">
                 <span className="font-medium text-blue-600 truncate" style={{ fontSize: 15 }}>
-                  {service.serviceType || 'General Service'}
+                  {baseServiceLabel}
                 </span>
                 <Tag size={14} className="text-zinc-400 shrink-0" strokeWidth={1.5} />
               </div>
@@ -262,9 +273,31 @@ export default function MobileCheckoutSheet({
               )}
             </div>
             <div className="u-nums text-zinc-900 font-medium shrink-0" style={{ fontSize: 15 }}>
-              ${price.toFixed(0)}
+              ${baseServicePrice.toFixed(0)}
             </div>
           </button>
+
+          {splitAppointmentAddons && appointmentAddons.map((addon) => (
+            <div
+              key={addon.id || addon.serviceId || addon.serviceName}
+              className="flex items-start justify-between gap-3 py-4 border-b border-hairline border-zinc-200"
+            >
+              <div className="flex-1 min-w-0 pr-2">
+                <div className="flex items-center gap-1.5">
+                  <span className="font-medium text-blue-600 truncate" style={{ fontSize: 15 }}>
+                    {addon.serviceName || 'Service add-on'}
+                  </span>
+                  <Tag size={14} className="text-zinc-400 shrink-0" strokeWidth={1.5} />
+                </div>
+                <div className="text-ink-tertiary truncate" style={{ fontSize: 12, marginTop: 2 }}>
+                  Included with appointment
+                </div>
+              </div>
+              <div className="u-nums text-zinc-900 font-medium shrink-0" style={{ fontSize: 15 }}>
+                ${Number(addon.estimatedPrice || 0).toFixed(0)}
+              </div>
+            </div>
+          ))}
 
           {/* Extra added services + discounts */}
           {extras.map((e) => {

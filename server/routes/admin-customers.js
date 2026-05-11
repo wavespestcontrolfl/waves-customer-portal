@@ -313,7 +313,7 @@ router.post('/backfill-review-status', requireAdmin, async (req, res, next) => {
 });
 
 // POST /api/admin/customers/quick-add — minimal customer creation from appointment modal
-router.post('/quick-add', async (req, res, next) => {
+router.post('/quick-add', requireAdmin, async (req, res, next) => {
   try {
     const { firstName, lastName, phone, email, address, city, state, zip, profileLabel, leadSource, pipelineStage, tags, notes } = req.body;
     if (!firstName || !lastName || !phone) {
