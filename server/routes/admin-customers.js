@@ -11,6 +11,102 @@ const PhotoService = require('../services/photos');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+const CUSTOMER_STAGES = [
+  'new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up',
+  'negotiating', 'won', 'active_customer', 'at_risk', 'churned', 'lost', 'dormant',
+];
+const CUSTOMER_STAGE_SET = new Set(CUSTOMER_STAGES);
+
+let healthScoreColumnsCache = null;
+
+async function getHealthScoreColumns() {
+  if (healthScoreColumnsCache) return healthScoreColumnsCache;
+  try {
+    const exists = await db.schema.hasTable('customer_health_scores');
+    if (!exists) {
+      healthScoreColumnsCache = new Set();
+      return healthScoreColumnsCache;
+    }
+    const result = await db.raw(
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'customer_health_scores'"
+    );
+    healthScoreColumnsCache = new Set((result.rows || []).map(r => r.column_name));
+    return healthScoreColumnsCache;
+  } catch (err) {
+    logger.warn(`[customers] health score column detection failed: ${err.message}`);
+    healthScoreColumnsCache = new Set();
+    return healthScoreColumnsCache;
+  }
+}
+
+function latestHealthScoreRaw(columns) {
+  const scoreCol = columns.has('overall_score')
+    ? 'overall_score'
+    : columns.has('health_score')
+      ? 'health_score'
+      : null;
+  if (!scoreCol) return db.raw('NULL as health_score');
+  const orderCol = columns.has('scored_at')
+    ? 'scored_at'
+    : columns.has('score_date')
+      ? 'score_date'
+      : columns.has('created_at')
+        ? 'created_at'
+        : 'id';
+  return db.raw(`(
+    SELECT ${scoreCol}
+    FROM customer_health_scores
+    WHERE customer_health_scores.customer_id = customers.id
+    ORDER BY ${orderCol} DESC
+    LIMIT 1
+  ) as health_score`);
+}
+
+async function latestHealthScoreForCustomer(customerId) {
+  const columns = await getHealthScoreColumns();
+  if (!columns.size) return null;
+  const orderCol = columns.has('scored_at')
+    ? 'scored_at'
+    : columns.has('score_date')
+      ? 'score_date'
+      : columns.has('created_at')
+        ? 'created_at'
+        : 'id';
+  return db('customer_health_scores')
+    .where({ customer_id: customerId })
+    .orderBy(orderCol, 'desc')
+    .first()
+    .catch(e => {
+      logger.warn(`[customers:${customerId}] health_scores: ${e.message}`);
+      return null;
+    });
+}
+
+function isValidStage(stage) {
+  return !stage || CUSTOMER_STAGE_SET.has(stage);
+}
+
+function mapPipelineCustomer(c, stage = c.pipeline_stage) {
+  return {
+    id: c.id,
+    firstName: c.first_name || '',
+    lastName: c.last_name || '',
+    name: `${c.first_name || ''} ${c.last_name || ''}`.trim(),
+    accountId: c.account_id,
+    profileLabel: c.profile_label,
+    address: `${c.address_line1 || ''}, ${c.city || ''}`.replace(/^,\s*|\s*,\s*$/g, ''),
+    phone: c.phone,
+    tier: c.waveguard_tier,
+    monthlyRate: parseFloat(c.monthly_rate || 0),
+    leadScore: c.lead_score,
+    leadSource: c.lead_source,
+    pipelineStage: stage,
+    stageEnteredAt: c.pipeline_stage_changed_at,
+    pipelineStageChangedAt: c.pipeline_stage_changed_at,
+    nextFollowUp: c.next_follow_up_date,
+  };
+}
+
 function applyCustomerListFilters(query, filters) {
   const { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited } = filters;
   if (search) {
@@ -315,16 +411,16 @@ router.post('/backfill-review-status', requireAdmin, async (req, res, next) => {
 // POST /api/admin/customers/quick-add — minimal customer creation from appointment modal
 router.post('/quick-add', requireAdmin, async (req, res, next) => {
   try {
-    const { firstName, lastName, phone, email, address, city, state, zip, profileLabel, leadSource, pipelineStage, tags, notes } = req.body;
-    if (!firstName || !lastName || !phone) {
-      return res.status(400).json({ error: 'firstName, lastName, phone required' });
+    const { firstName, lastName, phone, email, address, addressLine1, city, state, zip, profileLabel, leadSource, pipelineStage, tags, notes } = req.body;
+    if (!firstName || !phone) {
+      return res.status(400).json({ error: 'firstName and phone required' });
     }
     const normalized = {
       firstName: cleanText(firstName),
       lastName: cleanText(lastName),
       phone: cleanText(phone),
       email: cleanEmail(email),
-      address: cleanText(address),
+      address: cleanText(addressLine1 || address),
       city: cleanText(city),
       state: cleanState(state),
       zip: cleanText(zip),
@@ -333,9 +429,10 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
       pipelineStage: cleanText(pipelineStage) || 'new_lead',
       notes: cleanOptionalText(notes),
     };
-    if (!normalized.firstName || !normalized.lastName || !normalized.phone) {
-      return res.status(400).json({ error: 'firstName, lastName, phone required' });
+    if (!normalized.firstName || !normalized.phone) {
+      return res.status(400).json({ error: 'firstName and phone required' });
     }
+    if (!isValidStage(normalized.pipelineStage)) return res.status(400).json({ error: 'Invalid pipeline stage' });
 
     const customer = await db.transaction(async (trx) => {
       const account = await ensureCustomerAccount(trx, normalized);
@@ -345,7 +442,7 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
         is_primary_profile: !account.existingCustomer,
         profile_label: normalized.profileLabel || (account.existingCustomer ? 'Rental property' : 'Primary'),
         first_name: normalized.firstName,
-        last_name: normalized.lastName,
+        last_name: normalized.lastName || null,
         phone: normalized.phone,
         email: normalized.email,
         address_line1: normalized.address,
@@ -409,7 +506,10 @@ router.get('/', async (req, res, next) => {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit) || 100));
 
+    if (stage && !isValidStage(stage)) return res.status(400).json({ error: 'Invalid pipeline stage' });
+
     const filters = { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited };
+    const healthScoreSelect = latestHealthScoreRaw(await getHealthScoreColumns());
     let query = applyCustomerListFilters(db('customers').whereNull('customers.deleted_at'), filters).select(
       'customers.*',
       db.raw('(SELECT COUNT(*) FROM service_records WHERE service_records.customer_id = customers.id) as services_count'),
@@ -421,7 +521,7 @@ router.get('/', async (req, res, next) => {
       // rating column may not exist — use satisfaction_rating from treatment_outcomes or skip
       db.raw("(SELECT NULL) as last_rating"),
       db.raw("(SELECT COALESCE(SUM(total), 0) FROM invoices WHERE invoices.customer_id = customers.id AND status IN ('sent', 'viewed', 'overdue')) as balance_owed"),
-      db.raw("(SELECT COALESCE(overall_score, 0) FROM customer_health_scores WHERE customer_health_scores.customer_id = customers.id ORDER BY created_at DESC LIMIT 1) as health_score"),
+      healthScoreSelect,
       db.raw("(SELECT COUNT(*) FROM payment_methods WHERE payment_methods.customer_id = customers.id) as cards_on_file"),
     );
 
@@ -496,36 +596,36 @@ router.get('/', async (req, res, next) => {
 // GET /api/admin/customers/pipeline — kanban view
 router.get('/pipeline/view', async (req, res, next) => {
   try {
-    const stages = ['new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up', 'negotiating', 'won', 'active_customer', 'at_risk', 'churned', 'lost', 'dormant'];
+    const limitPerStage = Math.min(500, Math.max(1, parseInt(req.query.limitPerStage) || 100));
     const result = {};
+    const flatCustomers = [];
 
-    for (const stage of stages) {
+    for (const stage of CUSTOMER_STAGES) {
+      const stageQuery = db('customers')
+        .where({ pipeline_stage: stage })
+        .whereNull('deleted_at');
+      const [countRow, revenueRow] = await Promise.all([
+        stageQuery.clone().count('* as count').first(),
+        stageQuery.clone().sum('monthly_rate as total').first(),
+      ]);
       const customers = await db('customers')
         .where({ pipeline_stage: stage })
         .whereNull('deleted_at')
         .select('*')
         .orderBy('lead_score', 'desc')
-        .limit(20);
+        .limit(limitPerStage);
 
-      const monthlyTotal = customers.reduce((s, c) => s + parseFloat(c.monthly_rate || 0), 0);
+      const mappedCustomers = customers.map(c => mapPipelineCustomer(c, stage));
+      flatCustomers.push(...mappedCustomers);
 
       result[stage] = {
-        count: customers.length,
-        monthlyRevenue: monthlyTotal,
-        customers: customers.map(c => ({
-          id: c.id, name: `${c.first_name} ${c.last_name}`,
-          accountId: c.account_id, profileLabel: c.profile_label,
-          address: `${c.address_line1 || ''}, ${c.city || ''}`,
-          phone: c.phone, tier: c.waveguard_tier,
-          monthlyRate: parseFloat(c.monthly_rate || 0),
-          leadScore: c.lead_score, leadSource: c.lead_source,
-          pipelineStageChangedAt: c.pipeline_stage_changed_at,
-          nextFollowUp: c.next_follow_up_date,
-        })),
+        count: parseInt(countRow?.count || 0),
+        monthlyRevenue: parseFloat(revenueRow?.total || 0),
+        customers: mappedCustomers,
       };
     }
 
-    res.json({ pipeline: result });
+    res.json({ pipeline: result, customers: flatCustomers });
   } catch (err) { next(err); }
 });
 
@@ -822,7 +922,7 @@ router.get('/:id', async (req, res, next) => {
       db('payments').where({ customer_id: c.id, status: 'paid' }).first(db.raw('COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0)::float as net')).catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
       db('scheduled_services').where({ customer_id: c.id }).orderBy('scheduled_date').limit(10),
       db('sms_log').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(20),
-      db('customer_health_scores').where({ customer_id: c.id }).orderBy('scored_at', 'desc').first().catch(e => { logger.warn(`[customers:${c.id}] health_scores: ${e.message}`); return null; }),
+      latestHealthScoreForCustomer(c.id),
       db('invoices').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(10).catch(e => { logger.warn(`[customers:${c.id}] invoices: ${e.message}`); return []; }),
       db('payment_methods').where({ customer_id: c.id }).catch(e => { logger.warn(`[customers:${c.id}] payment_methods: ${e.message}`); return []; }),
       db('service_photos')
@@ -961,7 +1061,7 @@ router.get('/:id', async (req, res, next) => {
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const { firstName, lastName, phone, email, address, addressLine1, city, state, zip, tier, monthlyRate, leadSource, pipelineStage, tags, notes, companyName, propertyType, profileLabel } = req.body;
-    if (!firstName || !lastName || !phone) return res.status(400).json({ error: 'Name and phone required' });
+    if (!firstName || !phone) return res.status(400).json({ error: 'First name and phone required' });
     const normalized = {
       firstName: cleanText(firstName),
       lastName: cleanText(lastName),
@@ -980,9 +1080,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
       propertyType: cleanOptionalText(propertyType),
       profileLabel: cleanOptionalText(profileLabel),
     };
-    if (!normalized.firstName || !normalized.lastName || !normalized.phone) {
-      return res.status(400).json({ error: 'Name and phone required' });
+    if (!normalized.firstName || !normalized.phone) {
+      return res.status(400).json({ error: 'First name and phone required' });
     }
+    if (!isValidStage(normalized.pipelineStage)) return res.status(400).json({ error: 'Invalid pipeline stage' });
 
     const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
 
@@ -993,8 +1094,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
         account_id: account.accountId,
         is_primary_profile: !account.existingCustomer,
         profile_label: normalized.profileLabel || (account.existingCustomer ? 'Rental property' : 'Primary'),
-        first_name: normalized.firstName, last_name: normalized.lastName, phone: normalized.phone, email: normalized.email,
-        address_line1: normalized.addressLine1, city: normalized.city, state: normalized.state, zip: normalized.zip,
+        first_name: normalized.firstName, last_name: normalized.lastName || null, phone: normalized.phone, email: normalized.email,
+        address_line1: normalized.addressLine1 || null, city: normalized.city || null, state: normalized.state, zip: normalized.zip || null,
         waveguard_tier: normalized.tier, monthly_rate: normalized.monthlyRate,
         member_since: etDateString(),
         referral_code: code, lead_source: normalized.leadSource,
@@ -1049,6 +1150,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
 router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
     const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', hasLeftGoogleReview: 'has_left_google_review' };
+    const before = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
+    if (!before) return res.status(404).json({ error: 'Customer not found' });
+    if (req.body.pipelineStage !== undefined && !isValidStage(req.body.pipelineStage)) {
+      return res.status(400).json({ error: 'Invalid pipeline stage' });
+    }
     const updates = {};
     for (const [k, v] of Object.entries(fields)) {
       if (req.body[k] !== undefined) {
@@ -1058,6 +1164,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         else if (v === 'has_left_google_review') { updates[v] = !!req.body[k]; }
         else if (v === 'email') { updates[v] = cleanEmail(req.body[k]); }
         else if (v === 'phone') { updates[v] = cleanText(req.body[k]); }
+        else if (v === 'last_name') { updates[v] = cleanOptionalText(req.body[k]); }
         else if (v === 'state') { updates[v] = cleanOptionalState(req.body[k]); }
         else { updates[v] = req.body[k]; }
       }
@@ -1066,11 +1173,10 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     if (updates.has_left_google_review !== undefined) {
       updates.review_marked_at = updates.has_left_google_review ? new Date() : null;
     }
-    let before = null;
+    if (updates.pipeline_stage !== undefined && updates.pipeline_stage !== before.pipeline_stage) {
+      updates.pipeline_stage_changed_at = new Date();
+    }
     if (Object.keys(updates).length) {
-      before = await db('customers').where({ id: req.params.id }).first();
-      if (!before) return res.status(404).json({ error: 'Customer not found' });
-
       const contactConflict = await findCrossAccountContactConflict(
         req.params.id,
         before.account_id || before.id,
@@ -1180,7 +1286,8 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
 router.put('/:id/stage', async (req, res, next) => {
   try {
     const { stage, notes } = req.body;
-    const customer = await db('customers').where({ id: req.params.id }).first();
+    if (!isValidStage(stage)) return res.status(400).json({ error: 'Invalid pipeline stage' });
+    const customer = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
     const oldStage = customer.pipeline_stage;
     await db('customers').where({ id: req.params.id }).update({ pipeline_stage: stage, pipeline_stage_changed_at: new Date() });
@@ -1297,6 +1404,18 @@ router.post('/:id/refund', requireAdmin, async (req, res, next) => {
     const { paymentId, amount, reason } = req.body;
     if (!paymentId) return res.status(400).json({ error: 'paymentId required' });
 
+    const payment = await db('payments').where({ id: paymentId, customer_id: req.params.id }).first();
+    if (!payment) return res.status(404).json({ error: 'Payment not found for this customer' });
+    if (amount !== undefined && amount !== null && amount !== '') {
+      const refundAmount = parseFloat(amount);
+      if (!Number.isFinite(refundAmount) || refundAmount <= 0) {
+        return res.status(400).json({ error: 'Refund amount must be greater than 0' });
+      }
+      if (refundAmount > parseFloat(payment.amount || 0)) {
+        return res.status(400).json({ error: 'Refund amount cannot exceed payment amount' });
+      }
+    }
+
     await auditCustomerMutation(req, 'customer.payment.refund', req.params.id, {
       paymentId,
       amount: amount || null,
@@ -1307,5 +1426,11 @@ router.post('/:id/refund', requireAdmin, async (req, res, next) => {
     res.json(result);
   } catch (err) { next(err); }
 });
+
+router._private = {
+  CUSTOMER_STAGES,
+  isValidStage,
+  mapPipelineCustomer,
+};
 
 module.exports = router;
