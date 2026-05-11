@@ -20,8 +20,8 @@ exports.up = async function (knex) {
     WITH delivery AS (
       SELECT
         id,
-        COALESCE(delivery_channels ? 'sms', false) AS has_sms_key,
-        COALESCE(delivery_channels ? 'email', false) AS has_email_key,
+        COALESCE(delivery_channels \? 'sms', false) AS has_sms_key,
+        COALESCE(delivery_channels \? 'email', false) AS has_email_key,
         COALESCE(delivery_channels->'sms'->>'ok', 'false') = 'true' AS sms_channel_ok,
         COALESCE(delivery_channels->'email'->>'ok', 'false') = 'true' AS email_channel_ok,
         LOWER(COALESCE(delivery_channels->'sms'->>'error', '')) = 'no phone on file' AS sms_missing_contact,
