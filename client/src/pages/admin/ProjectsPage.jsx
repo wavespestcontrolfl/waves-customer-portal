@@ -181,12 +181,19 @@ export default function ProjectsPage() {
     setLoading(true);
     setError('');
     const qs = new URLSearchParams();
+    qs.set('limit', '500');
     if (filterStatus) qs.set('status', filterStatus);
     if (filterType) qs.set('project_type', filterType);
     try {
-      const res = await adminFetch(`/admin/projects?${qs.toString()}`);
-      const data = await readJsonResponse(res, 'Could not load projects');
-      setProjects(mergeProjectsUnique(data.projects || []));
+      const requests = [adminFetch(`/admin/projects?${qs.toString()}`)];
+      if (!filterType) {
+        const wdoQs = new URLSearchParams(qs);
+        wdoQs.set('project_type', WDO_TYPE);
+        requests.push(adminFetch(`/admin/projects?${wdoQs.toString()}`));
+      }
+      const responses = await Promise.all(requests);
+      const payloads = await Promise.all(responses.map(res => readJsonResponse(res, 'Could not load projects')));
+      setProjects(mergeProjectsUnique(payloads.flatMap(data => data.projects || [])));
     } catch (e) {
       setError(e.message || 'Could not load projects');
       setProjects([]);

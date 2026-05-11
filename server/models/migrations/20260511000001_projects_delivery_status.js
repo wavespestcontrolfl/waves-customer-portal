@@ -16,13 +16,28 @@ exports.up = async function (knex) {
   }
 
   await knex.raw(`
-    UPDATE projects
+    WITH delivery AS (
+      SELECT
+        id,
+        COALESCE(delivery_channels ? 'sms', false) AS has_sms,
+        COALESCE(delivery_channels ? 'email', false) AS has_email,
+        COALESCE(delivery_channels->'sms'->>'ok', 'false') = 'true' AS sms_ok,
+        COALESCE(delivery_channels->'email'->>'ok', 'false') = 'true' AS email_ok
+      FROM projects
+    )
+    UPDATE projects p
     SET delivery_status = CASE
-      WHEN status IN ('sent', 'closed') THEN 'sent'
-      WHEN last_delivery_at IS NOT NULL THEN 'failed'
+      WHEN (d.sms_ok OR d.email_ok)
+        AND ((d.has_sms AND NOT d.sms_ok) OR (d.has_email AND NOT d.email_ok))
+        THEN 'partial'
+      WHEN d.sms_ok OR d.email_ok THEN 'sent'
+      WHEN d.has_sms OR d.has_email OR p.last_delivery_at IS NOT NULL THEN 'failed'
+      WHEN p.status IN ('sent', 'closed') THEN 'sent'
       ELSE 'not_sent'
     END
-    WHERE delivery_status IS NULL OR delivery_status = 'not_sent'
+    FROM delivery d
+    WHERE p.id = d.id
+      AND (p.delivery_status IS NULL OR p.delivery_status = 'not_sent')
   `);
 };
 
