@@ -39,8 +39,9 @@ class SiteAuditor {
           .filter(Boolean);
 
         for (const loc of locs) {
+          if (!this.isHttpUrl(loc) || !this.isSameOrigin(loc, siteUrl)) continue;
           if (/\.xml(\?.*)?$/i.test(loc)) await crawlSitemap(loc);
-          else if (this.isSameOrigin(loc, siteUrl)) pages.add(loc);
+          else pages.add(loc);
         }
       } catch (err) {
         logger.warn(`[site-audit] Sitemap fetch failed for ${url}: ${err.message}`);
@@ -63,6 +64,15 @@ class SiteAuditor {
   isSameOrigin(url, siteUrl) {
     try {
       return new URL(url).hostname.replace(/^www\./, '') === new URL(siteUrl).hostname.replace(/^www\./, '');
+    } catch {
+      return false;
+    }
+  }
+
+  isHttpUrl(url) {
+    try {
+      const protocol = new URL(url).protocol;
+      return protocol === 'http:' || protocol === 'https:';
     } catch {
       return false;
     }

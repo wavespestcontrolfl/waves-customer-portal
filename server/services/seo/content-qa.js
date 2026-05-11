@@ -113,7 +113,11 @@ class ContentQA {
       recommendation,
     };
 
-    const existing = await db('seo_content_qa_scores').where({ blog_post_id: blogPostId }).first();
+    const existing = await db('seo_content_qa_scores')
+      .where({ blog_post_id: blogPostId })
+      .orderBy('created_at', 'desc')
+      .orderBy('id', 'desc')
+      .first();
     if (existing) {
       await db('seo_content_qa_scores').where({ id: existing.id }).update({ ...record, updated_at: new Date() });
     } else {
