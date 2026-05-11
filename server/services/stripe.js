@@ -895,11 +895,21 @@ const StripeService = {
           piParams.setup_future_usage = 'off_session';
         }
 
-        // Idempotency key includes saveCard + method mode so toggling either
-        // regenerates a clean PI instead of hitting the cached one. The
-        // "explicit" suffix also avoids replaying older automatic-method PIs.
-        const idempotencyKey = `invoice_pi_${invoiceId}_${amountCents}_${saveCard ? 'save' : 'nosave'}_${methodMode}`;
+        // Include the currently stored PI id in the key so a replacement
+        // setup cannot replay an older canceled intent for this invoice.
+        const sourceIntent = lockedInvoice.stripe_payment_intent_id || 'new';
+        const idempotencyKey = `invoice_pi_${invoiceId}_${amountCents}_${saveCard ? 'save' : 'nosave'}_${methodMode}_${sourceIntent}`;
         paymentIntent = await stripe.paymentIntents.create(piParams, { idempotencyKey });
+
+        if (paymentIntent.status === 'canceled') {
+          logger.warn(`[stripe] Stripe replayed canceled PI ${paymentIntent.id} for invoice ${lockedInvoice.invoice_number}; minting replacement`);
+          paymentIntent = await stripe.paymentIntents.create(piParams, {
+            idempotencyKey: `${idempotencyKey}_replacement_${uuidv4()}`,
+          });
+        }
+        if (paymentIntent.status === 'canceled') {
+          throw new Error(`Stripe returned canceled PaymentIntent ${paymentIntent.id}`);
+        }
 
         const invoiceUpdated = await trx('invoices')
           .where({ id: invoiceId })
