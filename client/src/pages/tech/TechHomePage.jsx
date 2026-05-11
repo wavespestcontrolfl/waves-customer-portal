@@ -101,6 +101,7 @@ export default function TechHomePage() {
   const [schedule, setSchedule] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showCreateProject, setShowCreateProject] = useState(false);
+  const [projectDefaults, setProjectDefaults] = useState(null);
   const [photoTarget, setPhotoTarget] = useState(null); // { id, customerName }
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const techName = localStorage.getItem('techName') || localStorage.getItem('adminName') || 'Tech';
@@ -273,7 +274,15 @@ export default function TechHomePage() {
           <button
             key={action.label}
             onClick={() => {
-              if (action.action === 'create-project') setShowCreateProject(true);
+              if (action.action === 'create-project') {
+                setProjectDefaults(nextStop ? {
+                  customerId: nextStop.customer_id || nextStop.customerId || '',
+                  customerLabel: nextStop.customer_name || nextStop.customerName || '',
+                  scheduledServiceId: nextStop.id || '',
+                  projectDate: nextStop.scheduled_date || etDateString(),
+                } : {});
+                setShowCreateProject(true);
+              }
               else if (action.path) navigate(action.path);
             }}
             style={{
@@ -400,8 +409,12 @@ export default function TechHomePage() {
 
       {showCreateProject && (
         <CreateProjectModal
-          onClose={() => setShowCreateProject(false)}
-          onCreated={() => setShowCreateProject(false)}
+          defaultCustomerId={projectDefaults?.customerId || ''}
+          defaultCustomerLabel={projectDefaults?.customerLabel || ''}
+          defaultScheduledServiceId={projectDefaults?.scheduledServiceId || ''}
+          defaultProjectDate={projectDefaults?.projectDate || ''}
+          onClose={() => { setShowCreateProject(false); setProjectDefaults(null); }}
+          onCreated={() => { setShowCreateProject(false); setProjectDefaults(null); }}
         />
       )}
 

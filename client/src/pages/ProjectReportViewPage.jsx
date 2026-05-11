@@ -302,62 +302,36 @@ function buildClientSnapshot({ projectType, findings, recommendations }) {
   return null;
 }
 
-function getReportText(data, findings) {
-  return [
-    data?.projectType,
-    data?.title,
-    data?.recommendations,
-    ...Object.values(findings || {}),
-  ].filter(Boolean).join(' ').toLowerCase();
-}
-
-function buildAtAGlance({ data, findings, reportTitle, clientSnapshot }) {
-  const text = getReportText(data, findings);
-  const kind = getProjectKind(data.projectType);
+function buildAtAGlance({ data, reportTitle, clientSnapshot }) {
   const rows = [
     ['Service type', reportTitle],
   ];
-  if (kind === 'rodent' || includesAny(text, ['rat', 'rodent', 'trap'])) {
-    rows.push(['Activity level', includesAny(text, ['active', 'trap', 'pressure']) ? 'Active / suspected active roof rat activity' : 'Rodent activity documented']);
-    rows.push(['Primary concern', includesAny(text, ['garage', 'jamb']) ? 'Garage entry point at right-side jamb' : 'Rodent travel routes and possible entry points']);
-    rows.push(['Immediate action', includesAny(text, ['trap']) ? 'Leave traps undisturbed and keep children and pets away' : 'Monitor activity and avoid disturbing evidence']);
-    rows.push(['Recommended next step', includesAny(text, ['seal', 'sweep', 'exclusion']) ? 'Garage door seal repair plus follow-up trapping/exclusion inspection' : clientSnapshot?.next || 'Review findings with Waves']);
-  } else if (clientSnapshot) {
+  if (clientSnapshot) {
     rows.push(['Next step', clientSnapshot.priority]);
     rows.push(['Recommended action', clientSnapshot.next]);
   }
   if (data.upcomingAppointment) {
     rows.push(['Follow-up', formatAppointmentWindow(data.upcomingAppointment)]);
+  } else if (data.followupCompletedAt) {
+    rows.push(['Follow-up completed', formatAppointmentDate(data.followupCompletedAt)]);
   } else if (data.followupDate) {
-    rows.push(['Follow-up', formatAppointmentDate(data.followupDate)]);
+    const followupLabel = formatAppointmentDate(data.followupDate);
+    rows.push(['Follow-up', isPastReportDate(data.followupDate) ? `Past due: ${followupLabel}` : followupLabel]);
   }
   return rows.filter(([, value]) => value);
 }
 
-function buildReportSummary({ text }) {
-  if (!includesAny(text, ['roof rat']) || !includesAny(text, ['right-side jamb'])) return '';
-  if (!includesAny(text, ['six snap traps']) || !includesAny(text, ['two inside the kitchen', 'four in the garage'])) return '';
-  if (!includesAny(text, ['vinyl weather stripping']) || !includesAny(text, ['gap exceeding a quarter inch', 'gap over 1/4 inch'])) return '';
-  if (!includesAny(text, ['garage door side seal']) || !includesAny(text, ['threshold sweep'])) return '';
-  return 'Active roof rat pressure was documented around the attached garage. The main concern is gnaw damage and a gap at the right-side garage door jamb, which may allow rodents to access the garage. Six snap traps were placed in the kitchen and garage. The next priority is to monitor trap activity, repair the garage door seal, improve the threshold sweep, and reduce attractants near the garage.';
-}
-
-function buildScopeRows(text) {
-  if (!includesAny(text, ['roof rat', 'rodent', 'trap'])) return [];
-  const rows = [];
-  if (includesAny(text, ['kitchen']) && includesAny(text, ['garage'])) {
-    rows.push([
-      'Areas inspected',
-      'Kitchen, under sink, behind refrigerator, attached garage, garage door perimeter, and refuse storage area.',
-    ]);
-  }
-  if (includesAny(text, ['garage door perimeter', 'building envelope', 'structural openings'])) {
-    rows.push([
-      'Limited or not fully inspected',
-      'Attic, roofline, soffits, wall voids, crawlspaces, exterior utility penetrations, and other concealed areas unless specifically noted in the report photos or findings.',
-    ]);
-  }
-  return rows;
+function isPastReportDate(value) {
+  const key = reportDateKey(value);
+  if (!key) return false;
+  const todayParts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const get = (type) => todayParts.find(part => part.type === type)?.value || '';
+  return key < `${get('year')}-${get('month')}-${get('day')}`;
 }
 
 export default function ProjectReportViewPage() {
@@ -412,11 +386,7 @@ export default function ProjectReportViewPage() {
     findings,
     recommendations: data.recommendations,
   });
-  const reportText = getReportText(data, findings);
-  const atAGlanceRows = buildAtAGlance({ data, findings, reportTitle, clientSnapshot });
-  const showRodentDetails = getProjectKind(data.projectType) === 'rodent' || includesAny(reportText, ['roof rat', 'rodent', 'trap']);
-  const reportSummary = buildReportSummary({ text: reportText });
-  const scopeRows = buildScopeRows(reportText);
+  const atAGlanceRows = buildAtAGlance({ data, reportTitle, clientSnapshot });
 
   return (
     <div style={{ minHeight: '100vh', background: B.offWhite, fontFamily: FONTS.body }}>
@@ -458,8 +428,6 @@ export default function ProjectReportViewPage() {
 
           {atAGlanceRows.length > 0 && <AtAGlance rows={atAGlanceRows} />}
 
-          {reportSummary && <ReportSummary text={reportSummary} />}
-
           {clientSnapshot && (
             <div style={{
               marginTop: 16,
@@ -482,18 +450,6 @@ export default function ProjectReportViewPage() {
               <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.5, marginTop: 6 }}>
                 {clientSnapshot.next}
               </div>
-            </div>
-          )}
-
-          {showRodentDetails && <RodentDetails text={reportText} />}
-
-          {scopeRows.length > 0 && (
-            <div style={{ marginTop: 12 }}>
-              <ReportTable
-                title="Inspection scope"
-                columns={['Scope', 'Details']}
-                rows={scopeRows}
-              />
             </div>
           )}
 
@@ -641,95 +597,6 @@ function AtAGlance({ rows }) {
   );
 }
 
-function ReportSummary({ text }) {
-  return (
-    <div style={{ marginTop: 16, padding: '12px 14px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
-      <div style={{ fontSize: 12, fontWeight: 800, color: B.blueDeeper, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>
-        Summary
-      </div>
-      <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.6 }}>
-        {text}
-      </div>
-    </div>
-  );
-}
-
-function RodentDetails({ text }) {
-  const entryRows = [];
-  if (includesAny(text, ['right-side jamb']) && includesAny(text, ['vinyl weather stripping']) && includesAny(text, ['quarter inch'])) {
-    entryRows.push(['Garage door, right-side jamb', 'Gnawed vinyl weather stripping with gap over 1/4 inch', 'High', 'Replace side seal and install rodent-resistant sweep']);
-  }
-  if (includesAny(text, ['refuse containers staged close', 'refuse containers']) && includesAny(text, ['8-10 feet', 'sealed lidded bins'])) {
-    entryRows.push(['Garage refuse area', 'Trash containers staged near damaged jamb', 'Medium', 'Move bins 8-10 feet away or use sealed lidded bins']);
-  }
-  if (includesAny(text, ['full door perimeter', 'full garage door perimeter']) && includesAny(text, ['follow-up', 'followup'])) {
-    entryRows.push(['Full garage door perimeter', 'Needs reassessment during follow-up', 'Pending', 'Inspect during scheduled follow-up']);
-  }
-  const trapRows = [];
-  if (includesAny(text, ['six snap traps']) && includesAny(text, ['behind the refrigerator']) && includesAny(text, ['under the sink'])) {
-    trapRows.push(['Snap traps', '2', 'Kitchen: behind refrigerator and under sink']);
-  }
-  if (includesAny(text, ['six snap traps']) && includesAny(text, ['four in the garage']) && includesAny(text, ['wall-floor junctions'])) {
-    trapRows.push(['Snap traps', '4', 'Garage: wall-floor junctions near entry corridor']);
-  }
-  if (trapRows.length > 0 && includesAny(text, ['pets and children', 'children and pets'])) {
-    trapRows.push(['Safety note', '-', 'Do not move, reset, or dispose of traps. Keep children and pets away from trap locations.']);
-  }
-  if (entryRows.length === 0 && trapRows.length === 0) return null;
-  return (
-    <div style={{ marginTop: 16, display: 'grid', gap: 12 }}>
-      {entryRows.length > 0 && (
-        <ReportTable
-          title="Entry points and vulnerabilities"
-          columns={['Location', 'Finding', 'Priority', 'Recommendation']}
-          rows={entryRows}
-        />
-      )}
-      {trapRows.length > 0 && (
-        <ReportTable
-          title="Trap placement and safety"
-          columns={['Trap type', 'Quantity', 'Location']}
-          rows={trapRows}
-        />
-      )}
-    </div>
-  );
-}
-
-function ReportTable({ title, columns, rows }) {
-  return (
-    <div style={{ borderRadius: 10, overflow: 'hidden', border: `1px solid ${B.bluePale}`, background: '#fff' }}>
-      <div style={{ padding: '10px 12px', fontSize: 12, fontWeight: 800, color: B.blueDeeper, textTransform: 'uppercase', letterSpacing: 0.5, background: B.blueSurface }}>
-        {title}
-      </div>
-      <div style={{ overflowX: 'auto' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14, color: B.grayDark }}>
-          <thead>
-            <tr>
-              {columns.map(col => (
-                <th key={col} style={{ textAlign: 'left', padding: '9px 10px', color: B.navy, borderTop: `1px solid ${B.bluePale}`, borderBottom: `1px solid ${B.bluePale}` }}>
-                  {col}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row, i) => (
-              <tr key={`${row[0]}-${i}`}>
-                {row.map((cell, idx) => (
-                  <td key={`${row[0]}-${idx}`} style={{ padding: '9px 10px', verticalAlign: 'top', borderBottom: i === rows.length - 1 ? 'none' : `1px solid ${B.bluePale}` }}>
-                    {cell}
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
 function RoofRatPhoto() {
   return (
     <figure style={{ margin: '10px 0 0', borderRadius: 8, overflow: 'hidden', border: `1px solid ${B.bluePale}`, background: '#fff' }}>
@@ -839,43 +706,6 @@ function titleCase(s) {
   return s.split(' ').map(w => w[0] + w.slice(1).toLowerCase()).join(' ');
 }
 
-function buildRecommendationPriorities(text) {
-  const value = String(text || '').toLowerCase();
-  if (!includesAny(value, ['rodent', 'rat', 'trap', 'garage door'])) return [];
-  const rows = [];
-  if (includesAny(value, ['traps undisturbed', 'follow-up', 'followup'])) {
-    rows.push(['Priority 1', 'Trapping follow-up', 'Keep traps in place until the scheduled follow-up. Waves will check captures, reset or relocate traps as needed, and reassess activity.']);
-  }
-  if (includesAny(value, ['garage door side seal', 'side seal']) && includesAny(value, ['threshold sweep', 'rodent-resistant'])) {
-    rows.push(['Priority 2', 'Seal likely entry point', 'Replace the damaged garage door side seal and install a rodent-resistant threshold sweep.']);
-  }
-  if (includesAny(value, ['refuse containers', 'sealed lidded bins', '8-10 feet'])) {
-    rows.push(['Priority 3', 'Reduce attractants', 'Move refuse containers at least 8-10 feet from the garage or switch to sealed lidded bins.']);
-  }
-  if (includesAny(value, ['full door perimeter', 'additional vulnerabilities'])) {
-    rows.push(['Priority 4', 'Confirm full exclusion needs', 'Inspect the garage door perimeter and other access points during the follow-up or exclusion estimate.']);
-  }
-  return rows;
-}
-
-function RecommendationPriorities({ rows }) {
-  if (rows.length === 0) return null;
-  return (
-    <div style={{ display: 'grid', gap: 8, margin: '0 0 10px' }}>
-      {rows.map(([priority, title, body]) => (
-        <div key={priority} style={{ padding: '9px 10px', borderRadius: 8, background: '#fff', border: `1px solid ${B.bluePale}` }}>
-          <div style={{ fontSize: 12, fontWeight: 800, color: B.blueDeeper, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-            {priority} - {title}
-          </div>
-          <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.5, marginTop: 4 }}>
-            {body}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function RecommendationsBlock({ text, upcomingAppointment }) {
   const sections = parseSections(text);
   if (sections) {
@@ -886,7 +716,6 @@ function RecommendationsBlock({ text, upcomingAppointment }) {
             <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>
               {titleCase(s.heading)}
             </div>
-            {s.heading === 'WHAT WE RECOMMEND' && <RecommendationPriorities rows={buildRecommendationPriorities(s.body)} />}
             <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.65, whiteSpace: 'pre-wrap' }}>{s.body}</div>
             {s.heading === 'WHAT WE RECOMMEND' && shouldShowBookingCta(s.body) && <BookingCta upcomingAppointment={upcomingAppointment} text={s.body} />}
           </div>
@@ -897,7 +726,6 @@ function RecommendationsBlock({ text, upcomingAppointment }) {
   return (
     <div style={{ marginTop: 16, padding: '12px 14px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
       <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 4 }}>Recommendations</div>
-      <RecommendationPriorities rows={buildRecommendationPriorities(text)} />
       <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{text}</div>
       {shouldShowBookingCta(text) && <BookingCta upcomingAppointment={upcomingAppointment} text={text} />}
     </div>
