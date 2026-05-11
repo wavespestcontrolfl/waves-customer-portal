@@ -200,7 +200,8 @@ async function optimizeAllRoutes(input) {
       'scheduled_services.*',
       'customers.first_name', 'customers.last_name',
       'customers.address_line1', 'customers.city', 'customers.state', 'customers.zip',
-      'customers.lat', 'customers.lng',
+      db.raw('COALESCE(scheduled_services.lat, customers.latitude) as lat'),
+      db.raw('COALESCE(scheduled_services.lng, customers.longitude) as lng'),
     );
 
   if (!services.length) return { message: 'No services found for this date', date };
@@ -275,7 +276,9 @@ async function optimizeTechRoute(input) {
     .select(
       'scheduled_services.*',
       'customers.first_name', 'customers.last_name',
-      'customers.city', 'customers.lat', 'customers.lng',
+      'customers.city',
+      db.raw('COALESCE(scheduled_services.lat, customers.latitude) as lat'),
+      db.raw('COALESCE(scheduled_services.lng, customers.longitude) as lng'),
     );
 
   if (services.length < 2) return { message: `${tech.name} has ${services.length} stop(s) — nothing to optimize`, tech: tech.name };
@@ -672,8 +675,8 @@ async function findAvailableSlotsTool(input) {
 
   // Resolve customer → lat/lng if provided
   if (customer_id && (!lat || !lng)) {
-    const c = await db('customers').where('id', customer_id).select('lat', 'lng', 'address_line1', 'city', 'state', 'zip').first();
-    if (c?.lat && c?.lng) { lat = parseFloat(c.lat); lng = parseFloat(c.lng); }
+    const c = await db('customers').where('id', customer_id).select('latitude', 'longitude', 'address_line1', 'city', 'state', 'zip').first();
+    if (c?.latitude && c?.longitude) { lat = parseFloat(c.latitude); lng = parseFloat(c.longitude); }
     else if (c && !address) address = [c.address_line1, c.city, c.state, c.zip].filter(Boolean).join(', ');
   }
 

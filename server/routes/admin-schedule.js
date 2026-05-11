@@ -16,6 +16,11 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
+const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
+const {
+  recordTrackTransitionFailure,
+  recordTrackTransitionResultFailure,
+} = require('../services/track-transition-alerts');
 
 // ─── Destructive maintenance endpoints ──────────────────────────────────────
 // Defined BEFORE the router-level auth chain so `devOnly` runs first and
@@ -1269,6 +1274,14 @@ router.post('/', requireAdmin, async (req, res, next) => {
       await AppointmentTagger.onServiceScheduled(svc.id);
     } catch (e) { logger.error(`Appointment tagger failed: ${e.message}`); }
 
+    // Keep the live dispatch board in sync when a same-day job is created
+    // while dispatchers already have the Board tab open.
+    try {
+      await emitDispatchJobUpdate({ jobId: svc.id, actorId: req.technicianId });
+    } catch (e) {
+      logger.error(`[schedule] dispatch board create broadcast failed: ${e.message}`);
+    }
+
     res.status(201).json({ id: svc.id, recurringCreated: isRecurring ? (recurringCount || 4) : 1 });
   } catch (err) { next(err); }
 });
@@ -1291,10 +1304,25 @@ router.put('/:id/update-details', async (req, res, next) => {
     if (scheduledDate !== undefined && scheduledDate !== '') updates.scheduled_date = scheduledDate;
     if (windowStart !== undefined) updates.window_start = windowStart || null;
     if (windowEnd !== undefined) updates.window_end = windowEnd || null;
-    if (technicianId !== undefined) updates.technician_id = technicianId || null;
     if (notes !== undefined) updates.notes = notes;
     if (routeOrder !== undefined && routeOrder !== '') updates.route_order = parseInt(routeOrder);
     if (zone !== undefined) updates.zone = zone;
+    const hasTechnicianIdUpdate = technicianId !== undefined;
+    const requestedTechnicianId = hasTechnicianIdUpdate ? (technicianId || null) : undefined;
+    let assignmentNeedsChange = false;
+    if (hasTechnicianIdUpdate) {
+      if (technicianId !== null && typeof technicianId !== 'string') {
+        return res.status(400).json({ error: 'technicianId must be a UUID string or null' });
+      }
+      const existingAssignment = await db('scheduled_services')
+        .where({ id: req.params.id })
+        .first('id', 'technician_id');
+      if (!existingAssignment) return res.status(404).json({ error: 'Service not found' });
+      assignmentNeedsChange = (existingAssignment.technician_id || null) !== requestedTechnicianId;
+      if (assignmentNeedsChange && req.techRole !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required' });
+      }
+    }
     let editAnchorDate = scheduledDate;
     if (isRecurring && MONTH_RECURRENCE_INTERVALS[recurringPattern] && !editAnchorDate) {
       const existingService = await db('scheduled_services')
@@ -1348,125 +1376,160 @@ router.put('/:id/update-details', async (req, res, next) => {
         if (cols.discount_amount) updates.discount_amount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
       } catch {}
     }
-    if (Object.keys(updates).length) {
-      await db('scheduled_services').where({ id: req.params.id }).update(updates);
-    }
-
-    // Spawn recurring children if requested (Ongoing seeds 4; Fixed uses recurringCount)
+    const detailsChanged = Object.keys(updates).length > 0;
+    let assignmentChanged = false;
     let recurringCreated = 0;
-    const spawnCount = isRecurring ? (recurringOngoing ? 4 : (recurringCount || 0)) : 0;
-    if (isRecurring && recurringPattern && spawnCount > 1) {
-      const parent = await db('scheduled_services').where({ id: req.params.id }).first();
-      if (parent) {
-        const baseDateStr = parent.scheduled_date
-          ? String(parent.scheduled_date).split('T')[0]
-          : etDateString();
-        const rOpts = {
-          nth: editMonthAnchorOpts.nth != null ? editMonthAnchorOpts.nth : parent.recurring_nth,
-          weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
-          intervalDays: recurringIntervalDays != null ? recurringIntervalDays : parent.recurring_interval_days,
-        };
-        const skipParent = parent.skip_weekends != null ? !!parent.skip_weekends : false;
-        const dirParent = parent.weekend_shift === 'back' ? 'back' : 'forward';
-        const skipChild = skipWeekends !== undefined ? !!skipWeekends : skipParent;
-        const dirChild = (weekendShift !== undefined ? weekendShift : dirParent) === 'back' ? 'back' : 'forward';
-        // Pull parent's existing add-on lines once so we can mirror them
-        // onto each spawned child below.
-        let parentAddons = [];
-        try {
-          parentAddons = await db('scheduled_service_addons').where({ scheduled_service_id: parent.id });
-        } catch (e) { /* table may not exist pre-migration — non-blocking */ }
-        // Dedupe shifted child dates — same rationale as the POST spawn:
-        // skip-weekends can collapse consecutive recurrences onto the
-        // same weekday.
-        const seenChildDates = new Set();
-        seenChildDates.add(String(baseDateStr || '').split('T')[0]);
-        // Iterate by inserts (matches POST spawn): skip-weekends can
-        // collapse multiple raw recurrences onto the same shifted weekday,
-        // and a fixed-count plan still owes spawnCount-1 children.
-        const maxAttempts = (spawnCount - 1) * 4 + 30;
-        let attempt = 1;
-        let inserted = 0;
-        while (inserted < spawnCount - 1 && attempt < maxAttempts) {
-          const rawNext = nextRecurringDate(baseDateStr, recurringPattern, attempt, rOpts);
-          attempt++;
-          const nextDateStr = shiftPastWeekend(rawNext, skipChild, dirChild);
-          if (seenChildDates.has(nextDateStr)) continue;
-          seenChildDates.add(nextDateStr);
-          const childData = {
-            customer_id: parent.customer_id,
-            technician_id: parent.technician_id,
-            scheduled_date: nextDateStr,
-            window_start: parent.window_start,
-            window_end: parent.window_end,
-            service_type: parent.service_type,
-            status: 'pending',
-            time_window: parent.time_window,
-            zone: parent.zone,
-            estimated_duration_minutes: parent.estimated_duration_minutes,
-            is_recurring: true,
-            recurring_pattern: recurringPattern,
+
+    await db.transaction(async (trx) => {
+      if (assignmentNeedsChange) {
+        const assignment = await assignDispatchJob({
+          jobId: req.params.id,
+          technicianId: requestedTechnicianId,
+          actorId: req.technicianId,
+          emit: false,
+          trx,
+        });
+        assignmentChanged = !!assignment.changed;
+      }
+
+      if (detailsChanged) {
+        await trx('scheduled_services').where({ id: req.params.id }).update(updates);
+      }
+
+      // Spawn recurring children if requested (Ongoing seeds 4; Fixed uses recurringCount)
+      const spawnCount = isRecurring ? (recurringOngoing ? 4 : (recurringCount || 0)) : 0;
+      if (isRecurring && recurringPattern && spawnCount > 1) {
+        const parent = await trx('scheduled_services').where({ id: req.params.id }).first();
+        if (parent) {
+          const baseDateStr = parent.scheduled_date
+            ? String(parent.scheduled_date).split('T')[0]
+            : etDateString();
+          const rOpts = {
+            nth: editMonthAnchorOpts.nth != null ? editMonthAnchorOpts.nth : parent.recurring_nth,
+            weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
+            intervalDays: recurringIntervalDays != null ? recurringIntervalDays : parent.recurring_interval_days,
           };
+          const skipParent = parent.skip_weekends != null ? !!parent.skip_weekends : false;
+          const dirParent = parent.weekend_shift === 'back' ? 'back' : 'forward';
+          const skipChild = skipWeekends !== undefined ? !!skipWeekends : skipParent;
+          const dirChild = (weekendShift !== undefined ? weekendShift : dirParent) === 'back' ? 'back' : 'forward';
+          // Pull parent's existing add-on lines once so we can mirror them
+          // onto each spawned child below.
+          let parentAddons = [];
           try {
-            const cols = await db('scheduled_services').columnInfo();
-            if (cols.recurring_parent_id) childData.recurring_parent_id = parent.id;
-            if (cols.service_id && parent.service_id) childData.service_id = parent.service_id;
-            if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
-            if (cols.recurring_nth) childData.recurring_nth = (rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) ? parseInt(rOpts.nth) : null;
-            if (cols.recurring_weekday) childData.recurring_weekday = (rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) ? parseInt(rOpts.weekday) : null;
-            if (cols.recurring_interval_days) childData.recurring_interval_days = (rOpts.intervalDays != null && rOpts.intervalDays !== '' && !isNaN(parseInt(rOpts.intervalDays))) ? parseInt(rOpts.intervalDays) : null;
-            if (cols.skip_weekends) childData.skip_weekends = skipChild;
-            if (cols.weekend_shift && skipChild) childData.weekend_shift = dirChild;
-            const dType = discountType !== undefined ? discountType : parent.discount_type;
-            const dAmt = discountAmount !== undefined ? discountAmount : parent.discount_amount;
-            // parent.estimated_price is already discounted at save time — copy as-is to children
-            if (cols.estimated_price && parent.estimated_price != null) childData.estimated_price = parent.estimated_price;
-            copyLineDiscountFields(childData, parent, cols);
-            if (cols.discount_type && dType) childData.discount_type = dType;
-            if (cols.discount_amount && dAmt != null && dAmt !== '') childData.discount_amount = Number(dAmt);
-            const inv = createInvoice !== undefined ? !!createInvoice : !!parent.create_invoice_on_complete;
-            if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = inv;
-          } catch { /* non-blocking */ }
-          const [childRow] = await db('scheduled_services').insert(childData).returning('*');
-          if (parentAddons.length > 0 && childRow?.id) {
+            parentAddons = await trx('scheduled_service_addons').where({ scheduled_service_id: parent.id });
+          } catch (e) { /* table may not exist pre-migration — non-blocking */ }
+          // Dedupe shifted child dates — same rationale as the POST spawn:
+          // skip-weekends can collapse consecutive recurrences onto the
+          // same weekday.
+          const seenChildDates = new Set();
+          seenChildDates.add(String(baseDateStr || '').split('T')[0]);
+          // Iterate by inserts (matches POST spawn): skip-weekends can
+          // collapse multiple raw recurrences onto the same shifted weekday,
+          // and a fixed-count plan still owes spawnCount-1 children.
+          const maxAttempts = (spawnCount - 1) * 4 + 30;
+          let attempt = 1;
+          let inserted = 0;
+          while (inserted < spawnCount - 1 && attempt < maxAttempts) {
+            const rawNext = nextRecurringDate(baseDateStr, recurringPattern, attempt, rOpts);
+            attempt++;
+            const nextDateStr = shiftPastWeekend(rawNext, skipChild, dirChild);
+            if (seenChildDates.has(nextDateStr)) continue;
+            seenChildDates.add(nextDateStr);
+            const childData = {
+              customer_id: parent.customer_id,
+              technician_id: parent.technician_id,
+              scheduled_date: nextDateStr,
+              window_start: parent.window_start,
+              window_end: parent.window_end,
+              service_type: parent.service_type,
+              status: 'pending',
+              time_window: parent.time_window,
+              zone: parent.zone,
+              estimated_duration_minutes: parent.estimated_duration_minutes,
+              is_recurring: true,
+              recurring_pattern: recurringPattern,
+            };
             try {
-              const addonCols = await db('scheduled_service_addons').columnInfo();
-              for (const addon of parentAddons) {
-                const addonData = {
-                  scheduled_service_id: childRow.id,
-                  service_id: addon.service_id || null,
-                  service_name: addon.service_name,
-                  estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
-                };
-                copyAddonDiscountFields(addonData, addon, addonCols);
-                await db('scheduled_service_addons').insert(addonData);
-              }
-            } catch (e) { logger.warn(`[schedule] PUT recurring child addon insert failed (non-blocking): ${e.message}`); }
+              const cols = await db('scheduled_services').columnInfo();
+              if (cols.recurring_parent_id) childData.recurring_parent_id = parent.id;
+              if (cols.service_id && parent.service_id) childData.service_id = parent.service_id;
+              if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
+              if (cols.recurring_nth) childData.recurring_nth = (rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) ? parseInt(rOpts.nth) : null;
+              if (cols.recurring_weekday) childData.recurring_weekday = (rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) ? parseInt(rOpts.weekday) : null;
+              if (cols.recurring_interval_days) childData.recurring_interval_days = (rOpts.intervalDays != null && rOpts.intervalDays !== '' && !isNaN(parseInt(rOpts.intervalDays))) ? parseInt(rOpts.intervalDays) : null;
+              if (cols.skip_weekends) childData.skip_weekends = skipChild;
+              if (cols.weekend_shift && skipChild) childData.weekend_shift = dirChild;
+              const dType = discountType !== undefined ? discountType : parent.discount_type;
+              const dAmt = discountAmount !== undefined ? discountAmount : parent.discount_amount;
+              // parent.estimated_price is already discounted at save time — copy as-is to children
+              if (cols.estimated_price && parent.estimated_price != null) childData.estimated_price = parent.estimated_price;
+              copyLineDiscountFields(childData, parent, cols);
+              if (cols.discount_type && dType) childData.discount_type = dType;
+              if (cols.discount_amount && dAmt != null && dAmt !== '') childData.discount_amount = Number(dAmt);
+              const inv = createInvoice !== undefined ? !!createInvoice : !!parent.create_invoice_on_complete;
+              if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = inv;
+            } catch { /* non-blocking */ }
+            const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
+            if (parentAddons.length > 0 && childRow?.id) {
+              try {
+                const addonCols = await db('scheduled_service_addons').columnInfo();
+                for (const addon of parentAddons) {
+                  const addonData = {
+                    scheduled_service_id: childRow.id,
+                    service_id: addon.service_id || null,
+                    service_name: addon.service_name,
+                    estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
+                  };
+                  copyAddonDiscountFields(addonData, addon, addonCols);
+                  await trx('scheduled_service_addons').insert(addonData);
+                }
+              } catch (e) { logger.warn(`[schedule] PUT recurring child addon insert failed (non-blocking): ${e.message}`); }
+            }
+            recurringCreated++;
+            inserted++;
           }
-          recurringCreated++;
-          inserted++;
         }
+      }
+    });
+
+    if (assignmentChanged || detailsChanged) {
+      try {
+        await emitDispatchJobUpdate({ jobId: req.params.id, actorId: req.technicianId });
+      } catch (e) {
+        logger.error(`[schedule/update-details] dispatch board broadcast failed: ${e.message}`);
       }
     }
 
     res.json({ success: true, recurringCreated });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
 });
 
 // PUT /api/admin/schedule/:id/assign — assign technician
-router.put('/:id/assign', async (req, res, next) => {
+router.put('/:id/assign', requireAdmin, async (req, res, next) => {
   try {
-    const { technicianId } = req.body;
-    if (technicianId === undefined) return res.status(400).json({ error: 'technicianId required' });
-    await db('scheduled_services').where({ id: req.params.id }).update({ technician_id: technicianId });
-    if (technicianId === null) {
+    const result = await assignDispatchJob({
+      jobId: req.params.id,
+      technicianId: req.body ? req.body.technicianId : undefined,
+      actorId: req.technicianId,
+    });
+    if (result.job.technician_id === null) {
       logger.info(`[schedule] Unassigned service ${req.params.id}`);
-      return res.json({ success: true, technicianName: null });
+    } else {
+      logger.info(`[schedule] Assigned service ${req.params.id} to ${result.technicianName || result.job.technician_id}`);
     }
-    const tech = await db('technicians').where({ id: technicianId }).first();
-    logger.info(`[schedule] Assigned service ${req.params.id} to ${tech?.name || technicianId}`);
-    res.json({ success: true, technicianName: tech?.name });
-  } catch (err) { next(err); }
+    res.json({
+      success: true,
+      technicianName: result.technicianName,
+      job: result.job,
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
 });
 
 // POST /api/admin/schedule/:id/prepaid — record payment taken in advance
@@ -1825,11 +1888,25 @@ router.put('/:id/status', async (req, res, next) => {
     // SMS guard on track_sms_sent_at), so a retry from any path is safe.
     if (toStatus === 'en_route') {
       try {
-        await trackTransitions.markEnRoute(svc.id, {
+        const result = await trackTransitions.markEnRoute(svc.id, {
           actorType: 'admin',
           actorId: req.technicianId,
         });
-      } catch (e) { logger.error(`[en-route] markEnRoute failed: ${e.message}`); }
+        await recordTrackTransitionResultFailure({
+          jobId: svc.id,
+          action: 'mark_en_route',
+          actorId: req.technicianId,
+          result,
+        });
+      } catch (e) {
+        logger.error(`[en-route] markEnRoute failed: ${e.message}`);
+        await recordTrackTransitionFailure({
+          jobId: svc.id,
+          action: 'mark_en_route',
+          actorId: req.technicianId,
+          error: e,
+        });
+      }
 
       try {
         const NotificationService = require('../services/notification-service');
@@ -2087,7 +2164,9 @@ router.post('/optimize', async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
-        'customers.lat', 'customers.lng', 'customers.city', 'customers.zip',
+        db.raw('COALESCE(scheduled_services.lat, customers.latitude) as lat'),
+        db.raw('COALESCE(scheduled_services.lng, customers.longitude) as lng'),
+        'customers.city', 'customers.zip',
         db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name")
       );
 
@@ -2176,7 +2255,9 @@ router.post('/optimize-route', async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
-        'customers.lat', 'customers.lng', 'customers.city', 'customers.zip',
+        db.raw('COALESCE(scheduled_services.lat, customers.latitude) as lat'),
+        db.raw('COALESCE(scheduled_services.lng, customers.longitude) as lng'),
+        'customers.city', 'customers.zip',
         db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name")
       );
 
