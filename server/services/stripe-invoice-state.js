@@ -1,4 +1,5 @@
 const { etDateString } = require('../utils/datetime-et');
+const { computeChargeAmount } = require('./stripe-pricing');
 
 function normalizeMethodType(value) {
   return String(value || '').trim().toLowerCase();
@@ -23,6 +24,63 @@ function isAchPaymentIntent(paymentIntent, actualMethodType) {
     ? paymentIntent.payment_method_types
     : [];
   return types.some(isAchMethodType) && paymentIntent?.status === 'processing';
+}
+
+function isTerminalInvoicePaymentIntent(paymentIntent, actualMethodType) {
+  const actual = normalizeMethodType(actualMethodType);
+  if (actual === 'card_present') return true;
+  if (normalizeMethodType(paymentIntent?.metadata?.source) === 'tap_to_pay') return true;
+
+  const types = Array.isArray(paymentIntent?.payment_method_types)
+    ? paymentIntent.payment_method_types.map(normalizeMethodType)
+    : [];
+  return types.includes('card_present');
+}
+
+function methodFamily(value) {
+  const method = normalizeMethodType(value);
+  if (!method) return null;
+  return isAchMethodType(method) ? 'ach' : 'card';
+}
+
+function selectedMethodFamily(paymentIntent) {
+  const selected = normalizeMethodType(paymentIntent?.metadata?.selected_method_category);
+  if (selected) return methodFamily(selected);
+
+  const types = Array.isArray(paymentIntent?.payment_method_types)
+    ? paymentIntent.payment_method_types.map(normalizeMethodType).filter(Boolean)
+    : [];
+  if (types.length === 1) return methodFamily(types[0]);
+
+  return null;
+}
+
+function chargeAmountCents(paymentIntent) {
+  const received = Number(paymentIntent?.amount_received || 0);
+  if (received > 0) return received;
+  return Number(paymentIntent?.amount || 0);
+}
+
+function expectedChargeCents(invoiceBaseAmount, actualMethodType) {
+  if (!actualMethodType || invoiceBaseAmount === undefined || invoiceBaseAmount === null) return null;
+  const amount = Number(invoiceBaseAmount);
+  if (!Number.isFinite(amount)) return null;
+  return Math.round(computeChargeAmount(amount, actualMethodType).total * 100);
+}
+
+function assertInvoicePaymentIntentTenderMatches(paymentIntent, actualMethodType, invoiceBaseAmount) {
+  const selectedFamily = selectedMethodFamily(paymentIntent);
+  const actualFamily = methodFamily(actualMethodType);
+
+  if (selectedFamily && actualFamily && selectedFamily !== actualFamily) {
+    throw new Error('Payment method changed after the invoice total was calculated. Please refresh the invoice and try again.');
+  }
+
+  const actualCents = chargeAmountCents(paymentIntent);
+  const expectedCents = expectedChargeCents(invoiceBaseAmount, actualMethodType);
+  if (expectedCents !== null && actualCents > 0 && Math.abs(actualCents - expectedCents) > 1) {
+    throw new Error('Payment amount does not match the selected payment method. Please refresh the invoice and try again.');
+  }
 }
 
 function invoicePaymentStatusForIntent(paymentIntent, actualMethodType) {
@@ -70,8 +128,10 @@ function dateOnlyString(value) {
 }
 
 module.exports = {
+  assertInvoicePaymentIntentTenderMatches,
   isAchMethodType,
   isAchPaymentIntent,
+  isTerminalInvoicePaymentIntent,
   invoicePaymentStatusForIntent,
   nextInvoiceStatusAfterFailedPayment,
 };

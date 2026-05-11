@@ -9,7 +9,9 @@ const { triggerNotification } = require('../services/notification-triggers');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { etDateString } = require('../utils/datetime-et');
 const {
+  assertInvoicePaymentIntentTenderMatches,
   isAchPaymentIntent,
+  isTerminalInvoicePaymentIntent,
   nextInvoiceStatusAfterFailedPayment,
 } = require('../services/stripe-invoice-state');
 const { computeChargeAmount } = require('../services/stripe-pricing');
@@ -76,27 +78,54 @@ async function paymentDetailsFromIntent(paymentIntent) {
     cardLastFour: null,
     receiptUrl: null,
   };
+  let resolvedFromStripeDetails = false;
 
-  if (!paymentIntent.latest_charge) return details;
+  if (paymentIntent.latest_charge) {
+    try {
+      const stripe = getStripe();
+      if (stripe) {
+        const charge = await stripe.charges.retrieve(paymentIntent.latest_charge);
+        details.receiptUrl = charge?.receipt_url || null;
+        const pmd = charge?.payment_method_details;
+        if (pmd?.card) {
+          details.paymentMethod = 'card';
+          details.cardBrand = pmd.card.brand?.toUpperCase() || null;
+          details.cardLastFour = pmd.card.last4 || null;
+          resolvedFromStripeDetails = true;
+        } else if (pmd?.us_bank_account) {
+          details.paymentMethod = 'us_bank_account';
+          details.cardLastFour = pmd.us_bank_account.last4 || null;
+          resolvedFromStripeDetails = true;
+        } else if (pmd?.type) {
+          details.paymentMethod = pmd.type;
+          resolvedFromStripeDetails = true;
+        }
+      }
+    } catch (err) {
+      logger.warn(`[stripe-webhook] charge detail lookup failed for PI ${paymentIntent.id}: ${err.message}`);
+    }
+  }
+
+  if (resolvedFromStripeDetails || !paymentIntent.payment_method) return details;
 
   try {
     const stripe = getStripe();
     if (!stripe) return details;
-    const charge = await stripe.charges.retrieve(paymentIntent.latest_charge);
-    details.receiptUrl = charge?.receipt_url || null;
-    const pmd = charge?.payment_method_details;
-    if (pmd?.card) {
+    const pm = typeof paymentIntent.payment_method === 'string'
+      ? await stripe.paymentMethods.retrieve(paymentIntent.payment_method)
+      : paymentIntent.payment_method;
+    if (pm?.card) {
       details.paymentMethod = 'card';
-      details.cardBrand = pmd.card.brand?.toUpperCase() || null;
-      details.cardLastFour = pmd.card.last4 || null;
-    } else if (pmd?.us_bank_account) {
+      details.cardBrand = pm.card.brand?.toUpperCase() || details.cardBrand;
+      details.cardLastFour = pm.card.last4 || details.cardLastFour;
+    } else if (pm?.us_bank_account) {
       details.paymentMethod = 'us_bank_account';
-      details.cardLastFour = pmd.us_bank_account.last4 || null;
-    } else if (pmd?.type) {
-      details.paymentMethod = pmd.type;
+      details.cardLastFour = pm.us_bank_account.last4 || details.cardLastFour;
+    } else if (pm?.type) {
+      details.paymentMethod = pm.type;
     }
   } catch (err) {
-    logger.warn(`[stripe-webhook] charge detail lookup failed for PI ${paymentIntent.id}: ${err.message}`);
+    logger.warn(`[stripe-webhook] payment method lookup failed for PI ${paymentIntent.id}: ${err.message}`);
   }
 
   return details;
@@ -393,6 +422,27 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
   const chargedCents = Number(paymentIntent.amount_received || paymentIntent.amount || 0);
   const chargedTotal = chargedCents > 0 ? Math.round((chargedCents / 100) * 100) / 100 : null;
   const details = await paymentDetailsFromIntent(paymentIntent);
+  const invoiceForTenderGuard = await findInvoiceForPaymentIntent(paymentIntent);
+  const invoiceForTenderGuardStatus = String(invoiceForTenderGuard?.status || '').toLowerCase();
+  if (invoiceForTenderGuard
+    && !INVOICE_TERMINAL_PAYMENT_STATUSES.includes(invoiceForTenderGuardStatus)
+    && !isTerminalInvoicePaymentIntent(paymentIntent, details.paymentMethod)) {
+    const invoiceBaseAmount = Number(invoiceForTenderGuard.total);
+    try {
+      assertInvoicePaymentIntentTenderMatches(paymentIntent, details.paymentMethod, invoiceBaseAmount);
+    } catch (err) {
+      logger.error(
+        `[stripe-webhook] Refusing succeeded invoice PI ${piId}: ${err.message} ` +
+        `(invoice=${invoiceForTenderGuard.id}, method=${details.paymentMethod || 'unknown'}, amount=${chargedCents}c)`,
+      );
+      await recordOrphanSucceededPaymentIntent(
+        paymentIntent,
+        chargedTotal ?? centsToDollars(paymentIntent.amount),
+        `Rejected invoice payment tender mismatch for invoice ${invoiceForTenderGuard.id}: ${err.message}`,
+      );
+      return;
+    }
+  }
 
   // Update payments table
   const paymentUpdates = {
