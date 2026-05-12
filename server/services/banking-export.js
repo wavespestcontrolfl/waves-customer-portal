@@ -150,7 +150,9 @@ function generateCSV(payouts, transactions) {
     for (const p of payouts) {
       const amount = parseFloat(p.amount || 0);
       const fees = parseFloat(p.fee_total || 0);
-      const net = amount - fees;
+      // Stripe payout amount is already the net bank deposit. Fees are useful
+      // context, but subtracting them again understates cash received.
+      const net = amount;
       const arrivalDate = p.arrival_date
         ? new Date(p.arrival_date).toISOString().split('T')[0]
         : '';
@@ -176,7 +178,7 @@ function generateCSV(payouts, transactions) {
       'TOTAL',
       totalAmount.toFixed(2),
       totalFees.toFixed(2),
-      (totalAmount - totalFees).toFixed(2),
+      totalAmount.toFixed(2),
       '', '', '', payouts.reduce((s, p) => s + (p.transaction_count || 0), 0),
       '', '',
     ].join(','));

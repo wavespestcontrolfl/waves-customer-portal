@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { Fragment, useState, useEffect, useCallback } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { etDateString } from '../../lib/timezone';
 
@@ -28,6 +28,12 @@ const fmtM = (n) => n != null ? '$' + Number(n).toLocaleString(undefined, { mini
 const fmtD = (d) => d ? new Date(d).toLocaleDateString() : '--';
 
 const STATUS_COLORS = { paid: D.green, pending: D.amber, in_transit: '#0A7EC2', failed: D.red };
+
+function newInstantPayoutIdempotencyKey() {
+  return globalThis.crypto?.randomUUID
+    ? `ipo_${globalThis.crypto.randomUUID()}`
+    : `ipo_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
 
 function Badge({ children, color }) {
   return <span style={{ display: 'inline-block', padding: '2px 10px', borderRadius: 9999, fontSize: 11, fontWeight: 600, background: `${color || D.muted}22`, color: color || D.muted, textTransform: 'capitalize', letterSpacing: 0.5 }}>{children}</span>;
@@ -115,8 +121,8 @@ function PayoutsTab() {
           </thead>
           <tbody>
             {payouts.map(p => (
-              <>
-                <tr key={p.id} onClick={() => toggleExpand(p.id)} style={{ cursor: 'pointer', background: expanded === p.id ? D.bg : 'transparent', transition: 'background 0.15s' }}
+              <Fragment key={p.id}>
+                <tr onClick={() => toggleExpand(p.id)} style={{ cursor: 'pointer', background: expanded === p.id ? D.bg : 'transparent', transition: 'background 0.15s' }}
                   onMouseEnter={e => { if (expanded !== p.id) e.currentTarget.style.background = `${D.card}88`; }}
                   onMouseLeave={e => { if (expanded !== p.id) e.currentTarget.style.background = 'transparent'; }}>
                   <td style={tdStyle}>{fmtD(p.date || p.created)}</td>
@@ -168,7 +174,7 @@ function PayoutsTab() {
                     </td>
                   </tr>
                 )}
-              </>
+              </Fragment>
             ))}
           </tbody>
         </table>
@@ -213,6 +219,9 @@ function CashFlowTab() {
 
   const chartData = data?.periods || [];
   const summary = data?.summary || {};
+  const totalIn = summary.total_in ?? summary.total_revenue ?? 0;
+  const totalOut = summary.total_out ?? ((summary.total_expenses || 0) + (summary.stripe_fees || 0));
+  const net = summary.net ?? summary.operating_cash_flow ?? summary.net_cash_flow ?? 0;
 
   return (
     <div>
@@ -249,9 +258,9 @@ function CashFlowTab() {
 
       {!loading && (
         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4, 1fr)', gap: 10 }}>
-          <SummaryCard label="Total In" value={fmtM(summary.total_in)} color={D.green} />
-          <SummaryCard label="Total Out" value={fmtM(summary.total_out)} color={D.red} />
-          <SummaryCard label="Net" value={fmtM(summary.net)} color={(summary.net || 0) >= 0 ? D.green : D.red} />
+          <SummaryCard label="Revenue In" value={fmtM(totalIn)} color={D.green} />
+          <SummaryCard label="Expenses + Fees" value={fmtM(totalOut)} color={D.red} />
+          <SummaryCard label="Operating Net" value={fmtM(net)} color={net >= 0 ? D.green : D.red} />
           <SummaryCard label="Stripe Fees" value={fmtM(summary.stripe_fees)} color={D.amber} />
         </div>
       )}
@@ -294,7 +303,7 @@ function ReconciliationTab() {
     setLoading(true);
     try {
       const d = await adminFetch('/admin/banking/reconciliation');
-      setItems(d.payouts || []);
+      setItems(Array.isArray(d) ? d : (d.payouts || []));
     } catch (e) { /* no-op */ }
     setLoading(false);
   }, []);
@@ -538,18 +547,24 @@ function ExportsTab() {
 // ═══════════════════════════════════════════════════════════════
 function InstantPayoutModal({ available, onClose, onSuccess }) {
   const [amount, setAmount] = useState(available || 0);
+  const [idempotencyKey, setIdempotencyKey] = useState(() => newInstantPayoutIdempotencyKey());
   const [submitting, setSubmitting] = useState(false);
 
   const fee = (parseFloat(amount) || 0) * 0.01;
   const net = (parseFloat(amount) || 0) - fee;
 
   const handleSubmit = async () => {
-    if (!amount || parseFloat(amount) <= 0) return;
+    const parsedAmount = parseFloat(amount);
+    if (!amount || parsedAmount <= 0) return;
+    if (parsedAmount > (available || 0)) {
+      alert('Instant payout amount exceeds available balance.');
+      return;
+    }
     setSubmitting(true);
     try {
       await adminFetch('/admin/banking/payouts/instant', {
         method: 'POST',
-        body: JSON.stringify({ amount: parseFloat(amount) }),
+        body: JSON.stringify({ amount: parsedAmount, idempotency_key: idempotencyKey }),
       });
       onSuccess();
     } catch (e) {
@@ -569,7 +584,10 @@ function InstantPayoutModal({ available, onClose, onSuccess }) {
           <input
             type="number" step="0.01" min="0" max={available || 0}
             value={amount}
-            onChange={e => setAmount(e.target.value)}
+            onChange={e => {
+              setAmount(e.target.value);
+              setIdempotencyKey(newInstantPayoutIdempotencyKey());
+            }}
             style={{ ...inputStyle, width: '100%', fontSize: 20, fontFamily: MONO, fontWeight: 700, padding: '12px 16px' }}
           />
           <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>Available: <span style={{ fontFamily: MONO, color: D.green }}>{fmtM(available)}</span></div>

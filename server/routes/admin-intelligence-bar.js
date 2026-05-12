@@ -28,7 +28,7 @@ const { COMMS_TOOLS, executeCommsTool } = require('../services/intelligence-bar/
 const { TAX_TOOLS, executeTaxTool } = require('../services/intelligence-bar/tax-tools');
 const { LEADS_TOOLS, executeLeadsTool } = require('../services/intelligence-bar/leads-tools');
 const { EMAIL_TOOLS, executeEmailTool } = require('../services/intelligence-bar/email-tools');
-const { BANKING_TOOLS, executeBankingTool } = require('../services/intelligence-bar/banking-tools');
+const { BANKING_TOOLS, BANKING_QUERY_TOOLS, executeBankingTool } = require('../services/intelligence-bar/banking-tools');
 const { ESTIMATE_TOOLS, executeEstimateTool } = require('../services/intelligence-bar/estimate-tools');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
@@ -36,6 +36,7 @@ const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 
 const adminToolBreaker = getBreaker('intelligence-bar');
+const CONFIRMED_ACTION_TOOL_NAMES = new Set(['request_instant_payout']);
 
 function isToolFailure(result) {
   return result && typeof result === 'object' && (result.error || result.failed === true);
@@ -483,7 +484,7 @@ BANKING CAPABILITIES:
 - Payout history with transaction-level detail (which customers paid in each deposit)
 - Cash flow analysis (money in vs out, net, trend)
 - Fee analysis (effective processing rate, card vs ACH comparison)
-- Instant payout requests (1% fee — always show fee before executing)
+- Instant payout planning (1% fee). The query bar can calculate and explain the payout, but execution must go through the confirmed action endpoint.
 - Reconciliation tracking (match Stripe deposits to bank records)
 - CSV/OFX export for Capital One import or CPA handoff
 
@@ -499,7 +500,7 @@ RESPONSE STYLE:
 - For payouts, include the arrival date (when it actually hits the bank)
 - For cash flow, always show net (in minus out) with a clear positive/negative indicator
 - When discussing fees, show both the dollar amount and the effective percentage rate
-- For instant payouts, ALWAYS show the fee calculation and confirm before executing`,
+- For instant payouts, ALWAYS show the fee calculation and ask for explicit confirmation. Do not execute from the query flow.`,
 };
 
 function getToolsForContext(context) {
@@ -534,7 +535,7 @@ function getToolsForContext(context) {
     return [...TOOLS, ...EMAIL_TOOLS];
   }
   if (context === 'banking') {
-    return [...TOOLS, ...BANKING_TOOLS];
+    return [...TOOLS, ...BANKING_QUERY_TOOLS];
   }
   if (context === 'estimates') {
     return [...TOOLS, ...LEADS_TOOLS, ...ESTIMATE_TOOLS];
@@ -638,6 +639,9 @@ router.post('/query', async (req, res, next) => {
 
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ error: 'Prompt is required' });
+    }
+    if (context === 'banking' && req.techRole !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required for banking intelligence' });
     }
 
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
@@ -801,13 +805,19 @@ router.post('/query', async (req, res, next) => {
 
 router.post('/execute', async (req, res, next) => {
   try {
-    const { action, params } = req.body;
+    const { action, params, confirmed } = req.body;
 
     if (!action) {
       return res.status(400).json({ error: 'Action is required' });
     }
+    if (BANKING_TOOL_NAMES.has(action) && req.techRole !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required for banking actions' });
+    }
+    if (CONFIRMED_ACTION_TOOL_NAMES.has(action) && confirmed !== true) {
+      return res.status(400).json({ error: 'Explicit confirmation is required for this action' });
+    }
 
-    const result = await executeToolByName(action, params);
+    const result = await executeToolByName(action, params || {});
 
     logger.info(`[intelligence-bar] Executed action: ${action}`, params);
 
@@ -827,6 +837,9 @@ router.post('/execute', async (req, res, next) => {
 
 router.get('/quick-actions', async (req, res) => {
   const { context } = req.query;
+  if (context === 'banking' && req.techRole !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required for banking intelligence' });
+  }
 
   const baseActions = [
     { id: 'missing_city', group: 'Find', label: 'Missing Cities', prompt: 'Show me customers with no city on their profile' },
