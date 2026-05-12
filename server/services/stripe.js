@@ -846,30 +846,10 @@ const StripeService = {
         if (!lockedInvoice) throw new Error('Invoice not found');
         assertInvoiceCollectible(lockedInvoice.status);
 
-        if (lockedInvoice.stripe_payment_intent_id) {
-          const activePayment = await trx('payments')
-            .where({ stripe_payment_intent_id: lockedInvoice.stripe_payment_intent_id })
-            .first();
-          const terminalStatuses = ['failed', 'canceled', 'cancelled', 'refunded'];
-          if (activePayment && !terminalStatuses.includes(activePayment.status)) {
-            throw new Error('Invoice has a different active payment');
-          }
-          if (!activePayment) {
-            const activeIntent = await stripe.paymentIntents.retrieve(lockedInvoice.stripe_payment_intent_id);
-            const cancellableStatuses = ['requires_payment_method', 'requires_confirmation', 'canceled'];
-            if (!cancellableStatuses.includes(activeIntent.status)) {
-              throw new Error('Invoice has a different active payment');
-            }
-            if (activeIntent.status !== 'canceled') {
-              await stripe.paymentIntents.cancel(activeIntent.id);
-            }
-          }
-        }
-
         baseAmount = parseFloat(lockedInvoice.total);
-        // The pay page defaults to card/wallet, so mint the first PI with the
-        // card-family surcharge already applied. ACH selection still calls
-        // /update-amount and drops the PI back to the base invoice total.
+        // The pay page defaults to card/wallet, so the PI starts locked to
+        // card-family with the surcharge applied. ACH selection calls
+        // /update-amount and reprices the same bound PI to ACH-only.
         const cardCharge = computeChargeAmount(baseAmount, 'card');
         const cardBase = cardCharge.base;
         cardSurcharge = cardCharge.surcharge;
@@ -895,6 +875,48 @@ const StripeService = {
         if (stripeCustomerId) {
           piParams.customer = stripeCustomerId;
           piParams.setup_future_usage = 'off_session';
+        }
+
+        if (lockedInvoice.stripe_payment_intent_id) {
+          const activePayment = await trx('payments')
+            .where({ stripe_payment_intent_id: lockedInvoice.stripe_payment_intent_id })
+            .first();
+          const terminalStatuses = ['failed', 'canceled', 'cancelled', 'refunded'];
+          if (activePayment && !terminalStatuses.includes(activePayment.status)) {
+            const err = new Error('Invoice payment is already in progress');
+            err.statusCode = 409;
+            throw err;
+          }
+
+          const activeIntent = await stripe.paymentIntents.retrieve(lockedInvoice.stripe_payment_intent_id);
+          const activeIntentInvoiceId = activeIntent.metadata?.waves_invoice_id || null;
+          if (activeIntentInvoiceId && String(activeIntentInvoiceId) !== String(invoiceId)) {
+            throw new Error('PaymentIntent does not belong to this invoice');
+          }
+
+          if (activeIntent.status === 'requires_payment_method') {
+            const updateParams = { ...piParams };
+            delete updateParams.currency;
+            if (!stripeCustomerId) {
+              updateParams.setup_future_usage = '';
+            }
+            paymentIntent = await stripe.paymentIntents.update(activeIntent.id, updateParams);
+            const invoiceUpdated = await trx('invoices')
+              .where({ id: invoiceId })
+              .whereNotIn('status', ['paid', 'processing', 'void', 'refunded', 'canceled', 'cancelled'])
+              .update({
+                processor: 'stripe',
+                stripe_payment_intent_id: paymentIntent.id,
+              });
+            if (!invoiceUpdated) throw new Error('Invoice is no longer collectible');
+            return;
+          }
+
+          if (activeIntent.status !== 'canceled') {
+            const err = new Error('Invoice payment is already in progress');
+            err.statusCode = 409;
+            throw err;
+          }
         }
 
         // Include the currently stored PI id in the key so a replacement
@@ -932,6 +954,10 @@ const StripeService = {
         cardSurchargeRate: CARD_SURCHARGE_RATE,
       };
     } catch (err) {
+      if (err.statusCode) {
+        logger.warn(`[stripe] Invoice PaymentIntent setup blocked for invoice ${invoiceId}: ${err.message}`);
+        throw err;
+      }
       if (paymentIntent?.id) {
         try {
           const currentInvoice = await db('invoices').where({ id: invoiceId }).first();

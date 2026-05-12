@@ -102,6 +102,9 @@ router.post('/:token/setup', async (req, res, next) => {
     });
   } catch (err) {
     logger.error(`[pay-v2] Setup error: ${err.message}`);
+    if (err.statusCode === 409) {
+      return res.status(409).json({ error: err.message });
+    }
     next(err);
   }
 });

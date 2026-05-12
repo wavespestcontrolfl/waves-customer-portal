@@ -37,6 +37,12 @@ describe('StripeService.createInvoicePaymentIntent', () => {
             status: 'requires_payment_method',
             client_secret: 'pi_fresh_secret',
           }),
+        update: jest.fn().mockImplementation(async (id, params) => ({
+          id,
+          status: 'requires_payment_method',
+          client_secret: `${id}_secret`,
+          ...params,
+        })),
       },
     };
 
@@ -103,6 +109,57 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       processor: 'stripe',
       stripe_payment_intent_id: 'pi_fresh',
     });
+  });
+
+  test('reuses an already-bound open PaymentIntent instead of failing setup', async () => {
+    invoiceRow.stripe_payment_intent_id = 'pi_open';
+    stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
+      id: 'pi_open',
+      status: 'requires_payment_method',
+      metadata: { waves_invoice_id: invoiceRow.id },
+    });
+
+    const StripeService = require('../services/stripe');
+    const result = await StripeService.createInvoicePaymentIntent(invoiceRow.id);
+
+    expect(result.paymentIntentId).toBe('pi_open');
+    expect(result.clientSecret).toBe('pi_open_secret');
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.update).toHaveBeenCalledWith('pi_open', expect.objectContaining({
+      amount: 7799,
+      payment_method_types: ['card'],
+      setup_future_usage: '',
+      metadata: expect.objectContaining({
+        waves_invoice_id: invoiceRow.id,
+        selected_method_category: 'card',
+        base_amount: '75',
+        card_surcharge: '2.99',
+      }),
+    }));
+    expect(stripeClient.paymentIntents.update.mock.calls[0][1]).not.toHaveProperty('currency');
+    expect(updateInvoice).toHaveBeenCalledWith({
+      processor: 'stripe',
+      stripe_payment_intent_id: 'pi_open',
+    });
+  });
+
+  test('setup returns a client-safe conflict when a bound PaymentIntent is already in progress', async () => {
+    invoiceRow.stripe_payment_intent_id = 'pi_processing';
+    stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
+      id: 'pi_processing',
+      status: 'processing',
+      metadata: { waves_invoice_id: invoiceRow.id },
+    });
+
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.createInvoicePaymentIntent(invoiceRow.id))
+      .rejects.toMatchObject({
+        message: 'Invoice payment is already in progress',
+        statusCode: 409,
+      });
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
   });
 });
 
