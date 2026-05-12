@@ -41,10 +41,8 @@ async function attachLeadToEstimate({ database = db, leadId, estimateId, technic
     estimate_id: estimateId,
     updated_at: new Date(),
   };
-  if (lead.status === 'new') updates.status = 'contacted';
 
   await database('leads').where({ id: leadId }).update(updates);
-  await recordFirstResponseIfNeeded(database, lead, performedBy);
   await database('lead_activities').insert({
     lead_id: leadId,
     activity_type: 'estimate_created',
