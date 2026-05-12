@@ -101,3 +101,7 @@ export async function adminFetch(path, options = {}) {
 export function isRateLimitError(err) {
   return err && (err.status === 429 || err.code === 'RATE_LIMITED');
 }
+
+export function isForbiddenError(err) {
+  return err && err.status === 403;
+}

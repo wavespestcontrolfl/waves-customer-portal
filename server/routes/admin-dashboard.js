@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { etDateString, etMonthStart, etMonthEnd, etYearStart, etWeekStart, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { cacheRoute } = require('../utils/route-cache');
 const {
@@ -10,7 +10,7 @@ const {
   INTERNAL_TEST_CUSTOMERS,
 } = require('../services/intelligence-bar/dashboard-tools');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 // Per-user response cache (60s) for the read-only KPI panels. The underlying
 // SQL aggregates revenue/AR/MRR/attribution windows that don't shift inside a
@@ -48,6 +48,15 @@ function startOfLastMonth() { return etMonthStart(new Date(), -1); }
 function endOfLastMonth() { return etMonthEnd(new Date(), -1); }
 function mondayThisWeek() { return etWeekStart(); }
 function sundayThisWeek() { return etDateString(addETDays(parseETDateTime(etWeekStart() + 'T12:00'), 6)); }
+function addDaysET(dateStr, days) {
+  return etDateString(addETDays(parseETDateTime(`${dateStr}T12:00`), days));
+}
+function inclusiveDayCount(from, to) {
+  const a = parseETDateTime(`${from}T12:00`).getTime();
+  const b = parseETDateTime(`${to}T12:00`).getTime();
+  return Math.max(1, Math.round((b - a) / 86400000) + 1);
+}
+function minDateStr(a, b) { return a <= b ? a : b; }
 
 function applyETTimestampWindow(qb, column, from, to) {
   return qb
@@ -126,7 +135,7 @@ router.get('/', dashboardCache, async (req, res, next) => {
     const today = etDateString();
     const som = startOfMonth();
     const solm = startOfLastMonth();
-    const eolm = endOfLastMonth();
+    const eolm = minDateStr(addDaysET(solm, inclusiveDayCount(som, today) - 1), endOfLastMonth());
     const monW = mondayThisWeek();
     const sunW = sundayThisWeek();
 
@@ -694,7 +703,7 @@ router.get('/compare', dashboardCache, async (req, res, next) => {
     const period = String(req.query.period || 'this_month').toLowerCase();
     const against = String(req.query.against || 'last_month').toLowerCase();
 
-    function resolveWindow(p) {
+    function resolveWindow(p, opts = {}) {
       const today = etDateString();
       switch (p) {
         case 'today':       return { from: today, to: today, label: 'Today' };
@@ -706,7 +715,15 @@ router.get('/compare', dashboardCache, async (req, res, next) => {
           return { from: monLast, to: sunLast, label: 'Last week' };
         }
         case 'this_month':  return { from: etMonthStart(), to: today, label: 'This month' };
-        case 'last_month':  return { from: etMonthStart(new Date(), -1), to: etMonthEnd(new Date(), -1), label: 'Last month' };
+        case 'last_month': {
+          const from = etMonthStart(new Date(), -1);
+          const monthEnd = etMonthEnd(new Date(), -1);
+          if (opts.alignToElapsed && opts.elapsedDays) {
+            const to = minDateStr(addDaysET(from, opts.elapsedDays - 1), monthEnd);
+            return { from, to, label: 'Last month to date' };
+          }
+          return { from, to: monthEnd, label: 'Last month' };
+        }
         case 'ytd':         return { from: etYearStart(), to: today, label: 'YTD' };
         default:            return { from: etMonthStart(), to: today, label: 'This month' };
       }
@@ -732,7 +749,9 @@ router.get('/compare', dashboardCache, async (req, res, next) => {
     }
 
     const a = resolveWindow(period);
-    const b = resolveWindow(against);
+    const elapsedDays = inclusiveDayCount(a.from, a.to);
+    const alignToElapsed = period === 'this_month' && against === 'last_month';
+    const b = resolveWindow(against, { alignToElapsed, elapsedDays });
 
     const [seriesA, seriesB, totalsA, totalsB] = await Promise.all([
       dailySeries(a.from, a.to),
@@ -755,6 +774,7 @@ router.get('/compare', dashboardCache, async (req, res, next) => {
         servicesCompleted: pctChange(totalsA.servicesCompleted, totalsB.servicesCompleted),
         newCustomers: pctChange(totalsA.newCustomers, totalsB.newCustomers),
       },
+      comparisonBasis: alignToElapsed ? 'elapsed_period' : 'full_period',
     });
   } catch (err) {
     logger.error(`[admin-dashboard] /compare failed: ${err.message}`);

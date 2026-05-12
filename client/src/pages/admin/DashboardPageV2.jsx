@@ -26,7 +26,7 @@ import {
   fmtMoneyCompact,
 } from '../../components/dashboard/charts';
 import useIsMobile from '../../hooks/useIsMobile';
-import { adminFetch, isRateLimitError } from '../../utils/admin-fetch';
+import { adminFetch, isForbiddenError, isRateLimitError } from '../../utils/admin-fetch';
 
 const PERIODS = [
   { id: 'today', label: 'Today' },
@@ -41,6 +41,18 @@ const greeting = () => {
   if (h < 17) return 'Good afternoon';
   return 'Good evening';
 };
+
+function adminFirstName() {
+  try {
+    if (typeof localStorage === 'undefined') return 'there';
+    const user = JSON.parse(localStorage.getItem('waves_admin_user') || 'null');
+    const raw = user?.name || user?.first_name || user?.email || '';
+    const first = String(raw).trim().split(/\s+/)[0] || 'there';
+    return first.includes('@') ? first.split('@')[0] : first;
+  } catch {
+    return 'there';
+  }
+}
 
 // Build a daily-revenue sparkline series from the array of { date, total }
 // returned by /admin/dashboard. Pad to at least 2 points so the sparkline
@@ -67,6 +79,7 @@ export default function DashboardPageV2() {
   const [mix, setMix] = useState(null);
   const [today, setToday] = useState(null);
   const [billing, setBilling] = useState(null);
+  const [alerts, setAlerts] = useState([]);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -85,7 +98,7 @@ export default function DashboardPageV2() {
     function track(label, p) {
       return p.catch((e) => {
         console.error(`[dashboard-v2] ${label}`, e);
-        if (isRateLimitError(e) && !cancelled) setLoadError(e);
+        if (!cancelled) setLoadError((prev) => prev || e);
         return null;
       });
     }
@@ -95,13 +108,15 @@ export default function DashboardPageV2() {
         track('/compare',           adminFetch('/admin/dashboard/compare?period=this_month&against=last_month')),
         track('/today-completion',  adminFetch('/admin/dashboard/today-completion')),
         track('/billing-health',    adminFetch('/admin/billing-health')),
+        track('/alerts',            adminFetch('/admin/dashboard/alerts')),
       ]);
-      const [d, cmp, td, bh] = wave1;
+      const [d, cmp, td, bh, al] = wave1;
       if (cancelled) return;
       setData(d);
       setCompare(cmp);
       setToday(td);
       setBilling(bh?.summary || null);
+      setAlerts(Array.isArray(al?.alerts) ? al.alerts : []);
       setLoading(false);
 
       const wave2 = await Promise.all([
@@ -186,9 +201,16 @@ export default function DashboardPageV2() {
         </div>
       );
     }
+    if (isForbiddenError(loadError)) {
+      return (
+        <div className="p-16 text-center text-14 sm:text-13 text-alert-fg">
+          Dashboard access requires an admin account.
+        </div>
+      );
+    }
     return (
       <div className="p-16 text-center text-14 sm:text-13 text-alert-fg">
-        Failed to load dashboard. <a href="/admin/login" className="underline">Try logging in again</a>
+        Failed to load dashboard. <button onClick={() => window.location.reload()} className="underline">Retry</button>.
       </div>
     );
   }
@@ -196,19 +218,19 @@ export default function DashboardPageV2() {
   const k = data.kpis;
   const dailySpark = sparkSeries(data.revenueChart?.daily);
   const todayLabel = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+  const firstName = adminFirstName();
   const mrrTrendSub = mrrTrend?.avg_growth_pct != null
     ? `${mrrTrend.avg_growth_pct >= 0 ? '↑' : '↓'} ${Math.abs(mrrTrend.avg_growth_pct)}% avg monthly growth`
     : 'last 12 months';
 
-  // Hero KPI tiles. Google Rating tile intentionally removed — NPS from the
-  // /rate/:token submissions (review_requests.score where status='submitted')
-  // is the more honest customer-satisfaction signal.
+  // Hero KPI tiles. Google Rating tile intentionally removed. Review Index
+  // uses /rate/:token submissions and is not a standard NPS calculation.
   const HERO = [
     {
       label: 'Revenue MTD',
       value: fmtMoney(k.revenueMTD),
       delta: compare?.deltas?.revenue ?? k.revenueChangePercent,
-      deltaSuffix: '% vs last month',
+      deltaSuffix: '% vs same days last month',
       series: dailySpark,
     },
     {
@@ -222,7 +244,7 @@ export default function DashboardPageV2() {
       sub: `ARR ${fmtMoneyCompact(data.mrr * 12)}`,
     },
     {
-      label: 'NPS',
+      label: 'Review Index',
       value: kpis?.quality?.nps != null ? String(kpis.quality.nps) : '—',
       sub: kpis?.quality?.csatResponses
         ? `${kpis.quality.csatResponses} responses · ${kpis.quality.csatAvg}/10 avg`
@@ -230,6 +252,8 @@ export default function DashboardPageV2() {
       alert: kpis?.quality?.nps != null && kpis.quality.nps < 30,
     },
   ];
+  const sales = kpis?.sales || {};
+  const salesUnavailable = !!sales.error;
 
   return (
     <div className="dashboard-blackout font-sans bg-surface-page min-h-full p-3 sm:p-6 pb-[calc(6rem+env(safe-area-inset-bottom))] md:pb-6 text-zinc-900">
@@ -240,12 +264,14 @@ export default function DashboardPageV2() {
               {todayLabel}
             </div>
             <h1 className="text-28 font-normal tracking-h1 mt-1 max-md:mt-2">
-              <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>{greeting()}, Adam</span>
-              <span className="hidden md:inline">{greeting()}, Adam</span>
+              <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>{greeting()}, {firstName}</span>
+              <span className="hidden md:inline">{greeting()}, {firstName}</span>
             </h1>
           </div>
         </div>
       </header>
+
+      {alerts.length > 0 && <DashboardAlertsBanner alerts={alerts} />}
 
       {/* Hero KPI row — sparkline + delta */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4 mb-4 md:mb-5">
@@ -262,7 +288,7 @@ export default function DashboardPageV2() {
             sub={
               compare?.deltas?.revenue != null
                 ? `${compare.deltas.revenue >= 0 ? '↑' : '↓'} ${Math.abs(compare.deltas.revenue)}% vs ${compare.against?.label?.toLowerCase() || 'prior period'}`
-                : 'vs last month'
+                : 'vs same days last month'
             }
             action={
               <span className="text-12 text-ink-secondary">
@@ -423,15 +449,15 @@ export default function DashboardPageV2() {
               <KpiGrid>
                 <KpiTile
                   label="Lead → Booked"
-                  value={kpis.sales.conversion != null ? `${kpis.sales.conversion}%` : '—'}
-                  sub={`${kpis.sales.booked}/${kpis.sales.leads} leads`}
-                  alert={kpis.sales.conversion != null && kpis.sales.conversion < 20}
+                  value={!salesUnavailable && sales.conversion != null ? `${sales.conversion}%` : '—'}
+                  sub={salesUnavailable ? 'lead metrics unavailable' : `${sales.booked ?? 0}/${sales.leads ?? 0} leads`}
+                  alert={salesUnavailable || (sales.conversion != null && sales.conversion < 20)}
                 />
                 <KpiTile
                   label="Response Speed"
-                  value={kpis.sales.avgResponseMin != null ? `${kpis.sales.avgResponseMin}m` : '—'}
-                  sub="lead → first contact"
-                  alert={kpis.sales.avgResponseMin != null && kpis.sales.avgResponseMin > 60}
+                  value={!salesUnavailable && sales.avgResponseMin != null ? `${sales.avgResponseMin}m` : '—'}
+                  sub={salesUnavailable ? 'lead metrics unavailable' : 'lead → first contact'}
+                  alert={salesUnavailable || (sales.avgResponseMin != null && sales.avgResponseMin > 60)}
                 />
                 <KpiTile
                   label="CSAT"
@@ -525,6 +551,47 @@ export default function DashboardPageV2() {
         )
       )}
     </div>
+  );
+}
+
+function DashboardAlertsBanner({ alerts }) {
+  const visible = alerts.slice(0, 4);
+  const criticalCount = alerts.filter((a) => a.severity === 'critical').length;
+  return (
+    <Card className="mb-4 max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
+      <CardBody className="p-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="u-label text-ink-secondary">Operational Alerts</div>
+            <div className="mt-1 text-13 text-zinc-900">
+              {criticalCount > 0
+                ? `${criticalCount} critical alert${criticalCount === 1 ? '' : 's'}`
+                : `${alerts.length} active alert${alerts.length === 1 ? '' : 's'}`}
+            </div>
+          </div>
+          <Badge tone={criticalCount > 0 ? 'alert' : 'neutral'}>{alerts.length}</Badge>
+        </div>
+        <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2">
+          {visible.map((alert) => (
+            <a
+              key={alert.id}
+              href={alert.href || '#'}
+              className="flex items-center justify-between gap-3 rounded-sm border-hairline border-zinc-200 bg-surface-sunken px-3 py-2 text-13 text-zinc-900 hover:bg-white"
+            >
+              <span className="flex items-center gap-2 min-w-0">
+                <span className={cn('h-2 w-2 rounded-full flex-shrink-0', alert.severity === 'critical' ? 'bg-alert-fg' : 'bg-amber-500')} />
+                <span className="truncate">{alert.label}</span>
+              </span>
+              {alert.amount != null && (
+                <span className="u-nums text-12 text-ink-secondary flex-shrink-0">
+                  {fmtMoneyCompact(alert.amount)}
+                </span>
+              )}
+            </a>
+          ))}
+        </div>
+      </CardBody>
+    </Card>
   );
 }
 
