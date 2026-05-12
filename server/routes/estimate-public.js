@@ -116,8 +116,8 @@ const BRAND = {
 function shellTopBar() {
   return `<header class="top-bar">
     <div class="top-bar-inner">
-      <img src="/waves-logo.png" alt="Waves" class="top-logo"/>
       <a href="tel:+19412975749" class="top-phone">(941) 297-5749</a>
+      <img src="/waves-logo.png" alt="Waves" class="top-logo"/>
     </div>
   </header>`;
 }
@@ -175,6 +175,30 @@ function visitsPerYearFromFrequency(freq) {
   if (f === 'semiannual' || f === 'biannual') return 2;
   if (f === 'annual' || f === 'yearly') return 1;
   return 4;
+}
+
+function frequencyKeyFromVisitsPerYear(visitsPerYear) {
+  const n = Number(visitsPerYear || 0);
+  if (n >= 12) return 'monthly';
+  if (n >= 6) return 'bi_monthly';
+  return 'quarterly';
+}
+
+function billingIntervalMonthsForFrequencyKey(key) {
+  if (key === 'quarterly') return 3;
+  if (key === 'bi_monthly') return 2;
+  return 1;
+}
+
+function pricePeriodLabelForFrequencyKey(key) {
+  if (key === 'quarterly') return '/quarter';
+  if (key === 'bi_monthly') return '/bi-monthly';
+  return '/mo';
+}
+
+function intervalPriceFromMonthly(monthlyAmount, frequencyKey) {
+  const amount = Number(monthlyAmount || 0) * billingIntervalMonthsForFrequencyKey(frequencyKey);
+  return Math.round(amount * 100) / 100;
 }
 
 // How many pest-control recurring services are in this estimate + the
@@ -392,7 +416,7 @@ function renderPage(token, estimate, estData) {
   const estResult = estData?.result || estData || {};
   const recurring = estResult?.recurring?.services || [];
   const oneTimeItems = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
-  const baseMonthly = Number(estData?.baseMonthly || estData?.preDiscountMonthly || (recurring.reduce((s, x) => s + Number(x.mo || x.monthly || 0), 0)) || est.monthlyTotal || 0);
+  const storedBaseMonthly = Number(estData?.baseMonthly || estData?.preDiscountMonthly || (recurring.reduce((s, x) => s + Number(x.mo || x.monthly || 0), 0)) || est.monthlyTotal || 0);
 
   const pestRecurring = detectPestRecurring(recurring);
   const hasPestOneTime = detectPestOneTime(oneTimeItems);
@@ -401,25 +425,32 @@ function renderPage(token, estimate, estData) {
   const prefs = normalizePrefs(estData?.preferences);
   const { monthlyOff: prefMonthlyOff, oneTimeOff: prefOneTimeOff } = computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTotal);
 
-  const tierPrices = {};
-  ['Bronze', 'Silver', 'Gold', 'Platinum'].forEach((t) => {
-    tierPrices[t] = Math.max(0, Math.round((baseMonthly * (1 - tierDiscount(t)) - prefMonthlyOff) * 100) / 100);
-  });
-
-  const monthlyTotal = Math.max(0, Number(est.monthlyTotal || 0) - prefMonthlyOff);
-  const annualTotal = Math.max(0, Number(est.annualTotal || monthlyTotal * 12) - prefMonthlyOff * 12);
-  const onetimeTotal = Math.max(0, Number(est.onetimeTotal || 0) - prefOneTimeOff);
-  const locked = est.status === 'accepted';
-
-  const savingsPerMo = Math.max(0, Math.round((baseMonthly - monthlyTotal) * 100) / 100);
-  const dayPrice = Math.round((monthlyTotal / 30) * 100) / 100;
-
   // One-time toggle — admin opted this estimate into letting the customer
   // pick "single visit" instead of a recurring plan. Only renders when the
   // flag is on AND we have a non-zero alternative one-time price.
   const showOneTimeOption = !!est.showOneTimeOption;
   const oneTimeChoicePrice = Number(est.oneTimeChoicePrice || 0);
   const canChooseOneTime = showOneTimeOption && oneTimeChoicePrice > 0;
+  const displayPestOnly = canChooseOneTime && Number(pestRecurring?.monthlyBase || 0) > 0;
+  const baseMonthly = displayPestOnly ? Number(pestRecurring.monthlyBase || 0) : storedBaseMonthly;
+  const recurringMonthlyBeforePrefs = displayPestOnly
+    ? Math.round(baseMonthly * (1 - tierDiscount(tier)) * 100) / 100
+    : Number(est.monthlyTotal || 0);
+
+  const tierPrices = {};
+  ['Bronze', 'Silver', 'Gold', 'Platinum'].forEach((t) => {
+    tierPrices[t] = Math.max(0, Math.round((baseMonthly * (1 - tierDiscount(t)) - prefMonthlyOff) * 100) / 100);
+  });
+
+  const monthlyTotal = Math.max(0, recurringMonthlyBeforePrefs - prefMonthlyOff);
+  const annualTotal = displayPestOnly
+    ? Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100)
+    : Math.max(0, Number(est.annualTotal || monthlyTotal * 12) - prefMonthlyOff * 12);
+  const onetimeTotal = Math.max(0, Number(est.onetimeTotal || 0) - prefOneTimeOff);
+  const locked = est.status === 'accepted';
+
+  const savingsPerMo = Math.max(0, Math.round((baseMonthly - monthlyTotal) * 100) / 100);
+  const dayPrice = Math.round((monthlyTotal / 30) * 100) / 100;
 
   const inputs = estData?.inputs || {};
   const homeSqFt = Number(inputs.homeSqFt) || Number(estResult?.property?.footprint * (Number(inputs.stories) || 1)) || null;
@@ -447,7 +478,7 @@ function renderPage(token, estimate, estData) {
   } else if (recurring.length === 2 && !hasName('mosquito')) {
     upsellService = 'WaveGuard Mosquito';
   }
-  const showUpsell = !!upsellService;
+  const showUpsell = !!upsellService && !canChooseOneTime;
 
   const nextTierCount = recurring.length + 1;
   const nextTierName = nextTierCount >= 4 ? 'Platinum' : nextTierCount === 3 ? 'Gold' : 'Silver';
@@ -493,28 +524,55 @@ function renderPage(token, estimate, estData) {
     const freq = visitsToLabel(visitsForService(name));
     return freq ? `${freq} ${name}` : name;
   };
+  const pestTiers = Array.isArray(R.pestTiers) ? R.pestTiers : [];
+  const selectedPestTier = pestTiers.find((t) => Math.abs(Number(t?.mo || 0) - Number(pestRecurring?.monthlyBase || 0)) < 0.01) || pestTiers[0] || null;
+  const pestTierCadence = selectedPestTier?.label || visitsToLabel(pestRecurring?.visitsPerYear);
+  const selectedPestFrequencyKey = (() => {
+    const label = String(selectedPestTier?.label || pestTierCadence || '').toLowerCase().replace(/[-\s]/g, '_');
+    if (label === 'bi_monthly' || label === 'bimonthly') return 'bi_monthly';
+    if (label === 'monthly') return 'monthly';
+    if (label === 'quarterly') return 'quarterly';
+    return pestRecurring ? 'quarterly' : null;
+  })();
+  const pestChoiceLabel = pestRecurring && canChooseOneTime
+    ? `${pestTierCadence ? `${pestTierCadence} ` : ''}Pest Control or One-Time Pest Control`
+    : null;
   const quotedServiceNames = recurring.map((s) => labelWithFreq(s.name)).filter(Boolean);
   const quotedOneTimeNames = oneTimeItems.map((it) => it.name).filter(Boolean);
-  const quotedServicesLabel = quotedServiceNames.length
+  const quotedServicesLabel = pestChoiceLabel || (quotedServiceNames.length
     ? quotedServiceNames.join(' + ')
-    : (quotedOneTimeNames.length ? quotedOneTimeNames.join(' + ') : `WaveGuard ${tier}`);
+    : (quotedOneTimeNames.length ? quotedOneTimeNames.join(' + ') : `WaveGuard ${tier}`));
+  const recurringPricePeriodLabel = pricePeriodLabelForFrequencyKey(selectedPestFrequencyKey);
+  const recurringDisplayTotal = intervalPriceFromMonthly(monthlyTotal, selectedPestFrequencyKey);
+  const recurringDisplayBase = intervalPriceFromMonthly(baseMonthly, selectedPestFrequencyKey);
+  const recurringDisplaySavings = intervalPriceFromMonthly(savingsPerMo, selectedPestFrequencyKey);
 
-  // WaveGuard Membership — $99 initial fee rolled into oneTimeTotal by the
-  // pricing engine but not into oneTime.items[]. Surface it as its own
-  // line so the customer sees what the fee is and the "waived with annual
-  // prepayment" note explains how to skip it.
-  const membershipFee = Number(estResult?.oneTime?.membershipFee || 0);
-  const membershipRow = membershipFee > 0
-    ? `<tr><td>WaveGuard Membership<div class="sub">Waived if you prepay 12 months up front</div></td><td style="text-align:right">${fmtMoney(membershipFee)}</td></tr>`
-    : '';
+  // WaveGuard Membership — recurring pest plans carry a $99 setup fee
+  // unless the customer prepays 12 months. Older v1 estimates may not have
+  // oneTime.membershipFee cached, so fall back to the pricing constant when
+  // a recurring pest line is present.
+  const explicitMembershipFee = Number(estResult?.oneTime?.membershipFee || 0);
+  const membershipFee = explicitMembershipFee > 0
+    ? explicitMembershipFee
+    : (pestRecurring ? Number(PEST.initialFee || 99) : 0);
+  const showMembershipFee = membershipFee > 0 && !locked;
+  const membershipFeeHtml = showMembershipFee ? `
+  <div class="setup-fee" data-mode-only="recurring">
+    <div>
+      <div class="setup-fee-title">+ ${fmtMoney(membershipFee)} one-time WaveGuard membership setup</div>
+      <div class="setup-fee-sub">Waived when you pay the year in full up front.</div>
+    </div>
+  </div>` : '';
 
   const realOneTimeRows = oneTimeItems.map((it) => {
+    const label = String(it.name || it.label || '').toLowerCase();
+    if (it.service === 'waveguard_setup' || label.includes('waveguard setup') || label.includes('waveguard membership')) return '';
     const price = Number(it.price || 0);
     if (price <= 0) return '';
     return `<tr><td>${escapeHtml(it.name)}${it.detail ? `<div class="sub">${escapeHtml(it.detail)}</div>` : ''}</td><td style="text-align:right">${fmtMoney(price)}</td></tr>`;
   }).filter(Boolean).join('');
   const hasRealOneTime = realOneTimeRows.length > 0;
-  const oneTimeRows = membershipRow + realOneTimeRows;
+  const oneTimeRows = realOneTimeRows;
 
   const perksHtml = PERKS.map((p) => `<li>${escapeHtml(p)}</li>`).join('');
   const locationsHtml = LOCATIONS.map((l) => {
@@ -567,10 +625,12 @@ function renderPage(token, estimate, estData) {
     let savingsLabel = '';
     if (pestRecurring && hasPestOneTime) {
       const rec = (cfg.perVisit * pestRecurring.visitsPerYear) / 12;
-      savingsLabel = `Save ${fmtMoney(Math.round(rec * 100) / 100)}/mo + ${fmtMoney(cfg.oneTime)} on one-time`;
+      const freqKey = frequencyKeyFromVisitsPerYear(pestRecurring.visitsPerYear);
+      savingsLabel = `Save ${fmtMoney(intervalPriceFromMonthly(rec, freqKey))}${pricePeriodLabelForFrequencyKey(freqKey)} + ${fmtMoney(cfg.oneTime)} on one-time`;
     } else if (pestRecurring) {
       const rec = (cfg.perVisit * pestRecurring.visitsPerYear) / 12;
-      savingsLabel = `Save ${fmtMoney(Math.round(rec * 100) / 100)}/mo`;
+      const freqKey = frequencyKeyFromVisitsPerYear(pestRecurring.visitsPerYear);
+      savingsLabel = `Save ${fmtMoney(intervalPriceFromMonthly(rec, freqKey))}${pricePeriodLabelForFrequencyKey(freqKey)}`;
     } else if (hasPestOneTime) {
       savingsLabel = `Save ${fmtMoney(cfg.oneTime)}`;
     }
@@ -587,8 +647,9 @@ function renderPage(token, estimate, estData) {
       </label>
     </div>`;
   }
+  const recurringOnlyAttr = canChooseOneTime ? ' data-mode-only="recurring"' : '';
   const prefsBlockHtml = showPrefs ? `
-  <section class="card prefs-card">
+  <section class="card prefs-card"${recurringOnlyAttr}>
     <div class="eyebrow">Customize your visit</div>
     <h2>Skip parts you don't need</h2>
     <p class="card-sub">Both are on by default. Toggle off whatever you don't want and the price adjusts instantly.</p>
@@ -608,6 +669,7 @@ function renderPage(token, estimate, estData) {
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&display=swap" rel="stylesheet">
 <style>
   *{box-sizing:border-box}
+  [hidden]{display:none!important}
   body{margin:0;font-family:Inter,system-ui,sans-serif;background:#FAF8F3;color:#1B2C5B;line-height:1.55;min-height:100vh;display:flex;flex-direction:column}
   h1,h2,h3{font-family:'Source Serif 4','Source Serif Pro',Georgia,serif;font-weight:500;letter-spacing:-0.01em;margin:0 0 12px;color:#1B2C5B}
   h1{font-size:clamp(32px,5vw,44px);line-height:1.1}
@@ -632,7 +694,11 @@ function renderPage(token, estimate, estData) {
   .save-row{margin-top:10px}
   .save-pill{display:inline-block;color:${BRAND.green};font-size:13px;font-weight:600}
   .day-price{margin-top:8px;font-size:14px;color:#6B7280}
+  .setup-fee{margin-top:12px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;max-width:520px;padding:12px 14px;border:1px solid #D4CBB8;border-radius:10px;background:#fff}
+  .setup-fee-title{font-size:14px;font-weight:700;color:#1B2C5B;line-height:1.35}
+  .setup-fee-sub{font-size:12px;color:#6B7280;margin-top:2px;line-height:1.45}
   .mini-guarantee{margin-top:10px;font-size:13px;color:#1B2C5B}
+  .mini-guarantee[data-mode-only="one_time"]{margin-top:4px;font-size:14px;line-height:1.55;color:#3F4A65}
   .mode-toggle{display:inline-flex;gap:4px;margin-top:18px;padding:4px;background:#F1F5F9;border-radius:999px;border:1px solid #E2E8F0}
   .mode-btn{appearance:none;border:0;background:transparent;color:#475569;font:600 13px/1 Inter,system-ui,sans-serif;padding:10px 18px;border-radius:999px;cursor:pointer;letter-spacing:.02em;transition:background .15s,color .15s}
   .mode-btn.is-active{background:#009CDE;color:#fff;box-shadow:0 1px 4px rgba(15,23,42,.12)}
@@ -666,16 +732,18 @@ function renderPage(token, estimate, estData) {
   .switch input:checked+.slider{background:#1B2C5B}
   .switch input:checked+.slider::before{transform:translateX(18px)}
   .switch input:disabled+.slider{opacity:.5;cursor:not-allowed}
-  .booking-card h2{margin-bottom:4px}
+  .booking-card h2{font-family:Inter,system-ui,sans-serif;font-size:22px;font-weight:600;letter-spacing:0;color:#1B2C5B;margin:0 0 8px;line-height:1.2}
+  .booking-card .card-sub{font-size:14px;color:#6B7280;margin:0 0 20px;line-height:1.55}
   .booking-state{padding:14px;border:1px dashed #E7E2D7;border-radius:10px;background:#F7F5EE;font-size:13px;color:#6B7280;text-align:center}
-  .slot-list{display:flex;flex-direction:column;gap:8px;margin-top:12px}
-  .slot-btn{background:#fff;border:2px solid #E7E2D7;border-radius:10px;padding:12px 14px;text-align:left;cursor:pointer;font:inherit;color:inherit;transition:border-color .15s,background .15s;display:flex;flex-direction:column;gap:2px;width:100%}
-  .slot-btn:hover:not([disabled]){border-color:${BRAND.blueDark}}
-  .slot-btn.selected{border-color:#1B2C5B;background:#F7F5EE}
-  .slot-btn .slot-day{font-size:14px;font-weight:600;color:#1B2C5B}
-  .slot-btn .slot-window{font-size:13px;color:#3F4A65}
-  .slot-btn .slot-tag{display:inline-block;margin-top:4px;padding:2px 8px;border-radius:999px;background:rgba(22,163,74,0.1);color:${BRAND.green};font-size:11px;font-weight:600;align-self:flex-start}
-  .slot-more{background:transparent;border:none;color:#1B2C5B;font:inherit;font-size:13px;font-weight:500;text-decoration:underline;cursor:pointer;padding:8px 0;align-self:flex-start}
+  .slot-list{display:grid;gap:10px}
+  .slot-btn{width:100%;padding:14px 16px;border-radius:12px;cursor:pointer;background:#fff;color:#1B2C5B;border:1.5px solid #E2E8F0;text-align:left;transition:background-color .15s,border-color .15s,color .15s;font-family:Inter,system-ui,sans-serif}
+  .slot-btn:hover:not([disabled]){border-color:${BRAND.blue}}
+  .slot-btn.selected{border-color:${BRAND.blue};background:${BRAND.blue};color:#fff}
+  .slot-btn .slot-day{display:block;font-size:14px;font-weight:600;color:#6B7280;margin-bottom:5px;line-height:1.25}
+  .slot-btn .slot-time{display:block;font-size:20px;font-weight:700;margin-bottom:4px;line-height:1.2}
+  .slot-btn .slot-reason{display:block;font-size:14px;color:#6B7280;line-height:1.35}
+  .slot-btn.selected .slot-day{color:rgba(255,255,255,.82)}
+  .slot-btn.selected .slot-reason{color:rgba(255,255,255,.86)}
   .pay-pref-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}
   @media(max-width:560px){.pay-pref-grid{grid-template-columns:1fr}}
   .pay-pref-btn{background:#fff;border:2px solid #E7E2D7;border-radius:10px;padding:14px;text-align:left;cursor:pointer;font:inherit;color:inherit;transition:border-color .15s,background .15s;display:flex;flex-direction:column;gap:4px}
@@ -686,6 +754,9 @@ function renderPage(token, estimate, estData) {
   .pay-pref-btn.primary{background:#1B2C5B;color:#fff;border-color:#1B2C5B}
   .pay-pref-btn.primary .pay-pref-title{color:#fff}
   .pay-pref-btn.primary .pay-pref-sub{color:rgba(255,255,255,.8)}
+  .pay-pref-btn.prepay{background:#16A34A;color:#fff;border-color:#16A34A}
+  .pay-pref-btn.prepay .pay-pref-title{color:#fff}
+  .pay-pref-btn.prepay .pay-pref-sub{color:rgba(255,255,255,.85)}
   .reservation-banner{background:#ECFDF5;border:1px solid ${BRAND.green};color:#065F46;border-radius:10px;padding:12px 14px;font-size:13px;margin-top:12px;display:flex;align-items:center;justify-content:space-between;gap:10px}
   .reservation-banner .countdown{font-family:'Source Serif 4',Georgia,serif;font-weight:500;color:#065F46;font-size:15px}
   table{width:100%;border-collapse:collapse}
@@ -705,9 +776,9 @@ function renderPage(token, estimate, estData) {
   .upsell h3{color:#1B2C5B;margin:0 0 4px}
   .upsell-btn{background:#1B2C5B;color:#fff;padding:12px 20px;border-radius:8px;border:none;font-weight:500;cursor:pointer;font-size:14px;min-height:44px;pointer-events:none}
   @media(max-width:520px){.upsell-btn{width:100%}}
-  .perks-list{list-style:none;padding:0;margin:0;columns:2;column-gap:20px}
+  .perks-list{list-style:none;padding:0;margin:0;columns:2;column-gap:20px;font-size:14px}
   @media(max-width:640px){.perks-list{columns:1}}
-  .perks-list li{padding:6px 0 6px 24px;position:relative;break-inside:avoid;font-size:14px;color:#3F4A65}
+  .perks-list li{padding:6px 0 6px 24px;position:relative;break-inside:avoid;font:400 14px/1.45 Inter,system-ui,sans-serif;color:#3F4A65}
   .perks-list li::before{content:'✓';position:absolute;left:0;color:${BRAND.green};font-weight:600}
   .review-carousel{background:#F7F5EE;border-radius:10px;padding:22px;min-height:170px;position:relative;border:1px solid #E7E2D7}
   .review-slide .stars{color:${BRAND.yellow};font-size:16px;margin-bottom:10px;letter-spacing:1px}
@@ -765,33 +836,35 @@ ${shellTopBar()}
 
   <div class="hero">
     <div class="eyebrow">Your estimate · ${escapeHtml(quotedServicesLabel)}</div>
-    <h1>Hey ${firstName}, here\u2019s your custom plan.</h1>
+    <h1>Hey ${firstName}, choose your pest control option.</h1>
     <div class="addr">${address}</div>
     ${propertyLine ? `<div class="prop-meta">${escapeHtml(propertyLine)}</div>` : ''}
     ${canChooseOneTime ? `
-    <div class="mode-toggle" role="group" aria-label="Service plan">
-      <button type="button" class="mode-btn is-active" data-mode-set="recurring" aria-pressed="true">Recurring</button>
-      <button type="button" class="mode-btn" data-mode-set="one_time" aria-pressed="false">One-time</button>
+    <div class="mode-toggle" role="group" aria-label="Pest control service type">
+      <button type="button" class="mode-btn is-active" data-mode-set="recurring" aria-pressed="true">${escapeHtml(pestTierCadence || 'Recurring')} Pest Control</button>
+      <button type="button" class="mode-btn" data-mode-set="one_time" aria-pressed="false">One-Time Pest Control</button>
     </div>` : ''}
     <div class="big-price" data-mode-only="recurring">
-      ${savingsPerMo > 0 ? `<span class="anchor" id="anchor-display">${fmtMoney(baseMonthly)}/mo</span>` : ''}
-      <span class="num" id="monthly-display">${fmtMoney(monthlyTotal)}</span>
-      <span class="per">/mo</span>
+      ${savingsPerMo > 0 ? `<span class="anchor" id="anchor-display">${fmtMoney(recurringDisplayBase)}${recurringPricePeriodLabel}</span>` : ''}
+      <span class="num" id="monthly-display">${fmtMoney(recurringDisplayTotal)}</span>
+      <span class="per">${recurringPricePeriodLabel}</span>
       <span class="tier-lbl" id="tier-display">WaveGuard ${escapeHtml(tier)}</span>
     </div>
     <div class="save-row" data-mode-only="recurring"${savingsPerMo > 0 ? '' : ' style="display:none"'}>
-      <span class="save-pill">You save <span id="savings-display">${fmtMoney(savingsPerMo)}</span>/mo with WaveGuard <span id="savings-tier">${escapeHtml(tier)}</span></span>
+      <span class="save-pill">You save <span id="savings-display">${fmtMoney(recurringDisplaySavings)}</span>${recurringPricePeriodLabel} with WaveGuard <span id="savings-tier">${escapeHtml(tier)}</span></span>
     </div>
     <div class="day-price" data-mode-only="recurring">That\u2019s just <span id="day-price">${fmtMoney(dayPrice)}</span>/day for complete home protection.</div>
+    ${membershipFeeHtml}
     ${canChooseOneTime ? `
     <div class="big-price" data-mode-only="one_time" hidden>
       <span class="num" id="onetime-display">${fmtMoney(oneTimeChoicePrice)}</span>
       <span class="per">one-time</span>
     </div>
     <div class="onetime-note" data-mode-only="one_time" hidden>
-      One visit, pay on service day. No recurring schedule, no tier discount. Most pest problems come back \u2014 if this single treatment doesn\u2019t resolve it, switch to recurring and we\u2019ll credit this visit toward your first month.
+      One visit, pay on service day. No recurring schedule, no tier discount.
     </div>` : ''}
-    <div class="mini-guarantee">Try us risk-free \u2014 90-day money-back guarantee.</div>
+    <div class="mini-guarantee" data-mode-only="recurring">Try us risk-free \u2014 90-day money-back guarantee.</div>
+    ${canChooseOneTime ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>Includes a 30-day callback period if pests return after this visit.</div>` : ''}
   </div>
 
   ${aiBlockHtml}
@@ -799,7 +872,7 @@ ${shellTopBar()}
   ${prefsBlockHtml}
 
   ${showUpsell ? `
-  <button type="button" class="upsell" onclick="inquireBundle('${escapeHtml(upsellService)}')" aria-label="Get a bundle quote for ${escapeHtml(upsellService)}">
+  <button type="button" class="upsell"${recurringOnlyAttr} onclick="inquireBundle('${escapeHtml(upsellService)}')" aria-label="Get a bundle quote for ${escapeHtml(upsellService)}">
     <span class="txt">
       <h3>Add ${escapeHtml(upsellService)} and save more</h3>
       <div style="font-size:14px">Bundling unlocks ${escapeHtml(nextTierName)} tier pricing (${nextTierPct}% off everything). Curious what that looks like?</div>
@@ -809,16 +882,16 @@ ${shellTopBar()}
 
   ${locked ? '' : `
   <section class="card booking-card" id="booking-card">
-    <div class="eyebrow">Pick a time</div>
-    <h2>Reserve your first visit</h2>
-    <p class="card-sub">Here are the next open times nearest your address. We will hold your pick for 15 minutes while you confirm.</p>
-    <div id="slot-area" class="booking-state">Loading available times...</div>
+    <h2 id="booking-title">Find a date &amp; time that works for you</h2>
+    <p class="card-sub">These are the windows when we\u2019ll already be working in your neighborhood \u2014 pick whichever fits.</p>
+    <div id="slot-area" class="booking-state">Checking the route map\u2026</div>
     <div id="pay-pref-area" style="display:none">
       <h3 id="pay-pref-heading" style="margin:20px 0 4px">How would you like to pay?</h3>
       <p class="card-sub" id="pay-pref-subhead" style="margin:0">Both options reserve your slot. You will not be charged today.</p>
       <div class="pay-pref-grid">
         <button type="button" class="pay-pref-btn primary" data-pay-pref="card_on_file" data-pay-pref-card><span class="pay-pref-title">Save a card to lock my slot</span><span class="pay-pref-sub">Add a card on file now so your slot is reserved. We charge on the visit day, not today.</span></button>
         <button type="button" class="pay-pref-btn" data-pay-pref="pay_at_visit" data-pay-pref-visit><span class="pay-pref-title" data-pay-visit-title>Pay at the visit</span><span class="pay-pref-sub" data-pay-visit-sub>We will collect payment with the tech on-site. No card needed now.</span></button>
+        ${showMembershipFee ? `<button type="button" class="pay-pref-btn prepay" data-pay-pref="prepay_annual" data-pay-pref-prepay><span class="pay-pref-title">Pay the year up front</span><span class="pay-pref-sub">Prepay 12 months and we waive the ${fmtMoney(membershipFee)} setup fee.</span></button>` : ''}
       </div>
     </div>
     <div id="review-area" style="display:none">
@@ -866,7 +939,7 @@ ${shellTopBar()}
   </div>
 
   <div class="final">
-    <h2 data-mode-only="recurring">Ready to lock in <span data-monthly-echo>${fmtMoney(monthlyTotal)}</span>/mo?</h2>
+    <h2 data-mode-only="recurring">Ready to lock in <span data-monthly-echo>${fmtMoney(recurringDisplayTotal)}</span>${recurringPricePeriodLabel}?</h2>
     ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>Ready to lock in <span data-onetime-echo>${fmtMoney(oneTimeChoicePrice)}</span> one-time?</h2>` : ''}
     <p>No surprise increases, no hidden fees.</p>
     ${locked ? '' : `<button type="button" class="cta pick-time-cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B">Pick a time and book</button>`}
@@ -893,7 +966,11 @@ ${shellQuestionsBar()}
 <script>
   const TOKEN = ${JSON.stringify(token)};
   const API = '/api/estimates/' + TOKEN;
+  const DEFAULT_RECURRING_FREQUENCY = ${JSON.stringify(selectedPestFrequencyKey)};
+  const BILLING_INTERVAL_MONTHS = ${JSON.stringify(billingIntervalMonthsForFrequencyKey(selectedPestFrequencyKey))};
+  const PRICE_PERIOD_LABEL = ${JSON.stringify(recurringPricePeriodLabel)};
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 });
+  const intervalPrice = (monthly) => Math.round(Number(monthly || 0) * BILLING_INTERVAL_MONTHS * 100) / 100;
   const toast = (msg) => { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2800); };
 
   // Service-preferences toggles — PUT /:token/preferences and refresh totals.
@@ -909,8 +986,8 @@ ${shellQuestionsBar()}
         });
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || 'Failed');
-        document.getElementById('monthly-display').textContent = fmt(data.monthlyTotal);
-        document.querySelectorAll('[data-monthly-echo]').forEach(el => el.textContent = fmt(data.monthlyTotal));
+        document.getElementById('monthly-display').textContent = fmt(intervalPrice(data.monthlyTotal));
+        document.querySelectorAll('[data-monthly-echo]').forEach(el => el.textContent = fmt(intervalPrice(data.monthlyTotal)));
         if (data.onetimeTotal != null) {
           const oneTimeDisplay = document.getElementById('onetime-display');
           if (oneTimeDisplay) oneTimeDisplay.textContent = fmt(data.onetimeTotal);
@@ -920,7 +997,7 @@ ${shellQuestionsBar()}
         if (data.tierPrices) {
           document.querySelectorAll('[data-price-for]').forEach((pel) => {
             const t = pel.dataset.priceFor;
-            if (data.tierPrices[t] != null) pel.innerHTML = fmt(data.tierPrices[t]) + '<span class="per">/mo</span>';
+            if (data.tierPrices[t] != null) pel.innerHTML = fmt(intervalPrice(data.tierPrices[t])) + '<span class="per">' + PRICE_PERIOD_LABEL + '</span>';
           });
         }
         const anchor = document.getElementById('anchor-display');
@@ -928,8 +1005,8 @@ ${shellQuestionsBar()}
         const savingsEl = document.getElementById('savings-display');
         if (data.savingsPerMo > 0) {
           if (saveRow) saveRow.style.display = '';
-          if (savingsEl) savingsEl.textContent = fmt(data.savingsPerMo);
-          if (anchor) anchor.textContent = fmt(data.baseMonthly) + '/mo';
+          if (savingsEl) savingsEl.textContent = fmt(intervalPrice(data.savingsPerMo));
+          if (anchor) anchor.textContent = fmt(intervalPrice(data.baseMonthly)) + PRICE_PERIOD_LABEL;
         } else if (saveRow) {
           saveRow.style.display = 'none';
         }
@@ -1001,6 +1078,7 @@ ${shellQuestionsBar()}
     const isOneTime = bookingState.serviceMode === 'one_time';
     const cardBtn = document.querySelector('[data-pay-pref-card]');
     const visitBtn = document.querySelector('[data-pay-pref-visit]');
+    const prepayBtn = document.querySelector('[data-pay-pref-prepay]');
     const heading = document.getElementById('pay-pref-heading');
     const subhead = document.getElementById('pay-pref-subhead');
     const visitTitle = document.querySelector('[data-pay-visit-title]');
@@ -1012,11 +1090,16 @@ ${shellQuestionsBar()}
     if (visitBtn) {
       visitBtn.classList.toggle('primary', isOneTime);
     }
+    if (prepayBtn) {
+      prepayBtn.hidden = isOneTime;
+    }
     if (heading) heading.textContent = isOneTime ? 'Book your visit' : 'How would you like to pay?';
     if (subhead) {
       subhead.textContent = isOneTime
         ? 'This books a single visit. You will not be charged today.'
-        : 'Both options reserve your slot. You will not be charged today.';
+        : ${JSON.stringify(showMembershipFee
+          ? `Both options reserve your slot. Choose annual prepay to waive the ${fmtMoney(membershipFee)} setup fee.`
+          : 'Both options reserve your slot. You will not be charged today.')};
     }
     if (visitTitle) visitTitle.textContent = isOneTime ? 'Book + pay on service day' : 'Pay at the visit';
     if (visitSub) {
@@ -1029,28 +1112,36 @@ ${shellQuestionsBar()}
   function fmtSlotDay(dateStr) {
     try {
       const d = new Date(dateStr + 'T12:00:00');
-      return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+      return d.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
     } catch { return dateStr; }
   }
-  function fmtSlotWindow(start, end) {
+  function fmtSlotTime(start) {
     const fmt = (t) => {
       if (!t) return '';
       const [h, m] = String(t).split(':').map(Number);
       const d = new Date(); d.setHours(h, m, 0, 0);
       return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
     };
-    return fmt(start) + ' – ' + fmt(end);
+    return fmt(start);
+  }
+  function slotReason(s) {
+    if (s.routeOptimal) {
+      return s.techFirstName
+        ? s.techFirstName + ' will already be nearby.'
+        : 'We\\'ll already be working in your neighborhood.';
+    }
+    return 'Open route window for your area.';
   }
 
-  function renderSlot(s, isExpander) {
+  function renderSlot(s) {
     const day = fmtSlotDay(s.date);
-    const win = fmtSlotWindow(s.windowStart, s.windowEnd);
-    const tech = s.techFirstName ? 'with ' + s.techFirstName : 'tech TBD';
-    const tag = s.routeOptimal ? '<span class="slot-tag">Nearby day — good for you</span>' : '';
-    return '<button type="button" class="slot-btn" data-slot-id="' + s.slotId + '" data-slot-label="' + day + ' at ' + win + '">'
+    const start = fmtSlotTime(s.windowStart);
+    const reason = slotReason(s);
+    return '<button type="button" class="slot-btn" data-slot-id="' + s.slotId + '" data-slot-label="' + day + ' at ' + start + '">'
       + '<span class="slot-day">' + day + '</span>'
-      + '<span class="slot-window">' + win + ' · ' + tech + '</span>'
-      + tag + '</button>';
+      + '<span class="slot-time">' + start + '</span>'
+      + '<span class="slot-reason">' + reason + '</span>'
+      + '</button>';
   }
 
   async function loadSlots() {
@@ -1062,30 +1153,19 @@ ${shellQuestionsBar()}
       const body = await r.json();
       const primary = body.primary || [];
       const expander = body.expander || [];
-      if (!primary.length && !expander.length) {
+      const slots = primary.concat(expander).slice(0, 4);
+      if (!slots.length) {
         area.className = 'booking-state';
-        area.innerHTML = 'No open times in the next 2 weeks. <a href="tel:${COMPANY.phoneRaw}" style="color:#1B2C5B;font-weight:600">Call ${COMPANY.phone}</a> and we will fit you in.';
+        area.innerHTML = 'No times available in the next 2 weeks. <a href="tel:${COMPANY.phoneRaw}" style="color:#1B2C5B;font-weight:600">Call ${COMPANY.phone}</a> and we\\'ll get you on the schedule.';
         return;
       }
       area.className = '';
       const html = [];
       html.push('<div class="slot-list">');
-      primary.forEach((s) => html.push(renderSlot(s, false)));
-      if (expander.length) {
-        html.push('<button type="button" class="slot-more" id="slot-more-btn">See more times</button>');
-        html.push('<div class="slot-list" id="slot-expander" style="display:none">');
-        expander.forEach((s) => html.push(renderSlot(s, true)));
-        html.push('</div>');
-      }
+      slots.forEach((s) => html.push(renderSlot(s)));
       html.push('</div>');
       area.innerHTML = html.join('');
       area.querySelectorAll('.slot-btn').forEach((btn) => btn.addEventListener('click', () => selectSlot(btn)));
-      const more = document.getElementById('slot-more-btn');
-      if (more) more.addEventListener('click', () => {
-        const expanderEl = document.getElementById('slot-expander');
-        if (expanderEl) expanderEl.style.display = '';
-        more.style.display = 'none';
-      });
     } catch (e) {
       area.className = 'booking-state';
       area.innerHTML = 'Could not load times right now. <a href="tel:${COMPANY.phoneRaw}" style="color:#1B2C5B;font-weight:600">Call ${COMPANY.phone}</a> and we will get you scheduled.';
@@ -1150,6 +1230,9 @@ ${shellQuestionsBar()}
       if (pref === 'card_on_file') {
         if (title) title.textContent = 'Confirm and save card';
         if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · next step adds your card on file. We charge on the visit day, not now.';
+      } else if (pref === 'prepay_annual') {
+        if (title) title.textContent = 'Confirm annual prepay';
+        if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · prepay 12 months and the setup fee is waived.';
       } else {
         if (title) title.textContent = 'Confirm and book';
         if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · pay at the visit, no card needed now.';
@@ -1211,14 +1294,18 @@ ${shellQuestionsBar()}
     const btn = document.getElementById('confirm-book-btn');
     if (btn) btn.disabled = true;
     try {
+      const payload = {
+        slotId: bookingState.selectedSlotId,
+        paymentMethodPreference: bookingState.pickedPref,
+        serviceMode: bookingState.serviceMode,
+      };
+      if (bookingState.serviceMode === 'recurring' && DEFAULT_RECURRING_FREQUENCY) {
+        payload.selectedFrequency = DEFAULT_RECURRING_FREQUENCY;
+      }
       const r = await fetch(API + '/accept', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          slotId: bookingState.selectedSlotId,
-          paymentMethodPreference: bookingState.pickedPref,
-          serviceMode: bookingState.serviceMode,
-        }),
+        body: JSON.stringify(payload),
       });
       const data = await r.json();
       if (r.status === 409) {
@@ -1370,7 +1457,12 @@ ${shellQuestionsBar()}
 }
 
 function sendEstimatePage(res, token, estimate, estData) {
-  res.set('Content-Type', 'text/html; charset=utf-8').send(renderPage(token, estimate, estData));
+  res
+    .set('Cache-Control', 'no-cache, no-store, must-revalidate')
+    .set('Pragma', 'no-cache')
+    .set('Expires', '0')
+    .set('Content-Type', 'text/html; charset=utf-8')
+    .send(renderPage(token, estimate, estData));
 }
 
 async function handleEstimateView(req, res, next) {
@@ -1566,7 +1658,10 @@ router.put('/:token/accept', async (req, res, next) => {
 
     // Parse estimate data + detect one-time-only vs recurring (read-only — safe outside txn)
     const estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
-    const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
+    let { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
+    if (estimate.show_one_time_option && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
+      recurringSvcList = recurringSvcList.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service));
+    }
     const isOneTimeOnly = isStructuralOneTimeOnlyEstimate(estData, estimate);
     const pricingBundle = (requestedOneTime || selectedFrequencyKey || billByInvoice || isOneTimeOnly)
       ? await buildPricingBundle(estimate)
@@ -1616,6 +1711,21 @@ router.put('/:token/accept', async (req, res, next) => {
           annualTotal: effectiveAnnualTotal,
           selectedAt: new Date().toISOString(),
         };
+        if (estimate.show_one_time_option && Array.isArray(nextEstimateData.result?.recurring?.services)) {
+          nextEstimateData.result = {
+            ...nextEstimateData.result,
+            recurring: {
+              ...nextEstimateData.result.recurring,
+              services: nextEstimateData.result.recurring.services.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service)),
+            },
+          };
+        }
+        if (estimate.show_one_time_option && Array.isArray(nextEstimateData.recurring?.services)) {
+          nextEstimateData.recurring = {
+            ...nextEstimateData.recurring,
+            services: nextEstimateData.recurring.services.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service)),
+          };
+        }
         acceptedUpdates.estimate_data = JSON.stringify(nextEstimateData);
       }
       if (treatAsOneTime && effectiveOneTimeTotal > 0 && Number(estimate.onetime_total || 0) !== effectiveOneTimeTotal) {
@@ -2105,7 +2215,10 @@ router.put('/:token/preferences', async (req, res, next) => {
     // baseMonthly resolution via shared helper (see resolveBaseMonthly).
     // Persisted back to estimate_data.baseMonthly below so subsequent
     // toggles + tier flips on this row are a no-op for resolution.
-    const { baseMonthly } = resolveBaseMonthly(estimate, parsedData);
+    const { baseMonthly: resolvedBaseMonthly } = resolveBaseMonthly(estimate, parsedData);
+    const baseMonthly = estimate.show_one_time_option && Number(pestRecurring?.monthlyBase || 0) > 0
+      ? Number(pestRecurring.monthlyBase || 0)
+      : resolvedBaseMonthly;
 
     const currentTier = estimate.waveguard_tier || 'Bronze';
     const currentDiscount = tierDiscount(currentTier);
@@ -2139,10 +2252,14 @@ router.put('/:token/preferences', async (req, res, next) => {
       let savingsLabel = '';
       if (pestRecurring && hasPestOneTime) {
         const rec = Math.round(((cfg.perVisit * pestRecurring.visitsPerYear) / 12) * 100) / 100;
-        savingsLabel = `Save $${rec.toFixed(rec % 1 ? 2 : 0)}/mo + $${cfg.oneTime} on one-time`;
+        const freqKey = frequencyKeyFromVisitsPerYear(pestRecurring.visitsPerYear);
+        const intervalSavings = intervalPriceFromMonthly(rec, freqKey);
+        savingsLabel = `Save $${intervalSavings.toFixed(intervalSavings % 1 ? 2 : 0)}${pricePeriodLabelForFrequencyKey(freqKey)} + $${cfg.oneTime} on one-time`;
       } else if (pestRecurring) {
         const rec = Math.round(((cfg.perVisit * pestRecurring.visitsPerYear) / 12) * 100) / 100;
-        savingsLabel = `Save $${rec.toFixed(rec % 1 ? 2 : 0)}/mo`;
+        const freqKey = frequencyKeyFromVisitsPerYear(pestRecurring.visitsPerYear);
+        const intervalSavings = intervalPriceFromMonthly(rec, freqKey);
+        savingsLabel = `Save $${intervalSavings.toFixed(intervalSavings % 1 ? 2 : 0)}${pricePeriodLabelForFrequencyKey(freqKey)}`;
       } else if (hasPestOneTime) {
         savingsLabel = `Save $${cfg.oneTime}`;
       }
@@ -2899,19 +3016,24 @@ function shapePreferenceAddOns(prefs, pestTier) {
   });
 }
 
-function shapeFromV1(v1, ladder, pestTier, prefs) {
+function isPestServiceName(name) {
+  return /pest/i.test(String(name || ''));
+}
+
+function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
   // pestTier may be null if pest isn't in this estimate. In that case
   // the frequency entry shows the recurring total regardless of freq key
   // (lawn-only / mosquito-only estimates — slider position doesn't
   // actually matter).
+  const pestOnly = options.pestOnly === true && !!pestTier;
   const pestMoBefore = pestTier ? Number(pestTier.mo || 0) : 0;
   const pestAnnBefore = pestTier ? Number(pestTier.ann || 0) : 0;
   const nonPestMoBefore = v1.services.reduce((sum, svc) => {
-    if (svc?.name === 'Pest Control') return sum;
+    if (isPestServiceName(svc?.name)) return sum;
     return sum + (Number(svc?.mo || svc?.monthly || 0));
   }, 0);
 
-  const totalMoBefore = pestMoBefore + nonPestMoBefore;
+  const totalMoBefore = pestMoBefore + (pestOnly ? 0 : nonPestMoBefore);
   const pestRecurring = pestTier
     ? { monthlyBase: pestMoBefore, visitsPerYear: Number(pestTier.apps || pestTier.v || 4) || 4 }
     : null;
@@ -2924,7 +3046,10 @@ function shapeFromV1(v1, ladder, pestTier, prefs) {
   // Included items: full recurring services list. These don't change with
   // pest frequency (changing quarterly → monthly doesn't add or remove
   // lawn care; only pest's visit cadence changes).
-  const included = v1.services.map((svc) => ({
+  const includedServices = pestOnly
+    ? v1.services.filter((svc) => isPestServiceName(svc?.name))
+    : v1.services;
+  const included = includedServices.map((svc) => ({
     key: (svc?.name || '').toLowerCase().replace(/\s+/g, '_') || 'service',
     label: svc?.displayName || svc?.name || 'Service',
     detail: svc?.detail || null,
@@ -2962,10 +3087,11 @@ async function buildPricingBundle(estimate) {
   // This is the dominant path until Session 11 retires the client engine.
   const v1 = readV1Shape(estData);
   if (v1) {
+    const pestOnlyChoice = !!estimate.show_one_time_option && v1.pestTiers.length > 0;
     const frequencies = [];
     for (const [v1Label, ladder] of Object.entries(V1_LABEL_TO_LADDER)) {
       const pestTier = v1.pestTiers.find((t) => t?.label === v1Label) || null;
-      frequencies.push(shapeFromV1(v1, ladder, pestTier, prefs));
+      frequencies.push(shapeFromV1(v1, ladder, pestTier, prefs, { pestOnly: pestOnlyChoice }));
     }
 
     // If no pest at all, drop the extra two entries — slider is meaningless

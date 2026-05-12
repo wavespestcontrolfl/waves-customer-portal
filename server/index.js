@@ -216,6 +216,14 @@ app.use('/api/webhooks/resend', require('./routes/webhooks-resend'));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+// Public assets used by server-rendered customer pages. In production Vite
+// copies these into client/dist; in local API-only dev they still need to be
+// served from client/public so SSR pages can render shared brand artwork.
+app.use(express.static(path.join(__dirname, '..', 'client', 'public'), {
+  index: false,
+  maxAge: config.nodeEnv === 'production' ? '1h' : 0,
+}));
+
 // Request logging
 app.use(morgan('combined', {
   stream: { write: (message) => logger.info(message.trim()) },

@@ -2,9 +2,8 @@
  * Estimate slot availability — thin wrapper around scheduling/find-time.js
  * for the customer-facing estimate view.
  *
- * Given an estimate token's underlying row, returns the 3 best route-optimal
- * time slots over the next 14 days plus an expander list with up to 2
- * additional options (5 total visible). Route-optimality is detour-based
+ * Given an estimate token's underlying row, returns the best route-aware
+ * time slots over the next 14 days. Route-optimality is detour-based
  * (the cost the fleet
  * actually pays, not raw distance to the nearest stop) because find-time
  * already computed it that way and the signal is honest.
@@ -96,30 +95,71 @@ async function geocodeAddress(address) {
 
 // ---------- coordinate resolution ----------
 
+function parseCityFromAddress(address) {
+  const raw = String(address || '').trim();
+  if (!raw) return '';
+  const parts = raw.split(',').map((part) => part.trim()).filter(Boolean);
+  if (parts.length >= 3) return parts[parts.length - 2];
+  const match = raw.match(/,\s*([^,]+),\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?/i);
+  return match?.[1]?.trim() || '';
+}
+
+async function fallbackZoneCenter(city) {
+  const normalizedCity = String(city || '').trim().toLowerCase();
+  if (!normalizedCity) return null;
+  try {
+    const zones = await db('service_zones').select('zone_name', 'cities', 'center_lat', 'center_lng');
+    const match = zones.find((zone) => {
+      const cities = Array.isArray(zone.cities) ? zone.cities : [];
+      return cities.some((candidate) => String(candidate || '').trim().toLowerCase() === normalizedCity);
+    });
+    const lat = match?.center_lat != null ? Number(match.center_lat) : null;
+    const lng = match?.center_lng != null ? Number(match.center_lng) : null;
+    if (Number.isFinite(lat) && Number.isFinite(lng) && lat !== 0 && lng !== 0) {
+      return { lat, lng, source: 'service_zone_fallback', city, zoneName: match.zone_name || null };
+    }
+  } catch (err) {
+    logger.warn(`[estimate-slots] service-zone fallback failed: ${err.message}`);
+  }
+  return null;
+}
+
 async function resolveEstimateCoords(estimate) {
+  let customerAddress = '';
+  let customerCity = '';
+
   // Prefer linked-customer coords (zero cost, zero external call).
   if (estimate.customer_id) {
     try {
       const cust = await db('customers')
         .where({ id: estimate.customer_id })
-        .first('latitude', 'longitude');
+        .first('latitude', 'longitude', 'address_line1', 'city', 'state', 'zip');
       const lat = cust?.latitude != null ? Number(cust.latitude) : null;
       const lng = cust?.longitude != null ? Number(cust.longitude) : null;
       if (Number.isFinite(lat) && Number.isFinite(lng) && lat !== 0 && lng !== 0) {
         return { lat, lng, source: 'customer_record' };
       }
+      customerAddress = [cust?.address_line1, cust?.city, cust?.state, cust?.zip].filter(Boolean).join(', ');
+      customerCity = cust?.city || '';
     } catch (err) {
       logger.warn(`[estimate-slots] customer coord lookup failed: ${err.message}`);
     }
   }
 
-  // Fallback: geocode the estimate's address.
-  if (estimate.address) {
-    const coords = await geocodeAddress(estimate.address);
+  // Fallback: geocode the exact estimate/customer address.
+  const addressCandidates = [estimate.address, customerAddress].filter(Boolean);
+  for (const address of addressCandidates) {
+    const coords = await geocodeAddress(address);
     if (coords) {
       return { ...coords, source: 'geocoded' };
     }
   }
+
+  // Last resort for local/dev or missing geocode keys: match the city to the
+  // same service-zone centers used by the book-online availability route.
+  const city = parseCityFromAddress(estimate.address) || customerCity || parseCityFromAddress(customerAddress);
+  const zoneCoords = await fallbackZoneCenter(city);
+  if (zoneCoords) return zoneCoords;
 
   return null;
 }
