@@ -836,7 +836,7 @@ ${shellTopBar()}
 
   <div class="hero">
     <div class="eyebrow">Your estimate · ${escapeHtml(quotedServicesLabel)}</div>
-    <h1>Hey ${firstName}, choose your pest control option.</h1>
+    <h1>Hey ${firstName}, ${canChooseOneTime ? 'choose your pest control option.' : "here's your custom quote."}</h1>
     <div class="addr">${address}</div>
     ${propertyLine ? `<div class="prop-meta">${escapeHtml(propertyLine)}</div>` : ''}
     ${canChooseOneTime ? `
