@@ -102,10 +102,15 @@ const ALL_NUMBERS = [
     { number: '+19412135203', formatted: '(941) 213-5203', label: 'palmettoexterminator.com' },
     { number: '+19412943355', formatted: '(941) 294-3355', label: 'palmettoflpestcontrol.com' },
     { number: '+19419098995', formatted: '(941) 909-8995', label: 'parrishexterminator.com' },
+    { number: '+19412535279', formatted: '(941) 253-5279', label: 'parrishpestcontrol.com' },
     { number: '+19413187765', formatted: '(941) 318-7765', label: 'sarasotaflexterminator.com' },
     { number: '+19412998937', formatted: '(941) 299-8937', label: 'veniceexterminator.com' },
-    { number: '+19412589109', formatted: '(941) 258-9109', label: 'portcharlotteflpestcontrol.com' },
+    { number: '+19412411388', formatted: '(941) 241-1388', label: 'veniceflpestcontrol.com' },
+    { number: '+19412589109', formatted: '(941) 258-9109', label: 'northportflpestcontrol.com' },
     { number: '+19412402066', formatted: '(941) 240-2066', label: 'wavespestcontrol.com/north-port' },
+  ]},
+  { group: 'Paid Campaigns', numbers: [
+    { number: '+19412691697', formatted: '(941) 269-1697', label: 'Google Ads — Pest' },
   ]},
   { group: 'Lawn Care Domains', numbers: [
     { number: '+19413041850', formatted: '(941) 304-1850', label: 'bradentonfllawncare.com' },
@@ -117,10 +122,6 @@ const ALL_NUMBERS = [
   { group: 'Operations', numbers: [
     { number: '+18559260203', formatted: '(855) 926-0203', label: 'AI Agent' },
     { number: '+19412412459', formatted: '(941) 241-2459', label: 'Waves Van' },
-  ]},
-  { group: 'Unassigned', numbers: [
-    { number: '+19412535279', formatted: '(941) 253-5279', label: 'Unassigned' },
-    { number: '+19412411388', formatted: '(941) 241-1388', label: 'Unassigned' },
   ]},
 ];
 
@@ -1060,6 +1061,7 @@ function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
 
   const totalNumbers = ALL_NUMBERS.reduce((s, g) => s + g.numbers.length, 0);
   const estMonthlyCost = totalNumbers * 1.15; // ~$1.15/number/month typical Twilio
+  const groupCount = (name) => ALL_NUMBERS.find(g => g.group === name)?.numbers.length || 0;
 
   // Find top performing number by messages
   let topLabel = '';
@@ -1126,10 +1128,11 @@ function PhoneNumbersTab({ channelStats, maxChannel, stats }) {
       {/* Summary Stat Cards */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
         <StatCard label="Total Numbers" value={totalNumbers} color={D.white} />
-        <StatCard label="GBP Locations" value={ALL_NUMBERS[0].numbers.length} color={D.green} />
-        <StatCard label="Pest Domains" value={ALL_NUMBERS[1].numbers.length} color={D.teal} />
-        <StatCard label="Lawn Domains" value={ALL_NUMBERS[2].numbers.length} color={D.green} />
-        <StatCard label="Operations" value={ALL_NUMBERS[3].numbers.length + ALL_NUMBERS[4].numbers.length} color={D.muted} />
+        <StatCard label="GBP Locations" value={groupCount('GBP Locations')} color={D.green} />
+        <StatCard label="Pest Domains" value={groupCount('Pest Control Domains')} color={D.teal} />
+        <StatCard label="Paid" value={groupCount('Paid Campaigns')} color={D.amber} />
+        <StatCard label="Lawn Domains" value={groupCount('Lawn Care Domains')} color={D.green} />
+        <StatCard label="Operations" value={groupCount('Operations')} color={D.muted} />
       </div>
 
       {/* Number Groups */}

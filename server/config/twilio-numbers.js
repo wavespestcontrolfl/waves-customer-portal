@@ -18,11 +18,11 @@ const TWILIO_NUMBERS = {
     { number: '+19412135203', formatted: '(941) 213-5203', domain: 'palmettoexterminator.com', area: 'Palmetto', location: 'parrish' },
     { number: '+19412943355', formatted: '(941) 294-3355', domain: 'palmettoflpestcontrol.com', area: 'Palmetto', location: 'parrish' },
     { number: '+19419098995', formatted: '(941) 909-8995', domain: 'parrishexterminator.com', area: 'Parrish', location: 'parrish' },
-    { number: '+19412972817', formatted: '(941) 297-2817', domain: 'parrishpestcontrol.com', area: 'Parrish', location: 'parrish' },
+    { number: '+19412535279', formatted: '(941) 253-5279', domain: 'parrishpestcontrol.com', area: 'Parrish', location: 'parrish' },
     { number: '+19413187765', formatted: '(941) 318-7765', domain: 'sarasotaflexterminator.com', area: 'Sarasota', location: 'sarasota' },
     { number: '+19412998937', formatted: '(941) 299-8937', domain: 'veniceexterminator.com', area: 'Venice', location: 'venice' },
-    { number: '+19412973337', formatted: '(941) 297-3337', domain: 'veniceflpestcontrol.com', area: 'Venice', location: 'venice' },
-    { number: '+19412589109', formatted: '(941) 258-9109', domain: 'portcharlotteflpestcontrol.com', area: 'Port Charlotte', location: 'venice' },
+    { number: '+19412411388', formatted: '(941) 241-1388', domain: 'veniceflpestcontrol.com', area: 'Venice', location: 'venice' },
+    { number: '+19412589109', formatted: '(941) 258-9109', domain: 'northportflpestcontrol.com', area: 'North Port / Port Charlotte', location: 'venice' },
     { number: '+19412402066', formatted: '(941) 240-2066', domain: 'wavespestcontrol.com', area: 'North Port', location: 'venice', page: '/pest-control-north-port-fl/' },
   ],
 
@@ -42,11 +42,18 @@ const TWILIO_NUMBERS = {
 
   tollFree: { number: '+18559260203', formatted: '(855) 926-0203', label: 'Customer Chat' },
 
+  // ── Paid Campaign Tracking ───────────────────────────────────
+  paidTracking: {
+    googleAdsPest: {
+      number: '+19412691697',
+      formatted: '(941) 269-1697',
+      label: 'Google Ads — Pest',
+      location: 'lakewood-ranch',
+    },
+  },
+
   // ── Unassigned ──────────────────────────────────────────────
-  unassigned: [
-    { number: '+19412535279', formatted: '(941) 253-5279' },
-    { number: '+19412411388', formatted: '(941) 241-1388' },
-  ],
+  unassigned: [],
 
   // ── Helpers ─────────────────────────────────────────────────
 
@@ -64,6 +71,7 @@ const TWILIO_NUMBERS = {
       ...Object.entries(this.locations).map(([id, l]) => ({ ...l, type: 'location', locationId: id })),
       ...this.domainTracking.map(d => ({ ...d, type: 'pest_domain' })),
       ...this.lawnDomainTracking.map(d => ({ ...d, type: 'lawn_domain' })),
+      ...Object.entries(this.paidTracking).map(([id, p]) => ({ ...p, type: 'google_ads', trackingId: id })),
       { ...this.tracking.vanWrap, type: 'van_tracking' },
       { ...this.tollFree, type: 'customer_chat' },
       ...this.unassigned.map(u => ({ ...u, type: 'unassigned', label: 'Unassigned' })),
@@ -81,6 +89,10 @@ const TWILIO_NUMBERS = {
     // Lawn domain tracking
     const lawn = this.lawnDomainTracking.find(d => d.number === phoneNumber);
     if (lawn) return { ...lawn, type: 'domain_tracking', locationId: lawn.location };
+    // Paid campaign tracking
+    for (const [id, paid] of Object.entries(this.paidTracking)) {
+      if (paid.number === phoneNumber) return { ...paid, type: 'google_ads', trackingId: id, locationId: paid.location };
+    }
     // Van wrap
     if (this.tracking.vanWrap.number === phoneNumber) return { ...this.tracking.vanWrap, type: 'van_tracking' };
     // Toll-free / customer chat
@@ -100,6 +112,9 @@ const TWILIO_NUMBERS = {
     if (domain) return { source: 'domain_website', domain: domain.domain, area: domain.area };
     const lawn = this.lawnDomainTracking.find(d => d.number === phoneNumber);
     if (lawn) return { source: 'domain_website', domain: lawn.domain, area: lawn.area };
+    for (const [, paid] of Object.entries(this.paidTracking)) {
+      if (paid.number === phoneNumber) return { source: 'google_ads', domain: null, area: paid.label };
+    }
     if (this.tracking.vanWrap.number === phoneNumber) return { source: 'van_wrap', domain: null, area: null };
     for (const [, loc] of Object.entries(this.locations)) {
       if (loc.number === phoneNumber) return { source: 'location_direct', domain: null, area: loc.label };
