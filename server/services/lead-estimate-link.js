@@ -3,6 +3,32 @@ const leadAttribution = require('./lead-attribution');
 
 const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'unresponsive', 'disqualified', 'duplicate']);
 
+function normalizePhone(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) return digits.slice(1);
+  if (digits.length === 10) return digits;
+  return digits || null;
+}
+
+function normalizeEmail(value) {
+  return String(value || '').trim().toLowerCase() || null;
+}
+
+function leadMatchesEstimateContact(lead, estimate) {
+  if (!lead || !estimate) return false;
+  if (lead.customer_id && estimate.customer_id) {
+    return String(lead.customer_id) === String(estimate.customer_id);
+  }
+
+  const leadPhone = normalizePhone(lead.phone);
+  const estimatePhone = normalizePhone(estimate.customer_phone);
+  if (leadPhone && estimatePhone && leadPhone === estimatePhone) return true;
+
+  const leadEmail = normalizeEmail(lead.email);
+  const estimateEmail = normalizeEmail(estimate.customer_email);
+  return !!(leadEmail && estimateEmail && leadEmail === estimateEmail);
+}
+
 function performedByFromTechnician(technician) {
   const name = [technician?.first_name, technician?.last_name].filter(Boolean).join(' ').trim();
   return name || 'system';
@@ -26,13 +52,30 @@ async function recordFirstResponseIfNeeded(database, lead, performedBy = 'system
   });
 }
 
-async function attachLeadToEstimate({ database = db, leadId, estimateId, technician }) {
+async function attachLeadToEstimate({ database = db, leadId, estimateId, estimate = null, technician }) {
   if (!leadId) return null;
 
   const lead = await database('leads').where({ id: leadId }).first();
   if (!lead) {
     const err = new Error('Lead not found');
     err.statusCode = 404;
+    throw err;
+  }
+  if (CLOSED_LEAD_STATUSES.has(lead.status)) {
+    const err = new Error('Lead is closed and cannot be linked to a new estimate');
+    err.statusCode = 409;
+    throw err;
+  }
+  if (lead.estimate_id && String(lead.estimate_id) !== String(estimateId)) {
+    const err = new Error('Lead is already linked to another estimate');
+    err.statusCode = 409;
+    throw err;
+  }
+
+  const estimateForValidation = estimate || await database('estimates').where({ id: estimateId }).first();
+  if (!leadMatchesEstimateContact(lead, estimateForValidation)) {
+    const err = new Error('Lead contact does not match estimate contact');
+    err.statusCode = 409;
     throw err;
   }
 

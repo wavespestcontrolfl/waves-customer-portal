@@ -134,7 +134,6 @@ router.get('/billing-health', async (req, res, next) => {
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
     const thirtyDaysAgo = new Date(); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
     const sixtyDaysOut = new Date(); sixtyDaysOut.setDate(sixtyDaysOut.getDate() + 60);
-    const today = etDateString(now);
     const sixtyDaysOutDate = etDateString(sixtyDaysOut);
 
     // Active billable customers — `active=true` alone isn't enough,
@@ -202,7 +201,7 @@ router.get('/billing-health', async (req, res, next) => {
       .where('description', 'like', '%WaveGuard Monthly%')
       .count('* as n').first();
 
-    // Cards expiring in next 60 days (for active autopay customers)
+    // Cards already expired or expiring in next 60 days (for active autopay customers)
     const expiringCards = await db('payment_methods')
       .join('customers', 'customers.id', 'payment_methods.customer_id')
       .where('customers.active', true)
@@ -210,8 +209,8 @@ router.get('/billing-health', async (req, res, next) => {
       .where('customers.autopay_enabled', true)
       .where('payment_methods.autopay_enabled', true)
       .whereRaw(
-        "(make_date(payment_methods.exp_year::int, payment_methods.exp_month::int, 1) + INTERVAL '1 month - 1 day')::date BETWEEN ?::date AND ?::date",
-        [today, sixtyDaysOutDate]
+        "(make_date(payment_methods.exp_year::int, payment_methods.exp_month::int, 1) + INTERVAL '1 month - 1 day')::date <= ?::date",
+        [sixtyDaysOutDate]
       )
       .count('* as n').first()
       .catch(() => ({ n: 0 }));

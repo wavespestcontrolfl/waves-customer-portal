@@ -73,6 +73,7 @@ router.post('/', async (req, res, next) => {
           database: trx,
           leadId: linkedLeadId,
           estimateId: created.id,
+          estimate: created,
           technician: req.technician,
         });
       }

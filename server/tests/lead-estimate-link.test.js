@@ -9,13 +9,17 @@ const {
   markLinkedLeadEstimateSent,
 } = require('../services/lead-estimate-link');
 
-function makeDb(lead) {
+function makeDb(lead, estimate = null) {
   const updates = [];
   const activities = [];
   const database = (table) => ({
     where(clause) {
       return {
-        first: async () => (table === 'leads' && lead && clause.id === lead.id ? lead : null),
+        first: async () => {
+          if (table === 'leads' && lead && clause.id === lead.id) return lead;
+          if (table === 'estimates' && estimate && clause.id === estimate.id) return estimate;
+          return null;
+        },
         update: async (patch) => {
           updates.push({ table, clause, patch });
           return 1;
@@ -40,6 +44,7 @@ describe('lead-estimate link service', () => {
     const lead = {
       id: 'lead-1',
       status: 'new',
+      phone: '9415550101',
       first_contact_at: new Date(Date.now() - 12 * 60000).toISOString(),
       response_time_minutes: null,
     };
@@ -49,6 +54,7 @@ describe('lead-estimate link service', () => {
       database,
       leadId: lead.id,
       estimateId: 'estimate-1',
+      estimate: { id: 'estimate-1', customer_phone: '+1 (941) 555-0101' },
       technician: { first_name: 'Ava', last_name: 'Tech' },
     });
 
@@ -63,6 +69,26 @@ describe('lead-estimate link service', () => {
     expect(updates[0].patch).not.toHaveProperty('status');
     expect(updates[0].patch).not.toHaveProperty('response_time_minutes');
     expect(activities.map((a) => a.row.activity_type)).toEqual(['estimate_created']);
+  });
+
+  test('rejects stale lead ids that do not match the estimate contact', async () => {
+    const lead = {
+      id: 'lead-1',
+      status: 'new',
+      phone: '9415550101',
+      email: 'lead@example.com',
+    };
+    const { database, updates, activities } = makeDb(lead);
+
+    await expect(attachLeadToEstimate({
+      database,
+      leadId: lead.id,
+      estimateId: 'estimate-1',
+      estimate: { id: 'estimate-1', customer_phone: '9415559999', customer_email: 'other@example.com' },
+    })).rejects.toMatchObject({ statusCode: 409 });
+
+    expect(updates).toEqual([]);
+    expect(activities).toEqual([]);
   });
 
   test('records first response after linked estimate is sent', async () => {

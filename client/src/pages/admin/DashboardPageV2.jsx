@@ -693,7 +693,7 @@ function BillingHealthPanel({ summary: h }) {
     { label: 'Failed (30d)',      value: h.failed_last_30_days,      alert: h.failed_last_30_days > 0 },
     { label: 'In retry',          value: h.in_retry_queue,           alert: h.in_retry_queue > 0 },
     { label: 'Escalated (30d)',   value: h.escalated_last_30_days,   alert: h.escalated_last_30_days > 0 },
-    { label: 'Cards expiring 60d',value: h.expiring_cards_60_days,   alert: h.expiring_cards_60_days > 0 },
+    { label: 'Cards expired/60d', value: h.expiring_cards_60_days,   alert: h.expiring_cards_60_days > 0 },
   ];
   return (
     <Card className="mb-5 max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
