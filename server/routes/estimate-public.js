@@ -17,7 +17,10 @@ const rateLimit = require('express-rate-limit');
 const { generateEstimate } = require('../services/pricing-engine');
 const { PEST, ONE_TIME } = require('../services/pricing-engine/constants');
 const addonDefaults = require('../config/addon-defaults-by-frequency');
-const { markLinkedLeadEstimateViewed } = require('../services/lead-estimate-link');
+const {
+  markLinkedLeadEstimateAccepted,
+  markLinkedLeadEstimateViewed,
+} = require('../services/lead-estimate-link');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
 
@@ -1738,6 +1741,19 @@ router.put('/:token/accept', async (req, res, next) => {
     });
 
     const { customerId, onboardingToken, reservationCommitted } = txResult;
+    if (customerId) {
+      try {
+        await markLinkedLeadEstimateAccepted({
+          estimateId: estimate.id,
+          customerId,
+          monthlyValue: treatAsOneTime ? null : effectiveMonthlyTotal,
+          initialServiceValue: effectiveOneTimeTotal || estimate.onetime_total || null,
+          waveguardTier: estimate.waveguard_tier || null,
+        });
+      } catch (e) {
+        logger.error(`[estimate-accept] Linked lead conversion failed for estimate ${estimate.id}: ${e.message}`);
+      }
+    }
 
     // Notify office
     if (customerId) {

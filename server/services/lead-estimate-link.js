@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const leadAttribution = require('./lead-attribution');
 
 const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'unresponsive', 'disqualified', 'duplicate']);
 
@@ -96,8 +97,30 @@ async function markLinkedLeadEstimateViewed({ estimateId, performedBy = 'system'
   }
 }
 
+async function markLinkedLeadEstimateAccepted({
+  estimateId,
+  customerId,
+  monthlyValue,
+  initialServiceValue,
+  waveguardTier,
+  leadAttributionService = leadAttribution,
+}) {
+  if (!estimateId) return;
+  const leads = await db('leads').where({ estimate_id: estimateId });
+  for (const lead of leads) {
+    if (CLOSED_LEAD_STATUSES.has(lead.status)) continue;
+    await leadAttributionService.markConverted(lead.id, {
+      customerId,
+      monthlyValue,
+      initialServiceValue,
+      waveguardTier,
+    });
+  }
+}
+
 module.exports = {
   attachLeadToEstimate,
   markLinkedLeadEstimateSent,
   markLinkedLeadEstimateViewed,
+  markLinkedLeadEstimateAccepted,
 };

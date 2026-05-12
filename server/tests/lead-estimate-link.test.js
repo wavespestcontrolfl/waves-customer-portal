@@ -1,6 +1,12 @@
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/lead-attribution', () => ({ markConverted: jest.fn() }));
 
-const { attachLeadToEstimate } = require('../services/lead-estimate-link');
+const db = require('../models/db');
+const leadAttribution = require('../services/lead-attribution');
+const {
+  attachLeadToEstimate,
+  markLinkedLeadEstimateAccepted,
+} = require('../services/lead-estimate-link');
 
 function makeDb(lead) {
   const updates = [];
@@ -25,6 +31,10 @@ function makeDb(lead) {
 }
 
 describe('lead-estimate link service', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
   test('links a new lead to an estimate and records pipeline activities', async () => {
     const lead = {
       id: 'lead-1',
@@ -66,5 +76,34 @@ describe('lead-estimate link service', () => {
     })).rejects.toMatchObject({ statusCode: 404 });
 
     expect(activities).toEqual([]);
+  });
+
+  test('marks open linked leads converted when estimate is accepted', async () => {
+    db.mockImplementation((table) => ({
+      where: async (clause) => {
+        expect(table).toBe('leads');
+        expect(clause).toEqual({ estimate_id: 'estimate-1' });
+        return [
+          { id: 'lead-open', status: 'estimate_viewed' },
+          { id: 'lead-lost', status: 'lost' },
+        ];
+      },
+    }));
+
+    await markLinkedLeadEstimateAccepted({
+      estimateId: 'estimate-1',
+      customerId: 'customer-1',
+      monthlyValue: 125,
+      initialServiceValue: 99,
+      waveguardTier: 'Gold',
+    });
+
+    expect(leadAttribution.markConverted).toHaveBeenCalledTimes(1);
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-open', {
+      customerId: 'customer-1',
+      monthlyValue: 125,
+      initialServiceValue: 99,
+      waveguardTier: 'Gold',
+    });
   });
 });
