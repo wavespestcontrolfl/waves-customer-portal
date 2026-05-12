@@ -108,6 +108,8 @@ Use for: "export payouts for QuickBooks", "download payout CSV", "OFX export for
   },
 ];
 
+const BANKING_QUERY_TOOLS = BANKING_TOOLS.filter(t => t.name !== 'request_instant_payout');
+
 
 // ─── EXECUTION ──────────────────────────────────────────────────
 
@@ -168,7 +170,7 @@ async function getPayoutHistory(input) {
         stripe_payout_id: p.stripe_payout_id,
         amount: parseFloat(p.amount || 0),
         fee_total: parseFloat(p.fee_total || 0),
-        net: parseFloat(p.amount || 0) - parseFloat(p.fee_total || 0),
+        net: parseFloat(p.amount || 0),
         status: p.status,
         arrival_date: p.arrival_date,
         method: p.method,
@@ -180,7 +182,7 @@ async function getPayoutHistory(input) {
       total: payouts.length,
       total_amount: Math.round(totalAmount * 100) / 100,
       total_fees: Math.round(totalFees * 100) / 100,
-      total_net: Math.round((totalAmount - totalFees) * 100) / 100,
+      total_net: Math.round(totalAmount * 100) / 100,
     };
   } catch (err) {
     return { error: `Could not fetch payout history: ${err.message}` };
@@ -409,4 +411,4 @@ async function exportPayouts(input) {
 }
 
 
-module.exports = { BANKING_TOOLS, executeBankingTool };
+module.exports = { BANKING_TOOLS, BANKING_QUERY_TOOLS, executeBankingTool };
