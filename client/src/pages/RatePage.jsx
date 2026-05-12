@@ -330,14 +330,14 @@ export default function RatePage() {
                     <button key={s} onClick={() => toggleStandout(s)} disabled={disabled} style={{
                       minHeight: 40, border: `2px solid ${selected ? COLORS.green : COLORS.grayLight}`,
                       borderRadius: 12, background: selected ? COLORS.green : COLORS.white,
-                      color: selected ? COLORS.white : COLORS.textBody, fontSize: 13, fontWeight: 800,
+                      color: selected ? COLORS.white : COLORS.textBody, fontSize: 14, fontWeight: 800,
                       cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.45 : 1,
                       boxShadow: selected ? '0 6px 14px rgba(22,163,74,0.22)' : '0 2px 8px rgba(15,23,42,0.08)',
                     }}>{s}</button>
                   );
                 })}
               </div>
-              <div style={{ marginTop: 12, fontSize: 13, lineHeight: 1.45, color: COLORS.textCaption, textAlign: 'center' }}>
+              <div style={{ marginTop: 12, fontSize: 14, lineHeight: 1.45, color: COLORS.textCaption, textAlign: 'center' }}>
                 Public Google reviews help local neighbors choose a provider.
               </div>
               <button onClick={handleHappyReviewStart} disabled={generating} style={{
@@ -510,7 +510,7 @@ export default function RatePage() {
                 Copy & Open Google
               </Button>
               {postHint && (
-                <div style={{ marginTop: 8, textAlign: 'center', fontSize: 13, color: COLORS.green, fontWeight: 800 }}>
+                <div style={{ marginTop: 8, textAlign: 'center', fontSize: 14, color: COLORS.green, fontWeight: 800 }}>
                   {postHint}
                 </div>
               )}
