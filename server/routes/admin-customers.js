@@ -907,7 +907,7 @@ router.get('/:id', async (req, res, next) => {
     if (!c) return res.status(404).json({ error: 'Customer not found' });
 
     const currentYear = Number(etDateString().slice(0, 4));
-    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, smsLog, healthScore, invoices, cards, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties] = await Promise.all([
+    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties] = await Promise.all([
       db('customer_tags').where({ customer_id: c.id }).select('tag'),
       db('customer_interactions').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(30),
       db('property_preferences').where({ customer_id: c.id }).first(),
@@ -925,6 +925,46 @@ router.get('/:id', async (req, res, next) => {
       latestHealthScoreForCustomer(c.id),
       db('invoices').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(10).catch(e => { logger.warn(`[customers:${c.id}] invoices: ${e.message}`); return []; }),
       db('payment_methods').where({ customer_id: c.id }).catch(e => { logger.warn(`[customers:${c.id}] payment_methods: ${e.message}`); return []; }),
+      db('payment_method_consents as pmc')
+        .leftJoin('payment_methods as pm', 'pmc.payment_method_id', 'pm.id')
+        .where('pmc.customer_id', c.id)
+        .select(
+          'pmc.id',
+          'pmc.payment_method_id',
+          'pmc.stripe_payment_method_id',
+          'pmc.source',
+          'pmc.consent_text_version',
+          'pmc.consent_text_snapshot',
+          'pmc.ip',
+          'pmc.user_agent',
+          'pmc.created_at',
+          'pm.method_type',
+          'pm.card_brand',
+          'pm.last_four',
+          'pm.exp_month',
+          'pm.exp_year',
+          'pm.bank_name',
+          'pm.bank_last_four',
+          'pm.is_default',
+          'pm.autopay_enabled'
+        )
+        .orderBy('pmc.created_at', 'desc')
+        .limit(20)
+        .catch(e => { logger.warn(`[customers:${c.id}] payment_method_consents: ${e.message}`); return []; }),
+      db('customer_contracts as cc')
+        .leftJoin('payment_methods as pm', 'cc.payment_method_id', 'pm.id')
+        .where('cc.customer_id', c.id)
+        .select(
+          'cc.*',
+          'pm.method_type',
+          'pm.card_brand',
+          'pm.last_four',
+          'pm.bank_name',
+          'pm.bank_last_four'
+        )
+        .orderBy('cc.created_at', 'desc')
+        .limit(20)
+        .catch(e => { logger.warn(`[customers:${c.id}] customer_contracts: ${e.message}`); return []; }),
       db('service_photos')
         .join('service_records', 'service_photos.service_record_id', 'service_records.id')
         .where('service_records.customer_id', c.id)
@@ -1033,6 +1073,62 @@ router.get('/:id', async (req, res, next) => {
       healthScore: healthScore || null,
       invoices: mappedInvoices,
       cards: cards || [],
+      paymentMethodConsents: (paymentMethodConsents || []).map((consent) => ({
+        id: consent.id,
+        paymentMethodId: consent.payment_method_id,
+        stripePaymentMethodId: consent.stripe_payment_method_id,
+        source: consent.source,
+        consentTextVersion: consent.consent_text_version,
+        consentTextSnapshot: consent.consent_text_snapshot,
+        ip: consent.ip,
+        userAgent: consent.user_agent,
+        createdAt: consent.created_at,
+        methodType: consent.method_type,
+        cardBrand: consent.card_brand,
+        lastFour: consent.last_four || consent.bank_last_four,
+        expMonth: consent.exp_month,
+        expYear: consent.exp_year,
+        bankName: consent.bank_name,
+        isDefault: !!consent.is_default,
+        autopayEnabled: !!consent.autopay_enabled,
+      })),
+      contracts: (contracts || []).map((contract) => ({
+        id: contract.id,
+        customerId: contract.customer_id,
+        paymentMethodId: contract.payment_method_id,
+        createdBy: contract.created_by,
+        contractType: contract.contract_type,
+        title: contract.title,
+        status: contract.status,
+        recipientName: contract.recipient_name,
+        recipientEmail: contract.recipient_email,
+        recipientPhone: contract.recipient_phone,
+        serviceName: contract.service_name,
+        renewalDate: contract.renewal_date,
+        cancellationDeadline: contract.cancellation_deadline,
+        autoRenewalNoticeRequired: !!contract.auto_renewal_notice_required,
+        autoRenewalNoticeSentAt: contract.auto_renewal_notice_sent_at,
+        consentTextVersion: contract.consent_text_version,
+        consentTextSnapshot: contract.consent_text_snapshot,
+        contractTextSnapshot: contract.contract_text_snapshot,
+        esignDisclosureSnapshot: contract.esign_disclosure_snapshot,
+        shareTokenExpiresAt: contract.share_token_expires_at,
+        sharedAt: contract.shared_at,
+        viewedAt: contract.viewed_at,
+        signedAt: contract.signed_at,
+        signedName: contract.signed_name,
+        recipientInitials: contract.recipient_initials,
+        signerIp: contract.signer_ip,
+        signerUserAgent: contract.signer_user_agent,
+        cancelledAt: contract.cancelled_at,
+        cancelledReason: contract.cancelled_reason,
+        createdAt: contract.created_at,
+        updatedAt: contract.updated_at,
+        methodType: contract.method_type,
+        cardBrand: contract.card_brand,
+        lastFour: contract.last_four || contract.bank_last_four,
+        bankName: contract.bank_name,
+      })),
       photos: signedPhotos,
       notificationPrefs: notificationPrefs || null,
       referralInfo: referralInfo || null,
