@@ -46,7 +46,7 @@
  * Tier 1 V2 styling for chrome (loading / error states); the GoogleMap
  * itself is a flex container with no V2 chrome.
  */
-import React, { useMemo, useCallback } from 'react';
+import React, { useMemo, useCallback, useEffect, useRef, useState } from 'react';
 import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
 
 const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
@@ -108,20 +108,27 @@ export default function DispatchMap({
     googleMapsApiKey: MAPS_KEY,
   });
 
-  // Initial center: average of available marker coords, falls back to
-  // Manatee core. Computed once-ish — a new center on every techs/jobs
-  // update would yank the user's pan state, so we only re-center when
-  // the marker set goes from empty to non-empty.
-  const initialCenter = useMemo(() => {
+  const [mapCenter, setMapCenter] = useState(DEFAULT_CENTER);
+  const centeredOnMarkersRef = useRef(false);
+
+  // Average available marker coords. We use this only for the first
+  // non-empty marker set so a late GPS ping centers the initial board,
+  // while later pings don't yank a dispatcher away from their pan/zoom.
+  const markerCenter = useMemo(() => {
     const points = [];
     for (const t of techs) if (t.lat != null && t.lng != null) points.push([t.lat, t.lng]);
     for (const j of jobs) if (j.lat != null && j.lng != null) points.push([j.lat, j.lng]);
-    if (points.length === 0) return DEFAULT_CENTER;
+    if (points.length === 0) return null;
     const lat = points.reduce((s, p) => s + p[0], 0) / points.length;
     const lng = points.reduce((s, p) => s + p[1], 0) / points.length;
     return { lat, lng };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [techs.length === 0 && jobs.length === 0]);
+  }, [techs, jobs]);
+
+  useEffect(() => {
+    if (!markerCenter || centeredOnMarkersRef.current) return;
+    centeredOnMarkersRef.current = true;
+    setMapCenter(markerCenter);
+  }, [markerCenter]);
 
   const handleJobClick = useCallback(
     (jobId) => {
@@ -192,7 +199,7 @@ export default function DispatchMap({
     <div className="flex-1 relative min-w-0">
       <GoogleMap
         mapContainerStyle={{ width: '100%', height: '100%' }}
-        center={initialCenter}
+        center={mapCenter}
         zoom={11}
         options={{
           disableDefaultUI: false,

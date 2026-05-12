@@ -4,38 +4,9 @@ const db = require('../models/db');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const DiscountEngine = require('../services/discount-engine');
 const logger = require('../services/logger');
+const { parseETDateTime } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
-
-let _discountsChecked = false;
-router.use(async (req, res, next) => {
-  if (!_discountsChecked) {
-    _discountsChecked = true;
-    try {
-      await db.raw(`CREATE TABLE IF NOT EXISTS discounts (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        discount_key varchar(80) UNIQUE NOT NULL, name varchar(200) NOT NULL, description text,
-        discount_type varchar(20) NOT NULL DEFAULT 'percentage', amount decimal(10,2) NOT NULL DEFAULT 0,
-        max_discount_dollars decimal(10,2), applies_to varchar(30) DEFAULT 'all',
-        service_category_filter varchar(200), service_key_filter varchar(200),
-        requires_waveguard_tier varchar(20), is_waveguard_tier_discount boolean DEFAULT false,
-        requires_military boolean DEFAULT false, requires_senior boolean DEFAULT false,
-        requires_referral boolean DEFAULT false, requires_new_customer boolean DEFAULT false,
-        requires_multi_home boolean DEFAULT false, requires_prepayment boolean DEFAULT false,
-        min_service_count integer, min_subtotal decimal(10,2),
-        is_stackable boolean DEFAULT true, stack_group varchar(30), priority integer DEFAULT 100,
-        promo_code varchar(50) UNIQUE, promo_code_expiry timestamptz,
-        promo_code_max_uses integer, promo_code_current_uses integer DEFAULT 0,
-        is_active boolean DEFAULT true, is_auto_apply boolean DEFAULT false,
-        show_in_estimates boolean DEFAULT true, show_in_invoices boolean DEFAULT true,
-        show_in_scheduling boolean DEFAULT false, sort_order integer, color varchar(30), icon varchar(50),
-        times_applied integer DEFAULT 0, total_discount_given decimal(12,2) DEFAULT 0,
-        created_at timestamptz NOT NULL DEFAULT NOW(), updated_at timestamptz NOT NULL DEFAULT NOW()
-      )`);
-    } catch (e) { /* already exists */ }
-  }
-  next();
-});
 
 // GET /api/admin/discounts — list all discounts
 router.get('/', async (req, res, next) => {
@@ -56,6 +27,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
     logger.info(`[discounts] Created: ${disc.name}`);
     res.status(201).json(disc);
   } catch (err) {
+    if (err.status === 400) return res.status(400).json({ error: err.message });
     if (err.code === '23505') return res.status(409).json({ error: 'Discount key or promo code already exists' });
     next(err);
   }
@@ -73,6 +45,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     DiscountEngine.clearCache();
     res.json(disc);
   } catch (err) {
+    if (err.status === 400) return res.status(400).json({ error: err.message });
     if (err.code === '23505') return res.status(409).json({ error: 'Discount key or promo code already exists' });
     next(err);
   }
@@ -149,6 +122,65 @@ router.get('/stats', async (req, res, next) => {
 });
 
 // ── helpers ──
+const VALID_DISCOUNT_TYPES = new Set(['percentage', 'fixed_amount', 'variable_amount', 'variable_percentage', 'free_service']);
+const VALID_APPLIES_TO = new Set(['all', 'service', 'invoice', 'customer']);
+const VALID_WAVEGUARD_TIERS = new Set(['', 'Bronze', 'Silver', 'Gold', 'Platinum', 'One-Time']);
+const NUMERIC_FIELDS = new Set(['amount', 'max_discount_dollars', 'min_subtotal']);
+const INTEGER_FIELDS = new Set(['min_service_count', 'promo_code_max_uses', 'sort_order', 'priority']);
+const BOOLEAN_FIELDS = new Set([
+  'is_waveguard_tier_discount', 'requires_military', 'requires_senior',
+  'requires_referral', 'requires_new_customer', 'requires_multi_home',
+  'requires_prepayment', 'is_stackable', 'is_active', 'is_auto_apply',
+  'show_in_estimates', 'show_in_invoices', 'show_in_scheduling',
+]);
+
+function validationError(message) {
+  const err = new Error(message);
+  err.status = 400;
+  return err;
+}
+
+function normalizeKey(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_|_$/g, '')
+    .substring(0, 80);
+}
+
+function normalizeNullableString(value) {
+  if (value === null) return null;
+  const trimmed = String(value || '').trim();
+  return trimmed || null;
+}
+
+function normalizeNumber(value, field) {
+  if (value === '' || value === null || value === undefined) return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) throw validationError(`Invalid numeric value for ${field}`);
+  if (parsed < 0) throw validationError(`${field} cannot be negative`);
+  return parsed;
+}
+
+function normalizeInteger(value, field) {
+  const parsed = normalizeNumber(value, field);
+  if (parsed === null) return null;
+  if (!Number.isInteger(parsed)) throw validationError(`${field} must be a whole number`);
+  return parsed;
+}
+
+function normalizeBoolean(value, field) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+  }
+  if (typeof value === 'number' && (value === 0 || value === 1)) return Boolean(value);
+  throw validationError(`${field} must be a boolean`);
+}
+
 function buildDiscountData(body, { generateKey = false } = {}) {
   const fields = [
     'discount_key', 'name', 'description', 'discount_type', 'amount', 'max_discount_dollars',
@@ -166,17 +198,49 @@ function buildDiscountData(body, { generateKey = false } = {}) {
   for (const f of fields) {
     if (body[f] !== undefined) data[f] = body[f];
   }
-  if (typeof data.discount_key === 'string') data.discount_key = data.discount_key.trim();
+  if (typeof data.discount_key === 'string') data.discount_key = normalizeKey(data.discount_key);
   if (typeof data.name === 'string') data.name = data.name.trim();
   if (generateKey && !data.discount_key && typeof data.name === 'string' && data.name.trim()) {
-    data.discount_key = data.name.trim().toLowerCase()
-      .replace(/[^a-z0-9]+/g, '_')
-      .replace(/^_|_$/g, '')
-      .substring(0, 80);
+    data.discount_key = normalizeKey(data.name);
   }
-  // Uppercase promo code
-  if (data.promo_code) data.promo_code = data.promo_code.toUpperCase().trim();
+
+  for (const f of ['description', 'service_category_filter', 'service_key_filter', 'requires_waveguard_tier', 'stack_group', 'promo_code', 'promo_code_expiry', 'color', 'icon']) {
+    if (data[f] !== undefined) data[f] = normalizeNullableString(data[f]);
+  }
+  if (data.service_key_filter) data.service_key_filter = normalizeKey(data.service_key_filter);
+  if (data.promo_code) data.promo_code = data.promo_code.toUpperCase();
+  for (const f of NUMERIC_FIELDS) {
+    if (data[f] !== undefined) data[f] = normalizeNumber(data[f], f);
+  }
+  for (const f of INTEGER_FIELDS) {
+    if (data[f] !== undefined) data[f] = normalizeInteger(data[f], f);
+  }
+  for (const f of BOOLEAN_FIELDS) {
+    if (data[f] !== undefined) data[f] = normalizeBoolean(data[f], f);
+  }
+  if (data.promo_code_expiry) {
+    const dt = parseETDateTime(data.promo_code_expiry);
+    if (Number.isNaN(dt.getTime())) throw validationError('Invalid promo code expiry');
+    data.promo_code_expiry = dt;
+  }
+  validateDiscountData(data, { partial: !generateKey });
   return data;
 }
 
+function validateDiscountData(data, { partial = false } = {}) {
+  if (data.discount_key !== undefined && !data.discount_key) throw validationError('Discount key is required');
+  if (data.discount_key && !/^[a-z0-9_]{1,80}$/.test(data.discount_key)) throw validationError('Discount key may only contain lowercase letters, numbers, and underscores');
+  if (data.discount_type !== undefined && !VALID_DISCOUNT_TYPES.has(data.discount_type)) throw validationError('Invalid discount type');
+  if (data.applies_to !== undefined && data.applies_to !== null && !VALID_APPLIES_TO.has(data.applies_to)) throw validationError('Invalid applies_to value');
+  if (data.requires_waveguard_tier !== undefined && data.requires_waveguard_tier !== null && !VALID_WAVEGUARD_TIERS.has(data.requires_waveguard_tier)) throw validationError('Invalid WaveGuard tier');
+  if (data.amount !== undefined) {
+    const type = data.discount_type || (partial ? null : 'percentage');
+    if ((type === 'percentage' || type === 'variable_percentage') && data.amount > 100) {
+      throw validationError('Percentage discounts cannot exceed 100');
+    }
+    if (type === 'free_service') data.amount = 0;
+  }
+}
+
 module.exports = router;
+module.exports.__private = { buildDiscountData, validateDiscountData };

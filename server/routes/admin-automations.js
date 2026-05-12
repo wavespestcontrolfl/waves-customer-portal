@@ -8,9 +8,10 @@
  */
 
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const AutomationRunner = require('../services/automation-runner');
 const MODELS = require('../config/models');
@@ -18,7 +19,52 @@ const MODELS = require('../config/models');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
+
+const AUTOMATION_FROM_ALLOWLIST = (process.env.AUTOMATION_FROM_ALLOWLIST
+  || 'automations@wavespestcontrol.com,newsletter@wavespestcontrol.com,events@wavespestcontrol.com,weekly@wavespestcontrol.com'
+).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+
+const AUTOMATION_ASM_GROUPS = new Set(['service', 'newsletter']);
+
+function badRequest(message) {
+  const err = new Error(message);
+  err.status = 400;
+  return err;
+}
+
+function normalizeAutomationFromEmail(email) {
+  if (!email) return 'automations@wavespestcontrol.com';
+  const lc = String(email).trim().toLowerCase();
+  if (!AUTOMATION_FROM_ALLOWLIST.includes(lc)) {
+    throw badRequest(`fromEmail must be one of: ${AUTOMATION_FROM_ALLOWLIST.join(', ')}`);
+  }
+  return lc;
+}
+
+function normalizeAsmGroup(value, fallback = 'service') {
+  const group = String(value || fallback).trim().toLowerCase();
+  if (!AUTOMATION_ASM_GROUPS.has(group)) {
+    throw badRequest('asmGroup must be service or newsletter');
+  }
+  return group;
+}
+
+function limitedText(value, field, max) {
+  if (value == null) return '';
+  const text = String(value).trim();
+  if (text.length > max) throw badRequest(`${field} must be ${max} characters or fewer`);
+  return text;
+}
+
+const aiDraftLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `tech_${req.technicianId || req.ip}`,
+  message: { error: 'Too many AI drafts in the last hour. Try again later.' },
+});
 
 // ── Templates ────────────────────────────────────────────────────
 
@@ -67,12 +113,15 @@ router.put('/templates/:key', async (req, res, next) => {
       description: description ?? t.description,
       enabled: enabled ?? t.enabled,
       sms_template: smsTemplate !== undefined ? smsTemplate : t.sms_template,
-      asm_group: asmGroup ?? t.asm_group,
+      asm_group: asmGroup !== undefined ? normalizeAsmGroup(asmGroup, t.asm_group) : t.asm_group,
       updated_at: new Date(),
     });
     const updated = await db('automation_templates').where({ key: req.params.key }).first();
     res.json({ template: updated });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
 });
 
 // ── Steps ───────────────────────────────────────────────────────
@@ -98,13 +147,16 @@ router.post('/templates/:key/steps', async (req, res, next) => {
       html_body: htmlBody || null,
       text_body: textBody || null,
       from_name: fromName || 'Waves Pest Control',
-      from_email: fromEmail || 'automations@wavespestcontrol.com',
+      from_email: normalizeAutomationFromEmail(fromEmail),
       reply_to: replyTo || 'contact@wavespestcontrol.com',
       enabled: true,
     }).returning('*');
 
     res.json({ step: row });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
 });
 
 // PUT /api/admin/automations/steps/:id
@@ -121,7 +173,7 @@ router.put('/steps/:id', async (req, res, next) => {
       html_body: htmlBody !== undefined ? htmlBody : step.html_body,
       text_body: textBody !== undefined ? textBody : step.text_body,
       from_name: fromName ?? step.from_name,
-      from_email: fromEmail ?? step.from_email,
+      from_email: fromEmail !== undefined ? normalizeAutomationFromEmail(fromEmail) : step.from_email,
       reply_to: replyTo ?? step.reply_to,
       enabled: enabled ?? step.enabled,
       step_order: stepOrder ?? step.step_order,
@@ -129,7 +181,10 @@ router.put('/steps/:id', async (req, res, next) => {
     });
     const updated = await db('automation_steps').where({ id: req.params.id }).first();
     res.json({ step: updated });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
 });
 
 // DELETE /api/admin/automations/steps/:id
@@ -144,12 +199,20 @@ router.delete('/steps/:id', async (req, res, next) => {
 
 // POST /api/admin/automations/draft-ai
 // Body: { templateKey, stepGoal, stepIndex, totalSteps, audience?, tone?, includeCTA? }
-router.post('/draft-ai', async (req, res) => {
+router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
   try {
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
       return res.status(400).json({ error: 'Anthropic API not configured' });
     }
     const { templateKey, stepGoal, stepIndex = 0, totalSteps = 1, audience, tone, includeCTA = true } = req.body;
+    const cleanStepGoal = limitedText(stepGoal, 'stepGoal', 2000);
+    if (cleanStepGoal.length < 4) {
+      return res.status(400).json({ error: 'stepGoal is required' });
+    }
+    const cleanAudience = limitedText(audience, 'audience', 500);
+    const cleanTone = limitedText(tone, 'tone', 300);
+    const safeStepIndex = Math.max(0, Math.min(Number(stepIndex) || 0, 20));
+    const safeTotalSteps = Math.max(1, Math.min(Number(totalSteps) || 1, 20));
 
     const template = templateKey ? await db('automation_templates').where({ key: templateKey }).first() : null;
 
@@ -160,7 +223,7 @@ router.post('/draft-ai', async (req, res) => {
 CONTEXT FOR THIS EMAIL:
 ${template ? `- Automation: ${template.name}
 - Purpose: ${template.description || '(no description)'}` : '- No template context provided.'}
-- Step ${stepIndex + 1} of ${totalSteps}
+- Step ${safeStepIndex + 1} of ${safeTotalSteps}
 
 VOICE:
 - Warm, neighborly, owner-operator tone
@@ -170,7 +233,7 @@ VOICE:
 - Personalization: you MAY use {{first_name}} in the body. Do NOT invent other placeholders.
 
 PURPOSE OF STEP (what the email should accomplish):
-${stepGoal || '(not specified — use the automation description to guide you)'}
+${cleanStepGoal}
 
 FORMAT (HTML body):
 - Lead with a warm, specific opener using {{first_name}}
@@ -190,8 +253,8 @@ Return STRICT JSON:
 No prose outside the JSON.`;
 
     const userPrompt = `Draft the email.
-${audience ? `\nAudience: ${audience}` : ''}
-${tone ? `\nTone: ${tone}` : ''}`;
+${cleanAudience ? `\nAudience: ${cleanAudience}` : ''}
+${cleanTone ? `\nTone: ${cleanTone}` : ''}`;
 
     const response = await anthropic.messages.create({
       model: MODELS.WORKHORSE,
@@ -207,7 +270,7 @@ ${tone ? `\nTone: ${tone}` : ''}`;
     res.json({ success: true, draft });
   } catch (err) {
     logger.error(`[automations/draft-ai] failed: ${err.message}`);
-    res.status(500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 

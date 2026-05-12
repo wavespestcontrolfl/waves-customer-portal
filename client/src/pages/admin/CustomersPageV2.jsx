@@ -158,11 +158,16 @@ function HealthDot({ score }) {
   );
 }
 
+function getAdminRole() {
+  try { return JSON.parse(localStorage.getItem('waves_admin_user') || '{}')?.role || null; }
+  catch { return null; }
+}
+
 // --- Pipeline card (V2) ---
 // Monochrome card. alert-fg reserved for the delete-confirm state only —
 // the stage's own "urgency" color is collapsed to neutral chrome; the column
 // header handles the at-risk signal via StageBadgeV2.
-function PipelineCardV2({ customer, onDelete }) {
+function PipelineCardV2({ customer, onDelete, canDelete = false }) {
   const [confirming, setConfirming] = useState(false);
   const daysInStage = customer.stageEnteredAt
     ? Math.floor((Date.now() - new Date(customer.stageEnteredAt)) / 86400000)
@@ -176,16 +181,18 @@ function PipelineCardV2({ customer, onDelete }) {
         <div className="text-13 font-medium text-ink-primary tracking-tight">
           {customer.firstName} {customer.lastName}
         </div>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            setConfirming(!confirming);
-          }}
-          className="text-ink-tertiary hover:text-ink-primary text-14 leading-none u-focus-ring px-1"
-          aria-label="Remove"
-        >
-          ×
-        </button>
+        {canDelete && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setConfirming(!confirming);
+            }}
+            className="text-ink-tertiary hover:text-ink-primary text-14 leading-none u-focus-ring px-1"
+            aria-label="Remove"
+          >
+            ×
+          </button>
+        )}
       </div>
 
       {confirming && (
@@ -199,10 +206,14 @@ function PipelineCardV2({ customer, onDelete }) {
               size="sm"
               onClick={async () => {
                 try {
-                  await fetch(`${API_BASE}/admin/customers/${customer.id}`, {
+                  const r = await fetch(`${API_BASE}/admin/customers/${customer.id}`, {
                     method: 'DELETE',
                     headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` },
                   });
+                  if (!r.ok) {
+                    const err = await r.json().catch(() => ({}));
+                    throw new Error(err.error || `HTTP ${r.status}`);
+                  }
                   onDelete?.(customer.id);
                 } catch (e) {
                   alert('Delete failed: ' + e.message);
@@ -242,7 +253,7 @@ function PipelineCardV2({ customer, onDelete }) {
 }
 
 // --- Pipeline column (V2) ---
-function PipelineColumnV2({ stage, customers, onDeleteCustomer, fullWidth = false }) {
+function PipelineColumnV2({ stage, customers, onDeleteCustomer, fullWidth = false, canDelete = false }) {
   const monthlyTotal = customers.reduce((sum, c) => sum + (c.monthlyRate || 0), 0);
   const isAlertStage = stage.key === 'at_risk' || stage.key === 'churned';
   return (
@@ -274,7 +285,7 @@ function PipelineColumnV2({ stage, customers, onDeleteCustomer, fullWidth = fals
           <div className="text-ink-tertiary text-12 text-center py-5">No customers</div>
         ) : (
           customers.map((c) => (
-            <PipelineCardV2 key={c.id} customer={c} onDelete={onDeleteCustomer} />
+            <PipelineCardV2 key={c.id} customer={c} onDelete={onDeleteCustomer} canDelete={canDelete} />
           ))
         )}
       </div>
@@ -338,11 +349,12 @@ function QuickAddModalV2({ open, onClose, onCreated, initialValues = null, title
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!form.firstName.trim() || !form.lastName.trim() || !form.phone.trim()) return;
+    if (!form.firstName.trim() || !form.phone.trim()) return;
     setSubmitting(true);
     try {
       const body = {
         ...form,
+        addressLine1: form.address,
         profileLabel: resolvedProfileLabel || undefined,
         tags: selectedTags,
       };
@@ -386,8 +398,8 @@ function QuickAddModalV2({ open, onClose, onCreated, initialValues = null, title
               <input value={form.firstName} onChange={(e) => set('firstName', e.target.value)} className={INPUT_CLS} required />
             </div>
             <div>
-              <label className={LABEL_CLS}>Last name *</label>
-              <input value={form.lastName} onChange={(e) => set('lastName', e.target.value)} className={INPUT_CLS} required />
+              <label className={LABEL_CLS}>Last name</label>
+              <input value={form.lastName} onChange={(e) => set('lastName', e.target.value)} className={INPUT_CLS} />
             </div>
           </div>
           <div className="grid grid-cols-2 gap-3">
@@ -642,9 +654,27 @@ function detectTier(c) {
   return c.tier || 'Bronze';
 }
 
+function pipelineCustomersFrom(data) {
+  if (Array.isArray(data?.customers)) return data.customers;
+  if (!data?.pipeline) return [];
+  return Object.entries(data.pipeline).flatMap(([stage, group]) => (
+    (group?.customers || []).map((customer) => {
+      const nameParts = (customer.name || '').trim().split(/\s+/).filter(Boolean);
+      return {
+        ...customer,
+        firstName: customer.firstName || customer.first_name || nameParts[0] || '',
+        lastName: customer.lastName || customer.last_name || nameParts.slice(1).join(' '),
+        pipelineStage: customer.pipelineStage || customer.pipeline_stage || stage,
+        stageEnteredAt: customer.stageEnteredAt || customer.pipelineStageChangedAt || customer.pipeline_stage_changed_at,
+      };
+    })
+  ));
+}
+
 export default function CustomersPageV2() {
   const isMobile = useIsMobile();
   const navigate = useNavigate();
+  const isAdmin = getAdminRole() === 'admin';
   const [customers, setCustomers] = useState([]);
   const [pipelineData, setPipelineData] = useState(null);
   const [pipelineLoading, setPipelineLoading] = useState(false);
@@ -734,6 +764,8 @@ export default function CustomersPageV2() {
     if (filterCards !== 'all') params.set('cards', filterCards);
     if (filterHasBalance) params.set('hasBalance', 'true');
     if (filterLastVisited !== 'all') params.set('lastVisited', filterLastVisited);
+    params.set('sort', sortBy);
+    params.set('order', sortDir);
     params.set('page', String(pg));
     // Load up to the server's max so the full customer list lands in a
     // single alphabetical scroll rather than A-H on page 1, I-Q on
@@ -785,7 +817,7 @@ export default function CustomersPageV2() {
     const t = setTimeout(() => { setPage(1); loadCustomers(1); }, 300);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, filterStage, filterTier, filterCards, filterHasBalance, filterLastVisited, view]);
+  }, [search, filterStage, filterTier, filterCards, filterHasBalance, filterLastVisited, sortBy, sortDir, view]);
 
   const handleSort = (key) => {
     if (sortBy === key) setSortDir((d) => d === 'asc' ? 'desc' : 'asc');
@@ -852,13 +884,13 @@ export default function CustomersPageV2() {
     }
     return true;
   });
-  const totalCount = customers.length;
 
   // Pipeline groups (for rendering V1 PipelineColumn)
   const pipelineGroups = {};
   KANBAN_STAGES.forEach((k) => { pipelineGroups[k] = []; });
   if (view === 'pipeline') {
-    (pipelineData?.customers || customers).forEach((c) => {
+    const pipelineCustomers = pipelineCustomersFrom(pipelineData);
+    (pipelineData ? pipelineCustomers : customers).forEach((c) => {
       const key = c.pipelineStage || 'new_lead';
       if (pipelineGroups[key]) pipelineGroups[key].push(c);
     });
@@ -907,7 +939,7 @@ export default function CustomersPageV2() {
             <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Customers</span>
             <span className="hidden md:inline">Customers</span>
           </h1>
-          {view === 'directory' && (
+          {view === 'directory' && isAdmin && (
             <button
               type="button"
               onClick={() => openAddCustomer()}
@@ -929,7 +961,7 @@ export default function CustomersPageV2() {
               className="hidden sm:block bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-3 w-56 focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
             />
           )}
-          {view === 'directory' && (
+          {view === 'directory' && isAdmin && (
             <button
               type="button"
               onClick={() => openAddCustomer()}
@@ -1029,7 +1061,7 @@ export default function CustomersPageV2() {
       {view === 'directory' && (
         <>
           <div className="u-nums text-11 text-ink-tertiary text-right mb-3 mt-3">
-            {filteredSorted.length} result{filteredSorted.length !== 1 ? 's' : ''}
+            {totalCustomers} result{totalCustomers !== 1 ? 's' : ''}
           </div>
 
           {/* Filters dialog */}
@@ -1282,21 +1314,25 @@ export default function CustomersPageV2() {
                             <MessageSquare size={12} strokeWidth={1.75} />
                           </a>
                         )}
-                        <button
-                          type="button"
-                          onClick={(e) => { e.stopPropagation(); startEdit(c); }}
-                          className="h-6 px-2 u-label border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(e) => { e.stopPropagation(); handleDeleteCustomer(c.id, `${c.firstName} ${c.lastName}`); }}
-                          aria-label="Delete customer"
-                          className="inline-flex items-center justify-center h-6 w-6 border-hairline border-alert-fg/30 rounded-xs text-alert-fg bg-white hover:bg-alert-bg"
-                        >
-                          <Trash2 size={12} strokeWidth={1.75} />
-                        </button>
+                        {isAdmin && (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); startEdit(c); }}
+                            className="h-6 px-2 u-label border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
+                          >
+                            Edit
+                          </button>
+                        )}
+                        {isAdmin && (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); handleDeleteCustomer(c.id, `${c.firstName} ${c.lastName}`); }}
+                            aria-label="Delete customer"
+                            className="inline-flex items-center justify-center h-6 w-6 border-hairline border-alert-fg/30 rounded-xs text-alert-fg bg-white hover:bg-alert-bg"
+                          >
+                            <Trash2 size={12} strokeWidth={1.75} />
+                          </button>
+                        )}
                       </div>
                     </div>
                   )}
@@ -1451,6 +1487,7 @@ export default function CustomersPageV2() {
               stage={STAGE_MAP[pipelineStageMobile]}
               customers={pipelineGroups[pipelineStageMobile] || []}
               onDeleteCustomer={() => { loadPipeline(); loadCustomers(); }}
+              canDelete={isAdmin}
               fullWidth
             />
           </div>
@@ -1466,6 +1503,7 @@ export default function CustomersPageV2() {
                   stage={stage}
                   customers={pipelineGroups[key] || []}
                   onDeleteCustomer={() => { loadPipeline(); loadCustomers(); }}
+                  canDelete={isAdmin}
                 />
               );
             })}

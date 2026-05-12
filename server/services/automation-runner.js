@@ -30,6 +30,25 @@ function substitute(text, customer) {
     .replace(/\{last_name\}/g, last);
 }
 
+const AUTOMATION_FROM_ALLOWLIST = (process.env.AUTOMATION_FROM_ALLOWLIST
+  || 'automations@wavespestcontrol.com,newsletter@wavespestcontrol.com,events@wavespestcontrol.com,weekly@wavespestcontrol.com'
+).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+
+function normalizeAutomationFromEmail(email) {
+  const lc = String(email || 'automations@wavespestcontrol.com').trim().toLowerCase();
+  if (!AUTOMATION_FROM_ALLOWLIST.includes(lc)) {
+    throw new Error(`automation from_email is not allowed: ${lc}`);
+  }
+  return lc;
+}
+
+function automationAsmGroupId(template) {
+  const group = String(template.asm_group || 'service').trim().toLowerCase();
+  if (group === 'newsletter') return parseInt(process.env.SENDGRID_ASM_GROUP_NEWSLETTER) || null;
+  if (group === 'service') return parseInt(process.env.SENDGRID_ASM_GROUP_SERVICE) || null;
+  throw new Error(`invalid automation asm_group: ${template.asm_group}`);
+}
+
 /**
  * Does this template have *any* enabled step with an html or text body?
  * Used by the cutover gate in email-automations.js — if yes, the local
@@ -134,9 +153,8 @@ async function sendStep(enrollmentId, { testRecipient } = {}) {
   const rawHtml = substitute(step.html_body || '', personal);
   const text = substitute(step.text_body || '', personal);
 
-  const asmGroupId = template.asm_group === 'newsletter'
-    ? (parseInt(process.env.SENDGRID_ASM_GROUP_NEWSLETTER) || null)
-    : (parseInt(process.env.SENDGRID_ASM_GROUP_SERVICE) || null);
+  const asmGroupId = automationAsmGroupId(template);
+  const fromEmail = normalizeAutomationFromEmail(step.from_email);
 
   // Wrap operator-written body in branded chrome (same template the
   // newsletter campaigns use). For the unsubscribe URL we pass
@@ -163,7 +181,7 @@ async function sendStep(enrollmentId, { testRecipient } = {}) {
   try {
     const res = await sendgrid.sendOne({
       to: recipient,
-      fromEmail: step.from_email,
+      fromEmail,
       fromName: step.from_name,
       replyTo: step.reply_to,
       subject: testRecipient ? `[TEST] ${subject}` : subject,
@@ -265,9 +283,7 @@ async function testSequence({ templateKey, toEmail }) {
     .orderBy('step_order', 'asc');
   if (!steps.length) throw new Error('no steps to send');
 
-  const asmGroupId = template.asm_group === 'newsletter'
-    ? (parseInt(process.env.SENDGRID_ASM_GROUP_NEWSLETTER) || null)
-    : (parseInt(process.env.SENDGRID_ASM_GROUP_SERVICE) || null);
+  const asmGroupId = automationAsmGroupId(template);
 
   const fake = { first_name: 'Test', last_name: 'User', email: toEmail };
   const results = [];
@@ -277,7 +293,7 @@ async function testSequence({ templateKey, toEmail }) {
     try {
       const res = await sendgrid.sendOne({
         to: toEmail,
-        fromEmail: step.from_email,
+        fromEmail: normalizeAutomationFromEmail(step.from_email),
         fromName: step.from_name,
         replyTo: step.reply_to,
         subject: `[TEST step ${step.step_order}] ${substitute(step.subject || template.name, fake)}`,
@@ -294,4 +310,13 @@ async function testSequence({ templateKey, toEmail }) {
   return { template: template.key, to: toEmail, results };
 }
 
-module.exports = { hasLocalContent, enrollCustomer, sendStep, processDueSteps, testSequence, substitute };
+module.exports = {
+  hasLocalContent,
+  enrollCustomer,
+  sendStep,
+  processDueSteps,
+  testSequence,
+  substitute,
+  normalizeAutomationFromEmail,
+  automationAsmGroupId,
+};

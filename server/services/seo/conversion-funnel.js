@@ -39,11 +39,6 @@ class ConversionFunnel {
     const funnel = gscPages.map(page => {
       const kw = kwByUrl[page.page_url];
 
-      // Rough estimate matching — by day, not by referrer (we don't have referrer tracking)
-      const pageEstimates = estimates.length; // simplified — would need referrer tracking for accuracy
-      const booked = estimates.filter(e => e.status === 'accepted' || e.status === 'won').length;
-      const revenue = Object.values(revenueByCustomer).reduce((s, r) => s + r, 0);
-
       return {
         landingPage: page.page_url,
         keyword: kw?.keyword || null,
@@ -68,6 +63,8 @@ class ConversionFunnel {
       estimates: { total: totalEstimates, booked: totalBooked, conversionRate: totalEstimates > 0 ? Math.round(totalBooked / totalEstimates * 100) : 0 },
       revenue: totalRevenue,
       funnelByPage: funnel.slice(0, 30),
+      attribution: 'sitewide_correlation',
+      attributionNote: 'Booked jobs and revenue are same-period sitewide totals, not organic landing-page attribution. Add referrer or UTM capture before treating them as SEO-attributed.',
     };
   }
 

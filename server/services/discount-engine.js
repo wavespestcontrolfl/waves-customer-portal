@@ -92,7 +92,8 @@ const DiscountEngine = {
     // Filter eligible discounts
     const eligible = [];
     for (const disc of allDiscounts) {
-      // Skip tier discounts here — they're handled separately in invoice/pricing engine
+      // Skip tier discounts here. Invoices only apply them when the operator
+      // selects the tier discount row manually.
       if (disc.is_waveguard_tier_discount) continue;
 
       // Promo code discounts only apply if assigned to customer
@@ -120,9 +121,11 @@ const DiscountEngine = {
         continue;
       }
 
-      // Service filter
-      if (disc.service_key_filter && serviceKey && disc.service_key_filter !== serviceKey) continue;
-      if (disc.service_category_filter && serviceCategory && disc.service_category_filter !== serviceCategory) continue;
+      // Service filters are restrictive. If a discount is scoped to a service
+      // key/category and the caller did not provide that context, the discount
+      // is not eligible for generic invoice/customer calculations.
+      if (disc.service_key_filter && disc.service_key_filter !== serviceKey) continue;
+      if (disc.service_category_filter && disc.service_category_filter !== serviceCategory) continue;
 
       // Payment method condition (ACH discount only applies when paying via bank)
       if (disc.payment_method_condition && disc.payment_method_condition !== paymentMethod) continue;

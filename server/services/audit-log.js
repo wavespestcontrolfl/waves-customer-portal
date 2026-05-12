@@ -34,6 +34,7 @@ async function recordAuditEvent({
   ip_address = null,
   user_agent = null,
   critical = false,
+  trx = null,
 }) {
   const row = {
     actor_type,
@@ -46,13 +47,14 @@ async function recordAuditEvent({
     user_agent,
   };
 
+  const auditDb = trx || db;
   if (critical) {
-    await db('audit_log').insert(row);
+    await auditDb('audit_log').insert(row);
     return;
   }
 
   try {
-    await db('audit_log').insert(row);
+    await auditDb('audit_log').insert(row);
   } catch (err) {
     logger.error(`[audit-log] write failed for ${action}: ${err.message}`);
   }
@@ -166,6 +168,30 @@ async function auditPaymentReconcile({
   });
 }
 
+async function auditServiceCatalogChange({
+  tech_user_id, service_id, change_type, changed_fields,
+  before, after, references, ip_address, user_agent,
+  trx = null,
+}) {
+  return recordAuditEvent({
+    actor_type: 'technician',
+    actor_id: tech_user_id || null,
+    action: `service_catalog.${change_type}`,
+    resource_type: 'service',
+    resource_id: service_id || null,
+    metadata: {
+      changed_fields: changed_fields || [],
+      before: before || null,
+      after: after || null,
+      references: references || null,
+    },
+    ip_address,
+    user_agent,
+    critical: true,
+    trx,
+  });
+}
+
 function ipFromReq(req) {
   return (req.headers?.['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || null;
 }
@@ -180,6 +206,7 @@ module.exports = {
   auditTerminalHandoffRateLimited,
   auditTerminalHandoffValidate,
   auditPaymentReconcile,
+  auditServiceCatalogChange,
   ipFromReq,
   uaFromReq,
 };

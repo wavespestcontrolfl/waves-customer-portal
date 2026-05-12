@@ -18,6 +18,12 @@ const { recordServiceProductNutrients } = require('../services/nutrient-ledger')
 const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
+const { customerOnAutopay } = require('../services/autopay-eligibility');
+const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
+const {
+  recordTrackTransitionFailure,
+  recordTrackTransitionResultFailure,
+} = require('../services/track-transition-alerts');
 
 // Haversine ETA for the dispatch board tech cards. Returns a whole
 // number of minutes, or null when any input is missing or the tech is
@@ -529,6 +535,9 @@ router.get('/:date?', async (req, res, next) => {
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone',
         'customers.address_line1', 'customers.city', 'customers.state', 'customers.zip',
         'customers.waveguard_tier', 'customers.monthly_rate', 'customers.lawn_type',
+        'customers.autopay_enabled', 'customers.autopay_paused_until',
+        'customers.autopay_payment_method_id',
+        'customers.ach_status',
         'technicians.name as tech_name'
       )
       .orderByRaw('COALESCE(route_order, 999), window_start');
@@ -543,6 +552,21 @@ router.get('/:date?', async (req, res, next) => {
         .where({ job_id: s.id })
         .orderBy('transitioned_at')
         .select('to_status as status', 'transitioned_at as at', 'notes');
+      let checkoutInvoice = null;
+      try {
+        checkoutInvoice = await db('invoices')
+          .where({ scheduled_service_id: s.id })
+          .whereNot('status', 'void')
+          .orderBy('created_at', 'desc')
+          .first('id', 'status', 'total', 'token');
+      } catch { /* scheduled_service_id may be absent before migration */ }
+      const autopayActive = await customerOnAutopay({
+        id: s.customer_id,
+        autopay_enabled: s.autopay_enabled,
+        autopay_paused_until: s.autopay_paused_until,
+        autopay_payment_method_id: s.autopay_payment_method_id,
+        ach_status: s.ach_status,
+      });
 
       // Build property notes
       const alerts = [];
@@ -573,9 +597,14 @@ router.get('/:date?', async (req, res, next) => {
         customerConfirmed: s.customer_confirmed,
         waveguardTier: s.waveguard_tier,
         monthlyRate: parseFloat(s.monthly_rate || 0),
+        autopayActive,
+        autopayEnabled: s.autopay_enabled !== false,
         estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
         createInvoiceOnComplete: !!s.create_invoice_on_complete,
+        checkoutInvoiceId: checkoutInvoice?.id || null,
+        checkoutInvoiceStatus: checkoutInvoice?.status || null,
+        checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
         isRecurring: !!s.is_recurring,
         lawnType: s.lawn_type,
         propertyAlerts: alerts,
@@ -720,11 +749,25 @@ router.put('/:serviceId/status', async (req, res, next) => {
 
       for (const target of targets) {
         try {
-          await trackTransitions.cancel(target.id, {
+          const result = await trackTransitions.cancel(target.id, {
             reason: notes || null,
             actorId: req.technicianId,
           });
-        } catch (e) { logger.error(`[admin-dispatch] series cancel track transition failed for ${target.id}: ${e.message}`); }
+          await recordTrackTransitionResultFailure({
+            jobId: target.id,
+            action: 'cancel',
+            actorId: req.technicianId,
+            result,
+          });
+        } catch (e) {
+          logger.error(`[admin-dispatch] series cancel track transition failed for ${target.id}: ${e.message}`);
+          await recordTrackTransitionFailure({
+            jobId: target.id,
+            action: 'cancel',
+            actorId: req.technicianId,
+            error: e,
+          });
+        }
       }
 
       await db('activity_log').insert({
@@ -794,18 +837,46 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // timestamps for the customer tracker, and the en-route SMS fire.
     if (toStatus === 'en_route') {
       try {
-        await trackTransitions.markEnRoute(svc.id, {
+        const result = await trackTransitions.markEnRoute(svc.id, {
           actorType: 'admin',
           actorId: req.technicianId,
         });
-      } catch (e) { logger.error(`[admin-dispatch] markEnRoute failed: ${e.message}`); }
+        await recordTrackTransitionResultFailure({
+          jobId: svc.id,
+          action: 'mark_en_route',
+          actorId: req.technicianId,
+          result,
+        });
+      } catch (e) {
+        logger.error(`[admin-dispatch] markEnRoute failed: ${e.message}`);
+        await recordTrackTransitionFailure({
+          jobId: svc.id,
+          action: 'mark_en_route',
+          actorId: req.technicianId,
+          error: e,
+        });
+      }
     } else if (toStatus === 'completed') {
       try {
-        await trackTransitions.markComplete(svc.id, {
+        const result = await trackTransitions.markComplete(svc.id, {
           actorType: 'admin',
           actorId: req.technicianId,
         });
-      } catch (e) { logger.error(`[admin-dispatch] markComplete failed: ${e.message}`); }
+        await recordTrackTransitionResultFailure({
+          jobId: svc.id,
+          action: 'mark_complete',
+          actorId: req.technicianId,
+          result,
+        });
+      } catch (e) {
+        logger.error(`[admin-dispatch] markComplete failed: ${e.message}`);
+        await recordTrackTransitionFailure({
+          jobId: svc.id,
+          action: 'mark_complete',
+          actorId: req.technicianId,
+          error: e,
+        });
+      }
     } else if (toStatus === 'cancelled') {
       try {
         const AppointmentReminders = require('../services/appointment-reminders');
@@ -815,11 +886,25 @@ router.put('/:serviceId/status', async (req, res, next) => {
       } catch (e) { logger.error(`[admin-dispatch] cancellation reminder handling failed: ${e.message}`); }
 
       try {
-        await trackTransitions.cancel(svc.id, {
+        const result = await trackTransitions.cancel(svc.id, {
           reason: notes || null,
           actorId: req.technicianId,
         });
-      } catch (e) { logger.error(`[admin-dispatch] cancel failed: ${e.message}`); }
+        await recordTrackTransitionResultFailure({
+          jobId: svc.id,
+          action: 'cancel',
+          actorId: req.technicianId,
+          result,
+        });
+      } catch (e) {
+        logger.error(`[admin-dispatch] cancel failed: ${e.message}`);
+        await recordTrackTransitionFailure({
+          jobId: svc.id,
+          action: 'cancel',
+          actorId: req.technicianId,
+          error: e,
+        });
+      }
     }
 
     await db('activity_log').insert({
@@ -890,7 +975,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
-      .select('scheduled_services.*', 'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone', 'customers.city', 'customers.property_type', 'customers.monthly_rate as cust_monthly_rate', 'customers.waveguard_tier as cust_waveguard_tier', 'technicians.name as tech_name')
+      .select(
+        'scheduled_services.*',
+        'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone',
+        'customers.city', 'customers.property_type',
+        'customers.monthly_rate as cust_monthly_rate',
+        'customers.waveguard_tier as cust_waveguard_tier',
+        'customers.autopay_enabled as cust_autopay_enabled',
+        'customers.autopay_paused_until as cust_autopay_paused_until',
+        'customers.autopay_payment_method_id as cust_autopay_payment_method_id',
+        'customers.ach_status as cust_ach_status',
+        'technicians.name as tech_name'
+      )
       .first();
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
@@ -1362,11 +1458,25 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // terminal public tracker state.
     if (!resumingCommittedCompletion) {
       try {
-        await trackTransitions.markComplete(svc.id, {
+        const result = await trackTransitions.markComplete(svc.id, {
           actorType: 'admin',
           actorId: req.technicianId,
         });
-      } catch (e) { logger.error(`[admin-dispatch] markComplete failed: ${e.message}`); }
+        await recordTrackTransitionResultFailure({
+          jobId: svc.id,
+          action: 'mark_complete',
+          actorId: req.technicianId,
+          result,
+        });
+      } catch (e) {
+        logger.error(`[admin-dispatch] markComplete failed: ${e.message}`);
+        await recordTrackTransitionFailure({
+          jobId: svc.id,
+          action: 'mark_complete',
+          actorId: req.technicianId,
+          error: e,
+        });
+      }
     }
 
     if (isIncompleteVisit) {
@@ -1384,11 +1494,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Invoice + completion SMS:
     //   - If the appointment was flagged `create_invoice_on_complete` (scheduler's
     //     "Create invoice" checkbox) OR the customer is WaveGuard with a monthly_rate,
-    //     generate an invoice and send a single combined SMS (report + pay link).
+    //     generate an invoice and send a single combined SMS (report + pay link),
+    //     unless the visit is already covered by prepay/paid invoice/autopay.
     //   - Otherwise send the plain service-complete SMS (report link only).
-    const invoiceAmount = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
+    const hasVisitPrice = svc.estimated_price != null && Number(svc.estimated_price) > 0;
+    const invoiceAmount = hasVisitPrice
       ? Number(svc.estimated_price)
       : (svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
+    const customerAutopayActive = await customerOnAutopay({
+      id: svc.customer_id,
+      autopay_enabled: svc.cust_autopay_enabled,
+      autopay_paused_until: svc.cust_autopay_paused_until,
+      autopay_payment_method_id: svc.cust_autopay_payment_method_id,
+      ach_status: svc.cust_ach_status,
+    });
+    const autopayCoversVisit = customerAutopayActive
+      && !hasVisitPrice
+      && !!svc.cust_waveguard_tier
+      && Number(svc.cust_monthly_rate || 0) > 0;
     // Skip invoice creation if a paid invoice already exists for this service record
     // (covers the "customer paid prior to service report" case)
     let invoiceCreated = false;
@@ -1461,7 +1584,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           .first();
       }
     } catch (e) { /* column may not exist pre-migration — non-blocking */ }
-    const shouldInvoice = !recapReviewOnly && !alreadyPaid && !prepaidCovered && !preMintedInvoice && !existingCompletionInvoice
+    const shouldInvoice = !recapReviewOnly && !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice
       && (!!svc.create_invoice_on_complete || !!svc.cust_waveguard_tier) && invoiceAmount > 0;
     // Customer-facing SMS URL must be the canonical portal domain, not
     // the raw Railway URL (CLIENT_URL is set to the Railway hostname on
@@ -1542,6 +1665,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           amount: invoiceAmount,
           description: svc.service_type,
           taxRate: svc.property_type === 'commercial' ? 0.07 : 0,
+          useScheduledReplay: true,
         });
         invoice = await applyPrepaidCreditToInvoice(invoice);
         invoiceCreated = true;
@@ -1619,7 +1743,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         let sentSmsBody = null;
         let completionSmsWasTruncated = false;
         let sentSmsType = null;
-        if (invoiceCreated && payUrl && !suppressCompletionInvoiceLink) {
+        const allowCompletionInvoiceLink = !suppressCompletionInvoiceLink
+          && !prepaidCovered
+          && !alreadyPaid
+          && !autopayCoversVisit;
+        if (invoiceCreated && payUrl && allowCompletionInvoiceLink) {
           const fallback = `Hello ${svc.first_name}! Your ${displayServiceType} service report is ready: ${portalUrl}\n\nInvoice for today's visit: ${payUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = await renderTemplate('service_complete_with_invoice', {
             first_name: svc.first_name || '',
@@ -1630,16 +1758,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           sentSmsType = 'service_complete_with_invoice';
           sentSmsBody = `${body}${reviewSuffix}`.trim();
           completionSmsWasTruncated = false;
-        } else if (prepaidCovered || alreadyPaid) {
-          const fallback = `Hello ${svc.first_name}! Thanks for your payment today. Your ${displayServiceType} service report is ready: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
-          const body = await renderTemplate('service_complete_prepaid', {
-            first_name: svc.first_name || '',
-            service_type: displayServiceType,
-            portal_url: portalUrl,
-          }, fallback);
-          sentSmsType = 'service_complete_prepaid';
-          const concise = `Hello ${svc.first_name}! Report: ${portalUrl}\nReply with questions.`;
-          ({ body: sentSmsBody, truncated: completionSmsWasTruncated } = withRecap(body, concise));
         } else {
           const fallback = `Hello ${svc.first_name}! Your service report is ready. View it here: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
           const body = await renderTemplate('service_complete', { first_name: svc.first_name || '' }, fallback);
@@ -1768,6 +1886,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const finalRecordNotes = parseJsonObject(record.structured_notes);
     const completionSmsStatus = finalRecordNotes.completionSmsStatus
       || (sendCompletionSms ? (svc.cust_phone ? 'not_sent' : 'no_phone') : 'not_requested');
+    const completionSmsType = finalRecordNotes.completionSmsType || finalRecordNotes.sentSmsType || null;
+    const invoicePaymentActionRequired = !!invoice
+      && invoice.status !== 'paid'
+      && !prepaidCovered
+      && !alreadyPaid
+      && !autopayCoversVisit
+      && !suppressCompletionInvoiceLink
+      && completionSmsType !== 'service_complete';
     const responsePayload = {
       success: true,
       serviceRecordId: record.id,
@@ -1775,9 +1901,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       invoiceTotal: invoice?.total != null ? Number(invoice.total) : null,
       invoiceToken: invoice?.token || null,
       invoiceStatus: invoice?.status || null,
+      invoicePaymentActionRequired,
       completionSmsStatus,
       completionSmsError: finalRecordNotes.completionSmsError || null,
-      completionSmsType: finalRecordNotes.completionSmsType || finalRecordNotes.sentSmsType || null,
+      completionSmsType,
       completionSmsTruncated: !!finalRecordNotes.completionSmsTruncated,
     };
     // Refresh the stored response with the final invoice info — this is an
@@ -1891,6 +2018,11 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
           occurrence.date,
           { start: occurrence.windowStart, end: occurrence.windowEnd },
         );
+        try {
+          await emitDispatchJobUpdate({ jobId: occurrence.id, actorId: req.technicianId });
+        } catch (err) {
+          logger.error(`[dispatch] series reschedule board broadcast failed for ${occurrence.id}: ${err.message}`);
+        }
       }
 
       let notificationSent = false;
@@ -1955,6 +2087,11 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     }
     const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', rescheduleOptions);
     await syncRescheduleReminder(req.params.serviceId, newDate, newWindow);
+    try {
+      await emitDispatchJobUpdate({ jobId: req.params.serviceId, actorId: req.technicianId });
+    } catch (err) {
+      logger.error(`[dispatch] reschedule board broadcast failed for ${req.params.serviceId}: ${err.message}`);
+    }
     if (notifyCustomer !== false) {
       const svc = await db('scheduled_services')
         .where('scheduled_services.id', req.params.serviceId)
@@ -2054,9 +2191,9 @@ router.get('/reschedules/log', async (req, res, next) => {
 //               must have a tech_status row with location_updated_at >= NOW()-24h
 //               (rolling window, not midnight ET — avoids the "tech pinged
 //               at 11:50pm last night, card disappears at midnight" gap).
-//   - jobs[]:   all scheduled_services WHERE scheduled_date = today (ET),
-//               regardless of assignment, so unassigned pins still show
-//               on the map in a neutral color.
+//   - jobs[]:   visible scheduled_services WHERE scheduled_date = today (ET),
+//               excluding cancelled/rescheduled phantom rows but regardless
+//               of assignment, so unassigned pins still show neutral.
 //
 // Address is normalized into a single string at this layer — clients
 // don't see the schema's composable shape (address_line1/line2/city/
@@ -2094,6 +2231,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         FROM scheduled_services
         WHERE scheduled_date = ?
           AND technician_id IS NOT NULL
+          AND status NOT IN ('cancelled', 'rescheduled')
         GROUP BY technician_id
       ) today_agg ON today_agg.technician_id = t.id
       WHERE t.role IN ('admin','technician')
@@ -2127,6 +2265,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
       FROM scheduled_services s
       INNER JOIN customers c ON c.id = s.customer_id
       WHERE s.scheduled_date = ?
+        AND s.status NOT IN ('cancelled', 'rescheduled')
       ORDER BY s.window_start NULLS LAST, c.last_name
       `,
       [today]
@@ -2599,131 +2738,14 @@ router.get('/technicians', requireAdmin, async (req, res, next) => {
 //     customer-visible state change).
 router.put('/jobs/:id/assign', requireAdmin, async (req, res, next) => {
   try {
-    const rawTechId = req.body ? req.body.technicianId : undefined;
-    if (rawTechId !== null && typeof rawTechId !== 'string') {
-      return res.status(400).json({ error: 'technicianId must be a UUID string or null' });
-    }
-    const newTechId = rawTechId || null;
-
-    const job = await db('scheduled_services').where({ id: req.params.id }).first();
-    if (!job) return res.status(404).json({ error: 'Job not found' });
-    if (['completed', 'cancelled', 'skipped'].includes(job.status)) {
-      return res.status(409).json({
-        error: `Cannot reassign a ${job.status} job`,
-      });
-    }
-
-    if (newTechId) {
-      const tech = await db('technicians').where({ id: newTechId }).first();
-      if (!tech) return res.status(400).json({ error: 'Unknown technician' });
-      if (!tech.active) return res.status(400).json({ error: 'Technician is inactive' });
-    }
-
-    // No-op: avoid re-broadcasting + re-running auto-resolve when the
-    // dispatcher saves without changing anything.
-    if ((job.technician_id || null) === newTechId) {
-      return res.json({ job: { ...job, technician_id: newTechId } });
-    }
-
-    const fromTechId = job.technician_id || null;
-
-    // Trx scope: status-guarded update + auto-resolve (if applicable).
-    // The UPDATE re-applies the terminal-status filter as a transactional
-    // predicate to close the TOCTOU race that the pre-trx check leaves
-    // open: a concurrent PUT /:serviceId/status transitioning the job
-    // to completed/cancelled/skipped between our SELECT and our UPDATE
-    // would otherwise let the reassignment land on a terminal row.
-    // Codex P1 on PR #320. 0-rowcount means the status flipped (or, very
-    // rarely, the row was deleted) — we throw and the catch arm below
-    // converts to 409.
-    //
-    // The dispatch-alerts helper's emit chains on trx.executionPromise,
-    // so alert_resolved broadcasts fire post-commit and are suppressed
-    // on rollback.
-    const TERMINAL_RACE = 'TERMINAL_STATUS_RACE';
-    let updatedRow;
-    try {
-      await db.transaction(async (trx) => {
-        const rows = await trx('scheduled_services')
-          .where({ id: req.params.id })
-          .whereNotIn('status', ['completed', 'cancelled', 'skipped'])
-          .update({ technician_id: newTechId, updated_at: trx.fn.now() })
-          .returning('*');
-        if (rows.length === 0) {
-          // Status flipped to terminal between the pre-trx SELECT and
-          // this UPDATE. Throwing rolls back the trx and skips the
-          // auto-resolve + commit; the catch arm returns 409.
-          throw Object.assign(new Error('terminal status race'), { code: TERMINAL_RACE });
-        }
-        updatedRow = rows[0];
-
-        // null → tech: the unassigned_overdue alert is moot. We don't
-        // touch tech_late here — the late condition is on the JOB's
-        // window, not the tech, so reassigning between techs leaves
-        // tech_late open until the job actually lands on_site.
-        if (!fromTechId && newTechId) {
-          const { resolveAlert } = require('../services/dispatch-alerts');
-          const openAlerts = await trx('dispatch_alerts')
-            .where({ type: 'unassigned_overdue', job_id: req.params.id })
-            .whereNull('resolved_at')
-            .select('id');
-          for (const { id } of openAlerts) {
-            await resolveAlert({ id, resolvedBy: req.technicianId, trx });
-          }
-        }
-      });
-    } catch (err) {
-      if (err && err.code === TERMINAL_RACE) {
-        return res.status(409).json({
-          error: 'Cannot reassign — job transitioned to a terminal state concurrently',
-        });
-      }
-      throw err;
-    }
-
-    // Best-effort dispatch:job_update broadcast. Mirror's transitionJobStatus's
-    // adminPayload shape so future client listeners can treat both the
-    // status-transition and assign paths uniformly.
-    try {
-      const { getIo } = require('../sockets');
-      const io = getIo();
-      if (io) {
-        const enriched = await db('scheduled_services as s')
-          .leftJoin('technicians as t', 's.technician_id', 't.id')
-          .leftJoin('customers as c', 's.customer_id', 'c.id')
-          .where('s.id', req.params.id)
-          .first(
-            's.id as job_id', 's.customer_id', 's.technician_id as tech_id',
-            's.status', 's.service_type', 's.scheduled_date',
-            's.window_start', 's.window_end', 's.notes', 's.internal_notes',
-            's.updated_at', 't.name as tech_full_name', 'c.first_name as cust_first_name'
-          );
-        if (enriched) {
-          io.to('dispatch:admins').emit('dispatch:job_update', {
-            job_id: enriched.job_id,
-            customer_id: enriched.customer_id,
-            cust_first_name: enriched.cust_first_name,
-            status: enriched.status,
-            from_status: enriched.status, // metadata-only change
-            tech_id: enriched.tech_id,
-            tech_full_name: enriched.tech_full_name,
-            service_type: enriched.service_type,
-            scheduled_date: enriched.scheduled_date,
-            window_start: enriched.window_start,
-            window_end: enriched.window_end,
-            notes: enriched.notes,
-            internal_notes: enriched.internal_notes,
-            transitioned_by: req.technicianId,
-            updated_at: enriched.updated_at,
-          });
-        }
-      }
-    } catch (e) {
-      logger.error(`[dispatch/jobs/assign] broadcast failed: ${e.message}`);
-    }
-
-    res.json({ job: updatedRow });
+    const result = await assignDispatchJob({
+      jobId: req.params.id,
+      technicianId: req.body ? req.body.technicianId : undefined,
+      actorId: req.technicianId,
+    });
+    res.json({ job: result.job });
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
     logger.error(`[dispatch/jobs/assign] failed for ${req.params.id}: ${err.message}`);
     next(err);
   }

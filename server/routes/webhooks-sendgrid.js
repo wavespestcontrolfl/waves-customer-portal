@@ -24,6 +24,7 @@ const logger = require('../services/logger');
 
 const SIG_HEADER = 'x-twilio-email-event-webhook-signature';
 const TS_HEADER = 'x-twilio-email-event-webhook-timestamp';
+const WEBHOOK_MAX_AGE_SECONDS = 5 * 60;
 
 // Convert SendGrid's base64 SPKI public key to a Node KeyObject.
 // Cached — key is static env input.
@@ -56,6 +57,20 @@ function verifySignature(rawBody, timestamp, signature) {
   }
 }
 
+function isFreshTimestamp(timestamp, nowMs = Date.now()) {
+  const n = Number(timestamp);
+  if (!Number.isFinite(n)) return false;
+  const tsMs = n > 1e12 ? n : n * 1000;
+  return Math.abs(nowMs - tsMs) <= WEBHOOK_MAX_AGE_SECONDS * 1000;
+}
+
+function redactEmail(value) {
+  if (!value || typeof value !== 'string') return '';
+  const [local, domain] = value.split('@');
+  if (!domain) return '[redacted]';
+  return `${local.slice(0, 2)}***@${domain}`;
+}
+
 router.post('/events', express.raw({ type: '*/*' }), async (req, res) => {
   // Fail closed unless the public key is configured — we don't want anyone
   // POSTing fake bounces to suppress recipients.
@@ -64,11 +79,15 @@ router.post('/events', express.raw({ type: '*/*' }), async (req, res) => {
     return res.status(500).send('Webhook public key not configured');
   }
 
-  const sig = req.headers[SIG_HEADER];
-  const ts = req.headers[TS_HEADER];
+  const sig = Array.isArray(req.headers[SIG_HEADER]) ? req.headers[SIG_HEADER][0] : req.headers[SIG_HEADER];
+  const ts = Array.isArray(req.headers[TS_HEADER]) ? req.headers[TS_HEADER][0] : req.headers[TS_HEADER];
   if (!sig || !ts) {
     logger.warn('[sendgrid-webhook] Missing signature headers — rejecting');
     return res.status(400).send('Missing signature headers');
+  }
+  if (!isFreshTimestamp(ts)) {
+    logger.warn('[sendgrid-webhook] Stale signature timestamp — rejecting');
+    return res.status(403).send('Stale signature timestamp');
   }
   if (!verifySignature(req.body, ts, sig)) {
     logger.warn('[sendgrid-webhook] Signature verification failed — rejecting');
@@ -120,15 +139,48 @@ async function handleEvent(ev) {
     .first() : null;
 
   if (newsletterDelivery) {
-    await handleNewsletterEvent(ev, newsletterDelivery);
+    await processWebhookEvent(ev, messageId, email, (trx) => handleNewsletterEvent(ev, newsletterDelivery, trx));
     return;
   }
   if (automationSend) {
-    await handleAutomationEvent(ev, automationSend);
+    await processWebhookEvent(ev, messageId, email, (trx) => handleAutomationEvent(ev, automationSend, trx));
     return;
   }
   // Untracked send (transactional invoices, receipts, etc.) — ignore.
   return;
+}
+
+async function processWebhookEvent(ev, messageId, email, handler) {
+  const eventId = ev.sg_event_id ? String(ev.sg_event_id) : null;
+  if (!eventId) {
+    await handler(db);
+    return;
+  }
+
+  await db.transaction(async (trx) => {
+    const inserted = await trx('sendgrid_webhook_events')
+      .insert({
+        event_id: eventId,
+        event_type: ev.event || null,
+        message_id: messageId,
+        email: email || null,
+        status: 'processing',
+      })
+      .onConflict('event_id')
+      .ignore()
+      .returning('event_id');
+
+    if (!inserted.length) return;
+
+    await handler(trx);
+    await trx('sendgrid_webhook_events')
+      .where({ event_id: eventId })
+      .update({
+        status: 'processed',
+        processed_at: new Date(),
+        updated_at: new Date(),
+      });
+  });
 }
 
 /**
@@ -206,7 +258,9 @@ function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
       // initiated unsubs (rare — we disable subscription_tracking). Only
       // flip if not already unsubbed so the unsubscribed_at timestamp
       // captures the FIRST unsub, not subsequent re-fires.
+      if (delivery.unsubscribed_at) return null;
       return {
+        delivery: { unsubscribed_at: now, updated_at: now },
         sendIncrement: 'unsubscribed_count',
         subscriberAction: delivery.subscriber_id ? 'unsubscribe_if_active' : null,
         subscriberAt: now,
@@ -223,32 +277,32 @@ function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
   }
 }
 
-async function handleNewsletterEvent(ev, delivery) {
+async function handleNewsletterEvent(ev, delivery, client = db) {
   const updates = computeNewsletterEventUpdates(ev, delivery);
   if (!updates) return;
 
   if (updates.delivery) {
-    await db('newsletter_send_deliveries').where({ id: delivery.id }).update(updates.delivery);
+    await client('newsletter_send_deliveries').where({ id: delivery.id }).update(updates.delivery);
   }
   if (updates.sendIncrement) {
-    await db('newsletter_sends').where({ id: delivery.send_id }).increment(updates.sendIncrement, 1);
+    await client('newsletter_sends').where({ id: delivery.send_id }).increment(updates.sendIncrement, 1);
   }
   if (updates.subscriberAction && delivery.subscriber_id) {
     const at = updates.subscriberAt;
     if (updates.subscriberAction === 'bounce_increment') {
-      await db('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
-        bounce_count: db.raw('COALESCE(bounce_count,0) + 1'),
+      await client('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
+        bounce_count: client.raw('COALESCE(bounce_count,0) + 1'),
         last_bounced_at: at,
         updated_at: at,
       });
     } else if (updates.subscriberAction === 'force_unsubscribe') {
-      await db('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
+      await client('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
         status: 'unsubscribed',
         unsubscribed_at: at,
         updated_at: at,
       });
     } else if (updates.subscriberAction === 'unsubscribe_if_active') {
-      await db('newsletter_subscribers')
+      await client('newsletter_subscribers')
         .where({ id: delivery.subscriber_id })
         .whereNot({ status: 'unsubscribed' })
         .update({
@@ -266,13 +320,14 @@ async function handleNewsletterEvent(ev, delivery) {
  * enrollment for that email so the sequence doesn't keep ticking. Group
  * unsubscribes only cancel enrollments whose template's asm_group matches.
  */
-async function handleAutomationEvent(ev, sendRow) {
+async function handleAutomationEvent(ev, sendRow, client = db) {
   const now = new Date();
+  const newsletterUnsubscribe = () => unsubscribeNewsletterSubscriber(ev.email, now, client);
 
   switch (ev.event) {
     case 'delivered':
       if (!sendRow.delivered_at) {
-        await db('automation_step_sends').where({ id: sendRow.id }).update({
+        await client('automation_step_sends').where({ id: sendRow.id }).update({
           status: 'delivered', delivered_at: now, updated_at: now,
         });
       }
@@ -280,7 +335,7 @@ async function handleAutomationEvent(ev, sendRow) {
 
     case 'open':
       if (!sendRow.opened_at) {
-        await db('automation_step_sends').where({ id: sendRow.id }).update({
+        await client('automation_step_sends').where({ id: sendRow.id }).update({
           opened_at: now, updated_at: now,
         });
       }
@@ -288,7 +343,7 @@ async function handleAutomationEvent(ev, sendRow) {
 
     case 'click':
       if (!sendRow.clicked_at) {
-        await db('automation_step_sends').where({ id: sendRow.id }).update({
+        await client('automation_step_sends').where({ id: sendRow.id }).update({
           clicked_at: now, updated_at: now,
         });
       }
@@ -297,7 +352,7 @@ async function handleAutomationEvent(ev, sendRow) {
     case 'bounce':
     case 'blocked':
     case 'dropped':
-      await db('automation_step_sends').where({ id: sendRow.id }).update({
+      await client('automation_step_sends').where({ id: sendRow.id }).update({
         status: 'bounced',
         failure_reason: (ev.reason || ev.response || ev.type || '').toString().slice(0, 500),
         updated_at: now,
@@ -309,24 +364,23 @@ async function handleAutomationEvent(ev, sendRow) {
       // bad, just that we already knew. Cancelling on either was destructive
       // since enrollment.status='cancelled' is terminal.
       if (ev.type === 'bounce') {
-        await cancelActiveEnrollments({ email: ev.email, reason: 'hard_bounce' });
+        await cancelActiveEnrollments({ email: ev.email, reason: 'hard_bounce' }, client);
       }
       break;
 
     case 'spamreport':
-      await db('automation_step_sends').where({ id: sendRow.id }).update({
+      await client('automation_step_sends').where({ id: sendRow.id }).update({
         status: 'complained', updated_at: now,
       });
       // Complaint → cancel everything + mark newsletter sub unsubscribed.
-      await cancelActiveEnrollments({ email: ev.email, reason: 'spam_report' });
-      await db('newsletter_subscribers').where({ email: ev.email }).whereNot({ status: 'unsubscribed' }).update({
-        status: 'unsubscribed', unsubscribed_at: now, updated_at: now,
-      });
+      await cancelActiveEnrollments({ email: ev.email, reason: 'spam_report' }, client);
+      await newsletterUnsubscribe();
       break;
 
     case 'unsubscribe':
       // Global unsub — cancel every active enrollment for this email.
-      await cancelActiveEnrollments({ email: ev.email, reason: 'unsubscribe' });
+      await cancelActiveEnrollments({ email: ev.email, reason: 'unsubscribe' }, client);
+      await newsletterUnsubscribe();
       break;
 
     case 'group_unsubscribe': {
@@ -340,7 +394,8 @@ async function handleAutomationEvent(ev, sendRow) {
       if (gid && gid === newsletterGid) asmGroupToCancel = 'newsletter';
       else if (gid && gid === serviceGid) asmGroupToCancel = 'service';
       if (asmGroupToCancel) {
-        await cancelActiveEnrollments({ email: ev.email, reason: 'group_unsubscribe', asmGroup: asmGroupToCancel });
+        await cancelActiveEnrollments({ email: ev.email, reason: 'group_unsubscribe', asmGroup: asmGroupToCancel }, client);
+        if (asmGroupToCancel === 'newsletter') await newsletterUnsubscribe();
       }
       break;
     }
@@ -353,11 +408,25 @@ async function handleAutomationEvent(ev, sendRow) {
   }
 }
 
-async function cancelActiveEnrollments({ email, reason, asmGroup }) {
+async function unsubscribeNewsletterSubscriber(email, at, client = db) {
   if (!email) return;
-  let q = db('automation_enrollments as e')
+  const lc = String(email).trim().toLowerCase();
+  await client('newsletter_subscribers')
+    .whereRaw('LOWER(email) = ?', [lc])
+    .whereNot({ status: 'unsubscribed' })
+    .update({
+      status: 'unsubscribed',
+      unsubscribed_at: at,
+      updated_at: at,
+    });
+}
+
+async function cancelActiveEnrollments({ email, reason, asmGroup }, client = db) {
+  if (!email) return;
+  const lc = String(email).trim().toLowerCase();
+  let q = client('automation_enrollments as e')
     .join('automation_templates as t', 't.key', 'e.template_key')
-    .where('e.email', email)
+    .whereRaw('LOWER(e.email) = ?', [lc])
     .where('e.status', 'active');
   if (asmGroup) q = q.where('t.asm_group', asmGroup);
 
@@ -365,17 +434,18 @@ async function cancelActiveEnrollments({ email, reason, asmGroup }) {
   if (!rows.length) return;
 
   const ids = rows.map((r) => r.id);
-  await db('automation_enrollments').whereIn('id', ids).update({
+  await client('automation_enrollments').whereIn('id', ids).update({
     status: 'cancelled',
     next_send_at: null,
     completed_at: new Date(),
-    metadata: db.raw("jsonb_set(COALESCE(metadata,'{}'::jsonb), '{cancel_reason}', ?::jsonb, true)", [JSON.stringify(reason)]),
+    metadata: client.raw("jsonb_set(COALESCE(metadata,'{}'::jsonb), '{cancel_reason}', ?::jsonb, true)", [JSON.stringify(reason)]),
     updated_at: new Date(),
   });
-  logger.info(`[sendgrid-webhook] cancelled ${rows.length} enrollment(s) for ${email} reason=${reason}${asmGroup ? ` group=${asmGroup}` : ''}`);
+  logger.info(`[sendgrid-webhook] cancelled ${rows.length} enrollment(s) for ${redactEmail(email)} reason=${reason}${asmGroup ? ` group=${asmGroup}` : ''}`);
 }
 
 // Default export is the Express router; the pure event-mapping function
 // is hung off as a property so the test suite can exercise it directly.
 module.exports = router;
 module.exports.computeNewsletterEventUpdates = computeNewsletterEventUpdates;
+module.exports.isFreshTimestamp = isFreshTimestamp;

@@ -11,7 +11,18 @@
 import { adminFetch } from './adminFetch';
 import { snapshotForHandoff } from './tapToPayReturn';
 
+function isIPhoneLikeDevice() {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  const platform = navigator.platform || '';
+  return /iPad|iPhone|iPod/.test(ua) || (platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
 export async function launchTapToPay(invoiceId) {
+  if (!isIPhoneLikeDevice()) {
+    throw new Error('Tap to Pay requires WavesPay on an iPhone. Use Copy Link or Add payment here.');
+  }
+
   const r = await adminFetch('/stripe/terminal/handoff', {
     method: 'POST',
     body: { invoice_id: invoiceId },
@@ -28,5 +39,30 @@ export async function launchTapToPay(invoiceId) {
   snapshotForHandoff();
 
   window.location.href = data.deep_link;
-  return data;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('pagehide', onPageHide);
+    };
+    const resolveOpened = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(data);
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') resolveOpened();
+    };
+    const onPageHide = () => resolveOpened();
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('pagehide', onPageHide);
+    window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error('WavesPay did not open. Use Copy Link or Add payment.'));
+    }, 1800);
+  });
 }

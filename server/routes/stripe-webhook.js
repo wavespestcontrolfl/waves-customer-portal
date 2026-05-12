@@ -7,6 +7,16 @@ const stripeConfig = require('../config/stripe-config');
 const { classifyExistingWebhookEvent, STALE_CLAIM_WINDOW_MS } = require('./stripe-webhook-helpers');
 const { triggerNotification } = require('../services/notification-triggers');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { etDateString } = require('../utils/datetime-et');
+const {
+  assertInvoicePaymentIntentTenderMatches,
+  isAchPaymentIntent,
+  isTerminalInvoicePaymentIntent,
+  nextInvoiceStatusAfterFailedPayment,
+} = require('../services/stripe-invoice-state');
+const { computeChargeAmount } = require('../services/stripe-pricing');
+const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('../services/invoice-helpers');
+const INVOICE_TERMINAL_PAYMENT_STATUSES = INVOICE_UNCOLLECTIBLE_STATUSES.filter(s => s !== 'processing');
 
 // Build a "First Last" string from a customer row, falling back to phone
 // then a generic 'customer'. Used to fill the body of the bell + push
@@ -59,6 +69,131 @@ function getStripe() {
   if (!stripeConfig.secretKey) return null;
   _stripe = new Stripe(stripeConfig.secretKey, { apiVersion: '2024-12-18.acacia' });
   return _stripe;
+}
+
+async function paymentDetailsFromIntent(paymentIntent) {
+  const details = {
+    paymentMethod: paymentIntent.payment_method_types?.[0] || null,
+    cardBrand: null,
+    cardLastFour: null,
+    receiptUrl: null,
+  };
+  let resolvedFromStripeDetails = false;
+
+  if (paymentIntent.latest_charge) {
+    try {
+      const stripe = getStripe();
+      if (stripe) {
+        const charge = await stripe.charges.retrieve(paymentIntent.latest_charge);
+        details.receiptUrl = charge?.receipt_url || null;
+        const pmd = charge?.payment_method_details;
+        if (pmd?.card) {
+          details.paymentMethod = 'card';
+          details.cardBrand = pmd.card.brand?.toUpperCase() || null;
+          details.cardLastFour = pmd.card.last4 || null;
+          resolvedFromStripeDetails = true;
+        } else if (pmd?.us_bank_account) {
+          details.paymentMethod = 'us_bank_account';
+          details.cardLastFour = pmd.us_bank_account.last4 || null;
+          resolvedFromStripeDetails = true;
+        } else if (pmd?.type) {
+          details.paymentMethod = pmd.type;
+          resolvedFromStripeDetails = true;
+        }
+      }
+    } catch (err) {
+      logger.warn(`[stripe-webhook] charge detail lookup failed for PI ${paymentIntent.id}: ${err.message}`);
+    }
+  }
+
+  if (resolvedFromStripeDetails || !paymentIntent.payment_method) return details;
+
+  try {
+    const stripe = getStripe();
+    if (!stripe) return details;
+    const pm = typeof paymentIntent.payment_method === 'string'
+      ? await stripe.paymentMethods.retrieve(paymentIntent.payment_method)
+      : paymentIntent.payment_method;
+    if (pm?.card) {
+      details.paymentMethod = 'card';
+      details.cardBrand = pm.card.brand?.toUpperCase() || details.cardBrand;
+      details.cardLastFour = pm.card.last4 || details.cardLastFour;
+    } else if (pm?.us_bank_account) {
+      details.paymentMethod = 'us_bank_account';
+      details.cardLastFour = pm.us_bank_account.last4 || details.cardLastFour;
+    } else if (pm?.type) {
+      details.paymentMethod = pm.type;
+    }
+  } catch (err) {
+    logger.warn(`[stripe-webhook] payment method lookup failed for PI ${paymentIntent.id}: ${err.message}`);
+  }
+
+  return details;
+}
+
+async function findInvoiceForPaymentIntent(paymentIntent) {
+  const byPaymentIntent = await db('invoices')
+    .where({ stripe_payment_intent_id: paymentIntent.id })
+    .first();
+  const invoiceId = paymentIntent.metadata?.waves_invoice_id || null;
+  if (byPaymentIntent) {
+    if (invoiceId && String(byPaymentIntent.id) !== String(invoiceId)) {
+      logger.warn(
+        `[stripe-webhook] PI ${paymentIntent.id} metadata invoice ${invoiceId} conflicts with local invoice ${byPaymentIntent.id}; using local binding`,
+      );
+    }
+    return byPaymentIntent;
+  }
+
+  if (invoiceId) {
+    const byMetadata = await db('invoices').where({ id: invoiceId }).first();
+    if (byMetadata?.stripe_payment_intent_id
+      && String(byMetadata.stripe_payment_intent_id) !== String(paymentIntent.id)) {
+      logger.warn(
+        `[stripe-webhook] PI ${paymentIntent.id} metadata invoice ${invoiceId} is already bound to ${byMetadata.stripe_payment_intent_id}; ignoring metadata fallback`,
+      );
+      return null;
+    }
+    if (byMetadata) return byMetadata;
+  }
+  return null;
+}
+
+function centsToDollars(cents) {
+  const n = Number(cents || 0);
+  return Math.round((n / 100) * 100) / 100;
+}
+
+async function recordOrphanSucceededPaymentIntent(paymentIntent, amount, reason) {
+  const latestCharge = paymentIntent.latest_charge;
+  const stripeChargeId = typeof latestCharge === 'string'
+    ? latestCharge
+    : latestCharge?.id || null;
+
+  try {
+    await db('stripe_orphan_charges')
+      .insert({
+        stripe_payment_intent_id: paymentIntent.id,
+        stripe_charge_id: stripeChargeId,
+        customer_id: paymentIntent.metadata?.waves_customer_id || null,
+        invoice_id: paymentIntent.metadata?.waves_invoice_id || null,
+        amount,
+        source: 'invoice_payment_webhook',
+        original_db_error: reason.slice(0, 1000),
+      })
+      .onConflict('stripe_payment_intent_id')
+      .ignore();
+  } catch (err) {
+    logger.error(`[stripe-webhook] Failed to record orphan succeeded PI ${paymentIntent.id}: ${err.message}`);
+    throw err;
+  }
+}
+
+async function lockPaymentIntentPaymentRow(trx, piId) {
+  await trx.raw(
+    'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+    ['stripe.pi.payment', String(piId)],
+  );
 }
 
 // Use express.raw() for Stripe signature verification
@@ -286,6 +421,28 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
   logger.info(`[stripe-webhook] PaymentIntent succeeded: ${piId}`);
   const chargedCents = Number(paymentIntent.amount_received || paymentIntent.amount || 0);
   const chargedTotal = chargedCents > 0 ? Math.round((chargedCents / 100) * 100) / 100 : null;
+  const details = await paymentDetailsFromIntent(paymentIntent);
+  const invoiceForTenderGuard = await findInvoiceForPaymentIntent(paymentIntent);
+  const invoiceForTenderGuardStatus = String(invoiceForTenderGuard?.status || '').toLowerCase();
+  if (invoiceForTenderGuard
+    && !INVOICE_TERMINAL_PAYMENT_STATUSES.includes(invoiceForTenderGuardStatus)
+    && !isTerminalInvoicePaymentIntent(paymentIntent, details.paymentMethod)) {
+    const invoiceBaseAmount = Number(invoiceForTenderGuard.total);
+    try {
+      assertInvoicePaymentIntentTenderMatches(paymentIntent, details.paymentMethod, invoiceBaseAmount);
+    } catch (err) {
+      logger.error(
+        `[stripe-webhook] Refusing succeeded invoice PI ${piId}: ${err.message} ` +
+        `(invoice=${invoiceForTenderGuard.id}, method=${details.paymentMethod || 'unknown'}, amount=${chargedCents}c)`,
+      );
+      await recordOrphanSucceededPaymentIntent(
+        paymentIntent,
+        chargedTotal ?? centsToDollars(paymentIntent.amount),
+        `Rejected invoice payment tender mismatch for invoice ${invoiceForTenderGuard.id}: ${err.message}`,
+      );
+      return;
+    }
+  }
 
   // Update payments table
   const paymentUpdates = {
@@ -293,12 +450,113 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
     stripe_charge_id: paymentIntent.latest_charge || null,
   };
   if (chargedTotal !== null) paymentUpdates.amount = chargedTotal;
+  if (details.receiptUrl) paymentUpdates.receipt_url = details.receiptUrl;
+  if (details.cardBrand) paymentUpdates.card_brand = details.cardBrand;
+  if (details.cardLastFour) paymentUpdates.card_last_four = details.cardLastFour;
+  let fallbackLinkedInvoiceId = null;
   const updated = await db('payments')
     .where({ stripe_payment_intent_id: piId, status: 'processing' })
     .update(paymentUpdates);
 
   if (updated > 0) {
     logger.info(`[stripe-webhook] Updated ${updated} payment(s) to paid for PI: ${piId}`);
+  } else {
+    await db.transaction(async (trx) => {
+      await lockPaymentIntentPaymentRow(trx, piId);
+      const existingPayment = await trx('payments')
+        .where({ stripe_payment_intent_id: piId })
+        .forUpdate()
+        .first();
+      if (existingPayment) {
+        if (!['paid', 'refunded'].includes(existingPayment.status)) {
+          await trx('payments').where({ id: existingPayment.id }).update(paymentUpdates);
+        }
+        return;
+      }
+
+      const invoice = await findInvoiceForPaymentIntent(paymentIntent);
+      if (!invoice?.customer_id) {
+        await recordOrphanSucceededPaymentIntent(
+          paymentIntent,
+          chargedTotal ?? centsToDollars(paymentIntent.amount),
+          `No locally collectible invoice matched succeeded PI ${piId}`,
+        );
+        return;
+      }
+
+      const lockedInvoice = await trx('invoices')
+        .where({ id: invoice.id })
+        .forUpdate()
+        .first();
+      if (!lockedInvoice) return;
+
+      const activePi = lockedInvoice.stripe_payment_intent_id
+        ? String(lockedInvoice.stripe_payment_intent_id)
+        : '';
+      if (INVOICE_TERMINAL_PAYMENT_STATUSES.includes(String(lockedInvoice.status || '').toLowerCase())
+        || (lockedInvoice.status === 'processing' && activePi !== String(piId))
+        || (activePi && activePi !== String(piId))) {
+        logger.warn(
+          `[stripe-webhook] Skipping paid fallback row for PI ${piId}; ` +
+          `invoice ${invoice.id} status=${lockedInvoice.status || 'unknown'} active_pi=${activePi || 'none'}`,
+        );
+        return;
+      }
+
+      const fallbackInvoiceUpdates = {
+        status: 'paid',
+        paid_at: new Date().toISOString(),
+        processor: 'stripe',
+        stripe_payment_intent_id: piId,
+        stripe_charge_id: paymentIntent.latest_charge || null,
+      };
+      if (chargedTotal !== null) fallbackInvoiceUpdates.total = chargedTotal;
+      if (details.paymentMethod) fallbackInvoiceUpdates.payment_method = details.paymentMethod;
+      if (details.cardBrand) fallbackInvoiceUpdates.card_brand = details.cardBrand;
+      if (details.cardLastFour) fallbackInvoiceUpdates.card_last_four = details.cardLastFour;
+      if (details.receiptUrl) fallbackInvoiceUpdates.receipt_url = details.receiptUrl;
+
+      const invoiceLinked = await trx('invoices')
+        .where({ id: lockedInvoice.id })
+        .whereNotIn('status', INVOICE_TERMINAL_PAYMENT_STATUSES)
+        .where(function activePaidIntentGuard() {
+          this.whereNull('stripe_payment_intent_id')
+            .orWhere({ stripe_payment_intent_id: piId });
+        })
+        .update(fallbackInvoiceUpdates);
+      if (!invoiceLinked) {
+        throw new Error(`Invoice ${invoice.id} no longer matches PI ${piId}`);
+      }
+      fallbackLinkedInvoiceId = lockedInvoice.id;
+
+      const metadataBaseAmount = Number(paymentIntent.metadata?.base_amount ?? invoice.total);
+      const metadataCardSurcharge = Number(paymentIntent.metadata?.card_surcharge ?? 0);
+      await trx('payments').insert({
+        customer_id: invoice.customer_id,
+        processor: 'stripe',
+        stripe_payment_intent_id: piId,
+        stripe_charge_id: paymentIntent.latest_charge || null,
+        payment_date: etDateString(),
+        amount: chargedTotal ?? centsToDollars(paymentIntent.amount),
+        status: 'paid',
+        description: metadataCardSurcharge > 0
+          ? `Invoice ${invoice.invoice_number} (includes $${metadataCardSurcharge.toFixed(2)} card processing fee)`
+          : `Invoice ${invoice.invoice_number}`,
+        receipt_url: details.receiptUrl || null,
+        card_brand: details.cardBrand || null,
+        card_last_four: details.cardLastFour || null,
+        metadata: JSON.stringify({
+          invoice_id: invoice.id,
+          stripe_receipt_url: details.receiptUrl || null,
+          base_amount: metadataBaseAmount,
+          card_surcharge: metadataCardSurcharge,
+          charged_amount: chargedTotal ?? centsToDollars(paymentIntent.amount),
+          payment_method: details.paymentMethod || paymentIntent.payment_method_types?.[0] || null,
+          payment_state: 'paid',
+        }),
+      });
+      logger.info(`[stripe-webhook] Inserted missing paid payment row for PI: ${piId}`);
+    });
   }
 
   // Update invoices table
@@ -308,10 +566,17 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
     stripe_charge_id: paymentIntent.latest_charge || null,
   };
   if (chargedTotal !== null) invoiceUpdates.total = chargedTotal;
-  const invoiceUpdated = await db('invoices')
+  if (details.paymentMethod) invoiceUpdates.payment_method = details.paymentMethod;
+  if (details.cardBrand) invoiceUpdates.card_brand = details.cardBrand;
+  if (details.cardLastFour) invoiceUpdates.card_last_four = details.cardLastFour;
+  if (details.receiptUrl) invoiceUpdates.receipt_url = details.receiptUrl;
+  let invoiceUpdated = await db('invoices')
     .where({ stripe_payment_intent_id: piId })
-    .whereNot({ status: 'paid' })
+    .whereNotIn('status', INVOICE_TERMINAL_PAYMENT_STATUSES)
     .update(invoiceUpdates);
+  if (fallbackLinkedInvoiceId && invoiceUpdated === 0) {
+    invoiceUpdated = 1;
+  }
 
   if (invoiceUpdated > 0) {
     logger.info(`[stripe-webhook] Updated ${invoiceUpdated} invoice(s) to paid for PI: ${piId}`);
@@ -577,6 +842,17 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
       status: 'failed',
       failure_reason: `${failureMessage}${failureCode ? ` (${failureCode})` : ''}`,
     });
+
+  const failedInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first();
+  if (failedInvoice?.status === 'processing') {
+    const nextStatus = nextInvoiceStatusAfterFailedPayment(failedInvoice);
+    await db('invoices')
+      .where({ id: failedInvoice.id })
+      .update({
+        status: nextStatus,
+        paid_at: null,
+      });
+  }
 
   // Fire-and-forget health rescore after payment failure
   try {
@@ -895,17 +1171,130 @@ async function handleAchFailure(paymentIntent, failureReason) {
 async function handlePaymentIntentProcessing(paymentIntent) {
   const piId = paymentIntent.id;
   logger.info(`[stripe-webhook] PaymentIntent processing (ACH in flight): ${piId}`);
+  const invoice = await findInvoiceForPaymentIntent(paymentIntent);
+  const isAch = isAchPaymentIntent(paymentIntent, paymentIntent.metadata?.selected_method_category);
+  if (!isAch) {
+    logger.info(`[stripe-webhook] Ignoring non-ACH PaymentIntent processing event: ${piId}`);
+    return;
+  }
+  const stripe = getStripe();
+  if (stripe) {
+    const currentIntent = await stripe.paymentIntents.retrieve(piId);
+    if (currentIntent.status !== 'processing') {
+      logger.info(`[stripe-webhook] Ignoring stale processing event for PI ${piId}; current status is ${currentIntent.status}`);
+      return;
+    }
+  }
 
-  await db('payments')
-    .where({ stripe_payment_intent_id: piId })
-    .update({ status: 'processing' })
-    .catch(() => {});
+  const amount = centsToDollars(paymentIntent.amount);
+  const metadataBaseAmount = Number(paymentIntent.metadata?.base_amount ?? invoice?.total ?? amount);
+  const metadataCardSurcharge = Number(paymentIntent.metadata?.card_surcharge ?? 0);
 
-  await db('invoices')
-    .where({ stripe_payment_intent_id: piId })
-    .whereNot({ status: 'paid' })
-    .update({ status: 'processing' })
-    .catch(() => {});
+  const paymentMetadata = JSON.stringify({
+    invoice_id: invoice?.id || paymentIntent.metadata?.waves_invoice_id || null,
+    base_amount: metadataBaseAmount,
+    card_surcharge: metadataCardSurcharge,
+    charged_amount: amount,
+    payment_method: isAch ? 'us_bank_account' : paymentIntent.payment_method_types?.[0] || null,
+    payment_state: 'processing',
+  });
+
+  if (!invoice?.id) {
+    logger.warn(`[stripe-webhook] No invoice found for ACH processing PI: ${piId}`);
+    return;
+  }
+
+  await db.transaction(async (trx) => {
+    await lockPaymentIntentPaymentRow(trx, piId);
+
+    const lockedInvoice = await trx('invoices')
+      .where({ id: invoice.id })
+      .forUpdate()
+      .first();
+
+    if (!lockedInvoice) return;
+    if (INVOICE_TERMINAL_PAYMENT_STATUSES.includes(String(lockedInvoice.status || '').toLowerCase())) {
+      logger.info(`[stripe-webhook] Skipping processing event for terminal invoice ${invoice.id} status=${lockedInvoice.status} on PI: ${piId}`);
+      return;
+    }
+
+    const activePi = lockedInvoice.stripe_payment_intent_id
+      ? String(lockedInvoice.stripe_payment_intent_id)
+      : '';
+    if (activePi && activePi !== String(piId)) {
+      logger.warn(
+        `[stripe-webhook] Ignoring stale ACH processing PI ${piId} for invoice ${invoice.id}; ` +
+        `active PI is ${activePi}`,
+      );
+      return;
+    }
+
+    const expected = computeChargeAmount(parseFloat(lockedInvoice.total), 'us_bank_account');
+    const expectedCents = Math.round(expected.total * 100);
+    const actualCents = Number(paymentIntent.amount || 0);
+    if (actualCents !== expectedCents) {
+      logger.error(
+        `[stripe-webhook] ACH processing amount mismatch on PI ${piId}. ` +
+        `Expected ${expectedCents}c from invoice ${lockedInvoice.id}; got ${actualCents}c.`,
+      );
+      if (stripe) {
+        try {
+          await stripe.paymentIntents.cancel(piId);
+        } catch (cancelErr) {
+          logger.warn(`[stripe-webhook] Could not cancel mismatched processing PI ${piId}: ${cancelErr.message}`);
+        }
+      }
+      return;
+    }
+
+    const existingPayment = await trx('payments')
+      .where({ stripe_payment_intent_id: piId })
+      .forUpdate()
+      .first();
+    if (['paid', 'refunded', 'canceled', 'cancelled'].includes(existingPayment?.status)) {
+      logger.info(`[stripe-webhook] Skipping processing downgrade for terminal payment row on PI: ${piId}`);
+      return;
+    }
+
+    if (existingPayment) {
+      await trx('payments')
+        .where({ id: existingPayment.id })
+        .update({
+          status: 'processing',
+          failure_reason: null,
+          amount,
+          metadata: paymentMetadata,
+        });
+    } else {
+      if (!invoice?.customer_id) return;
+
+      await trx('payments').insert({
+        customer_id: invoice.customer_id,
+        processor: 'stripe',
+        stripe_payment_intent_id: piId,
+        payment_date: etDateString(),
+        amount,
+        status: 'processing',
+        description: `Invoice ${invoice.invoice_number} (bank payment pending)`,
+        metadata: paymentMetadata,
+      });
+    }
+
+    await trx('invoices')
+      .where({ id: lockedInvoice.id })
+      .whereNotIn('status', INVOICE_TERMINAL_PAYMENT_STATUSES)
+      .where(function activeProcessingIntentGuard() {
+        this.whereNull('stripe_payment_intent_id')
+          .orWhere({ stripe_payment_intent_id: piId });
+      })
+      .update({
+        status: 'processing',
+        processor: 'stripe',
+        stripe_payment_intent_id: piId,
+        payment_method: isAch ? 'us_bank_account' : paymentIntent.payment_method_types?.[0] || null,
+        total: amount,
+      });
+  });
 }
 
 /**

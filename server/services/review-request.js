@@ -239,7 +239,7 @@ const ReviewService = {
     // complaint, no unresolved billing, opted in, no recent ask in
     // cooldown). Here we just make sure the channel is permitted at
     // send time — sms_enabled, suppression list, segment count, no
-    // emoji / price leak.
+    // emoji / customer voice policy.
     try {
       const { sendCustomerMessage } = require('./messaging/send-customer-message');
       const result = await sendCustomerMessage({
@@ -592,11 +592,63 @@ const ReviewService = {
     // this fell on (today - 2 ET days) or earlier in the ET calendar.
     const cutoff = parseETDateTime(`${etDateString(addETDays(new Date(), -1))}T00:00`);
     const recentFollowupCutoff = new Date(Date.now() - 14 * 24 * 3600000); // 14 days
+
+    const nonPromoterDrafts = await db('review_requests')
+      .whereIn('status', ['sent', 'opened'])
+      .where('sms_sent_at', '<', cutoff)
+      .where({ followup_sent: false })
+      .whereNull('rated_at')
+      .where('score', '<', 8)
+      .orderBy('sms_sent_at', 'asc')
+      .limit(20);
+
+    let internalFollowups = 0;
+    for (const request of nonPromoterDrafts) {
+      const customer = await db('customers').where({ id: request.customer_id }).first();
+      const customerName = customer ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() : 'Unknown customer';
+      const serviceLabel = request.service_type || 'service';
+
+      try {
+        const TwilioService = require('./twilio');
+        const alertPhone = process.env.OWNER_PHONE || '+19413187612';
+        const result = await TwilioService.sendSMS(
+          alertPhone,
+          `Review follow-up needed: ${customerName} tapped ${request.score}/10 for ${serviceLabel} but did not submit feedback. Reach out before asking for a Google review.`,
+          { messageType: 'internal_alert' }
+        );
+        if (!result?.success) throw new Error(result?.error || 'SMS send failed');
+
+        await db('activity_log').insert({
+          customer_id: request.customer_id,
+          action: 'review_draft_needs_followup',
+          description: `Draft NPS ${request.score}/10 needs follow-up — ${serviceLabel}`,
+          metadata: JSON.stringify({
+            reviewRequestId: request.id,
+            score: request.score,
+            category: request.category,
+            serviceType: request.service_type,
+          }),
+        }).catch((err) => logger.warn(`[review] Draft follow-up activity skipped: ${err.message}`));
+
+        await db('review_requests').where({ id: request.id }).update({
+          followup_sent: true,
+          followup_sent_at: new Date(),
+        });
+        internalFollowups++;
+      } catch (err) {
+        logger.error(`[review] Draft low-score follow-up failed: ${err.message}`);
+      }
+    }
+
     const eligible = await db('review_requests')
       .whereIn('status', ['sent', 'opened'])
       .where('sms_sent_at', '<', cutoff)
       .where({ followup_sent: false })
       .whereNull('rated_at')
+      // Draft score taps are durable but not final. Do not send the
+      // straight-to-Google reminder when the draft score already tells us the
+      // customer was not a promoter.
+      .where((builder) => builder.whereNull('score').orWhere('score', '>=', 8))
       .orderBy('sms_sent_at', 'asc')
       .limit(20);
 
@@ -690,10 +742,10 @@ const ReviewService = {
         logger.error(`[review] Follow-up SMS failed: ${err.message}`);
       }
     }
-    if (sent > 0 || suppressed > 0) {
-      logger.info(`[review] Follow-ups: ${sent} sent, ${suppressed} suppressed (dedup)`);
+    if (sent > 0 || suppressed > 0 || internalFollowups > 0) {
+      logger.info(`[review] Follow-ups: ${sent} sent, ${suppressed} suppressed (dedup), ${internalFollowups} internal`);
     }
-    return { sent, suppressed };
+    return { sent, suppressed, internalFollowups };
   },
 
   // ── Stats ──

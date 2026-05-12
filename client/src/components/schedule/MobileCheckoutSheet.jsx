@@ -9,10 +9,9 @@
 // request body (negative amounts for discounts).
 //
 // Audit focus:
-// - Discount math — TIER_DISCOUNT values are duplicated client-side from
-//   the server's WaveGuard tier table. Worth confirming this stays in
-//   sync with server/services/pricing-engine/constants.js (or refactor
-//   to fetch from the server).
+// - Discount math — only manually added discounts reduce the charge preview.
+//   Customer WaveGuard tier is displayed as billing context, not as an
+//   automatically applied discount.
 // - Charge → invoice → payment handoff: the invoice id + total are
 //   passed to MobilePaymentSheet via parent state. Confirm the parent
 //   doesn't allow re-clicking "Charge" before the first invoice POST
@@ -31,15 +30,6 @@ import MobileServicePickerSheet from './MobileServicePickerSheet';
 import MobileItemDiscountPickerSheet from './MobileItemDiscountPickerSheet';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-
-// Source of truth: server/services/pricing-engine/constants.js
-// WAVEGUARD.tiers (see docs/pricing/POLICY.md). Keep aligned on change.
-const TIER_DISCOUNT = {
-  bronze: 0,
-  silver: 0.10,
-  gold: 0.15,
-  platinum: 0.20,
-};
 
 function tierLabel(t) {
   if (!t) return '';
@@ -79,13 +69,22 @@ export default function MobileCheckoutSheet({
   if (!service) return null;
 
   const tier = service.waveguardTier ? String(service.waveguardTier).toLowerCase() : null;
-  const pct = tier && TIER_DISCOUNT[tier] != null ? TIER_DISCOUNT[tier] : 0;
   const rawPrice = service.estimatedPrice != null ? Number(service.estimatedPrice) : null;
   const price = rawPrice != null ? rawPrice : Number(service.monthlyRate || 0);
+  const appointmentAddons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
+  const appointmentAddonTotal = Math.round(
+    appointmentAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100
+  ) / 100;
+  const splitAppointmentAddons = appointmentAddons.length > 0 && appointmentAddonTotal > 0 && appointmentAddonTotal < price;
+  const baseServicePrice = splitAppointmentAddons
+    ? Math.max(0, Math.round((price - appointmentAddonTotal) * 100) / 100)
+    : price;
+  const baseServiceLabel = splitAppointmentAddons
+    ? (service.serviceType || 'General Service')
+    : (service.serviceTypeDisplay || service.serviceType || 'General Service');
 
   // Separate extras: positive-amount services vs negative-amount discounts.
-  // Tier discount applies only to services subtotal (base + positive extras)
-  // to match the server-side DiscountEngine behavior for WaveGuard tiers.
+  // All discounts are manual rows added by the operator.
   const { extraServicesTotal, extraDiscountsTotal } = useMemo(() => {
     let s = 0, d = 0;
     for (const e of extras) {
@@ -96,9 +95,8 @@ export default function MobileCheckoutSheet({
   }, [extras]);
 
   const servicesSubtotal = price + extraServicesTotal;
-  const tierDiscountAmt = Math.round(servicesSubtotal * pct * 100) / 100;
   const prepaidAmount = service.prepaidAmount != null ? Math.max(0, Number(service.prepaidAmount) || 0) : 0;
-  const totalBeforePrepaid = Math.max(0, servicesSubtotal - tierDiscountAmt + extraDiscountsTotal);
+  const totalBeforePrepaid = Math.max(0, servicesSubtotal + extraDiscountsTotal);
   const prepaidCredit = Math.min(prepaidAmount, totalBeforePrepaid);
   const total = Math.max(0, totalBeforePrepaid - prepaidCredit);
 
@@ -161,6 +159,11 @@ export default function MobileCheckoutSheet({
     setExtras((prev) => [...prev, {
       id: uid(),
       _kind: 'discount',
+      discount_id: d.id || null,
+      discount_key: d.discount_key || null,
+      discount_type: d.discount_type || null,
+      discount_amount: amt,
+      is_waveguard_tier_discount: !!d.is_waveguard_tier_discount,
       description: isPercent ? `${label} (${amt}%)` : label,
       quantity: 1,
       unit_price: -dollarOff,
@@ -248,7 +251,7 @@ export default function MobileCheckoutSheet({
             <div className="flex-1 min-w-0 pr-2">
               <div className="flex items-center gap-1.5">
                 <span className="font-medium text-blue-600 truncate" style={{ fontSize: 15 }}>
-                  {service.serviceType || 'General Service'}
+                  {baseServiceLabel}
                 </span>
                 <Tag size={14} className="text-zinc-400 shrink-0" strokeWidth={1.5} />
               </div>
@@ -262,9 +265,31 @@ export default function MobileCheckoutSheet({
               )}
             </div>
             <div className="u-nums text-zinc-900 font-medium shrink-0" style={{ fontSize: 15 }}>
-              ${price.toFixed(0)}
+              ${baseServicePrice.toFixed(0)}
             </div>
           </button>
+
+          {splitAppointmentAddons && appointmentAddons.map((addon) => (
+            <div
+              key={addon.id || addon.serviceId || addon.serviceName}
+              className="flex items-start justify-between gap-3 py-4 border-b border-hairline border-zinc-200"
+            >
+              <div className="flex-1 min-w-0 pr-2">
+                <div className="flex items-center gap-1.5">
+                  <span className="font-medium text-blue-600 truncate" style={{ fontSize: 15 }}>
+                    {addon.serviceName || 'Service add-on'}
+                  </span>
+                  <Tag size={14} className="text-zinc-400 shrink-0" strokeWidth={1.5} />
+                </div>
+                <div className="text-ink-tertiary truncate" style={{ fontSize: 12, marginTop: 2 }}>
+                  Included with appointment
+                </div>
+              </div>
+              <div className="u-nums text-zinc-900 font-medium shrink-0" style={{ fontSize: 15 }}>
+                ${Number(addon.estimatedPrice || 0).toFixed(0)}
+              </div>
+            </div>
+          ))}
 
           {/* Extra added services + discounts */}
           {extras.map((e) => {
@@ -299,19 +324,6 @@ export default function MobileCheckoutSheet({
               </div>
             );
           })}
-
-          {/* Tier discount (auto-applied WaveGuard) */}
-          {pct > 0 && (
-            <div className="flex items-center justify-between py-4 border-b border-hairline border-zinc-200">
-              <span className="font-medium text-blue-600" style={{ fontSize: 15 }}>
-                {tierLabel(tier)} Discount
-              </span>
-              <span className="u-nums text-zinc-900" style={{ fontSize: 15 }}>
-                −${tierDiscountAmt.toFixed(2)}
-              </span>
-            </div>
-          )}
-
           {prepaidCredit > 0 && (
             <div className="flex items-center justify-between py-4 border-b border-hairline border-zinc-200">
               <span className="font-medium text-zinc-900" style={{ fontSize: 15 }}>

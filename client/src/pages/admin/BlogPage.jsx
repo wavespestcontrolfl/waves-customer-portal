@@ -7,23 +7,54 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#F4F4F5', card: '#FFFFFF', border: '#E4E4E7', teal: '#18181B', green: '#15803D', amber: '#A16207', red: '#991B1B', orange: '#18181B', text: '#27272A', muted: '#71717A', white: '#FFFFFF', purple: '#18181B', heading: '#09090B', inputBorder: '#D4D4D8' };
 const MONO = "'JetBrains Mono', monospace";
 
+async function parseAdminResponse(response) {
+  const text = await response.text();
+  let data = {};
+  if (text) {
+    try { data = JSON.parse(text); } catch { data = { error: text }; }
+  }
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
+}
+
 function adminFetch(path) {
   return fetch(`${API_BASE}${path}`, {
     headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
-  }).then(r => r.json());
+  }).then(parseAdminResponse);
 }
 function adminPost(path, body) {
   return fetch(`${API_BASE}${path}`, {
     method: 'POST', headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  }).then(r => r.json());
+  }).then(parseAdminResponse);
 }
 function adminPut(path, body) {
   return fetch(`${API_BASE}${path}`, {
     method: 'PUT', headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  }).then(r => r.json());
+  }).then(parseAdminResponse);
 }
+
+const BLOG_CATEGORIES = [
+  { value: 'pest-control', label: 'Pest Control' },
+  { value: 'lawn-care', label: 'Lawn Care' },
+  { value: 'termite', label: 'Termite' },
+  { value: 'mosquito', label: 'Mosquito' },
+  { value: 'tree-shrub', label: 'Tree & Shrub' },
+  { value: 'seasonal', label: 'Seasonal' },
+];
+
+const BLOG_POST_TYPES = [
+  { value: 'location', label: 'Location' },
+  { value: 'diagnostic', label: 'Diagnostic' },
+  { value: 'seasonal', label: 'Seasonal' },
+  { value: 'by-grass-type', label: 'By Grass Type' },
+  { value: 'protocol', label: 'Protocol' },
+  { value: 'cost', label: 'Cost' },
+  { value: 'comparison', label: 'Comparison' },
+  { value: 'case-study', label: 'Case Study' },
+  { value: 'decision', label: 'Decision' },
+];
 
 const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
 
@@ -214,43 +245,60 @@ function PostEditor({ post, onBack, onUpdate }) {
 
   const handleGenerate = async () => {
     setGenerating(true);
-    const result = await adminPost(`/admin/content/blog/${post.id}/generate`, {});
-    if (result.content) {
-      setEditing(prev => ({ ...prev, content: result.content, word_count: result.wordCount, status: 'draft' }));
+    try {
+      const result = await adminPost(`/admin/content/blog/${post.id}/generate`, {});
+      if (result.content) {
+        setEditing(prev => ({ ...prev, content: result.content, word_count: result.wordCount, status: 'draft' }));
+      } else if (result.error) {
+        alert(`Generate failed: ${result.error}`);
+      }
+    } catch (err) {
+      alert(`Generate failed: ${err.message}`);
     }
     setGenerating(false);
   };
 
   const handleOptimize = async () => {
     setOptimizing(true);
-    const result = await adminPost(`/admin/content/blog/${post.id}/optimize`, {});
-    setOptimization(result.optimization);
+    try {
+      const result = await adminPost(`/admin/content/blog/${post.id}/optimize`, {});
+      setOptimization(result.optimization);
+    } catch (err) {
+      alert(`Optimize failed: ${err.message}`);
+    }
     setOptimizing(false);
   };
 
   const handleSave = async ({ notify = true } = {}) => {
-    const updated = await adminPut(`/admin/content/blog/${post.id}`, {
-      title: editing.title,
-      content: editing.content,
-      meta_description: editing.meta_description,
-      keyword: editing.keyword,
-      tag: editing.tag,
-      status: editing.status,
-      author_slug: editing.author_slug || null,
-      reviewer_slug: editing.reviewer_slug || null,
-      technically_reviewed_at: editing.technically_reviewed_at || null,
-      fact_checked_by: editing.fact_checked_by || null,
-      fact_checked_at: editing.fact_checked_at || null,
-      category: editing.category || null,
-      post_type: editing.post_type || null,
-      service_areas_tag: serviceAreaTags,
-      related_services: relatedServices,
-      target_sites: targetSites,
-      hero_image_alt: editing.hero_image_alt || null,
-    });
-    if (notify && onUpdate) onUpdate(updated.post);
-    if (updated.post) setEditing(prev => ({ ...prev, ...updated.post }));
-    return updated;
+    try {
+      const updated = await adminPut(`/admin/content/blog/${post.id}`, {
+        title: editing.title,
+        content: editing.content,
+        meta_description: editing.meta_description,
+        keyword: editing.keyword,
+        tag: editing.tag,
+        status: editing.status,
+        author_slug: editing.author_slug || null,
+        reviewer_slug: editing.reviewer_slug || null,
+        technically_reviewed_at: editing.technically_reviewed_at || null,
+        fact_checked_by: editing.fact_checked_by || null,
+        fact_checked_at: editing.fact_checked_at || null,
+        category: editing.category || null,
+        post_type: editing.post_type || null,
+        service_areas_tag: serviceAreaTags,
+        related_services: relatedServices,
+        target_sites: targetSites,
+        hero_image_alt: editing.hero_image_alt || null,
+      });
+      if (!updated.post) throw new Error('Save response did not include a post');
+      if (notify && onUpdate) onUpdate(updated.post);
+      setEditing(prev => ({ ...prev, ...updated.post }));
+      return updated;
+    } catch (err) {
+      alert(`Save failed: ${err.message}`);
+      if (notify) return null;
+      throw err;
+    }
   };
 
   const applyOptimization = () => {
@@ -264,21 +312,22 @@ function PostEditor({ post, onBack, onUpdate }) {
   };
 
   const handlePublishAstro = async () => {
-    await handleSave({ notify: false });
+    try {
+      await handleSave({ notify: false });
+    } catch {
+      return;
+    }
     setAstroPublishing(true);
     try {
       const result = await adminPost(`/admin/content/blog/${post.id}/publish-astro`, {});
-      if (result.error) {
-        alert(`Astro publish failed: ${result.error}`);
-      } else {
-        setEditing(prev => ({
-          ...prev,
-          astro_status: 'pr_open',
-          astro_pr_number: result.pr_number,
-          astro_branch_name: result.branch,
-          astro_preview_url: result.preview_url,
-        }));
-      }
+      setEditing(prev => ({
+        ...prev,
+        astro_status: 'pr_open',
+        astro_pr_number: result.pr_number,
+        astro_branch_name: result.branch,
+        astro_preview_url: result.preview_url,
+        astro_publish_error: null,
+      }));
     } catch (err) {
       alert('Astro publish failed: ' + err.message);
     }
@@ -293,7 +342,7 @@ function PostEditor({ post, onBack, onUpdate }) {
       if (result.error) {
         alert(`Merge failed: ${result.error}`);
       } else {
-        setEditing(prev => ({ ...prev, astro_status: 'merged', status: 'published' }));
+        setEditing(prev => ({ ...prev, astro_status: 'merged', status: 'published', astro_live_url: result.live_url || prev.astro_live_url }));
       }
     } catch (err) {
       alert('Merge failed: ' + err.message);
@@ -404,8 +453,8 @@ function PostEditor({ post, onBack, onUpdate }) {
               width: '100%', padding: '6px 10px', borderRadius: 6, border: `1px solid ${D.border}`,
               background: D.bg, color: D.text, fontSize: 12,
             }} />
-            <div style={{ fontSize: 10, color: (editing.meta_description || '').length > 160 ? D.red : D.muted, marginTop: 2 }}>
-              {(editing.meta_description || '').length}/160 chars
+            <div style={{ fontSize: 10, color: ((editing.meta_description || '').length > 0 && ((editing.meta_description || '').length < 115 || (editing.meta_description || '').length > 160)) ? D.red : D.muted, marginTop: 2 }}>
+              {(editing.meta_description || '').length}/115-160 chars
             </div>
           </div>
         </div>
@@ -463,7 +512,7 @@ function PostEditor({ post, onBack, onUpdate }) {
               background: D.bg, color: D.text, fontSize: 12, cursor: 'pointer',
             }}>
               <option value="">Select...</option>
-              {['pest','lawn','termite','mosquito','rodent','commercial','bed-bug'].map(c => (<option key={c} value={c}>{c}</option>))}
+              {BLOG_CATEGORIES.map(c => (<option key={c.value} value={c.value}>{c.label}</option>))}
             </select>
           </div>
           <div>
@@ -473,7 +522,7 @@ function PostEditor({ post, onBack, onUpdate }) {
               background: D.bg, color: D.text, fontSize: 12, cursor: 'pointer',
             }}>
               <option value="">Select...</option>
-              {['article','how-to','location','comparison','checklist'].map(t => (<option key={t} value={t}>{t}</option>))}
+              {BLOG_POST_TYPES.map(t => (<option key={t.value} value={t.value}>{t.label}</option>))}
             </select>
           </div>
           <div>
@@ -599,7 +648,7 @@ function PostEditor({ post, onBack, onUpdate }) {
               background: `${D.amber}15`, border: `1px solid ${D.amber}66`,
               color: D.amber, fontSize: 12, lineHeight: 1.5,
             }}>
-              No hero image yet. The post will publish without a hero image unless you generate one.
+              No hero image yet. Generate one before publishing to Astro.
               {imageError && (
                 <div style={{ marginTop: 6, color: D.red, fontFamily: MONO, fontSize: 11 }}>
                   Last attempt: {imageError}
@@ -774,10 +823,20 @@ function AstroPublishPanel({ post, onPublish, onMerge, onRefresh, onUnpublish, p
         {status === 'merged' && (
           <>
             <div style={{ fontSize: 12, color: D.muted }}>Merged. Live build in progress.</div>
+            {post.astro_live_url && (
+              <a href={post.astro_live_url} target="_blank" rel="noreferrer" style={{
+                padding: '8px 14px', borderRadius: 8, border: `1px solid ${D.green}`,
+                color: D.green, fontSize: 12, textDecoration: 'none', fontWeight: 600,
+              }}>Expected Live URL ↗</a>
+            )}
             <button onClick={onRefresh} disabled={refreshing} style={{
               padding: '8px 14px', borderRadius: 8, border: `1px solid ${D.border}`, background: 'transparent',
               color: D.muted, fontSize: 12, cursor: 'pointer', opacity: refreshing ? 0.5 : 1,
             }}>Refresh</button>
+            <button onClick={onUnpublish} disabled={unpublishing} style={{
+              padding: '8px 14px', borderRadius: 8, border: '1px solid #d6d3d1', background: '#fafaf9',
+              color: '#991B1B', fontSize: 12, fontWeight: 500, cursor: 'pointer', opacity: unpublishing ? 0.5 : 1,
+            }}>{unpublishing ? 'Opening revert PR…' : 'Unpublish'}</button>
           </>
         )}
         {status === 'live' && (
@@ -1040,7 +1099,8 @@ function GenerateTab({ onGenerated }) {
       if (result.post || result.id) {
         onGenerated();
       }
-    } catch {
+    } catch (err) {
+      alert(`Generate failed: ${err.message}`);
       setGenerating(false);
     }
   };
@@ -1202,9 +1262,13 @@ export default function BlogPage() {
 
   const handleGenerateIdeas = async () => {
     setGeneratingIdeas(true);
-    await adminPost('/admin/content/blog/ideas', { count: 20 });
+    try {
+      await adminPost('/admin/content/blog/ideas', { count: 20 });
+      setTab('ideas');
+    } catch (err) {
+      alert(`Idea generation failed: ${err.message}`);
+    }
     setGeneratingIdeas(false);
-    setTab('ideas');
   };
 
   if (selectedPost) {

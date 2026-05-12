@@ -1,7 +1,6 @@
 import { COLORS, FONTS } from '../theme-brand';
 import { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
-import BrandFooter from '../components/BrandFooter';
 import { Button } from '../components/Button';
 import Icon from '../components/Icon';
 
@@ -23,12 +22,22 @@ const STANDOUT_OPTIONS = [
   'On time', 'Professional', 'Thorough', 'Friendly', 'Great results', 'Fair price',
 ];
 
+const QUICK_STANDOUT_OPTIONS = ['On time', 'Professional', 'Thorough', 'Friendly'];
+
+function getServiceSelection(serviceType) {
+  const clean = String(serviceType || '').trim();
+  if (!clean) return [];
+  const match = SERVICE_OPTIONS.find((service) => clean.toLowerCase().includes(service.toLowerCase()));
+  return [match || clean];
+}
+
 export default function RatePage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [score, setScore] = useState(null);
+  const [scoreHover, setScoreHover] = useState(0);
   const [screen, setScreen] = useState('rating'); // rating, highlights, ai-review, feedback, success, redirect
   const [highlights, setHighlights] = useState([]);
   const [feedback, setFeedback] = useState('');
@@ -39,11 +48,14 @@ export default function RatePage() {
   const [selectedStandouts, setSelectedStandouts] = useState([]);
   const [personalNote, setPersonalNote] = useState('');
   const [generatedReview, setGeneratedReview] = useState('');
+  const [reviewError, setReviewError] = useState('');
   const [generating, setGenerating] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [postHint, setPostHint] = useState('');
 
-  // Holds the in-flight /submit promise from the promoter fast-path so
-  // /generate-review can await it and avoid racing the score persist.
+  // Score taps are saved separately from final feedback submission so quick
+  // bounces are still captured without locking the token before corrections.
+  const scoreSavePromiseRef = useRef(Promise.resolve());
   const submitPromiseRef = useRef(null);
 
   useEffect(() => {
@@ -53,28 +65,42 @@ export default function RatePage() {
       .catch(e => { setError(e.message); setLoading(false); });
   }, [token]);
 
+  const getKnownServices = () => (
+    data?.hasServiceType ? getServiceSelection(data.serviceType) : []
+  );
+
+  const saveScoreDraft = (nextScore, nextHighlights = selectedStandouts) => {
+    const savePromise = scoreSavePromiseRef.current
+      .catch(() => {})
+      .then(() => fetch(`${API_BASE}/rate/${token}/score`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ score: nextScore, highlights: nextHighlights }),
+      }))
+      .then((r) => {
+        if (!r.ok && r.status !== 409) throw new Error('Unable to save rating');
+        return r.json().catch(() => ({}));
+      })
+      .catch(() => ({}));
+
+    scoreSavePromiseRef.current = savePromise;
+    return savePromise;
+  };
+
   const handleScore = (s) => {
     setScore(s);
-    // 8–10 goes straight to the chip + AI draft screen. Submit the NPS score
-    // up-front (fire-and-forget) so the record is saved even if the customer
-    // bounces before generating a draft.
+    setPostHint('');
+    setReviewError('');
+    setGeneratedReview('');
+    saveScoreDraft(s, s >= 8 ? selectedStandouts : []);
+    // 8–10 stays on the rating screen, reveals the quick standout chips, and
+    // waits to submit until the customer commits to the Google-review path.
     if (s >= 8) {
-      setScreen('ai-review');
-      // Pre-seed selected service from server context so the customer doesn't
-      // re-pick what we already know.
-      if (data?.serviceType) {
-        const match = SERVICE_OPTIONS.find((x) => data.serviceType.toLowerCase().includes(x.toLowerCase()));
-        if (match) setSelectedServices([match]);
-      }
-      // Fire immediately so the score is recorded even if the customer
-      // bounces, but stash the promise — handleGenerateReview awaits it
-      // before calling /generate-review (the server requires score to be
-      // persisted, otherwise it 400s).
-      submitPromiseRef.current = fetch(`${API_BASE}/rate/${token}/submit`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ score: s, feedback: '', highlights: [] }),
-      }).catch(() => {});
+      setScreen('rating');
+      const knownServices = getKnownServices();
+      if (knownServices.length) setSelectedServices(knownServices);
+      submitPromiseRef.current = null;
     } else {
+      submitPromiseRef.current = null;
       setScreen('feedback');
     }
   };
@@ -89,15 +115,19 @@ export default function RatePage() {
 
   const toggleStandout = (s) => {
     setSelectedStandouts(prev => {
-      if (prev.includes(s)) return prev.filter(x => x !== s);
-      if (prev.length >= 3) return prev; // max 3
-      return [...prev, s];
+      let next;
+      if (prev.includes(s)) next = prev.filter(x => x !== s);
+      else if (prev.length >= 3) next = prev; // max 3
+      else next = [...prev, s];
+      if (score >= 8 && next !== prev) saveScoreDraft(score, next);
+      return next;
     });
   };
 
   const handleSubmit = async () => {
     setSubmitting(true);
     try {
+      await scoreSavePromiseRef.current;
       const r = await fetch(`${API_BASE}/rate/${token}/submit`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ score, feedback, highlights }),
@@ -117,6 +147,7 @@ export default function RatePage() {
   const handleHighlightsNext = async () => {
     setSubmitting(true);
     try {
+      await scoreSavePromiseRef.current;
       await fetch(`${API_BASE}/rate/${token}/submit`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ score, feedback: '', highlights }),
@@ -124,38 +155,66 @@ export default function RatePage() {
     } catch { /* proceed anyway */ }
     setSubmitting(false);
     // Pre-select service type from data if available
-    if (data?.serviceType) {
-      const match = SERVICE_OPTIONS.find(s => data.serviceType.toLowerCase().includes(s.toLowerCase()));
-      if (match && !selectedServices.includes(match)) {
-        setSelectedServices([match]);
-      }
+    const knownServices = getKnownServices();
+    if (knownServices.length && !knownServices.every((service) => selectedServices.includes(service))) {
+      setSelectedServices(knownServices);
     }
     setScreen('ai-review');
   };
 
-  const handleGenerateReview = async () => {
+  const ensureHighScoreSubmitted = async (standouts = selectedStandouts) => {
+    await scoreSavePromiseRef.current;
+
+    if (submitPromiseRef.current) {
+      await submitPromiseRef.current;
+      return;
+    }
+
+    const submitPromise = fetch(`${API_BASE}/rate/${token}/submit`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ score, feedback: '', highlights: standouts }),
+    }).then((r) => {
+      // If the score was already persisted in this session, the draft endpoint
+      // can still proceed because it only needs request.score >= 8.
+      if (!r.ok && r.status !== 409) throw new Error('Unable to save rating');
+      return r.json().catch(() => ({}));
+    });
+
+    submitPromiseRef.current = submitPromise;
+    await submitPromise;
+  };
+
+  const handleGenerateReview = async ({ services = selectedServices, standouts = selectedStandouts, note = personalNote } = {}) => {
     setGenerating(true);
     setGeneratedReview('');
-    // Make sure the up-front /submit from handleScore has landed before we
-    // ask the server to draft a review — the server gates on persisted score.
-    if (submitPromiseRef.current) {
-      try { await submitPromiseRef.current; } catch { /* tolerated */ }
-    }
+    setReviewError('');
+    setPostHint('');
     try {
+      await ensureHighScoreSubmitted(standouts);
       const r = await fetch(`${API_BASE}/rate/${token}/generate-review`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          services: selectedServices,
-          highlights: selectedStandouts,
-          personalNote,
+          services,
+          highlights: standouts,
+          personalNote: note,
         }),
       });
-      const result = await r.json();
-      setGeneratedReview(result.review || '');
-    } catch {
-      setGeneratedReview('Great experience with Waves Pest Control. Professional service and thorough treatment. Would recommend to anyone in Southwest Florida.');
+      const result = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(result.error || 'Unable to write review');
+      if (!result.review) throw new Error('Review writer returned no draft');
+      setGeneratedReview(result.review);
+    } catch (err) {
+      setReviewError("We couldn't write this automatically. You can still write your own on Google.");
     }
     setGenerating(false);
+  };
+
+  const handleHappyReviewStart = async () => {
+    const services = selectedServices.length ? selectedServices : getKnownServices();
+    if (services.length) setSelectedServices(services);
+    setScreen('ai-review');
+    if (!services.length) return;
+    await handleGenerateReview({ services, standouts: selectedStandouts });
   };
 
   const handleCopyReview = () => {
@@ -168,15 +227,19 @@ export default function RatePage() {
   // Single-action "Post on Google" — copy the draft and immediately redirect
   // to the closest GBP review URL in the same tab. New tabs get orphaned on
   // mobile Safari, which is the main browser these review links open on.
-  const handlePostOnGoogle = () => {
+  const handlePostOnGoogle = async () => {
     if (!data?.googleReviewUrl) return;
     try {
-      if (generatedReview) navigator.clipboard.writeText(generatedReview).catch(() => {});
+      if (generatedReview) await navigator.clipboard.writeText(generatedReview);
     } catch { /* clipboard API can fail on iOS in-app browsers; still redirect */ }
-    window.location.href = data.googleReviewUrl;
+    setPostHint('Review copied. Paste it into Google.');
+    setTimeout(() => { window.location.href = data.googleReviewUrl; }, 900);
   };
 
-  const handleSkipToGoogle = () => {
+  const handleSkipToGoogle = async () => {
+    if (score >= 8) {
+      try { await ensureHighScoreSubmitted(selectedStandouts); } catch { await saveScoreDraft(score, selectedStandouts); }
+    }
     if (data?.googleReviewUrl) {
       window.location.href = data.googleReviewUrl;
     } else {
@@ -186,6 +249,8 @@ export default function RatePage() {
 
   const firstName = data?.firstName || 'there';
   const techName = data?.techName || 'your technician';
+  const knownServiceSelection = getKnownServices();
+  const hasKnownService = knownServiceSelection.length > 0;
 
   if (loading) return (
     <Page>
@@ -225,21 +290,68 @@ export default function RatePage() {
             <span style={{ fontSize: 12, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: COLORS.textCaption }}>Not Great</span>
             <span style={{ fontSize: 12, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.5, color: COLORS.textCaption }}>Amazing!</span>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 6 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(10, minmax(0, 1fr))', gap: 4 }}>
             {[1,2,3,4,5,6,7,8,9,10].map(n => {
-              const selected = score === n;
-              const bg = selected ? (n <= 3 ? COLORS.red : n <= 7 ? COLORS.orange : COLORS.green) : COLORS.white;
+              const activeScore = scoreHover || score || 0;
+              const isActive = n <= activeScore;
+              const color = n <= 3 ? COLORS.red : n <= 7 ? COLORS.orange : COLORS.green;
+              const shadow = isActive
+                ? n <= 3 ? '0 8px 18px rgba(200,16,46,0.28)' : n <= 7 ? '0 8px 18px rgba(245,158,11,0.30)' : '0 8px 18px rgba(22,163,74,0.30)'
+                : '0 3px 10px rgba(15,23,42,0.12)';
               return (
-                <button key={n} onClick={() => handleScore(n)} style={{
-                  minHeight: 44, minWidth: 44, border: `2px solid ${selected ? bg : COLORS.grayLight}`, borderRadius: 12,
-                  background: bg, fontFamily: FONTS.display, fontSize: 18, fontWeight: 700,
-                  color: selected ? COLORS.white : COLORS.textBody, cursor: 'pointer', display: 'flex',
-                  alignItems: 'center', justifyContent: 'center', padding: 0,
-                }}>{n}</button>
+                <button
+                  key={n}
+                  onMouseEnter={() => setScoreHover(n)}
+                  onMouseLeave={() => setScoreHover(0)}
+                  onFocus={() => setScoreHover(n)}
+                  onBlur={() => setScoreHover(0)}
+                  onClick={() => handleScore(n)}
+                  style={{
+                    minHeight: 40, minWidth: 0, border: 'none', borderRadius: 9,
+                    background: isActive ? color : COLORS.offWhite, fontFamily: FONTS.display, fontSize: 16, fontWeight: 800,
+                    color: isActive ? COLORS.white : COLORS.textCaption, cursor: 'pointer', display: 'flex',
+                    alignItems: 'center', justifyContent: 'center', padding: 0,
+                    boxShadow: shadow,
+                    transition: 'all 0.15s ease', transform: isActive ? 'scale(1.08)' : 'scale(1)',
+                  }}>{n}</button>
               );
             })}
           </div>
-          <div style={{ textAlign: 'center', marginTop: 10, fontSize: 14, color: COLORS.textCaption, fontWeight: 600 }}>Tap a number to rate</div>
+          {score >= 8 ? (
+            <div style={{ marginTop: 18 }}>
+              <div style={{ fontSize: 14, fontWeight: 800, color: COLORS.blueDeeper, marginBottom: 8, textAlign: 'center' }}>
+                What stood out? <span style={{ fontWeight: 500, color: COLORS.textCaption }}>(optional)</span>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
+                {QUICK_STANDOUT_OPTIONS.map(s => {
+                  const selected = selectedStandouts.includes(s);
+                  const disabled = !selected && selectedStandouts.length >= 3;
+                  return (
+                    <button key={s} onClick={() => toggleStandout(s)} disabled={disabled} style={{
+                      minHeight: 40, border: `2px solid ${selected ? COLORS.green : COLORS.grayLight}`,
+                      borderRadius: 12, background: selected ? COLORS.green : COLORS.white,
+                      color: selected ? COLORS.white : COLORS.textBody, fontSize: 14, fontWeight: 800,
+                      cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.45 : 1,
+                      boxShadow: selected ? '0 6px 14px rgba(22,163,74,0.22)' : '0 2px 8px rgba(15,23,42,0.08)',
+                    }}>{s}</button>
+                  );
+                })}
+              </div>
+              <div style={{ marginTop: 12, fontSize: 14, lineHeight: 1.45, color: COLORS.textCaption, textAlign: 'center' }}>
+                Public Google reviews help local neighbors choose a provider.
+              </div>
+              <button onClick={handleHappyReviewStart} disabled={generating} style={{
+                width: '100%', marginTop: 12, padding: '13px 14px', border: 'none', borderRadius: 12,
+                background: generating ? COLORS.slate400 : COLORS.wavesBlue, color: COLORS.white,
+                fontSize: 16, fontWeight: 900, cursor: generating ? 'wait' : 'pointer',
+                boxShadow: generating ? 'none' : '0 8px 20px rgba(0,156,222,0.26)',
+              }}>
+                {generating ? 'Writing your review...' : 'Help Me Write It'}
+              </button>
+            </div>
+          ) : (
+            <div style={{ textAlign: 'center', marginTop: 10, fontSize: 14, color: COLORS.textCaption, fontWeight: 600 }}>Tap a number to rate</div>
+          )}
         </div>
       )}
 
@@ -282,66 +394,92 @@ export default function RatePage() {
               We'll write it for you!
             </div>
             <div style={{ fontSize: 16, color: COLORS.textBody, lineHeight: 1.5 }}>
-              Answer a couple quick questions and we'll draft a Google review you can paste.
+              Public Google reviews help local neighbors choose a provider.
             </div>
           </div>
 
-          {/* Service selection */}
-          <div style={{ marginBottom: 18 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 8 }}>What service did you receive?</div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-              {SERVICE_OPTIONS.map(s => (
-                <button key={s} onClick={() => toggleService(s)} style={{
-                  padding: '9px 16px', border: `2px solid ${selectedServices.includes(s) ? COLORS.wavesBlue : COLORS.grayLight}`,
-                  borderRadius: 20, background: selectedServices.includes(s) ? COLORS.wavesBlue : COLORS.white,
-                  color: selectedServices.includes(s) ? COLORS.white : COLORS.textBody, fontSize: 14, fontWeight: 700, cursor: 'pointer',
-                }}>{s}</button>
-              ))}
+          {!generatedReview && !generating && (
+            <>
+              {/* Service selection */}
+              {!hasKnownService && (
+                <div style={{ marginBottom: 18 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 8 }}>What service did you receive?</div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                    {SERVICE_OPTIONS.map(s => (
+                      <button key={s} onClick={() => toggleService(s)} style={{
+                        padding: '9px 16px', border: `2px solid ${selectedServices.includes(s) ? COLORS.wavesBlue : COLORS.grayLight}`,
+                        borderRadius: 20, background: selectedServices.includes(s) ? COLORS.wavesBlue : COLORS.white,
+                        color: selectedServices.includes(s) ? COLORS.white : COLORS.textBody, fontSize: 14, fontWeight: 700, cursor: 'pointer',
+                      }}>{s}</button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Standout selection */}
+              <div style={{ marginBottom: 18 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 4 }}>What stood out?</div>
+                <div style={{ fontSize: 12, color: COLORS.textCaption, marginBottom: 8 }}>Pick up to 3</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  {STANDOUT_OPTIONS.map(s => (
+                    <button key={s} onClick={() => toggleStandout(s)} style={{
+                      padding: '9px 16px', border: `2px solid ${selectedStandouts.includes(s) ? COLORS.green : COLORS.grayLight}`,
+                      borderRadius: 20, background: selectedStandouts.includes(s) ? COLORS.green : COLORS.white,
+                      color: selectedStandouts.includes(s) ? COLORS.white : COLORS.textBody, fontSize: 14, fontWeight: 700, cursor: 'pointer',
+                      opacity: (!selectedStandouts.includes(s) && selectedStandouts.length >= 3) ? 0.4 : 1,
+                    }}>{s}</button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Personal note */}
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 8 }}>Anything specific you loved? <span style={{ fontWeight: 400, color: COLORS.textCaption }}>(optional)</span></div>
+                <input
+                  value={personalNote}
+                  onChange={e => setPersonalNote(e.target.value)}
+                  placeholder="e.g. No more ants in the kitchen!"
+                  maxLength={150}
+                  style={{
+                    width: '100%', padding: '12px 14px', border: '2px solid #CBD5E1', borderRadius: 12,
+                    fontSize: 14, color: COLORS.blueDeeper, outline: 'none', boxSizing: 'border-box',
+                  }}
+                />
+              </div>
+
+              {/* Generate button */}
+              <button onClick={() => handleGenerateReview()} disabled={selectedServices.length === 0} style={{
+                width: '100%', padding: 14, border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 800,
+                color: COLORS.white, cursor: selectedServices.length === 0 ? 'default' : 'pointer',
+                background: selectedServices.length === 0 ? COLORS.slate400 : COLORS.wavesBlue,
+                opacity: selectedServices.length === 0 ? 0.5 : 1,
+                transition: 'all 0.2s',
+              }}>
+                Help Me Write It
+              </button>
+            </>
+          )}
+
+          {generating && (
+            <div style={{ textAlign: 'center', padding: '20px 0 8px', color: COLORS.textBody, fontSize: 15, fontWeight: 700 }}>
+              Writing your review...
             </div>
-          </div>
+          )}
 
-          {/* Standout selection */}
-          <div style={{ marginBottom: 18 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 4 }}>What stood out?</div>
-            <div style={{ fontSize: 12, color: COLORS.textCaption, marginBottom: 8 }}>Pick up to 3</div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-              {STANDOUT_OPTIONS.map(s => (
-                <button key={s} onClick={() => toggleStandout(s)} style={{
-                  padding: '9px 16px', border: `2px solid ${selectedStandouts.includes(s) ? COLORS.green : COLORS.grayLight}`,
-                  borderRadius: 20, background: selectedStandouts.includes(s) ? COLORS.green : COLORS.white,
-                  color: selectedStandouts.includes(s) ? COLORS.white : COLORS.textBody, fontSize: 14, fontWeight: 700, cursor: 'pointer',
-                  opacity: (!selectedStandouts.includes(s) && selectedStandouts.length >= 3) ? 0.4 : 1,
-                }}>{s}</button>
-              ))}
-            </div>
-          </div>
-
-          {/* Personal note */}
-          <div style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 8 }}>Anything specific you loved? <span style={{ fontWeight: 400, color: COLORS.textCaption }}>(optional)</span></div>
-            <input
-              value={personalNote}
-              onChange={e => setPersonalNote(e.target.value)}
-              placeholder="e.g. No more ants in the kitchen!"
-              maxLength={150}
-              style={{
-                width: '100%', padding: '12px 14px', border: '2px solid #CBD5E1', borderRadius: 12,
-                fontSize: 14, color: COLORS.blueDeeper, outline: 'none', boxSizing: 'border-box',
-              }}
-            />
-          </div>
-
-          {/* Generate button */}
-          {!generatedReview && (
-            <button onClick={handleGenerateReview} disabled={generating || selectedServices.length === 0} style={{
-              width: '100%', padding: 14, border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 800,
-              color: COLORS.white, cursor: (generating || selectedServices.length === 0) ? 'default' : 'pointer',
-              background: (generating || selectedServices.length === 0) ? COLORS.slate400 : COLORS.wavesBlue,
-              opacity: selectedServices.length === 0 ? 0.5 : 1,
-              transition: 'all 0.2s',
+          {reviewError && !generating && !generatedReview && (
+            <div style={{
+              background: '#FEF7E0', border: `2px solid ${COLORS.orange}`, borderRadius: 14,
+              padding: 14, color: COLORS.blueDeeper, fontSize: 14, lineHeight: 1.5, fontWeight: 700,
             }}>
-              {generating ? 'Writing your review...' : 'AI Write My Review'}
-            </button>
+              {reviewError}
+              <button onClick={handleSkipToGoogle} style={{
+                display: 'block', width: '100%', marginTop: 12, padding: 12, border: 'none', borderRadius: 10,
+                background: COLORS.wavesBlue, color: COLORS.white, fontSize: 15, fontWeight: 800,
+                cursor: 'pointer',
+              }}>
+                Open Google
+              </button>
+            </div>
           )}
 
           {/* Generated review — editable textarea so the customer can tweak
@@ -369,8 +507,13 @@ export default function RatePage() {
                 onClick={handlePostOnGoogle}
                 style={{ width: '100%', fontSize: 16 }}
               >
-                Post on Google
+                Copy & Open Google
               </Button>
+              {postHint && (
+                <div style={{ marginTop: 8, textAlign: 'center', fontSize: 14, color: COLORS.green, fontWeight: 800 }}>
+                  {postHint}
+                </div>
+              )}
 
               <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginTop: 12 }}>
                 <button onClick={handleGenerateReview} disabled={generating} style={{
@@ -468,16 +611,12 @@ function Page({ children }) {
           fontSize: 36, color: COLORS.offWhite, letterSpacing: '0.03em', lineHeight: 1,
           margin: 0, textShadow: '2px 2px 0 #1B2C5B',
         }}>
-          Waves <span style={{ color: COLORS.yellow }}>Lawn & Pest</span>
+          Waves
         </h1>
-        <div style={{ fontSize: 14, fontWeight: 700, color: 'rgba(255,255,255,.85)', letterSpacing: 1, fontStyle: 'italic', marginTop: 6 }}>Wave Goodbye to Pests!</div>
       </div>
       <div style={{ position: 'relative', zIndex: 1, width: 'calc(100% - 24px)', maxWidth: 420, background: COLORS.white, borderRadius: 20, boxShadow: '0 12px 40px rgba(10,61,122,.25)', overflow: 'hidden', marginTop: 8 }}>
         <div style={{ height: 5, background: 'linear-gradient(90deg, #C8102E, #C8102E, #F59E0B, #FFD700)' }} />
-        <div style={{ padding: '28px 22px 24px' }}>{children}</div>
-      </div>
-      <div style={{ position: 'relative', zIndex: 1, width: 'calc(100% - 24px)', maxWidth: 420, padding: '0 0 32px' }}>
-        <BrandFooter variant="dark" />
+        <div style={{ padding: '28px clamp(12px, 5vw, 22px) 24px' }}>{children}</div>
       </div>
       {/* Anton / Montserrat / Inter load globally via client/index.html */}
     </div>

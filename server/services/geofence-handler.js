@@ -25,14 +25,15 @@ function getTwilio() {
 
 /**
  * Best-effort arrival SMS to the customer ("Tech is on-site now").
- * Reuses Twilio + notification_prefs gating via sendTechEnRoute with eta=0.
+ * Reuses the same appointment-progress preference gate as en-route SMS,
+ * but sends arrival-specific copy.
  */
 async function sendArrivalSms(customerId, techName) {
   try {
     const tw = getTwilio();
-    if (!tw || !tw.sendTechEnRoute) return;
-    // Skip if customer has no prefs row or opt-out — sendTechEnRoute guards internally.
-    await tw.sendTechEnRoute(customerId, techName || 'Your tech', 0);
+    if (!tw || !tw.sendTechArrived) return;
+    // Skip if customer has no prefs row or opt-out — sendTechArrived guards internally.
+    await tw.sendTechArrived(customerId, techName || 'Your tech');
   } catch (err) {
     logger.warn(`[geofence-handler] arrival SMS failed: ${err.message}`);
   }

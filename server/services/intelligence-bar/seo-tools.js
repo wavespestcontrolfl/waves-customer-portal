@@ -353,8 +353,19 @@ async function querySeoRankings(input) {
   const compareDate = etDateString(addETDays(new Date(), -days_back));
 
   let kwQuery = db('seo_target_keywords as k')
-    .leftJoin(db.raw(`(SELECT keyword_id, organic_position, map_pack_position, ai_overview_cited FROM seo_rank_history WHERE check_date = (SELECT MAX(check_date) FROM seo_rank_history)) as latest ON k.id = latest.keyword_id`))
-    .leftJoin(db.raw(`(SELECT keyword_id, organic_position as prev_position, map_pack_position as prev_map FROM seo_rank_history WHERE check_date <= '${compareDate}' ORDER BY check_date DESC LIMIT 1) as prev ON k.id = prev.keyword_id`))
+    .leftJoin(db.raw(`(
+      SELECT DISTINCT ON (keyword_id)
+        keyword_id, organic_position, map_pack_position, ai_overview_cited
+      FROM seo_rank_history
+      ORDER BY keyword_id, check_date DESC
+    ) as latest ON k.id = latest.keyword_id`))
+    .leftJoin(db.raw(`(
+      SELECT DISTINCT ON (keyword_id)
+        keyword_id, organic_position as prev_position, map_pack_position as prev_map
+      FROM seo_rank_history
+      WHERE check_date <= ?
+      ORDER BY keyword_id, check_date DESC
+    ) as prev ON k.id = prev.keyword_id`, [compareDate]))
     .select(
       'k.id', 'k.keyword', 'k.primary_city', 'k.service_category', 'k.target_url', 'k.monthly_volume', 'k.priority',
       'latest.organic_position', 'latest.map_pack_position', 'latest.ai_overview_cited',
@@ -561,7 +572,7 @@ async function getBacklinkOverview(input) {
   const { domain } = input;
 
   let blQuery = db('seo_backlinks');
-  if (domain) blQuery = blQuery.where('target_domain', domain);
+  if (domain) blQuery = blQuery.whereILike('target_url', `%${domain}%`);
 
   const total = await blQuery.clone().count('* as c').first();
   const byStatus = await blQuery.clone().select('status').count('* as count').groupBy('status');
@@ -666,24 +677,30 @@ async function compareDomains(input) {
 async function getContentDecayAlerts(input) {
   const { domain } = input;
 
-  let decayQuery = db('seo_content_decay_alerts').where('status', 'active');
-  if (domain) decayQuery = decayQuery.whereILike('page_url', `%${domain}%`);
+  let decayQuery = db('seo_content_decay_alerts').where('status', 'open');
+  if (domain) decayQuery = decayQuery.whereILike('url', `%${domain}%`);
   const decayAlerts = await decayQuery.orderBy('created_at', 'desc').limit(20);
 
-  let cannibQuery = db('seo_cannibalization_flags').where('status', 'active');
-  if (domain) cannibQuery = cannibQuery.whereILike('page_a_url', `%${domain}%`);
+  let cannibQuery = db('seo_cannibalization_flags').where('status', 'open');
+  if (domain) cannibQuery = cannibQuery.whereRaw('urls::text ILIKE ?', [`%${domain}%`]);
   const cannibFlags = await cannibQuery.orderBy('created_at', 'desc').limit(20);
 
   return {
     decay_alerts: decayAlerts.map(a => ({
-      page_url: a.page_url, alert_type: a.alert_type, severity: a.severity,
-      clicks_before: a.clicks_before, clicks_after: a.clicks_after,
-      position_before: a.position_before, position_after: a.position_after,
+      page_url: a.url,
+      alert_type: a.alert_type,
+      severity: Math.abs(parseFloat(a.change_pct || 0)) >= 50 ? 'high' : Math.abs(parseFloat(a.change_pct || 0)) >= 25 ? 'medium' : 'low',
+      metric: a.metric_name,
+      previous_value: a.previous_value,
+      current_value: a.current_value,
+      change_pct: a.change_pct,
       detected: a.created_at,
     })),
     cannibalization_flags: cannibFlags.map(f => ({
-      keyword: f.keyword, page_a: f.page_a_url, page_b: f.page_b_url,
-      severity: f.severity, detected: f.created_at,
+      keyword: f.query,
+      urls: typeof f.urls === 'string' ? JSON.parse(f.urls) : f.urls,
+      recommendation: f.recommendation,
+      detected: f.created_at,
     })),
     total_decay: decayAlerts.length,
     total_cannibalization: cannibFlags.length,
@@ -842,11 +859,15 @@ async function getSemanticConceptMap(input) {
       termite: 'termite', tree_shrub: 'tree_shrub', rodent: 'rodent',
     };
     const since = etDateString(addETDays(new Date(), -28));
-    gscData = await db('gsc_top_queries')
+    gscData = await db('gsc_queries')
       .where('service_category', categoryMap[service_line] || service_line)
       .where('date', '>=', since)
-      .select('query', 'clicks', 'impressions', 'position')
-      .orderBy('clicks', 'desc')
+      .select('query')
+      .sum('clicks as clicks')
+      .sum('impressions as impressions')
+      .avg('position as position')
+      .groupBy('query')
+      .orderByRaw('SUM(clicks) DESC')
       .limit(20);
   } catch (e) { /* table may not exist */ }
 
@@ -878,10 +899,10 @@ async function scorePageRefreshPriority(input) {
   const since = etDateString(addETDays(new Date(), -28));
   const prevSince = etDateString(addETDays(new Date(), -56));
 
-  let currentQuery = db('gsc_top_pages')
+  let currentQuery = db('gsc_pages')
     .where('date', '>=', since)
     .whereILike('domain', '%wavespestcontrol.com%');
-  let prevQuery = db('gsc_top_pages')
+  let prevQuery = db('gsc_pages')
     .whereBetween('date', [prevSince, since])
     .whereILike('domain', '%wavespestcontrol.com%');
 
@@ -890,44 +911,47 @@ async function scorePageRefreshPriority(input) {
     prevQuery = prevQuery.where('service_category', service_category);
   }
   if (city) {
-    currentQuery = currentQuery.whereILike('page', `%${city.toLowerCase()}%`);
-    prevQuery = prevQuery.whereILike('page', `%${city.toLowerCase()}%`);
+    currentQuery = currentQuery.whereILike('page_url', `%${city.toLowerCase()}%`);
+    prevQuery = prevQuery.whereILike('page_url', `%${city.toLowerCase()}%`);
   }
 
   let currentPages, prevPages;
   try {
-    currentPages = await currentQuery.select('page')
+    currentPages = await currentQuery.select('page_url')
       .sum('clicks as clicks').sum('impressions as impressions')
       .avg('position as avg_position')
-      .groupBy('page').orderByRaw('SUM(clicks) DESC').limit(limit * 2);
-    prevPages = await prevQuery.select('page')
+      .groupBy('page_url').orderByRaw('SUM(clicks) DESC').limit(limit * 2);
+    prevPages = await prevQuery.select('page_url')
       .sum('clicks as clicks').sum('impressions as impressions')
       .avg('position as avg_position')
-      .groupBy('page');
+      .groupBy('page_url');
   } catch (e) {
     return { error: 'GSC page data not available. Run a GSC sync first.' };
   }
 
   const prevMap = {};
-  prevPages.forEach(p => { prevMap[p.page] = p; });
+  prevPages.forEach(p => { prevMap[p.page_url] = p; });
 
   // Pull content decay alerts
   let decayAlerts = [];
   try {
     decayAlerts = await db('seo_content_decay_alerts')
-      .where('status', 'active')
-      .whereILike('page_url', '%wavespestcontrol.com%')
-      .select('page_url', 'severity');
+      .where('status', 'open')
+      .whereILike('url', '%wavespestcontrol.com%')
+      .select('url', 'change_pct');
   } catch (e) { /* ok */ }
   const decayMap = {};
-  decayAlerts.forEach(a => { decayMap[a.page_url] = a.severity; });
+  decayAlerts.forEach(a => {
+    const change = Math.abs(parseFloat(a.change_pct || 0));
+    decayMap[a.url] = change >= 50 ? 'high' : change >= 25 ? 'medium' : 'low';
+  });
 
   // Score each page
   const scored = currentPages.map(p => {
-    const prev = prevMap[p.page] || {};
+    const prev = prevMap[p.page_url] || {};
     const clickDelta = parseInt(p.clicks || 0) - parseInt(prev.clicks || 0);
     const posDelta = parseFloat(prev.avg_position || 0) - parseFloat(p.avg_position || 0); // positive = improved
-    const hasDecay = decayMap[p.page] || null;
+    const hasDecay = decayMap[p.page_url] || null;
 
     // Scoring: higher = more urgent refresh needed
     let score = 0;
@@ -947,7 +971,7 @@ async function scorePageRefreshPriority(input) {
     else if (pos >= 16 && pos <= 30) score += 8;
 
     return {
-      page: p.page,
+      page: p.page_url,
       clicks_current: parseInt(p.clicks || 0),
       clicks_delta: clickDelta,
       avg_position: parseFloat(parseFloat(p.avg_position || 0).toFixed(1)),
@@ -995,9 +1019,18 @@ async function getContentWorkflowBrief(input) {
   // Pull ranking data for this keyword if we have it
   let rankingData = null;
   try {
-    rankingData = await db('seo_rankings')
-      .whereILike('keyword', `%${target_keyword}%`)
-      .orderBy('checked_at', 'desc')
+    rankingData = await db('seo_target_keywords as k')
+      .leftJoin('seo_rank_history as rh', 'k.id', 'rh.keyword_id')
+      .whereILike('k.keyword', `%${target_keyword}%`)
+      .orderBy('rh.check_date', 'desc')
+      .select(
+        'k.keyword',
+        'k.target_url',
+        'rh.organic_position',
+        'rh.map_pack_position',
+        'rh.ai_overview_cited',
+        'rh.check_date',
+      )
       .first();
   } catch (e) { /* ok */ }
 
@@ -1005,7 +1038,7 @@ async function getContentWorkflowBrief(input) {
   let gscData = null;
   try {
     const since = etDateString(addETDays(new Date(), -28));
-    gscData = await db('gsc_top_queries')
+    gscData = await db('gsc_queries')
       .whereILike('query', `%${target_keyword}%`)
       .where('date', '>=', since)
       .select('query')

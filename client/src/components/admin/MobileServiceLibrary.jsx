@@ -7,6 +7,7 @@
 // Desktop ServiceLibraryPage (tabs + filters + grouped catalog) is unchanged.
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { SERVICE_CATEGORY_LABELS as CATEGORY_LABELS } from '../../constants/serviceCategories';
 
 const API = import.meta.env.VITE_API_URL || '/api';
 
@@ -19,20 +20,6 @@ function aFetch(path, opts = {}) {
     ...opts,
   }).then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 }
-
-// Mirrors CATEGORIES in ServiceLibraryPage.jsx; kept local so this file has no
-// import-time coupling. Keep labels in sync when new categories are added.
-const CATEGORY_LABELS = {
-  pest_control: 'Pest Control',
-  lawn_care: 'Lawn Care',
-  mosquito: 'Mosquito',
-  termite: 'Termite',
-  rodent: 'Rodent',
-  tree_shrub: 'Tree & Shrub',
-  inspection: 'Inspection',
-  specialty: 'Specialty',
-  other: 'Other',
-};
 
 // Shared row + card styling so the three views look identical.
 const rowChrome = 'flex items-center gap-3 bg-white border-hairline border-zinc-200 rounded-sm px-3 no-underline';
@@ -420,6 +407,14 @@ function DiscountEditPanel({ discount, onCancel, onSaved }) {
           New Discount
         </div>
       )}
+      {!isNew && (
+        <div className="bg-white border-hairline border-zinc-200 rounded-sm px-3 py-2">
+          <div className="text-ink-tertiary uppercase tracking-label" style={{ fontSize: 10 }}>Quick Edit</div>
+          <div className="text-ink-secondary mt-1" style={{ fontSize: 12 }}>
+            {[discount?.discount_key, discount?.service_key_filter && `Service: ${discount.service_key_filter}`, discount?.promo_code && `Promo: ${discount.promo_code}`].filter(Boolean).join(' · ') || 'General discount'}
+          </div>
+        </div>
+      )}
       <Field label="Name">
         <input className={inputChrome} value={name} onChange={(e) => setName(e.target.value)} required />
       </Field>
@@ -473,6 +468,7 @@ function AllServicesView({ onBack }) {
     const params = new URLSearchParams({ limit: '500' });
     if (status === 'active') params.set('is_active', 'true');
     if (status === 'inactive') params.set('is_active', 'false');
+    if (status === 'archived') params.set('is_archived', 'true');
     return aFetch(`/admin/services?${params}`)
       .then((d) => { setServices(d.services || []); setLoading(false); })
       .catch(() => setLoading(false));
@@ -527,11 +523,12 @@ function AllServicesView({ onBack }) {
       <div className="mt-3">
         <SearchBar value={query} onChange={setQuery} placeholder="Search All Services" />
       </div>
-      <div className="grid grid-cols-3 gap-2 mb-3">
+      <div className="grid gap-2 mb-3" style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}>
         {[
           ['active', 'Active'],
           ['inactive', 'Inactive'],
           ['all', 'All'],
+          ['archived', 'Archived'],
         ].map(([key, label]) => (
           <button
             key={key}
@@ -566,8 +563,10 @@ function AllServicesView({ onBack }) {
                   <Thumb color={s.color || '#E4E4E7'} />
                   <div className="flex-1 min-w-0">
                     <div className="font-semibold text-ink-primary truncate" style={{ fontSize: 15 }}>{s.name}</div>
-                    {duration && (
-                      <div className="text-ink-tertiary truncate" style={{ fontSize: 12, marginTop: 2 }}>{duration}</div>
+                    {(duration || s.is_archived) && (
+                      <div className="text-ink-tertiary truncate" style={{ fontSize: 12, marginTop: 2 }}>
+                        {[duration, s.is_archived && 'Archived'].filter(Boolean).join(' · ')}
+                      </div>
                     )}
                   </div>
                   <div className="flex items-center gap-2">
@@ -599,6 +598,7 @@ const PRICING_TYPES = [
 
 function ServiceEditPanel({ service, onCancel, onSaved }) {
   const isNew = !service?.id;
+  const isArchived = !!service?.is_archived;
   const [name, setName] = useState(service?.name || '');
   const [duration, setDuration] = useState(service?.default_duration_minutes != null ? String(service.default_duration_minutes) : '60');
   const [pricingType, setPricingType] = useState(service?.pricing_type || 'variable');
@@ -631,11 +631,34 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
     }
   };
 
+  const restore = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await aFetch(`/admin/services/${service.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ is_archived: false, is_active: true }),
+      });
+      await onSaved();
+    } catch (err) {
+      setError(err.message || 'Restore failed');
+      setSaving(false);
+    }
+  };
+
   return (
     <form onSubmit={submit} className={editPanelChrome}>
       {isNew && (
         <div className="text-ink-primary font-semibold" style={{ fontSize: 15 }}>
           New Service
+        </div>
+      )}
+      {!isNew && (
+        <div className="bg-white border-hairline border-zinc-200 rounded-sm px-3 py-2">
+          <div className="text-ink-tertiary uppercase tracking-label" style={{ fontSize: 10 }}>Quick Edit</div>
+          <div className="text-ink-secondary mt-1" style={{ fontSize: 12 }}>
+            {[service?.service_key, CATEGORY_LABELS[service?.category] || service?.category, service?.billing_type, isArchived && 'Archived'].filter(Boolean).join(' · ')}
+          </div>
         </div>
       )}
       <Field label="Name">
@@ -678,6 +701,11 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
       </label>
       {error && <div className="text-alert-fg" style={{ fontSize: 12 }}>{error}</div>}
       <div className="flex gap-2 justify-end pt-1">
+        {isArchived && (
+          <button type="button" onClick={restore} disabled={saving} className="bg-white border-hairline border-zinc-300 text-ink-primary rounded-sm u-focus-ring" style={{ padding: '8px 14px', fontSize: 13 }}>
+            Restore
+          </button>
+        )}
         <button type="button" onClick={onCancel} disabled={saving} className="bg-white border-hairline border-zinc-300 text-ink-primary rounded-sm u-focus-ring" style={{ padding: '8px 14px', fontSize: 13 }}>
           Cancel
         </button>
@@ -690,9 +718,13 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
 }
 
 // ── Root mobile component ───────────────────────────────────────────────
-export default function MobileServiceLibrary() {
-  const [view, setView] = useState('menu'); // 'menu' | 'categories' | 'discounts' | 'services'
+export default function MobileServiceLibrary({ initialView = 'menu' }) {
+  const [view, setView] = useState(initialView); // 'menu' | 'categories' | 'discounts' | 'services'
   const onBack = () => setView('menu');
+
+  useEffect(() => {
+    setView(initialView || 'menu');
+  }, [initialView]);
 
   if (view === 'categories') return <CategoriesView onBack={onBack} />;
   if (view === 'discounts') return <DiscountsView onBack={onBack} />;

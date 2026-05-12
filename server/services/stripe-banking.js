@@ -26,6 +26,13 @@ function getStripe() {
   return _stripe;
 }
 
+function nonPiiActorId(value) {
+  const actor = String(value || '').trim();
+  if (!actor) return null;
+  if (actor.includes('@') || /\s/.test(actor)) return 'admin';
+  return actor.slice(0, 120);
+}
+
 
 // ═══════════════════════════════════════════════════════════════
 // GET BALANCE
@@ -223,16 +230,30 @@ async function syncPayoutTransactions(stripePayoutId) {
   try {
     // Fetch all balance transactions from Stripe BEFORE touching local DB.
     // If the API call fails, the existing local rows are left intact.
-    const transactions = await stripe.balanceTransactions.list({
-      payout: stripePayoutId,
-      limit: 100,
-    });
+    const transactionRows = [];
+    let startingAfter = null;
+    let hasMore = true;
+    const MAX_PAGES = 100;
+    for (let pageIdx = 0; pageIdx < MAX_PAGES && hasMore; pageIdx++) {
+      const page = await stripe.balanceTransactions.list({
+        payout: stripePayoutId,
+        limit: 100,
+        ...(startingAfter ? { starting_after: startingAfter } : {}),
+      });
+      transactionRows.push(...(page.data || []));
+      hasMore = !!page.has_more;
+      startingAfter = page.data?.length ? page.data[page.data.length - 1].id : null;
+      if (!startingAfter) break;
+    }
+    if (hasMore) {
+      logger.warn(`[stripe-banking] Payout ${stripePayoutId} transaction sync hit ${MAX_PAGES} page safety cap`);
+    }
 
     let totalFees = 0;
     let txnCount = 0;
 
     // Batch-resolve local payments/customers to avoid N+1.
-    const chargeSources = transactions.data
+    const chargeSources = transactionRows
       .map(t => (typeof t.source === 'string' && t.source.startsWith('ch_')) ? t.source : null)
       .filter(Boolean);
 
@@ -261,7 +282,7 @@ async function syncPayoutTransactions(stripePayoutId) {
     }
 
     const txnInserts = [];
-    for (const txn of transactions.data) {
+    for (const txn of transactionRows) {
       let customerId = null;
       let customerName = null;
       let invoiceId = null;
@@ -406,22 +427,38 @@ async function getPayoutDetails(payoutId) {
  * Request an instant payout from Stripe.
  * @param {number} amountDollars — amount in dollars
  */
-async function createInstantPayout(amountDollars) {
+async function createInstantPayout(amountDollars, opts = {}) {
   const stripe = getStripe();
   if (!stripe) throw new Error('Stripe not configured');
 
   try {
     const amountCents = Math.round(amountDollars * 100);
+    const balance = await stripe.balance.retrieve();
+    const availableUsdCents = (balance.available || [])
+      .filter(b => String(b.currency || '').toLowerCase() === 'usd')
+      .reduce((sum, b) => sum + Number(b.amount || 0), 0);
+    if (amountCents > availableUsdCents) {
+      throw new Error(`Instant payout amount exceeds available Stripe balance ($${(availableUsdCents / 100).toFixed(2)})`);
+    }
 
     // Idempotency key: collapses retries within the same minute for the same amount.
     // Stripe honors this for 24h; duplicate submissions in that window return the original payout.
     const minuteBucket = Math.floor(Date.now() / 60000);
-    const idempotencyKey = `ipo_${amountCents}_${minuteBucket}`;
+    const idempotencyKey = opts.idempotencyKey && /^[a-zA-Z0-9._:-]{8,120}$/.test(String(opts.idempotencyKey))
+      ? String(opts.idempotencyKey)
+      : `ipo_${amountCents}_${minuteBucket}`;
 
-    const payout = await stripe.payouts.create(
-      { amount: amountCents, currency: 'usd', method: 'instant' },
-      { idempotencyKey },
-    );
+    const actorId = nonPiiActorId(opts.requestedBy);
+    const createParams = {
+      amount: amountCents,
+      currency: 'usd',
+      method: 'instant',
+    };
+    if (actorId) {
+      createParams.metadata = { waves_requested_by: actorId };
+    }
+
+    const payout = await stripe.payouts.create(createParams, { idempotencyKey });
 
     // Store in local DB
     await db('stripe_payouts').insert({
@@ -435,9 +472,9 @@ async function createInstantPayout(amountDollars) {
       type: payout.type,
       description: payout.description || 'Instant payout',
       synced_at: new Date().toISOString(),
-    });
+    }).onConflict('stripe_payout_id').merge();
 
-    logger.info(`[stripe-banking] Instant payout created: $${amountDollars}, payout ${payout.id}`);
+    logger.info(`[stripe-banking] Instant payout created: $${amountDollars}, payout ${payout.id}, requestedBy=${actorId || 'unknown'}`);
 
     return {
       payout_id: payout.id,
@@ -515,17 +552,31 @@ async function getCashFlow(startDate, endDate) {
     const dailyMap = {};
     revenueRows.forEach(r => {
       const d = typeof r.date === 'string' ? r.date : new Date(r.date).toISOString().split('T')[0];
-      if (!dailyMap[d]) dailyMap[d] = { date: d, revenue: 0, expenses: 0, payouts: 0 };
+      if (!dailyMap[d]) dailyMap[d] = { date: d, revenue: 0, expenses: 0, fees: 0, payouts: 0 };
       dailyMap[d].revenue += parseFloat(r.total || 0);
     });
     expenseRows.forEach(r => {
       const d = typeof r.date === 'string' ? r.date : new Date(r.date).toISOString().split('T')[0];
-      if (!dailyMap[d]) dailyMap[d] = { date: d, revenue: 0, expenses: 0, payouts: 0 };
+      if (!dailyMap[d]) dailyMap[d] = { date: d, revenue: 0, expenses: 0, fees: 0, payouts: 0 };
       dailyMap[d].expenses += parseFloat(r.total || 0);
+    });
+    const feeDailyRows = await db('stripe_payout_transactions')
+      .whereBetween('created_at_stripe', [startDate, endDate + 'T23:59:59'])
+      .select(
+        db.raw("DATE(created_at_stripe AT TIME ZONE ?) as date", [process.env.BUSINESS_TIMEZONE || 'America/New_York']),
+        db.raw('COALESCE(SUM(fee), 0) as total'),
+      )
+      .groupBy(db.raw("DATE(created_at_stripe AT TIME ZONE ?)", [process.env.BUSINESS_TIMEZONE || 'America/New_York']))
+      .orderBy('date')
+      .catch((e) => { logger.error('[stripe-banking] cash-flow daily fee query failed:', e); return []; });
+    feeDailyRows.forEach(r => {
+      const d = typeof r.date === 'string' ? r.date : new Date(r.date).toISOString().split('T')[0];
+      if (!dailyMap[d]) dailyMap[d] = { date: d, revenue: 0, expenses: 0, fees: 0, payouts: 0 };
+      dailyMap[d].fees = (dailyMap[d].fees || 0) + parseFloat(r.total || 0);
     });
     payoutRows.forEach(r => {
       const d = typeof r.date === 'string' ? r.date : new Date(r.date).toISOString().split('T')[0];
-      if (!dailyMap[d]) dailyMap[d] = { date: d, revenue: 0, expenses: 0, payouts: 0 };
+      if (!dailyMap[d]) dailyMap[d] = { date: d, revenue: 0, expenses: 0, fees: 0, payouts: 0 };
       dailyMap[d].payouts += parseFloat(r.total || 0);
     });
 
@@ -610,17 +661,21 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
     if (!allowedStatuses.includes(status)) {
       throw new Error(`Invalid reconciliation status: ${status}`);
     }
+    if (!Number.isFinite(Number(actualAmount))) {
+      throw new Error('Invalid actual amount');
+    }
 
     const expectedAmount = parseFloat(payout.amount || 0);
-    const discrepancy = Math.round((actualAmount - expectedAmount) * 100) / 100;
+    const normalizedActual = Number(actualAmount);
+    const discrepancy = Math.round((normalizedActual - expectedAmount) * 100) / 100;
     const matched = Math.abs(discrepancy) < 0.01;
     const now = new Date().toISOString();
 
     await db.transaction(async (trx) => {
-      const existing = await trx('bank_reconciliation').where('payout_id', payoutId).first();
       const reconRow = {
+        payout_id: payoutId,
         expected_amount: expectedAmount,
-        actual_amount: actualAmount,
+        actual_amount: normalizedActual,
         matched,
         discrepancy,
         notes,
@@ -628,11 +683,7 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
         reconciled_at: now,
         reconciled_by: reconciledBy,
       };
-      if (existing) {
-        await trx('bank_reconciliation').where('payout_id', payoutId).update(reconRow);
-      } else {
-        await trx('bank_reconciliation').insert({ payout_id: payoutId, ...reconRow });
-      }
+      await trx('bank_reconciliation').insert(reconRow);
 
       // Only 'confirmed' flips the payout flag; 'rejected' un-reconciles it.
       await trx('stripe_payouts').where('id', payoutId).update({
@@ -642,12 +693,12 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
       });
     });
 
-    logger.info(`[stripe-banking] Payout ${payoutId} reconciliation=${status}: expected=$${expectedAmount}, actual=$${actualAmount}, matched=${matched}`);
+    logger.info(`[stripe-banking] Payout ${payoutId} reconciliation=${status}: expected=$${expectedAmount}, actual=$${normalizedActual}, matched=${matched}`);
 
     return {
       payout_id: payoutId,
       expected_amount: expectedAmount,
-      actual_amount: actualAmount,
+      actual_amount: normalizedActual,
       discrepancy,
       matched,
       status,

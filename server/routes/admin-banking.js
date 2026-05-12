@@ -1,12 +1,105 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const StripeBanking = require('../services/stripe-banking');
 const BankingExport = require('../services/banking-export');
+const { parseETDateTime, etWeekStart } = require('../utils/datetime-et');
 
-router.use(adminAuthenticate);
+router.use(adminAuthenticate, requireAdmin);
+
+const BUSINESS_TZ = process.env.BUSINESS_TIMEZONE || 'America/New_York';
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function validateDateParam(value, name) {
+  if (value && !ISO_DATE_RE.test(String(value))) {
+    const err = new Error(`Invalid ${name}; expected YYYY-MM-DD`);
+    err.status = 400;
+    throw err;
+  }
+}
+
+function applyBusinessDateRange(query, column, startDate, endDate) {
+  if (startDate) query = query.whereRaw(`DATE(${column} AT TIME ZONE ?) >= ?::date`, [BUSINESS_TZ, startDate]);
+  if (endDate) query = query.whereRaw(`DATE(${column} AT TIME ZONE ?) <= ?::date`, [BUSINESS_TZ, endDate]);
+  return query;
+}
+
+function getAdminActorId(req) {
+  return String(req.technicianId || req.technician?.id || 'admin');
+}
+
+function summarizeCashFlowForUi(cashFlow, period) {
+  const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+  const buckets = new Map();
+
+  const addToBucket = (key, label, day) => {
+    if (!buckets.has(key)) {
+      buckets.set(key, {
+        key,
+        label,
+        money_in: 0,
+        money_out: 0,
+        net: 0,
+        revenue: 0,
+        expenses: 0,
+        fees: 0,
+        payouts: 0,
+      });
+    }
+    const row = buckets.get(key);
+    const revenue = Number(day.revenue || 0);
+    const expenses = Number(day.expenses || 0);
+    const fees = Number(day.fees || 0);
+    const payouts = Number(day.payouts || 0);
+    row.money_in += revenue;
+    row.money_out += expenses + fees;
+    row.net += revenue - expenses - fees;
+    row.revenue += revenue;
+    row.expenses += expenses;
+    row.fees += fees;
+    row.payouts += payouts;
+  };
+
+  for (const day of cashFlow.daily || []) {
+    const date = String(day.date).slice(0, 10);
+    if (period === 'monthly') {
+      addToBucket(date.slice(0, 7), date.slice(0, 7), day);
+    } else if (period === 'weekly') {
+      const key = etWeekStart(parseETDateTime(`${date}T12:00`));
+      addToBucket(key, key, day);
+    } else {
+      addToBucket(date, date, day);
+    }
+  }
+
+  const periods = Array.from(buckets.values())
+    .sort((a, b) => a.key.localeCompare(b.key))
+    .map(row => ({
+      ...row,
+      money_in: round2(row.money_in),
+      money_out: round2(row.money_out),
+      net: round2(row.net),
+      revenue: round2(row.revenue),
+      expenses: round2(row.expenses),
+      fees: round2(row.fees),
+      payouts: round2(row.payouts),
+    }));
+
+  const summary = cashFlow.summary || {};
+  const totalOut = Number(summary.total_expenses || 0) + Number(summary.stripe_fees || 0);
+  return {
+    ...cashFlow,
+    periods,
+    summary: {
+      ...summary,
+      total_in: round2(summary.total_revenue),
+      total_out: round2(totalOut),
+      net: round2(summary.operating_cash_flow ?? summary.net_cash_flow),
+    },
+  };
+}
 
 // ═══════════════════════════════════════════════════════════════
 // GET /balance — current Stripe balance
@@ -27,8 +120,12 @@ router.get('/balance', async (req, res) => {
 router.get('/payouts', async (req, res) => {
   try {
     const { status, start_date, end_date, page = 1, limit = 20 } = req.query;
-    const pg = Math.max(1, parseInt(page));
-    const lim = Math.min(100, Math.max(1, parseInt(limit)));
+    validateDateParam(start_date, 'start_date');
+    validateDateParam(end_date, 'end_date');
+    const parsedPage = parseInt(page, 10);
+    const parsedLimit = parseInt(limit, 10);
+    const pg = Number.isFinite(parsedPage) ? Math.max(1, parsedPage) : 1;
+    const lim = Number.isFinite(parsedLimit) ? Math.min(100, Math.max(1, parsedLimit)) : 20;
     const offset = (pg - 1) * lim;
 
     let query = db('stripe_payouts');
@@ -38,14 +135,8 @@ router.get('/payouts', async (req, res) => {
       query = query.where('status', status);
       countQuery = countQuery.where('status', status);
     }
-    if (start_date) {
-      query = query.where('created_at_stripe', '>=', start_date);
-      countQuery = countQuery.where('created_at_stripe', '>=', start_date);
-    }
-    if (end_date) {
-      query = query.where('created_at_stripe', '<=', end_date);
-      countQuery = countQuery.where('created_at_stripe', '<=', end_date);
-    }
+    query = applyBusinessDateRange(query, 'arrival_date', start_date, end_date);
+    countQuery = applyBusinessDateRange(countQuery, 'arrival_date', start_date, end_date);
 
     const [{ count }] = await countQuery.count('* as count');
     const total = parseInt(count);
@@ -63,7 +154,7 @@ router.get('/payouts', async (req, res) => {
     });
   } catch (err) {
     logger.error('[banking] Payouts list failed:', err);
-    res.status(500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 
@@ -95,7 +186,10 @@ router.post('/payouts/instant', async (req, res) => {
     if (!Number.isFinite(amount) || amount <= 0) {
       return res.status(400).json({ error: 'Invalid amount — must be a positive number' });
     }
-    const result = await StripeBanking.createInstantPayout(amount);
+    const result = await StripeBanking.createInstantPayout(amount, {
+      requestedBy: getAdminActorId(req),
+      idempotencyKey: req.body.idempotency_key,
+    });
     res.json(result);
   } catch (err) {
     logger.error('[banking] Instant payout failed:', err);
@@ -122,6 +216,8 @@ router.post('/sync', async (req, res) => {
 router.get('/cash-flow', async (req, res) => {
   try {
     const { period, start_date, end_date } = req.query;
+    validateDateParam(start_date, 'start_date');
+    validateDateParam(end_date, 'end_date');
     const now = new Date();
     const pad = (n) => String(n).padStart(2, '0');
     const localDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -129,38 +225,10 @@ router.get('/cash-flow', async (req, res) => {
     const endDate = end_date || localDate(now);
 
     const cashFlow = await StripeBanking.getCashFlow(startDate, endDate);
-
-    if (period === 'weekly') {
-      const buckets = {};
-      for (const day of cashFlow.daily || []) {
-        const d = new Date(day.date + 'T12:00:00');
-        const weekStart = new Date(d);
-        weekStart.setDate(d.getDate() - d.getDay());
-        const key = weekStart.toISOString().split('T')[0];
-        if (!buckets[key]) buckets[key] = { week_start: key, gross: 0, fees: 0, net: 0, count: 0 };
-        buckets[key].gross += parseFloat(day.gross || 0);
-        buckets[key].fees += parseFloat(day.fees || 0);
-        buckets[key].net += parseFloat(day.net || 0);
-        buckets[key].count += parseInt(day.count || 0);
-      }
-      cashFlow.weekly = Object.values(buckets).sort((a, b) => a.week_start.localeCompare(b.week_start));
-    } else if (period === 'monthly') {
-      const buckets = {};
-      for (const day of cashFlow.daily || []) {
-        const key = day.date.substring(0, 7);
-        if (!buckets[key]) buckets[key] = { month: key, gross: 0, fees: 0, net: 0, count: 0 };
-        buckets[key].gross += parseFloat(day.gross || 0);
-        buckets[key].fees += parseFloat(day.fees || 0);
-        buckets[key].net += parseFloat(day.net || 0);
-        buckets[key].count += parseInt(day.count || 0);
-      }
-      cashFlow.monthly = Object.values(buckets).sort((a, b) => a.month.localeCompare(b.month));
-    }
-
-    res.json(cashFlow);
+    res.json(summarizeCashFlowForUi(cashFlow, period || 'daily'));
   } catch (err) {
     logger.error('[banking] Cash flow failed:', err);
-    res.status(500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 
@@ -190,7 +258,7 @@ router.get('/reconciliation', async (req, res) => {
       )
       .orderBy('stripe_payouts.arrival_date', 'desc');
 
-    res.json(rows);
+    res.json({ payouts: rows });
   } catch (err) {
     logger.error('[banking] Reconciliation list failed:', err);
     res.status(500).json({ error: err.message });
@@ -203,11 +271,15 @@ router.get('/reconciliation', async (req, res) => {
 router.post('/reconciliation/:payoutId', async (req, res) => {
   try {
     const { actual_amount, notes, status } = req.body;
+    const actualAmount = Number(actual_amount);
+    if (!Number.isFinite(actualAmount)) {
+      return res.status(400).json({ error: 'Invalid actual_amount — must be a number' });
+    }
     const result = await StripeBanking.reconcilePayout(
       req.params.payoutId,
-      actual_amount,
+      actualAmount,
       notes,
-      'admin',
+      getAdminActorId(req),
       status || 'confirmed',
     );
     res.json(result);
@@ -223,6 +295,8 @@ router.post('/reconciliation/:payoutId', async (req, res) => {
 router.get('/export', async (req, res) => {
   try {
     const { format = 'csv', start_date, end_date } = req.query;
+    validateDateParam(start_date, 'start_date');
+    validateDateParam(end_date, 'end_date');
     const now = new Date();
     const pad = (n) => String(n).padStart(2, '0');
     const todayStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
@@ -230,9 +304,8 @@ router.get('/export', async (req, res) => {
     const rangeEnd = end_date || todayStr;
 
     let query = db('stripe_payouts');
-    if (start_date) query = query.where('created_at_stripe', '>=', start_date);
-    if (end_date) query = query.where('created_at_stripe', '<=', end_date);
-    const payouts = await query.orderBy('created_at_stripe', 'desc');
+    query = applyBusinessDateRange(query, 'arrival_date', start_date, end_date);
+    const payouts = await query.orderBy('arrival_date', 'desc');
 
     if (format === 'ofx') {
       const ofx = BankingExport.generateOFX(payouts, rangeStart, rangeEnd);
@@ -253,7 +326,7 @@ router.get('/export', async (req, res) => {
     res.send(csv.content);
   } catch (err) {
     logger.error('[banking] Export failed:', err);
-    res.status(500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 
@@ -266,9 +339,10 @@ router.get('/stats', async (req, res) => {
     const pad = (n) => String(n).padStart(2, '0');
     const mtdStart = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-01`;
 
-    const stats = await db('stripe_payouts')
-      .where('status', 'paid')
-      .where('created_at_stripe', '>=', mtdStart)
+    let statsQuery = db('stripe_payouts')
+      .where('status', 'paid');
+    statsQuery = applyBusinessDateRange(statsQuery, 'arrival_date', mtdStart, null);
+    const stats = await statsQuery
       .select(
         db.raw('COALESCE(SUM(amount), 0) as mtd_deposited'),
         db.raw('COALESCE(SUM(fee_total), 0) as mtd_fees'),

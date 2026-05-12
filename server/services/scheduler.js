@@ -788,7 +788,7 @@ function initScheduledJobs() {
   cron.schedule('0 6 * * *', async () => {
     logger.info('Running: GSC data sync');
     try {
-      const SearchConsole = require('./seo/search-console');
+      const SearchConsole = require('./seo/search-console-v2');
       await SearchConsole.syncDailyData(3);
     } catch (err) {
       logger.error(`GSC sync failed: ${err.message}`);

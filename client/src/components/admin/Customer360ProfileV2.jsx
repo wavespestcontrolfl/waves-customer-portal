@@ -8,7 +8,7 @@
  *     POST /admin/communications/sms, /admin/customers/:id/refund,
  *     /admin/customers/:id/charge-now)
  *   - state (data, loading, activeTab, timelineFilter, smsReply, sendingSms)
- *   - tabs (overview / services / billing / comms / property / compliance)
+ *   - tabs (overview / services / billing / contracts / comms / property / compliance)
  *   - slide-out overlay structure + ESC handler
  *   - mobile sticky-bottom CustomerActionBar (standalone)
  *
@@ -47,10 +47,11 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
-import { ChevronLeft, Droplets, MoreHorizontal, ShieldCheck, Trash2 } from 'lucide-react';
+import { CheckCircle2, ChevronLeft, Copy, CreditCard, Droplets, FileText, Link2, MoreHorizontal, PenLine, RotateCcw, ShieldCheck, Trash2, XCircle } from 'lucide-react';
 import { CustomerActionBar } from './StickyActionBar';
 import { Card, CardBody, Badge, Button, Switch, Table, THead, TBody, TR, TH, TD, cn } from '../ui';
 import CallBridgeLink, { callViaBridge } from './CallBridgeLink';
+import { CONSENT_TEXT, CONSENT_VERSION } from '../../lib/paymentMethodConsentText';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -58,7 +59,22 @@ function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
     ...options,
-  }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
+  }).then(async (r) => {
+    if (!r.ok) {
+      let serverMsg = '';
+      try {
+        const body = await r.clone().json();
+        serverMsg = body?.error || body?.reason || body?.message || body?.code || '';
+      } catch {
+        try { serverMsg = (await r.text()).trim(); } catch { /* ignore */ }
+      }
+      const err = new Error(serverMsg || `HTTP ${r.status}`);
+      err.status = r.status;
+      throw err;
+    }
+    if (r.status === 204) return null;
+    return r.json();
+  });
 }
 
 function timeAgo(dateStr) {
@@ -80,6 +96,10 @@ function fmtDate(d) {
 }
 
 function fmtCurrency(v) { return '$' + parseFloat(v || 0).toFixed(2); }
+function getAdminRole() {
+  try { return JSON.parse(localStorage.getItem('waves_admin_user') || '{}')?.role || null; }
+  catch { return null; }
+}
 function fmtNumber(v, digits = 3) {
   const n = Number(v);
   if (!Number.isFinite(n)) return '0';
@@ -212,6 +232,587 @@ function StatCardV2({ label, value, alert }) {
   );
 }
 
+function sourceLabel(source) {
+  const labels = {
+    pay_page: 'Payment page',
+    onboarding: 'Onboarding',
+    portal_add_card: 'Customer portal',
+    admin_tap_to_pay: 'Admin tap to pay',
+    contract_signing: 'Contract signing',
+    backfill: 'Backfill',
+  };
+  return labels[source] || String(source || 'Unknown').replace(/_/g, ' ');
+}
+
+const FLORIDA_COMPLIANCE_ITEMS = [
+  {
+    title: 'Automatic renewal disclosure',
+    body: 'Service contracts with automatic renewal terms should disclose those terms clearly and conspicuously. For covered 12-month-plus contracts that renew for more than one month, send renewal notice 30-60 days before the cancellation deadline and support cancellation through the same acceptance method.',
+    citation: 'Fla. Stat. 501.165',
+    href: 'https://www.flsenate.gov/Laws/Statutes/2025/501.165',
+  },
+  {
+    title: 'No unfair or deceptive billing practice',
+    body: 'Keep payment timing, saved-payment use, processing fees, cancellation, and revocation terms easy to understand so the billing practice does not create avoidable FDUTPA risk.',
+    citation: 'Fla. Stat. 501.204',
+    href: 'https://www.leg.state.fl.us/statutes/index.cfm/index.cfm?App_mode=Display_Statute&URL=0500-0599/0501/Sections/0501.204.html',
+  },
+  {
+    title: 'Electronic signature record',
+    body: 'Capture the customer\'s intent to sign electronically and retain the electronic record, signature, initials, IP address, user agent, timestamp, and exact contract snapshot.',
+    citation: 'Fla. Stat. 668.50',
+    href: 'https://www.leg.state.fl.us/statutes/index.cfm?App_mode=Display_Statute&URL=0600-0699/0668/Sections/0668.50.html',
+  },
+  {
+    title: 'Personal information security',
+    body: 'Use reasonable safeguards for electronic personal information and retain only processor-safe payment tokens. Do not treat this admin contract view as a place to store raw card data.',
+    citation: 'Fla. Stat. 501.171',
+    href: 'https://www.leg.state.fl.us/statutes/index.cfm?App_mode=Display_Statute&URL=0500-0599/0501/Sections/0501.171.html',
+  },
+];
+
+function paymentMethodLabel(method) {
+  if (!method) return 'No payment method selected';
+  const methodType = method.methodType || method.method_type;
+  if (methodType === 'ach' || methodType === 'us_bank_account') {
+    return `${method.bankName || method.bank_name || 'Bank account'} ending ${method.lastFour || method.bank_last_four || '—'}`;
+  }
+  const brand = method.cardBrand || method.card_brand || 'Card';
+  const lastFour = method.lastFour || method.last_four || '—';
+  return `${brand} ending ${lastFour}`;
+}
+
+function ContractMeta({ label, value }) {
+  return (
+    <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-2">
+      <div className="u-label text-ink-tertiary mb-1">{label}</div>
+      <div className="text-13 text-zinc-900 break-words">{value || '—'}</div>
+    </div>
+  );
+}
+
+function contractStatusTone(status) {
+  if (status === 'signed') return 'strong';
+  if (status === 'cancelled' || status === 'voided') return 'alert';
+  return 'neutral';
+}
+
+function contractStatusLabel(status) {
+  return String(status || 'draft').replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function ElectronicAuthorizationContractV2({ customer, consents = [], cards = [], contracts = [], onRefresh }) {
+  const latest = consents[0] || null;
+  const latestContract = contracts[0] || null;
+  const activeContract = contracts.find((contract) => ['draft', 'sent', 'viewed'].includes(contract.status));
+  const displayedText = latestContract?.consentTextSnapshot || latest?.consentTextSnapshot || CONSENT_TEXT;
+  const displayedVersion = latestContract?.consentTextVersion || latest?.consentTextVersion || CONSENT_VERSION;
+  const contractSignedAt = latestContract?.signedAt || null;
+  const consentSignedAt = latest?.createdAt || null;
+  const signedTimestamp = contractSignedAt || consentSignedAt;
+  const signedAt = signedTimestamp ? `${fmtDate(signedTimestamp)} · ${new Date(signedTimestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}` : 'Not signed';
+  const requestedAt = latestContract?.createdAt ? new Date(latestContract.createdAt) : (latest?.createdAt ? new Date(latest.createdAt) : new Date());
+  const requestedLabel = requestedAt.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+  const contractDate = requestedAt.toLocaleDateString('en-US');
+  const signerName = `${customer.firstName || ''} ${customer.lastName || ''}`.trim() || 'Customer';
+  const defaultCard = cards.find((card) => card.is_default || card.isDefault || card.autopay_enabled || card.autopayEnabled) || cards[0] || null;
+  const [contractForm, setContractForm] = useState({
+    paymentMethodId: '',
+    serviceName: customer.tier ? `${customer.tier} service agreement` : 'Waves service agreement',
+    renewalDate: '',
+    cancellationDeadline: '',
+  });
+  const [creatingContract, setCreatingContract] = useState(false);
+  const [contractAction, setContractAction] = useState('');
+  const [contractErr, setContractErr] = useState('');
+  const [signingUrl, setSigningUrl] = useState('');
+  const selectedPaymentMethodId = contractForm.paymentMethodId || defaultCard?.id || '';
+  const selectedPaymentMethod = cards.find((card) => card.id === selectedPaymentMethodId) || defaultCard;
+  const methodForSummary = latestContract || latest || selectedPaymentMethod || defaultCard;
+  const hasSignedAuthorization = latestContract?.status === 'signed' || consents.length > 0;
+  const displayedContractText = latestContract?.contractTextSnapshot || [
+    'AutoPay Authorization',
+    displayedText,
+  ].join('\n\n');
+  const updateContractForm = (key, value) => setContractForm((prev) => ({ ...prev, [key]: value }));
+  const canCreateContract = !!selectedPaymentMethodId;
+
+  const createContract = async () => {
+    if (!canCreateContract || creatingContract) return;
+    setCreatingContract(true);
+    setContractErr('');
+    setContractAction('');
+    try {
+      const result = await adminFetch(`/admin/contracts/customer/${customer.id}/autopay-authorization`, {
+        method: 'POST',
+        body: JSON.stringify({
+          paymentMethodId: selectedPaymentMethodId,
+          serviceName: contractForm.serviceName,
+          renewalDate: contractForm.renewalDate || null,
+          cancellationDeadline: contractForm.cancellationDeadline || null,
+        }),
+      });
+      setSigningUrl(result.signingUrl || result.contract?.signingUrl || '');
+      setContractAction('Signing link created. The template remains off until you send this manually or wire an automation.');
+      await onRefresh?.();
+    } catch (err) {
+      setContractErr(err.message || 'Could not create contract link');
+    } finally {
+      setCreatingContract(false);
+    }
+  };
+
+  const regenerateLink = async (contract) => {
+    if (!contract?.id || creatingContract) return;
+    setCreatingContract(true);
+    setContractErr('');
+    setContractAction('');
+    try {
+      const result = await adminFetch(`/admin/contracts/${contract.id}/share-link`, { method: 'POST' });
+      setSigningUrl(result.signingUrl || result.contract?.signingUrl || '');
+      setContractAction('New signing link created.');
+      await onRefresh?.();
+    } catch (err) {
+      setContractErr(err.message || 'Could not create signing link');
+    } finally {
+      setCreatingContract(false);
+    }
+  };
+
+  const cancelContract = async (contract) => {
+    if (!contract?.id) return;
+    const revokeAutopay = contract.status === 'signed';
+    const ok = window.confirm(
+      revokeAutopay
+        ? 'Cancel this signed authorization and revoke future automatic payment authorization for this customer?'
+        : 'Cancel this signing request? This will invalidate the link and keep any existing AutoPay authorization in place.'
+    );
+    if (!ok) return;
+    setCreatingContract(true);
+    setContractErr('');
+    setContractAction('');
+    try {
+      const result = await adminFetch(`/admin/contracts/${contract.id}/cancel`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: 'Cancelled from customer contracts tab', revokeAutopay }),
+      });
+      setSigningUrl('');
+      setContractAction(
+        revokeAutopay
+          ? (result.autopayRevoked ? 'Contract cancelled and future autopay authorization revoked.' : 'Contract cancelled. Current AutoPay was not changed.')
+          : 'Signing request cancelled.'
+      );
+      await onRefresh?.();
+    } catch (err) {
+      setContractErr(err.message || 'Could not cancel contract');
+    } finally {
+      setCreatingContract(false);
+    }
+  };
+
+  const markRenewalNoticeSent = async (contract) => {
+    if (!contract?.id) return;
+    setCreatingContract(true);
+    setContractErr('');
+    setContractAction('');
+    try {
+      await adminFetch(`/admin/contracts/${contract.id}/renewal-notice`, { method: 'POST' });
+      setContractAction('Renewal notice marked as sent for this contract.');
+      await onRefresh?.();
+    } catch (err) {
+      setContractErr(err.message || 'Could not mark renewal notice');
+    } finally {
+      setCreatingContract(false);
+    }
+  };
+
+  const copySigningUrl = async () => {
+    if (!signingUrl) return;
+    try {
+      await navigator.clipboard?.writeText(signingUrl);
+      setContractAction('Signing link copied.');
+    } catch {
+      setContractAction('Signing link is ready.');
+    }
+  };
+
+  return (
+    <div>
+      <div className="mb-5 rounded-sm border-hairline border-zinc-200 bg-white">
+        <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
+          <div>
+            <div className="text-16 font-medium text-zinc-900">AutoPay Authorization</div>
+            <div className="text-12 text-ink-secondary mt-1">Create, share, sign, and audit saved-payment authorization contracts.</div>
+          </div>
+          <Button size="sm" variant="secondary" onClick={activeContract ? () => regenerateLink(activeContract) : createContract} disabled={creatingContract || !canCreateContract}>
+            <Link2 size={13} className="mr-1" />
+            {activeContract ? 'New Link' : 'Create Link'}
+          </Button>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 border-b border-hairline border-zinc-200">
+          {[
+            ['Details', 'Recipient, name, payment, attachments'],
+            ['Add information', 'Selected clauses and custom fields'],
+            ['Review & share', 'Preview, signatures, audit status'],
+          ].map(([step, sub], idx) => (
+            <div key={step} className={cn(
+              'px-4 py-3 border-zinc-200',
+              idx < 2 ? 'md:border-r border-hairline' : ''
+            )}>
+              <div className="text-12 font-medium text-zinc-900">{step}</div>
+              <div className="text-11 text-ink-secondary mt-1">{sub}</div>
+            </div>
+          ))}
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-4">
+          <ContractMeta label="Recipient" value={signerName} />
+          <ContractMeta label="Contract name" value="AutoPay Authorization" />
+          <ContractMeta label="Status" value={latestContract ? contractStatusLabel(latestContract.status) : 'No contract created'} />
+          <ContractMeta label="Payment method" value={paymentMethodLabel(selectedPaymentMethod)} />
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-[1fr_0.8fr] gap-3 px-4 pb-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <label className="block">
+              <div className="u-label text-ink-secondary mb-1">Payment method</div>
+              <select
+                value={selectedPaymentMethodId}
+                onChange={(e) => updateContractForm('paymentMethodId', e.target.value)}
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+              >
+                {cards.length === 0 && <option value="">No saved payment method</option>}
+                {cards.map((card) => (
+                  <option key={card.id} value={card.id}>{paymentMethodLabel(card)}</option>
+                ))}
+              </select>
+            </label>
+            <label className="block">
+              <div className="u-label text-ink-secondary mb-1">Service name</div>
+              <input
+                value={contractForm.serviceName}
+                onChange={(e) => updateContractForm('serviceName', e.target.value)}
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+              />
+            </label>
+            <label className="block">
+              <div className="u-label text-ink-secondary mb-1">Renewal date</div>
+              <input
+                type="date"
+                value={contractForm.renewalDate}
+                onChange={(e) => updateContractForm('renewalDate', e.target.value)}
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+              />
+            </label>
+            <label className="block">
+              <div className="u-label text-ink-secondary mb-1">Cancellation deadline</div>
+              <input
+                type="date"
+                value={contractForm.cancellationDeadline}
+                onChange={(e) => updateContractForm('cancellationDeadline', e.target.value)}
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+              />
+            </label>
+          </div>
+          <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3">
+            <div className="u-label text-ink-secondary mb-2">Signing Link</div>
+            {signingUrl ? (
+              <div className="space-y-2">
+                <div className="break-all text-12 text-zinc-900 leading-5">{signingUrl}</div>
+                <Button size="sm" variant="secondary" onClick={copySigningUrl}>
+                  <Copy size={13} className="mr-1" /> Copy
+                </Button>
+              </div>
+            ) : (
+              <div className="text-12 text-ink-secondary leading-5">
+                Create a link to send manually. SMS templates are seeded but inactive, so this will not send automatically.
+              </div>
+            )}
+            {!canCreateContract && (
+              <div className="mt-2 text-11 text-alert-fg">Add a saved payment method before creating an authorization contract.</div>
+            )}
+            {contractAction && <div className="mt-2 text-11 text-zinc-900">{contractAction}</div>}
+            {contractErr && <div className="mt-2 text-11 text-alert-fg">{contractErr}</div>}
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-[1.2fr_0.8fr] gap-5">
+        <Card>
+          <CardBody className="p-0">
+            <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-hairline border-zinc-200">
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 inline-flex h-9 w-9 items-center justify-center rounded-sm border-hairline border-zinc-200 bg-zinc-50 text-zinc-900">
+                  <FileText size={18} strokeWidth={1.75} />
+                </div>
+                <div>
+                  <div className="text-18 font-medium tracking-tight text-zinc-900">Electronic Payment Authorization</div>
+                  <div className="text-12 text-ink-secondary mt-1">Waves Pest Control, LLC</div>
+                </div>
+              </div>
+              <Badge tone={latestContract ? contractStatusTone(latestContract.status) : (hasSignedAuthorization ? 'strong' : 'neutral')}>
+                {latestContract ? contractStatusLabel(latestContract.status) : (hasSignedAuthorization ? 'Signed' : 'Template')}
+              </Badge>
+            </div>
+
+            <div className="px-5 py-5">
+              <SectionTitle>Selected Clauses</SectionTitle>
+              <div className="mb-5 rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-13 font-medium text-zinc-900">AutoPay Authorization - Initials required</div>
+                    <div className="text-12 leading-5 text-ink-secondary mt-2">{displayedText}</div>
+                  </div>
+                  <Badge tone="neutral">Clause</Badge>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-5">
+                <ContractMeta label="Customer" value={signerName} />
+                <ContractMeta label="Payment Method" value={paymentMethodLabel(methodForSummary)} />
+                <ContractMeta label="Authorization Version" value={displayedVersion} />
+                <ContractMeta label="Signed" value={signedAt} />
+              </div>
+
+              <SectionTitle>Contract Preview</SectionTitle>
+              <div className="rounded-sm border-hairline border-zinc-200 bg-white p-5">
+                <div className="flex items-start justify-between gap-4 pb-4 border-b border-hairline border-zinc-200">
+                  <div>
+                    <div className="text-15 font-medium text-zinc-900">Waves Pest Control</div>
+                    <div className="text-12 text-ink-secondary mt-1">Signature requested on {requestedLabel}</div>
+                  </div>
+                  <Badge tone={latestContract ? contractStatusTone(latestContract.status) : (hasSignedAuthorization ? 'strong' : 'neutral')}>
+                    {latestContract ? contractStatusLabel(latestContract.status) : (hasSignedAuthorization ? 'Signed' : 'Draft')}
+                  </Badge>
+                </div>
+
+                <div className="py-4 border-b border-hairline border-zinc-200">
+                  <div className="text-18 font-medium text-zinc-900 mb-3">AutoPay Authorization</div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-12">
+                    <div>
+                      <div className="u-label text-ink-secondary mb-1">Business</div>
+                      <div className="text-zinc-900">Waves Pest Control</div>
+                      <div className="text-ink-secondary mt-1">contact@wavespestcontrol.com</div>
+                      <div className="text-ink-secondary">(941) 318-7612</div>
+                    </div>
+                    <div>
+                      <div className="u-label text-ink-secondary mb-1">Recipient</div>
+                      <div className="text-zinc-900">{signerName}</div>
+                      <div className="text-ink-secondary mt-1">{customer.email || 'No email on file'}</div>
+                      <div className="text-ink-secondary">{customer.phone || 'No phone on file'}</div>
+                    </div>
+                  </div>
+                  <div className="mt-4 text-12 leading-5 text-zinc-900">
+                    This contract is between Waves Pest Control (the Business) and {signerName} (the Client) dated {contractDate}.
+                  </div>
+                </div>
+
+                <div className="py-4 border-b border-hairline border-zinc-200">
+                  <div className="u-label text-ink-secondary mb-2">Terms</div>
+                  <div className="text-13 font-medium text-zinc-900 mb-2">AutoPay Authorization</div>
+                  <p className="text-13 leading-6 text-zinc-900 m-0 whitespace-pre-line">{displayedContractText}</p>
+                  <div className="mt-4 rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-2">
+                    <div className="u-label text-ink-secondary mb-1">Recipient Initial</div>
+                    <div className="h-7 rounded-sm border-hairline border-zinc-300 bg-white" />
+                  </div>
+                </div>
+
+                <div className="pt-4">
+                  <div className="u-label text-ink-secondary mb-2">Signatures</div>
+                  <div className="text-12 text-ink-secondary leading-5 mb-4">
+                    Electronic signatures count as original for all purposes. By typing their names as signatures below, both parties agree to the terms and provisions of this agreement.
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <ContractMeta label="Business signature" value="Waves Pest Control" />
+                    <ContractMeta label="Business date signed" value={contractDate} />
+                    <ContractMeta label="Recipient signature" value={latestContract?.signedName || (hasSignedAuthorization ? signerName : '')} />
+                    <ContractMeta label="Recipient date signed" value={signedTimestamp ? fmtDate(signedTimestamp) : ''} />
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3 text-12 text-ink-secondary leading-5">
+                This authorization covers saved-payment use only. Service scope, visit frequency, renewal terms, and cancellation policy remain controlled by the customer&apos;s service agreement and account record.
+              </div>
+
+              <div className="mt-5">
+                <SectionTitle>Florida Compliance Reference</SectionTitle>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {FLORIDA_COMPLIANCE_ITEMS.map((item) => (
+                    <div key={item.title} className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3">
+                      <div className="text-12 font-medium text-zinc-900">{item.title}</div>
+                      <div className="text-12 text-ink-secondary leading-5 mt-1">{item.body}</div>
+                      <a
+                        href={item.href}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex mt-2 text-11 u-label text-zinc-900 hover:underline"
+                      >
+                        {item.citation}
+                      </a>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-2 text-11 text-ink-tertiary leading-5">
+                  Internal compliance reference only. Final customer-facing contract language should be reviewed by counsel before use.
+                </div>
+              </div>
+            </div>
+          </CardBody>
+        </Card>
+
+        <Card>
+          <CardBody className="p-4">
+            <div className="flex items-center gap-2 mb-3">
+              <PenLine size={16} strokeWidth={1.75} />
+              <div className="text-14 font-medium text-zinc-900">Signature Record</div>
+            </div>
+            {latestContract?.signedAt ? (
+              <div className="space-y-2 text-12">
+                <div className="flex justify-between gap-3 border-b border-hairline border-zinc-200 pb-2">
+                  <span className="text-ink-secondary">Signer</span>
+                  <span className="text-zinc-900 text-right">{latestContract.signedName || signerName}</span>
+                </div>
+                <div className="flex justify-between gap-3 border-b border-hairline border-zinc-200 pb-2">
+                  <span className="text-ink-secondary">Source</span>
+                  <span className="text-zinc-900 text-right">Contract signing</span>
+                </div>
+                <div className="flex justify-between gap-3 border-b border-hairline border-zinc-200 pb-2">
+                  <span className="text-ink-secondary">Accepted</span>
+                  <span className="u-nums text-zinc-900 text-right">{signedAt}</span>
+                </div>
+                <div className="flex justify-between gap-3 border-b border-hairline border-zinc-200 pb-2">
+                  <span className="text-ink-secondary">Initials</span>
+                  <span className="u-nums text-zinc-900 text-right">{latestContract.recipientInitials || '—'}</span>
+                </div>
+                <div className="flex justify-between gap-3 border-b border-hairline border-zinc-200 pb-2">
+                  <span className="text-ink-secondary">IP</span>
+                  <span className="u-nums text-zinc-900 text-right">{latestContract.signerIp || '—'}</span>
+                </div>
+                <div>
+                  <div className="text-ink-secondary mb-1">User agent</div>
+                  <div className="text-zinc-900 break-words leading-5">{latestContract.signerUserAgent || '—'}</div>
+                </div>
+              </div>
+            ) : latest ? (
+              <div className="space-y-2 text-12">
+                <div className="flex justify-between gap-3 border-b border-hairline border-zinc-200 pb-2">
+                  <span className="text-ink-secondary">Signer</span>
+                  <span className="text-zinc-900 text-right">{signerName}</span>
+                </div>
+                <div className="flex justify-between gap-3 border-b border-hairline border-zinc-200 pb-2">
+                  <span className="text-ink-secondary">Source</span>
+                  <span className="text-zinc-900 text-right">{sourceLabel(latest.source)}</span>
+                </div>
+                <div className="flex justify-between gap-3 border-b border-hairline border-zinc-200 pb-2">
+                  <span className="text-ink-secondary">Accepted</span>
+                  <span className="u-nums text-zinc-900 text-right">{signedAt}</span>
+                </div>
+                <div className="flex justify-between gap-3 border-b border-hairline border-zinc-200 pb-2">
+                  <span className="text-ink-secondary">IP</span>
+                  <span className="u-nums text-zinc-900 text-right">{latest.ip || '—'}</span>
+                </div>
+                <div>
+                  <div className="text-ink-secondary mb-1">User agent</div>
+                  <div className="text-zinc-900 break-words leading-5">{latest.userAgent || '—'}</div>
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3 text-12 text-ink-secondary leading-5">
+                No signed saved-payment authorization is recorded for this customer yet.
+              </div>
+            )}
+
+            <div className="mt-4 flex items-start gap-2 rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3">
+              <CreditCard size={15} strokeWidth={1.75} className="mt-0.5 flex-shrink-0" />
+              <div>
+                <div className="text-12 font-medium text-zinc-900">{paymentMethodLabel(methodForSummary)}</div>
+                <div className="text-11 text-ink-secondary mt-0.5">
+                  {latest?.isDefault || defaultCard?.is_default ? 'Default payment method' : 'Saved payment method'}
+                  {latest?.autopayEnabled || defaultCard?.autopay_enabled ? ' · Autopay enabled' : ''}
+                </div>
+              </div>
+            </div>
+          </CardBody>
+        </Card>
+      </div>
+
+      <div className="mt-5">
+        <SectionTitle>Contract History ({contracts.length})</SectionTitle>
+        {contracts.length > 0 ? (
+          <div className="overflow-x-auto mb-5">
+            <Table>
+              <THead>
+                <TR>
+                  <TH>Status</TH><TH>Created</TH><TH>Signed</TH><TH>Method</TH><TH>Actions</TH>
+                </TR>
+              </THead>
+              <TBody>
+                {contracts.map((contract) => (
+                  <TR key={contract.id}>
+                    <TD>
+                      <Badge tone={contractStatusTone(contract.status)}>
+                        {contractStatusLabel(contract.status)}
+                      </Badge>
+                    </TD>
+                    <TD className="u-nums">{fmtDate(contract.createdAt)}</TD>
+                    <TD className="u-nums">{contract.signedAt ? fmtDate(contract.signedAt) : '—'}</TD>
+                    <TD>{paymentMethodLabel(contract)}</TD>
+                    <TD>
+                      <div className="flex flex-wrap gap-1.5">
+                        {!['signed', 'cancelled', 'voided'].includes(contract.status) && (
+                          <Button size="sm" variant="secondary" onClick={() => regenerateLink(contract)} disabled={creatingContract}>
+                            <RotateCcw size={13} className="mr-1" /> Link
+                          </Button>
+                        )}
+                        {contract.autoRenewalNoticeRequired && !contract.autoRenewalNoticeSentAt && (
+                          <Button size="sm" variant="secondary" onClick={() => markRenewalNoticeSent(contract)} disabled={creatingContract}>
+                            <CheckCircle2 size={13} className="mr-1" /> Notice
+                          </Button>
+                        )}
+                        {contract.status !== 'cancelled' && (
+                          <Button size="sm" variant="danger" onClick={() => cancelContract(contract)} disabled={creatingContract}>
+                            <XCircle size={13} className="mr-1" /> Cancel
+                          </Button>
+                        )}
+                      </div>
+                    </TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+          </div>
+        ) : (
+          <div className="mb-5 text-13 text-ink-secondary">No contract records created yet.</div>
+        )}
+
+        <SectionTitle>Authorization History ({consents.length})</SectionTitle>
+        {consents.length > 0 ? (
+          <div className="overflow-x-auto">
+            <Table>
+              <THead>
+                <TR>
+                  <TH>Accepted</TH><TH>Source</TH><TH>Method</TH><TH>Version</TH>
+                </TR>
+              </THead>
+              <TBody>
+                {consents.map((consent) => (
+                  <TR key={consent.id}>
+                    <TD className="u-nums">{fmtDate(consent.createdAt)}</TD>
+                    <TD>{sourceLabel(consent.source)}</TD>
+                    <TD>{paymentMethodLabel(consent)}</TD>
+                    <TD className="u-nums">{consent.consentTextVersion || '—'}</TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+          </div>
+        ) : (
+          <div className="text-13 text-ink-secondary">No saved-payment authorizations recorded.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Service row (collapsible) ───────────────────────────────────
 function ServiceRowV2({ service: s, initiallyExpanded = false }) {
   const [expanded, setExpanded] = useState(initiallyExpanded);
@@ -319,7 +920,7 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
 }
 
 // ─── Autopay panel ───────────────────────────────────────────────
-function AdminAutopayPanelV2({ customerId, monthlyRate, customerName }) {
+function AdminAutopayPanelV2({ customerId, monthlyRate, customerName, canCharge = false }) {
   const [state, setState] = useState(null);
   const [charging, setCharging] = useState(false);
   const [err, setErr] = useState('');
@@ -375,9 +976,11 @@ function AdminAutopayPanelV2({ customerId, monthlyRate, customerName }) {
               </div>
             )}
           </div>
-          <Button onClick={chargeNow} disabled={charging} size="md">
-            {charging ? 'Charging…' : `Charge now${monthlyRate ? ` ($${parseFloat(monthlyRate).toFixed(2)})` : ''}`}
-          </Button>
+          {canCharge && (
+            <Button onClick={chargeNow} disabled={charging} size="md">
+              {charging ? 'Charging…' : `Charge now${monthlyRate ? ` ($${parseFloat(monthlyRate).toFixed(2)})` : ''}`}
+            </Button>
+          )}
         </div>
         {msg && <div className="mt-2.5 px-2 py-1.5 bg-zinc-100 text-zinc-900 rounded-xs text-12">{msg}</div>}
         {err && <div className="mt-2.5 px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">{err}</div>}
@@ -424,6 +1027,7 @@ export default function Customer360ProfileV2({ customerId, onClose, onSelectCust
   const menuRef = useRef(null);
   const commsSeqRef = useRef(0);
   const commsAbortRef = useRef(null);
+  const isAdmin = getAdminRole() === 'admin';
 
   const reloadCustomer = () =>
     adminFetch(`/admin/customers/${customerId}`).then(setData).catch(() => {});
@@ -513,9 +1117,11 @@ export default function Customer360ProfileV2({ customerId, onClose, onSelectCust
   const c = data.customer;
   const prefs = data.preferences || {};
   const hs = data.healthScore || {};
-  const score = hs.health_score ?? hs.score ?? null;
+  const score = hs.overall_score ?? hs.health_score ?? hs.score ?? null;
   const invoices = data.invoices || [];
   const cards = data.cards || [];
+  const paymentMethodConsents = data.paymentMethodConsents || [];
+  const contracts = data.contracts || [];
   const photos = data.photos || [];
   const referral = data.referralInfo;
   const discounts = data.customerDiscounts || [];
@@ -604,6 +1210,7 @@ export default function Customer360ProfileV2({ customerId, onClose, onSelectCust
     { key: 'overview', label: 'Overview' },
     { key: 'services', label: 'Services' },
     { key: 'billing', label: 'Billing' },
+    { key: 'contracts', label: 'Contracts' },
     { key: 'comms', label: 'Comms' },
     { key: 'property', label: 'Property' },
     { key: 'compliance', label: 'Compliance' },
@@ -693,32 +1300,36 @@ export default function Customer360ProfileV2({ customerId, onClose, onSelectCust
                 className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Book Appt</a>
               <a href={`/admin/invoices?customer=${customerId}`}
                 className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Invoice</a>
-              <button
-                type="button"
-                onClick={() => onAddProperty?.(c)}
-                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Add Property</button>
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={() => onAddProperty?.(c)}
+                  className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Add Property</button>
+              )}
               <button onClick={() => setActiveTab('comms')}
                 className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Add Note</button>
-              <button
-                onClick={() => {
-                  setEditForm({
-                    firstName: c.firstName || '',
-                    lastName: c.lastName || '',
-                    email: c.email || '',
-                    phone: c.phone || '',
-                    profileLabel: c.profileLabel || '',
-                    addressLine1: c.address?.line1 || '',
-                    city: c.address?.city || '',
-                    state: c.address?.state || '',
-                    zip: c.address?.zip || '',
-                    monthlyRate: c.monthlyRate ?? '',
-                    tier: c.tier || '',
-                    pipelineStage: c.pipelineStage || 'new_lead',
-                  });
-                  setEditErr('');
-                  setEditOpen(true);
-                }}
-                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Edit</button>
+              {isAdmin && (
+                <button
+                  onClick={() => {
+                    setEditForm({
+                      firstName: c.firstName || '',
+                      lastName: c.lastName || '',
+                      email: c.email || '',
+                      phone: c.phone || '',
+                      profileLabel: c.profileLabel || '',
+                      addressLine1: c.address?.line1 || '',
+                      city: c.address?.city || '',
+                      state: c.address?.state || '',
+                      zip: c.address?.zip || '',
+                      monthlyRate: c.monthlyRate ?? '',
+                      tier: c.tier || '',
+                      pipelineStage: c.pipelineStage || 'new_lead',
+                    });
+                    setEditErr('');
+                    setEditOpen(true);
+                  }}
+                  className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0">Edit</button>
+              )}
             </div>
           </div>
 
@@ -765,30 +1376,32 @@ export default function Customer360ProfileV2({ customerId, onClose, onSelectCust
                       role="menu"
                       className="absolute right-0 top-[calc(100%+4px)] z-20 min-w-[180px] rounded-sm border-hairline border-zinc-300 bg-white shadow-md py-1"
                     >
-                      <button
-                        role="menuitem"
-                        onClick={() => {
-                          setEditForm({
-                            firstName: c.firstName || '',
-                            lastName: c.lastName || '',
-                            email: c.email || '',
-                            phone: c.phone || '',
-                            addressLine1: c.address?.line1 || '',
-                            city: c.address?.city || '',
-                            state: c.address?.state || '',
-                            zip: c.address?.zip || '',
-                            monthlyRate: c.monthlyRate ?? '',
-                            tier: c.tier || '',
-                            pipelineStage: c.pipelineStage || 'new_lead',
-                          });
-                          setEditErr('');
-                          setEditOpen(true);
-                          setMenuOpen(false);
-                        }}
-                        className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
-                      >
-                        Edit customer
-                      </button>
+                      {isAdmin && (
+                        <button
+                          role="menuitem"
+                          onClick={() => {
+                            setEditForm({
+                              firstName: c.firstName || '',
+                              lastName: c.lastName || '',
+                              email: c.email || '',
+                              phone: c.phone || '',
+                              addressLine1: c.address?.line1 || '',
+                              city: c.address?.city || '',
+                              state: c.address?.state || '',
+                              zip: c.address?.zip || '',
+                              monthlyRate: c.monthlyRate ?? '',
+                              tier: c.tier || '',
+                              pipelineStage: c.pipelineStage || 'new_lead',
+                            });
+                            setEditErr('');
+                            setEditOpen(true);
+                            setMenuOpen(false);
+                          }}
+                          className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                        >
+                          Edit customer
+                        </button>
+                      )}
                       <button
                         role="menuitem"
                         onClick={() => { setActiveTab('comms'); setMenuOpen(false); }}
@@ -1011,7 +1624,7 @@ export default function Customer360ProfileV2({ customerId, onClose, onSelectCust
                 {score != null && (
                   <div className="text-center text-12 text-ink-secondary mt-1">
                     Score: <span className="font-medium" style={{ color: score >= 70 ? '#10B981' : score >= 40 ? '#F59E0B' : '#C8312F' }}>{score}/100</span>
-                    {hs.churn_risk_level && <span> · {hs.churn_risk_level}</span>}
+                    {(hs.churn_risk_level || hs.churn_risk) && <span> · {hs.churn_risk_level || hs.churn_risk}</span>}
                   </div>
                 )}
                 {referral && (
@@ -1092,7 +1705,7 @@ export default function Customer360ProfileV2({ customerId, onClose, onSelectCust
                 <StatCardV2 label="Lifetime Revenue" value={fmtCurrency(c.lifetimeRevenue)} />
               </div>
 
-              <AdminAutopayPanelV2 customerId={c.id} monthlyRate={c.monthlyRate} customerName={`${c.firstName} ${c.lastName}`} />
+              <AdminAutopayPanelV2 customerId={c.id} monthlyRate={c.monthlyRate} customerName={`${c.firstName} ${c.lastName}`} canCharge={isAdmin} />
 
               <SectionTitle>Invoices ({invoices.length})</SectionTitle>
               {invoices.length > 0 ? (
@@ -1129,7 +1742,7 @@ export default function Customer360ProfileV2({ customerId, onClose, onSelectCust
                     <Badge tone={isRefund || isFailed ? 'alert' : 'neutral'}>
                       {isRefund ? 'Refunded' : (p.status || '').toUpperCase()}
                     </Badge>
-                    {p.processor === 'stripe' && p.status === 'paid' && !isRefund && (
+                    {isAdmin && p.processor === 'stripe' && p.status === 'paid' && !isRefund && (
                       <Button
                         size="sm"
                         variant="danger"
@@ -1163,6 +1776,17 @@ export default function Customer360ProfileV2({ customerId, onClose, onSelectCust
                 </div>
               )}
             </div>
+          )}
+
+          {/* CONTRACTS */}
+          {activeTab === 'contracts' && (
+            <ElectronicAuthorizationContractV2
+              customer={c}
+              consents={paymentMethodConsents}
+              cards={cards}
+              contracts={contracts}
+              onRefresh={reloadCustomer}
+            />
           )}
 
           {/* COMMS */}

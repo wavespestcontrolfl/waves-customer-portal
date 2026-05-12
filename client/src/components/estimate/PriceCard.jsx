@@ -1,7 +1,7 @@
 /**
- * Primary price display — frequency-aware. Shows selected frequency's
- * monthly/annual price with an optional anchor (strikethrough higher
- * one-time total) for "you're saving by going recurring" framing.
+ * Primary price display — frequency-aware. The API stores recurring rates
+ * as monthly equivalents, but customers see the actual service cadence:
+ * quarterly per quarter, bi-monthly per bi-monthly visit, monthly per month.
  */
 const W = {
   blue: '#065A8C', blueBright: '#009CDE', blueDeeper: '#1B2C5B',
@@ -16,12 +16,14 @@ function fmtMoney(n) {
   return '$' + v.toLocaleString('en-US', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 });
 }
 
-export default function PriceCard({ frequency, anchorOneTimePrice, waveGuardTier }) {
+export default function PriceCard({ frequency, waveGuardTier }) {
   if (!frequency) return null;
 
   const monthly = frequency.monthly;
   const annual = frequency.annual;
-  const showAnchor = anchorOneTimePrice && monthly && anchorOneTimePrice > monthly;
+  const intervalMonths = frequency.key === 'quarterly' ? 3 : frequency.key === 'bi_monthly' ? 2 : 1;
+  const periodLabel = frequency.key === 'quarterly' ? '/quarter' : frequency.key === 'bi_monthly' ? '/bi-monthly' : '/mo';
+  const cadencePrice = monthly == null ? null : Math.round(Number(monthly) * intervalMonths * 100) / 100;
 
   return (
     <div style={{
@@ -32,18 +34,12 @@ export default function PriceCard({ frequency, anchorOneTimePrice, waveGuardTier
     }}>
       <div style={{ fontSize: 13, fontWeight: 600, color: W.blueBright,
         textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
-        {frequency.label} service
+        {frequency.label} pest control
       </div>
 
-      {showAnchor ? (
-        <div style={{ fontSize: 15, color: W.textCaption, textDecoration: 'line-through', marginBottom: 4 }}>
-          {fmtMoney(anchorOneTimePrice)} one-time
-        </div>
-      ) : null}
-
       <div style={{ fontSize: 42, fontWeight: 700, color: W.navy, lineHeight: 1.1 }}>
-        {fmtMoney(monthly)}
-        <span style={{ fontSize: 18, fontWeight: 500, color: W.textBody, marginLeft: 6 }}>/mo</span>
+        {fmtMoney(cadencePrice)}
+        <span style={{ fontSize: 18, fontWeight: 500, color: W.textBody, marginLeft: 6 }}>{periodLabel}</span>
       </div>
 
       {annual ? (

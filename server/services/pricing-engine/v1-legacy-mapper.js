@@ -262,7 +262,7 @@ function mapV1ToLegacyShape(v1Result) {
     v1OtItems.push({
       name: `${CAP(tbLI.system)} Installation`,
       price: tmInstall,
-      detail: `${tbLI.stations} stations`,
+      detail: `${tbLI.stations} stations · ${tbLI.perimeter} linear ft perimeter`,
     });
   }
 

@@ -9,6 +9,8 @@
  *
  * Two invocation modes (mirroring the v2 suite):
  *   LOCAL=1            — in-process. Catches module-load errors before push.
+ *                        Without pricing DB config, LOCAL mode diffs against
+ *                        the checked-in in-memory constants baseline.
  *   PROD_URL + ADMIN_TOKEN — HTTP against /api/admin/estimator/calculate-estimate.
  *
  * CAPTURE_BASELINE=1 writes baseline instead of diffing.
@@ -23,12 +25,32 @@ const path = require('path');
 
 require('dotenv').config({ path: path.join(__dirname, '..', '..', '.env') });
 
-const BASELINE_PATH = path.join(__dirname, 'pricing-engine-v1-adapter.baseline.json');
+const DB_BASELINE_PATH = path.join(__dirname, 'pricing-engine-v1-adapter.baseline.json');
+const LOCAL_BASELINE_PATH = path.join(__dirname, 'pricing-engine-v1-adapter.local-baseline.json');
 const PROD_URL = (process.env.PROD_URL || '').replace(/\/$/, '');
 const RAW_TOKEN = process.env.ADMIN_TOKEN || '';
 const ADMIN_TOKEN = RAW_TOKEN.replace(/^Bearer\s+/i, '');
 const CAPTURE_MODE = process.env.CAPTURE_BASELINE === '1';
 const LOCAL_MODE = process.env.LOCAL === '1' || !PROD_URL;
+
+function hasPricingDbConfig() {
+  const directUrl = String(process.env.DATABASE_URL || '').trim();
+  if (directUrl && directUrl !== 'undefined' && directUrl !== 'null') return true;
+  if (
+    process.env.DATABASE_PRIVATE_URL
+    || process.env.DATABASE_PUBLIC_URL
+    || process.env.POSTGRES_URL
+    || process.env.POSTGRES_PRIVATE_URL
+  ) {
+    return true;
+  }
+  return !!(process.env.PGDATABASE && process.env.PGUSER && process.env.PGHOST);
+}
+
+const HAS_PRICING_DB_CONFIG = hasPricingDbConfig();
+const BASELINE_PATH = LOCAL_MODE && !HAS_PRICING_DB_CONFIG
+  ? LOCAL_BASELINE_PATH
+  : DB_BASELINE_PATH;
 
 if (!LOCAL_MODE && !ADMIN_TOKEN) {
   throw new Error('ADMIN_TOKEN env var required in HTTP mode (set LOCAL=1 to run in-process instead)');
@@ -238,8 +260,8 @@ function extractAssertions(result) {
 function wireLocalModeHooks() {
   if (!LOCAL_MODE) return;
   beforeAll(async () => {
-    if (!process.env.DATABASE_URL) {
-      console.warn('[LOCAL mode] DATABASE_URL unset — running against in-memory constants. Baseline parity with prod NOT guaranteed; set DATABASE_URL for math parity.');
+    if (!HAS_PRICING_DB_CONFIG) {
+      console.warn('[LOCAL mode] pricing DB config unset — using in-memory constants baseline. Set DATABASE_URL or complete PG vars for prod math parity.');
       return;
     }
     require('../models/db');

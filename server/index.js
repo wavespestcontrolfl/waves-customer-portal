@@ -216,6 +216,14 @@ app.use('/api/webhooks/resend', require('./routes/webhooks-resend'));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+// Public assets used by server-rendered customer pages. In production Vite
+// copies these into client/dist; in local API-only dev they still need to be
+// served from client/public so SSR pages can render shared brand artwork.
+app.use(express.static(path.join(__dirname, '..', 'client', 'public'), {
+  index: false,
+  maxAge: config.nodeEnv === 'production' ? '1h' : 0,
+}));
+
 // Request logging
 app.use(morgan('combined', {
   stream: { write: (message) => logger.info(message.trim()) },
@@ -341,6 +349,7 @@ app.use('/api/admin/automations', require('./routes/admin-automations'));
 app.use('/api/admin/social-media', require('./routes/admin-social-media'));
 app.use('/api/admin/call-recordings', require('./routes/admin-call-recordings'));
 
+app.use('/api/admin/contracts', require('./routes/admin-contracts'));
 app.use('/api/admin/invoices', require('./routes/admin-invoices'));
 app.use('/api/admin/job-forms', require('./routes/admin-job-forms'));
 app.use('/api/admin/job-costs', require('./routes/admin-job-costs'));
@@ -348,6 +357,7 @@ app.use('/api/admin/job-expenses', require('./routes/admin-job-expenses'));
 app.use('/api/admin/projects', require('./routes/admin-projects'));
 app.use('/api/pay', require('./routes/pay-v2'));
 app.use('/api/receipt', require('./routes/receipt-v2'));
+app.use('/api/contracts', require('./routes/contracts-public'));
 app.use('/api/rate', require('./routes/review-gate'));
 app.use('/api/admin/tax', require('./routes/admin-tax'));
 app.use('/api/admin/pricing', require('./routes/admin-pricing-strategy'));

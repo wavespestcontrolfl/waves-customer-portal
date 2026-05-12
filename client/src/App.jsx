@@ -119,6 +119,7 @@ const AdminKnowledgeBasePage = lazyWithRetry(() => import('./pages/admin/Knowled
 const AdminInvoicesPage = lazyWithRetry(() => import('./pages/admin/AdminInvoicesPage'));
 const PayPage = lazyWithRetry(() => import('./pages/PayPageV2'));
 const ReceiptPage = lazyWithRetry(() => import('./pages/ReceiptPage'));
+const ContractSignPage = lazyWithRetry(() => import('./pages/ContractSignPage'));
 const TrackPage = lazyWithRetry(() => import('./pages/TrackPage'));
 const TrackPreviewPage = lazyWithRetry(() => import('./pages/TrackPreviewPage'));
 const EstimateViewPage = lazyWithRetry(() => import('./pages/EstimateViewPage'));
@@ -132,7 +133,6 @@ const ProjectsPage = lazyWithRetry(() => import('./pages/admin/ProjectsPage'));
 const CredentialsPage = lazyWithRetry(() => import('./pages/admin/CredentialsPage'));
 const GeofenceEventsPage = lazyWithRetry(() => import('./pages/admin/GeofenceEventsPage'));
 const NewsletterPage = lazyWithRetry(() => import('./pages/admin/NewsletterPage'));
-const DiscountsPage = lazyWithRetry(() => import('./pages/admin/DiscountsPage'));
 const CompliancePage = lazyWithRetry(() => import('./pages/admin/CompliancePage'));
 const PricingLogicPage = lazyWithRetry(() => import('./pages/admin/PricingLogicPage'));
 const DesignSystemPage = lazyWithRetry(() => import('./pages/admin/_DesignSystemPage'));
@@ -203,6 +203,7 @@ export default function App() {
           <Route path="/report/:token" element={<ReportViewPage />} />
           <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
           <Route path="/receipt/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReceiptPage /></Suspense>} />
+          <Route path="/contract/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ContractSignPage /></Suspense>} />
           <Route path="/track/:token" element={<Suspense fallback={<div style={{background:'#F1F5F9',minHeight:'100vh'}}/>}><TrackPage /></Suspense>} />
           <Route path="/track-preview" element={<Suspense fallback={<div style={{background:'#FEF7E0',minHeight:'100vh'}}/>}><TrackPreviewPage /></Suspense>} />
           <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#F1F5F9',minHeight:'100vh'}}/>}><EstimatePublicGateway /></Suspense>} />

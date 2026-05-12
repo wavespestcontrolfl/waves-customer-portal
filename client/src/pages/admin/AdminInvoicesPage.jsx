@@ -27,7 +27,7 @@
 //   server/services/pdf/invoice-pdf.js      (PDF generation)
 //   server/routes/admin-payments-reconcile.js  (Tap to Pay reconcile)
 //   server/routes/admin-billing-health.js   (charge-now + manual refund)
-//   server/services/discount-engine.js      (WaveGuard tier %)
+//   server/services/discount-engine.js      (discount catalog + audit rows)
 //   server/services/tax-calculator.js       (per-county sales tax)
 //
 // Audit focus:
@@ -69,11 +69,25 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // STATUS_COLORS folds cleanly — sent/viewed were both #0A7EC2 in V1, stay identical post-fold.
 const D = { bg: '#F4F4F5', card: '#FFFFFF', border: '#E4E4E7', teal: '#18181B', green: '#15803D', amber: '#A16207', red: '#991B1B', purple: '#18181B', blue: '#18181B', text: '#000000', muted: '#000000', white: '#FFFFFF', input: '#FFFFFF', heading: '#000000', inputBorder: '#D4D4D8' };
 
-function adminFetch(path, options = {}) {
-  return fetch(`${API_BASE}${path}`, {
+async function adminFetch(path, options = {}) {
+  const r = await fetch(`${API_BASE}${path}`, {
     headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
     ...options,
-  }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
+  });
+  if (!r.ok) {
+    let message = `HTTP ${r.status}`;
+    try {
+      const data = await r.clone().json();
+      message = data.error || data.message || message;
+    } catch {
+      const text = await r.text().catch(() => '');
+      if (text) message = text;
+    }
+    const err = new Error(message);
+    err.status = r.status;
+    throw err;
+  }
+  return r.json();
 }
 
 const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 20, marginBottom: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' };
@@ -82,6 +96,24 @@ const sBadge = (bg, color) => ({ fontSize: 10, padding: '2px 8px', borderRadius:
 const sInput = (isMobile) => ({ width: '100%', padding: isMobile ? '12px 14px' : '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: isMobile ? 16 : 13, fontFamily: "'Roboto', Arial, sans-serif", outline: 'none', boxSizing: 'border-box', minHeight: isMobile ? 44 : undefined });
 
 const STATUS_COLORS = { draft: D.muted, scheduled: D.amber, sending: D.amber, sent: D.blue, viewed: D.teal, paid: D.green, overdue: D.red, void: D.muted };
+
+function formatDateParam(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function datePeriodStart(period) {
+  const current = new Date();
+  const today = new Date(current.getFullYear(), current.getMonth(), current.getDate());
+  if (period === 'today') return today;
+  if (period === '7d') return new Date(today.getTime() - 7 * 86400000);
+  if (period === '30d') return new Date(today.getTime() - 30 * 86400000);
+  if (period === 'month') return new Date(current.getFullYear(), current.getMonth(), 1);
+  return null;
+}
+
 export default function AdminInvoicesPage() {
   const [tab, setTab] = useState('list');
   const [stats, setStats] = useState(null);
@@ -190,7 +222,11 @@ function FilterPill({ label, value, options, onChange, isMobile }) {
 
 // ── Invoice List (mirrors attached UI) ──
 function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
+  const PAGE_SIZE = 100;
   const [invoices, setInvoices] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [filter, setFilter] = useState('all');
   const [datePeriod, setDatePeriod] = useState('all');
   const [sort, setSort] = useState('newest');
@@ -202,22 +238,38 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
   const [paymentModalInvoice, setPaymentModalInvoice] = useState(null);
   const sendReceiptEnabled = useFeatureFlag('ff_invoice_send_receipt', true);
 
-  const load = useCallback(async () => {
-    const params = new URLSearchParams({ limit: '100' });
-    if (filter === 'overdue' || filter === 'draft') params.set('status', filter);
+  const load = useCallback(async ({ append = false, pageNo = 1 } = {}) => {
+    const params = new URLSearchParams({
+      limit: String(PAGE_SIZE),
+      page: String(pageNo),
+      sort,
+    });
     if (filter === 'archived') params.set('archived', 'only');
-    const data = await adminFetch(`/admin/invoices?${params}`).catch(() => ({ invoices: [] }));
-    let rows = data.invoices || [];
-    if (filter === 'unpaid') {
-      rows = rows.filter(i => i.status !== 'paid' && i.status !== 'void');
-    } else if (filter === 'paid') {
-      rows = rows.filter(i => i.status === 'paid');
-    } else if (filter === 'needs_receipt') {
-      rows = rows.filter(i => i.status === 'paid' && !i.receipt_sent_at);
+    else if (filter !== 'all') params.set('status', filter);
+
+    const term = query.trim();
+    if (term) params.set('search', term);
+
+    const start = datePeriodStart(datePeriod);
+    if (start) params.set('from', formatDateParam(start));
+
+    const data = await adminFetch(`/admin/invoices?${params}`).catch(() => null);
+    if (!data) {
+      if (!append) {
+        setInvoices([]);
+        setTotal(0);
+        setSelected(new Set());
+      }
+      return;
     }
-    setInvoices(rows);
-    setSelected(new Set());
-  }, [filter]);
+    const rows = data.invoices || [];
+    setInvoices(prev => append ? [...prev, ...rows] : rows);
+    setTotal(Number(data.total ?? rows.length) || 0);
+    setPage(Number(data.page || pageNo));
+    if (!append) {
+      setSelected(new Set());
+    }
+  }, [PAGE_SIZE, datePeriod, filter, query, sort]);
   useEffect(() => { load(); }, [load]);
 
   const handleSend = async (id) => {
@@ -257,9 +309,11 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
   // "invoices we can send" to "paid invoices that still owe a receipt".
   const receiptMode = filter === 'needs_receipt';
   const BATCH_RECEIPT_MAX = 25;
+  const invoiceSendableStatuses = new Set(['draft', 'scheduled', 'sent', 'viewed', 'overdue']);
+  const invoiceNonCollectibleStatuses = new Set(['paid', 'void', 'processing', 'refunded', 'canceled', 'cancelled']);
   const sendableInvoices = receiptMode
     ? invoices.filter(i => i.status === 'paid' && !i.receipt_sent_at)
-    : invoices.filter(i => i.status === 'draft' || i.status === 'sent' || i.status === 'viewed');
+    : invoices.filter(i => invoiceSendableStatuses.has(i.status));
   const selectAllSendable = () => setSelected(new Set(sendableInvoices.slice(0, receiptMode ? BATCH_RECEIPT_MAX : sendableInvoices.length).map(i => i.id)));
   const clearSelection = () => setSelected(new Set());
   const handleBatchSend = async () => {
@@ -292,6 +346,9 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
   const getDisplayStatus = (inv) => {
     if (inv.status === 'paid') return { key: 'paid', label: 'Paid', color: D.green };
     if (inv.status === 'void') return { key: 'void', label: 'Void', color: D.muted };
+    if (inv.status === 'processing') return { key: 'processing', label: 'Processing', color: D.amber };
+    if (inv.status === 'refunded') return { key: 'refunded', label: 'Refunded', color: D.muted };
+    if (inv.status === 'canceled' || inv.status === 'cancelled') return { key: 'canceled', label: 'Canceled', color: D.muted };
     if (inv.status === 'scheduled') return { key: 'scheduled', label: 'Scheduled', color: D.amber };
     if (inv.status === 'sending') return { key: 'sending', label: 'Sending', color: D.amber };
     if (inv.status === 'draft') return { key: 'draft', label: 'Draft', color: D.muted };
@@ -309,34 +366,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
     return new Date(s);
   };
 
-  // Date-period filter
-  const now = new Date();
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const periodFloor = (() => {
-    if (datePeriod === 'today') return startOfToday;
-    if (datePeriod === '7d') return new Date(startOfToday.getTime() - 7 * 86400000);
-    if (datePeriod === '30d') return new Date(startOfToday.getTime() - 30 * 86400000);
-    if (datePeriod === 'month') return new Date(now.getFullYear(), now.getMonth(), 1);
-    return null;
-  })();
-
-  const q = query.trim().toLowerCase();
-  let rows = invoices.filter(inv => {
-    if (periodFloor && getRowDate(inv) < periodFloor) return false;
-    if (!q) return true;
-    const hay = [
-      inv.invoice_number, inv.first_name, inv.last_name,
-      inv.title, `${inv.first_name || ''} ${inv.last_name || ''}`,
-    ].join(' ').toLowerCase();
-    return hay.includes(q);
-  });
-
-  rows = [...rows].sort((a, b) => {
-    if (sort === 'oldest') return getRowDate(a) - getRowDate(b);
-    if (sort === 'amount_high') return parseFloat(b.total) - parseFloat(a.total);
-    if (sort === 'amount_low') return parseFloat(a.total) - parseFloat(b.total);
-    return getRowDate(b) - getRowDate(a);
-  });
+  const rows = invoices;
 
   // Group by day — date header matches "Saturday, April 18, 2026"
   const groups = [];
@@ -450,11 +480,12 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                 const lineItems = typeof inv.line_items === 'string' ? JSON.parse(inv.line_items) : (inv.line_items || []);
                 const canSelect = receiptMode
                   ? (inv.status === 'paid' && !inv.receipt_sent_at)
-                  : (inv.status === 'draft' || inv.status === 'sent' || inv.status === 'viewed');
+                  : invoiceSendableStatuses.has(inv.status);
                 const isSelected = selected.has(inv.id);
                 const display = getDisplayStatus(inv);
                 const isOpen = expanded === inv.id;
                 const cardOnFile = inv.card_on_file && inv.card_on_file.last_four ? inv.card_on_file : null;
+                const canCollect = !invoiceNonCollectibleStatuses.has(inv.status);
                 return (
                   <div key={inv.id} style={{ borderBottom: `1px solid ${D.border}` }}>
                     <button
@@ -499,7 +530,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, padding: '14px 0', fontSize: 13, color: D.muted }}>
                           <span>{inv.title || lineItems[0]?.description || 'Service'}</span>
                           {inv.waveguard_tier && <span style={sBadge(`${D.amber}22`, D.amber)}>{inv.waveguard_tier}</span>}
-                          {cardOnFile && inv.status !== 'paid' && inv.status !== 'void' && (
+                          {cardOnFile && canCollect && (
                             <span>💳 {cardOnFile.brand || 'Card'} •{cardOnFile.last_four} on file</span>
                           )}
                         </div>
@@ -507,12 +538,12 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                         <InvoiceTimeline invoice={inv} />
 
                         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                          {inv.status === 'draft' && <button onClick={() => handleSend(inv.id)} style={sBtn(D.heading, D.white, isMobile)} title="Send invoice via SMS + email">Send</button>}
-                          {(inv.status === 'sent' || inv.status === 'viewed') && <button onClick={() => handleSend(inv.id)} style={sBtn(D.heading, D.white, isMobile)} title="Resend invoice via SMS + email">Resend</button>}
-                          {inv.status !== 'paid' && inv.status !== 'void' && (
+                          {(inv.status === 'draft' || inv.status === 'scheduled') && <button onClick={() => handleSend(inv.id)} style={sBtn(D.heading, D.white, isMobile)} title="Send invoice via SMS + email">Send</button>}
+                          {(inv.status === 'sent' || inv.status === 'viewed' || inv.status === 'overdue') && <button onClick={() => handleSend(inv.id)} style={sBtn(D.heading, D.white, isMobile)} title="Resend invoice via SMS + email">Resend</button>}
+                          {canCollect && (
                             <button onClick={() => { navigator.clipboard.writeText(`${domain}/pay/${inv.token}`); showToast('Pay link copied'); }} style={sBtn(D.card, D.text, isMobile)}>Copy Link</button>
                           )}
-                          {inv.status !== 'paid' && inv.status !== 'void' && (
+                          {canCollect && (
                             <button
                               onClick={async () => {
                                 try { await launchTapToPay(inv.id); }
@@ -522,7 +553,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                               title="Open Waves Tech app to tap customer's card/phone"
                             >Charge in person</button>
                           )}
-                          {inv.status !== 'paid' && inv.status !== 'void' && (
+                          {canCollect && (
                             <button
                               onClick={() => setPaymentModalInvoice(inv)}
                               style={sBtn(D.heading, D.white, isMobile)}
@@ -540,7 +571,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                               Download PDF
                             </a>
                           )}
-                          {inv.status !== 'paid' && inv.status !== 'void' && <button onClick={() => handleVoid(inv.id)} style={sBtn('transparent', D.red, isMobile)}>Void</button>}
+                          {canCollect && <button onClick={() => handleVoid(inv.id)} style={sBtn('transparent', D.red, isMobile)}>Void</button>}
                           {inv.status === 'void' && !inv.archived_at && (
                             <button onClick={() => handleArchive(inv.id)} style={sBtn(D.heading, D.white, isMobile)} title="Tuck this voided invoice out of the default list">Archive</button>
                           )}
@@ -558,7 +589,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                           )}
                         </div>
 
-                        {inv.status !== 'paid' && inv.status !== 'void' && inv.status !== 'draft' && (
+                        {canCollect && inv.status !== 'draft' && (
                           <FollowupPanel invoiceId={inv.id} showToast={showToast} isMobile={isMobile} />
                         )}
                       </div>
@@ -568,6 +599,22 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
               })}
             </div>
           ))}
+        </div>
+      )}
+
+      {invoices.length < total && (
+        <div style={{ padding: isMobile ? '18px 16px' : '18px 0', textAlign: 'center' }}>
+          <button
+            onClick={async () => {
+              setLoadingMore(true);
+              try { await load({ append: true, pageNo: page + 1 }); }
+              finally { setLoadingMore(false); }
+            }}
+            disabled={loadingMore}
+            style={{ ...sBtn(D.card, D.text, isMobile), border: `1px solid ${D.border}`, opacity: loadingMore ? 0.6 : 1 }}
+          >
+            {loadingMore ? 'Loading...' : `Load more (${invoices.length} of ${total})`}
+          </button>
         </div>
       )}
 
@@ -1049,8 +1096,8 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const [discountQueries, setDiscountQueries] = useState({});
   const [aiNotesLoading, setAiNotesLoading] = useState(false);
 
-  // Load active, invoice-visible, non-tier discounts once. Tier discount is auto-applied
-  // server-side from the customer's WaveGuard tier, so we exclude it from the picker.
+  // Load active, invoice-visible discounts once. Tier discounts are included here
+  // for explicit line-level selection; customer tier never applies a hidden discount.
   useEffect(() => {
     adminFetch('/admin/discounts')
       .then(d => {
@@ -1058,7 +1105,6 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
           .filter(x => (
             x.is_active
             && x.show_in_invoices
-            && !x.is_waveguard_tier_discount
           ));
         setAvailableDiscounts(list);
       })
@@ -1190,11 +1236,13 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
       client_id: `li_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       _kind: 'discount',
       discount_id: discount.id,
+      discount_key: discount.discount_key || null,
       discount_for: parent.client_id,
       description: `${discount.name} (${parent.description || 'line item'})`,
       quantity: 1,
       unit_price: -dollars,
       amount: -dollars,
+      is_waveguard_tier_discount: !!discount.is_waveguard_tier_discount,
       ...(custom?.custom_discount_amount ? { custom_discount_amount: custom.custom_discount_amount } : {}),
       ...(custom?.custom_discount_percentage ? { custom_discount_percentage: custom.custom_discount_percentage } : {}),
     };
@@ -1225,10 +1273,6 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const lineDiscountAmt = Math.abs(lineItems
     .filter(i => i._kind === 'discount')
     .reduce((sum, i) => sum + Math.min(0, lineAmount(i)), 0));
-  // WaveGuard tier discounts — keep aligned with server/services/pricing-engine/constants.js
-  // WAVEGUARD.tiers (see docs/pricing/POLICY.md).
-  const tierDiscount = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 }[selectedCustomer?.waveguard_tier] || 0;
-  const discountAmt = subtotal * tierDiscount;
 
   // Mirror server discount-engine math so the preview matches stored totals.
   const previewDiscount = (disc, baseAmount) => {
@@ -1242,7 +1286,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
     if (disc.discount_type === 'free_service') return baseAmount;
     return 0;
   };
-  const totalDiscountAmt = Math.min(subtotal, discountAmt + lineDiscountAmt);
+  const totalDiscountAmt = Math.min(subtotal, lineDiscountAmt);
 
   const afterDiscount = subtotal - totalDiscountAmt;
   const isCommercial = selectedCustomer?.property_type === 'commercial' || selectedCustomer?.property_type === 'business';
@@ -1748,11 +1792,6 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             <div style={summaryRowStyle()}>
               <span style={summaryLabelStyle}>Subtotal</span><span style={summaryAmountStyle}>${subtotal.toFixed(2)}</span>
             </div>
-            {discountAmt > 0 && (
-              <div style={summaryRowStyle()}>
-                <span style={summaryLabelStyle}>{selectedCustomer?.waveguard_tier} -{Math.round(tierDiscount * 100)}%</span><span style={summaryAmountStyle}>-${discountAmt.toFixed(2)}</span>
-              </div>
-            )}
             {lineDiscountAmt > 0 && (
               <div style={summaryRowStyle()}>
                 <span style={summaryLabelStyle}>Line-item discounts</span><span style={summaryAmountStyle}>-${lineDiscountAmt.toFixed(2)}</span>

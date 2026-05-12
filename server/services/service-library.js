@@ -2,6 +2,7 @@
  * Service Library Service — single source of truth for all Waves services
  */
 const db = require('../models/db');
+const { auditServiceCatalogChange } = require('./audit-log');
 
 const SERVICE_COLS = [
   'id', 'service_key', 'name', 'short_name', 'description', 'internal_notes',
@@ -25,10 +26,22 @@ const VALID_CATEGORIES = new Set([
 const VALID_BILLING_TYPES = new Set(['recurring', 'one_time', 'free']);
 const VALID_PRICING_TYPES = new Set(['variable', 'fixed', 'quoted']);
 const VALID_FREQUENCIES = new Set(['', 'monthly', 'every_6_weeks', 'bimonthly', 'quarterly', 'semiannual', 'annual']);
+const NON_LIVE_SCHEDULE_STATUSES = ['completed', 'cancelled', 'skipped'];
+const BOOLEAN_COLS = new Set([
+  'is_waveguard', 'requires_follow_up', 'is_taxable', 'requires_license',
+  'customer_visible', 'booking_enabled', 'is_active', 'is_archived',
+]);
 
 function validationError(message) {
   const err = new Error(message);
   err.status = 400;
+  return err;
+}
+
+function conflictError(message, details = {}) {
+  const err = new Error(message);
+  err.status = 409;
+  Object.assign(err, details);
   return err;
 }
 
@@ -39,6 +52,127 @@ function normalizeServiceKey(value) {
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_|_$/g, '')
     .substring(0, 80);
+}
+
+function normalizeBoolean(value, field) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+  }
+  if (typeof value === 'number' && (value === 0 || value === 1)) return Boolean(value);
+  throw validationError(`${field} must be a boolean`);
+}
+
+function serviceTextPatterns(service) {
+  const candidates = [
+    service.name,
+    service.short_name,
+    service.service_key ? service.service_key.replace(/_/g, ' ') : null,
+  ];
+  return [...new Set(candidates
+    .map(v => String(v || '').trim())
+    .filter(v => v.length >= 3))];
+}
+
+function whereTextMatches(query, column, patterns) {
+  if (!patterns.length) return query.whereRaw('1 = 0');
+  return query.where(function () {
+    patterns.forEach((pattern, idx) => {
+      const like = `%${pattern}%`;
+      if (idx === 0) this.where(column, 'ilike', like);
+      else this.orWhere(column, 'ilike', like);
+    });
+  });
+}
+
+function auditSnapshot(row) {
+  if (!row) return null;
+  return SERVICE_COLS.reduce((out, key) => {
+    if (row[key] !== undefined) out[key] = row[key];
+    return out;
+  }, {});
+}
+
+function changedFields(before, after) {
+  if (!before || !after) return [];
+  return SERVICE_COLS.filter((key) => {
+    if (key === 'updated_at') return false;
+    return JSON.stringify(before[key] ?? null) !== JSON.stringify(after[key] ?? null);
+  });
+}
+
+async function countRef(table, buildQuery, knexDb = db) {
+  const row = await buildQuery(knexDb(table)).count('* as count').first();
+  return Number(row?.count || 0);
+}
+
+async function getServiceReferences(serviceOrId, knexDb = db) {
+  const service = typeof serviceOrId === 'object'
+    ? serviceOrId
+    : await knexDb('services').where({ id: serviceOrId }).first();
+  if (!service) return null;
+
+  const id = service.id;
+  const serviceKey = service.service_key;
+  const textPatterns = serviceTextPatterns(service);
+  const refs = {
+    scheduled_services: await countRef('scheduled_services', (q) => q
+      .where({ service_id: id })
+      .whereNotIn('status', NON_LIVE_SCHEDULE_STATUSES), knexDb),
+    scheduled_services_by_type: await countRef('scheduled_services', (q) => whereTextMatches(q
+      .whereNotIn('status', NON_LIVE_SCHEDULE_STATUSES)
+      .where(function () {
+        this.whereNull('service_id').orWhereNot('service_id', id);
+      }), 'service_type', textPatterns), knexDb),
+    scheduled_service_addons: await countRef('scheduled_service_addons as ssa', (q) => q
+      .join('scheduled_services as ss', 'ss.id', 'ssa.scheduled_service_id')
+      .where('ssa.service_id', id)
+      .whereNotIn('ss.status', NON_LIVE_SCHEDULE_STATUSES), knexDb),
+    scheduled_service_addons_by_name: await countRef('scheduled_service_addons as ssa', (q) => whereTextMatches(q
+      .join('scheduled_services as ss', 'ss.id', 'ssa.scheduled_service_id')
+      .whereNotIn('ss.status', NON_LIVE_SCHEDULE_STATUSES)
+      .where(function () {
+        this.whereNull('ssa.service_id').orWhereNot('ssa.service_id', id);
+      }), 'ssa.service_name', textPatterns), knexDb),
+    service_addons_as_parent: await countRef('service_addons', (q) => q.where({ parent_service_id: id }), knexDb),
+    service_addons_as_addon: await countRef('service_addons', (q) => q.where({ addon_service_id: id }), knexDb),
+    service_package_items: await countRef('service_package_items', (q) => q.where({ service_id: id }), knexDb),
+    service_discount_rules: serviceKey
+      ? await countRef('service_discount_rules', (q) => q.where({ service_key: serviceKey }), knexDb)
+      : 0,
+    discounts_by_service_key: serviceKey
+      ? await countRef('discounts', (q) => q.where({ service_key_filter: serviceKey }), knexDb)
+      : 0,
+    historical_service_records: await countRef('service_records', (q) => q.where({ service_id: id }), knexDb),
+  };
+  refs.blocking_total = refs.scheduled_services
+    + refs.scheduled_services_by_type
+    + refs.scheduled_service_addons
+    + refs.scheduled_service_addons_by_name
+    + refs.service_addons_as_parent
+    + refs.service_addons_as_addon
+    + refs.service_package_items
+    + refs.service_discount_rules
+    + refs.discounts_by_service_key;
+  return refs;
+}
+
+async function writeCatalogAudit(changeType, { before = null, after = null, references = null, audit = {}, trx = null } = {}) {
+  const serviceId = after?.id || before?.id || null;
+  await auditServiceCatalogChange({
+    tech_user_id: audit.actorId || null,
+    service_id: serviceId,
+    change_type: changeType,
+    changed_fields: changedFields(before || {}, after || {}),
+    before: auditSnapshot(before),
+    after: auditSnapshot(after),
+    references,
+    ip_address: audit.ipAddress || null,
+    user_agent: audit.userAgent || null,
+    trx,
+  });
 }
 
 function validateServicePayload(data, { partial = false } = {}) {
@@ -86,7 +220,7 @@ function validateServicePayload(data, { partial = false } = {}) {
 /**
  * Paginated list of services with filters
  */
-async function getServices({ category, billingType, isActive, search, limit = 50, offset = 0 } = {}) {
+async function getServices({ category, billingType, isActive, isArchived, includeArchived = false, search, limit = 50, offset = 0 } = {}) {
   let query = db('services').select(SERVICE_COLS).orderBy('sort_order', 'asc').orderBy('name', 'asc');
 
   if (category) query = query.where('category', category);
@@ -116,8 +250,10 @@ async function getServices({ category, billingType, isActive, search, limit = 50
     }
   }
 
-  // Don't show archived by default
-  query = query.where('is_archived', false);
+  if (typeof isArchived === 'boolean') query = query.where('is_archived', isArchived);
+  else if (isArchived === 'true') query = query.where('is_archived', true);
+  else if (isArchived === 'false') query = query.where('is_archived', false);
+  else if (includeArchived !== true && includeArchived !== 'true') query = query.where('is_archived', false);
 
   const countQuery = query.clone().clearSelect().clearOrder().count('* as total').first();
   const [rows, countResult] = await Promise.all([
@@ -155,7 +291,7 @@ async function getServiceByKey(serviceKey) {
 /**
  * Create a new service
  */
-async function createService(data) {
+async function createService(data, { audit } = {}) {
   validateServicePayload(data);
   // Generate service_key if not provided
   if (!data.service_key && data.name) {
@@ -187,6 +323,9 @@ async function createService(data) {
   for (const key of allowed) {
     if (data[key] !== undefined) {
       let val = data[key];
+      if (BOOLEAN_COLS.has(key)) {
+        val = normalizeBoolean(val, key);
+      }
       if (numericKeys.has(key)) {
         if (val === '' || val === null || (typeof val === 'number' && isNaN(val))) {
           val = null;
@@ -207,32 +346,23 @@ async function createService(data) {
     }
   }
 
-  // Retry loop: strip missing columns until the insert succeeds
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      const [row] = await db('services').insert(insert).returning('*');
-      return row;
-    } catch (err) {
-      if (err.code === '42703') {
-        const colMatch = err.message.match(/column "(\w+)"/);
-        if (colMatch && insert[colMatch[1]] !== undefined) {
-          delete insert[colMatch[1]];
-          continue;
-        }
-      }
-      throw err;
-    }
-  }
-  // Exhausted retries — try with minimum fields
-  const [row] = await db('services').insert({ service_key: insert.service_key, name: insert.name }).returning('*');
-  return row;
+  return db.transaction(async (trx) => {
+    const [row] = await trx('services').insert(insert).returning('*');
+    await writeCatalogAudit('create', { after: row, audit, trx });
+    return row;
+  });
 }
 
 /**
  * Update an existing service
  */
-async function updateService(id, data) {
+async function updateService(id, data, { audit } = {}) {
   validateServicePayload(data, { partial: true });
+  const before = await db('services').where({ id }).first();
+  if (!before) return null;
+  if (data.service_key !== undefined && data.service_key !== before.service_key) {
+    throw validationError('Service key cannot be changed after creation');
+  }
   // Only update columns that exist on the services table
   const allowed = [
     'service_key', 'name', 'short_name', 'description', 'internal_notes',
@@ -261,6 +391,9 @@ async function updateService(id, data) {
   for (const key of allowed) {
     if (data[key] !== undefined) {
       let val = data[key];
+      if (BOOLEAN_COLS.has(key)) {
+        val = normalizeBoolean(val, key);
+      }
       if (numericKeys.has(key)) {
         // Coerce empty strings, NaN, and non-numeric values to null
         if (val === '' || val === null || (typeof val === 'number' && isNaN(val))) {
@@ -283,36 +416,44 @@ async function updateService(id, data) {
     }
   }
 
-  // Retry loop: strip missing columns until the update succeeds
-  const strippedCols = [];
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      const [row] = await db('services').where({ id }).update(update).returning('*');
-      return row;
-    } catch (err) {
-      if (err.code === '42703') {
-        // Column doesn't exist — strip it and retry
-        const colMatch = err.message.match(/column "(\w+)"/);
-        if (colMatch && update[colMatch[1]] !== undefined) {
-          strippedCols.push(colMatch[1]);
-          delete update[colMatch[1]];
-          continue;
-        }
-      }
-      throw err;
+  let archiveReferences = null;
+  if (update.is_archived === true && before.is_archived !== true) {
+    archiveReferences = await getServiceReferences(before);
+    if (archiveReferences?.blocking_total > 0) {
+      throw conflictError('Service is still referenced and cannot be archived', { references: archiveReferences });
     }
+    update.is_active = false;
   }
-  // If we exhausted retries, try with just the basics
-  const [row] = await db('services').where({ id }).update({ updated_at: new Date() }).returning('*');
-  return row;
+
+  return db.transaction(async (trx) => {
+    const [row] = await trx('services').where({ id }).update(update).returning('*');
+    if (row) {
+      const changeType = before.is_archived && row.is_archived === false
+        ? 'reactivate'
+        : !before.is_archived && row.is_archived === true
+          ? 'archive'
+          : 'update';
+      await writeCatalogAudit(changeType, { before, after: row, references: archiveReferences, audit, trx });
+    }
+    return row;
+  });
 }
 
 /**
  * Soft-delete (deactivate)
  */
-async function deactivateService(id) {
-  const [row] = await db('services').where({ id }).update({ is_active: false, is_archived: true, updated_at: new Date() }).returning('*');
-  return row;
+async function deactivateService(id, { audit } = {}) {
+  const before = await db('services').where({ id }).first();
+  if (!before) return null;
+  const references = await getServiceReferences(before);
+  if (references?.blocking_total > 0) {
+    throw conflictError('Service is still referenced and cannot be archived', { references });
+  }
+  return db.transaction(async (trx) => {
+    const [row] = await trx('services').where({ id }).update({ is_active: false, is_archived: true, updated_at: new Date() }).returning('*');
+    if (row) await writeCatalogAudit('archive', { before, after: row, references, audit, trx });
+    return row;
+  });
 }
 
 /**
@@ -413,4 +554,10 @@ module.exports = {
   getPackages,
   updatePackage,
   resolveServiceType,
+  getServiceReferences,
+  __private: {
+    normalizeServiceKey,
+    validateServicePayload,
+    changedFields,
+  },
 };

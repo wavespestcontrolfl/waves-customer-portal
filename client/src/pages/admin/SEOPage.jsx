@@ -7,16 +7,31 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#F4F4F5', card: '#FFFFFF', border: '#E4E4E7', teal: '#18181B', green: '#15803D', amber: '#A16207', red: '#991B1B', orange: '#18181B', text: '#27272A', muted: '#71717A', white: '#FFFFFF', purple: '#18181B', heading: '#09090B', inputBorder: '#D4D4D8' };
 const MONO = "'JetBrains Mono', monospace";
 
-function adminFetch(path) {
+function adminFetch(path, options = {}) {
+  const body = options.body && typeof options.body !== 'string' ? JSON.stringify(options.body) : options.body;
   return fetch(`${API_BASE}${path}`, {
-    headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
-  }).then(r => r.json());
+    ...options,
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
+      'Content-Type': 'application/json',
+      ...(options.headers || {}),
+    },
+    body,
+  }).then(async (r) => {
+    if (!r.ok) {
+      let message = `${r.status} ${r.statusText}`;
+      try {
+        const data = await r.clone().json();
+        message = data?.error || message;
+      } catch { /* keep default message */ }
+      throw new Error(message);
+    }
+    if (r.status === 204) return null;
+    return r.json();
+  });
 }
 function adminPost(path, body) {
-  return fetch(`${API_BASE}${path}`, {
-    method: 'POST', headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  }).then(r => r.json());
+  return adminFetch(path, { method: 'POST', body });
 }
 
 function fmt(n) { return '$' + Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 }); }
@@ -127,7 +142,7 @@ function SyncHealthCard() {
       .catch(() => setLoading(false));
   }, []);
   if (loading) return null;
-  if (!health) return null;
+  if (!health?.gsc || !health?.gbp) return null;
   const { gsc, gbp } = health;
   const gscOk = gsc.configured && gsc.daily?.count > 0;
   const gbpOk = gbp.anyConfigured && gbp.locations.some((l) => l.rowCount > 0);
@@ -319,7 +334,16 @@ function BacklinksTab() {
 
   useEffect(() => { adminFetch('/admin/seo/backlinks').then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false)); }, []);
 
-  const handleScan = async () => { setScanning(true); await adminPost('/admin/seo/backlinks/scan', {}); const d = await adminFetch('/admin/seo/backlinks'); setData(d); setScanning(false); };
+  const handleScan = async () => {
+    setScanning(true);
+    try {
+      await adminPost('/admin/seo/backlinks/scan', {});
+      const d = await adminFetch('/admin/seo/backlinks');
+      setData(d);
+    } finally {
+      setScanning(false);
+    }
+  };
 
   if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading backlinks...</div>;
   if (!data) return <Card style={{ padding: 40, textAlign: 'center' }}><div style={{ color: D.muted }}>No backlink data yet. Click "Scan" to pull from DataForSEO.</div></Card>;
@@ -493,8 +517,12 @@ function BacklinkAgentPanel() {
 
   const handleProcess = async () => {
     setProcessing(true);
-    await adminPost('/admin/backlink-agent/process', { limit: 3 });
-    setTimeout(() => { setProcessing(false); loadData(); }, 3000);
+    try {
+      await adminPost('/admin/backlink-agent/process', { limit: 3 });
+      setTimeout(() => { setProcessing(false); loadData(); }, 3000);
+    } catch {
+      setProcessing(false);
+    }
   };
 
   const handleRetry = async (id) => {
@@ -549,10 +577,41 @@ function BacklinkAgentPanel() {
         <button onClick={handleProcess} disabled={processing || (stats?.pending || 0) === 0} style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: D.teal, color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: processing || !(stats?.pending) ? 0.5 : 1 }}>
           {processing ? 'Processing...' : `Process Queue (${stats?.pending || 0})`}
         </button>
+        <button onClick={handlePoll} style={{ padding: '8px 16px', borderRadius: 8, border: `1px solid ${D.border}`, background: '#fff', color: D.text, fontSize: 13, cursor: 'pointer' }}>Poll X Targets</button>
+        <button onClick={handleVerifyEmails} style={{ padding: '8px 16px', borderRadius: 8, border: `1px solid ${D.border}`, background: '#fff', color: D.text, fontSize: 13, cursor: 'pointer' }}>Verify Emails</button>
         <button onClick={loadData} style={{ padding: '8px 16px', borderRadius: 8, border: `1px solid ${D.border}`, background: 'transparent', color: D.muted, fontSize: 13, cursor: 'pointer' }}>Refresh</button>
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {/* X Targets */}
+          <Card>
+            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>X Targets</div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+              <input
+                value={newTarget}
+                onChange={e => setNewTarget(e.target.value)}
+                placeholder="@username"
+                style={{ flex: 1, padding: 10, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none' }}
+              />
+              <button onClick={handleAddTarget} style={{ padding: '8px 18px', borderRadius: 8, border: 'none', background: D.teal, color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Add Target</button>
+            </div>
+            {targets.length === 0 ? (
+              <div style={{ color: D.muted, fontSize: 13 }}>No X targets configured.</div>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8 }}>
+                {targets.map((target) => (
+                  <div key={target.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '8px 10px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 13, color: D.heading, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>@{target.x_username}</div>
+                      <div style={{ fontSize: 11, color: target.is_active ? D.green : D.muted }}>{target.is_active ? 'active' : 'inactive'}{target.last_polled_at ? ` · ${String(target.last_polled_at).slice(0, 10)}` : ''}</div>
+                    </div>
+                    <button onClick={() => handleDeleteTarget(target.id)} style={{ border: 'none', background: 'transparent', color: D.red, fontSize: 12, cursor: 'pointer' }}>Remove</button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+
           {/* Manual URL Input */}
           <Card>
             <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Add URLs</div>
@@ -677,8 +736,8 @@ function FunnelTab() {
     <div className="seo-kpi-grid-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
       <KpiCard label="Impressions" value={(o.impressions || 0).toLocaleString()} />
       <KpiCard label="Clicks" value={(o.clicks || 0).toLocaleString()} sub={{ text: `${o.ctr || 0}% CTR` }} />
-      <KpiCard label="Booked" value={data.estimates?.booked || 0} color={D.green} />
-      <KpiCard label="Revenue" value={fmt(data.revenue || 0)} color={D.green} />
+      <KpiCard label="Sitewide Booked" value={data.estimates?.booked || 0} color={D.green} />
+      <KpiCard label="Sitewide Revenue" value={fmt(data.revenue || 0)} color={D.green} sub={{ text: 'correlated, not attributed' }} />
     </div>
   );
 }
@@ -842,8 +901,11 @@ function SiteAuditTab() {
       await adminPost('/admin/seo/audit/run', {});
       const d = await adminFetch('/admin/seo/audit');
       setData(d);
-    } catch {}
-    setRunning(false);
+    } catch {
+      // Keep current dashboard data visible; adminFetch has already rejected.
+    } finally {
+      setRunning(false);
+    }
   };
 
   if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: 'center' }}>Loading site audit...</div>;

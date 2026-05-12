@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { COLORS as B, FONTS } from '../theme-brand';
+import { isLoginOrCustomerPortalPath } from '../lib/customerPortalChrome';
 
 export default function InstallPrompt() {
   const [deferredPrompt, setDeferredPrompt] = useState(null);
   const [show, setShow] = useState(false);
+  const { pathname } = useLocation();
 
   useEffect(() => {
     const dismissed = sessionStorage.getItem('pwaPromptDismissed');
@@ -12,11 +15,9 @@ export default function InstallPrompt() {
     function handlePrompt(e) {
       e.preventDefault();
       setDeferredPrompt(e);
-      // Show after 30 seconds — but never on the monochrome admin/tech surfaces
-      // (the gold/navy brand styling is reserved for customer-facing pages).
+      // Show after 30 seconds, scoped to login + the authenticated customer portal.
       setTimeout(() => {
-        const path = window.location.pathname;
-        if (path.startsWith('/admin') || path.startsWith('/tech')) return;
+        if (!isLoginOrCustomerPortalPath(window.location.pathname)) return;
         setShow(true);
       }, 30000);
     }
@@ -24,6 +25,10 @@ export default function InstallPrompt() {
     window.addEventListener('beforeinstallprompt', handlePrompt);
     return () => window.removeEventListener('beforeinstallprompt', handlePrompt);
   }, []);
+
+  useEffect(() => {
+    if (!isLoginOrCustomerPortalPath(pathname)) setShow(false);
+  }, [pathname]);
 
   async function handleInstall() {
     if (!deferredPrompt) return;
@@ -40,7 +45,7 @@ export default function InstallPrompt() {
     sessionStorage.setItem('pwaPromptDismissed', '1');
   }
 
-  if (!show) return null;
+  if (!show || !isLoginOrCustomerPortalPath(pathname)) return null;
 
   return (
     <div style={{

@@ -2,10 +2,28 @@ import { useState, useEffect, useMemo } from "react";
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-function adminFetch(path) {
+function adminFetch(path, options = {}) {
+  const body = options.body && typeof options.body !== 'string' ? JSON.stringify(options.body) : options.body;
   return fetch(`${API_BASE}${path}`, {
-    headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' },
-  }).then(r => r.json());
+    ...options,
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
+      'Content-Type': 'application/json',
+      ...(options.headers || {}),
+    },
+    body,
+  }).then(async (r) => {
+    if (!r.ok) {
+      let message = `${r.status} ${r.statusText}`;
+      try {
+        const data = await r.clone().json();
+        message = data?.error || message;
+      } catch { /* keep default message */ }
+      throw new Error(message);
+    }
+    if (r.status === 204) return null;
+    return r.json();
+  });
 }
 
 // Tier 2 monochrome palette — WAVES_COLORS keys preserved so the 90+
@@ -132,7 +150,7 @@ function DeltaArrow({ current, previous }) {
   const diff = previous - current; // positive = improved (lower position is better)
   if (diff === 0) return <span style={{ color: WAVES_COLORS.textMuted, fontSize: 13, fontWeight: 600 }}>--</span>;
   const color = diff > 0 ? WAVES_COLORS.green : WAVES_COLORS.red;
-  return <span style={{ color, fontSize: 13, fontWeight: 700 }}>{diff > 0 ? "+" : ""}{diff > 0 ? "+" : "-"}{Math.abs(diff)}</span>;
+  return <span style={{ color, fontSize: 13, fontWeight: 700 }}>{diff > 0 ? "+" : "-"}{Math.abs(diff)}</span>;
 }
 
 function PositionBadge({ pos }) {
@@ -327,11 +345,11 @@ export default function WavesSEODashboard() {
   const runSync = async () => {
     setSyncing(true); setSyncMsg('Syncing GSC data...');
     try {
-      await adminFetch('/admin/seo/sync', { method: 'POST', body: JSON.stringify({ daysBack: 28 }) });
+      await adminFetch('/admin/seo/sync', { method: 'POST', body: { daysBack: 28 } });
       setSyncMsg('GSC synced. Running rank tracking...');
-      await adminFetch('/admin/seo/rankings/track', { method: 'POST', body: JSON.stringify({}) }).catch(() => {});
+      await adminFetch('/admin/seo/rankings/track', { method: 'POST', body: {} }).catch(() => {});
       setSyncMsg('Generating SEO report...');
-      await adminFetch('/admin/seo/advisor/generate', { method: 'POST', body: JSON.stringify({}) }).catch(() => {});
+      await adminFetch('/admin/seo/advisor/generate', { method: 'POST', body: {} }).catch(() => {});
       setSyncMsg('Done! Refreshing...');
       setTimeout(() => window.location.reload(), 1500);
     } catch (e) { setSyncMsg('Sync failed: ' + e.message); }

@@ -243,34 +243,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [discountAmount, setDiscountAmount] = useState('');
   const [discountPresets, setDiscountPresets] = useState([]);
   const [discountPresetId, setDiscountPresetId] = useState('');
-  const [discountSearch, setDiscountSearch] = useState('');
   const [lineDiscountQueries, setLineDiscountQueries] = useState({});
   const [lineDiscountOpenIdx, setLineDiscountOpenIdx] = useState(null);
-
-  const filteredDiscounts = useMemo(() => {
-    const q = discountSearch.trim().toLowerCase();
-    if (!q) return discountPresets;
-    return discountPresets.filter((d) => (d.name || '').toLowerCase().includes(q));
-  }, [discountPresets, discountSearch]);
-
-  const selectedDiscountLabel = useMemo(() => {
-    if (!discountPresetId) return '';
-    if (discountPresetId === 'custom') return 'Custom amount';
-    const d = discountPresets.find((x) => String(x.id) === String(discountPresetId));
-    if (!d) return '';
-    const amt = d.discount_type === 'percentage'
-      ? `${Number(d.amount).toFixed(d.amount % 1 ? 2 : 0)}%`
-      : `$${Number(d.amount).toFixed(2)}`;
-    return `${d.name} — ${amt}`;
-  }, [discountPresetId, discountPresets]);
 
   const lineDiscountPresets = useMemo(() => {
     return discountPresets.filter((d) => (
       d.is_active
       && d.show_in_invoices
-      && !d.is_waveguard_tier_discount
     ));
   }, [discountPresets]);
+  const appointmentDiscountPresets = lineDiscountPresets;
 
   // Notes & Confirm state
   const [customerNotes, setCustomerNotes] = useState('');
@@ -437,7 +419,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setDiscountPresetId(id);
     if (!id) { setDiscountType(''); setDiscountAmount(''); return; }
     if (id === 'custom') return;
-    const d = discountPresets.find(x => String(x.id) === String(id));
+    const d = appointmentDiscountPresets.find(x => String(x.id) === String(id));
     if (!d) return;
     setDiscountType(d.discount_type);
     setDiscountAmount(String(d.amount ?? ''));
@@ -666,7 +648,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     //   - fixed_amount / free_service: must apply ONCE across the booking,
     //     otherwise mixed-cadence ($50 off applied to monthly AND quarterly)
     //     would multiply the discount.
-    const discountAppliesToAll = discountType === 'percentage';
+    const discountAppliesToAll = discountType === 'percentage' || discountType === 'variable_percentage';
     for (const group of groups) {
       const key = groupKey(group);
       // Skip groups already created in a prior attempt of this submit
@@ -681,11 +663,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         });
         const groupDuration = group.lines.reduce((sum, s) => sum + (s.duration || s.default_duration_minutes || 30), 0);
         const addons = extras.map((s) => {
+          const basePrice = lineBaseAmount(s);
           const p = lineNetAmount(s);
           return {
             serviceId: s.id || null,
             serviceName: s.name,
             name: s.name,
+            basePrice: basePrice > 0 ? basePrice : null,
             price: p > 0 ? p : null,
             discountId: s.lineDiscount?.id || null,
             discountName: s.lineDiscount?.name || null,
@@ -702,6 +686,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           scheduledDate: apptDate,
           serviceType: primary.name,
           serviceId: primary.id || null,
+          primaryLinePrice: groupHasPrice ? lineBaseAmount(primary) : null,
           primaryLineDiscount: primary.lineDiscount ? {
             discountId: primary.lineDiscount.id || null,
             discountName: primary.lineDiscount.name || null,
@@ -757,6 +742,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               })()
             : undefined,
           discountType: (discountType && (discountAppliesToAll || !discountConsumedRef.current)) ? discountType : undefined,
+          discountId: (discountType && discountPresetId && discountPresetId !== 'custom' && (discountAppliesToAll || !discountConsumedRef.current))
+            ? discountPresetId
+            : undefined,
           discountAmount: (discountType && discountAmount !== '' && (discountAppliesToAll || !discountConsumedRef.current))
             ? Number(discountAmount)
             : undefined,
@@ -1411,10 +1399,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             style={inputStyle}
           >
             <option value="">No discount</option>
-            {discountPresets.map((d) => {
+            {appointmentDiscountPresets.map((d) => {
               const amt = d.discount_type === 'free_service'
                 ? 'Free'
-                : d.discount_type === 'percentage'
+                : d.discount_type === 'percentage' || d.discount_type === 'variable_percentage'
                   ? `${Number(d.amount).toFixed(d.amount % 1 ? 2 : 0)}%`
                   : `$${Number(d.amount).toFixed(2)}`;
               return (

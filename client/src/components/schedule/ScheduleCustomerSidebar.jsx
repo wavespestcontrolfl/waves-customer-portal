@@ -4,14 +4,6 @@ import { adminFetch } from '../../lib/adminFetch';
 import { TIMEZONE } from '../../lib/timezone';
 import CallBridgeLink from '../admin/CallBridgeLink';
 
-const TIER_DISCOUNT = { bronze: 0, silver: 0.10, gold: 0.15, platinum: 0.20 };
-
-function tierLabel(t) {
-  if (!t) return '';
-  const s = String(t).toLowerCase();
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
-
 function money(value) {
   const n = Number(value || 0);
   return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -140,13 +132,21 @@ export default function ScheduleCustomerSidebar({
   const payments = data?.payments || [];
   const cards = data?.cards || [];
 
-  const tier = String(service?.waveguardTier || c.tier || '').toLowerCase();
-  const discountPct = TIER_DISCOUNT[tier] || 0;
   const basePrice = service?.estimatedPrice != null
     ? Number(service.estimatedPrice)
     : Number(service?.monthlyRate || c.monthlyRate || 0);
-  const discount = Math.round(basePrice * discountPct * 100) / 100;
-  const total = Math.max(0, basePrice - discount);
+  const appointmentAddons = Array.isArray(service?.serviceAddons) ? service.serviceAddons : [];
+  const appointmentAddonTotal = Math.round(
+    appointmentAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100
+  ) / 100;
+  const splitAppointmentAddons = appointmentAddons.length > 0 && appointmentAddonTotal > 0 && appointmentAddonTotal < basePrice;
+  const baseServicePrice = splitAppointmentAddons
+    ? Math.max(0, Math.round((basePrice - appointmentAddonTotal) * 100) / 100)
+    : basePrice;
+  const baseServiceLabel = splitAppointmentAddons
+    ? (service?.serviceType || 'Service')
+    : (service?.serviceTypeDisplay || service?.serviceType || 'Service');
+  const total = Math.max(0, basePrice);
   const timeWindow = fmtWindow(service);
   const duration = fmtDuration(service);
   const address = addressText(c, service?.address);
@@ -340,17 +340,20 @@ export default function ScheduleCustomerSidebar({
           <Section title="Services and items">
             <div className="flex items-start justify-between gap-3 pb-3 border-b border-hairline border-zinc-100">
               <div className="min-w-0">
-                <div className="text-15 text-zinc-900">{service.serviceType || 'Service'}</div>
+                <div className="text-15 text-zinc-900">{baseServiceLabel}</div>
                 <div className="text-13 text-ink-secondary mt-1">{[fmtTime(service.windowStart), duration].filter(Boolean).join(' · ')}</div>
               </div>
-              <div className="u-nums text-14 text-zinc-900">{money(basePrice)}</div>
+              <div className="u-nums text-14 text-zinc-900">{money(baseServicePrice)}</div>
             </div>
-            {discountPct > 0 && (
-              <div className="flex items-center justify-between gap-3 py-3 border-b border-hairline border-zinc-100">
-                <div className="text-14 text-zinc-900">WaveGuard {tierLabel(tier)} discount</div>
-                <div className="u-nums text-14 text-zinc-900">({money(discount)})</div>
+            {splitAppointmentAddons && appointmentAddons.map((addon) => (
+              <div key={addon.id || addon.serviceId || addon.serviceName} className="flex items-start justify-between gap-3 py-3 border-b border-hairline border-zinc-100">
+                <div className="min-w-0">
+                  <div className="text-14 text-zinc-900">{addon.serviceName || 'Service add-on'}</div>
+                  <div className="text-13 text-ink-secondary mt-1">Add-on service</div>
+                </div>
+                <div className="u-nums text-14 text-zinc-900">{money(Number(addon.estimatedPrice || 0))}</div>
               </div>
-            )}
+            ))}
             <div className="flex items-center justify-between gap-3 pt-3">
               <div className="text-15 font-medium text-zinc-900">Total</div>
               <div className="u-nums text-15 font-medium text-zinc-900">{money(total)}</div>

@@ -23,6 +23,12 @@ function resolveReviewLocation(request, customer) {
 
 const WAVES_ADMIN_PHONE = '+19413187612';
 
+function categorizeScore(score) {
+  if (score >= 8) return 'promoter';
+  if (score >= 4) return 'passive';
+  return 'detractor';
+}
+
 // GET /api/rate/:token — public page data for the review funnel
 router.get('/:token', async (req, res, next) => {
   try {
@@ -58,10 +64,54 @@ router.get('/:token', async (req, res, next) => {
       firstName: contact.name || customer?.first_name || 'there',
       techName: request.tech_name || 'your technician',
       serviceType: request.service_type || 'pest control service',
+      hasServiceType: Boolean(request.service_type),
       serviceDate: request.service_date,
       locationName: loc.name,
       googleReviewUrl: loc.googleReviewUrl,
     });
+  } catch (err) { next(err); }
+});
+
+// POST /api/rate/:token/score — persist score taps without final submission.
+// This protects bounce cases while leaving the customer free to correct their
+// score before committing to feedback or the Google-review path. The request
+// status is intentionally left alone so reminder and low-score workflows still
+// run only from the final /submit path.
+router.post('/:token/score', async (req, res, next) => {
+  try {
+    const { score, highlights } = req.body;
+
+    if (!score || score < 1 || score > 10) {
+      return res.status(400).json({ error: 'Score must be between 1 and 10' });
+    }
+
+    const request = await db('review_requests')
+      .where({ token: req.params.token })
+      .first();
+
+    if (!request) {
+      return res.status(404).json({ error: 'Review link not found' });
+    }
+
+    if (request.expires_at && new Date(request.expires_at) < new Date()) {
+      return res.status(410).json({ error: 'This review link has expired' });
+    }
+
+    if (['submitted', 'reviewed'].includes(request.status)) {
+      return res.status(409).json({ error: 'Feedback already submitted' });
+    }
+
+    const category = categorizeScore(score);
+    await db('review_requests')
+      .where({ id: request.id })
+      .whereNotIn('status', ['submitted', 'reviewed'])
+      .update({
+        score,
+        highlights: highlights ? JSON.stringify(highlights) : null,
+        category,
+      });
+
+    res.json({ saved: true, category });
   } catch (err) { next(err); }
 });
 
@@ -91,10 +141,7 @@ router.post('/:token/submit', async (req, res, next) => {
     }
 
     // Categorize by NPS score
-    let category;
-    if (score >= 8) category = 'promoter';
-    else if (score >= 4) category = 'passive';
-    else category = 'detractor';
+    const category = categorizeScore(score);
 
     // Update the review request record
     await db('review_requests').where({ id: request.id }).update({

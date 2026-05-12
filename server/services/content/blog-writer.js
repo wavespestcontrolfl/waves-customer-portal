@@ -200,6 +200,7 @@ Return JSON: {
   }
 
   async generateNewIdeas(count = 20) {
+    count = Math.min(Math.max(Number.parseInt(count, 10) || 20, 1), 50);
     const existing = await db('blog_posts').select('title', 'keyword', 'tag', 'city');
 
     // Find gaps

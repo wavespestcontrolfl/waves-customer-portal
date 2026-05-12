@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useId } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { DiscountsSection } from './DiscountsTabs';
 import useIsMobile from '../../hooks/useIsMobile';
 import MobileServiceLibrary from '../../components/admin/MobileServiceLibrary';
+import { SERVICE_CATEGORIES as CATEGORIES } from '../../constants/serviceCategories';
 
 const API = import.meta.env.VITE_API_URL || '/api';
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -16,18 +17,6 @@ async function aFetch(path, opts = {}) {
   }
   return r.json();
 }
-
-const CATEGORIES = [
-  { value: 'pest_control', label: 'Pest Control' },
-  { value: 'lawn_care', label: 'Lawn Care' },
-  { value: 'mosquito', label: 'Mosquito' },
-  { value: 'termite', label: 'Termite' },
-  { value: 'rodent', label: 'Rodent' },
-  { value: 'tree_shrub', label: 'Tree & Shrub' },
-  { value: 'inspection', label: 'Inspection' },
-  { value: 'specialty', label: 'Specialty' },
-  { value: 'other', label: 'Other' },
-];
 
 const sCard = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 16 };
 const sInput = { padding: '8px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 8, color: D.text, fontSize: 13, outline: 'none', boxSizing: 'border-box', width: '100%' };
@@ -86,16 +75,18 @@ function categoryLabel(value) {
   return (CATEGORIES.find(c => c.value === value) || {}).label || value || '—';
 }
 
-function Field({ label, children, half }) {
+function Field({ label, children, half, htmlFor }) {
   return (
     <div style={{ flex: half ? '1 1 48%' : '1 1 100%', minWidth: half ? 140 : 0, marginBottom: 10 }}>
-      <label style={{ fontSize: 11, color: D.muted, marginBottom: 3, display: 'block' }}>{label}</label>
+      <label htmlFor={htmlFor} style={{ fontSize: 11, color: D.muted, marginBottom: 3, display: 'block' }}>{label}</label>
       {children}
     </div>
   );
 }
 
 function ServiceForm({ svc, onSave, onCancel, isNew }) {
+  const rawFormId = useId().replace(/:/g, '');
+  const fieldId = (key) => `${rawFormId}-${key}`;
   const [form, setForm] = useState({ ...EMPTY_SVC, ...svc });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -110,58 +101,61 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
     try { await onSave(form); } catch (e) { setError(e.message || 'Save failed'); } finally { setSaving(false); }
   };
 
-  const inp = (key, type = 'text') => (
-    <input style={sInput} type={type} required={key === 'name'} value={form[key] ?? ''} onChange={e => set(key, type === 'number' ? (e.target.value === '' ? '' : Number(e.target.value)) : e.target.value)} />
+  const inp = (key, type = 'text', extra = {}) => (
+    <input id={fieldId(key)} name={key} style={{ ...sInput, ...(extra.disabled ? { opacity: 0.75, cursor: 'not-allowed' } : {}) }} type={type} required={key === 'name'} value={form[key] ?? ''} disabled={extra.disabled} title={extra.title} onChange={e => set(key, type === 'number' ? (e.target.value === '' ? '' : Number(e.target.value)) : e.target.value)} />
   );
   const sel = (key, options) => (
-    <select style={sInput} value={form[key] || ''} onChange={e => set(key, e.target.value)}>
+    <select id={fieldId(key)} name={key} style={sInput} value={form[key] || ''} onChange={e => set(key, e.target.value)}>
       {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
     </select>
   );
-  const chk = (key, label) => (
-    <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: D.text, cursor: 'pointer' }}>
-      <input type="checkbox" checked={!!form[key]} onChange={e => set(key, e.target.checked)} /> {label}
-    </label>
-  );
+  const chk = (key, label) => {
+    const id = fieldId(key);
+    return (
+      <label htmlFor={id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: D.text, cursor: 'pointer' }}>
+        <input id={id} name={key} type="checkbox" checked={!!form[key]} onChange={e => set(key, e.target.checked)} /> {label}
+      </label>
+    );
+  };
 
   return (
     <div>
       <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 8 }}>Definition</div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-        <Field label="Name" half>{inp('name')}</Field>
-        <Field label="Service Key" half>{inp('service_key')}</Field>
-        <Field label="Short Name" half>{inp('short_name')}</Field>
-        <Field label="Icon" half>{inp('icon')}</Field>
-        <Field label="Category" half>
+        <Field label="Name" half htmlFor={fieldId('name')}>{inp('name')}</Field>
+        <Field label="Service Key" half htmlFor={fieldId('service_key')}>{inp('service_key', 'text', { disabled: !isNew, title: isNew ? undefined : 'Service keys are locked after creation' })}</Field>
+        <Field label="Short Name" half htmlFor={fieldId('short_name')}>{inp('short_name')}</Field>
+        <Field label="Icon" half htmlFor={fieldId('icon')}>{inp('icon')}</Field>
+        <Field label="Category" half htmlFor={fieldId('category')}>
           {sel('category', CATEGORIES)}
         </Field>
-        <Field label="Subcategory" half>{inp('subcategory')}</Field>
-        <Field label="Billing Type" half>
+        <Field label="Subcategory" half htmlFor={fieldId('subcategory')}>{inp('subcategory')}</Field>
+        <Field label="Billing Type" half htmlFor={fieldId('billing_type')}>
           {sel('billing_type', [{ value: 'recurring', label: 'Recurring' }, { value: 'one_time', label: 'One-Time' }, { value: 'free', label: 'Free' }])}
         </Field>
-        <Field label="Frequency" half>
+        <Field label="Frequency" half htmlFor={fieldId('frequency')}>
           {sel('frequency', [{ value: '', label: 'N/A' }, { value: 'monthly', label: 'Monthly' }, { value: 'every_6_weeks', label: 'Every 6 Weeks' }, { value: 'bimonthly', label: 'Bi-Monthly' }, { value: 'quarterly', label: 'Quarterly' }, { value: 'semiannual', label: 'Semiannual' }, { value: 'annual', label: 'Annual' }])}
         </Field>
-        <Field label="Visits/Year" half>{inp('visits_per_year', 'number')}</Field>
-        <Field label="Duration (min)" half>{inp('default_duration_minutes', 'number')}</Field>
+        <Field label="Visits/Year" half htmlFor={fieldId('visits_per_year')}>{inp('visits_per_year', 'number')}</Field>
+        <Field label="Duration (min)" half htmlFor={fieldId('default_duration_minutes')}>{inp('default_duration_minutes', 'number')}</Field>
       </div>
 
       <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.4, marginTop: 14, marginBottom: 8 }}>Pricing</div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-        <Field label="Pricing Type" half>
+        <Field label="Pricing Type" half htmlFor={fieldId('pricing_type')}>
           {sel('pricing_type', [{ value: 'variable', label: 'Variable' }, { value: 'fixed', label: 'Fixed' }, { value: 'quoted', label: 'Quoted' }])}
         </Field>
-        <Field label="Price" half>{inp('base_price', 'number')}</Field>
-        <Field label="Pricing Model Key" half>{inp('pricing_model_key')}</Field>
-        <Field label="Sort Order" half>{inp('sort_order', 'number')}</Field>
+        <Field label="Price" half htmlFor={fieldId('base_price')}>{inp('base_price', 'number')}</Field>
+        <Field label="Pricing Model Key" half htmlFor={fieldId('pricing_model_key')}>{inp('pricing_model_key')}</Field>
+        <Field label="Sort Order" half htmlFor={fieldId('sort_order')}>{inp('sort_order', 'number')}</Field>
       </div>
 
       <div style={{ fontSize: 11, fontWeight: 600, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.4, marginTop: 14, marginBottom: 8 }}>Compliance & Skills</div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-        <Field label="Tax Service Key" half>{inp('tax_service_key')}</Field>
-        <Field label="License Category" half>{inp('license_category')}</Field>
-        <Field label="Min Tech Skill Level" half>{inp('min_tech_skill_level', 'number')}</Field>
-        <Field label="Color" half><input style={{ ...sInput, height: 36 }} type="color" value={form.color || '#18181B'} onChange={e => set('color', e.target.value)} /></Field>
+        <Field label="Tax Service Key" half htmlFor={fieldId('tax_service_key')}>{inp('tax_service_key')}</Field>
+        <Field label="License Category" half htmlFor={fieldId('license_category')}>{inp('license_category')}</Field>
+        <Field label="Min Tech Skill Level" half htmlFor={fieldId('min_tech_skill_level')}>{inp('min_tech_skill_level', 'number')}</Field>
+        <Field label="Color" half htmlFor={fieldId('color')}><input id={fieldId('color')} name="color" style={{ ...sInput, height: 36 }} type="color" value={form.color || '#18181B'} onChange={e => set('color', e.target.value)} /></Field>
       </div>
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 10 }}>
@@ -176,15 +170,15 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
 
       {form.requires_follow_up && (
         <div style={{ marginTop: 8 }}>
-          <Field label="Follow-up Interval (days)" half>{inp('follow_up_interval_days', 'number')}</Field>
+          <Field label="Follow-up Interval (days)" half htmlFor={fieldId('follow_up_interval_days')}>{inp('follow_up_interval_days', 'number')}</Field>
         </div>
       )}
 
-      <Field label="Description">
-        <textarea style={{ ...sInput, minHeight: 60, resize: 'vertical' }} value={form.description || ''} onChange={e => set('description', e.target.value)} />
+      <Field label="Description" htmlFor={fieldId('description')}>
+        <textarea id={fieldId('description')} name="description" style={{ ...sInput, minHeight: 60, resize: 'vertical' }} value={form.description || ''} onChange={e => set('description', e.target.value)} />
       </Field>
-      <Field label="Internal Notes">
-        <textarea style={{ ...sInput, minHeight: 40, resize: 'vertical' }} value={form.internal_notes || ''} onChange={e => set('internal_notes', e.target.value)} />
+      <Field label="Internal Notes" htmlFor={fieldId('internal_notes')}>
+        <textarea id={fieldId('internal_notes')} name="internal_notes" style={{ ...sInput, minHeight: 40, resize: 'vertical' }} value={form.internal_notes || ''} onChange={e => set('internal_notes', e.target.value)} />
       </Field>
 
       {error && <div style={{ color: D.red, fontSize: 12, marginTop: 8, padding: '6px 10px', background: D.red + '15', borderRadius: 6 }}>{error}</div>}
@@ -194,6 +188,10 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
       </div>
     </div>
   );
+}
+
+function normalizeTab(value) {
+  return value === 'discounts' ? 'discounts' : 'catalog';
 }
 
 // ── Left rail: category list + saved-view shortcuts ───────────────────
@@ -249,7 +247,7 @@ function ServiceListRow({ svc, selected, onSelect }) {
         border: 'none',
         borderBottom: `1px solid ${D.border}`,
         cursor: 'pointer', textAlign: 'left', width: '100%',
-        opacity: svc.is_active ? 1 : 0.6,
+        opacity: svc.is_archived ? 0.55 : svc.is_active ? 1 : 0.6,
         transition: 'background 0.12s',
       }}
       onMouseEnter={e => { if (!selected) e.currentTarget.style.background = '#FAFAFA'; }}
@@ -268,6 +266,14 @@ function ServiceListRow({ svc, selected, onSelect }) {
           display: 'flex', alignItems: 'center', gap: 8,
         }}>
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{cleanName(svc)}</span>
+          {svc.is_archived && (
+            <span style={{
+              fontSize: 9, fontWeight: 700, padding: '2px 5px', borderRadius: 3,
+              background: selected ? 'rgba(250,250,250,0.18)' : '#71717A18',
+              color: selected ? D.selectedFg : D.muted,
+              letterSpacing: 0.4, flexShrink: 0,
+            }}>ARCHIVED</span>
+          )}
           {svc.is_waveguard && (
             <span style={{
               fontSize: 9, fontWeight: 700, padding: '2px 5px', borderRadius: 3,
@@ -293,7 +299,7 @@ function ServiceListRow({ svc, selected, onSelect }) {
 function DetailPane({ svc, creating, onSaveNew, onCancelNew, onUpdated, onDeleted }) {
   if (creating) {
     return (
-      <div style={{ overflow: 'auto', height: '100%' }}>
+      <div style={{ overflowY: 'auto', height: '100%', minHeight: 0, WebkitOverflowScrolling: 'touch' }}>
         <div style={{
           position: 'sticky', top: 0, zIndex: 1,
           background: D.card, borderBottom: `1px solid ${D.border}`,
@@ -331,12 +337,12 @@ function DetailPane({ svc, creating, onSaveNew, onCancelNew, onUpdated, onDelete
   const products = parseProducts(svc);
 
   const handleDelete = async () => {
-    if (!window.confirm(`Delete "${cleanName(svc)}"?\n\nThis removes it from the service catalog. Past services already invoiced keep their history. You can't undo this.`)) return;
+    if (!window.confirm(`Archive "${cleanName(svc)}"?\n\nThis removes it from the active service catalog. The archive will be blocked if this service is still referenced by live schedules, packages, add-ons, or discount rules.`)) return;
     try {
       await aFetch(`/admin/services/${svc.id}`, { method: 'DELETE' });
       onDeleted();
     } catch (err) {
-      window.alert('Delete failed: ' + (err?.message || 'unknown error'));
+      window.alert('Archive failed: ' + (err?.message || 'unknown error'));
     }
   };
 
@@ -344,11 +350,22 @@ function DetailPane({ svc, creating, onSaveNew, onCancelNew, onUpdated, onDelete
     try {
       await aFetch(`/admin/services/${svc.id}`, { method: 'PUT', body: JSON.stringify({ is_active: !svc.is_active }) });
       onUpdated();
-    } catch {}
+    } catch (err) {
+      window.alert('Status update failed: ' + (err?.message || 'unknown error'));
+    }
+  };
+
+  const handleRestore = async () => {
+    try {
+      await aFetch(`/admin/services/${svc.id}`, { method: 'PUT', body: JSON.stringify({ is_archived: false, is_active: true }) });
+      onUpdated('Restored');
+    } catch (err) {
+      window.alert('Restore failed: ' + (err?.message || 'unknown error'));
+    }
   };
 
   return (
-    <div style={{ overflow: 'auto', height: '100%' }} key={svc.id}>
+    <div style={{ overflowY: 'auto', height: '100%', minHeight: 0, WebkitOverflowScrolling: 'touch' }} key={svc.id}>
       {/* Sticky summary header */}
       <div style={{
         position: 'sticky', top: 0, zIndex: 1,
@@ -369,17 +386,24 @@ function DetailPane({ svc, creating, onSaveNew, onCancelNew, onUpdated, onDelete
               }}>WaveGuard</span>
             )}
           </h2>
-          <button
-            onClick={handleToggleActive}
-            type="button"
-            style={{
-              ...sBtn(svc.is_active ? D.green + '18' : D.red + '15', svc.is_active ? D.green : D.red),
+          {svc.is_archived ? (
+            <span style={{
+              ...sBtn('#71717A18', D.muted),
               fontSize: 11, padding: '4px 10px', whiteSpace: 'nowrap',
-            }}
-            title="Toggle active status"
-          >
-            {svc.is_active ? '● Active' : '○ Inactive'}
-          </button>
+            }}>Archived</span>
+          ) : (
+            <button
+              onClick={handleToggleActive}
+              type="button"
+              style={{
+                ...sBtn(svc.is_active ? D.green + '18' : D.red + '15', svc.is_active ? D.green : D.red),
+                fontSize: 11, padding: '4px 10px', whiteSpace: 'nowrap',
+              }}
+              title="Toggle active status"
+            >
+              {svc.is_active ? '● Active' : '○ Inactive'}
+            </button>
+          )}
         </div>
         <div style={{ display: 'flex', gap: 12, marginTop: 12, fontSize: 13, color: D.muted, flexWrap: 'wrap' }}>
           <span><b style={{ color: D.text, fontWeight: 500 }}>{billingLabel(svc.billing_type)}</b>{svc.frequency ? ` · ${frequencyLabel(svc.frequency)}` : ''}</span>
@@ -452,11 +476,19 @@ function DetailPane({ svc, creating, onSaveNew, onCancelNew, onUpdated, onDelete
           }}
         />
         <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${D.border}` }}>
-          <button
-            type="button"
-            onClick={handleDelete}
-            style={{ ...sBtn(D.red + '15', D.red), border: `1px solid ${D.red}33`, fontSize: 12 }}
-          >Delete service</button>
+          {svc.is_archived ? (
+            <button
+              type="button"
+              onClick={handleRestore}
+              style={{ ...sBtn(D.green + '18', D.green), border: `1px solid ${D.green}33`, fontSize: 12 }}
+            >Restore service</button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleDelete}
+              style={{ ...sBtn(D.red + '15', D.red), border: `1px solid ${D.red}33`, fontSize: 12 }}
+            >Archive service</button>
+          )}
         </div>
       </div>
     </div>
@@ -472,6 +504,7 @@ function CompactCategoryChips({ counts, selectedView, onChange }) {
     })),
     { key: 'view:waveguard', label: 'WaveGuard', count: counts.waveguard },
     ...(counts.inactive > 0 ? [{ key: 'view:inactive', label: 'Inactive', count: counts.inactive }] : []),
+    ...(counts.archived > 0 ? [{ key: 'view:archived', label: 'Archived', count: counts.archived }] : []),
   ];
   return (
     <div style={{
@@ -510,8 +543,8 @@ export default function ServiceLibraryPage() {
   const [search, setSearch] = useState('');
   const [showNew, setShowNew] = useState(false);
   const [toast, setToast] = useState('');
-  const [searchParams] = useSearchParams();
-  const [tab, setTab] = useState(searchParams.get('tab') || 'catalog');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [tab, setTabState] = useState(() => normalizeTab(searchParams.get('tab')));
   // 768-1023px tablet stacked mode (separate from <768 mobile drilldown)
   const [isTablet, setIsTablet] = useState(() => typeof window !== 'undefined' && window.innerWidth < 1024);
 
@@ -521,23 +554,37 @@ export default function ServiceLibraryPage() {
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
+  useEffect(() => {
+    setTabState(normalizeTab(searchParams.get('tab')));
+  }, [searchParams]);
+
+  const setTab = useCallback((nextTab) => {
+    const normalized = normalizeTab(nextTab);
+    setTabState(normalized);
+    const next = new URLSearchParams(searchParams);
+    if (normalized === 'discounts') next.set('tab', 'discounts');
+    else next.delete('tab');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
 
   const loadServices = useCallback(async () => {
     try {
       // Load all services once; filter client-side for snappier nav.
-      const data = await aFetch('/admin/services?limit=500');
+      const data = await aFetch('/admin/services?limit=500&include_archived=true');
       setServices(data.services || []);
     } catch { setServices([]); }
   }, []);
 
   useEffect(() => { loadServices(); }, [loadServices]);
 
-  if (isMobile) return <MobileServiceLibrary />;
+  if (isMobile) return <MobileServiceLibrary initialView={tab === 'discounts' ? 'discounts' : 'menu'} />;
 
   const counts = (() => {
-    const c = { all: 0, waveguard: 0, recurring: 0, onetime: 0, inactive: 0, byCategory: {} };
+    const c = { all: 0, waveguard: 0, recurring: 0, onetime: 0, inactive: 0, archived: 0, byCategory: {} };
     for (const s of services) {
+      if (s.is_archived) { c.archived++; continue; }
       if (s.is_active === false) { c.inactive++; continue; }
       c.all++;
       if (s.is_waveguard) c.waveguard++;
@@ -551,14 +598,15 @@ export default function ServiceLibraryPage() {
 
   const viewFiltered = (() => {
     let list = services;
-    if (selectedView === 'all') list = list.filter(s => s.is_active !== false);
-    else if (selectedView === 'view:waveguard') list = list.filter(s => s.is_waveguard && s.is_active !== false);
-    else if (selectedView === 'view:recurring') list = list.filter(s => s.billing_type === 'recurring' && s.is_active !== false);
-    else if (selectedView === 'view:onetime') list = list.filter(s => s.billing_type === 'one_time' && s.is_active !== false);
-    else if (selectedView === 'view:inactive') list = list.filter(s => s.is_active === false);
+    if (selectedView === 'all') list = list.filter(s => s.is_active !== false && !s.is_archived);
+    else if (selectedView === 'view:waveguard') list = list.filter(s => s.is_waveguard && s.is_active !== false && !s.is_archived);
+    else if (selectedView === 'view:recurring') list = list.filter(s => s.billing_type === 'recurring' && s.is_active !== false && !s.is_archived);
+    else if (selectedView === 'view:onetime') list = list.filter(s => s.billing_type === 'one_time' && s.is_active !== false && !s.is_archived);
+    else if (selectedView === 'view:inactive') list = list.filter(s => s.is_active === false && !s.is_archived);
+    else if (selectedView === 'view:archived') list = list.filter(s => s.is_archived);
     else if (selectedView.startsWith('category:')) {
       const cat = selectedView.slice('category:'.length);
-      list = list.filter(s => (s.category || 'other') === cat && s.is_active !== false);
+      list = list.filter(s => (s.category || 'other') === cat && s.is_active !== false && !s.is_archived);
     }
     if (search.trim()) {
       const q = search.trim().toLowerCase();
@@ -584,8 +632,12 @@ export default function ServiceLibraryPage() {
     loadServices();
   };
 
-  const handleUpdated = () => { loadServices(); showToast('Saved'); };
-  const handleDeleted = () => { setSelectedId(null); loadServices(); showToast('Deleted'); };
+  const handleUpdated = (message = 'Saved') => {
+    if (message === 'Restored') setSelectedView('all');
+    loadServices();
+    showToast(message);
+  };
+  const handleDeleted = () => { setSelectedId(null); loadServices(); showToast('Archived'); };
 
   const tabs = [
     { key: 'catalog', label: 'Service Catalog' },
@@ -684,8 +736,9 @@ export default function ServiceLibraryPage() {
           <div style={{
             display: 'grid',
             gridTemplateColumns: '210px 360px 1fr',
-            height: 'calc(100vh - 240px)',
-            minHeight: 600,
+            height: 'clamp(420px, calc(100dvh - 240px), 760px)',
+            minHeight: 0,
+            minWidth: 0,
             background: D.card,
             border: `1px solid ${D.border}`,
             borderRadius: 12,
@@ -696,6 +749,7 @@ export default function ServiceLibraryPage() {
               borderRight: `1px solid ${D.border}`,
               padding: '12px 8px',
               overflowY: 'auto',
+              minHeight: 0,
               background: D.railBg,
             }}>
               <RailSection title="Catalog">
@@ -722,6 +776,9 @@ export default function ServiceLibraryPage() {
                 {counts.inactive > 0 && (
                   <RailItem label="Inactive" count={counts.inactive} active={selectedView === 'view:inactive'} onClick={() => { setSelectedView('view:inactive'); setSelectedId(null); }} />
                 )}
+                {counts.archived > 0 && (
+                  <RailItem label="Archived" count={counts.archived} active={selectedView === 'view:archived'} onClick={() => { setSelectedView('view:archived'); setSelectedId(null); }} />
+                )}
               </RailSection>
             </div>
 
@@ -730,6 +787,7 @@ export default function ServiceLibraryPage() {
               borderRight: `1px solid ${D.border}`,
               display: 'flex', flexDirection: 'column',
               minWidth: 0,
+              minHeight: 0,
             }}>
               <div style={{ padding: 12, borderBottom: `1px solid ${D.border}` }}>
                 <input
@@ -742,7 +800,7 @@ export default function ServiceLibraryPage() {
                   {viewFiltered.length} {viewFiltered.length === 1 ? 'service' : 'services'}
                 </div>
               </div>
-              <div style={{ flex: 1, overflowY: 'auto' }}>
+              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
                 {viewFiltered.length === 0 ? (
                   <div style={{ padding: 32, textAlign: 'center', color: D.muted, fontSize: 13 }}>
                     No services found
@@ -761,7 +819,7 @@ export default function ServiceLibraryPage() {
             </div>
 
             {/* DETAIL */}
-            <div style={{ minWidth: 0, background: D.card }}>
+            <div style={{ minWidth: 0, minHeight: 0, height: '100%', background: D.card }}>
               <DetailPane
                 svc={showNew ? null : selectedSvc}
                 creating={showNew}

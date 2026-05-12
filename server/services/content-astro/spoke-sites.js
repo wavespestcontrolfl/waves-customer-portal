@@ -41,5 +41,52 @@ const SPOKE_SITES = [
 ];
 
 const SPOKE_SITE_KEYS = SPOKE_SITES.map((s) => s.key);
+const SPOKE_SITE_KEY_SET = new Set(SPOKE_SITE_KEYS);
 
-module.exports = { SPOKE_SITES, SPOKE_SITE_KEYS };
+function arrayFromValue(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) return parsed;
+    } catch { /* treat as a single domain below */ }
+    return value.trim() ? [value] : [];
+  }
+  return [];
+}
+
+function normalizeSpokeSiteKey(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return null;
+  try {
+    const parsed = new URL(text.includes('://') ? text : `https://${text}`);
+    return parsed.hostname.replace(/^www\./, '');
+  } catch {
+    return text.replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0] || null;
+  }
+}
+
+function normalizeSpokeSites(value) {
+  const out = [];
+  for (const item of arrayFromValue(value)) {
+    const key = normalizeSpokeSiteKey(item);
+    if (SPOKE_SITE_KEY_SET.has(key) && !out.includes(key)) out.push(key);
+  }
+  return out;
+}
+
+function invalidSpokeSites(value) {
+  const invalid = [];
+  for (const item of arrayFromValue(value)) {
+    const key = normalizeSpokeSiteKey(item);
+    if (key && !SPOKE_SITE_KEY_SET.has(key) && !invalid.includes(key)) invalid.push(key);
+  }
+  return invalid;
+}
+
+module.exports = {
+  SPOKE_SITES,
+  SPOKE_SITE_KEYS,
+  normalizeSpokeSites,
+  invalidSpokeSites,
+};

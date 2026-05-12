@@ -10,14 +10,14 @@
  * and must stay in sync with this file.
  */
 
-const CONSENT_VERSION = 'v2_2026-04-28';
+const CONSENT_VERSION = 'v4_2026-05-12';
 
 const CONSENT_TEXT = [
   'By checking this box, I authorize Waves Pest Control, LLC to save',
   'this payment method and charge it for future service visits and',
   'invoices as agreed, until I revoke authorization in writing or by',
-  'calling (941) 297-5749. Credit and debit card payments include a',
-  '3.99% processing fee. I can manage or remove saved cards anytime in',
+  'calling (941) 318-7612. Credit and debit card payments include a',
+  '3.99% processing fee. I can manage or remove saved payment methods anytime in',
   'my customer portal.',
 ].join(' ');
 

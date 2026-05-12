@@ -36,6 +36,7 @@ const ROUTE_CONTEXT_MAP = {
   '/admin/customers': 'customers',
   '/admin/estimates': 'estimates',
   '/admin/seo': 'seo',
+  '/admin/blog': 'seo',
   '/admin/ppc': 'seo',
   '/admin/social-media': 'seo',
   '/admin/inventory': 'procurement',
@@ -88,7 +89,8 @@ const CONTEXT_COLORS = {
 
 function detectContext(pathname) {
   if (ROUTE_CONTEXT_MAP[pathname]) return ROUTE_CONTEXT_MAP[pathname];
-  for (const [route, ctx] of Object.entries(ROUTE_CONTEXT_MAP)) {
+  const routes = Object.entries(ROUTE_CONTEXT_MAP).sort((a, b) => b[0].length - a[0].length);
+  for (const [route, ctx] of routes) {
     if (pathname.startsWith(route)) return ctx;
   }
   return 'dashboard';
