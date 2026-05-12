@@ -53,7 +53,6 @@ import AdminLoginPage from './pages/AdminLoginPage';
 import AdminLayout from './components/AdminLayoutV2';
 import TechLayout from './components/TechLayout';
 import InstallPrompt from './components/InstallPrompt';
-import AdminDashboardPage from './pages/admin/DashboardPageV2';
 import AdminReviewsPage from './pages/admin/ReviewsPage';
 import AdminDispatchPage from './pages/admin/AdminDispatchPage';
 import AdminInventoryPage from './pages/admin/InventoryPage';
@@ -98,6 +97,7 @@ function lazyWithRetry(factory) {
     }
   });
 }
+const AdminDashboardPage = lazyWithRetry(() => import('./pages/admin/DashboardPageV2'));
 const AdminEstimatePage = lazyWithRetry(() => import('./pages/admin/EstimatesPageV2'));
 const TechHomePage = lazyWithRetry(() => import('./pages/tech/TechHomePage'));
 const TechEstimatorPage = lazyWithRetry(() => import('./pages/tech/TechEstimatorPage'));
@@ -223,7 +223,7 @@ export default function App() {
           </Route>
           <Route path="/admin" element={<PageErrorBoundary><AdminLayout /></PageErrorBoundary>}>
             <Route index element={<Navigate to="dashboard" />} />
-            <Route path="dashboard" element={<AdminDashboardPage />} />
+            <Route path="dashboard" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading dashboard...</div>}><AdminDashboardPage /></Suspense>} />
             <Route path="customers" element={<AdminCustomersPage />} />
             <Route path="estimates" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading estimator...</div>}><AdminEstimatePage /></Suspense>} />
             {/* /admin/dispatch is now the canonical dispatcher surface

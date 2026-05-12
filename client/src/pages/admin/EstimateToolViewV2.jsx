@@ -111,7 +111,7 @@ const INPUT_CLS =
   'w-full h-10 px-3 text-14 text-zinc-900 bg-white border-hairline border-zinc-300 ' +
   'rounded-sm u-focus-ring placeholder:text-ink-disabled';
 
-const CONTACT_FIELDS = new Set(['customerId', 'customerName', 'customerPhone', 'customerEmail']);
+const CONTACT_FIELDS = new Set(['leadId', 'customerId', 'customerName', 'customerPhone', 'customerEmail']);
 const SEND_FIELDS = new Set(['scheduleSend', 'scheduledAt']);
 const DELIVERY_OPTION_FIELDS = new Set(['showOneTimeOption', 'billByInvoice']);
 
@@ -370,6 +370,7 @@ function SectionTitle({ children, className }) {
 // State, refs, effects, callbacks all copied verbatim from V1.
 // ═══════════════════════════════════════════════════════════════
 export default function EstimateToolViewV2({
+  initialLeadId = '',
   initialCustomerId = '',
   initialAddress = '',
   initialCustomerName = '',
@@ -448,6 +449,7 @@ export default function EstimateToolViewV2({
 
   // ── form state (verbatim from V1) ─────────────────────────────
   const [form, setForm] = useState({
+    leadId: initialLeadId || '',
     customerId: initialCustomerId || '',
     address: initialAddress || '',
     customerName: initialCustomerName || '',
@@ -480,6 +482,7 @@ export default function EstimateToolViewV2({
 
   useEffect(() => {
     const incoming = {
+      leadId: initialLeadId,
       customerId: initialCustomerId,
       address: initialAddress,
       customerName: initialCustomerName,
@@ -495,7 +498,7 @@ export default function EstimateToolViewV2({
       }
       return next;
     });
-  }, [initialAddress, initialCustomerEmail, initialCustomerId, initialCustomerName, initialCustomerPhone, initialServiceInterest]);
+  }, [initialAddress, initialCustomerEmail, initialCustomerId, initialCustomerName, initialCustomerPhone, initialLeadId, initialServiceInterest]);
 
   // ── live preview (verbatim from V1) ───────────────────────────
   const livePreview = useMemo(() => {
@@ -1050,6 +1053,7 @@ export default function EstimateToolViewV2({
           customerName: form.customerName || '',
           customerPhone: form.customerPhone || '',
           customerEmail: form.customerEmail || '',
+          leadId: form.leadId || null,
           customerId: form.customerId || existingCustomerMatch?.id || null,
           estimateData: { inputs: form, result: E },
           monthlyTotal: E.recurring?.grandTotal || 0,
@@ -1121,6 +1125,7 @@ export default function EstimateToolViewV2({
       bedArea: '', palmCount: '', treeCount: '',
       boracareSqft: '', preslabSqft: '',
       customerId: '',
+      leadId: '',
       customerName: '', customerPhone: '', customerEmail: '',
       leadServiceInterest: '',
       _boracareAuto: false, _preslabAuto: false,

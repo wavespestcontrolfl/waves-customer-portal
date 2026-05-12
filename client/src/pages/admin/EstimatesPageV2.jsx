@@ -40,6 +40,7 @@ import {
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const ROBOTO = "'Roboto', Arial, sans-serif";
+const ESTIMATE_PIPELINE_LIMIT = 500;
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -188,6 +189,7 @@ const V3_CHIPS = [
   { key: 'open', label: 'Open' },
   { key: 'closed', label: 'Closed' },
   { key: 'drafts', label: 'Drafts' },
+  { key: 'archived', label: 'Archived' },
 ];
 
 function v3ChipMatches(e, chip) {
@@ -195,6 +197,7 @@ function v3ChipMatches(e, chip) {
   if (chip === 'pricing_risk') return !!e.pricingRisk?.hasRisk;
   if (chip === 'missing_cogs') return (e.pricingRisk?.missingCogsCount || 0) > 0;
   if (chip === 'low_margin') return (e.pricingRisk?.lowMarginCount || 0) > 0;
+  if (chip === 'archived') return !!e.archivedAt;
   if (chip === 'drafts') return e.status === 'draft';
   if (chip === 'open') return e.status === 'scheduled' || e.status === 'sent' || e.status === 'viewed';
   if (chip === 'closed') return e.status === 'accepted' || e.status === 'declined';
@@ -759,6 +762,7 @@ function EstimatePipelineViewV2() {
   const navigate = useNavigate();
   const [estimates, setEstimates] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [customerPanelId, setCustomerPanelId] = useState(null);
   const [filter, setFilter] = useState('all');
   const [followUpTarget, setFollowUpTarget] = useState(null);
@@ -770,13 +774,20 @@ function EstimatePipelineViewV2() {
     // When the "Archived" filter is picked, ask the API for archived-only;
     // otherwise the default hides archived rows so closed/old work stops
     // cluttering the pipeline.
-    const qs = filter === 'archived' ? '?archived=only&limit=all&pricingRisk=1' : '?limit=all&pricingRisk=1';
+    const qs = filter === 'archived'
+      ? `?archived=only&limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`
+      : `?limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`;
+    setLoading(true);
+    setError(null);
     adminFetch(`/admin/estimates${qs}`)
       .then((d) => {
         setEstimates(d.estimates || []);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch((err) => {
+        setError(err);
+        setLoading(false);
+      });
   }, [filter]);
 
   useEffect(() => {
@@ -862,6 +873,16 @@ function EstimatePipelineViewV2() {
     return (
       <div className="p-10 text-center text-13 text-ink-secondary">
         Loading estimates…
+      </div>
+    );
+  }
+
+  if (error && estimates.length === 0) {
+    return (
+      <div className="p-10 text-center">
+        <div className="text-14 text-alert-fg mb-3">Failed to load estimates</div>
+        <div className="text-13 text-ink-tertiary mb-4">{error.message || String(error)}</div>
+        <Button variant="primary" onClick={() => refreshEstimates()}>Retry</Button>
       </div>
     );
   }
@@ -953,6 +974,12 @@ function EstimatePipelineViewV2() {
           initialFocus={auditTarget.focus || 'all'}
           onClose={() => setAuditTarget(null)}
         />
+      )}
+
+      {error && (
+        <div className="mb-4 border-hairline border-alert-fg bg-alert-bg text-alert-fg rounded-xs p-3 text-13">
+          Failed to refresh estimates: {error.message || String(error)}
+        </div>
       )}
 
       {/* Stats bar */}
@@ -1820,6 +1847,25 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
           <Trash2 size={16} strokeWidth={1.75} />
         </button>
       )}
+      {estimate.archivedAt && (
+        <button
+          type="button"
+          onClick={async (e) => {
+            e.stopPropagation();
+            try {
+              await adminFetch(`/admin/estimates/${estimate.id}/unarchive`, { method: 'POST' });
+              onDeleted?.(estimate.id);
+            } catch (err) {
+              alert('Unarchive failed: ' + err.message);
+            }
+          }}
+          aria-label={`Unarchive estimate for ${customerName}`}
+          title="Restore this estimate"
+          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+        >
+          <ArrowLeft size={16} strokeWidth={1.75} />
+        </button>
+      )}
     </div>
   );
 }
@@ -1831,6 +1877,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
   const v3Flag = useFeatureFlag('estimates_v2_status_pills');
   const [estimates, setEstimates] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
   const [dateFilter, setDateFilter] = useState('all');
@@ -1839,16 +1886,20 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
   const [sort, setSort] = useState('newest');
 
   const refreshEstimates = useCallback(() => {
-    adminFetch('/admin/estimates?limit=all&pricingRisk=1')
+    const qs = filter === 'archived'
+      ? `?archived=only&limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`
+      : `?limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`;
+    setError(null);
+    adminFetch(`/admin/estimates${qs}`)
       .then((d) => setEstimates(d.estimates || []))
-      .catch(() => {});
-  }, []);
+      .catch((err) => setError(err))
+      .finally(() => setLoading(false));
+  }, [filter]);
 
   useEffect(() => {
-    adminFetch('/admin/estimates?limit=all&pricingRisk=1')
-      .then((d) => { setEstimates(d.estimates || []); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, []);
+    setLoading(true);
+    refreshEstimates();
+  }, [refreshEstimates]);
 
   const groups = useMemo(() => {
     const now = Date.now();
@@ -1977,6 +2028,15 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
         </div>
       </div>
 
+      {error && (
+        <div className="mb-3 border-hairline border-alert-fg bg-alert-bg text-alert-fg rounded-xs p-3 text-13">
+          Failed to load estimates: {error.message || String(error)}
+          <button type="button" onClick={() => { setLoading(true); refreshEstimates(); }} className="ml-2 underline">
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Result count — mirrors Customers */}
       <div className="u-nums text-11 text-ink-tertiary text-right mb-3 mt-3">
         {flat.length} result{flat.length !== 1 ? 's' : ''}
@@ -2040,6 +2100,7 @@ export default function EstimatesPageV2() {
   const readLeadPrefill = useCallback((params) => {
     const legacyName = [params.get('first_name'), params.get('last_name')].filter(Boolean).join(' ').trim();
     return {
+      leadId: params.get('leadId') || '',
       customerId: params.get('customerId') || '',
       address: params.get('address') || '',
       customerName: params.get('customerName') || legacyName,
@@ -2053,7 +2114,7 @@ export default function EstimatesPageV2() {
   // row's "+ Estimate" quick action. Stays in state so consuming the params
   // (clearing the URL) doesn't blow away the wizard the user just landed on.
   const [prefill, setPrefill] = useState(() => readLeadPrefill(searchParams));
-  const hasPrefill = !!(prefill.customerId || prefill.address || prefill.customerName || prefill.customerPhone || prefill.customerEmail || prefill.serviceInterest);
+  const hasPrefill = !!(prefill.leadId || prefill.customerId || prefill.address || prefill.customerName || prefill.customerPhone || prefill.customerEmail || prefill.serviceInterest);
   const initialTab = TABS.some((t) => t.key === searchParams.get('tab')) ? searchParams.get('tab') : null;
 
   const [activeTab, setActiveTab] = useState(initialTab || (hasPrefill ? 'new' : 'leads'));
@@ -2069,7 +2130,7 @@ export default function EstimatesPageV2() {
   //      pull the values into prefill state, and switch into the create flow.
   useEffect(() => {
     const incoming = readLeadPrefill(searchParams);
-    const hasIncoming = !!(incoming.customerId || incoming.address || incoming.customerName || incoming.customerPhone || incoming.customerEmail || incoming.serviceInterest);
+    const hasIncoming = !!(incoming.leadId || incoming.customerId || incoming.address || incoming.customerName || incoming.customerPhone || incoming.customerEmail || incoming.serviceInterest);
     const tabParam = searchParams.get('tab');
     const hasTabParam = TABS.some((t) => t.key === tabParam);
     if (!hasIncoming && !hasTabParam) return;
@@ -2082,12 +2143,12 @@ export default function EstimatesPageV2() {
       if (tabParam === 'new') setMobileView('new');
     }
     const stripped = new URLSearchParams(searchParams);
-    ['customerId', 'address', 'customerName', 'customerPhone', 'customerEmail', 'serviceInterest', 'first_name', 'last_name', 'phone', 'email', 'service_interest', 'tab'].forEach((k) => stripped.delete(k));
+    ['leadId', 'customerId', 'address', 'customerName', 'customerPhone', 'customerEmail', 'serviceInterest', 'first_name', 'last_name', 'phone', 'email', 'service_interest', 'tab'].forEach((k) => stripped.delete(k));
     setSearchParams(stripped, { replace: true });
   }, [searchParams, setSearchParams, readLeadPrefill]);
 
   function clearPrefill() {
-    setPrefill({ customerId: '', address: '', customerName: '', customerPhone: '', customerEmail: '', serviceInterest: '' });
+    setPrefill({ leadId: '', customerId: '', address: '', customerName: '', customerPhone: '', customerEmail: '', serviceInterest: '' });
   }
 
   // Mobile: list (default) + create-estimate flow. Leads + Pricing Logic are
@@ -2106,6 +2167,7 @@ export default function EstimatesPageV2() {
             Back
           </button>
           <EstimateToolViewV2
+            initialLeadId={prefill.leadId}
             initialCustomerId={prefill.customerId}
             initialAddress={prefill.address}
             initialCustomerName={prefill.customerName}
@@ -2120,7 +2182,7 @@ export default function EstimatesPageV2() {
       <EstimatesMobileListView
         onNew={() => { clearPrefill(); setMobileView('new'); }}
         onCreateFromAddress={(addr) => {
-          setPrefill({ customerId: '', address: addr || '', customerName: '', customerPhone: '', customerEmail: '', serviceInterest: '' });
+          setPrefill({ leadId: '', customerId: '', address: addr || '', customerName: '', customerPhone: '', customerEmail: '', serviceInterest: '' });
           setMobileView('new');
         }}
       />
@@ -2190,6 +2252,7 @@ export default function EstimatesPageV2() {
       {activeTab === 'estimates' && <EstimatePipelineViewV2 />}
       {activeTab === 'new' && (
         <EstimateToolViewV2
+          initialLeadId={prefill.leadId}
           initialCustomerId={prefill.customerId}
           initialAddress={prefill.address}
           initialCustomerName={prefill.customerName}

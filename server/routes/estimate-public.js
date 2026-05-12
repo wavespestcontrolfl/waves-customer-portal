@@ -17,6 +17,10 @@ const rateLimit = require('express-rate-limit');
 const { generateEstimate } = require('../services/pricing-engine');
 const { PEST, ONE_TIME } = require('../services/pricing-engine/constants');
 const addonDefaults = require('../config/addon-defaults-by-frequency');
+const {
+  markLinkedLeadEstimateAccepted,
+  markLinkedLeadEstimateViewed,
+} = require('../services/lead-estimate-link');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
 
@@ -1532,6 +1536,11 @@ async function handleEstimateView(req, res, next) {
     // that show_one_time_option is handled by this rich SSR view.
     if (!estimate.viewed_at && !isAdminIp(requestIp) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
       await db('estimates').where({ id: estimate.id }).update({ viewed_at: db.fn.now(), status: 'viewed' });
+      try {
+        await markLinkedLeadEstimateViewed({ estimateId: estimate.id });
+      } catch (e) {
+        logger.warn(`[estimate-view] linked lead view status update failed: ${e.message}`);
+      }
 
       try {
         const NotificationService = require('../services/notification-service');
@@ -1847,6 +1856,19 @@ router.put('/:token/accept', async (req, res, next) => {
     });
 
     const { customerId, onboardingToken, reservationCommitted } = txResult;
+    if (customerId) {
+      try {
+        await markLinkedLeadEstimateAccepted({
+          estimateId: estimate.id,
+          customerId,
+          monthlyValue: treatAsOneTime ? null : effectiveMonthlyTotal,
+          initialServiceValue: effectiveOneTimeTotal || estimate.onetime_total || null,
+          waveguardTier: estimate.waveguard_tier || null,
+        });
+      } catch (e) {
+        logger.error(`[estimate-accept] Linked lead conversion failed for estimate ${estimate.id}: ${e.message}`);
+      }
+    }
 
     // Notify office
     if (customerId) {
@@ -3312,6 +3334,11 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         viewed_at: db.fn.now(),
         status: 'viewed',
       }).catch((e) => logger.error(`[estimate-data] first-view flip failed: ${e.message}`));
+      try {
+        await markLinkedLeadEstimateViewed({ estimateId: estimate.id });
+      } catch (e) {
+        logger.warn(`[estimate-data] linked lead view status update failed: ${e.message}`);
+      }
 
       try {
         const NotificationService = require('../services/notification-service');

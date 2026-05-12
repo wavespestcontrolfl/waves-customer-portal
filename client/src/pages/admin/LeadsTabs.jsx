@@ -46,6 +46,7 @@ const LEAD_TYPES = ['inbound_call','inbound_sms','form_submission','chat_widget'
 function leadEstimateParams(lead) {
   const params = new URLSearchParams({ tab: 'new' });
   const customerName = [lead.first_name, lead.last_name].filter(Boolean).join(' ').trim();
+  if (lead.id) params.set('leadId', lead.id);
   if (customerName) params.set('customerName', customerName);
   if (lead.phone) params.set('customerPhone', lead.phone);
   if (lead.email) params.set('customerEmail', lead.email);
@@ -196,14 +197,18 @@ export function LeadsSection() {
   const [lostReasons, setLostReasons] = useState([]);
   const [expandedLead, setExpandedLead] = useState(null);
   const [leadActivities, setLeadActivities] = useState([]);
+  const [leadActivitiesLoading, setLeadActivitiesLoading] = useState(false);
+  const [leadActivitiesError, setLeadActivitiesError] = useState(null);
   const [showModal, setShowModal] = useState(null);
   const [formData, setFormData] = useState({});
   const [filters, setFilters] = useState({ status:'', search:'', sort:'first_contact_at', page:1 });
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(null);
   const [techs, setTechs] = useState([]);
 
   const loadLeads = useCallback(async () => {
     try {
+      setLoadError(null);
       const params = new URLSearchParams();
       if (filters.status) params.set('status', filters.status);
       if (filters.search) params.set('search', filters.search);
@@ -213,25 +218,28 @@ export function LeadsSection() {
       const data = await adminFetch(`/admin/leads?${params}`);
       setLeads(data.leads || []);
       setLeadsTotal(data.total || 0);
-    } catch (e) { console.error('loadLeads', e); }
+    } catch (e) { console.error('loadLeads', e); setLoadError(e); }
   }, [filters]);
 
   const loadSources = useCallback(async () => {
     try {
+      setLoadError(null);
       const data = await adminFetch('/admin/leads/sources');
       setSources(data.sources || []);
-    } catch (e) { console.error('loadSources', e); }
+    } catch (e) { console.error('loadSources', e); setLoadError(e); }
   }, []);
 
   const loadCampaigns = useCallback(async () => {
     try {
+      setLoadError(null);
       const data = await adminFetch('/admin/leads/campaigns');
       setCampaigns(data.campaigns || []);
-    } catch (e) { console.error('loadCampaigns', e); }
+    } catch (e) { console.error('loadCampaigns', e); setLoadError(e); }
   }, []);
 
   const loadAnalytics = useCallback(async () => {
     try {
+      setLoadError(null);
       const [ov, fn, bs, bc, rb, lr] = await Promise.all([
         adminFetch('/admin/leads/analytics/overview'),
         adminFetch('/admin/leads/analytics/funnel'),
@@ -246,7 +254,7 @@ export function LeadsSection() {
       setByChannel(bc.channels || []);
       setResponseBuckets(rb.buckets || []);
       setLostReasons(lr.reasons || []);
-    } catch (e) { console.error('loadAnalytics', e); }
+    } catch (e) { console.error('loadAnalytics', e); setLoadError(e); }
   }, []);
 
   const loadTechs = useCallback(async () => {
@@ -270,17 +278,29 @@ export function LeadsSection() {
   const expandLead = async (lead) => {
     if (expandedLead === lead.id) { setExpandedLead(null); return; }
     setExpandedLead(lead.id);
+    setLeadActivities([]);
+    setLeadActivitiesError(null);
+    setLeadActivitiesLoading(true);
     try {
       const data = await adminFetch(`/admin/leads/${lead.id}`);
       setLeadActivities(data.activities || []);
-    } catch (e) { setLeadActivities([]); }
+    } catch (e) { setLeadActivities([]); setLeadActivitiesError(e); }
+    finally { setLeadActivitiesLoading(false); }
   };
 
   const updateLeadStatus = async (leadId, status) => {
     try {
       await adminFetch(`/admin/leads/${leadId}`, { method:'PUT', body:{ status } });
       loadLeads();
-    } catch (e) { console.error(e); }
+    } catch (e) { alert('Status update failed: ' + e.message); }
+  };
+
+  const retryCurrentTab = () => {
+    setLoadError(null);
+    if (tab === 'pipeline') { loadLeads(); loadAnalytics(); }
+    if (tab === 'sources') loadSources();
+    if (tab === 'campaigns') loadCampaigns();
+    if (tab === 'analytics') loadAnalytics();
   };
 
   const submitForm = async () => {
@@ -296,6 +316,11 @@ export function LeadsSection() {
         await adminFetch('/admin/leads/campaigns', { method:'POST', body:formData });
         loadCampaigns();
       } else if (showModal === 'convert') {
+        if (!formData.customer_id) {
+          alert('Customer ID is required to convert a lead.');
+          setLoading(false);
+          return;
+        }
         await adminFetch(`/admin/leads/${formData.leadId}/convert`, { method:'POST', body:formData });
         loadLeads();
       } else if (showModal === 'lost') {
@@ -433,7 +458,9 @@ export function LeadsSection() {
                       <div style={{ flex:'1 1 300px' }}>
                         <h4 style={{ margin:'0 0 8px', color:C.heading, fontSize:14 }}>Activity Timeline</h4>
                         <div style={{ maxHeight:200, overflowY:'auto' }}>
-                          {leadActivities.length === 0 && <div style={{ color:C.muted, fontSize:12 }}>No activities logged</div>}
+                          {leadActivitiesLoading && <div style={{ color:C.muted, fontSize:12 }}>Loading activities...</div>}
+                          {!leadActivitiesLoading && leadActivitiesError && <div style={{ color:C.red, fontSize:12 }}>Activity failed to load: {leadActivitiesError.message || String(leadActivitiesError)}</div>}
+                          {!leadActivitiesLoading && !leadActivitiesError && leadActivities.length === 0 && <div style={{ color:C.muted, fontSize:12 }}>No activities logged</div>}
                           {leadActivities.map(a => <div key={a.id} style={{ fontSize:12, color:C.muted, padding:'4px 0',
                             borderLeft:`2px solid ${C.border}`, paddingLeft:12, marginLeft:4, marginBottom:4 }}>
                             <Badge label={a.activity_type} color={C.teal} style={{ marginRight:8 }} />
@@ -891,7 +918,7 @@ export function LeadsSection() {
     </Modal>;
 
     if (showModal === 'convert') return <Modal title="Convert to Customer" onClose={()=>setShowModal(null)}>
-      <Input label="Customer ID (if existing)" value={formData.customer_id} onChange={v=>setFormData(f=>({...f,customer_id:v}))} placeholder="UUID or leave blank" />
+      <Input label="Customer ID (required)" value={formData.customer_id} onChange={v=>setFormData(f=>({...f,customer_id:v}))} placeholder="Existing customer UUID" />
       <Input label="Monthly Value ($)" value={formData.monthly_value} onChange={v=>setFormData(f=>({...f,monthly_value:v}))} type="number" />
       <Input label="Initial Service Value ($)" value={formData.initial_service_value} onChange={v=>setFormData(f=>({...f,initial_service_value:v}))} type="number" />
       <Input label="WaveGuard Tier" value={formData.waveguard_tier} onChange={v=>setFormData(f=>({...f,waveguard_tier:v}))}
@@ -978,6 +1005,11 @@ export function LeadsSection() {
       { key:'campaigns', label:'Campaigns' },
       { key:'analytics', label:'ROI Analytics' },
     ]} active={tab} onChange={setTab} />
+
+    {loadError && <div style={{ border:`1px solid ${C.red}44`, backgroundColor:C.red+'0f', color:C.red, borderRadius:8, padding:'10px 12px', fontSize:13, marginBottom:16 }}>
+      Pipeline data failed to load: {loadError.message || String(loadError)}
+      <button type="button" onClick={retryCurrentTab} style={{ marginLeft:10, border:`1px solid ${C.red}66`, background:'transparent', color:C.red, borderRadius:6, padding:'3px 8px', cursor:'pointer', fontSize:12 }}>Retry</button>
+    </div>}
 
     {tab === 'pipeline' && renderPipeline()}
     {tab === 'sources' && renderSources()}

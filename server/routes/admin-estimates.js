@@ -15,6 +15,12 @@ const {
   getLatestEstimatePricingAuditSnapshot,
   saveEstimatePricingAuditSnapshot,
 } = require('../services/estimate-pricing-audit');
+const {
+  attachLeadToEstimate,
+  markLinkedLeadEstimateSent,
+} = require('../services/lead-estimate-link');
+
+const ESTIMATE_LIST_LIMIT = 500;
 
 async function renderTemplate(templateKey, vars, fallback) {
   try {
@@ -31,7 +37,8 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // POST /api/admin/estimates — create estimate
 router.post('/', async (req, res, next) => {
   try {
-    const { customerId, estimateData, address, customerName, customerPhone, customerEmail, monthlyTotal, annualTotal, onetimeTotal, waveguardTier, notes, satelliteUrl, showOneTimeOption, billByInvoice } = req.body;
+    const { customerId, leadId, estimateData, address, customerName, customerPhone, customerEmail, monthlyTotal, annualTotal, onetimeTotal, waveguardTier, notes, satelliteUrl, showOneTimeOption, billByInvoice } = req.body;
+    const linkedLeadId = typeof leadId === 'string' ? leadId.trim() : leadId;
     const deliveryError = validateEstimateDeliveryOptions({
       showOneTimeOption: !!showOneTimeOption,
       billByInvoice: !!billByInvoice,
@@ -49,19 +56,36 @@ router.post('/', async (req, res, next) => {
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 7);
 
-    const [estimate] = await db('estimates').insert({
-      customer_id: customerId || null,
-      created_by_technician_id: req.technicianId,
-      estimate_data: estimateData ? JSON.stringify(estimateData) : null,
-      address, customer_name: customerName, customer_phone: customerPhone, customer_email: customerEmail,
-      monthly_total: monthlyTotal, annual_total: annualTotal, onetime_total: onetimeTotal,
-      waveguard_tier: waveguardTier, token, expires_at: expiresAt, notes, satellite_url: satelliteUrl,
-      show_one_time_option: !!showOneTimeOption,
-      bill_by_invoice: !!billByInvoice,
-    }).returning('*');
+    const estimate = await db.transaction(async (trx) => {
+      const [created] = await trx('estimates').insert({
+        customer_id: customerId || null,
+        created_by_technician_id: req.technicianId,
+        estimate_data: estimateData ? JSON.stringify(estimateData) : null,
+        address, customer_name: customerName, customer_phone: customerPhone, customer_email: customerEmail,
+        monthly_total: monthlyTotal, annual_total: annualTotal, onetime_total: onetimeTotal,
+        waveguard_tier: waveguardTier, token, expires_at: expiresAt, notes, satellite_url: satelliteUrl,
+        show_one_time_option: !!showOneTimeOption,
+        bill_by_invoice: !!billByInvoice,
+      }).returning('*');
+
+      if (linkedLeadId) {
+        await attachLeadToEstimate({
+          database: trx,
+          leadId: linkedLeadId,
+          estimateId: created.id,
+          estimate: created,
+          technician: req.technician,
+        });
+      }
+
+      return created;
+    });
 
     res.status(201).json({ id: estimate.id, token, viewUrl: `https://portal.wavespestcontrol.com/estimate/${token}` });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
 });
 
 // POST /api/admin/estimates/:id/send — send via SMS and/or email (immediate or scheduled)
@@ -246,6 +270,12 @@ async function sendEstimateNow(estimate, sendMethod) {
   await db('estimates').where({ id: estimate.id }).update({ status: 'sent', sent_at: db.fn.now(), scheduled_at: null, send_method: null });
 
   try {
+    await markLinkedLeadEstimateSent({ estimateId: estimate.id, sendMethod });
+  } catch (e) {
+    logger.warn(`[admin-estimates] linked lead status update failed for estimate ${estimate.id}: ${e.message}`);
+  }
+
+  try {
     const sentEstimate = await db('estimates').where({ id: estimate.id }).first();
     await saveEstimatePricingAuditSnapshot(sentEstimate || estimate, {
       trigger: 'send',
@@ -323,7 +353,7 @@ router.get('/', async (req, res, next) => {
 
     let estimates;
     if (limit === 'all') {
-      estimates = await query;
+      estimates = await query.limit(ESTIMATE_LIST_LIMIT);
     } else {
       const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 500);
       const pg = Math.max(parseInt(page, 10) || 1, 1);

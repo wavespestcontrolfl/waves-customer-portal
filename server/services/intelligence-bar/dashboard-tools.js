@@ -432,23 +432,35 @@ async function getMrrTrend(months) {
     });
   }
 
+  function customersActiveAsOf(endIso) {
+    return excludeInternalCustomers(
+      db({ c: 'customers' })
+        .where('c.created_at', '<=', endIso)
+        .where('c.monthly_rate', '>', 0)
+        .where(function () {
+          this.where('c.active', true).orWhereNotNull('c.churned_at');
+        })
+        .where(function () {
+          this.whereNull('c.deleted_at').orWhere('c.deleted_at', '>', endIso);
+        })
+        .where(function () {
+          this.whereNull('c.churned_at').orWhere('c.churned_at', '>', endIso);
+        }),
+    );
+  }
+
   // Batch: one query per month, all in parallel (instead of sequential awaits)
   const settled = await Promise.all(windows.map(async w => {
+    const endIso = w.end.toISOString();
     const [mrrRow, byTier] = await Promise.all([
-      db('customers')
-        .where({ active: true })
-        .where('created_at', '<=', w.end.toISOString())
-        .where('monthly_rate', '>', 0)
+      customersActiveAsOf(endIso)
         .select(
-          db.raw('SUM(monthly_rate) as mrr'),
+          db.raw('SUM(c.monthly_rate) as mrr'),
           db.raw('COUNT(*) as customer_count'),
         ).first(),
-      db('customers')
-        .where({ active: true })
-        .where('created_at', '<=', w.end.toISOString())
-        .where('monthly_rate', '>', 0)
-        .select('waveguard_tier', db.raw('SUM(monthly_rate) as mrr'), db.raw('COUNT(*) as count'))
-        .groupBy('waveguard_tier'),
+      customersActiveAsOf(endIso)
+        .select('c.waveguard_tier', db.raw('SUM(c.monthly_rate) as mrr'), db.raw('COUNT(*) as count'))
+        .groupBy('c.waveguard_tier'),
     ]);
     return {
       month: w.label,

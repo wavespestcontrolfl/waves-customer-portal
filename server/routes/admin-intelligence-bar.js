@@ -67,6 +67,10 @@ const EMAIL_TOOL_NAMES = new Set(EMAIL_TOOLS.map(t => t.name));
 const BANKING_TOOL_NAMES = new Set(BANKING_TOOLS.map(t => t.name));
 const ESTIMATE_TOOL_NAMES = new Set(ESTIMATE_TOOLS.map(t => t.name));
 
+function isNonAdminDashboardRequest(req) {
+  return req.techRole !== 'admin';
+}
+
 // Context-specific system prompt extensions
 const CONTEXT_PROMPTS = {
   schedule: `
@@ -640,6 +644,9 @@ router.post('/query', async (req, res, next) => {
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ error: 'Prompt is required' });
     }
+    if (context === 'dashboard' && isNonAdminDashboardRequest(req)) {
+      return res.status(403).json({ error: 'Admin access required for dashboard intelligence' });
+    }
     if (context === 'banking' && req.techRole !== 'admin') {
       return res.status(403).json({ error: 'Admin access required for banking intelligence' });
     }
@@ -714,7 +721,11 @@ router.post('/query', async (req, res, next) => {
         let circuitOpen = false;
         let errorMessage = null;
         const toolStartedAt = Date.now();
-        if (adminToolBreaker.isTripped()) {
+        if (DASHBOARD_TOOL_NAMES.has(toolUse.name) && isNonAdminDashboardRequest(req)) {
+          result = { error: 'Admin access required for dashboard intelligence' };
+          failed = true;
+          errorMessage = result.error;
+        } else if (adminToolBreaker.isTripped()) {
           result = adminToolBreaker.fastFailResult();
           failed = true;
           circuitOpen = true;
@@ -810,6 +821,9 @@ router.post('/execute', async (req, res, next) => {
     if (!action) {
       return res.status(400).json({ error: 'Action is required' });
     }
+    if (DASHBOARD_TOOL_NAMES.has(action) && isNonAdminDashboardRequest(req)) {
+      return res.status(403).json({ error: 'Admin access required for dashboard actions' });
+    }
     if (BANKING_TOOL_NAMES.has(action) && req.techRole !== 'admin') {
       return res.status(403).json({ error: 'Admin access required for banking actions' });
     }
@@ -837,6 +851,9 @@ router.post('/execute', async (req, res, next) => {
 
 router.get('/quick-actions', async (req, res) => {
   const { context } = req.query;
+  if (context === 'dashboard' && isNonAdminDashboardRequest(req)) {
+    return res.status(403).json({ error: 'Admin access required for dashboard intelligence' });
+  }
   if (context === 'banking' && req.techRole !== 'admin') {
     return res.status(403).json({ error: 'Admin access required for banking intelligence' });
   }
