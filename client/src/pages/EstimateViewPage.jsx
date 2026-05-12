@@ -134,7 +134,7 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
           background: mode === 'recurring' ? COLORS.wavesBlue : 'transparent',
           color: mode === 'recurring' ? COLORS.white : COLORS.textBody,
         }}
-      >Recurring</button>
+      >Recurring Pest Control</button>
       <button
         type="button"
         onClick={() => onChange('one_time')}
@@ -143,7 +143,7 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
           background: mode === 'one_time' ? COLORS.wavesBlue : 'transparent',
           color: mode === 'one_time' ? COLORS.white : COLORS.textBody,
         }}
-      >One-time</button>
+      >One-Time Pest Control</button>
     </div>
   );
 }
@@ -163,10 +163,9 @@ function OneTimePriceCard({ oneTimePrice }) {
         {fmtMoney(oneTimePrice)}
         <span style={{ fontSize: 18, fontWeight: 500, color: COLORS.textBody, marginLeft: 6 }}>one-time</span>
       </div>
-      <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 12, lineHeight: 1.55 }}>
         One visit, pay on service day. No recurring schedule, no tier discount.
-        Most pest problems come back — if this single treatment doesn't resolve it,
-        switch to recurring and we'll credit this visit toward your first month.
+        Includes a 30-day callback period if pests return after this visit.
       </div>
     </div>
   );
@@ -554,7 +553,7 @@ export default function EstimateViewPage() {
       const r = await fetch(`${API_BASE}/public/estimates/${token}/reserve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ slotId: selectedSlotId }),
+        body: JSON.stringify({ slotId: selectedSlotId, serviceMode }),
       });
       if (r.status === 409) {
         const body = await r.json().catch(() => ({}));
@@ -581,7 +580,7 @@ export default function EstimateViewPage() {
       setError(err.message);
       setCtaPhase('configure');
     }
-  }, [loadEstimate, selectedSlotId, token]);
+  }, [loadEstimate, selectedSlotId, serviceMode, token]);
 
   const handleConfirm = useCallback(async () => {
     setCtaPhase('submitting');
@@ -723,7 +722,6 @@ export default function EstimateViewPage() {
 
               <PriceCard
                 frequency={currentFrequency}
-                anchorOneTimePrice={pricing.anchorOneTimePrice}
                 waveGuardTier={pricing.waveGuardTier}
               />
 
