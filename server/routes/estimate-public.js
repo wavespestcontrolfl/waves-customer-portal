@@ -330,7 +330,6 @@ const PERKS = [
   'Locked-in pricing for 12 months',
   'Free annual termite inspection',
   '15% off any one-time treatment',
-  'Senior / military / first-responder discount stacking',
   'One point of contact — no call-center runaround',
   'Text your tech directly for quick questions',
   'Customer portal for service history, invoices, and payments',
@@ -453,14 +452,18 @@ function renderPage(token, estimate, estData) {
   const dayPrice = Math.round((monthlyTotal / 30) * 100) / 100;
 
   const inputs = estData?.inputs || {};
+  const R = estResult?.results || {};
   const homeSqFt = Number(inputs.homeSqFt) || Number(estResult?.property?.footprint * (Number(inputs.stories) || 1)) || null;
   const lotSqFt = Number(inputs.lotSqFt) || Number(estResult?.property?.lotSqFt) || null;
   const hasLawn = recurring.some((s) => String(s.name || '').toLowerCase().includes('lawn'));
   const lawnSqFt = hasLawn ? (Number(inputs.lawnSqFt) || Number(estResult?.property?.lawnSqFt) || null) : null;
+  const hasTermiteBait = recurring.some((s) => isTermiteBaitServiceName(s.name || s.label || s.service));
+  const termitePerimeterFt = Number(R.tmBait?.perim) || null;
   const propertyLine = [
     homeSqFt ? `${Math.round(homeSqFt).toLocaleString()} sq ft home` : null,
     lotSqFt ? `${Math.round(lotSqFt).toLocaleString()} sq ft lot` : null,
     lawnSqFt ? `${Math.round(lawnSqFt).toLocaleString()} sq ft treatable lawn` : null,
+    hasTermiteBait && termitePerimeterFt ? `${Math.round(termitePerimeterFt).toLocaleString()} linear ft termite perimeter` : null,
   ].filter(Boolean).join(' \u00B7 ');
 
   // Bundle upsell ladder:
@@ -494,7 +497,6 @@ function renderPage(token, estimate, estData) {
   // "Quarterly Pest Control + Monthly Lawn Care". Per-service frequency
   // comes from the engine's R block (estResult.results); falls back to the
   // bare name when we can't resolve a clean frequency label.
-  const R = estResult?.results || {};
   const visitsToLabel = (v) => {
     const n = Number(v);
     if (n === 12) return 'Monthly';
@@ -518,6 +520,7 @@ function renderPage(token, estimate, estData) {
       return sel?.v;
     }
     if (n.includes('tree') && Array.isArray(R.ts)) return R.ts[0]?.v;
+    if (n.includes('termite') && n.includes('bait')) return 4;
     return null;
   };
   const labelWithFreq = (name) => {
@@ -534,6 +537,7 @@ function renderPage(token, estimate, estData) {
     if (label === 'quarterly') return 'quarterly';
     return pestRecurring ? 'quarterly' : null;
   })();
+  const selectedRecurringFrequencyKey = selectedPestFrequencyKey || (hasTermiteBait ? 'quarterly' : null);
   const pestChoiceLabel = pestRecurring && canChooseOneTime
     ? `${pestTierCadence ? `${pestTierCadence} ` : ''}Pest Control or One-Time Pest Control`
     : null;
@@ -542,10 +546,10 @@ function renderPage(token, estimate, estData) {
   const quotedServicesLabel = pestChoiceLabel || (quotedServiceNames.length
     ? quotedServiceNames.join(' + ')
     : (quotedOneTimeNames.length ? quotedOneTimeNames.join(' + ') : `WaveGuard ${tier}`));
-  const recurringPricePeriodLabel = pricePeriodLabelForFrequencyKey(selectedPestFrequencyKey);
-  const recurringDisplayTotal = intervalPriceFromMonthly(monthlyTotal, selectedPestFrequencyKey);
-  const recurringDisplayBase = intervalPriceFromMonthly(baseMonthly, selectedPestFrequencyKey);
-  const recurringDisplaySavings = intervalPriceFromMonthly(savingsPerMo, selectedPestFrequencyKey);
+  const recurringPricePeriodLabel = pricePeriodLabelForFrequencyKey(selectedRecurringFrequencyKey);
+  const recurringDisplayTotal = intervalPriceFromMonthly(monthlyTotal, selectedRecurringFrequencyKey);
+  const recurringDisplayBase = intervalPriceFromMonthly(baseMonthly, selectedRecurringFrequencyKey);
+  const recurringDisplaySavings = intervalPriceFromMonthly(savingsPerMo, selectedRecurringFrequencyKey);
 
   // WaveGuard Membership — recurring pest plans carry a $99 setup fee
   // unless the customer prepays 12 months. Older v1 estimates may not have
@@ -569,7 +573,8 @@ function renderPage(token, estimate, estData) {
     if (it.service === 'waveguard_setup' || label.includes('waveguard setup') || label.includes('waveguard membership')) return '';
     const price = Number(it.price || 0);
     if (price <= 0) return '';
-    return `<tr><td>${escapeHtml(it.name)}${it.detail ? `<div class="sub">${escapeHtml(it.detail)}</div>` : ''}</td><td style="text-align:right">${fmtMoney(price)}</td></tr>`;
+    const detail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
+    return `<tr><td>${escapeHtml(it.name)}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}</td><td style="text-align:right">${fmtMoney(price)}</td></tr>`;
   }).filter(Boolean).join('');
   const hasRealOneTime = realOneTimeRows.length > 0;
   const oneTimeRows = realOneTimeRows;
@@ -966,8 +971,8 @@ ${shellQuestionsBar()}
 <script>
   const TOKEN = ${JSON.stringify(token)};
   const API = '/api/estimates/' + TOKEN;
-  const DEFAULT_RECURRING_FREQUENCY = ${JSON.stringify(selectedPestFrequencyKey)};
-  const BILLING_INTERVAL_MONTHS = ${JSON.stringify(billingIntervalMonthsForFrequencyKey(selectedPestFrequencyKey))};
+  const DEFAULT_RECURRING_FREQUENCY = ${JSON.stringify(selectedRecurringFrequencyKey)};
+  const BILLING_INTERVAL_MONTHS = ${JSON.stringify(billingIntervalMonthsForFrequencyKey(selectedRecurringFrequencyKey))};
   const PRICE_PERIOD_LABEL = ${JSON.stringify(recurringPricePeriodLabel)};
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 });
   const intervalPrice = (monthly) => Math.round(Number(monthly || 0) * BILLING_INTERVAL_MONTHS * 100) / 100;
@@ -2650,7 +2655,10 @@ function normalizeOneTimeBreakdown(estData) {
 
       const label = String(item.label || item.displayName || item.name || item.service || 'One-time service').trim();
       const service = item.service || (ROACH_NAME_RX.test(label) ? 'pest_initial_roach' : null);
-      const detail = item.detail || item.det || item.note || item.frequency || null;
+      const rawDetail = item.detail || item.det || item.note || item.frequency || null;
+      const detail = isTermiteInstallItem({ ...item, label, service })
+        ? formatTermiteBaitDetail(result.results?.tmBait, rawDetail)
+        : rawDetail;
       const key = [service || '', label, amount, detail || ''].join('|');
       if (seen.has(key)) continue;
       seen.add(key);
@@ -2709,7 +2717,9 @@ function normalizeOneTimeBreakdown(estData) {
         service: `${item.service || 'service'}_installation`,
         name: `${item.label || item.displayName || item.name || item.service || 'Service'} installation`,
         price: Number(item.installation.price),
-        detail: item.stations ? `${item.stations} stations` : null,
+        detail: isTermiteBaitServiceName(item.service)
+          ? formatTermiteBaitDetail(item, item.stations ? `${item.stations} stations` : null)
+          : (item.stations ? `${item.stations} stations` : null),
       }));
     addRows(installationRows);
   }
@@ -2993,6 +3003,7 @@ function readV1Shape(estData) {
   return {
     pestTiers,
     services,
+    tmBait: innerResults?.tmBait || result.tmBait || null,
     discount: Number(recurring.discount) || 0,
     waveGuardTier: recurring.waveGuardTier || recurring.tier || null,
     oneTimeTotal: Number(result.oneTime?.total) || 0,
@@ -3018,6 +3029,40 @@ function shapePreferenceAddOns(prefs, pestTier) {
 
 function isPestServiceName(name) {
   return /pest/i.test(String(name || ''));
+}
+
+function isTermiteBaitServiceName(name) {
+  const n = String(name || '').toLowerCase();
+  return n.includes('termite') && n.includes('bait');
+}
+
+function isTermiteInstallItem(item) {
+  const n = String(item?.name || item?.label || item?.service || '').toLowerCase();
+  return n.includes('termite_bait_installation')
+    || (n.includes('termite') && n.includes('install'))
+    || (n.includes('advance') && n.includes('install'))
+    || (n.includes('trelona') && n.includes('install'));
+}
+
+function formatTermiteBaitDetail(tmBait, existingDetail = '') {
+  const existing = String(existingDetail || '').trim();
+  const stations = Number(tmBait?.sta || tmBait?.stations || 0);
+  const perimeter = Number(tmBait?.perim || tmBait?.perimeter || 0);
+  const parts = [];
+  if (existing) {
+    parts.push(existing);
+  } else if (Number.isFinite(stations) && stations > 0) {
+    parts.push(`${Math.round(stations).toLocaleString()} stations`);
+  }
+  if (
+    Number.isFinite(perimeter)
+    && perimeter > 0
+    && !existing.toLowerCase().includes('linear')
+    && !existing.includes(String(Math.round(perimeter)))
+  ) {
+    parts.push(`${Math.round(perimeter).toLocaleString()} linear ft perimeter`);
+  }
+  return parts.join(' \u00B7 ') || null;
 }
 
 function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
@@ -3052,7 +3097,9 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
   const included = includedServices.map((svc) => ({
     key: (svc?.name || '').toLowerCase().replace(/\s+/g, '_') || 'service',
     label: svc?.displayName || svc?.name || 'Service',
-    detail: svc?.detail || null,
+    detail: isTermiteBaitServiceName(svc?.name || svc?.label || svc?.service)
+      ? formatTermiteBaitDetail(v1.tmBait, svc?.detail)
+      : (svc?.detail || null),
     includedAtThisFrequency: true,
   }));
 
