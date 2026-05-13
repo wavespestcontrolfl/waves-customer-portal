@@ -15,7 +15,7 @@ const W = {
   blue: '#065A8C', blueBright: '#009CDE', blueDeeper: '#1B2C5B',
   green: '#16A34A', greenLight: '#DCFCE7',
   navy: '#0F172A', textBody: '#334155', textCaption: '#64748B',
-  white: '#FFFFFF', offWhite: '#F1F5F9', sand: '#FEF7E0', border: '#CBD5E1',
+  white: '#FFFFFF', offWhite: '#F1F5F9', sand: '#FEF7E0', border: '#E2E8F0', warmBorder: '#E7E2D7',
 };
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -39,7 +39,7 @@ function formatSlotDate(date, windowStart, windowEnd) {
 
 function SlotCard({ slot, isSelected, onSelect }) {
   const { day, window } = formatSlotDate(slot.date, slot.windowStart, slot.windowEnd);
-  const techLine = slot.techFirstName ? `with ${slot.techFirstName}` : 'tech TBD';
+  const startTime = String(window || '').split('–')[0] || window;
 
   return (
     <button
@@ -47,19 +47,24 @@ function SlotCard({ slot, isSelected, onSelect }) {
       onClick={() => onSelect(slot.slotId)}
       style={{
         textAlign: 'left', width: '100%',
-        background: isSelected ? W.sand : W.white,
-        border: `2px solid ${isSelected ? W.blueBright : W.border}`,
-        borderRadius: 14, padding: 16,
+        background: isSelected ? W.blueDeeper : W.white,
+        color: isSelected ? W.white : W.blueDeeper,
+        border: `2px solid ${isSelected ? W.blueDeeper : W.border}`,
+        borderRadius: 12, padding: '16px 18px',
         cursor: 'pointer', marginBottom: 10,
         display: 'flex', flexDirection: 'column', gap: 4,
+        transition: 'border-color 160ms ease, background 160ms ease, color 160ms ease',
       }}
     >
-      <div style={{ fontSize: 16, fontWeight: 600, color: W.navy }}>{day}</div>
-      <div style={{ fontSize: 14, color: W.textBody }}>{window} · {techLine}</div>
+      <div style={{ fontSize: 16, fontWeight: 700, color: isSelected ? 'rgba(255,255,255,.82)' : W.textCaption }}>{day}</div>
+      <div style={{ fontSize: 30, fontWeight: 800, color: isSelected ? W.white : W.blueDeeper, lineHeight: 1.15 }}>{startTime}</div>
+      <div style={{ fontSize: 15, color: isSelected ? 'rgba(255,255,255,.86)' : W.textCaption }}>
+        Arrival window: {window}
+      </div>
       {slot.routeOptimal ? (
         <div style={{
-          marginTop: 6, fontSize: 12, fontWeight: 600, color: W.green,
-          background: W.greenLight, padding: '4px 8px', borderRadius: 999,
+          marginTop: 6, fontSize: 12, fontWeight: 700, color: isSelected ? W.white : W.green,
+          background: isSelected ? 'rgba(255,255,255,.16)' : W.greenLight, padding: '4px 8px', borderRadius: 999,
           alignSelf: 'flex-start',
         }}>
           Nearby day — {slot.techFirstName || 'tech'} is servicing a property close to you
@@ -91,7 +96,7 @@ export default function SlotPicker({ token, selectedSlotId, onSelect, refreshSig
 
   if (loading) {
     return (
-      <div style={{ background: W.white, borderRadius: 16, padding: 24, border: `1px solid ${W.border}`, marginBottom: 16, color: W.textCaption, fontSize: 14 }}>
+      <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16, color: W.textCaption, fontSize: 14 }}>
         Loading available times…
       </div>
     );
@@ -99,7 +104,7 @@ export default function SlotPicker({ token, selectedSlotId, onSelect, refreshSig
 
   if (error) {
     return (
-      <div style={{ background: W.white, borderRadius: 16, padding: 24, border: `1px solid ${W.border}`, marginBottom: 16 }}>
+      <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
         <div style={{ fontSize: 14, color: W.textBody }}>
           Couldn't load times right now. <a href="tel:+19412975749" style={{ color: W.blue }}>Call (941) 297-5749</a> and we'll get you scheduled.
         </div>
@@ -117,7 +122,7 @@ export default function SlotPicker({ token, selectedSlotId, onSelect, refreshSig
 
   if (allSlots.length === 0) {
     return (
-      <div style={{ background: W.white, borderRadius: 16, padding: 24, border: `1px solid ${W.border}`, marginBottom: 16 }}>
+      <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
         <div style={{ fontSize: 14, color: W.textBody }}>
           No open slots in the next 14 days. <a href="tel:+19412975749" style={{ color: W.blue }}>Call us</a> and we'll fit you in.
         </div>
@@ -129,10 +134,19 @@ export default function SlotPicker({ token, selectedSlotId, onSelect, refreshSig
   const more = allSlots.slice(INITIAL_VISIBLE);
 
   return (
-    <div style={{ background: W.white, borderRadius: 16, padding: 24, border: `1px solid ${W.border}`, marginBottom: 16 }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
-        textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 14 }}>
-        Pick a time
+    <div style={{ background: W.white, borderRadius: 14, padding: 32, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
+      <div style={{
+        fontSize: 30,
+        fontWeight: 800,
+        color: W.blueDeeper,
+        letterSpacing: 0,
+        lineHeight: 1.2,
+        marginBottom: 8,
+      }}>
+        Find a date & time that works for you
+      </div>
+      <div style={{ fontSize: 16, color: W.textCaption, lineHeight: 1.55, marginBottom: 22 }}>
+        These are the windows when we'll already be working in your neighborhood — pick whichever fits.
       </div>
       {initial.map((slot) => (
         <SlotCard key={slot.slotId} slot={slot} isSelected={selectedSlotId === slot.slotId} onSelect={onSelect} />

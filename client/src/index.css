@@ -100,3 +100,75 @@
   outline-offset: 2px;
   border-radius: 4px;
 }
+
+/* Customer-facing portal cleanup. These classes intentionally sit outside
+   admin shells and pair with inline React styles on the public pages. */
+.waves-customer-page {
+  width: min(100% - 32px, 1040px);
+  margin: 28px auto 56px;
+}
+
+.waves-billing-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 420px);
+  gap: 20px;
+  align-items: start;
+}
+
+.waves-receipt-page {
+  width: min(100% - 32px, 760px);
+  margin: 28px auto 56px;
+}
+
+.waves-customer-help {
+  margin-top: 22px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+.waves-estimate-page {
+  width: min(100% - 32px, 760px);
+  margin: 28px auto 48px;
+}
+
+.waves-rate-page {
+  width: min(100% - 32px, 520px);
+  margin: 48px auto 48px;
+}
+
+.help-phone-compact {
+  display: none;
+}
+
+@media (max-width: 820px) {
+  :root {
+    --h1-serif: 26px;
+  }
+
+  .waves-billing-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .waves-billing-grid > section {
+    position: static !important;
+  }
+
+  .waves-customer-page,
+  .waves-receipt-page,
+  .waves-estimate-page,
+  .waves-rate-page {
+    width: min(100% - 24px, 100%);
+    margin-top: 18px;
+    margin-bottom: 40px;
+  }
+
+  .help-phone-full {
+    display: none;
+  }
+
+  .help-phone-compact {
+    display: inline;
+  }
+}

@@ -5,7 +5,6 @@ import { COLORS as B, TIER, FONTS, BUTTON_BASE, GOLD_CTA, HALFTONE_PATTERN, HALF
 import NotificationBell from '../components/NotificationBell';
 import AutopayCard from '../components/billing/AutopayCard';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
-import BrandFooter from '../components/BrandFooter';
 import NewsletterSignup from '../components/NewsletterSignup';
 import Icon from '../components/Icon';
 import { etDateString } from '../lib/timezone';
@@ -16,6 +15,20 @@ function parseDate(d) {
   if (!d) return new Date(NaN);
   const str = typeof d === 'string' ? d.split('T')[0] : etDateString(new Date(d));
   return new Date(str + 'T12:00:00');
+}
+
+function utcDayFromDateKey(key) {
+  const [y, m, d] = String(key || '').split('-').map(Number);
+  if (!y || !m || !d) return NaN;
+  return Date.UTC(y, m - 1, d);
+}
+
+function daysUntilEtDate(d) {
+  const targetKey = typeof d === 'string' ? d.split('T')[0] : etDateString(new Date(d));
+  const targetDay = utcDayFromDateKey(targetKey);
+  const todayDay = utcDayFromDateKey(etDateString());
+  if (!Number.isFinite(targetDay) || !Number.isFinite(todayDay)) return null;
+  return Math.max(0, Math.round((targetDay - todayDay) / 86400000));
 }
 
 function fmtDate(d, opts) {
@@ -1358,7 +1371,7 @@ function HeroSlider({ onSwitchTab }) {
 // =========================================================================
 // DASHBOARD TAB — with referral, review prompt, irrigation recs
 // =========================================================================
-function DashboardTab({ customer, onSwitchTab }) {
+function LegacyDashboardTab({ customer, onSwitchTab }) {
   const [nextService, setNextService] = useState(null);
   const [stats, setStats] = useState(null);
   const [balance, setBalance] = useState(null);
@@ -2025,6 +2038,454 @@ function DashboardTab({ customer, onSwitchTab }) {
           background: B.yellow, color: B.blueDeeper,
         }}>Refer Now</button>
       </div>
+    </div>
+  );
+}
+
+function DashboardTab({ customer, onSwitchTab }) {
+  const compact = useIsMobile(720);
+  const [nextService, setNextService] = useState(null);
+  const [nextServiceStatus, setNextServiceStatus] = useState('loading');
+  const [stats, setStats] = useState(null);
+  const [balance, setBalance] = useState(null);
+  const [balanceStatus, setBalanceStatus] = useState('loading');
+  const [lastService, setLastService] = useState(null);
+  const [pendingSatisfaction, setPendingSatisfaction] = useState(null);
+  const [referralStats, setReferralStats] = useState(null);
+  const [satRating, setSatRating] = useState(0);
+  const [satHover, setSatHover] = useState(0);
+  const [satPhase, setSatPhase] = useState('rate');
+  const [satFeedback, setSatFeedback] = useState('');
+  const [satReviewLink, setSatReviewLink] = useState('');
+  const [satOfficeName, setSatOfficeName] = useState('');
+  const [satSubmitting, setSatSubmitting] = useState(false);
+  const [satDismissed, setSatDismissed] = useState(false);
+  const lawnHealth = useLawnHealth(customer.id);
+  const tier = TIER[customer.tier];
+
+  useEffect(() => {
+    api.getNextService()
+      .then(d => {
+        setNextService(d.next || null);
+        setNextServiceStatus('ready');
+      })
+      .catch(err => {
+        console.error(err);
+        setNextServiceStatus('error');
+      });
+    api.getServiceStats().then(setStats).catch(console.error);
+    api.getBalance()
+      .then(d => {
+        setBalance(d);
+        setBalanceStatus('ready');
+      })
+      .catch(err => {
+        console.error(err);
+        setBalanceStatus('error');
+      });
+    api.getServices({ limit: 1 }).then(d => {
+      if (d.services?.length) setLastService(d.services[0]);
+    }).catch(console.error);
+    api.getPendingSatisfaction().then(d => {
+      if (d.pending?.length) setPendingSatisfaction(d.pending[0]);
+    }).catch(console.error);
+    api.getReferrals().then(d => {
+      if (d?.stats) setReferralStats(d.stats);
+    }).catch(console.error);
+  }, []);
+
+  const formatTime = (t) => {
+    if (!t) return 'TBD';
+    const [h, m] = t.split(':').map(Number);
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${ampm}`;
+  };
+
+  const handleSatRating = async (rating) => {
+    setSatRating(rating);
+    setSatSubmitting(true);
+    try {
+      const result = await api.submitSatisfaction({
+        serviceRecordId: pendingSatisfaction.id,
+        rating,
+      });
+      if (result.action === 'review') {
+        setSatReviewLink(result.reviewLink);
+        setSatOfficeName(result.officeName);
+        setSatPhase('review');
+      } else {
+        setSatPhase('feedback');
+      }
+    } catch (err) {
+      console.error(err);
+    }
+    setSatSubmitting(false);
+  };
+
+  const handleSatFeedback = async () => {
+    setSatSubmitting(true);
+    try {
+      await api.submitSatisfaction({
+        serviceRecordId: pendingSatisfaction.id,
+        rating: satRating,
+        feedbackText: satFeedback,
+      });
+    } catch {
+      // Rating is already recorded; feedback is supplemental.
+    }
+    setSatPhase('thanks');
+    setSatSubmitting(false);
+  };
+
+  const card = {
+    background: B.white,
+    border: '1px solid #E1E7EF',
+    borderRadius: 8,
+    boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+  };
+  const muted = '#64748B';
+  const balanceReady = balanceStatus === 'ready' && !!balance;
+  const balancePending = balanceStatus === 'loading';
+  const balanceError = balanceStatus === 'error';
+  const currentBalance = balanceReady ? Number(balance.currentBalance || 0) : 0;
+  const hasBalance = balanceReady && currentBalance > 0;
+  const nextDate = nextService ? parseDate(nextService.date) : null;
+  const daysUntilNextService = nextService ? daysUntilEtDate(nextService.date) : null;
+  const nextServiceReady = nextServiceStatus === 'ready';
+  const nextDateLabel = nextServiceStatus === 'loading'
+    ? 'Checking schedule'
+    : nextServiceStatus === 'error'
+      ? 'Schedule unavailable'
+      : nextDate && !isNaN(nextDate)
+        ? nextDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+        : 'No visit scheduled';
+  const balanceLabel = balancePending
+    ? 'Checking balance'
+    : balanceError
+      ? 'Billing unavailable'
+      : hasBalance ? 'Balance due' : 'Account current';
+  const balanceValue = balancePending
+    ? '...'
+    : balanceError
+      ? 'Call us'
+      : `$${currentBalance.toFixed(2)}`;
+  const billingSub = balancePending
+    ? 'Checking...'
+    : balanceError
+      ? 'Tap to view'
+      : hasBalance ? `$${currentBalance.toFixed(2)} due` : 'All current';
+  const propertyLine = [
+    (customer.property?.lawnType || '').replace(/\s*(Full Sun|Shade|Sun\/Shade)\s*/gi, '') || null,
+    customer.property?.propertySqFt ? `${customer.property.propertySqFt.toLocaleString()} sq ft` : null,
+    customer.property?.lotSqFt ? `${customer.property.lotSqFt.toLocaleString()} sq ft lot` : null,
+  ].filter(Boolean).join(' · ');
+  const renewalCredit = customer.memberSince
+    ? Math.min(75, Math.round(((new Date() - parseDate(customer.memberSince)) / (1000 * 60 * 60 * 24 * 30)) * 6.25))
+    : 0;
+  const referralCredits = (referralStats?.totalReferrals || 0) * 25;
+  const referralTotal = Number(referralStats?.totalEarned ?? referralCredits);
+  const quickActions = [
+    { icon: 'wrench', label: 'Request', sub: 'New service', action: () => onSwitchTab?.('request') },
+    { icon: 'chat', label: 'Message', sub: 'Text the team', action: () => { window.location.href = 'sms:+19412975749'; } },
+    { icon: 'card', label: hasBalance ? 'Pay now' : 'Billing', sub: billingSub, action: () => onSwitchTab?.('billing') },
+    { icon: 'gift', label: 'Refer', sub: '$25 credit', action: () => onSwitchTab?.('refer') },
+  ];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <section style={{ ...card, padding: compact ? 20 : 28 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8,
+              padding: '5px 10px', borderRadius: 999,
+              background: tier ? `${tier.gradientFrom}22` : '#EEF6FF',
+              color: B.blueDeeper, fontSize: 12, fontWeight: 800,
+            }}>
+              WaveGuard {customer.tier || 'Member'}
+            </div>
+            <h1 style={{
+              margin: '12px 0 8px',
+              color: B.blueDeeper,
+              fontFamily: FONTS.heading,
+              fontSize: compact ? 28 : 34,
+              lineHeight: 1.1,
+              letterSpacing: 0,
+            }}>
+              Hi, {customer.firstName}.
+            </h1>
+            <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
+              {customer.address?.line1}
+              {customer.address?.city ? `, ${customer.address.city}` : ''}
+              {customer.address?.state ? `, ${customer.address.state}` : ''} {customer.address?.zip || ''}
+            </div>
+            {propertyLine && <div style={{ marginTop: 4, fontSize: 14, color: muted }}>{propertyLine}</div>}
+          </div>
+          <div style={{
+            minWidth: compact ? '100%' : 180,
+            padding: '14px 16px',
+            borderRadius: 8,
+            background: balanceReady ? (hasBalance ? '#FFF7ED' : '#F0FDF4') : '#F8FAFC',
+            border: `1px solid ${balanceReady ? (hasBalance ? '#FED7AA' : '#BBF7D0') : '#E1E7EF'}`,
+          }}>
+            <div style={{ fontSize: 12, color: balanceReady ? (hasBalance ? '#9A3412' : '#047857') : muted, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              {balanceLabel}
+            </div>
+            <div style={{ marginTop: 3, fontSize: 24, fontWeight: 800, color: B.blueDeeper }}>
+              {balanceValue}
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr 1fr' : 'repeat(4, 1fr)', gap: 10, marginTop: 22 }}>
+          {quickActions.map((item) => (
+            <button key={item.label} type="button" onClick={item.action} style={{
+              border: '1px solid #E1E7EF',
+              borderRadius: 8,
+              background: '#F8FAFC',
+              padding: 14,
+              textAlign: 'left',
+              cursor: 'pointer',
+              minHeight: 78,
+              fontFamily: FONTS.body,
+            }}>
+              <Icon name={item.icon} size={19} strokeWidth={1.8} />
+              <div style={{ marginTop: 8, fontSize: 14, fontWeight: 800, color: B.blueDeeper }}>{item.label}</div>
+              <div style={{ marginTop: 2, fontSize: 12, color: muted }}>{item.sub}</div>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      {pendingSatisfaction && !satDismissed && (
+        <section style={{ ...card, padding: 18, borderColor: satPhase === 'rate' ? '#FED7AA' : '#BFDBFE' }}>
+          {satPhase === 'rate' && (
+            <>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+                <div>
+                  <div style={{ fontSize: 16, fontWeight: 800, color: B.blueDeeper }}>How was your visit?</div>
+                  <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
+                    {pendingSatisfaction.service_type || pendingSatisfaction.serviceType}
+                    {pendingSatisfaction.technician_name || pendingSatisfaction.technicianName ? ` · ${pendingSatisfaction.technician_name || pendingSatisfaction.technicianName}` : ''}
+                  </div>
+                </div>
+                <button type="button" onClick={() => setSatDismissed(true)} style={{
+                  border: 'none', background: 'transparent', color: muted, cursor: 'pointer',
+                  width: 34, height: 34, borderRadius: 8, fontSize: 20,
+                }}>×</button>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(10, minmax(0, 1fr))', gap: 4, marginTop: 14 }}>
+                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => {
+                  const active = n <= (satHover || satRating);
+                  const color = n <= 3 ? B.red : n <= 7 ? B.orange : B.green;
+                  return (
+                    <button key={n} type="button" onMouseEnter={() => setSatHover(n)} onMouseLeave={() => setSatHover(0)} onClick={() => handleSatRating(n)} disabled={satSubmitting} style={{
+                      height: 38, borderRadius: 8, border: 'none',
+                      background: active ? color : '#F1F5F9',
+                      color: active ? '#fff' : B.grayMid,
+                      fontWeight: 800, cursor: satSubmitting ? 'wait' : 'pointer',
+                    }}>{n}</button>
+                  );
+                })}
+              </div>
+            </>
+          )}
+          {satPhase === 'review' && (
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontSize: 18, fontWeight: 800, color: B.blueDeeper }}>Thanks for the {satRating}/10.</div>
+              <div style={{ marginTop: 6, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
+                A quick Google review helps neighbors find the {satOfficeName || 'Waves'} team.
+              </div>
+              <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 14, flexWrap: 'wrap' }}>
+                <a href={satReviewLink} target="_blank" rel="noopener noreferrer" style={{
+                  ...BUTTON_BASE, textDecoration: 'none', background: B.blueDeeper, color: '#fff', padding: '10px 18px',
+                  boxShadow: 'none', borderRadius: 8,
+                }}>Open Google</a>
+                <button type="button" onClick={() => setSatDismissed(true)} style={{
+                  ...BUTTON_BASE, background: '#fff', color: B.blueDeeper, padding: '10px 18px',
+                  boxShadow: 'none', border: '1px solid #E1E7EF', borderRadius: 8,
+                }}>Done</button>
+              </div>
+            </div>
+          )}
+          {satPhase === 'feedback' && (
+            <div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: B.blueDeeper }}>Thanks for the feedback.</div>
+              <textarea
+                value={satFeedback}
+                onChange={e => setSatFeedback(e.target.value)}
+                placeholder="Anything we could do better?"
+                rows={3}
+                style={{
+                  width: '100%', marginTop: 10, padding: 12, borderRadius: 8,
+                  border: '1px solid #CBD5E1', fontSize: 14, fontFamily: FONTS.body,
+                  resize: 'vertical',
+                }}
+              />
+              <button type="button" onClick={handleSatFeedback} disabled={satSubmitting} style={{
+                ...BUTTON_BASE, marginTop: 10, width: '100%', background: B.blueDeeper,
+                color: '#fff', boxShadow: 'none', borderRadius: 8,
+              }}>{satSubmitting ? 'Sending...' : 'Send feedback'}</button>
+            </div>
+          )}
+          {satPhase === 'thanks' && (
+            <div style={{ textAlign: 'center', color: B.blueDeeper, fontWeight: 800 }}>
+              Thank you. We appreciate the note.
+            </div>
+          )}
+        </section>
+      )}
+
+      <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'minmax(0, 1.35fr) minmax(280px, .65fr)', gap: 16, alignItems: 'start' }}>
+        <section style={{ ...card, overflow: 'hidden' }}>
+          <div style={{ padding: 20, borderBottom: '1px solid #E1E7EF', display: 'flex', justifyContent: 'space-between', gap: 16 }}>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 800, color: muted, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Next Visit</div>
+              <div style={{ marginTop: 8, fontSize: 26, fontWeight: 800, color: B.blueDeeper }}>{nextDateLabel}</div>
+              <div style={{ marginTop: 6, fontSize: 15, fontWeight: 700, color: B.navy }}>
+                {nextService?.serviceType || 'Request service when you need us.'}
+              </div>
+              {nextService?.windowStart && (
+                <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
+                  {formatTime(nextService.windowStart)} – {formatTime(nextService.windowEnd)}
+                  {nextService.technician ? ` · ${nextService.technician}` : ''}
+                </div>
+              )}
+            </div>
+            {daysUntilNextService != null && (
+              <div style={{ textAlign: 'center', minWidth: 76 }}>
+                <div style={{ fontSize: 34, fontWeight: 850, color: B.blueDeeper, lineHeight: 1 }}>
+                  {daysUntilNextService}
+                </div>
+                <div style={{ marginTop: 4, fontSize: 12, color: muted, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.06em' }}>days</div>
+              </div>
+            )}
+          </div>
+          {nextService ? (
+            <div style={{ padding: 20, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+              {!nextService.customerConfirmed ? (
+                <button type="button" onClick={() => {
+                  api.confirmAppointment(nextService.id).then(() => {
+                    setNextService({ ...nextService, customerConfirmed: true, status: 'confirmed' });
+                  });
+                }} style={{
+                  ...BUTTON_BASE, background: B.blueDeeper, color: '#fff', boxShadow: 'none',
+                  borderRadius: 8, padding: '11px 18px', fontSize: 14,
+                }}>
+                  Confirm Visit
+                </button>
+              ) : (
+                <span style={{
+                  padding: '11px 18px', borderRadius: 8, background: '#ECFDF5',
+                  color: '#047857', fontSize: 14, fontWeight: 800,
+                }}>Confirmed</span>
+              )}
+              <a href={`sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${nextService.serviceType || 'service'} visit.`} style={{
+                ...BUTTON_BASE, background: '#fff', color: B.blueDeeper, boxShadow: 'none',
+                border: '1px solid #CBD5E1', borderRadius: 8, padding: '11px 18px',
+                textDecoration: 'none', fontSize: 14,
+              }}>Reschedule</a>
+            </div>
+          ) : nextServiceReady ? (
+            <div style={{ padding: 20 }}>
+              <button type="button" onClick={() => onSwitchTab?.('request')} style={{
+                ...BUTTON_BASE, background: B.blueDeeper, color: '#fff', boxShadow: 'none',
+                borderRadius: 8, padding: '11px 18px', fontSize: 14,
+              }}>
+                Request Service
+              </button>
+            </div>
+          ) : (
+            <div style={{ padding: 20, color: muted, fontSize: 14, lineHeight: 1.5 }}>
+              {nextServiceStatus === 'loading'
+                ? 'Checking your upcoming visits...'
+                : 'We could not load your schedule right now.'}
+            </div>
+          )}
+        </section>
+
+        <section style={{ ...card, padding: 18 }}>
+          <div style={{ fontSize: 12, fontWeight: 800, color: muted, textTransform: 'uppercase', letterSpacing: '0.08em' }}>At a glance</div>
+          <div style={{ display: 'grid', gap: 12, marginTop: 14 }}>
+            {[
+              { label: 'Monthly rate', value: customer.monthlyRate ? `$${customer.monthlyRate}` : '—', sub: `${tier?.discount || '0%'} discount` },
+              { label: 'Services YTD', value: stats?.servicesYTD ?? '—', sub: stats?.celsiusApplicationsThisYear != null ? `${stats.celsiusApplicationsThisYear} weed treatments` : 'completed visits' },
+              { label: 'Member since', value: customer.memberSince ? fmtDate(customer.memberSince, { month: 'short', year: 'numeric' }) : '—', sub: 'active customer' },
+            ].map(item => (
+              <div key={item.label} style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'baseline', borderBottom: '1px solid #E1E7EF', paddingBottom: 10 }}>
+                <div>
+                  <div style={{ fontSize: 14, color: muted }}>{item.label}</div>
+                  <div style={{ fontSize: 12, color: '#94A3B8', marginTop: 1 }}>{item.sub}</div>
+                </div>
+                <div style={{ fontSize: 18, fontWeight: 850, color: B.blueDeeper }}>{item.value}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+
+      <ServiceTracker />
+
+      {lastService && (
+        <section style={{ ...card, padding: 20 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'flex-start' }}>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 800, color: muted, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Last Visit</div>
+              <div style={{ marginTop: 7, fontSize: 17, fontWeight: 800, color: B.blueDeeper }}>{lastService.type || lastService.serviceType}</div>
+              <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
+                {fmtDate(lastService.date, { weekday: 'short', month: 'short', day: 'numeric' })} · {lastService.technician || 'Waves Team'}
+              </div>
+            </div>
+            <span style={{ borderRadius: 999, background: '#ECFDF5', color: '#047857', fontSize: 12, fontWeight: 800, padding: '5px 9px' }}>Completed</span>
+          </div>
+          {(lastService.notes || lastService.technician_notes) && (
+            <p style={{ margin: '12px 0 0', color: B.grayDark, fontSize: 14, lineHeight: 1.6 }}>
+              {((lastService.notes || lastService.technician_notes) || '').slice(0, 220)}
+              {((lastService.notes || lastService.technician_notes) || '').length > 220 ? '...' : ''}
+            </p>
+          )}
+        </section>
+      )}
+
+      {!lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (
+        <LawnHealthCard
+          scores={lawnHealth.scores}
+          initialScores={lawnHealth.initialScores}
+          photos={lawnHealth.photos}
+          beforeAfter={lawnHealth.beforeAfter}
+          trend={lawnHealth.trend}
+          recommendations={lawnHealth.recommendations}
+          seasonalContext={lawnHealth.seasonalContext}
+          neighborBenchmark={lawnHealth.neighborBenchmark}
+        />
+      )}
+
+      <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 16 }}>
+        <section style={{ ...card, padding: 18 }}>
+          <div style={{ fontSize: 16, fontWeight: 800, color: B.blueDeeper }}>WaveGuard Rewards</div>
+          <div style={{ marginTop: 5, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
+            ${renewalCredit} renewal credit · ${referralCredits} referral credits
+          </div>
+          <div style={{ marginTop: 10, fontSize: 22, fontWeight: 850, color: B.blueDeeper }}>${renewalCredit + referralCredits}</div>
+        </section>
+        <section style={{ ...card, padding: 18 }}>
+          <div style={{ fontSize: 16, fontWeight: 800, color: B.blueDeeper }}>
+            {referralStats?.totalReferrals ? `${referralStats.totalReferrals} referrals sent` : 'Give $25, get $25'}
+          </div>
+          <div style={{ marginTop: 5, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
+            {referralStats?.totalReferrals
+              ? `$${referralTotal} earned so far.`
+              : 'Share Waves with a neighbor and you both get credit.'}
+          </div>
+          <button type="button" onClick={() => onSwitchTab?.('refer')} style={{
+            ...BUTTON_BASE, marginTop: 12, background: '#fff', color: B.blueDeeper,
+            boxShadow: 'none', border: '1px solid #CBD5E1', borderRadius: 8,
+            padding: '10px 14px', fontSize: 14,
+          }}>Open referrals</button>
+        </section>
+      </div>
+
+      <MyRequestsCard />
     </div>
   );
 }
@@ -8184,8 +8645,8 @@ export default function PortalPage() {
           alignItems: 'center',
           gap: 6,
           flex: '0 0 auto',
-          background: isActive ? 'rgba(255,255,255,0.18)' : 'transparent',
-          color: isActive ? B.white : B.blueLight,
+          background: isActive ? '#EEF6FF' : 'transparent',
+          color: isActive ? B.blueDeeper : B.grayMid,
           fontFamily: FONTS.heading,
           fontSize: 12,
           fontWeight: 700,
@@ -8242,9 +8703,10 @@ export default function PortalPage() {
     }}>
       {/* Header */}
       <div style={{
-        background: B.blueDark,
-        backgroundImage: `${HALFTONE_PATTERN}`,
-        backgroundSize: HALFTONE_SIZE,
+        background: 'rgba(255,255,255,0.96)',
+        backdropFilter: 'blur(12px)',
+        borderBottom: '1px solid #E1E7EF',
+        boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
         padding: '12px 20px',
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         position: 'sticky', top: 0, zIndex: 100,
@@ -8252,8 +8714,8 @@ export default function PortalPage() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 34, width: 'auto' }} />
           <div>
-            <div style={{ fontSize: 14, fontWeight: 800, color: B.white, fontFamily: FONTS.heading }}>WAVES</div>
-            <div style={{ fontSize: 9, color: B.blueLight, fontWeight: 600, letterSpacing: 0.5, textTransform: 'uppercase' }}>Customer Portal</div>
+            <div style={{ fontSize: 14, fontWeight: 800, color: B.blueDeeper, fontFamily: FONTS.heading }}>WAVES</div>
+            <div style={{ fontSize: 12, color: B.grayMid, fontWeight: 600, letterSpacing: 0, textTransform: 'uppercase' }}>Customer Portal</div>
           </div>
         </div>
         {!isMobileShell && (
@@ -8275,9 +8737,9 @@ export default function PortalPage() {
             aria-expanded={showMenu}
             style={{
               width: 36, height: 36, borderRadius: '50%',
-              background: B.yellow, border: 'none', padding: 0,
+              background: B.blueDeeper, border: 'none', padding: 0,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              color: B.navy, fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: FONTS.heading,
+              color: B.white, fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: FONTS.heading,
             }}
           >{initials}</button>
           {showMenu && (
@@ -8374,7 +8836,7 @@ export default function PortalPage() {
 
       {/* Content — bottom padding clears the CTA bar (60px) + bottom nav
           (60px) stack so fixed UI doesn't hide the last section. */}
-      <div style={{ padding: `16px 16px ${isMobileShell ? 150 : 32}px`, maxWidth: 700, margin: '0 auto' }}>
+      <div style={{ padding: `16px 16px ${isMobileShell ? 150 : 32}px`, maxWidth: activeTab === 'dashboard' ? 960 : 700, margin: '0 auto' }}>
         {activeTab !== 'dashboard' && <h1 style={VISUALLY_HIDDEN}>{TAB_TITLES[activeTab] || 'Customer Portal'}</h1>}
         {activeTab === 'dashboard' && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} />}
@@ -8386,10 +8848,21 @@ export default function PortalPage() {
         {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} />}
       </div>
 
-      {/* Footer */}
-      <div style={{ maxWidth: 700, margin: '0 auto', padding: `0 20px ${isMobileShell ? 80 : 48}px` }}>
-        <BrandFooter />
-      </div>
+      <footer style={{
+        maxWidth: activeTab === 'dashboard' ? 960 : 700,
+        margin: '0 auto',
+        padding: `10px 20px ${isMobileShell ? 96 : 44}px`,
+        borderTop: '1px solid #D9E2EC',
+        color: B.grayMid,
+        fontSize: 12,
+        display: 'flex',
+        justifyContent: 'space-between',
+        gap: 12,
+        flexWrap: 'wrap',
+      }}>
+        <span>Waves Pest Control</span>
+        <span>Lakewood Ranch · Sarasota · Venice</span>
+      </footer>
 
       {/* Bottom nav — primary destinations pinned as icons, rest behind
           "More". Sits above the CTA bar (which stays anchored at bottom:0). */}
@@ -8418,62 +8891,32 @@ export default function PortalPage() {
       }}>
         <a href="tel:+19412975749" style={{
           ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
-          background: B.yellow, color: B.blueDeeper, fontSize: 12, textAlign: 'center',
-          boxShadow: `0 4px 15px ${B.yellow}55`, minHeight: 44,
+          background: '#fff', color: B.blueDeeper, fontSize: 12, textAlign: 'center',
+          boxShadow: 'none', border: '1px solid #E1E7EF', minHeight: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}><Icon name="phone" size={16} strokeWidth={1.75} /> Call</a>
         <a href="sms:+19412975749" style={{
           ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
-          background: B.yellow, color: B.blueDeeper, fontSize: 12,
-          textAlign: 'center', boxShadow: `0 4px 15px ${B.yellow}44`, minHeight: 44,
+          background: '#fff', color: B.blueDeeper, fontSize: 12,
+          textAlign: 'center', boxShadow: 'none', border: '1px solid #E1E7EF', minHeight: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}><Icon name="chat" size={16} strokeWidth={1.75} /> Text</a>
         <button onClick={() => setShowChat(true)} style={{
           ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
-          background: B.yellow, color: B.blueDeeper, fontSize: 12,
-          textAlign: 'center', boxShadow: `0 4px 15px ${B.yellow}44`, minHeight: 44,
+          background: '#fff', color: B.blueDeeper, fontSize: 12,
+          textAlign: 'center', boxShadow: 'none', border: '1px solid #E1E7EF', minHeight: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}><Icon name="bot" size={16} strokeWidth={1.75} /> Chat</button>
-        <a href="mailto:contact@wavespestcontrol.com"
-          onClick={(e) => {
-            e.preventDefault();
-            window.location.href = 'mailto:contact@wavespestcontrol.com';
-          }}
-          style={{
+        <button type="button" onClick={() => setShowReportIssue(true)} style={{
           ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
-          background: B.yellow, color: B.blueDeeper, fontSize: 12,
-          textAlign: 'center', boxShadow: `0 4px 15px ${B.yellow}44`, minHeight: 44,
+          background: B.blueDeeper, color: '#fff', fontSize: 12,
+          textAlign: 'center', boxShadow: 'none', minHeight: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          textDecoration: 'none',
-        }}><Icon name="mail" size={16} strokeWidth={1.75} /> Email</a>
+        }}><Icon name="wrench" size={16} strokeWidth={1.75} /> Request</button>
       </div>}
 
       {/* AI Chat Widget */}
       {showChat && <ChatWidget customer={customer} onClose={() => setShowChat(false)} />}
-
-      {/* Floating Action Button — New Request. Sits above the bottom nav +
-          CTA bar stack so it doesn't collide with either. */}
-      <div style={{ position: 'fixed', bottom: isMobileShell ? 140 : 24, right: 16, zIndex: 99, display: 'flex', alignItems: 'center', gap: 10 }}>
-        <button type="button" onClick={() => setShowReportIssue(true)}
-          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setShowReportIssue(true); }}
-          aria-label="New request" style={{
-          background: B.navy, color: '#fff', padding: '8px 14px', borderRadius: 10,
-          fontSize: 12, fontWeight: 700, fontFamily: FONTS.heading,
-          boxShadow: '0 4px 15px rgba(0,0,0,0.2)',
-          whiteSpace: 'nowrap', cursor: 'pointer', border: 'none', minHeight: 40,
-        }}>New Request</button>
-        <button onClick={() => setShowReportIssue(true)} aria-label="New request" style={{
-          width: 56, height: 56, borderRadius: '50%',
-          background: B.red, color: '#fff', border: 'none', cursor: 'pointer',
-          boxShadow: `0 4px 20px ${B.red}60`,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontSize: 28, fontWeight: 300,
-          transition: 'transform 0.2s, box-shadow 0.2s',
-        }}
-          onMouseEnter={e => { e.currentTarget.style.transform = 'scale(1.1)'; }}
-          onMouseLeave={e => { e.currentTarget.style.transform = 'scale(1)'; }}
-        ><span aria-hidden="true">+</span></button>
-      </div>
 
       {/* Report Issue Overlay */}
       <ReportIssueOverlay

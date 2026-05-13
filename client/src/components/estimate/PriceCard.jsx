@@ -24,42 +24,73 @@ export default function PriceCard({ frequency, waveGuardTier }) {
   const intervalMonths = frequency.key === 'quarterly' ? 3 : frequency.key === 'bi_monthly' ? 2 : 1;
   const periodLabel = frequency.key === 'quarterly' ? '/quarter' : frequency.key === 'bi_monthly' ? '/bi-monthly' : '/mo';
   const cadencePrice = monthly == null ? null : Math.round(Number(monthly) * intervalMonths * 100) / 100;
+  const anchorPrice = Number(frequency.perVisit || 0);
+  const savings = cadencePrice != null && anchorPrice > cadencePrice ? Math.round((anchorPrice - cadencePrice) * 100) / 100 : 0;
+  const dayPrice = monthly == null ? null : Math.round((Number(monthly) / 30) * 100) / 100;
 
   return (
     <div style={{
-      background: W.white, borderRadius: 16, padding: 24,
-      boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
-      borderTop: `4px solid ${W.blueBright}`,
-      marginBottom: 16,
+      padding: '8px 0 14px',
+      marginBottom: 6,
     }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: W.blueBright,
-        textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
-        {frequency.label} pest control
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap', marginTop: 8 }}>
+        {savings > 0 ? (
+          <span style={{
+            fontFamily: "'Source Serif 4', Georgia, serif",
+            fontSize: 26,
+            color: '#9CA3AF',
+            textDecoration: 'line-through',
+            lineHeight: 1,
+          }}>
+            {fmtMoney(anchorPrice)}{periodLabel}
+          </span>
+        ) : null}
+        <span style={{
+          fontFamily: "'Source Serif 4', Georgia, serif",
+          fontSize: 58,
+          fontWeight: 500,
+          color: W.blueDeeper,
+          lineHeight: 1,
+        }}>
+        {fmtMoney(cadencePrice)}
+        </span>
+        <span style={{ fontSize: 24, fontWeight: 500, color: '#6B7280' }}>{periodLabel}</span>
+        {waveGuardTier ? (
+          <span style={{
+            display: 'inline-block',
+            padding: '5px 11px',
+            background: '#EEF2FF',
+            color: W.blueDeeper,
+            borderRadius: 6,
+            fontSize: 13,
+            fontWeight: 700,
+            letterSpacing: '0.02em',
+          }}>
+            WaveGuard {waveGuardTier}
+          </span>
+        ) : null}
       </div>
 
-      <div style={{ fontSize: 42, fontWeight: 700, color: W.navy, lineHeight: 1.1 }}>
-        {fmtMoney(cadencePrice)}
-        <span style={{ fontSize: 18, fontWeight: 500, color: W.textBody, marginLeft: 6 }}>{periodLabel}</span>
-      </div>
+      {savings > 0 && waveGuardTier ? (
+        <div style={{ marginTop: 12, color: W.green, fontSize: 16, fontWeight: 800 }}>
+          You save {fmtMoney(savings)}{periodLabel} with WaveGuard {waveGuardTier}
+        </div>
+      ) : null}
 
       {annual ? (
-        <div style={{ fontSize: 14, color: W.textCaption, marginTop: 4 }}>
+        <div style={{ fontSize: 14, color: '#6B7280', marginTop: 8 }}>
           {fmtMoney(annual)} / year
         </div>
       ) : null}
 
-      {waveGuardTier ? (
-        <div style={{
-          display: 'inline-block', marginTop: 14, padding: '6px 12px',
-          background: W.sand, color: W.blueDeeper,
-          borderRadius: 999, fontSize: 13, fontWeight: 600,
-        }}>
-          WaveGuard {waveGuardTier}
+      {dayPrice ? (
+        <div style={{ fontSize: 15, color: '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
+          That's just {fmtMoney(dayPrice)}/day for complete home protection.
         </div>
       ) : null}
 
-      <div style={{ fontSize: 13, color: W.textBody, marginTop: 16, lineHeight: 1.5 }}>
-        Not satisfied after your first visit? We convert to one-time pricing and you pay the difference only.
+      <div style={{ fontSize: 16, color: W.blueDeeper, marginTop: 14, lineHeight: 1.5 }}>
+        Try us risk-free — 90-day money-back guarantee.
       </div>
     </div>
   );

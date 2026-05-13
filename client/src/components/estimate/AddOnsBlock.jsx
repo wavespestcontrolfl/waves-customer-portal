@@ -6,9 +6,14 @@
  */
 const W = {
   blue: '#065A8C', blueBright: '#009CDE', green: '#16A34A',
-  navy: '#0F172A', textBody: '#334155', textCaption: '#64748B',
-  white: '#FFFFFF', border: '#CBD5E1', borderLight: '#F1F5F9',
+  navy: '#0F172A', blueDeeper: '#1B2C5B', textBody: '#334155', textCaption: '#64748B',
+  white: '#FFFFFF', border: '#E7E2D7', borderLight: '#F1F5F9',
 };
+
+function savingsFromDetail(detail) {
+  const match = String(detail || '').match(/Save\s+(.+?)\s+if removed/i);
+  return match ? match[1].trim() : '';
+}
 
 export default function AddOnsBlock({ addOns, selectedKeys, onToggle }) {
   const items = Array.isArray(addOns) ? addOns : [];
@@ -16,37 +21,81 @@ export default function AddOnsBlock({ addOns, selectedKeys, onToggle }) {
 
   return (
     <div style={{
-      background: W.white, borderRadius: 16, padding: 24,
+      background: W.white, borderRadius: 14, padding: 24,
       border: `1px solid ${W.border}`, marginBottom: 16,
     }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
-        textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 14 }}>
-        Customize your plan
+      <div style={{ fontSize: 12, fontWeight: 700, color: W.textCaption,
+        textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 6 }}>
+        Customize your visit
+      </div>
+      <div style={{
+        fontFamily: "'Source Serif 4', Georgia, serif",
+        fontSize: 28,
+        fontWeight: 500,
+        color: W.blueDeeper,
+        lineHeight: 1.2,
+        marginBottom: 4,
+      }}>
+        Skip parts you don't need
+      </div>
+      <div style={{ fontSize: 16, color: '#6B7280', lineHeight: 1.5, marginBottom: 18 }}>
+        These are on by default. Toggle off whatever you don't want and the price adjusts instantly.
       </div>
 
       {items.map((item) => {
         const checked = selectedKeys.has(item.key);
+        const savings = savingsFromDetail(item.detail);
         return (
           <label key={item.key} style={{
-            display: 'flex', alignItems: 'flex-start', gap: 12,
-            padding: '12px 0', borderBottom: `1px solid ${W.borderLight}`,
+            display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16,
+            padding: 16,
+            marginTop: 12,
+            border: `1px solid ${W.border}`,
+            borderRadius: 10,
+            background: checked ? W.white : '#F7F5EE',
             cursor: 'pointer',
           }}>
-            <input
-              type="checkbox"
-              checked={checked}
-              onChange={() => onToggle(item.key)}
-              style={{
-                width: 20, height: 20, flexShrink: 0, marginTop: 1,
-                accentColor: W.blueBright, cursor: 'pointer',
-              }}
-            />
             <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 15, fontWeight: 500, color: W.navy }}>{item.label}</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: W.blueDeeper }}>
+                {item.label} {checked ? 'included' : 'skipped'}
+              </div>
               {item.detail ? (
-                <div style={{ fontSize: 13, color: W.textCaption, marginTop: 2 }}>{item.detail}</div>
+                <div style={{ fontSize: 14, color: W.textCaption, marginTop: 3, lineHeight: 1.5 }}>
+                  {checked ? 'Toggle off if you want to skip this.' : `Your estimate skips this. ${item.detail}`}
+                </div>
+              ) : null}
+              {savings ? (
+                <div style={{ fontSize: 14, color: checked ? W.green : '#9CA3AF', fontWeight: 800, marginTop: 6 }}>
+                  {checked ? `Save ${savings}` : 'Savings applied to your estimate'}
+                </div>
               ) : null}
             </div>
+            <span style={{ position: 'relative', display: 'inline-block', width: 48, height: 28, flexShrink: 0, marginTop: 2 }}>
+              <input
+                type="checkbox"
+                checked={checked}
+                onChange={() => onToggle(item.key)}
+                style={{ position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer', margin: 0 }}
+              />
+              <span aria-hidden="true" style={{
+                position: 'absolute',
+                inset: 0,
+                background: checked ? W.blueDeeper : '#D4CBB8',
+                borderRadius: 999,
+                transition: 'background 160ms ease',
+              }} />
+              <span aria-hidden="true" style={{
+                position: 'absolute',
+                width: 22,
+                height: 22,
+                top: 3,
+                left: checked ? 23 : 3,
+                background: W.white,
+                borderRadius: '50%',
+                boxShadow: '0 1px 2px rgba(0,0,0,.15)',
+                transition: 'left 160ms ease',
+              }} />
+            </span>
           </label>
         );
       })}

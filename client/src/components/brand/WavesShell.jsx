@@ -30,10 +30,6 @@ export default function WavesShell({
     left: 0,
     right: 0,
     zIndex: 10,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: '16px 24px',
     background: isTransparent ? 'transparent' : 'var(--surface)',
     borderBottom: isTransparent ? 'none' : '1px solid var(--border)',
   };
@@ -51,12 +47,23 @@ export default function WavesShell({
         }}
       >
         <header style={topBarStyle}>
-          <img
-            src="/waves-logo.png"
-            alt="Waves"
-            style={{ height: 28, display: 'block', filter: isTransparent ? 'brightness(0) invert(1)' : 'none' }}
-          />
-          <HelpPhoneLink tone={phoneTone} />
+          <div style={{
+            width: 'min(100%, 1120px)',
+            margin: '0 auto',
+            padding: '14px 20px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 16,
+            boxSizing: 'border-box',
+          }}>
+            <img
+              src="/waves-logo.png"
+              alt="Waves"
+              style={{ height: 36, display: 'block', filter: isTransparent ? 'brightness(0) invert(1)' : 'none' }}
+            />
+            <HelpPhoneLink tone={phoneTone} />
+          </div>
         </header>
         <main style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
           {children}

@@ -59,7 +59,9 @@ export default function HelpPhoneLink({ tone = 'dark', compact, inline = false }
       <span className="help-phone-full" style={compact ? { display: 'none' } : {}}>
         {HELP_NUMBER}
       </span>
-      {compact && <span className="help-phone-compact">Need help?</span>}
+      <span className="help-phone-compact">
+        Call Waves
+      </span>
     </a>
   );
 }
