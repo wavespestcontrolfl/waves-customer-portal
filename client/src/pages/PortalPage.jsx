@@ -9233,22 +9233,25 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
 }
 
 // =========================================================================
-// REPORT ISSUE OVERLAY — full-screen form triggered by FAB
+// NEW REQUEST OVERLAY — shared support form triggered across the portal
 // =========================================================================
 function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
+  const compact = useIsMobile(760);
   const [category, setCategory] = useState('');
   const [urgency, setUrgency] = useState('routine');
   const [description, setDescription] = useState('');
-  const [locations, setLocations] = useState([]); // multi-select array
+  const [location, setLocation] = useState('');
   const [photos, setPhotos] = useState([]); // array of { preview, data }
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [submitError, setSubmitError] = useState('');
   const [lastService, setLastService] = useState(null);
   const [nextService, setNextService] = useState(null);
   const fileRef = useRef(null);
 
   useEffect(() => {
     if (open) {
+      setSubmitError('');
       api.getServices({ limit: 1 }).then(d => {
         if (d.services?.length) setLastService(d.services[0]);
       }).catch(() => {});
@@ -9256,11 +9259,11 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     }
   }, [open]);
 
-  const problemCategories = [
-    { value: 'pest_issue', label: ' Pest' },
-    { value: 'lawn_concern', label: ' Lawn' },
-    { value: 'billing', label: ' Billing' },
-    { value: 'schedule_change', label: ' Schedule' },
+  const requestCategories = [
+    { value: 'pest_issue', label: 'Pest issue', shortLabel: 'Pest', icon: 'bug', description: 'Activity inside, outside, or around entry points.' },
+    { value: 'lawn_concern', label: 'Lawn concern', shortLabel: 'Lawn', icon: 'leaf', description: 'Weeds, turf stress, irrigation, or lawn pests.' },
+    { value: 'billing', label: 'Billing help', shortLabel: 'Billing', icon: 'card', description: 'Invoices, payments, credits, or account questions.' },
+    { value: 'schedule_change', label: 'Schedule change', shortLabel: 'Schedule', icon: 'calendar', description: 'Move, add, or adjust an upcoming visit.' },
   ];
 
   const locationOptions = [
@@ -9270,12 +9273,14 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     { value: 'inside_home', label: 'Inside Home' },
     { value: 'garage_lanai', label: 'Garage / Lanai' },
     { value: 'garden_beds', label: 'Garden Beds' },
-    { value: 'perimeter_foundation', label: 'Perimeter / Foundation' },
-    { value: 'pool_lanai', label: 'Pool Area / Lanai' },
     { value: 'other', label: 'Other' },
   ];
 
-  const isProblemCategory = ['pest_issue', 'lawn_concern', 'schedule_change'].includes(category);
+  const problemCategoryValues = ['pest_issue', 'lawn_concern', 'schedule_change'];
+  const isProblemCategory = problemCategoryValues.includes(category);
+  const selectedCategory = requestCategories.find(c => c.value === category);
+  const propertyAddress = formatPropertyAddress(customer);
+  const customerName = [customer?.firstName, customer?.lastName].filter(Boolean).join(' ');
 
   // Callback recognition: pest/lawn issue within 30 days of last service
   const tierName = customer?.tier || 'Bronze';
@@ -9292,19 +9297,76 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     return daysUntil >= 0 && daysUntil <= 3;
   })();
   const nextServiceDateStr = nextService ? parseDate(nextService.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '';
+  const lastServiceDateStr = lastService ? parseDate(lastService.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '';
+  const descriptionLimit = 500;
+  const photoLimit = 3;
+  const canSubmit = !!category && !!description.trim() && !submitting;
+  const photosRemaining = Math.max(0, photoLimit - photos.length);
 
-  const toggleLocation = (val) => {
-    setLocations(prev => prev.includes(val) ? prev.filter(v => v !== val) : [...prev, val]);
+  const muted = '#64748B';
+  const card = {
+    background: B.white,
+    border: '1px solid #E1E7EF',
+    borderRadius: 8,
+    boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+  };
+  const sectionTitle = {
+    fontSize: 12,
+    fontWeight: 850,
+    color: muted,
+    textTransform: 'uppercase',
+    letterSpacing: 0,
+    fontFamily: FONTS.heading,
+  };
+  const helperText = {
+    marginTop: 4,
+    fontSize: 14,
+    color: muted,
+    lineHeight: 1.45,
+  };
+  const iconTile = {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    background: '#EEF6FF',
+    color: B.blueDeeper,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  };
+  const secondaryAction = {
+    minHeight: 40,
+    borderRadius: 8,
+    border: '1px solid #CBD5E1',
+    background: '#fff',
+    color: B.blueDeeper,
+    fontFamily: FONTS.heading,
+    fontSize: 14,
+    fontWeight: 850,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    textDecoration: 'none',
+    cursor: 'pointer',
   };
 
-  const handlePhoto = (e) => {
-    const file = e.target.files?.[0];
-    if (!file || photos.length >= 5) return;
+  const toggleLocation = (val) => {
+    setLocation(prev => prev === val ? '' : val);
+  };
+
+  const readPhotoFile = (file) => new Promise((resolve) => {
     const reader = new FileReader();
-    reader.onload = (ev) => {
-      setPhotos(prev => [...prev, { preview: ev.target.result, data: ev.target.result }]);
-    };
+    reader.onload = (ev) => resolve({ preview: ev.target.result, data: ev.target.result, name: file.name });
     reader.readAsDataURL(file);
+  });
+
+  const handlePhoto = async (e) => {
+    const files = Array.from(e.target.files || []).slice(0, photosRemaining);
+    if (!files.length) return;
+    const nextPhotos = await Promise.all(files.map(readPhotoFile));
+    setPhotos(prev => [...prev, ...nextPhotos].slice(0, photoLimit));
     e.target.value = '';
   };
 
@@ -9312,16 +9374,21 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     setPhotos(prev => prev.filter((_, i) => i !== idx));
   };
 
-  const handleSubmit = async () => {
-    if (!category || !description.trim()) return;
+  const handleSubmit = async (e) => {
+    e?.preventDefault();
+    if (!category || !description.trim()) {
+      setSubmitError('Choose a request type and add a short description so the team has enough context.');
+      return;
+    }
     setSubmitting(true);
+    setSubmitError('');
     try {
       await api.createRequest({
         category,
         subject: description.trim().slice(0, 80),
         description: description.trim(),
         urgency: isProblemCategory ? urgency : 'routine',
-        locationOnProperty: locations.length ? locations.join(', ') : null,
+        locationOnProperty: location || null,
         photos: photos.map(p => p.data),
       });
       setSubmitted(true);
@@ -9329,13 +9396,15 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
       setTimeout(() => {
         setSubmitted(false);
         setCategory(''); setDescription('');
-        setUrgency('routine'); setLocations([]); setPhotos([]);
+        setUrgency('routine'); setLocation(''); setPhotos([]); setSubmitError('');
         onClose();
       }, 2500);
     } catch (err) {
       console.error(err);
+      setSubmitError(err?.message || 'Could not submit the request. Please try again or call Waves at (941) 297-5749.');
+    } finally {
+      setSubmitting(false);
     }
-    setSubmitting(false);
   };
 
   if (!open) return null;
@@ -9343,208 +9412,534 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   return (
     <div style={{
       position: 'fixed', inset: 0, zIndex: 1000,
-      background: B.offWhite, overflowY: 'auto',
-      animation: 'slideUp 0.3s ease-out',
+      background: compact ? '#F8FAFC' : 'rgba(15,23,42,0.48)',
+      display: 'flex',
+      alignItems: compact ? 'stretch' : 'center',
+      justifyContent: 'center',
+      padding: compact ? 0 : 24,
     }}>
       <style>{`
-        @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+        @keyframes requestOverlayIn { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: translateY(0); } }
         @keyframes checkPop { 0% { transform: scale(0); opacity: 0; } 50% { transform: scale(1.2); } 100% { transform: scale(1); opacity: 1; } }
+        @media (prefers-reduced-motion: reduce) {
+          [data-request-overlay] { animation: none !important; }
+        }
       `}</style>
 
-      {/* Header */}
-      <div style={{
-        position: 'sticky', top: 0, zIndex: 10,
-        background: 'rgba(255,255,255,0.95)', backdropFilter: 'blur(12px)',
-        borderBottom: `1px solid ${B.grayLight}`,
-        padding: '14px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-      }}>
-        <div style={{ fontSize: 17, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>New Request</div>
-        <button onClick={onClose} aria-label="Close" style={{
-          background: B.offWhite, border: 'none', cursor: 'pointer',
-          color: B.grayMid, width: 40, height: 40, borderRadius: '50%',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}><Icon name="close" size={16} strokeWidth={2} /></button>
-      </div>
-
-      {submitted ? (
-        <div style={{ padding: 40, textAlign: 'center' }}>
-          <div style={{ fontSize: 64, animation: 'checkPop 0.5s ease-out' }}>
-            <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 80, height: 80, borderRadius: '50%', background: `${B.green}15` }}>
-              <Icon name="check" size={28} strokeWidth={1.75} />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="New request"
+        data-request-overlay
+        style={{
+          width: '100%',
+          maxWidth: compact ? 'none' : 720,
+          height: compact ? '100%' : 'auto',
+          maxHeight: compact ? 'none' : 'calc(100vh - 48px)',
+          background: '#F8FAFC',
+          borderRadius: compact ? 0 : 8,
+          boxShadow: compact ? 'none' : '0 24px 70px rgba(15,23,42,0.28)',
+          border: compact ? 'none' : '1px solid #E1E7EF',
+          overflow: 'hidden',
+          display: 'flex',
+          flexDirection: 'column',
+          animation: 'requestOverlayIn 0.22s ease',
+        }}
+      >
+        <header style={{
+          flexShrink: 0,
+          background: 'rgba(255,255,255,0.96)',
+          backdropFilter: 'blur(12px)',
+          borderBottom: '1px solid #E1E7EF',
+          padding: compact ? '12px 14px' : '14px 18px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 12,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+            <span style={iconTile}>
+              <Icon name="wrench" size={17} strokeWidth={2} />
             </span>
-          </div>
-          <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginTop: 12 }}>Sent to Waves!</div>
-          <div style={{ fontSize: 16, color: B.grayDark, marginTop: 8, lineHeight: 1.6 }}>
-            We'll review your request and text you when it's been assigned.
-            {urgency === 'urgent' && isProblemCategory ? ' Urgent requests are prioritized — expect a response within 2 hours.' : ''}
-          </div>
-        </div>
-      ) : (
-        <div style={{ padding: '16px 20px 120px', maxWidth: 600, margin: '0 auto' }}>
-
-          {/* Pre-fill context */}
-          {customer && (
-            <div style={{
-              padding: '10px 14px', borderRadius: 10, background: B.blueSurface,
-              border: `1px solid ${B.bluePale}`, marginBottom: 16,
-              fontSize: 12, color: B.grayDark, lineHeight: 1.6,
-            }}>
-              <span style={{ fontWeight: 700, color: B.navy }}>{customer.firstName} {customer.lastName}</span>
-              {customer.address?.street && <span> · {customer.address.street}</span>}
-              <span> · WaveGuard {tierName}</span>
-              {lastService && (
-                <span> · Last service: {parseDate(lastService.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
-              )}
-            </div>
-          )}
-
-          {/* Photo Upload — moved to top */}
-          <div style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, marginBottom: 8 }}>
-               Photos <span style={{ fontWeight: 400, color: B.grayMid }}>(optional, up to 5)</span>
-            </div>
-            <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={handlePhoto} style={{ display: 'none' }} />
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-              {photos.length < 5 && (
-                <div onClick={() => fileRef.current?.click()} style={{
-                  width: 80, height: 80, borderRadius: 10, cursor: 'pointer',
-                  border: `2px dashed ${B.wavesBlue}`, background: `${B.wavesBlue}08`,
-                  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-                }}>
-                  <Icon name="camera" size={24} strokeWidth={1.75} />
-                  <span style={{ fontSize: 9, color: B.wavesBlue, marginTop: 2, fontWeight: 600 }}>Add photo</span>
-                </div>
-              )}
-              {photos.map((p, i) => (
-                <div key={i} style={{ position: 'relative', width: 80, height: 80 }}>
-                  <img src={p.preview} alt="" style={{
-                    width: 80, height: 80, objectFit: 'cover', borderRadius: 10,
-                    border: `1px solid ${B.grayLight}`,
-                  }} />
-                  <button onClick={() => removePhoto(i)} style={{
-                    position: 'absolute', top: -6, right: -6,
-                    width: 22, height: 22, borderRadius: '50%',
-                    background: B.red, color: '#fff', border: '2px solid #fff',
-                    cursor: 'pointer', fontSize: 12, display: 'flex',
-                    alignItems: 'center', justifyContent: 'center', padding: 0,
-                  }}></button>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: 15, fontWeight: 800, color: B.navy, marginBottom: 12, fontFamily: FONTS.heading }}>
-              We're on it. Tell us what's happening.
-            </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-              {problemCategories.map(c => (
-                <button key={c.value} onClick={() => { setCategory(c.value); if (!isProblemCategory) setUrgency('routine'); }} style={{
-                  ...BUTTON_BASE, padding: '9px 16px', fontSize: 14, borderRadius: 12,
-                  background: category === c.value ? B.wavesBlue : B.white,
-                  color: category === c.value ? '#fff' : B.grayDark,
-                  border: category === c.value ? 'none' : `1px solid ${B.grayLight}`,
-                }}>{c.label}</button>
-              ))}
-            </div>
-          </div>
-
-          {/* Callback recognition */}
-          {isCallbackEligible && (category === 'pest_issue' || category === 'lawn_concern') && (
-            <div style={{
-              padding: '10px 14px', borderRadius: 10, marginBottom: 16,
-              background: `${B.green}10`, border: `1px solid ${B.green}30`,
-              fontSize: 12, color: B.green, fontWeight: 600, lineHeight: 1.5,
-            }}>
-              Callbacks are free with your WaveGuard {tierName} plan. We'll get this taken care of.
-            </div>
-          )}
-
-          {/* Schedule awareness */}
-          {nextServiceSoon && isProblemCategory && (
-            <div style={{
-              padding: '10px 14px', borderRadius: 10, marginBottom: 16,
-              background: `${B.wavesBlue}10`, border: `1px solid ${B.wavesBlue}30`,
-              fontSize: 12, color: B.wavesBlue, fontWeight: 600, lineHeight: 1.5,
-            }}>
-               Your next visit is {nextServiceDateStr}. Want us to address it then, or do you need us sooner?
-            </div>
-          )}
-
-          {/* Urgency — only for problem categories */}
-          {isProblemCategory && (
-            <div style={{ marginBottom: 20 }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, marginBottom: 8 }}>How urgent?</div>
-              <div style={{ display: 'flex', gap: 10 }}>
-                {[
-                  { value: 'routine', label: 'Routine', desc: 'Next 24 hours', color: B.wavesBlue },
-                  { value: 'urgent', label: 'Urgent', desc: 'Within 2 hours', color: B.red },
-                ].map(u => (
-                  <button key={u.value} onClick={() => setUrgency(u.value)} style={{
-                    flex: 1, padding: '12px 14px', borderRadius: 12, cursor: 'pointer',
-                    border: urgency === u.value ? `2px solid ${u.color}` : `1px solid ${B.grayLight}`,
-                    background: urgency === u.value ? `${u.color}10` : B.white,
-                    textAlign: 'center',
-                  }}>
-                    <div style={{ fontSize: 14, fontWeight: 700, color: urgency === u.value ? u.color : B.grayDark }}>{u.label}</div>
-                    <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>{u.desc}</div>
-                  </button>
-                ))}
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 18, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading, lineHeight: 1.2 }}>New Request</div>
+              <div style={{ fontSize: 14, color: muted, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                Service, scheduling, and account help
               </div>
             </div>
-          )}
-
-          {/* Merged description field (subject + details combined) */}
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, marginBottom: 8 }}>
-              Describe what's happening
-            </div>
-            <textarea
-              value={description} onChange={e => { if (e.target.value.length <= 500) setDescription(e.target.value); }}
-              rows={5}
-              aria-label="Describe what's happening"
-              style={{
-                width: '100%', padding: '12px 14px', borderRadius: 12,
-                border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
-                color: B.navy, outline: 'none', boxSizing: 'border-box', resize: 'vertical',
-              }}
-              onFocus={e => e.target.style.borderColor = B.wavesBlue}
-              onBlur={e => e.target.style.borderColor = B.grayLight}
-            />
-            {description.length > 450 && (
-              <div style={{ fontSize: 12, color: B.red, marginTop: 4, textAlign: 'right' }}>
-                {description.length}/500
-              </div>
-            )}
           </div>
-
-          {/* Location on Property — multi-select */}
-          {isProblemCategory && (
-            <div style={{ marginBottom: 24 }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, marginBottom: 8 }}>Where on your property? <span style={{ fontWeight: 400, color: B.grayMid }}>(select all that apply)</span></div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {locationOptions.map(l => (
-                  <button key={l.value} onClick={() => toggleLocation(l.value)} style={{
-                    ...BUTTON_BASE, padding: '7px 12px', fontSize: 12, borderRadius: 20,
-                    background: locations.includes(l.value) ? B.teal : B.white,
-                    color: locations.includes(l.value) ? '#fff' : B.grayDark,
-                    border: locations.includes(l.value) ? 'none' : `1px solid ${B.grayLight}`,
-                  }}>{l.label}</button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Submit */}
-          <button onClick={handleSubmit} disabled={!category || !description.trim() || submitting} style={{
-            ...GOLD_CTA, width: '100%',
-            opacity: (!category || !description.trim() || submitting) ? 0.55 : 1,
-            cursor: (!category || !description.trim() || submitting) ? 'not-allowed' : 'pointer',
+          <button type="button" onClick={onClose} aria-label="Close request" style={{
+            width: 36,
+            height: 36,
+            borderRadius: 8,
+            border: '1px solid #CBD5E1',
+            background: '#fff',
+            color: B.blueDeeper,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            cursor: 'pointer',
+            flexShrink: 0,
           }}>
-            {submitting ? 'Submitting...' : 'Submit'}
+            <Icon name="close" size={16} strokeWidth={2} />
           </button>
-        </div>
-      )}
+        </header>
+
+        {submitted ? (
+          <div role="status" style={{
+            flex: 1,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: compact ? 20 : 32,
+          }}>
+            <div style={{ ...card, width: '100%', maxWidth: 460, padding: compact ? 24 : 30, textAlign: 'center' }}>
+              <div style={{ animation: 'checkPop 0.5s ease-out' }}>
+                <span style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: 68,
+                  height: 68,
+                  borderRadius: 8,
+                  background: B.greenLight,
+                  color: B.green,
+                }}>
+                  <Icon name="check" size={30} strokeWidth={2.2} />
+                </span>
+              </div>
+              <div style={{ fontSize: 22, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading, marginTop: 16 }}>Request sent</div>
+              <div style={{ fontSize: 15, color: B.textBody, marginTop: 8, lineHeight: 1.55 }}>
+                Waves will review this and text you when it is assigned.
+                {urgency === 'urgent' && isProblemCategory ? ' Urgent requests are prioritized for the next available response.' : ''}
+              </div>
+              <div style={{ marginTop: 18, display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
+                <a href="tel:+19412975749" style={secondaryAction}><Icon name="phone" size={15} strokeWidth={2} /> Call</a>
+                <a href="sms:+19412975749" style={secondaryAction}><Icon name="chat" size={15} strokeWidth={2} /> Text</a>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <form onSubmit={handleSubmit} style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+            <div style={{
+              flex: 1,
+              minHeight: 0,
+              overflowY: 'auto',
+              WebkitOverflowScrolling: 'touch',
+              padding: compact ? '14px 14px 18px' : '18px 20px',
+              display: 'grid',
+              gap: 12,
+            }}>
+              {customer && (
+                <section style={{ ...card, padding: 14 }}>
+                  <div style={{ display: 'grid', gap: 10 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                      <span style={iconTile}><Icon name="house" size={16} strokeWidth={2} /></span>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>
+                          {customerName || 'Waves customer'}
+                        </div>
+                        {propertyAddress && (
+                          <div style={{ fontSize: 12, color: muted, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {propertyAddress}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <div style={{
+                      display: 'grid',
+                      gridTemplateColumns: compact ? '1fr' : 'repeat(2, minmax(0, 1fr))',
+                      gap: 8,
+                    }}>
+                      <div style={{ background: '#F8FAFC', border: '1px solid #E1E7EF', borderRadius: 8, padding: 10 }}>
+                        <div style={sectionTitle}>Plan</div>
+                        <div style={{ marginTop: 4, fontSize: 14, color: B.blueDeeper, fontWeight: 850 }}>WaveGuard {tierName}</div>
+                      </div>
+                      <div style={{ background: '#F8FAFC', border: '1px solid #E1E7EF', borderRadius: 8, padding: 10 }}>
+                        <div style={sectionTitle}>Last service</div>
+                        <div style={{ marginTop: 4, fontSize: 14, color: B.blueDeeper, fontWeight: 850 }}>{lastServiceDateStr || 'Checking...'}</div>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              <section style={{ ...card, padding: 16 }}>
+                <div style={sectionTitle}>Request type</div>
+                <div style={helperText}>Pick the closest match so the right Waves team sees it first.</div>
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: compact ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))',
+                  gap: 8,
+                  marginTop: 12,
+                }}>
+                  {requestCategories.map(c => {
+                    const active = category === c.value;
+                    return (
+                      <button
+                        key={c.value}
+                        type="button"
+                        aria-pressed={active}
+                        onClick={() => {
+                          setCategory(c.value);
+                          setSubmitError('');
+                          if (!problemCategoryValues.includes(c.value)) setUrgency('routine');
+                        }}
+                        style={{
+                          minHeight: compact ? 94 : 104,
+                          borderRadius: 8,
+                          border: `1px solid ${active ? B.wavesBlue : '#E1E7EF'}`,
+                          background: active ? '#EEF6FF' : '#fff',
+                          color: B.blueDeeper,
+                          cursor: 'pointer',
+                          textAlign: 'left',
+                          padding: 10,
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 8,
+                          fontFamily: FONTS.body,
+                          boxShadow: active ? '0 0 0 2px rgba(0,156,222,0.12)' : 'none',
+                        }}
+                      >
+                        <span style={{ ...iconTile, width: 34, height: 34, background: active ? '#fff' : '#EEF6FF' }}>
+                          <Icon name={c.icon} size={16} strokeWidth={2} />
+                        </span>
+                        <span>
+                          <span style={{ display: 'block', fontSize: 14, fontWeight: 850, fontFamily: FONTS.heading }}>{compact ? c.shortLabel : c.label}</span>
+                          {!compact && <span style={{ display: 'block', marginTop: 3, fontSize: 12, color: muted, lineHeight: 1.35 }}>{c.description}</span>}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+
+              {(isCallbackEligible || (nextServiceSoon && isProblemCategory)) && (
+                <section style={{ display: 'grid', gap: 8 }}>
+                  {isCallbackEligible && (category === 'pest_issue' || category === 'lawn_concern') && (
+                    <div style={{
+                      ...card,
+                      padding: 12,
+                      background: '#F0FDF4',
+                      borderColor: '#BBF7D0',
+                      display: 'flex',
+                      gap: 10,
+                      alignItems: 'flex-start',
+                    }}>
+                      <span style={{ ...iconTile, background: B.greenLight, color: B.green }}><Icon name="checkCircle" size={16} strokeWidth={2} /></span>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 14, fontWeight: 850, color: '#047857' }}>Covered callback</div>
+                        <div style={{ marginTop: 2, fontSize: 14, color: '#047857', lineHeight: 1.4 }}>
+                          Callbacks are included with your WaveGuard {tierName} plan when an issue returns soon after service.
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {nextServiceSoon && isProblemCategory && (
+                    <div style={{
+                      ...card,
+                      padding: 12,
+                      background: '#EEF6FF',
+                      borderColor: '#CDEAFE',
+                      display: 'flex',
+                      gap: 10,
+                      alignItems: 'flex-start',
+                    }}>
+                      <span style={iconTile}><Icon name="calendar" size={16} strokeWidth={2} /></span>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Upcoming visit</div>
+                        <div style={{ marginTop: 2, fontSize: 14, color: B.blueDeeper, lineHeight: 1.4 }}>
+                          Your next visit is {nextServiceDateStr}. Tell us if this can wait for that visit or needs a separate stop.
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </section>
+              )}
+
+              {isProblemCategory && (
+                <section style={{ ...card, padding: 16 }}>
+                  <div style={sectionTitle}>Priority</div>
+                  <div style={helperText}>Routine is best for most issues. Use urgent for active interior activity or access-sensitive timing.</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8, marginTop: 12 }}>
+                    {[
+                      { value: 'routine', label: 'Routine', desc: 'Next business window', icon: 'clock', color: B.wavesBlue, bg: '#EEF6FF' },
+                      { value: 'urgent', label: 'Urgent', desc: 'Prioritize response', icon: 'warning', color: B.red, bg: '#FEF2F2' },
+                    ].map(u => {
+                      const active = urgency === u.value;
+                      return (
+                        <button
+                          key={u.value}
+                          type="button"
+                          aria-pressed={active}
+                          onClick={() => setUrgency(u.value)}
+                          style={{
+                            minHeight: 72,
+                            borderRadius: 8,
+                            cursor: 'pointer',
+                            border: `1px solid ${active ? u.color : '#E1E7EF'}`,
+                            background: active ? u.bg : '#fff',
+                            textAlign: 'left',
+                            padding: 12,
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 10,
+                            fontFamily: FONTS.body,
+                          }}
+                        >
+                          <span style={{ ...iconTile, background: active ? '#fff' : '#EEF6FF', color: active ? u.color : B.blueDeeper }}>
+                            <Icon name={u.icon} size={16} strokeWidth={2} />
+                          </span>
+                          <span style={{ minWidth: 0 }}>
+                            <span style={{ display: 'block', fontSize: 14, fontWeight: 850, color: active ? u.color : B.blueDeeper }}>{u.label}</span>
+                            <span style={{ display: 'block', marginTop: 2, fontSize: 12, color: muted, lineHeight: 1.35 }}>{u.desc}</span>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+              )}
+
+              <section style={{ ...card, padding: 16 }}>
+                <label htmlFor="portal-request-description" style={sectionTitle}>Details</label>
+                <div style={helperText}>
+                  {selectedCategory
+                    ? `Tell us what you are seeing for ${selectedCategory.label.toLowerCase()}.`
+                    : 'Tell us what you are seeing and what you need from Waves.'}
+                </div>
+                <textarea
+                  id="portal-request-description"
+                  value={description}
+                  onChange={e => { if (e.target.value.length <= descriptionLimit) setDescription(e.target.value); }}
+                  rows={5}
+                  aria-label="Describe what's happening"
+                  placeholder="Example: I am seeing ants by the kitchen window and along the lanai door."
+                  style={{
+                    width: '100%',
+                    minHeight: 132,
+                    marginTop: 10,
+                    padding: '12px 13px',
+                    borderRadius: 8,
+                    border: '1px solid #CBD5E1',
+                    fontSize: 14,
+                    fontFamily: FONTS.body,
+                    color: B.blueDeeper,
+                    outline: 'none',
+                    boxSizing: 'border-box',
+                    resize: 'vertical',
+                    background: '#fff',
+                    lineHeight: 1.5,
+                  }}
+                  onFocus={e => e.target.style.borderColor = B.wavesBlue}
+                  onBlur={e => e.target.style.borderColor = '#CBD5E1'}
+                />
+                <div style={{
+                  marginTop: 6,
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  gap: 10,
+                  fontSize: 12,
+                  color: description.length > 450 ? B.red : muted,
+                }}>
+                  <span>{description.trim() ? 'Enough detail helps dispatch route this quickly.' : 'A short description is required.'}</span>
+                  <span>{description.length}/{descriptionLimit}</span>
+                </div>
+              </section>
+
+              {isProblemCategory && (
+                <section style={{ ...card, padding: 16 }}>
+                  <div style={sectionTitle}>Location</div>
+                  <div style={helperText}>Select the area where the issue is happening.</div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7, marginTop: 12 }}>
+                    {locationOptions.map(l => {
+                      const active = location === l.value;
+                      return (
+                        <button
+                          key={l.value}
+                          type="button"
+                          aria-pressed={active}
+                          onClick={() => toggleLocation(l.value)}
+                          style={{
+                            minHeight: 36,
+                            padding: '8px 10px',
+                            borderRadius: 8,
+                            border: `1px solid ${active ? B.wavesBlue : '#CBD5E1'}`,
+                            background: active ? '#EEF6FF' : '#fff',
+                            color: active ? B.blueDeeper : B.textBody,
+                            cursor: 'pointer',
+                            fontSize: 12,
+                            fontWeight: 850,
+                            fontFamily: FONTS.heading,
+                          }}
+                        >
+                          {l.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+              )}
+
+              <section style={{ ...card, padding: 16 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
+                  <div>
+                    <div style={sectionTitle}>Photos</div>
+                    <div style={helperText}>Optional, up to {photoLimit}. Photos help the technician identify the issue before arrival.</div>
+                  </div>
+                  <div style={{ fontSize: 12, color: muted, fontWeight: 850, whiteSpace: 'nowrap' }}>{photos.length}/{photoLimit}</div>
+                </div>
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  multiple
+                  onChange={handlePhoto}
+                  style={{ display: 'none' }}
+                />
+                <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '160px 1fr', gap: 10, marginTop: 12 }}>
+                  {photosRemaining > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => fileRef.current?.click()}
+                      style={{
+                        minHeight: 92,
+                        borderRadius: 8,
+                        cursor: 'pointer',
+                        border: '1px dashed #93C5FD',
+                        background: '#EEF6FF',
+                        color: B.blueDeeper,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: 6,
+                        fontFamily: FONTS.heading,
+                        fontWeight: 850,
+                      }}
+                    >
+                      <Icon name="camera" size={22} strokeWidth={2} />
+                      <span style={{ fontSize: 14 }}>Add photos</span>
+                      <span style={{ fontSize: 12, color: muted, fontWeight: 700 }}>{photosRemaining} remaining</span>
+                    </button>
+                  )}
+                  <div style={{
+                    display: photos.length ? 'grid' : 'flex',
+                    gridTemplateColumns: 'repeat(auto-fill, minmax(72px, 1fr))',
+                    gap: 8,
+                    alignItems: photos.length ? 'stretch' : 'center',
+                    minHeight: photos.length ? 0 : 92,
+                    borderRadius: 8,
+                    border: photos.length ? 'none' : '1px solid #E1E7EF',
+                    background: photos.length ? 'transparent' : '#F8FAFC',
+                    padding: photos.length ? 0 : 12,
+                    color: muted,
+                    fontSize: 14,
+                  }}>
+                    {!photos.length && <span>No photos added yet.</span>}
+                    {photos.map((p, i) => (
+                      <div key={`${p.name || 'photo'}-${i}`} style={{ position: 'relative', aspectRatio: '1 / 1', minWidth: 0 }}>
+                        <img src={p.preview} alt="" style={{
+                          width: '100%',
+                          height: '100%',
+                          objectFit: 'cover',
+                          borderRadius: 8,
+                          border: '1px solid #E1E7EF',
+                          display: 'block',
+                        }} />
+                        <button
+                          type="button"
+                          onClick={() => removePhoto(i)}
+                          aria-label={`Remove photo ${i + 1}`}
+                          style={{
+                            position: 'absolute',
+                            top: 5,
+                            right: 5,
+                            width: 26,
+                            height: 26,
+                            borderRadius: 8,
+                            background: 'rgba(15,23,42,0.82)',
+                            color: '#fff',
+                            border: '1px solid rgba(255,255,255,0.65)',
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            padding: 0,
+                          }}
+                        >
+                          <Icon name="close" size={13} strokeWidth={2.2} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </section>
+
+              {submitError && (
+                <div role="alert" style={{
+                  ...card,
+                  padding: 12,
+                  background: '#FEF2F2',
+                  borderColor: '#FECACA',
+                  color: B.red,
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: 10,
+                  fontSize: 14,
+                  lineHeight: 1.45,
+                  fontWeight: 700,
+                }}>
+                  <Icon name="warning" size={16} strokeWidth={2} style={{ marginTop: 1 }} />
+                  <span>{submitError}</span>
+                </div>
+              )}
+            </div>
+
+            <footer style={{
+              flexShrink: 0,
+              borderTop: '1px solid #E1E7EF',
+              background: 'rgba(255,255,255,0.96)',
+              backdropFilter: 'blur(12px)',
+              padding: compact ? '10px 14px max(14px, env(safe-area-inset-bottom))' : '14px 18px',
+              display: 'grid',
+              gridTemplateColumns: compact ? '1fr' : '1fr auto',
+              gap: 10,
+              alignItems: 'center',
+            }}>
+              <div style={{ display: 'flex', gap: 8, minWidth: 0 }}>
+                <a href="tel:+19412975749" style={{ ...secondaryAction, flex: compact ? 1 : '0 0 auto', padding: '0 12px' }}>
+                  <Icon name="phone" size={15} strokeWidth={2} /> Call
+                </a>
+                <a href="sms:+19412975749" style={{ ...secondaryAction, flex: compact ? 1 : '0 0 auto', padding: '0 12px' }}>
+                  <Icon name="chat" size={15} strokeWidth={2} /> Text
+                </a>
+              </div>
+              <button type="submit" disabled={!canSubmit} style={{
+                minHeight: 44,
+                borderRadius: 8,
+                border: 'none',
+                background: canSubmit ? B.blueDeeper : '#CBD5E1',
+                color: '#fff',
+                fontSize: 14,
+                fontWeight: 850,
+                fontFamily: FONTS.heading,
+                cursor: canSubmit ? 'pointer' : 'not-allowed',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+                padding: '0 18px',
+                minWidth: compact ? '100%' : 180,
+              }}>
+                {submitting ? 'Sending...' : 'Submit Request'}
+                {!submitting && <Icon name="arrowRight" size={16} strokeWidth={2.2} />}
+              </button>
+            </footer>
+          </form>
+        )}
+      </div>
     </div>
   );
 }
@@ -9568,62 +9963,112 @@ function MyRequestsCard() {
   if (!open.length) return null;
 
   const statusConfig = {
-    new: { label: 'New', color: B.wavesBlue, bg: B.bluePale },
-    acknowledged: { label: 'Reviewed', color: B.orange, bg: `${B.orange}20` },
-    scheduled: { label: 'Scheduled', color: B.teal, bg: `${B.bluePale}20` },
-    resolved: { label: 'Resolved', color: B.green, bg: `${B.green}20` },
+    new: { label: 'New', color: B.wavesBlue, bg: '#EEF6FF', border: '#A7DDF8' },
+    acknowledged: { label: 'Reviewed', color: B.orange, bg: '#FFFBEB', border: '#FDE68A' },
+    scheduled: { label: 'Scheduled', color: B.teal, bg: '#F0F9FF', border: '#BAE6FD' },
+    resolved: { label: 'Resolved', color: B.green, bg: '#F0FDF4', border: '#BBF7D0' },
   };
 
   const STATUS_ORDER = ['new', 'acknowledged', 'scheduled', 'resolved'];
+  const muted = '#64748B';
 
   return (
-    <div style={{
-      background: B.white, borderRadius: 16, padding: 20,
-      border: `1px solid ${B.grayLight}`, boxShadow: '0 2px 12px rgba(0,0,0,0.03)',
+    <section style={{
+      background: B.white,
+      borderRadius: 8,
+      padding: 16,
+      border: '1px solid #E1E7EF',
+      boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
-        <Icon name="clipboard" size={18} strokeWidth={1.75} />
-        <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>My Requests</div>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+          <span style={{
+            width: 38,
+            height: 38,
+            borderRadius: 8,
+            background: '#EEF6FF',
+            color: B.blueDeeper,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flexShrink: 0,
+          }}>
+            <Icon name="clipboard" size={18} strokeWidth={2} />
+          </span>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>My Requests</div>
+            <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Open service and account requests</div>
+          </div>
+        </div>
         <span style={{
-          marginLeft: 'auto', fontSize: 12, fontWeight: 700, padding: '2px 8px',
-          borderRadius: 10, background: B.bluePale, color: B.wavesBlue,
+          fontSize: 12,
+          fontWeight: 850,
+          padding: '5px 9px',
+          borderRadius: 8,
+          background: '#EEF6FF',
+          color: B.blueDeeper,
+          border: '1px solid #CDEAFE',
+          whiteSpace: 'nowrap',
         }}>{open.length} open</span>
       </div>
 
-      {open.slice(0, 3).map(r => {
-        const s = statusConfig[r.status] || statusConfig.new;
-        const created = new Date(r.createdAt);
-        return (
-          <div key={r.id} style={{
-            padding: '12px 0',
-            borderBottom: `1px solid ${B.grayLight}`,
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>{r.subject}</div>
-              <span style={{
-                fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5,
-                padding: '3px 8px', borderRadius: 20,
-                background: s.bg, color: s.color,
-              }}>{s.label}</span>
-            </div>
-            {/* Status progress */}
-            <div style={{ display: 'flex', gap: 3, marginTop: 8 }}>
-              {STATUS_ORDER.map((st, i) => (
-                <div key={st} style={{
-                  flex: 1, height: 3, borderRadius: 2,
-                  background: STATUS_ORDER.indexOf(r.status) >= i ? s.color : B.grayLight,
-                }} />
-              ))}
-            </div>
-            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 6 }}>
-              {r.category?.replace(/_/g, ' ')} · {created.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-              {r.urgency === 'urgent' && <span style={{ color: B.red, fontWeight: 700, marginLeft: 6 }}>URGENT</span>}
-              {r.assignedTechnician && <span> · Assigned: {r.assignedTechnician}</span>}
-            </div>
+      <div style={{ display: 'grid', gap: 8 }}>
+        {open.slice(0, 3).map(r => {
+          const s = statusConfig[r.status] || statusConfig.new;
+          const created = new Date(r.createdAt);
+          const currentStep = Math.max(0, STATUS_ORDER.indexOf(r.status));
+          return (
+            <article key={r.id} style={{
+              border: '1px solid #E1E7EF',
+              borderRadius: 8,
+              background: '#F8FAFC',
+              padding: 12,
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, lineHeight: 1.35 }}>{r.subject}</div>
+                  <div style={{ fontSize: 12, color: muted, marginTop: 4 }}>
+                    {r.category?.replace(/_/g, ' ')} · {created.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                    {r.assignedTechnician && <span> · {r.assignedTechnician}</span>}
+                  </div>
+                </div>
+                <span style={{
+                  fontSize: 12,
+                  fontWeight: 850,
+                  textTransform: 'uppercase',
+                  letterSpacing: 0,
+                  padding: '5px 8px',
+                  borderRadius: 8,
+                  background: s.bg,
+                  color: s.color,
+                  border: `1px solid ${s.border}`,
+                  whiteSpace: 'nowrap',
+                }}>{s.label}</span>
+              </div>
+              <div aria-hidden="true" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 4, marginTop: 10 }}>
+                {STATUS_ORDER.map((st, i) => (
+                  <div key={st} style={{
+                    height: 4,
+                    borderRadius: 999,
+                    background: currentStep >= i ? s.color : '#E1E7EF',
+                  }} />
+                ))}
+              </div>
+              {r.urgency === 'urgent' && (
+                <div style={{ marginTop: 8, fontSize: 12, color: B.red, fontWeight: 850, display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <Icon name="warning" size={13} strokeWidth={2} /> Urgent priority
+                </div>
+              )}
+            </article>
+          );
+        })}
+        {open.length > 3 && (
+          <div style={{ fontSize: 12, color: muted, padding: '2px 2px 0' }}>
+            Showing the latest 3 of {open.length} open requests.
           </div>
-        );
-      })}
-    </div>
+        )}
+      </div>
+    </section>
   );
 }
 
