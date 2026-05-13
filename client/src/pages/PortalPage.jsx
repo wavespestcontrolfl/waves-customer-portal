@@ -33,7 +33,7 @@ function daysUntilEtDate(d) {
 
 function fmtDate(d, opts) {
   const dt = parseDate(d);
-  return isNaN(dt) ? '—' : dt.toLocaleDateString('en-US', opts);
+  return isNaN(dt) ? '—' : dt.toLocaleDateString('en-US', { timeZone: 'America/New_York', ...opts });
 }
 
 // =========================================================================
@@ -54,6 +54,69 @@ const VISUALLY_HIDDEN = {
   whiteSpace: 'nowrap',
   border: 0,
 };
+
+const PORTAL_SHELL = {
+  page: '#F8FAFC',
+  surface: '#FFFFFF',
+  border: '#E1E7EF',
+  borderStrong: '#CBD5E1',
+  muted: '#64748B',
+  text: B.blueDeeper,
+  soft: '#EEF6FF',
+  softBorder: '#CDEAFE',
+  successBg: '#F0FDF4',
+  successBorder: '#BBF7D0',
+  successText: '#047857',
+  shadow: '0 18px 45px rgba(15,23,42,0.14)',
+  shadowSoft: '0 1px 2px rgba(15,23,42,0.04)',
+};
+
+function ShellIconTile({ icon, active = false, tone = 'brand', size = 36 }) {
+  const toneStyle = tone === 'danger'
+    ? { background: `${B.red}10`, color: B.red }
+    : tone === 'success'
+      ? { background: PORTAL_SHELL.successBg, color: PORTAL_SHELL.successText }
+      : { background: active ? PORTAL_SHELL.surface : PORTAL_SHELL.soft, color: PORTAL_SHELL.text };
+  return (
+    <span style={{
+      width: size,
+      height: size,
+      borderRadius: 8,
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      flexShrink: 0,
+      ...toneStyle,
+    }}>
+      <Icon name={icon} size={Math.max(14, Math.round(size * 0.45))} strokeWidth={2} />
+    </span>
+  );
+}
+
+function ShellCloseButton({ onClick, label = 'Close' }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      style={{
+        width: 36,
+        height: 36,
+        borderRadius: 8,
+        border: `1px solid ${PORTAL_SHELL.borderStrong}`,
+        background: PORTAL_SHELL.surface,
+        color: PORTAL_SHELL.text,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        cursor: 'pointer',
+        flexShrink: 0,
+      }}
+    >
+      <Icon name="close" size={16} strokeWidth={2} />
+    </button>
+  );
+}
 
 // Wave divider SVG — used between sections
 function WaveDivider() {
@@ -9296,19 +9359,19 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     const daysUntil = (nextDate - new Date()) / (1000 * 60 * 60 * 24);
     return daysUntil >= 0 && daysUntil <= 3;
   })();
-  const nextServiceDateStr = nextService ? parseDate(nextService.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '';
-  const lastServiceDateStr = lastService ? parseDate(lastService.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '';
+  const nextServiceDateStr = nextService ? fmtDate(nextService.date, { month: 'short', day: 'numeric' }) : '';
+  const lastServiceDateStr = lastService ? fmtDate(lastService.date, { month: 'short', day: 'numeric' }) : '';
   const descriptionLimit = 500;
   const photoLimit = 3;
   const canSubmit = !!category && !!description.trim() && !submitting;
   const photosRemaining = Math.max(0, photoLimit - photos.length);
 
-  const muted = '#64748B';
+  const muted = PORTAL_SHELL.muted;
   const card = {
-    background: B.white,
-    border: '1px solid #E1E7EF',
+    background: PORTAL_SHELL.surface,
+    border: `1px solid ${PORTAL_SHELL.border}`,
     borderRadius: 8,
-    boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+    boxShadow: PORTAL_SHELL.shadowSoft,
   };
   const sectionTitle = {
     fontSize: 12,
@@ -9328,8 +9391,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     width: 36,
     height: 36,
     borderRadius: 8,
-    background: '#EEF6FF',
-    color: B.blueDeeper,
+    background: PORTAL_SHELL.soft,
+    color: PORTAL_SHELL.text,
     display: 'inline-flex',
     alignItems: 'center',
     justifyContent: 'center',
@@ -9338,9 +9401,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   const secondaryAction = {
     minHeight: 40,
     borderRadius: 8,
-    border: '1px solid #CBD5E1',
-    background: '#fff',
-    color: B.blueDeeper,
+    border: `1px solid ${PORTAL_SHELL.borderStrong}`,
+    background: PORTAL_SHELL.surface,
+    color: PORTAL_SHELL.text,
     fontFamily: FONTS.heading,
     fontSize: 14,
     fontWeight: 850,
@@ -9412,7 +9475,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   return (
     <div style={{
       position: 'fixed', inset: 0, zIndex: 1000,
-      background: compact ? '#F8FAFC' : 'rgba(15,23,42,0.48)',
+      background: compact ? PORTAL_SHELL.page : 'rgba(15,23,42,0.48)',
+      backdropFilter: compact ? 'none' : 'blur(5px)',
       display: 'flex',
       alignItems: compact ? 'stretch' : 'center',
       justifyContent: 'center',
@@ -9436,10 +9500,10 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
           maxWidth: compact ? 'none' : 720,
           height: compact ? '100%' : 'auto',
           maxHeight: compact ? 'none' : 'calc(100vh - 48px)',
-          background: '#F8FAFC',
+          background: PORTAL_SHELL.page,
           borderRadius: compact ? 0 : 8,
           boxShadow: compact ? 'none' : '0 24px 70px rgba(15,23,42,0.28)',
-          border: compact ? 'none' : '1px solid #E1E7EF',
+          border: compact ? 'none' : `1px solid ${PORTAL_SHELL.border}`,
           overflow: 'hidden',
           display: 'flex',
           flexDirection: 'column',
@@ -9450,7 +9514,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
           flexShrink: 0,
           background: 'rgba(255,255,255,0.96)',
           backdropFilter: 'blur(12px)',
-          borderBottom: '1px solid #E1E7EF',
+          borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           padding: compact ? '12px 14px' : '14px 18px',
           display: 'flex',
           alignItems: 'center',
@@ -9462,27 +9526,13 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
               <Icon name="wrench" size={17} strokeWidth={2} />
             </span>
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 18, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading, lineHeight: 1.2 }}>New Request</div>
+              <div style={{ fontSize: 18, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading, lineHeight: 1.2 }}>New Request</div>
               <div style={{ fontSize: 14, color: muted, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                 Service, scheduling, and account help
               </div>
             </div>
           </div>
-          <button type="button" onClick={onClose} aria-label="Close request" style={{
-            width: 36,
-            height: 36,
-            borderRadius: 8,
-            border: '1px solid #CBD5E1',
-            background: '#fff',
-            color: B.blueDeeper,
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            cursor: 'pointer',
-            flexShrink: 0,
-          }}>
-            <Icon name="close" size={16} strokeWidth={2} />
-          </button>
+          <ShellCloseButton onClick={onClose} label="Close request" />
         </header>
 
         {submitted ? (
@@ -9551,13 +9601,13 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                       gridTemplateColumns: compact ? '1fr' : 'repeat(2, minmax(0, 1fr))',
                       gap: 8,
                     }}>
-                      <div style={{ background: '#F8FAFC', border: '1px solid #E1E7EF', borderRadius: 8, padding: 10 }}>
+                      <div style={{ background: PORTAL_SHELL.page, border: `1px solid ${PORTAL_SHELL.border}`, borderRadius: 8, padding: 10 }}>
                         <div style={sectionTitle}>Plan</div>
-                        <div style={{ marginTop: 4, fontSize: 14, color: B.blueDeeper, fontWeight: 850 }}>WaveGuard {tierName}</div>
+                        <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 850 }}>WaveGuard {tierName}</div>
                       </div>
-                      <div style={{ background: '#F8FAFC', border: '1px solid #E1E7EF', borderRadius: 8, padding: 10 }}>
+                      <div style={{ background: PORTAL_SHELL.page, border: `1px solid ${PORTAL_SHELL.border}`, borderRadius: 8, padding: 10 }}>
                         <div style={sectionTitle}>Last service</div>
-                        <div style={{ marginTop: 4, fontSize: 14, color: B.blueDeeper, fontWeight: 850 }}>{lastServiceDateStr || 'Checking...'}</div>
+                        <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 850 }}>{lastServiceDateStr || 'Checking...'}</div>
                       </div>
                     </div>
                   </div>
@@ -9588,9 +9638,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                         style={{
                           minHeight: compact ? 94 : 104,
                           borderRadius: 8,
-                          border: `1px solid ${active ? B.wavesBlue : '#E1E7EF'}`,
-                          background: active ? '#EEF6FF' : '#fff',
-                          color: B.blueDeeper,
+                          border: `1px solid ${active ? B.wavesBlue : PORTAL_SHELL.border}`,
+                          background: active ? PORTAL_SHELL.soft : PORTAL_SHELL.surface,
+                          color: PORTAL_SHELL.text,
                           cursor: 'pointer',
                           textAlign: 'left',
                           padding: 10,
@@ -9601,7 +9651,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                           boxShadow: active ? '0 0 0 2px rgba(0,156,222,0.12)' : 'none',
                         }}
                       >
-                        <span style={{ ...iconTile, width: 34, height: 34, background: active ? '#fff' : '#EEF6FF' }}>
+                        <span style={{ ...iconTile, width: 34, height: 34, background: active ? PORTAL_SHELL.surface : PORTAL_SHELL.soft }}>
                           <Icon name={c.icon} size={16} strokeWidth={2} />
                         </span>
                         <span>
@@ -9620,16 +9670,16 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                     <div style={{
                       ...card,
                       padding: 12,
-                      background: '#F0FDF4',
-                      borderColor: '#BBF7D0',
+                      background: PORTAL_SHELL.successBg,
+                      borderColor: PORTAL_SHELL.successBorder,
                       display: 'flex',
                       gap: 10,
                       alignItems: 'flex-start',
                     }}>
                       <span style={{ ...iconTile, background: B.greenLight, color: B.green }}><Icon name="checkCircle" size={16} strokeWidth={2} /></span>
                       <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 14, fontWeight: 850, color: '#047857' }}>Covered callback</div>
-                        <div style={{ marginTop: 2, fontSize: 14, color: '#047857', lineHeight: 1.4 }}>
+                        <div style={{ fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.successText }}>Covered callback</div>
+                        <div style={{ marginTop: 2, fontSize: 14, color: PORTAL_SHELL.successText, lineHeight: 1.4 }}>
                           Callbacks are included with your WaveGuard {tierName} plan when an issue returns soon after service.
                         </div>
                       </div>
@@ -9639,16 +9689,16 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                     <div style={{
                       ...card,
                       padding: 12,
-                      background: '#EEF6FF',
-                      borderColor: '#CDEAFE',
+                      background: PORTAL_SHELL.soft,
+                      borderColor: PORTAL_SHELL.softBorder,
                       display: 'flex',
                       gap: 10,
                       alignItems: 'flex-start',
                     }}>
                       <span style={iconTile}><Icon name="calendar" size={16} strokeWidth={2} /></span>
                       <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Upcoming visit</div>
-                        <div style={{ marginTop: 2, fontSize: 14, color: B.blueDeeper, lineHeight: 1.4 }}>
+                        <div style={{ fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.text }}>Upcoming visit</div>
+                        <div style={{ marginTop: 2, fontSize: 14, color: PORTAL_SHELL.text, lineHeight: 1.4 }}>
                           Your next visit is {nextServiceDateStr}. Tell us if this can wait for that visit or needs a separate stop.
                         </div>
                       </div>
@@ -9710,6 +9760,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                 </div>
                 <textarea
                   id="portal-request-description"
+                  name="requestDescription"
                   value={description}
                   onChange={e => { if (e.target.value.length <= descriptionLimit) setDescription(e.target.value); }}
                   rows={5}
@@ -9791,6 +9842,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                 </div>
                 <input
                   ref={fileRef}
+                  id="portal-request-photos"
+                  name="requestPhotos"
                   type="file"
                   accept="image/*"
                   capture="environment"
@@ -10106,13 +10159,14 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
   const button = (t, onClick, isActive) => (
     <button
       key={t.id}
+      type="button"
       onClick={onClick}
       aria-current={isActive ? 'page' : undefined}
       style={{
         flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
-        justifyContent: 'center', gap: 3, padding: '6px 2px', border: 'none',
+        justifyContent: 'center', gap: 4, padding: '7px 2px', border: 'none',
         background: 'transparent', cursor: 'pointer', minHeight: 58,
-        color: isActive ? B.blueDeeper : B.grayMid,
+        color: isActive ? PORTAL_SHELL.text : PORTAL_SHELL.muted,
         fontFamily: FONTS.heading, transition: 'color 0.15s ease',
         position: 'relative',
       }}
@@ -10120,7 +10174,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
       {isActive && <span aria-hidden="true" style={{
         position: 'absolute',
         top: 4,
-        width: 22,
+        width: 24,
         height: 3,
         borderRadius: 999,
         background: B.wavesBlue,
@@ -10131,10 +10185,11 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
   );
   return (
     <nav aria-label="Main" style={{
-      position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 98,
-      background: 'rgba(255,255,255,0.98)', backdropFilter: 'blur(12px)',
-      borderTop: '1px solid #E1E7EF',
-      boxShadow: '0 -8px 24px rgba(15,23,42,0.08)',
+      position: 'fixed', bottom: 8, left: 10, right: 10, zIndex: 98,
+      background: 'rgba(255,255,255,0.98)', backdropFilter: 'blur(16px)',
+      border: `1px solid ${PORTAL_SHELL.border}`,
+      borderRadius: 16,
+      boxShadow: '0 14px 32px rgba(15,23,42,0.16)',
       display: 'flex', maxWidth: 700, margin: '0 auto',
       padding: '4px 8px max(6px, env(safe-area-inset-bottom))',
       boxSizing: 'border-box',
@@ -10157,19 +10212,19 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
-  const muted = '#64748B';
+  const muted = PORTAL_SHELL.muted;
   const card = {
-    background: B.white,
-    border: '1px solid #E1E7EF',
+    background: PORTAL_SHELL.surface,
+    border: `1px solid ${PORTAL_SHELL.border}`,
     borderRadius: 8,
-    boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+    boxShadow: PORTAL_SHELL.shadowSoft,
   };
   const iconTile = {
     width: 38,
     height: 38,
     borderRadius: 8,
-    background: '#EEF6FF',
-    color: B.blueDeeper,
+    background: PORTAL_SHELL.soft,
+    color: PORTAL_SHELL.text,
     display: 'inline-flex',
     alignItems: 'center',
     justifyContent: 'center',
@@ -10178,9 +10233,9 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
   const supportActionStyle = {
     minHeight: 44,
     borderRadius: 8,
-    border: '1px solid #CBD5E1',
-    background: B.white,
-    color: B.blueDeeper,
+    border: `1px solid ${PORTAL_SHELL.borderStrong}`,
+    background: PORTAL_SHELL.surface,
+    color: PORTAL_SHELL.text,
     fontFamily: FONTS.heading,
     fontSize: 14,
     fontWeight: 850,
@@ -10198,16 +10253,17 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
       style={{
         position: 'fixed', inset: 0, zIndex: 150,
         background: 'rgba(15,23,42,0.42)',
+        backdropFilter: 'blur(5px)',
         display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
       }}
     >
       <div role="dialog" aria-modal="true" aria-label="More navigation" style={{
-        background: '#F8FAFC',
-        borderRadius: '20px 20px 0 0',
+        background: PORTAL_SHELL.page,
+        borderRadius: '18px 18px 0 0',
         padding: '12px 14px max(18px, env(safe-area-inset-bottom))',
         boxShadow: '0 -8px 40px rgba(15,23,42,0.18)',
         animation: 'moreSheetUp 0.25s ease',
-        borderTop: '1px solid #E1E7EF',
+        borderTop: `1px solid ${PORTAL_SHELL.border}`,
         maxHeight: 'calc(100vh - 16px)',
         overflowY: 'auto',
         WebkitOverflowScrolling: 'touch',
@@ -10219,24 +10275,10 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
         }} />
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
           <div>
-            <div style={{ fontSize: 20, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading, lineHeight: 1.15 }}>More</div>
+            <div style={{ fontSize: 20, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading, lineHeight: 1.15 }}>More</div>
             <div style={{ marginTop: 3, fontSize: 14, color: muted }}>Documents, property tools, and help from Waves.</div>
           </div>
-          <button type="button" onClick={onClose} aria-label="Close more menu" style={{
-            width: 34,
-            height: 34,
-            borderRadius: 8,
-            border: '1px solid #CBD5E1',
-            background: '#fff',
-            color: B.blueDeeper,
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            cursor: 'pointer',
-            flexShrink: 0,
-          }}>
-            <Icon name="close" size={16} strokeWidth={2} />
-          </button>
+          <ShellCloseButton onClick={onClose} label="Close more menu" />
         </div>
 
         <section style={{ ...card, padding: 8, marginBottom: 10 }}>
@@ -10250,18 +10292,18 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
                 gap: 12,
                 padding: '11px 10px',
                 border: 'none',
-                background: isActive ? '#EEF6FF' : 'transparent',
+                background: isActive ? PORTAL_SHELL.soft : 'transparent',
                 borderRadius: 8,
                 cursor: 'pointer',
                 textAlign: 'left',
-                color: isActive ? B.blueDeeper : B.grayDark,
+                color: isActive ? PORTAL_SHELL.text : B.grayDark,
                 fontFamily: FONTS.body,
               }}>
-                <span style={{ ...iconTile, background: isActive ? '#fff' : '#EEF6FF' }}>
+                <span style={{ ...iconTile, background: isActive ? PORTAL_SHELL.surface : PORTAL_SHELL.soft }}>
                   <Icon name={t.icon} size={18} strokeWidth={2} />
                 </span>
                 <span style={{ minWidth: 0, flex: 1 }}>
-                  <span style={{ display: 'block', fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>{t.label}</span>
+                  <span style={{ display: 'block', fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.text }}>{t.label}</span>
                   <span style={{ display: 'block', marginTop: 2, fontSize: 12, color: muted, lineHeight: 1.35 }}>{t.description}</span>
                 </span>
                 <Icon name="chevronRight" size={17} strokeWidth={2} style={{ color: muted }} />
@@ -10275,7 +10317,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
             <span style={iconTile}><Icon name="sos" size={18} strokeWidth={2} /></span>
             <div>
               <div style={{ fontSize: 12, color: muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Support</div>
-              <div style={{ marginTop: 2, fontSize: 14, color: B.blueDeeper, fontWeight: 850 }}>Need help with service?</div>
+              <div style={{ marginTop: 2, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 850 }}>Need help with service?</div>
             </div>
           </div>
           <div style={{
@@ -10392,6 +10434,7 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
 // AI CHAT WIDGET
 // =========================================================================
 function ChatWidget({ customer, onClose }) {
+  const compact = useIsMobile(760);
   const firstName = customer?.firstName || customer?.first_name || '';
   const [messages, setMessages] = useState([
     { role: 'assistant', content: `Hi${firstName ? ` ${firstName}` : ''}! I'm the Waves AI assistant. How can I help you today?` },
@@ -10436,63 +10479,57 @@ function ChatWidget({ customer, onClose }) {
   return (
     <div style={{
       position: 'fixed', bottom: 0, left: 0, right: 0, top: 0, zIndex: 200,
-      background: 'rgba(15,23,42,0.42)', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
+      background: 'rgba(15,23,42,0.42)', backdropFilter: 'blur(5px)',
+      display: 'flex', flexDirection: 'column', justifyContent: compact ? 'flex-end' : 'center',
+      padding: compact ? 0 : 24,
     }} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div style={{
-        background: B.white,
-        borderRadius: '20px 20px 0 0',
-        maxHeight: '85vh',
-        maxWidth: 640,
-        width: '100%',
-        margin: '0 auto',
-        display: 'flex',
-        flexDirection: 'column',
-        boxShadow: '0 -8px 40px rgba(15,23,42,0.18)',
-        animation: 'chatSlideUp 0.3s ease',
-        border: '1px solid #E1E7EF',
-        borderBottom: 'none',
-      }}>
-        <style>{`@keyframes chatSlideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }`}</style>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Waves assistant"
+        style={{
+          background: PORTAL_SHELL.surface,
+          borderRadius: compact ? '18px 18px 0 0' : 8,
+          maxHeight: compact ? '85vh' : 'min(760px, calc(100vh - 48px))',
+          maxWidth: 640,
+          width: '100%',
+          margin: '0 auto',
+          display: 'flex',
+          flexDirection: 'column',
+          boxShadow: compact ? '0 -8px 40px rgba(15,23,42,0.18)' : PORTAL_SHELL.shadow,
+          animation: 'chatSlideUp 0.3s ease',
+          border: `1px solid ${PORTAL_SHELL.border}`,
+          borderBottom: compact ? 'none' : `1px solid ${PORTAL_SHELL.border}`,
+          overflow: 'hidden',
+        }}
+      >
+        <style>{`@keyframes chatSlideUp { from { opacity: .65; transform: translateY(${compact ? '100%' : '16px'}); } to { opacity: 1; transform: translateY(0); } }`}</style>
 
-        {/* Header */}
         <div style={{
           padding: '16px 18px',
-          borderBottom: '1px solid #E1E7EF',
+          borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          background: '#fff',
-          borderRadius: '20px 20px 0 0',
+          background: 'rgba(255,255,255,0.96)',
+          backdropFilter: 'blur(12px)',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <div style={{
-              width: 40,
-              height: 40,
-              borderRadius: 8,
-              background: '#EEF6FF',
-              color: B.blueDeeper,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontSize: 18,
-            }}><Icon name="waves" size={18} strokeWidth={2} /></div>
+            <ShellIconTile icon="waves" size={40} />
             <div>
-              <div style={{ fontSize: 15, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>Waves Assistant</div>
-              <div style={{ fontSize: 12, color: '#64748B', marginTop: 2 }}>Usually replies instantly</div>
+              <div style={{ fontSize: 15, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading }}>Waves Assistant</div>
+              <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 2 }}>Usually replies instantly</div>
             </div>
           </div>
-          <button onClick={onClose} aria-label="Close chat" style={{
-            background: '#fff',
-            border: '1px solid #CBD5E1',
-            color: B.blueDeeper,
-            width: 34,
-            height: 34,
-            borderRadius: 8,
-            cursor: 'pointer',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-          }}><Icon name="close" size={16} strokeWidth={2} /></button>
+          <ShellCloseButton onClick={onClose} label="Close chat" />
         </div>
 
-        {/* Messages */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 18px', minHeight: 300, maxHeight: '60vh', background: '#F8FAFC' }}>
+        <div style={{
+          flex: compact ? '1 1 300px' : '1 1 360px',
+          minHeight: 0,
+          overflowY: 'auto',
+          padding: '16px 18px',
+          maxHeight: compact ? '60vh' : 'none',
+          background: PORTAL_SHELL.page,
+        }}>
           {messages.map((msg, i) => (
             <div key={i} style={{
               display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
@@ -10509,11 +10546,11 @@ function ChatWidget({ customer, onClose }) {
                 ...(msg.role === 'user' ? {
                   background: B.blueDeeper, color: '#fff',
                 } : msg.role === 'system' ? {
-                  background: '#EEF6FF', color: B.blueDeeper, fontSize: 12, fontWeight: 700,
-                  border: '1px solid #CDEAFE',
+                  background: PORTAL_SHELL.soft, color: PORTAL_SHELL.text, fontSize: 12, fontWeight: 700,
+                  border: `1px solid ${PORTAL_SHELL.softBorder}`,
                 } : {
-                  background: '#fff', color: B.blueDeeper,
-                  border: '1px solid #E1E7EF',
+                  background: PORTAL_SHELL.surface, color: PORTAL_SHELL.text,
+                  border: `1px solid ${PORTAL_SHELL.border}`,
                 }),
               }}>
                 {msg.content}
@@ -10522,7 +10559,7 @@ function ChatWidget({ customer, onClose }) {
           ))}
           {sending && (
             <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10 }}>
-              <div style={{ background: '#fff', padding: '10px 14px', borderRadius: 8, fontSize: 14, color: '#64748B', border: '1px solid #E1E7EF' }}>
+              <div style={{ background: PORTAL_SHELL.surface, padding: '10px 14px', borderRadius: 8, fontSize: 14, color: PORTAL_SHELL.muted, border: `1px solid ${PORTAL_SHELL.border}` }}>
                 <span style={{ animation: 'pulse 1.5s ease infinite' }}>{'•••'}</span>
               </div>
             </div>
@@ -10530,13 +10567,13 @@ function ChatWidget({ customer, onClose }) {
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Input */}
         <div style={{
           padding: '12px 16px',
-          borderTop: '1px solid #E1E7EF',
+          borderTop: `1px solid ${PORTAL_SHELL.border}`,
           display: 'flex', gap: 8, alignItems: 'center', paddingBottom: 'max(12px, env(safe-area-inset-bottom))',
         }}>
           <input
+            name="chatMessage"
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && send()}
@@ -10548,12 +10585,12 @@ function ChatWidget({ customer, onClose }) {
               height: 44,
               padding: '0 14px',
               borderRadius: 8,
-              border: '1px solid #CBD5E1',
+              border: `1px solid ${PORTAL_SHELL.borderStrong}`,
               fontSize: 14,
               fontFamily: FONTS.body,
               outline: 'none',
               background: '#fff',
-              color: B.blueDeeper,
+              color: PORTAL_SHELL.text,
             }}
             autoFocus
           />
@@ -10607,10 +10644,7 @@ export default function PortalPage() {
     if (id === 'request') { setShowReportIssue(true); return; }
     setActiveTab(id);
   };
-  const headerNavItems = [
-    ...PRIMARY_TABS,
-    ...MORE_TABS,
-  ];
+  const headerNavItems = PRIMARY_TABS;
   const headerNavButton = (tab) => {
     const isActive = activeTab === tab.id;
     return (
@@ -10620,21 +10654,21 @@ export default function PortalPage() {
         onClick={() => switchTab(tab.id)}
         aria-current={isActive ? 'page' : undefined}
         style={{
-          border: `1px solid ${isActive ? '#A7DDF8' : 'transparent'}`,
+          border: `1px solid ${isActive ? PORTAL_SHELL.softBorder : 'transparent'}`,
           borderRadius: 8,
-          minHeight: 38,
-          padding: '8px 10px',
+          minHeight: 40,
+          padding: '8px 11px',
           display: 'inline-flex',
           alignItems: 'center',
           gap: 6,
           flex: '0 0 auto',
-          background: isActive ? '#fff' : 'transparent',
-          color: isActive ? B.blueDeeper : B.grayMid,
+          background: isActive ? PORTAL_SHELL.surface : 'transparent',
+          color: isActive ? PORTAL_SHELL.text : PORTAL_SHELL.muted,
           fontFamily: FONTS.heading,
           fontSize: 12,
           fontWeight: 850,
           cursor: 'pointer',
-          boxShadow: isActive ? '0 1px 2px rgba(15,23,42,0.05)' : 'none',
+          boxShadow: isActive ? PORTAL_SHELL.shadowSoft : 'none',
         }}
       >
         <Icon name={tab.icon} size={15} strokeWidth={isActive ? 2.1 : 1.75} />
@@ -10708,34 +10742,36 @@ export default function PortalPage() {
   return (
     <div style={{
       minHeight: '100vh',
-      background: B.offWhite,
+      background: PORTAL_SHELL.page,
       fontFamily: FONTS.body,
     }}>
       {/* Header */}
       <div style={{
         background: 'rgba(255,255,255,0.96)',
-        backdropFilter: 'blur(12px)',
-        borderBottom: '1px solid #E1E7EF',
+        backdropFilter: 'blur(16px)',
+        borderBottom: `1px solid ${PORTAL_SHELL.border}`,
         boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
-        padding: '10px 16px',
+        padding: '10px max(16px, calc((100vw - 1120px) / 2 + 16px))',
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         gap: 12,
         position: 'sticky', top: 0, zIndex: 100,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <img src="/waves-logo.png" alt="Waves" style={{ height: 32, width: 'auto' }} />
-          <div>
-            <div style={{ fontSize: 14, fontWeight: 800, color: B.blueDeeper, fontFamily: FONTS.heading }}>WAVES</div>
-            <div style={{ fontSize: 12, color: B.grayMid, fontWeight: 600, letterSpacing: 0, textTransform: 'uppercase' }}>Customer Portal</div>
+          <img src="/waves-logo.png" alt="Waves" style={{ height: 34, width: 'auto', display: 'block' }} />
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading }}>Customer Portal</div>
+            <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 1, maxWidth: isMobileShell ? 150 : 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {activePropertyAddress || 'Waves Pest Control'}
+            </div>
           </div>
         </div>
         {!isMobileShell && (
           <nav aria-label="Customer portal" style={{
             flex: 1, minWidth: 0, margin: '0 18px',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            display: 'flex', alignItems: 'center', justifyContent: 'flex-start',
             gap: 3, overflowX: 'auto', scrollbarWidth: 'none',
-            background: '#F8FAFC',
-            border: '1px solid #E1E7EF',
+            background: PORTAL_SHELL.page,
+            border: `1px solid ${PORTAL_SHELL.border}`,
             borderRadius: 8,
             padding: 4,
           }}>
@@ -10743,291 +10779,316 @@ export default function PortalPage() {
           </nav>
         )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {!isMobileShell && (
+            <button
+              type="button"
+              onClick={() => setShowReportIssue(true)}
+              style={{
+                minHeight: 38,
+                borderRadius: 8,
+                border: `1px solid ${PORTAL_SHELL.borderStrong}`,
+                background: PORTAL_SHELL.surface,
+                color: PORTAL_SHELL.text,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 7,
+                padding: '0 12px',
+                fontSize: 14,
+                fontWeight: 850,
+                fontFamily: FONTS.heading,
+                cursor: 'pointer',
+              }}
+            >
+              <Icon name="wrench" size={15} strokeWidth={2} />
+              Request
+            </button>
+          )}
           <NotificationBell type="customer" />
           <div ref={menuRef} style={{ position: 'relative' }}>
-          <button
-            type="button"
-            onClick={() => setShowMenu(!showMenu)}
-            aria-label="Account menu"
-            aria-haspopup="dialog"
-            aria-expanded={showMenu}
-            style={{
-              minHeight: 38,
-              width: isMobileShell ? 38 : 'auto',
-              borderRadius: 8,
-              background: B.white,
-              border: '1px solid #CBD5E1',
-              padding: isMobileShell ? 0 : '4px 8px 4px 4px',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 8,
-              color: B.blueDeeper,
-              fontSize: 14,
-              fontWeight: 850,
-              cursor: 'pointer',
-              fontFamily: FONTS.heading,
-              boxShadow: showMenu ? '0 0 0 3px rgba(0,156,222,0.14)' : 'none',
-            }}
-          >
-            <span style={{
-              width: 30,
-              height: 30,
-              borderRadius: 8,
-              background: B.blueDeeper,
-              color: '#fff',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontSize: 12,
-              fontWeight: 850,
-              flexShrink: 0,
-            }}>{initials}</span>
-            {!isMobileShell && (
-              <>
-                <span style={{ maxWidth: 132, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{customerName}</span>
-                <Icon name="chevronDown" size={15} strokeWidth={2} />
-              </>
-            )}
-          </button>
-          {showMenu && (
-            <div role="dialog" aria-label="Account menu" style={{
-              position: 'absolute',
-              right: 0,
-              top: 46,
-              width: 360,
-              maxWidth: 'calc(100vw - 24px)',
-              background: '#F8FAFC',
-              borderRadius: 8,
-              overflow: 'hidden',
-              maxHeight: 'calc(100vh - 72px)',
-              overflowY: 'auto',
-              boxShadow: '0 18px 45px rgba(15,23,42,0.18)',
-              border: '1px solid #E1E7EF',
-              zIndex: 200,
-            }}>
-              <div style={{ padding: 14, background: B.white, borderBottom: '1px solid #E1E7EF' }}>
-                <div style={{ fontSize: 12, color: '#64748B', fontWeight: 850, letterSpacing: 0, textTransform: 'uppercase', marginBottom: 10 }}>
-                  Account
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <span style={{
-                    width: 42,
-                    height: 42,
-                    borderRadius: 8,
-                    background: B.blueDeeper,
-                    color: '#fff',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    fontSize: 15,
-                    fontWeight: 850,
-                    fontFamily: FONTS.heading,
-                    flexShrink: 0,
-                  }}>{initials}</span>
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: 15, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>
-                      {customerName}
-                    </div>
-                    <div style={{ fontSize: 12, color: '#64748B', marginTop: 2 }}>{formatPhoneDisplay(customer.phone)}</div>
-                    {activePropertyAddress && (
-                      <div style={{ fontSize: 12, color: '#64748B', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {activePropertyAddress}
+            <button
+              type="button"
+              onClick={() => setShowMenu(!showMenu)}
+              aria-label="Account menu"
+              aria-haspopup="dialog"
+              aria-expanded={showMenu}
+              style={{
+                minHeight: 38,
+                width: isMobileShell ? 38 : 'auto',
+                borderRadius: 8,
+                background: PORTAL_SHELL.surface,
+                border: `1px solid ${PORTAL_SHELL.borderStrong}`,
+                padding: isMobileShell ? 0 : '4px 8px 4px 4px',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+                color: PORTAL_SHELL.text,
+                fontSize: 14,
+                fontWeight: 850,
+                cursor: 'pointer',
+                fontFamily: FONTS.heading,
+                boxShadow: showMenu ? '0 0 0 3px rgba(0,156,222,0.14)' : PORTAL_SHELL.shadowSoft,
+              }}
+            >
+              <span style={{
+                width: 30,
+                height: 30,
+                borderRadius: 8,
+                background: PORTAL_SHELL.text,
+                color: '#fff',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 12,
+                fontWeight: 850,
+                flexShrink: 0,
+              }}>{initials}</span>
+              {!isMobileShell && (
+                <>
+                  <span style={{ maxWidth: 132, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{customerName}</span>
+                  <Icon name="chevronDown" size={15} strokeWidth={2} />
+                </>
+              )}
+            </button>
+            {showMenu && (
+              <div role="dialog" aria-label="Account menu" style={{
+                position: 'absolute',
+                right: 0,
+                top: 46,
+                width: 360,
+                maxWidth: 'calc(100vw - 24px)',
+                background: PORTAL_SHELL.page,
+                borderRadius: 8,
+                overflow: 'hidden',
+                maxHeight: 'calc(100vh - 72px)',
+                overflowY: 'auto',
+                boxShadow: PORTAL_SHELL.shadow,
+                border: `1px solid ${PORTAL_SHELL.border}`,
+                zIndex: 200,
+              }}>
+                <div style={{ padding: 14, background: PORTAL_SHELL.surface, borderBottom: `1px solid ${PORTAL_SHELL.border}` }}>
+                  <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, fontWeight: 850, letterSpacing: 0, textTransform: 'uppercase', marginBottom: 10 }}>
+                    Account
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <span style={{
+                      width: 42,
+                      height: 42,
+                      borderRadius: 8,
+                      background: PORTAL_SHELL.text,
+                      color: '#fff',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: 15,
+                      fontWeight: 850,
+                      fontFamily: FONTS.heading,
+                      flexShrink: 0,
+                    }}>{initials}</span>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 15, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading }}>
+                        {customerName}
                       </div>
-                    )}
+                      <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 2 }}>{formatPhoneDisplay(customer.phone)}</div>
+                      {activePropertyAddress && (
+                        <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {activePropertyAddress}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
-              {canSwitchProperties && (
-                <div style={{ padding: 12, borderBottom: '1px solid #E1E7EF' }}>
+                {canSwitchProperties && (
+                  <div style={{ padding: 12, borderBottom: `1px solid ${PORTAL_SHELL.border}` }}>
+                    <div style={{
+                      fontSize: 12,
+                      color: PORTAL_SHELL.muted,
+                      fontWeight: 850,
+                      letterSpacing: 0,
+                      textTransform: 'uppercase',
+                      padding: '0 2px 8px',
+                    }}>
+                      Service Property
+                    </div>
+                    <div style={{ display: 'grid', gap: 6 }}>
+                      {portalProperties.map(property => {
+                        const active = property.id === customer.id;
+                        const address = formatPropertyAddress(property);
+                        return (
+                          <button
+                            key={property.id}
+                            type="button"
+                            onClick={() => selectProperty(property.id)}
+                            disabled={active || !!switchingPropertyId}
+                            style={{
+                              width: '100%',
+                              border: `1px solid ${active ? PORTAL_SHELL.softBorder : PORTAL_SHELL.border}`,
+                              borderRadius: 8,
+                              textAlign: 'left',
+                              padding: '9px 10px',
+                              cursor: active || switchingPropertyId ? 'default' : 'pointer',
+                              background: active ? PORTAL_SHELL.soft : PORTAL_SHELL.surface,
+                              color: PORTAL_SHELL.text,
+                              fontFamily: FONTS.body,
+                            }}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                              <span style={{ fontSize: 14, fontWeight: 800, minWidth: 0 }}>
+                                {property.profileLabel || (property.isPrimaryProfile ? 'Primary' : 'Property')}
+                              </span>
+                              {active && <span style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 850 }}>Current</span>}
+                              {switchingPropertyId === property.id && <span style={{ fontSize: 12, color: PORTAL_SHELL.muted, fontWeight: 850 }}>Switching</span>}
+                            </div>
+                            {address && (
+                              <div style={{
+                                fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 2,
+                                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                              }}>
+                                {address}
+                              </div>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+                <div style={{ padding: 12, borderBottom: `1px solid ${PORTAL_SHELL.border}` }}>
                   <div style={{
                     fontSize: 12,
-                    color: '#64748B',
+                    color: PORTAL_SHELL.muted,
                     fontWeight: 850,
-                    letterSpacing: 0,
                     textTransform: 'uppercase',
+                    letterSpacing: 0,
                     padding: '0 2px 8px',
-                  }}>
-                    Service Property
-                  </div>
-                  <div style={{ display: 'grid', gap: 6 }}>
-                    {portalProperties.map(property => {
-                      const active = property.id === customer.id;
-                      const address = formatPropertyAddress(property);
+                  }}>Support</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 6 }}>
+                    {accountSupportActions.map(action => {
+                      const sharedStyle = {
+                        minHeight: 54,
+                        borderRadius: 8,
+                        border: `1px solid ${PORTAL_SHELL.border}`,
+                        background: PORTAL_SHELL.surface,
+                        color: PORTAL_SHELL.text,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: 5,
+                        fontFamily: FONTS.heading,
+                        fontSize: 12,
+                        fontWeight: 850,
+                        textDecoration: 'none',
+                        cursor: 'pointer',
+                      };
+                      const content = (
+                        <>
+                          <Icon name={action.icon} size={16} strokeWidth={2} />
+                          <span>{action.label}</span>
+                        </>
+                      );
+                      if (action.href) {
+                        return (
+                          <a key={action.label} href={action.href} onClick={() => setShowMenu(false)} style={sharedStyle}>
+                            {content}
+                          </a>
+                        );
+                      }
                       return (
                         <button
-                          key={property.id}
+                          key={action.label}
                           type="button"
-                          onClick={() => selectProperty(property.id)}
-                          disabled={active || !!switchingPropertyId}
-                          style={{
-                            width: '100%',
-                            border: `1px solid ${active ? '#A7DDF8' : '#E1E7EF'}`,
-                            borderRadius: 8,
-                            textAlign: 'left',
-                            padding: '9px 10px',
-                            cursor: active || switchingPropertyId ? 'default' : 'pointer',
-                            background: active ? '#EEF6FF' : B.white,
-                            color: B.blueDeeper,
-                            fontFamily: FONTS.body,
-                          }}
+                          onClick={() => { action.action(); setShowMenu(false); }}
+                          style={sharedStyle}
                         >
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                            <span style={{ fontSize: 14, fontWeight: 800, minWidth: 0 }}>
-                              {property.profileLabel || (property.isPrimaryProfile ? 'Primary' : 'Property')}
-                            </span>
-                            {active && <span style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 850 }}>Current</span>}
-                            {switchingPropertyId === property.id && <span style={{ fontSize: 12, color: '#64748B', fontWeight: 850 }}>Switching</span>}
-                          </div>
-                          {address && (
-                            <div style={{
-                              fontSize: 12, color: '#64748B', marginTop: 2,
-                              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                            }}>
-                              {address}
-                            </div>
-                          )}
+                          {content}
                         </button>
                       );
                     })}
                   </div>
                 </div>
-              )}
-              <div style={{ padding: 12, borderBottom: '1px solid #E1E7EF' }}>
-                <div style={{
-                  fontSize: 12,
-                  color: '#64748B',
-                  fontWeight: 850,
-                  textTransform: 'uppercase',
-                  letterSpacing: 0,
-                  padding: '0 2px 8px',
-                }}>Support</div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 6 }}>
-                  {accountSupportActions.map(action => {
-                    const sharedStyle = {
-                      minHeight: 54,
-                      borderRadius: 8,
-                      border: '1px solid #E1E7EF',
-                      background: B.white,
-                      color: B.blueDeeper,
-                      display: 'flex',
-                      flexDirection: 'column',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: 5,
-                      fontFamily: FONTS.heading,
-                      fontSize: 12,
-                      fontWeight: 850,
-                      textDecoration: 'none',
-                      cursor: 'pointer',
-                    };
-                    const content = (
-                      <>
-                        <Icon name={action.icon} size={16} strokeWidth={2} />
-                        <span>{action.label}</span>
-                      </>
-                    );
-                    if (action.href) {
-                      return (
-                        <a key={action.label} href={action.href} onClick={() => setShowMenu(false)} style={sharedStyle}>
-                          {content}
-                        </a>
-                      );
-                    }
+                <div style={{ padding: 8, background: PORTAL_SHELL.surface }}>
+                  {accountMenuItems.map(item => {
+                    const isActive = activeTab === item.tab;
                     return (
                       <button
-                        key={action.label}
+                        key={item.label}
                         type="button"
-                        onClick={() => { action.action(); setShowMenu(false); }}
-                        style={sharedStyle}
+                        onClick={() => { item.action(); setShowMenu(false); }}
+                        style={{
+                          width: '100%',
+                          border: 'none',
+                          background: isActive ? PORTAL_SHELL.soft : 'transparent',
+                          borderRadius: 8,
+                          padding: '10px 8px',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 10,
+                          textAlign: 'left',
+                          fontFamily: FONTS.body,
+                        }}
                       >
-                        {content}
+                        <span style={{
+                          width: 34,
+                          height: 34,
+                          borderRadius: 8,
+                          background: isActive ? PORTAL_SHELL.surface : PORTAL_SHELL.soft,
+                          color: PORTAL_SHELL.text,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          flexShrink: 0,
+                        }}>
+                          <Icon name={item.icon} size={16} strokeWidth={2} />
+                        </span>
+                        <span style={{ minWidth: 0, flex: 1 }}>
+                          <span style={{ display: 'block', fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.text }}>{item.label}</span>
+                          <span style={{ display: 'block', marginTop: 1, fontSize: 12, color: PORTAL_SHELL.muted, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.sub}</span>
+                        </span>
+                        {isActive && <Icon name="check" size={15} strokeWidth={2.2} style={{ color: B.wavesBlue }} />}
                       </button>
                     );
                   })}
+                  <button
+                    type="button"
+                    onClick={() => { logout(); setShowMenu(false); }}
+                    style={{
+                      width: '100%',
+                      marginTop: 6,
+                      padding: '11px 8px',
+                      border: 'none',
+                      borderTop: `1px solid ${PORTAL_SHELL.border}`,
+                      background: 'transparent',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 10,
+                      color: B.red,
+                      fontFamily: FONTS.body,
+                      textAlign: 'left',
+                    }}
+                  >
+                    <span style={{
+                      width: 34,
+                      height: 34,
+                      borderRadius: 8,
+                      background: `${B.red}10`,
+                      color: B.red,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0,
+                    }}>
+                      <Icon name="door" size={16} strokeWidth={2} />
+                    </span>
+                    <span style={{ fontSize: 14, fontWeight: 850 }}>Sign Out</span>
+                  </button>
                 </div>
               </div>
-              <div style={{ padding: 8, background: B.white }}>
-                {accountMenuItems.map(item => {
-                  const isActive = activeTab === item.tab;
-                  return (
-                    <button
-                      key={item.label}
-                      type="button"
-                      onClick={() => { item.action(); setShowMenu(false); }}
-                      style={{
-                        width: '100%',
-                        border: 'none',
-                        background: isActive ? '#EEF6FF' : 'transparent',
-                        borderRadius: 8,
-                        padding: '10px 8px',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 10,
-                        textAlign: 'left',
-                        fontFamily: FONTS.body,
-                      }}
-                    >
-                      <span style={{
-                        width: 34,
-                        height: 34,
-                        borderRadius: 8,
-                        background: isActive ? '#fff' : '#EEF6FF',
-                        color: B.blueDeeper,
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        flexShrink: 0,
-                      }}>
-                        <Icon name={item.icon} size={16} strokeWidth={2} />
-                      </span>
-                      <span style={{ minWidth: 0, flex: 1 }}>
-                        <span style={{ display: 'block', fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>{item.label}</span>
-                        <span style={{ display: 'block', marginTop: 1, fontSize: 12, color: '#64748B', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.sub}</span>
-                      </span>
-                      {isActive && <Icon name="check" size={15} strokeWidth={2.2} style={{ color: B.wavesBlue }} />}
-                    </button>
-                  );
-                })}
-                <button
-                  type="button"
-                  onClick={() => { logout(); setShowMenu(false); }}
-                  style={{
-                    width: '100%',
-                    marginTop: 6,
-                    padding: '11px 8px',
-                    border: 'none',
-                    borderTop: '1px solid #E1E7EF',
-                    background: 'transparent',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 10,
-                    color: B.red,
-                    fontFamily: FONTS.body,
-                    textAlign: 'left',
-                  }}
-                >
-                  <span style={{
-                    width: 34,
-                    height: 34,
-                    borderRadius: 8,
-                    background: `${B.red}10`,
-                    color: B.red,
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    flexShrink: 0,
-                  }}>
-                    <Icon name="door" size={16} strokeWidth={2} />
-                  </span>
-                  <span style={{ fontSize: 14, fontWeight: 850 }}>Sign Out</span>
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
         </div>
       </div>
 
