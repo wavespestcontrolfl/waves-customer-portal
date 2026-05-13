@@ -138,6 +138,62 @@
   margin: 48px auto 48px;
 }
 
+.waves-onboarding-page,
+.waves-contract-page {
+  width: min(100% - 32px, 1080px);
+  margin: 28px auto 56px;
+}
+
+.waves-flow-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 24px;
+  margin-bottom: 22px;
+}
+
+.waves-onboarding-grid,
+.waves-contract-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
+  gap: 20px;
+  align-items: start;
+}
+
+.waves-onboarding-single,
+.waves-contract-single {
+  width: min(100%, 760px);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.waves-onboarding-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.waves-onboarding-step {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.waves-contract-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 18px;
+}
+
 .help-phone-compact {
   display: none;
 }
@@ -158,10 +214,35 @@
   .waves-customer-page,
   .waves-receipt-page,
   .waves-estimate-page,
-  .waves-rate-page {
+  .waves-rate-page,
+  .waves-onboarding-page,
+  .waves-contract-page {
     width: min(100% - 24px, 100%);
     margin-top: 18px;
     margin-bottom: 40px;
+  }
+
+  .waves-flow-header {
+    display: block;
+  }
+
+  .waves-onboarding-steps {
+    justify-content: flex-start;
+    margin-top: 18px;
+  }
+
+  .waves-onboarding-grid,
+  .waves-contract-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .waves-onboarding-grid > section,
+  .waves-contract-grid > section {
+    position: static !important;
+  }
+
+  .waves-contract-fields {
+    grid-template-columns: 1fr;
   }
 
   .help-phone-full {

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
+import Icon from '../components/Icon';
 import {
   WavesShell,
   BrandCard,
@@ -17,11 +18,39 @@ function fmtDate(value) {
   return date.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
 }
 
+function StatusPill({ tone = 'neutral', children }) {
+  const tones = {
+    neutral: { bg: '#F8FAFC', color: 'var(--text)', border: '#E1E7EF' },
+    ready: { bg: 'var(--brand-soft)', color: 'var(--brand)', border: 'var(--brand-ring)' },
+    signed: { bg: '#F0FDF4', color: '#047857', border: '#BBF7D0' },
+  };
+  const t = tones[tone] || tones.neutral;
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 6,
+      minHeight: 28,
+      padding: '5px 9px',
+      borderRadius: 8,
+      background: t.bg,
+      border: `1px solid ${t.border}`,
+      color: t.color,
+      fontSize: 12,
+      fontWeight: 850,
+      textTransform: 'uppercase',
+      whiteSpace: 'nowrap',
+    }}>
+      {children}
+    </span>
+  );
+}
+
 function Field({ label, value }) {
   return (
-    <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '12px 14px', background: 'var(--surface-muted)' }}>
-      <div style={{ fontSize: 14, textTransform: 'uppercase', letterSpacing: 0, color: 'var(--text-muted)', marginBottom: 4 }}>{label}</div>
-      <div style={{ fontSize: 14, color: 'var(--text)', lineHeight: 1.45 }}>{value || 'Not set'}</div>
+    <div style={{ minWidth: 0, padding: '12px 0', borderBottom: '1px solid var(--border)' }}>
+      <div style={{ fontSize: 12, textTransform: 'uppercase', fontWeight: 850, color: 'var(--text-muted)', marginBottom: 5 }}>{label}</div>
+      <div style={{ fontSize: 14, color: 'var(--text)', lineHeight: 1.45, fontWeight: 650 }}>{value || 'Not set'}</div>
     </div>
   );
 }
@@ -29,9 +58,10 @@ function Field({ label, value }) {
 function ContractError({ title, message }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div style={{ maxWidth: 620, width: '100%', margin: '48px auto', padding: '0 16px' }}>
-        <BrandCard>
-          <SerifHeading style={{ marginBottom: 12 }}>{title}</SerifHeading>
+      <div className="waves-contract-page waves-contract-single">
+        <BrandCard padding={28}>
+          <StatusPill>Contract unavailable</StatusPill>
+          <SerifHeading style={{ marginTop: 14, marginBottom: 12 }}>{title}</SerifHeading>
           <p style={{ margin: 0, color: 'var(--text)', lineHeight: 1.6 }}>
             {message} Give us a call and we can help - <HelpPhoneLink tone="dark" inline />.
           </p>
@@ -40,6 +70,42 @@ function ContractError({ title, message }) {
     </WavesShell>
   );
 }
+
+function AgreementRow({ checked, onChange, children }) {
+  return (
+    <label style={{
+      display: 'flex',
+      gap: 11,
+      alignItems: 'flex-start',
+      padding: '12px 0',
+      borderTop: '1px solid var(--border)',
+      color: 'var(--text)',
+      fontSize: 14,
+      lineHeight: 1.5,
+      cursor: 'pointer',
+    }}>
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        style={{ marginTop: 3, width: 16, height: 16, accentColor: 'var(--brand)' }}
+      />
+      <span>{children}</span>
+    </label>
+  );
+}
+
+const inputStyle = {
+  width: '100%',
+  height: 46,
+  borderRadius: 8,
+  border: '1px solid var(--border-strong)',
+  padding: '0 12px',
+  fontSize: 15,
+  color: 'var(--text)',
+  boxSizing: 'border-box',
+  outline: 'none',
+};
 
 export default function ContractSignPage() {
   const { token } = useParams();
@@ -122,114 +188,176 @@ export default function ContractSignPage() {
   if (loading) {
     return (
       <WavesShell variant="customer" topBar="solid">
-        <div style={{ padding: '64px 20px', textAlign: 'center', color: 'var(--text-muted)' }}>Loading contract...</div>
+        <div className="waves-contract-page waves-contract-single">
+          <BrandCard padding={28}>
+            <div style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-muted)' }}>Loading contract...</div>
+          </BrandCard>
+        </div>
       </WavesShell>
     );
   }
 
   if (error && !contract) {
-    return <ContractError title="We couldn't open that contract" message={error} />;
+    return <ContractError title="We could not open that contract" message={error} />;
   }
 
   if (!contract) {
-    return <ContractError title="We couldn't open that contract" message="The link may be expired or mistyped." />;
+    return <ContractError title="We could not open that contract" message="The link may be expired or mistyped." />;
   }
+
+  const signedLabel = signed ? 'Signed' : 'Ready to sign';
 
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div style={{ maxWidth: 760, width: '100%', margin: '32px auto 64px', padding: '0 16px' }}>
-        <BrandCard padding={28}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start', marginBottom: 20 }}>
-            <div>
-              <SerifHeading style={{ marginBottom: 8 }}>AutoPay Authorization</SerifHeading>
-              <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: 15, lineHeight: 1.55 }}>
-                Review the authorization below, then sign electronically.
-              </p>
-            </div>
-            <div style={{
-              fontSize: 14,
-              textTransform: 'uppercase',
-              letterSpacing: 0,
-              color: signed ? '#166534' : 'var(--text-muted)',
-              border: '1px solid var(--border)',
-              borderRadius: 8,
-              padding: '6px 10px',
-              whiteSpace: 'nowrap',
-            }}>
-              {signed ? 'Signed' : 'Ready'}
-            </div>
+      <div className="waves-contract-page">
+        <div className="waves-flow-header">
+          <div>
+            <StatusPill tone={signed ? 'signed' : 'ready'}>{signedLabel}</StatusPill>
+            <SerifHeading style={{ marginTop: 14, marginBottom: 8 }}>AutoPay Authorization</SerifHeading>
+            <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: 16, lineHeight: 1.55, maxWidth: 660 }}>
+              Review the saved-payment authorization, then sign electronically to keep AutoPay active for approved Waves services.
+            </p>
           </div>
+        </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10, marginBottom: 18 }}>
-            <Field label="Recipient" value={contract.recipientName} />
-            <Field label="Payment Method" value={contract.paymentMethodLabel} />
-            <Field label="Renewal Date" value={fmtDate(contract.renewalDate)} />
-            <Field label="Cancellation Deadline" value={fmtDate(contract.cancellationDeadline)} />
-          </div>
-
-          <div style={{
-            border: '1px solid var(--border)',
-            borderRadius: 10,
-            background: '#FFFFFF',
-            padding: 18,
-            maxHeight: 360,
-            overflow: 'auto',
-            whiteSpace: 'pre-line',
-            fontSize: 14,
-            lineHeight: 1.65,
-            color: 'var(--text)',
-            marginBottom: 18,
-          }}>
-            {contract.contractTextSnapshot}
-          </div>
-
-          {signed ? (
-            <div style={{ border: '1px solid #BBF7D0', background: '#F0FDF4', color: '#14532D', borderRadius: 10, padding: 16, lineHeight: 1.55 }}>
-              Signed on {fmtDate(contract.signedAt)} as {contract.signedName || contract.recipientName}. Waves has recorded your electronic signature and authorization.
+        <div className="waves-contract-grid">
+          <BrandCard padding={28}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <span style={{
+                  width: 44,
+                  height: 44,
+                  borderRadius: 8,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  background: 'var(--brand-soft)',
+                  color: 'var(--brand)',
+                }}>
+                  <Icon name="document" size={22} strokeWidth={2} />
+                </span>
+                <div>
+                  <div style={{ fontSize: 18, fontWeight: 850, color: 'var(--text)' }}>Electronic Payment Authorization</div>
+                  <div style={{ fontSize: 14, color: 'var(--text-muted)', marginTop: 2 }}>Waves Pest Control</div>
+                </div>
+              </div>
+              <StatusPill tone={signed ? 'signed' : 'ready'}>{signedLabel}</StatusPill>
             </div>
-          ) : (
-            <form onSubmit={submit}>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, marginBottom: 14 }}>
-                <label style={{ display: 'block' }}>
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>Initials</div>
+
+            <div className="waves-contract-fields">
+              <Field label="Recipient" value={contract.recipientName} />
+              <Field label="Payment Method" value={contract.paymentMethodLabel} />
+              <Field label="Renewal Date" value={fmtDate(contract.renewalDate)} />
+              <Field label="Cancellation Deadline" value={fmtDate(contract.cancellationDeadline)} />
+            </div>
+
+            <div style={{ marginTop: 24 }}>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 850, textTransform: 'uppercase', marginBottom: 8 }}>Authorization terms</div>
+              <div style={{
+                border: '1px solid var(--border)',
+                borderRadius: 8,
+                background: '#FFFFFF',
+                padding: 18,
+                maxHeight: 420,
+                overflow: 'auto',
+                whiteSpace: 'pre-line',
+                fontSize: 14,
+                lineHeight: 1.65,
+                color: 'var(--text)',
+              }}>
+                {contract.contractTextSnapshot}
+              </div>
+            </div>
+          </BrandCard>
+
+          <BrandCard padding={24} style={{ position: 'sticky', top: 20 }}>
+            {signed ? (
+              <div>
+                <div style={{
+                  width: 44,
+                  height: 44,
+                  borderRadius: 8,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  background: '#F0FDF4',
+                  color: '#047857',
+                  marginBottom: 14,
+                }}>
+                  <Icon name="checkCircle" size={24} strokeWidth={2} />
+                </div>
+                <div style={{ fontSize: 18, fontWeight: 850, color: 'var(--text)' }}>Authorization signed</div>
+                <p style={{ margin: '8px 0 0', color: 'var(--text-muted)', fontSize: 14, lineHeight: 1.55 }}>
+                  Signed on {fmtDate(contract.signedAt)} as {contract.signedName || contract.recipientName}. Waves has recorded your electronic signature and authorization.
+                </p>
+              </div>
+            ) : (
+              <form onSubmit={submit}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+                  <span style={{
+                    width: 38,
+                    height: 38,
+                    borderRadius: 8,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    background: 'var(--brand-soft)',
+                    color: 'var(--brand)',
+                  }}>
+                    <Icon name="pencil" size={18} strokeWidth={2} />
+                  </span>
+                  <div>
+                    <div style={{ fontSize: 16, fontWeight: 850, color: 'var(--text)' }}>Sign authorization</div>
+                    <div style={{ fontSize: 14, color: 'var(--text-muted)', marginTop: 2 }}>Both fields and agreements are required.</div>
+                  </div>
+                </div>
+
+                <label style={{ display: 'block', marginBottom: 12 }}>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 850, textTransform: 'uppercase', marginBottom: 7 }}>Initials</div>
                   <input
+                    name="initials"
                     value={form.initials}
                     onChange={(e) => update('initials', e.target.value.toUpperCase())}
-                    style={{ width: '100%', height: 44, borderRadius: 8, border: '1px solid var(--border-strong)', padding: '0 12px', fontSize: 16, boxSizing: 'border-box' }}
+                    style={inputStyle}
                     maxLength={20}
+                    autoComplete="off"
                   />
                 </label>
-                <label style={{ display: 'block' }}>
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>Typed Signature</div>
+
+                <label style={{ display: 'block', marginBottom: 16 }}>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 850, textTransform: 'uppercase', marginBottom: 7 }}>Typed Signature</div>
                   <input
+                    name="signedName"
                     value={form.signedName}
                     onChange={(e) => update('signedName', e.target.value)}
-                    style={{ width: '100%', height: 44, borderRadius: 8, border: '1px solid var(--border-strong)', padding: '0 12px', fontSize: 16, boxSizing: 'border-box' }}
+                    style={inputStyle}
+                    autoComplete="name"
                   />
                 </label>
-              </div>
 
-              <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginBottom: 10, color: 'var(--text)', fontSize: 14, lineHeight: 1.5 }}>
-                <input type="checkbox" checked={form.agreeElectronic} onChange={(e) => update('agreeElectronic', e.target.checked)} style={{ marginTop: 3 }} />
-                <span>I agree to receive and sign this authorization electronically.</span>
-              </label>
-              <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginBottom: 16, color: 'var(--text)', fontSize: 14, lineHeight: 1.5 }}>
-                <input type="checkbox" checked={form.agreeAuthorization} onChange={(e) => update('agreeAuthorization', e.target.checked)} style={{ marginTop: 3 }} />
-                <span>I authorize Waves to keep the listed payment method on file and use it for future agreed service payments until I revoke authorization.</span>
-              </label>
+                <AgreementRow checked={form.agreeElectronic} onChange={(checked) => update('agreeElectronic', checked)}>
+                  I agree to receive and sign this authorization electronically.
+                </AgreementRow>
+                <AgreementRow checked={form.agreeAuthorization} onChange={(checked) => update('agreeAuthorization', checked)}>
+                  I authorize Waves to keep the listed payment method on file and use it for future agreed service payments until I revoke authorization.
+                </AgreementRow>
 
-              {error && (
-                <div style={{ marginBottom: 14, color: '#991B1B', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, padding: 12, fontSize: 14 }}>
-                  {error}
+                {error && (
+                  <div style={{ margin: '14px 0', color: '#991B1B', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, padding: 12, fontSize: 14 }}>
+                    {error}
+                  </div>
+                )}
+
+                <BrandButton type="submit" disabled={!canSubmit} fullWidth style={{ marginTop: 16 }}>
+                  {submitting ? 'Signing...' : 'Sign Authorization'}
+                </BrandButton>
+                <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.45, textAlign: 'center' }}>
+                  Need help before signing? <HelpPhoneLink tone="dark" inline />
                 </div>
-              )}
-
-              <BrandButton type="submit" disabled={!canSubmit} fullWidth>
-                {submitting ? 'Signing...' : 'Sign Authorization'}
-              </BrandButton>
-            </form>
-          )}
-        </BrandCard>
+              </form>
+            )}
+          </BrandCard>
+        </div>
       </div>
     </WavesShell>
   );
