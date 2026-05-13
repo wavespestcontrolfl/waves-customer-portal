@@ -48,6 +48,7 @@ import { COLORS as B, FONTS } from '../../theme-brand';
 import api from '../../utils/api';
 import { etDateString, addETDays } from '../../lib/timezone';
 import SaveCardConsent from './SaveCardConsent';
+import Icon from '../Icon';
 
 function loadStripeJs(publishableKey) {
   return new Promise((resolve) => {
@@ -105,19 +106,20 @@ export default function AutopayCard({ onStateChange }) {
   if (loading) return null;
   if (!data) return null;
 
-  const { state, next_charge_date, monthly_rate, payment_methods = [], paused_until } = data;
+  const { state, next_charge_date, next_charge_amount, monthly_rate, payment_methods = [], paused_until } = data;
+  const nextChargeAmount = Number(next_charge_amount ?? monthly_rate ?? 0);
   const activeCard = payment_methods.find((p) => p.id === data.autopay_payment_method_id)
     || payment_methods.find((p) => p.is_default)
     || payment_methods[0];
 
   const theme = {
-    active: { bg: '#E8F5E9', border: '#C8E6C9', dot: B.green, label: 'Active' },
-    paused: { bg: '#FFF8E1', border: '#FFE082', dot: B.orange, label: 'Paused' },
-    disabled: { bg: B.offWhite || '#F5F5F5', border: B.grayLight, dot: B.grayMid, label: 'Disabled' },
+    active: { bg: '#F0FDF4', border: '#BBF7D0', dot: B.green, label: 'Active' },
+    paused: { bg: `${B.orange}10`, border: `${B.orange}33`, dot: B.orange, label: 'Paused' },
+    disabled: { bg: '#F8FAFC', border: '#E1E7EF', dot: B.grayMid, label: 'Off' },
   }[state];
 
   const formatDate = (s) => {
-    if (!s) return '—';
+    if (!s) return 'Not scheduled';
     const d = new Date(s);
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   };
@@ -135,6 +137,16 @@ export default function AutopayCard({ onStateChange }) {
   };
 
   const toggleAutopay = () => runUpdate({ autopay_enabled: !data.autopay_enabled });
+
+  const enableAutopay = () => {
+    const methodId = selectedCard || activeCard?.id;
+    if (!methodId) {
+      setErr('Add a payment method before enabling Auto Pay.');
+      setModal('card');
+      return;
+    }
+    runUpdate({ autopay_enabled: true, autopay_payment_method_id: methodId });
+  };
 
   const submitPause = async () => {
     if (!pauseUntil) { setErr('Pick a date'); return; }
@@ -204,7 +216,10 @@ export default function AutopayCard({ onStateChange }) {
         await load();
         if (newId) {
           setSelectedCard(newId);
-          await api.updateAutopay({ autopay_payment_method_id: newId });
+          await api.updateAutopay({
+            autopay_payment_method_id: newId,
+            ...(state === 'disabled' ? { autopay_enabled: true } : {}),
+          });
           await load();
           setModal(null);
         }
@@ -214,89 +229,101 @@ export default function AutopayCard({ onStateChange }) {
   };
 
   const card = {
-    background: theme.bg, border: `1px solid ${theme.border}`, borderRadius: 14,
-    padding: 18, display: 'flex', flexDirection: 'column', gap: 14,
+    background: B.white,
+    border: '1px solid #E1E7EF',
+    borderRadius: 8,
+    boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+    padding: 20,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 14,
     fontFamily: FONTS.body,
   };
 
   const btn = (kind = 'primary') => ({
-    padding: '10px 14px', borderRadius: 8, fontSize: 14, fontWeight: 600,
+    padding: '10px 14px', borderRadius: 8, fontSize: 14, fontWeight: 800,
     cursor: saving ? 'not-allowed' : 'pointer', opacity: saving ? 0.6 : 1,
     fontFamily: FONTS.heading,
-    border: kind === 'primary' ? 'none' : `1px solid ${B.grayLight}`,
-    background: kind === 'primary' ? B.wavesBlue : '#fff',
-    color: kind === 'primary' ? '#fff' : B.grayDark,
+    border: kind === 'primary' ? 'none' : '1px solid #CBD5E1',
+    background: kind === 'primary' ? B.blueDeeper : '#fff',
+    color: kind === 'primary' ? '#fff' : B.blueDeeper,
+    minHeight: 36,
   });
+
+  const errorBanner = err ? (
+    <div style={{ color: B.red, fontSize: 14, padding: 10, background: `${B.red}10`, border: `1px solid ${B.red}33`, borderRadius: 8 }}>
+      {err}
+    </div>
+  ) : null;
 
   return (
     <div style={card}>
-      {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
             <span style={{ width: 10, height: 10, borderRadius: 5, background: theme.dot, display: 'inline-block' }} />
-            <span style={{ fontSize: 12, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-              Auto-Pay · {theme.label}
+            <span style={{ fontSize: 12, fontWeight: 850, color: B.grayMid, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              Auto Pay / {theme.label}
             </span>
           </div>
-          <div style={{ fontSize: 16, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading }}>
+          <div style={{ fontSize: 18, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading, lineHeight: 1.25 }}>
             {state === 'active'
-              ? `Next charge: $${Number(monthly_rate || 0).toFixed(2)} on ${formatDate(next_charge_date)}`
+              ? `Next charge: $${nextChargeAmount.toFixed(2)} on ${formatDate(next_charge_date)}`
               : state === 'paused'
                 ? `Paused until ${formatDate(paused_until)}`
-                : 'Auto-pay is off — charges will not run automatically'}
+                : 'Auto Pay is off - charges will not run automatically'}
           </div>
           {activeCard && state !== 'disabled' && (
-            <div style={{ fontSize: 14, color: B.grayMid, marginTop: 4 }}>
+            <div style={{ fontSize: 14, color: B.grayMid, marginTop: 5 }}>
               Charging {activeCard.brand || 'card'} ending in {activeCard.last4}
             </div>
           )}
         </div>
       </div>
 
-      {err && <div style={{ color: B.red, fontSize: 14 }}>{err}</div>}
+      {!modal && errorBanner}
 
-      {/* Actions row */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
         {state === 'active' && (
           <>
-            <button style={btn('secondary')} disabled={saving} onClick={() => setModal('pause')}>Pause</button>
-            <button style={btn('secondary')} disabled={saving} onClick={() => setModal('card')}>Change card</button>
-            <button style={btn('secondary')} disabled={saving} onClick={() => setModal('day')}>Change billing day</button>
-            <button style={btn('secondary')} disabled={saving} onClick={toggleAutopay}>Turn off</button>
+            <button type="button" style={btn('secondary')} disabled={saving} onClick={() => setModal('pause')}>Pause</button>
+            <button type="button" style={btn('secondary')} disabled={saving} onClick={() => setModal('card')}>Change card</button>
+            <button type="button" style={btn('secondary')} disabled={saving} onClick={() => setModal('day')}>Change billing day</button>
+            <button type="button" style={btn('secondary')} disabled={saving} onClick={toggleAutopay}>Turn off</button>
           </>
         )}
         {state === 'paused' && (
           <>
-            <button style={btn('primary')} disabled={saving} onClick={submitResume}>Resume now</button>
-            <button style={btn('secondary')} disabled={saving} onClick={toggleAutopay}>Turn off</button>
+            <button type="button" style={btn('primary')} disabled={saving} onClick={submitResume}>Resume now</button>
+            <button type="button" style={btn('secondary')} disabled={saving} onClick={toggleAutopay}>Turn off</button>
           </>
         )}
         {state === 'disabled' && (
-          <button style={btn('primary')} disabled={saving} onClick={toggleAutopay}>Turn on auto-pay</button>
+          <button type="button" style={btn('primary')} disabled={saving} onClick={enableAutopay}>Turn on Auto Pay</button>
         )}
       </div>
 
       {modal && (
         <Modal title={
-          modal === 'pause' ? 'Pause auto-pay' :
-          modal === 'card' ? 'Change auto-pay card' :
+          modal === 'pause' ? 'Pause Auto Pay' :
+          modal === 'card' ? (state === 'disabled' ? 'Set up Auto Pay' : 'Change Auto Pay card') :
           'Change billing day'
         } onClose={() => { setModal(null); setErr(''); }}>
+          {errorBanner}
           {modal === 'pause' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <label style={{ fontSize: 14, color: B.grayDark, fontWeight: 600 }}>Pause until</label>
               <input type="date" value={pauseUntil} onChange={(e) => setPauseUntil(e.target.value)}
                 min={etDateString(addETDays(new Date(), 1))}
-                style={{ padding: 10, fontSize: 14, border: `1px solid ${B.grayLight}`, borderRadius: 8 }} />
+                style={{ padding: 10, fontSize: 14, border: '1px solid #CBD5E1', borderRadius: 8 }} />
               <label style={{ fontSize: 14, color: B.grayDark, fontWeight: 600 }}>Reason (optional)</label>
               <textarea value={pauseReason} onChange={(e) => setPauseReason(e.target.value)} rows={2}
                 placeholder="e.g. Out of town for the month"
-                style={{ padding: 10, fontSize: 14, border: `1px solid ${B.grayLight}`, borderRadius: 8, fontFamily: FONTS.body }} />
+                style={{ padding: 10, fontSize: 14, border: '1px solid #CBD5E1', borderRadius: 8, fontFamily: FONTS.body }} />
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                <button style={btn('secondary')} onClick={() => setModal(null)}>Cancel</button>
-                <button style={btn('primary')} disabled={saving || !pauseUntil} onClick={submitPause}>
-                  {saving ? 'Saving…' : 'Pause'}
+                <button type="button" style={btn('secondary')} onClick={() => setModal(null)}>Cancel</button>
+                <button type="button" style={btn('primary')} disabled={saving || !pauseUntil} onClick={submitPause}>
+                  {saving ? 'Saving...' : 'Pause'}
                 </button>
               </div>
             </div>
@@ -305,33 +332,40 @@ export default function AutopayCard({ onStateChange }) {
           {modal === 'card' && !addingCard && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               {payment_methods.length === 0 ? (
-                <div style={{ fontSize: 14, color: B.grayMid }}>No cards on file yet — add one below.</div>
+                <div style={{ fontSize: 14, color: B.grayMid }}>
+                  No cards on file yet. Add a payment method before Auto Pay can run.
+                </div>
               ) : (
                 payment_methods.map((pm) => (
                   <label key={pm.id} style={{
                     display: 'flex', alignItems: 'center', gap: 10, padding: 12,
-                    border: `1px solid ${selectedCard === pm.id ? B.wavesBlue : B.grayLight}`,
-                    background: selectedCard === pm.id ? `${B.wavesBlue}10` : '#fff',
+                    border: `1px solid ${selectedCard === pm.id ? B.wavesBlue : '#CBD5E1'}`,
+                    background: selectedCard === pm.id ? '#EEF6FF' : '#fff',
                     borderRadius: 8, cursor: 'pointer',
                   }}>
                     <input type="radio" name="autopay-card" checked={selectedCard === pm.id}
                       onChange={() => setSelectedCard(pm.id)} />
                     <span style={{ fontSize: 14, color: B.grayDark }}>
-                      {pm.brand || 'Card'} •••• {pm.last4}
-                      {pm.exp_month && pm.exp_year ? ` · exp ${String(pm.exp_month).padStart(2, '0')}/${String(pm.exp_year).slice(-2)}` : ''}
+                      {pm.brand || 'Card'} ending in {pm.last4}
+                      {pm.exp_month && pm.exp_year ? ` - exp ${String(pm.exp_month).padStart(2, '0')}/${String(pm.exp_year).slice(-2)}` : ''}
                     </span>
                   </label>
                 ))
               )}
-              <button style={{ ...btn('secondary'), alignSelf: 'flex-start' }} disabled={saving} onClick={startAddCard}>
-                + Add new card
+              <button type="button" style={{ ...btn('secondary'), alignSelf: 'flex-start' }} disabled={saving} onClick={startAddCard}>
+                Add new card
               </button>
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                <button style={btn('secondary')} onClick={() => setModal(null)}>Cancel</button>
-                <button style={btn('primary')} disabled={saving || !selectedCard || payment_methods.length === 0}
-                  onClick={() => runUpdate({ autopay_payment_method_id: selectedCard })}>
-                  {saving ? 'Saving…' : 'Use this card'}
-                </button>
+                <button type="button" style={btn('secondary')} onClick={() => setModal(null)}>Cancel</button>
+                {payment_methods.length > 0 && (
+                  <button type="button" style={btn('primary')} disabled={saving || !selectedCard}
+                    onClick={() => runUpdate({
+                      autopay_payment_method_id: selectedCard,
+                      ...(state === 'disabled' ? { autopay_enabled: true } : {}),
+                    })}>
+                    {saving ? 'Saving...' : 'Use this card'}
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -339,15 +373,15 @@ export default function AutopayCard({ onStateChange }) {
           {modal === 'card' && addingCard && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div ref={mountRef} style={{ minHeight: 180 }} />
-              {!stripeReady && <div style={{ fontSize: 14, color: B.grayMid }}>Loading payment form…</div>}
+              {!stripeReady && <div style={{ fontSize: 14, color: B.grayMid }}>Loading payment form...</div>}
               {/* Save-card authorization — locked because saving is the
                   whole purpose of this modal. Shown so the consent row
                   reflects the copy the customer saw. */}
               <SaveCardConsent locked onChange={() => {}} />
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                <button style={btn('secondary')} disabled={saving} onClick={resetAddCard}>Back</button>
-                <button style={btn('primary')} disabled={saving || !stripeReady} onClick={submitNewCard}>
-                  {saving ? 'Saving…' : 'Save card'}
+                <button type="button" style={btn('secondary')} disabled={saving} onClick={resetAddCard}>Back</button>
+                <button type="button" style={btn('primary')} disabled={saving || !stripeReady} onClick={submitNewCard}>
+                  {saving ? 'Saving...' : 'Save card'}
                 </button>
               </div>
             </div>
@@ -355,18 +389,18 @@ export default function AutopayCard({ onStateChange }) {
 
           {modal === 'day' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <label style={{ fontSize: 14, color: B.grayDark, fontWeight: 600 }}>Charge day of month (1–28)</label>
+              <label style={{ fontSize: 14, color: B.grayDark, fontWeight: 600 }}>Charge day of month (1-28)</label>
               <input type="number" min={1} max={28} value={selectedDay}
                 onChange={(e) => setSelectedDay(parseInt(e.target.value) || 1)}
-                style={{ padding: 10, fontSize: 14, border: `1px solid ${B.grayLight}`, borderRadius: 8 }} />
+                style={{ padding: 10, fontSize: 14, border: '1px solid #CBD5E1', borderRadius: 8 }} />
               <div style={{ fontSize: 12, color: B.grayMid }}>
-                Auto-pay runs on this day each month. Max is the 28th so every month is covered.
+                Auto Pay runs on this day each month. Max is the 28th so every month is covered.
               </div>
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                <button style={btn('secondary')} onClick={() => setModal(null)}>Cancel</button>
-                <button style={btn('primary')} disabled={saving || selectedDay < 1 || selectedDay > 28}
+                <button type="button" style={btn('secondary')} onClick={() => setModal(null)}>Cancel</button>
+                <button type="button" style={btn('primary')} disabled={saving || selectedDay < 1 || selectedDay > 28}
                   onClick={() => runUpdate({ billing_day: selectedDay })}>
-                  {saving ? 'Saving…' : 'Save'}
+                  {saving ? 'Saving...' : 'Save'}
                 </button>
               </div>
             </div>
@@ -384,12 +418,26 @@ function Modal({ title, children, onClose }) {
       display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
     }} onClick={onClose}>
       <div onClick={(e) => e.stopPropagation()} style={{
-        background: '#fff', borderRadius: 14, padding: 20, maxWidth: 440, width: '100%',
+        background: '#fff', borderRadius: 8, padding: 20, maxWidth: 460, width: '100%',
         display: 'flex', flexDirection: 'column', gap: 14, fontFamily: FONTS.body,
+        border: '1px solid #E1E7EF',
+        boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading }}>{title}</div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 22, cursor: 'pointer', color: B.grayMid }}>×</button>
+          <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>{title}</div>
+          <button type="button" aria-label="Close" onClick={onClose} style={{
+            background: 'transparent',
+            border: 'none',
+            cursor: 'pointer',
+            color: B.grayMid,
+            width: 36,
+            height: 36,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}>
+            <Icon name="close" size={20} strokeWidth={2} />
+          </button>
         </div>
         {children}
       </div>
