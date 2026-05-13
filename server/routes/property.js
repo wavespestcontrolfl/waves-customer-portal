@@ -104,7 +104,7 @@ router.get('/preferences', async (req, res, next) => {
         preferences: {
           neighborhoodGateCode: '', propertyGateCode: '', garageCode: '', lockboxCode: '',
           parkingNotes: '', sideGateAccess: '',
-          petCount: 0, petDetails: '', petSecuredPlan: '', petsStructured: [],
+          petCount: 0, petDetails: '', petsSecuredPlan: '', petsStructured: [],
           preferredDay: 'no_preference', preferredTime: 'no_preference', contactPreference: 'text',
           blackoutStart: null, blackoutEnd: null,
           irrigationSystem: false, irrigationControllerLocation: '', irrigationZones: null,
