@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import api from '../utils/api';
-import { COLORS as B, TIER, FONTS, BUTTON_BASE, GOLD_CTA, HALFTONE_PATTERN, HALFTONE_SIZE } from '../theme-brand';
+import { COLORS as B, TIER, FONTS, BUTTON_BASE, GOLD_CTA } from '../theme-brand';
 import NotificationBell from '../components/NotificationBell';
 import AutopayCard from '../components/billing/AutopayCard';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
@@ -229,17 +229,6 @@ function PortalInlineState({ icon = 'document', title, message, tone = 'brand' }
         <div style={{ fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading }}>{title}</div>
         {message && <div style={{ marginTop: 3, fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.45 }}>{message}</div>}
       </div>
-    </div>
-  );
-}
-
-// Wave divider SVG — used between sections
-function WaveDivider() {
-  return (
-    <div style={{ height: 20, overflow: 'hidden', margin: '4px 0' }}>
-      <svg viewBox="0 0 1200 60" style={{ width: '100%', height: '100%' }}>
-        <path d="M0,30 C200,60 400,0 600,30 C800,60 1000,0 1200,30" fill="none" stroke={B.blueLight} strokeWidth="2" strokeOpacity="0.3" />
-      </svg>
     </div>
   );
 }
@@ -582,8 +571,8 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
 
   return (
     <div style={{
-      background: B.white, borderRadius: 16, padding: 20,
-      border: `2px solid ${B.green}22`, boxShadow: '0 4px 20px rgba(0,0,0,0.04)',
+      ...PORTAL_CARD_STYLE,
+      padding: 20,
     }}>
       {/* Header with overall score ring */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
@@ -673,21 +662,27 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
       {/* Trend Chart (expandable) */}
       {trend && trend.length >= 2 && (
         <div style={{ marginTop: 16 }}>
-          <div
+          <button
+            type="button"
             onClick={() => setShowTrend(!showTrend)}
             style={{
+              width: '100%',
               display: 'flex', alignItems: 'center', justifyContent: 'space-between',
               cursor: 'pointer', padding: '8px 0',
+              background: 'transparent',
+              border: 'none',
+              fontFamily: FONTS.body,
+              textAlign: 'left',
             }}
           >
             <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, fontFamily: FONTS.ui, textTransform: 'uppercase', letterSpacing: 0 }}>
               Progress Over Time ({trend.length} visits)
             </div>
             <span style={{ fontSize: 12, color: B.teal, fontWeight: 600 }}>{showTrend ? '▾ Hide' : '▸ Show'}</span>
-          </div>
+          </button>
           {showTrend && (
             <div style={{
-              background: `${B.teal}06`, borderRadius: 10, padding: '12px 8px 8px',
+              background: `${B.teal}06`, borderRadius: 8, padding: '12px 8px 8px',
               border: `1px solid ${B.teal}12`,
             }}>
               <TrendSparkline trend={trend} height={70} />
@@ -705,7 +700,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
         <div style={{ marginTop: 16 }}>
           {recommendations.customerTip && (
             <div style={{
-              padding: '12px 16px', borderRadius: 12,
+              padding: '12px 16px', borderRadius: 8,
               background: `${B.teal}08`, border: `1px solid ${B.teal}20`,
             }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: B.teal, marginBottom: 4 }}>
@@ -718,7 +713,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
           )}
           {recommendations.nextVisitFocus && (
             <div style={{
-              marginTop: 8, padding: '12px 16px', borderRadius: 12,
+              marginTop: 8, padding: '12px 16px', borderRadius: 8,
               background: `${B.green}08`, border: `1px solid ${B.green}20`,
             }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: B.green, marginBottom: 4 }}>
@@ -735,7 +730,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
       {/* Fallback "What's Next" if no AI recommendations */}
       {!recommendations && (
         <div style={{
-          marginTop: 16, padding: '12px 16px', borderRadius: 12,
+          marginTop: 16, padding: '12px 16px', borderRadius: 8,
           background: `${B.teal}08`, border: `1px solid ${B.teal}20`,
         }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: B.teal, marginBottom: 4 }}>What's Next</div>
@@ -775,20 +770,18 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
       {/* Before/After fallback for single assessment */}
       {!beforeAfter && (
         <div style={{ marginTop: 18 }}>
-          <div style={{
-            fontSize: 12, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading,
-            marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0,
-          }}>
-            Before &amp; After
-          </div>
-          <BeforeAfterSlider beforeAfter={null} />
+          <PortalInlineState
+            icon="camera"
+            title="Before and after photos coming soon"
+            message="Comparison photos will appear after there are enough lawn assessments to show progress."
+          />
         </div>
       )}
 
       {/* Neighbor comparison */}
       {neighborBenchmark && neighborBenchmark.percentile && (
         <div style={{
-          marginTop: 12, padding: '10px 14px', borderRadius: 10,
+          marginTop: 12, padding: '10px 14px', borderRadius: 8,
           background: neighborBenchmark.percentile.includes('top 25') ? `${B.green}10`
             : neighborBenchmark.percentile.includes('top 50') ? `${B.teal}10`
             : `${B.wavesBlue}08`,
@@ -857,1369 +850,6 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
   );
 }
 
-// =========================================================================
-// BADGE SYSTEM — dashboard row, celebration toast, detail modal
-// =========================================================================
-// Gamification feature removed. Hook kept as a stub returning a frozen
-// "no badges" payload so every call site — BadgeRow (removed),
-// BadgeShowcase (removed), BadgeCelebrationToast (removed), admin
-// BadgesPage (removed) — compiles without widening the refactor.
-// Re-enable by restoring the original fetch call if badges return.
-function useBadges() {
-  return { loading: false, data: null };
-}
-
-function BadgeRow({ badges, earnedCount, totalCount, onViewAll }) {
-  if (!badges) return null;
-  const earned = badges.filter(b => b.earned).sort((a, b) => new Date(b.earnedAt) - new Date(a.earnedAt));
-  if (!earned.length) return null;
-
-  const displayBadges = earned.slice(0, 8);
-  const remaining = earned.length - displayBadges.length;
-
-  return (
-    <div style={{
-      background: B.white, borderRadius: 14, padding: '14px 18px',
-      border: `1px solid ${B.grayLight}`,
-    }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-        <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Your Badges</div>
-        <div style={{ fontSize: 12, color: B.grayMid }}>{earnedCount} of {totalCount}</div>
-      </div>
-      <div style={{ display: 'flex', gap: 8, overflowX: 'auto', WebkitOverflowScrolling: 'touch', paddingBottom: 4 }}>
-        {displayBadges.map(b => (
-          <div key={b.badgeType} title={b.title} style={{
-            width: 40, height: 40, borderRadius: '50%', flexShrink: 0,
-            background: `${B.wavesBlue}12`, border: `1.5px solid ${B.wavesBlue}33`,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 18, position: 'relative',
-          }}>
-            {b.icon}
-            {b.reward && (
-              <span style={{
-                position: 'absolute', top: -3, right: -3,
-                fontSize: 10, color: B.yellow, lineHeight: 1,
-              }}></span>
-            )}
-          </div>
-        ))}
-        {remaining > 0 && (
-          <div onClick={onViewAll} style={{
-            width: 40, height: 40, borderRadius: '50%', flexShrink: 0,
-            background: B.offWhite, border: `1px solid ${B.grayLight}`,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 12, fontWeight: 700, color: B.grayMid, cursor: 'pointer',
-          }}>+{remaining}</div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function BadgeShowcase({ badges, categories, categoryOrder }) {
-  const [selected, setSelected] = useState(null);
-
-  if (!badges) return null;
-
-  // Group by category
-  const grouped = {};
-  for (const b of badges) {
-    if (!grouped[b.category]) grouped[b.category] = [];
-    grouped[b.category].push(b);
-  }
-
-  // Use defined category order, falling back to Object.keys
-  const orderedCategories = (categoryOrder || Object.keys(grouped)).filter(cat => grouped[cat]);
-
-  const earnedCount = badges.filter(b => b.earned).length;
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <div style={{
-        background: `linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark})`,
-        backgroundImage: `${HALFTONE_PATTERN}, linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark})`,
-        backgroundSize: `${HALFTONE_SIZE}, 100% 100%`,
-        borderRadius: 16, padding: 20, color: '#fff', textAlign: 'center',
-      }}>
-        <div style={{ fontSize: 32 }}></div>
-        <div style={{ fontSize: 22, fontWeight: 400, fontFamily: FONTS.display, letterSpacing: 0, marginTop: 4 }}>{earnedCount} Badges Earned</div>
-        <div style={{ fontSize: 14, color: B.blueLight, marginTop: 4 }}>out of {badges.length} total</div>
-        <div style={{
-          marginTop: 12, height: 6, borderRadius: 3, background: 'rgba(255,255,255,0.15)',
-          overflow: 'hidden',
-        }}>
-          <div style={{
-            height: '100%', borderRadius: 3,
-            background: `linear-gradient(90deg, ${B.yellow}, ${B.orange})`,
-            width: `${(earnedCount / badges.length) * 100}%`,
-            transition: 'width 1s ease-out',
-          }} />
-        </div>
-      </div>
-
-      {orderedCategories.map(cat => {
-        const catBadges = grouped[cat];
-        if (!catBadges) return null;
-        return (
-          <div key={cat}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>
-              {categories[cat] || cat}
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
-              {catBadges.sort((a, b) => a.order - b.order).map(b => (
-                <div key={b.badgeType} onClick={() => setSelected(b)} style={{
-                  background: B.white, borderRadius: 12, padding: '14px 8px',
-                  border: `1px solid ${b.earned ? B.wavesBlue + '33' : B.grayLight}`,
-                  textAlign: 'center', cursor: 'pointer',
-                  opacity: b.earned ? 1 : 0.5,
-                  transition: 'transform 0.15s',
-                }}>
-                  <div style={{
-                    width: 44, height: 44, borderRadius: '50%', margin: '0 auto',
-                    background: b.earned ? `${B.wavesBlue}12` : B.grayLight,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: 22, position: 'relative',
-                  }}>
-                    {b.icon}
-                    {!b.earned && (
-                      <div style={{
-                        position: 'absolute', bottom: -2, right: -2,
-                        fontSize: 10, background: B.grayMid, color: '#fff',
-                        width: 16, height: 16, borderRadius: '50%',
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      }}></div>
-                    )}
-                    {b.reward && (
-                      <span style={{
-                        position: 'absolute', top: -3, right: -3,
-                        fontSize: 12, color: B.yellow, lineHeight: 1,
-                      }}></span>
-                    )}
-                  </div>
-                  <div style={{
-                    fontSize: 12, fontWeight: 600, marginTop: 6,
-                    color: b.earned ? B.navy : B.grayMid,
-                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                  }}>{b.title}</div>
-                  {b.reward && (
-                    <div style={{ fontSize: 8, color: B.yellow, fontWeight: 700, marginTop: 1 }}> Reward</div>
-                  )}
-                  {b.earned && b.earnedAt && (
-                    <div style={{ fontSize: 9, color: B.grayMid, marginTop: 2 }}>
-                      {new Date(b.earnedAt).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}
-                    </div>
-                  )}
-                  {!b.earned && b.progress && (
-                    <div style={{ fontSize: 9, color: B.orange, fontWeight: 600, marginTop: 2 }}>{b.progress}</div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        );
-      })}
-
-      {/* Badge Detail Modal */}
-      {selected && (
-        <div onClick={() => setSelected(null)} style={{
-          position: 'fixed', inset: 0, zIndex: 1000,
-          background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
-        }}>
-          <div onClick={e => e.stopPropagation()} style={{
-            background: B.white, borderRadius: 20, padding: 28, maxWidth: 340, width: '100%',
-            textAlign: 'center', boxShadow: '0 20px 60px rgba(0,0,0,0.2)',
-          }}>
-            <div style={{
-              width: 72, height: 72, borderRadius: '50%', margin: '0 auto',
-              background: selected.earned ? `${B.wavesBlue}12` : B.grayLight,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 36,
-            }}>{selected.icon}</div>
-            <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginTop: 12 }}>
-              {selected.title}
-            </div>
-            <div style={{ fontSize: 10, color: B.wavesBlue, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0, marginTop: 4 }}>
-              {selected.categoryLabel}
-            </div>
-            <div style={{ fontSize: 16, color: B.grayDark, marginTop: 10, lineHeight: 1.6 }}>
-              {selected.description}
-            </div>
-
-            {selected.earned ? (
-              <>
-                <div style={{ fontSize: 12, color: B.green, fontWeight: 600, marginTop: 12 }}>
-                   Earned {selected.earnedAt ? new Date(selected.earnedAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : ''}
-                </div>
-                {selected.reward && (
-                  <div style={{
-                    marginTop: 10, padding: '8px 12px', borderRadius: 8,
-                    background: `${B.yellow}20`, border: '1px solid #DAA520',
-                  }}>
-                    <div style={{ fontSize: 12, color: B.yellow, fontWeight: 700 }}> Reward unlocked: {selected.reward.description}</div>
-                  </div>
-                )}
-              </>
-            ) : (
-              <>
-                {selected.progress && (
-                  <div style={{ marginTop: 12 }}>
-                    <div style={{ fontSize: 12, color: B.grayMid, marginBottom: 4 }}>Progress</div>
-                    <div style={{
-                      height: 6, borderRadius: 3, background: B.grayLight, overflow: 'hidden',
-                    }}>
-                      <div style={{
-                        height: '100%', borderRadius: 3, background: B.orange,
-                        width: (() => {
-                          const match = selected.progress.match(/(\d+)\/(\d+)/);
-                          return match ? `${(parseInt(match[1]) / parseInt(match[2])) * 100}%` : '0%';
-                        })(),
-                      }} />
-                    </div>
-                    <div style={{ fontSize: 12, color: B.orange, fontWeight: 600, marginTop: 4 }}>{selected.progress}</div>
-                  </div>
-                )}
-                {selected.reward && (
-                  <div style={{
-                    marginTop: 10, padding: '8px 12px', borderRadius: 8,
-                    background: `${B.yellow}20`, border: `1px solid ${B.yellow}33`,
-                  }}>
-                    <div style={{ fontSize: 12, color: B.blueDeeper, fontWeight: 600 }}> Unlock reward: {selected.reward.description}</div>
-                  </div>
-                )}
-              </>
-            )}
-
-            {selected.nextBadgeInCategory && (
-              <div style={{
-                marginTop: 14, padding: '10px 14px', borderRadius: 10,
-                background: B.offWhite, border: `1px solid ${B.grayLight}`,
-              }}>
-                <div style={{ fontSize: 10, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0 }}>Next badge</div>
-                <div style={{ fontSize: 12, fontWeight: 600, color: B.navy, marginTop: 2 }}>{selected.nextBadgeInCategory.title}</div>
-                <div style={{ fontSize: 12, color: B.orange, marginTop: 1 }}>{selected.nextBadgeInCategory.remaining}</div>
-              </div>
-            )}
-
-            <button onClick={() => setSelected(null)} style={{
-              ...PORTAL_BUTTON_BASE, marginTop: 16, padding: '9px 24px', fontSize: 14,
-              background: B.offWhite, color: B.grayDark, border: `1px solid ${B.grayLight}`,
-            }}>Close</button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function BadgeCelebrationToast({ badges }) {
-  const [toasts, setToasts] = useState([]);
-  const notifiedRef = useRef(new Set());
-
-  useEffect(() => {
-    if (!badges) return;
-    const unnotified = badges.filter(b => b.earned && !b.notified && !notifiedRef.current.has(b.badgeType));
-    if (!unnotified.length) return;
-
-    // Queue toasts 2 seconds apart
-    unnotified.forEach((b, i) => {
-      notifiedRef.current.add(b.badgeType);
-      const isReward = !!b.reward;
-      const duration = isReward ? 6000 : 4000;
-      setTimeout(() => {
-        setToasts(prev => [...prev, b]);
-        api.notifyBadge(b.badgeType).catch(() => {});
-        // Remove after duration
-        setTimeout(() => {
-          setToasts(prev => prev.filter(t => t.badgeType !== b.badgeType));
-        }, duration);
-      }, i * 2000);
-    });
-  }, [badges]);
-
-  if (!toasts.length) return null;
-
-  return (
-    <>
-      <style>{`
-        @keyframes toast-slide-in { from { transform: translateY(-100px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-        @keyframes toast-slide-out { from { opacity: 1; } to { opacity: 0; transform: translateY(-20px); } }
-        @keyframes badge-confetti { 0% { transform: translateY(0) rotate(0); opacity: 1; } 100% { transform: translateY(60px) rotate(360deg); opacity: 0; } }
-      `}</style>
-      {toasts.map((b, i) => {
-        const isReward = !!b.reward;
-        return (
-          <div key={b.badgeType} style={{
-            position: 'fixed', top: 60 + i * 80, left: '50%', transform: 'translateX(-50%)',
-            zIndex: 2000, animation: 'toast-slide-in 0.5s ease-out',
-            background: B.white, borderRadius: 16, padding: '12px 20px',
-            boxShadow: isReward ? '0 8px 30px rgba(255,215,0,0.3)' : '0 8px 30px rgba(0,0,0,0.15)',
-            border: `2px solid ${isReward ? B.yellow : B.yellow}`,
-            display: 'flex', alignItems: 'center', gap: 12, minWidth: 280,
-            overflow: 'visible',
-          }}>
-            {/* Mini confetti */}
-            {[B.yellow, B.green, B.wavesBlue, B.orange].map((c, j) => (
-              <div key={j} style={{
-                position: 'absolute', top: -4, left: `${20 + j * 20}%`,
-                width: 5, height: 5, borderRadius: j % 2 ? 1 : '50%',
-                background: c, animation: `badge-confetti 1.5s ease-out ${j * 0.1}s forwards`,
-              }} />
-            ))}
-            <div style={{
-              width: 36, height: 36, borderRadius: '50%',
-              background: isReward ? `${B.yellow}20` : `${B.yellow}20`, display: 'flex', alignItems: 'center',
-              justifyContent: 'center', fontSize: 20, flexShrink: 0,
-            }}>{b.icon}</div>
-            <div>
-              <div style={{ fontSize: 12, color: isReward ? B.yellow : B.yellow, fontWeight: 700 }}>
-                {isReward ? ' Reward Badge Earned!' : ' New Badge Earned!'}
-              </div>
-              <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>{b.title}</div>
-              {isReward && b.reward && (
-                <div style={{ fontSize: 12, color: B.blueDeeper, marginTop: 1 }}>{b.reward.description}</div>
-              )}
-            </div>
-          </div>
-        );
-      })}
-    </>
-  );
-}
-
-// =========================================================================
-// CONTEXTUAL PROMOTION CARDS
-// =========================================================================
-function PromotionCards() {
-  const [promoData, setPromoData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [interacting, setInteracting] = useState(null); // promoId being acted on
-  const [interested, setInterested] = useState(new Set());
-
-  useEffect(() => {
-    api.getRelevantPromotions()
-      .then(d => { setPromoData(d); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, []);
-
-  const handleInterest = async (promo) => {
-    setInteracting(promo.id);
-    try {
-      await api.expressPromoInterest(promo.id, {
-        serviceType: promo.serviceType,
-        serviceName: promo.serviceName,
-      });
-      setInterested(prev => new Set([...prev, promo.id]));
-    } catch (err) { console.error(err); }
-    setInteracting(null);
-  };
-
-  const handleDismiss = async (promoId) => {
-    try {
-      await api.dismissPromotion(promoId);
-      setPromoData(prev => ({
-        ...prev,
-        promotions: prev.promotions.filter(p => p.id !== promoId),
-      }));
-    } catch (err) { console.error(err); }
-  };
-
-  if (loading || !promoData) return null;
-
-  // Fully protected — celebration card
-  if (promoData.fullyProtected) {
-    return (
-      <div style={{
-        background: `linear-gradient(135deg, ${B.green}15, ${B.teal}10)`,
-        borderRadius: 16, padding: 20,
-        border: `2px solid ${B.green}22`,
-        textAlign: 'center',
-      }}>
-        <div style={{ fontSize: 28 }}></div>
-        <div style={{ fontSize: 15, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginTop: 8 }}>
-          You're Fully Protected
-        </div>
-        <div style={{ fontSize: 16, color: B.grayDark, marginTop: 4, lineHeight: 1.6 }}>
-          WaveGuard Platinum member saving {promoData.discount} on everything. Thank you for trusting Waves with your complete home protection.
-        </div>
-      </div>
-    );
-  }
-
-  if (!promoData.promotions?.length) return null;
-
-  const urgencyConfig = {
-    peak: { badge: ' Peak Season', color: B.orange, bg: `${B.orange}20`, borderColor: B.orange },
-    high: { badge: ' Rising', color: B.orange, bg: `${B.orange}20`, borderColor: B.orange },
-    moderate: { badge: ' Recommended', color: B.teal, bg: `${B.bluePale}20`, borderColor: B.teal },
-  };
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {promoData.promotions.map(promo => {
-        const u = urgencyConfig[promo.seasonalUrgency] || urgencyConfig.moderate;
-        const isInterested = interested.has(promo.id);
-
-        return (
-          <div key={promo.id} style={{
-            background: B.white, borderRadius: 16, overflow: 'hidden',
-            border: `1px solid ${B.grayLight}`,
-            boxShadow: '0 2px 12px rgba(0,0,0,0.04)',
-            borderLeft: `4px solid ${u.borderColor}`,
-          }}>
-            <div style={{ padding: '16px 18px' }}>
-              {/* Header: urgency badge + dismiss */}
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-                <span style={{
-                  fontSize: 12, fontWeight: 700, padding: '3px 10px', borderRadius: 20,
-                  background: u.bg, color: u.color,
-                }}>{u.badge}</span>
-                <button onClick={() => handleDismiss(promo.id)} style={{
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  color: B.grayMid, fontSize: 18, padding: 0, lineHeight: 1,
-                }} title="Dismiss"></button>
-              </div>
-
-              {/* Title & description */}
-              <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>
-                {promo.title}
-              </div>
-              <div style={{ fontSize: 16, color: B.grayDark, marginTop: 4, lineHeight: 1.5 }}>
-                {promo.description}
-              </div>
-
-              {/* Price block */}
-              <div style={{
-                marginTop: 12, padding: '10px 14px', borderRadius: 10,
-                background: B.offWhite, display: 'flex', alignItems: 'center', gap: 10,
-              }}>
-                <span style={{ fontSize: 14, color: B.grayMid, textDecoration: 'line-through' }}>
-                  ${promo.originalMonthlyPrice}/mo
-                </span>
-                <span style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.ui }}>
-                  ${promo.discountedMonthlyPrice}/mo
-                </span>
-                {promo.savingsText && (
-                  <span style={{ fontSize: 12, color: B.green, fontWeight: 600, marginLeft: 'auto' }}>
-                    {promo.savingsText}
-                  </span>
-                )}
-              </div>
-
-              {/* Tier upgrade banner */}
-              {promo.tierUpgradeAvailable && (
-                <div style={{
-                  marginTop: 10, padding: '10px 14px', borderRadius: 10,
-                  background: `linear-gradient(135deg, ${B.yellow}15, ${B.orange}10)`,
-                  border: `1px solid ${B.yellow}33`,
-                }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <Icon name="arrowUp" size={14} strokeWidth={2} /> Add this and unlock {promo.potentialNewTier} — {promo.potentialNewDiscount} off everything
-                  </div>
-                  {promo.totalMonthlySavingsAtNewTier > 0 && (
-                    <div style={{ fontSize: 12, color: B.green, fontWeight: 600, marginTop: 2 }}>
-                      You'd save ${promo.totalMonthlySavingsAtNewTier.toFixed(2)}/mo total across all services
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Social proof */}
-              <div style={{ fontSize: 12, color: B.grayMid, marginTop: 10 }}>
-                {promo.socialProof}
-              </div>
-
-              {/* CTA */}
-              {!isInterested ? (
-                <button
-                  onClick={() => handleInterest(promo)}
-                  disabled={interacting === promo.id}
-                  style={{
-                    ...PORTAL_BUTTON_BASE, width: '100%', padding: 13, marginTop: 12, fontSize: 14,
-                    background: B.yellow,
-                    color: B.blueDeeper,
-                    boxShadow: `0 4px 15px ${B.yellow}55`,
-                    opacity: interacting === promo.id ? 0.7 : 1,
-                  }}
-                >
-                  {interacting === promo.id ? 'Sending...' : promo.ctaText}
-                </button>
-              ) : (
-                <div style={{
-                  marginTop: 12, padding: 13, borderRadius: 50, textAlign: 'center',
-                  background: `${B.green}20`, color: B.green, fontSize: 14, fontWeight: 700,
-                }}>
-                   We'll follow up within 24 hours!
-                </div>
-              )}
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// =========================================================================
-// HERO SLIDER — van + branded promotional slides
-// =========================================================================
-function HeroSlider({ onSwitchTab }) {
-  const [active, setActive] = useState(0);
-  const [paused, setPaused] = useState(false);
-  const touchStartX = useRef(0);
-  const touchDeltaX = useRef(0);
-
-  const slides = [
-    {
-      image: '/waves-ford-1.png',
-      alt: 'Waves Pest Control & Lawn Care truck',
-      title: 'Wave Goodbye to Pests!',
-      subtitle: 'Full-service pest control, lawn care & mosquito protection for your home.',
-      cta: { label: 'View My Plan', tab: 'plan' },
-    },
-    {
-      image: '/waves-ford-2.png',
-      alt: 'Waves Pest Control & Lawn Care truck',
-      title: 'Refer a Friend, Earn Cash!',
-      subtitle: 'Share your referral link and earn rewards for every neighbor who signs up.',
-      cta: { label: 'Start Referring', tab: 'refer' },
-    },
-    {
-      image: '/waves-ford-3.png',
-      alt: 'Waves Pest Control & Lawn Care truck',
-      title: 'Lawn Care Programs',
-      subtitle: 'St. Augustine, Bermuda, Zoysia & Bahia — customized fertilization & weed control.',
-      cta: { label: 'Learn More', tab: 'learn' },
-    },
-    {
-      image: '/waves-ford-4.png',
-      alt: 'Waves Pest Control & Lawn Care truck',
-      title: 'Trusted SWFL Service',
-      subtitle: 'Family-owned & operated across Manatee, Sarasota & Charlotte counties.',
-      cta: { label: 'View My Plan', tab: 'plan' },
-    },
-    {
-      image: '/waves-ford-1.png',
-      alt: 'Waves Pest Control & Lawn Care truck',
-      title: 'Stay in the Know',
-      subtitle: 'SWFL pest & lawn tips, expert advice from UF/IFAS, and our monthly newsletter — all in the Learn tab.',
-      cta: { label: 'Learn More', tab: 'learn' },
-    },
-  ];
-
-  const count = slides.length;
-
-  useEffect(() => {
-    if (paused) return;
-    const timer = setInterval(() => setActive(p => (p + 1) % count), 5000);
-    return () => clearInterval(timer);
-  }, [paused, count]);
-
-  const goTo = (i) => setActive(i);
-  const prev = () => setActive(p => (p - 1 + count) % count);
-  const next = () => setActive(p => (p + 1) % count);
-
-  const handleTouchStart = (e) => { touchStartX.current = e.touches[0].clientX; touchDeltaX.current = 0; };
-  const handleTouchMove = (e) => { touchDeltaX.current = e.touches[0].clientX - touchStartX.current; };
-  const handleTouchEnd = () => {
-    if (touchDeltaX.current > 50) prev();
-    else if (touchDeltaX.current < -50) next();
-  };
-
-  return (
-    <div
-      style={{ position: 'relative', borderRadius: 16, overflow: 'hidden', boxShadow: '0 4px 20px rgba(0,0,0,0.10)' }}
-      onMouseEnter={() => setPaused(true)}
-      onMouseLeave={() => setPaused(false)}
-      onTouchStart={handleTouchStart}
-      onTouchMove={handleTouchMove}
-      onTouchEnd={handleTouchEnd}
-    >
-      <style>{`
-        @keyframes heroFadeIn { from { opacity: 0; transform: scale(1.02); } to { opacity: 1; transform: scale(1); } }
-      `}</style>
-
-      {/* Slides */}
-      <div style={{ position: 'relative', width: '100%', aspectRatio: '16 / 7', minHeight: 160 }}>
-        {slides.map((slide, i) => (
-          <div
-            key={i}
-            style={{
-              position: 'absolute', inset: 0,
-              opacity: i === active ? 1 : 0,
-              transition: 'opacity 0.6s ease',
-              pointerEvents: i === active ? 'auto' : 'none',
-            }}
-          >
-            <img
-              src={slide.image}
-              alt={slide.alt}
-              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
-            />
-            <div style={{
-              position: 'absolute', inset: 0,
-              background: 'linear-gradient(90deg, rgba(0,0,0,0.65) 0%, rgba(0,0,0,0.45) 55%, rgba(0,0,0,0.25) 100%)',
-            }} />
-            <div style={{
-              position: 'absolute', inset: 0,
-              display: 'flex', flexDirection: 'column', justifyContent: 'center',
-              padding: '24px 28px 24px 44px', boxSizing: 'border-box',
-              ...(i === active ? { animation: 'heroFadeIn 0.6s ease' } : {}),
-            }}>
-              <div style={{
-                fontSize: 20, fontWeight: 800, color: '#fff',
-                fontFamily: FONTS.heading, lineHeight: 1.2, marginBottom: 6,
-                textShadow: '0 2px 8px rgba(0,0,0,0.5)',
-              }}>{slide.title}</div>
-              <div style={{
-                fontSize: 14, fontWeight: 600, color: 'rgba(255,255,255,0.98)', lineHeight: 1.4,
-                maxWidth: 320, marginBottom: 14,
-                textShadow: '0 1px 4px rgba(0,0,0,0.5)',
-              }}>{slide.subtitle}</div>
-              {slide.cta && (
-                <button
-                  onClick={() => onSwitchTab(slide.cta.tab)}
-                  style={{
-                    ...PORTAL_BUTTON_BASE, padding: '8px 18px', fontSize: 12,
-                    background: B.yellow, color: '#000',
-                    border: 'none',
-                    alignSelf: 'flex-start',
-                  }}
-                >{slide.cta.label}</button>
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {/* Arrow buttons */}
-      {[
-        { dir: 'left', onClick: prev, char: '\u2039', label: 'Previous slide' },
-        { dir: 'right', onClick: next, char: '\u203A', label: 'Next slide' },
-      ].map(({ dir, onClick, char, label }) => (
-        <button
-          key={dir}
-          onClick={onClick}
-          aria-label={label}
-          style={{
-            position: 'absolute', top: '50%', [dir]: 8, transform: 'translateY(-50%)',
-            width: 40, height: 40, borderRadius: '50%',
-            background: 'rgba(0,0,0,0.35)', color: '#fff', border: 'none',
-            fontSize: 20, fontWeight: 700, cursor: 'pointer',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            backdropFilter: 'blur(4px)', transition: 'background 0.2s',
-            lineHeight: 1,
-          }}
-          onMouseEnter={e => e.currentTarget.style.background = 'rgba(0,0,0,0.55)'}
-          onMouseLeave={e => e.currentTarget.style.background = 'rgba(0,0,0,0.35)'}
-        >{char}</button>
-      ))}
-
-      {/* Dot indicators */}
-      <div style={{
-        position: 'absolute', bottom: 10, left: '50%', transform: 'translateX(-50%)',
-        display: 'flex', gap: 6,
-      }}>
-        {slides.map((_, i) => (
-          <button
-            key={i}
-            onClick={() => goTo(i)}
-            aria-label={`Go to slide ${i + 1}`}
-            aria-current={i === active ? 'true' : undefined}
-            style={{
-              width: 36, height: 32, borderRadius: 8,
-              background: 'transparent',
-              border: 'none', cursor: 'pointer', padding: 0,
-              transition: 'all 0.3s ease',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-            }}
-          >
-            <span aria-hidden="true" style={{
-              width: i === active ? 20 : 8, height: 8, borderRadius: 4,
-              background: i === active ? '#fff' : 'rgba(255,255,255,0.5)',
-              display: 'block',
-            }} />
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// =========================================================================
-// DASHBOARD TAB — with referral, review prompt, irrigation recs
-// =========================================================================
-function LegacyDashboardTab({ customer, onSwitchTab }) {
-  const [nextService, setNextService] = useState(null);
-  const [stats, setStats] = useState(null);
-  const [balance, setBalance] = useState(null);
-  const [lastService, setLastService] = useState(null);
-  const [reviewDismissed, setReviewDismissed] = useState(false);
-  const [pendingSatisfaction, setPendingSatisfaction] = useState(null);
-  const [referralStats, setReferralStats] = useState(null);
-  const badgeData = useBadges();
-  const [satRating, setSatRating] = useState(0);
-  const [satHover, setSatHover] = useState(0);
-  const [satPhase, setSatPhase] = useState('rate'); // rate | review | feedback | thanks
-  const [satFeedback, setSatFeedback] = useState('');
-  const [satReviewLink, setSatReviewLink] = useState('');
-  const [satOfficeName, setSatOfficeName] = useState('');
-  const [satSubmitting, setSatSubmitting] = useState(false);
-  const [satDismissed, setSatDismissed] = useState(false);
-  const [showConfetti, setShowConfetti] = useState(false);
-  const lawnHealth = useLawnHealth(customer.id);
-
-  useEffect(() => {
-    api.getNextService().then(d => setNextService(d.next)).catch(console.error);
-    api.getServiceStats().then(setStats).catch(console.error);
-    api.getBalance().then(setBalance).catch(console.error);
-    api.getServices({ limit: 1 }).then(d => {
-      if (d.services?.length) setLastService(d.services[0]);
-    }).catch(console.error);
-    api.getPendingSatisfaction().then(d => {
-      if (d.pending?.length) setPendingSatisfaction(d.pending[0]);
-    }).catch(console.error);
-    api.getReferrals().then(d => {
-      if (d?.stats) setReferralStats(d.stats);
-    }).catch(console.error);
-  }, []);
-
-  const formatTime = (t) => {
-    if (!t) return 'TBD';
-    const [h, m] = t.split(':').map(Number);
-    const ampm = h >= 12 ? 'PM' : 'AM';
-    return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${ampm}`;
-  };
-
-  const tier = TIER[customer.tier];
-  const referralCode = customer.referralCode || '';
-
-  // Extract irrigation recommendations from last service notes
-  const irrigationRecs = [];
-  if (lastService?.notes) {
-    const noteText = lastService.notes.toLowerCase();
-    if (noteText.includes('irrigation') || noteText.includes('zone') || noteText.includes('watering') || noteText.includes('sprinkler')) {
-      irrigationRecs.push({ text: lastService.notes, date: lastService.date, tech: lastService.technician });
-    }
-  }
-
-  // Show review prompt if last service was within 3 days
-  const showReview = lastService && !reviewDismissed && (() => {
-    const svcDate = parseDate(lastService.date);
-    const now = new Date();
-    const diffDays = (now - svcDate) / (1000 * 60 * 60 * 24);
-    return diffDays >= 0 && diffDays <= 3;
-  })();
-
-  const handleSatRating = async (rating) => {
-    setSatRating(rating);
-    setSatSubmitting(true);
-    try {
-      const result = await api.submitSatisfaction({
-        serviceRecordId: pendingSatisfaction.id,
-        rating,
-      });
-      if (result.action === 'review') {
-        setSatReviewLink(result.reviewLink);
-        setSatOfficeName(result.officeName);
-        setSatPhase('review');
-        setShowConfetti(true);
-        setTimeout(() => setShowConfetti(false), 3000);
-      } else {
-        setSatPhase('feedback');
-      }
-    } catch (err) {
-      console.error(err);
-    }
-    setSatSubmitting(false);
-  };
-
-  const handleSatFeedback = async () => {
-    setSatSubmitting(true);
-    try {
-      await api.submitSatisfaction({
-        serviceRecordId: pendingSatisfaction.id,
-        rating: satRating,
-        feedbackText: satFeedback,
-      });
-    } catch (err) {
-      // Already submitted the rating, feedback is supplemental
-    }
-    setSatPhase('thanks');
-    setSatSubmitting(false);
-  };
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      {/* Hero Slider */}
-      <HeroSlider onSwitchTab={onSwitchTab} />
-
-      {/* Satisfaction Pulse — above everything */}
-      {pendingSatisfaction && !satDismissed && (() => {
-        const svcDate = parseDate(pendingSatisfaction.service_date || pendingSatisfaction.serviceDate);
-
-        // Confetti particles
-        const confettiColors = [B.yellow, B.green, B.wavesBlue, B.orange, B.red, B.blueDeeper];
-        const confettiParticles = showConfetti ? Array.from({ length: 40 }, (_, i) => ({
-          id: i,
-          color: confettiColors[i % confettiColors.length],
-          left: Math.random() * 100,
-          delay: Math.random() * 0.5,
-          size: 4 + Math.random() * 6,
-          rotation: Math.random() * 360,
-        })) : [];
-
-        return (
-          <div style={{
-            position: 'relative', overflow: 'hidden',
-            background: B.white, borderRadius: 16,
-            border: `2px solid ${satPhase === 'review' ? B.yellow : satPhase === 'feedback' || satPhase === 'thanks' ? B.wavesBlue : B.orange}33`,
-            boxShadow: '0 4px 24px rgba(0,0,0,0.06)',
-          }}>
-            {/* Confetti animation */}
-            {showConfetti && (
-              <style>{`
-                @keyframes confetti-fall {
-                  0% { transform: translateY(-20px) rotate(0deg); opacity: 1; }
-                  100% { transform: translateY(300px) rotate(720deg); opacity: 0; }
-                }
-              `}</style>
-            )}
-            {confettiParticles.map(p => (
-              <div key={p.id} style={{
-                position: 'absolute', top: 0, left: `${p.left}%`,
-                width: p.size, height: p.size, borderRadius: p.size > 7 ? 2 : '50%',
-                background: p.color, zIndex: 10, pointerEvents: 'none',
-                animation: `confetti-fall 2.5s ease-out ${p.delay}s forwards`,
-                transform: `rotate(${p.rotation}deg)`,
-              }} />
-            ))}
-
-            <div style={{ padding: 20, position: 'relative', zIndex: 5 }}>
-              {/* PHASE: Rate */}
-              {satPhase === 'rate' && (
-                <>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <div>
-                        <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>How was your visit?</div>
-                        <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
-                          {pendingSatisfaction.service_type || pendingSatisfaction.serviceType} · {!isNaN(svcDate) ? svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : ''} · {pendingSatisfaction.technician_name || pendingSatisfaction.technicianName}
-                        </div>
-                      </div>
-                    </div>
-                    <button onClick={() => setSatDismissed(true)} style={{
-                      background: 'none', border: 'none', color: B.grayMid, cursor: 'pointer', fontSize: 20, padding: 0, lineHeight: 1,
-                      minWidth: 44, minHeight: 44, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    }}>×</button>
-                  </div>
-
-                  <div style={{ marginTop: 16, textAlign: 'center' }}>
-                    <div style={{ fontSize: 12, color: B.grayMid, marginBottom: 8 }}>Tap a number to rate your experience</div>
-                    <div style={{ display: 'flex', gap: 3, justifyContent: 'center', flexWrap: 'wrap' }}>
-                      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => {
-                        const isActive = n <= (satHover || satRating);
-                        const color = n <= 3 ? B.red : n <= 7 ? B.orange : B.green;
-                        return (
-                          <button
-                            key={n}
-                            onMouseEnter={() => setSatHover(n)}
-                            onMouseLeave={() => setSatHover(0)}
-                            onClick={() => handleSatRating(n)}
-                            disabled={satSubmitting}
-                            style={{
-                              minWidth: 28, height: 44, borderRadius: 8, border: 'none',
-                              cursor: satSubmitting ? 'wait' : 'pointer',
-                              background: isActive ? color : B.offWhite,
-                              color: isActive ? '#fff' : B.grayMid,
-                              fontSize: 14, fontWeight: 700, fontFamily: FONTS.ui,
-                              transition: 'all 0.15s ease',
-                              transform: isActive ? 'scale(1.1)' : 'scale(1)',
-                              flex: '1 1 0',
-                            }}
-                          >{n}</button>
-                        );
-                      })}
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, padding: '0 2px' }}>
-                      <span style={{ fontSize: 10, color: B.grayMid }}>Not great</span>
-                      <span style={{ fontSize: 10, color: B.grayMid }}>Amazing</span>
-                    </div>
-                  </div>
-                </>
-              )}
-
-              {/* PHASE: Review prompt (8-10) */}
-              {satPhase === 'review' && (
-                <div style={{ textAlign: 'center' }}>
-                  <div style={{ fontSize: 36, marginBottom: 8 }}></div>
-                  <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>
-                    Awesome — {satRating}/10!
-                  </div>
-                  <div style={{ fontSize: 16, color: B.grayDark, marginTop: 6, lineHeight: 1.6 }}>
-                    Would you share your experience on Google? It helps your neighbors find great pest & lawn care and means the world to our {satOfficeName} team.
-                  </div>
-                  <div style={{ display: 'flex', gap: 10, marginTop: 16, justifyContent: 'center', flexWrap: 'wrap' }}>
-                    <a href={satReviewLink} target="_blank" rel="noopener noreferrer" style={{
-                      ...PORTAL_BUTTON_BASE, padding: '11px 22px', fontSize: 14,
-                      background: `linear-gradient(135deg, ${B.yellow}, ${B.orange})`,
-                      color: B.navy, textDecoration: 'none',
-                    }}>Leave a Review ⭐</a>
-                    <button onClick={() => setSatDismissed(true)} style={{
-                      ...PORTAL_BUTTON_BASE, padding: '11px 22px', fontSize: 14,
-                      background: 'transparent', color: B.grayMid,
-                      border: `1px solid ${B.grayLight}`,
-                    }}>Maybe Later</button>
-                  </div>
-                  <div style={{ fontSize: 12, color: B.grayMid, marginTop: 12 }}>
-                    We also texted you the review link in case you want to do it later
-                  </div>
-                </div>
-              )}
-
-              {/* PHASE: Feedback (1-7) */}
-              {satPhase === 'feedback' && (
-                <>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-                    <Icon name="chat" size={24} strokeWidth={1.75} />
-                    <div>
-                      <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>
-                        {satRating <= 3 ? "We're sorry to hear that." : "Thanks for the honest feedback."}
-                      </div>
-                      <div style={{ fontSize: 12, color: B.grayMid }}>
-                        {satRating <= 3
-                          ? "Tell us what went wrong and we'll make it right."
-                          : "Anything we could do better? This stays between us."}
-                      </div>
-                    </div>
-                  </div>
-                  <textarea
-                    value={satFeedback}
-                    onChange={e => setSatFeedback(e.target.value)}
-                    placeholder="What could we have done differently?"
-                    aria-label="Service feedback"
-                    rows={3}
-                    style={{
-                      width: '100%', padding: '12px 14px', borderRadius: 12,
-                      border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
-                      color: B.navy, outline: 'none', boxSizing: 'border-box', resize: 'vertical',
-                    }}
-                    onFocus={e => e.target.style.borderColor = B.wavesBlue}
-                    onBlur={e => e.target.style.borderColor = B.grayLight}
-                  />
-                  <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
-                    <button onClick={handleSatFeedback} disabled={satSubmitting} style={{
-                      ...PORTAL_BUTTON_BASE, padding: '10px 20px', flex: 1, fontSize: 14,
-                      background: B.yellow, color: B.blueDeeper,
-                      opacity: satSubmitting ? 0.7 : 1,
-                    }}>{satSubmitting ? 'Sending...' : 'Send Feedback'}</button>
-                    <button onClick={() => setSatPhase('thanks')} style={{
-                      ...PORTAL_BUTTON_BASE, padding: '10px 20px', fontSize: 14,
-                      background: 'transparent', color: B.grayMid,
-                      border: `1px solid ${B.grayLight}`,
-                    }}>Skip</button>
-                  </div>
-                </>
-              )}
-
-              {/* PHASE: Thank you */}
-              {satPhase === 'thanks' && (
-                <div style={{ textAlign: 'center', padding: '8px 0' }}>
-                  <Icon name="hand" size={28} strokeWidth={1.75} />
-                  <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginTop: 6 }}>
-                    Thank you for your feedback.
-                  </div>
-                  <div style={{ fontSize: 16, color: B.grayDark, marginTop: 4, lineHeight: 1.6 }}>
-                    {satRating <= 3
-                      ? `${(pendingSatisfaction.technician_name || pendingSatisfaction.technicianName) ? (pendingSatisfaction.technician_name || pendingSatisfaction.technicianName).split(' ')[0] + ' at Waves' : 'Your team at Waves'} will personally follow up with you within 24 hours.`
-                      : satRating <= 7
-                        ? "We appreciate you letting us know. We're always working to improve."
-                        : "Thank you for being a valued Waves customer!"}
-                  </div>
-                  <button onClick={() => setSatDismissed(true)} style={{
-                    ...PORTAL_BUTTON_BASE, padding: '8px 20px', fontSize: 12, marginTop: 12,
-                    background: B.offWhite, color: B.grayDark, border: `1px solid ${B.grayLight}`,
-                  }}>Dismiss</button>
-                </div>
-              )}
-            </div>
-          </div>
-        );
-      })()}
-
-      {/* Welcome */}
-      <div style={{
-        position: 'relative', overflow: 'hidden',
-        background: `linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark}, ${B.wavesBlue})`,
-        backgroundImage: `${HALFTONE_PATTERN}, linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark}, ${B.wavesBlue})`,
-        backgroundSize: `${HALFTONE_SIZE}, 100% 100%`,
-        borderRadius: 20, padding: '28px 24px 40px', color: '#fff',
-      }}>
-        {/* Hero video — waves-hero-service.mp4 */}
-        <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
-          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.3, zIndex: 0, pointerEvents: 'none' }}
-          aria-hidden="true">
-          <source src="/brand/waves-hero-service.mp4" type="video/mp4" />
-        </video>
-        {/* Wave motif at bottom */}
-        <div style={{
-          position: 'absolute', bottom: 0, left: 0, right: 0, height: 30, zIndex: 1,
-          background: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 120'%3E%3Cpath d='M0,60 C200,120 400,0 600,60 C800,120 1000,0 1200,60 L1200,120 L0,120Z' fill='%234DC9F6' fill-opacity='0.25'/%3E%3C/svg%3E") no-repeat bottom`,
-          backgroundSize: '100% 100%',
-        }} />
-        <div style={{ position: 'relative', zIndex: 1, fontSize: 14, color: B.blueLight, fontFamily: FONTS.body }}>Hey there,</div>
-        <h1 style={{
-          position: 'relative', zIndex: 1,
-          fontFamily: FONTS.display, fontWeight: 400,
-          fontSize: 'clamp(32px, 7vw, 44px)', color: '#fff',
-          letterSpacing: 0, lineHeight: 1.05,
-          margin: 0,
-          textShadow: '0 2px 12px rgba(0,0,0,0.25)',
-        }}>
-          {customer.firstName}! 
-        </h1>
-        {tier && (
-          <div style={{
-            position: 'relative', zIndex: 1,
-            marginTop: 12, display: 'inline-flex', alignItems: 'center', gap: 6,
-            padding: '5px 14px', borderRadius: 24, fontSize: 14, fontWeight: 700,
-            fontFamily: FONTS.heading,
-            background: `linear-gradient(135deg, ${tier.gradientFrom}, ${tier.gradientTo})`,
-            color: '#fff',
-            border: 'none',
-            textShadow: '0 1px 3px rgba(0,0,0,0.3)',
-          }}> WaveGuard {customer.tier}</div>
-        )}
-        <div style={{ position: 'relative', zIndex: 1, marginTop: 12, fontSize: 16, color: '#fff', lineHeight: 1.6 }}>
-          {customer.address?.line1}, {customer.address?.city}, {customer.address?.state} {customer.address?.zip}<br/>
-          <span style={{ color: B.blueLight }}>{(customer.property?.lawnType || '').replace(/\s*(Full Sun|Shade|Sun\/Shade)\s*/gi, '') || 'Lawn'} · {customer.property?.propertySqFt?.toLocaleString()} sq ft · {customer.property?.lotSqFt?.toLocaleString()} sq ft lot</span>
-        </div>
-      </div>
-
-      {/* Quick Actions Row */}
-      <div style={{
-        display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10,
-      }}>
-        {[
-          { icon: 'wrench', label: 'Request Service', action: () => onSwitchTab?.('request') },
-          { icon: 'chat', label: 'Message Us', action: () => onSwitchTab?.('messages') },
-          { icon: 'card', label: 'Pay Now', action: () => onSwitchTab?.('billing') },
-          { icon: 'gift', label: 'Refer a Friend', action: () => onSwitchTab?.('refer') },
-        ].map((item, i) => (
-          <button key={i} onClick={item.action} style={{
-            ...PORTAL_BUTTON_BASE, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
-            padding: '14px 8px', borderRadius: 14,
-            background: B.white, border: `1.5px solid ${B.bluePale}`,
-            color: B.navy, fontSize: 12, fontWeight: 600, fontFamily: FONTS.ui,
-            boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
-          }}>
-            <Icon name={item.icon} size={22} strokeWidth={1.75} />
-            {item.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Service Tracker — shows when a canonical tracker is active */}
-      <ServiceTracker />
-
-      {/* Next service — enhanced pre-service communication */}
-      {nextService && (() => {
-        const svcDate = parseDate(nextService.date);
-        const now = new Date();
-        const diffHrs = (svcDate - now) / (1000 * 60 * 60);
-        const isToday = svcDate.toDateString() === now.toDateString();
-        const isTomorrow = diffHrs > 0 && diffHrs <= 48 && !isToday;
-        const daysUntil = Math.max(0, Math.ceil(diffHrs / 24));
-
-        return (
-          <div style={{
-            background: B.white, borderRadius: 16, overflow: 'hidden',
-            border: `2px solid ${isToday ? B.green : isTomorrow ? B.orange : B.wavesBlue}22`,
-            boxShadow: '0 4px 20px rgba(0,0,0,0.04)',
-          }}>
-            {/* Header */}
-            <div style={{
-              background: isToday
-                ? `linear-gradient(135deg, ${B.green}, ${B.blueDark})`
-                : isTomorrow
-                  ? `linear-gradient(135deg, ${B.orange}, ${B.blueDark})`
-                  : `linear-gradient(135deg, ${B.wavesBlue}, ${B.blueDark})`,
-              padding: '16px 20px', color: '#fff',
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <span style={{ fontSize: 26 }}>{isToday ? '' : isTomorrow ? '⏰' : ''}</span>
-                <div>
-                  <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0, opacity: 0.85, fontFamily: FONTS.ui }}>
-                    {isToday ? "Today's Service" : isTomorrow ? 'Tomorrow' : 'Your Next Visit'}
-                  </div>
-                  <div style={{ fontSize: 18, fontWeight: 800, fontFamily: FONTS.heading }}>
-                    {svcDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
-                  </div>
-                </div>
-              </div>
-              {!isToday && (
-                <div style={{ textAlign: 'right' }}>
-                  <div style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.ui }}>{daysUntil}</div>
-                  <div style={{ fontSize: 10, opacity: 0.75, textTransform: 'uppercase', letterSpacing: 0 }}>{daysUntil === 1 ? 'day away' : 'days away'}</div>
-                </div>
-              )}
-            </div>
-
-            {/* Service details */}
-            <div style={{ padding: '16px 20px' }}>
-              <div style={{ fontSize: 15, fontWeight: 700, color: B.navy }}>{nextService.serviceType}</div>
-              <div style={{ fontSize: 12, color: B.grayDark, marginTop: 3, lineHeight: 1.5, fontStyle: 'italic' }}>
-                {(() => {
-                  const sType = (nextService.serviceType || '').toLowerCase();
-                  if (sType.includes('lawn') || sType.includes('fertiliz') || sType.includes('celsius'))
-                    return 'Fertilizer application + weed spot treatment + perimeter pest barrier';
-                  if (sType.includes('pest') || sType.includes('general'))
-                    return 'Interior + exterior perimeter spray + entry point treatment';
-                  if (sType.includes('mosquito'))
-                    return 'Backyard fogging + standing water treatment + barrier spray';
-                  if (sType.includes('rodent'))
-                    return 'Bait station check + exclusion inspection + trapping';
-                  if (sType.includes('termite'))
-                    return 'Termite monitoring station inspection + barrier check';
-                  return 'Full property inspection + targeted treatment application';
-                })()}
-              </div>
-              <div style={{ fontSize: 14, color: B.grayMid, marginTop: 4 }}>
-                Technician: <strong style={{ color: B.navy }}>{nextService.technician || 'TBD'}</strong>
-                {nextService.windowStart && ` · ${formatTime(nextService.windowStart)} – ${formatTime(nextService.windowEnd)}`}
-              </div>
-
-              {/* SMS Communication Timeline */}
-              <div style={{
-                marginTop: 16, padding: 14, borderRadius: 12,
-                background: B.offWhite, border: `1px solid ${B.grayLight}`,
-              }}>
-                <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0, color: B.grayMid, marginBottom: 10 }}>
-                  Communication Timeline
-                </div>
-                {[
-                  { icon: 'smartphone', label: '72-hour reminder', desc: 'SMS 3 days before your visit', done: diffHrs <= 72, active: diffHrs <= 72 && diffHrs > 24 },
-                  { icon: 'smartphone', label: '24-hour reminder', desc: 'SMS the day before your visit', done: diffHrs <= 24, active: diffHrs <= 24 && diffHrs > 1 },
-                  { icon: 'truck', label: 'Tech en route alert', desc: 'Live GPS tracking via Bouncie', done: false, active: isToday },
-                  { icon: 'checkCircle', label: 'Service complete summary', desc: 'Products applied + tech notes', done: false, active: false },
-                ].map((step, i) => (
-                  <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: i < 3 ? 10 : 0 }}>
-                    <div style={{
-                      width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
-                      background: step.done ? `${B.green}18` : step.active ? `${B.orange}18` : B.grayLight,
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      color: step.done ? B.green : step.active ? B.orange : B.grayMid,
-                      border: step.active ? `1.5px solid ${B.orange}` : step.done ? `1.5px solid ${B.green}` : `1px solid ${B.grayLight}`,
-                    }}><Icon name={step.icon} size={14} strokeWidth={2} /></div>
-                    <div>
-                      <div style={{ fontSize: 12, fontWeight: 600, color: step.done ? B.green : step.active ? B.orange : B.grayDark }}>
-                        {step.label} {step.done && ''}
-                      </div>
-                      <div style={{ fontSize: 12, color: B.grayMid }}>{step.desc}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {/* Action buttons */}
-              <div style={{ marginTop: 14, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                {!nextService.customerConfirmed ? (
-                  <button onClick={() => {
-                    api.confirmAppointment(nextService.id).then(() => {
-                      setNextService({ ...nextService, customerConfirmed: true, status: 'confirmed' });
-                    });
-                  }} style={{
-                    ...PORTAL_BUTTON_BASE, padding: '10px 20px', flex: 1,
-                    background: B.green, color: '#fff', fontSize: 14,
-                    boxShadow: `0 3px 10px ${B.green}30`,
-                  }}> Confirm Appointment</button>
-                ) : (
-                  <span style={{
-                    padding: '10px 20px', borderRadius: 50, background: `${B.green}20`, flex: 1,
-                    color: B.green, fontSize: 14, fontWeight: 700, textAlign: 'center',
-                  }}> Confirmed</span>
-                )}
-                <a href={`sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${nextService.serviceType} on ${svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} style={{
-                  ...PORTAL_BUTTON_BASE, padding: '10px 20px', flex: 1, textDecoration: 'none',
-                  background: 'transparent', color: B.wavesBlue, fontSize: 14,
-                  border: `1.5px solid ${B.wavesBlue}`,
-                }}>Reschedule</a>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
-
-      {/* Last Service Summary */}
-      {lastService && (
-        <div style={{
-          background: B.white, borderRadius: 16, padding: 20,
-          border: `1px solid ${B.bluePale}`, boxShadow: '0 2px 12px rgba(0,0,0,0.04)',
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-            <Icon name="checkCircle" size={22} strokeWidth={1.75} />
-            <div style={{ fontSize: 14, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>Last Visit</div>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>{lastService.type || lastService.serviceType}</div>
-              <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
-                {parseDate(lastService.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })} · {lastService.technician || 'Waves Team'}
-              </div>
-            </div>
-            <span style={{
-              fontSize: 12, padding: '3px 10px', borderRadius: 6,
-              background: `${B.green}20`, color: B.green, fontWeight: 700,
-            }}>Completed</span>
-          </div>
-          {lastService.notes || lastService.technician_notes ? (
-            <div style={{
-              marginTop: 10, padding: '10px 14px', borderRadius: 10,
-              background: B.offWhite, fontSize: 16, color: B.grayDark, lineHeight: 1.6,
-              borderLeft: `3px solid ${B.wavesBlue}`,
-            }}>
-              {((lastService.notes || lastService.technician_notes) || '').slice(0, 100)}
-              {((lastService.notes || lastService.technician_notes) || '').length > 100 ? '...' : ''}
-            </div>
-          ) : (
-            <div style={{
-              marginTop: 10, padding: '10px 14px', borderRadius: 10,
-              background: B.offWhite, fontSize: 12, color: B.grayMid, lineHeight: 1.5,
-            }}>
-              Service completed — full report in Documents
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Irrigation Recommendations */}
-      {irrigationRecs.length > 0 && (
-        <div style={{
-          background: B.white, borderRadius: 16, padding: 20,
-          border: `2px solid ${B.teal}33`, boxShadow: '0 4px 20px rgba(0,0,0,0.04)',
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-            <Icon name="droplet" size={24} strokeWidth={1.75} />
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Irrigation Recommendation</div>
-              <div style={{ fontSize: 12, color: B.grayMid }}>From {irrigationRecs[0].tech} · {parseDate(irrigationRecs[0].date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
-            </div>
-          </div>
-          <div style={{
-            padding: 14, borderRadius: 12, background: `${B.teal}08`,
-            fontSize: 16, color: B.grayDark, lineHeight: 1.6, borderLeft: `3px solid ${B.teal}`,
-          }}>
-            {irrigationRecs[0].text}
-          </div>
-        </div>
-      )}
-
-      {/* Lawn Health Progress — conditional display (moved up) */}
-      {!lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (
-        <LawnHealthCard
-          scores={lawnHealth.scores}
-          initialScores={lawnHealth.initialScores}
-          photos={lawnHealth.photos}
-          beforeAfter={lawnHealth.beforeAfter}
-          trend={lawnHealth.trend}
-          recommendations={lawnHealth.recommendations}
-          seasonalContext={lawnHealth.seasonalContext}
-          neighborBenchmark={lawnHealth.neighborBenchmark}
-        />
-      )}
-      {!lawnHealth.loading && lawnHealth.hasLawnCare && !lawnHealth.scores && (
-        <div style={{
-          background: B.white, borderRadius: 16, padding: 24,
-          border: `2px solid ${B.green}22`, boxShadow: '0 4px 20px rgba(0,0,0,0.04)',
-          textAlign: 'center',
-        }}>
-          <Icon name="sprout" size={28} strokeWidth={1.75} />
-          <div style={{ fontSize: 14, fontWeight: 600, color: B.navy, fontFamily: FONTS.heading, marginTop: 8 }}>Lawn Health Tracking</div>
-          <div style={{ fontSize: 16, color: B.grayMid, marginTop: 6, lineHeight: 1.6 }}>
-            Your lawn health tracking will begin after your first assessment visit.
-          </div>
-        </div>
-      )}
-
-      {/* Contextual Promotions — based on services they don't have + season */}
-      <PromotionCards />
-
-      {/* Quick stats */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-        {[
-          { label: 'Monthly Rate', value: `$${customer.monthlyRate}`, sub: `${tier?.discount || '0%'} discount`, icon: 'money' },
-          { label: 'Next Service', value: nextService ? parseDate(nextService.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—', sub: nextService?.serviceType || '', icon: 'calendar' },
-          { label: 'Services YTD', value: stats?.servicesYTD ?? '...', sub: stats?.celsiusApplicationsThisYear != null ? `Weed treatments: ${stats.celsiusApplicationsThisYear} of ${stats.celsiusMaxPerYear || 3} annual` : '', icon: 'clipboard' },
-          { label: 'Member Since', value: customer.memberSince ? parseDate(customer.memberSince).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '—', sub: '', icon: 'star' },
-        ].map((s, i) => (
-          <div key={i} style={{
-            background: B.white, borderRadius: 14, padding: 16,
-            border: `1px solid ${B.bluePale}`,
-          }}>
-            <div style={{ marginBottom: 6, color: B.wavesBlue }}><Icon name={s.icon} size={22} strokeWidth={1.75} /></div>
-            <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0, color: B.grayDark, fontFamily: FONTS.ui }}>{s.label}</div>
-            <div style={{ fontSize: 20, fontWeight: 700, color: B.navy, marginTop: 2, fontFamily: FONTS.ui }}>{s.value}</div>
-            <div style={{ fontSize: 12, color: B.green, fontWeight: 600, marginTop: 2 }}>{s.sub}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* WaveGuard Rewards — compact dashboard card */}
-      {tier && (() => {
-        const renewalCredit = Math.min(75, Math.round(((new Date() - parseDate(customer.memberSince)) / (1000 * 60 * 60 * 24 * 30)) * 6.25));
-        const referralCredits = (referralStats?.totalReferrals || 0) * 25;
-        const totalCredits = renewalCredit + referralCredits;
-        return totalCredits > 0 ? (
-          <div style={{
-            background: B.white, borderRadius: 14, padding: '14px 18px',
-            border: `1.5px solid ${B.wavesBlue}22`,
-            display: 'flex', alignItems: 'center', gap: 14,
-          }}>
-            <Icon name="medal" size={28} strokeWidth={1.75} />
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 14, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>Your WaveGuard Rewards</div>
-              <div style={{ fontSize: 12, color: B.grayDark, marginTop: 2, lineHeight: 1.5 }}>
-                ${renewalCredit} renewal credit · ${referralCredits} referral credits · <strong style={{ color: B.wavesBlue }}>Total: ${totalCredits}</strong>
-              </div>
-            </div>
-          </div>
-        ) : null;
-      })()}
-
-      {/* My Requests — open service requests */}
-      <MyRequestsCard />
-
-      {/* Referral — compact dashboard card */}
-      <div style={{
-        background: `linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark})`,
-        backgroundImage: `${HALFTONE_PATTERN}, linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark})`,
-        backgroundSize: `${HALFTONE_SIZE}, 100% 100%`,
-        borderRadius: 16, padding: 20, color: '#fff',
-        display: 'flex', alignItems: 'center', gap: 14,
-      }}>
-        <div style={{ fontSize: 36 }}></div>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 15, fontWeight: 800, fontFamily: FONTS.heading }}>
-            {referralStats && referralStats.totalReferrals > 0
-              ? `You've referred ${referralStats.totalReferrals} neighbor${referralStats.totalReferrals !== 1 ? 's' : ''} — $${referralStats.totalEarned} earned!`
-              : 'Give $25, Get $25'}
-          </div>
-          <div style={{ fontSize: 12, opacity: 0.8, marginTop: 2, lineHeight: 1.5 }}>
-            {referralStats && referralStats.totalReferrals > 0
-              ? 'Keep sharing — every referral earns you $25.'
-              : 'Know someone who needs pest control? Refer a neighbor and you both get $25.'}
-          </div>
-        </div>
-        <button onClick={() => onSwitchTab?.('refer')} style={{
-          ...PORTAL_BUTTON_BASE, padding: '9px 16px', fontSize: 12, flexShrink: 0,
-          background: B.yellow, color: B.blueDeeper,
-        }}>Refer Now</button>
-      </div>
-    </div>
-  );
-}
-
 function DashboardTab({ customer, onSwitchTab }) {
   const compact = useIsMobile(720);
   const [nextService, setNextService] = useState(null);
@@ -2228,6 +858,7 @@ function DashboardTab({ customer, onSwitchTab }) {
   const [balance, setBalance] = useState(null);
   const [balanceStatus, setBalanceStatus] = useState('loading');
   const [lastService, setLastService] = useState(null);
+  const [lastServiceStatus, setLastServiceStatus] = useState('loading');
   const [pendingSatisfaction, setPendingSatisfaction] = useState(null);
   const [referralStats, setReferralStats] = useState(null);
   const [satRating, setSatRating] = useState(0);
@@ -2261,9 +892,15 @@ function DashboardTab({ customer, onSwitchTab }) {
         console.error(err);
         setBalanceStatus('error');
       });
-    api.getServices({ limit: 1 }).then(d => {
-      if (d.services?.length) setLastService(d.services[0]);
-    }).catch(console.error);
+    api.getServices({ limit: 1 })
+      .then(d => {
+        setLastService(d.services?.[0] || null);
+        setLastServiceStatus('ready');
+      })
+      .catch(err => {
+        console.error(err);
+        setLastServiceStatus('error');
+      });
     api.getPendingSatisfaction().then(d => {
       if (d.pending?.length) setPendingSatisfaction(d.pending[0]);
     }).catch(console.error);
@@ -2315,13 +952,43 @@ function DashboardTab({ customer, onSwitchTab }) {
     setSatSubmitting(false);
   };
 
-  const card = {
-    background: B.white,
-    border: '1px solid #E1E7EF',
-    borderRadius: 8,
-    boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+  const card = PORTAL_CARD_STYLE;
+  const muted = PORTAL_SHELL.muted;
+  const subtle = PORTAL_SHELL.page;
+  const dashboardLabel = {
+    fontSize: 12,
+    fontWeight: 850,
+    color: muted,
+    textTransform: 'uppercase',
+    letterSpacing: 0,
+    fontFamily: FONTS.heading,
   };
-  const muted = '#64748B';
+  const dashboardActionCard = {
+    border: `1px solid ${PORTAL_SHELL.border}`,
+    borderRadius: 8,
+    background: subtle,
+    padding: compact ? 10 : 14,
+    textAlign: compact ? 'center' : 'left',
+    cursor: 'pointer',
+    minHeight: compact ? 66 : 86,
+    fontFamily: FONTS.body,
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: compact ? 'center' : 'flex-start',
+    justifyContent: compact ? 'center' : 'flex-start',
+    gap: compact ? 6 : 8,
+    boxShadow: 'none',
+  };
+  const dashboardSecondaryButton = {
+    ...PORTAL_SECONDARY_ACTION,
+    padding: '11px 18px',
+    fontSize: 14,
+  };
+  const dashboardPrimaryButton = {
+    ...PORTAL_PRIMARY_ACTION,
+    padding: '11px 18px',
+    fontSize: 14,
+  };
   const balanceReady = balanceStatus === 'ready' && !!balance;
   const balancePending = balanceStatus === 'loading';
   const balanceError = balanceStatus === 'error';
@@ -2368,6 +1035,24 @@ function DashboardTab({ customer, onSwitchTab }) {
     { icon: 'card', label: hasBalance ? 'Pay now' : 'Billing', sub: billingSub, action: () => onSwitchTab?.('billing') },
     { icon: 'gift', label: 'Refer', sub: '$25 credit', action: () => onSwitchTab?.('refer') },
   ];
+  const rewardCards = [
+    {
+      icon: 'coins',
+      label: 'WaveGuard Rewards',
+      value: `$${renewalCredit + referralCredits}`,
+      sub: `$${renewalCredit} renewal credit · $${referralCredits} referral credits`,
+      actionLabel: null,
+    },
+    {
+      icon: 'gift',
+      label: referralStats?.totalReferrals ? `${referralStats.totalReferrals} referrals sent` : 'Give $25, get $25',
+      value: referralStats?.totalReferrals ? `$${referralTotal}` : '$25',
+      sub: referralStats?.totalReferrals
+        ? 'earned so far'
+        : 'Share Waves with a neighbor and you both get credit.',
+      actionLabel: 'Open referrals',
+    },
+  ];
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -2376,10 +1061,16 @@ function DashboardTab({ customer, onSwitchTab }) {
           <div style={{ minWidth: 0 }}>
             <div style={{
               display: 'inline-flex', alignItems: 'center', gap: 8,
-              padding: '5px 10px', borderRadius: 999,
-              background: tier ? `${tier.gradientFrom}22` : '#EEF6FF',
-              color: B.blueDeeper, fontSize: 12, fontWeight: 800,
+              padding: '6px 10px',
+              borderRadius: 8,
+              background: PORTAL_SHELL.soft,
+              border: `1px solid ${PORTAL_SHELL.softBorder}`,
+              color: B.blueDeeper,
+              fontSize: 12,
+              fontWeight: 850,
+              fontFamily: FONTS.heading,
             }}>
+              <Icon name="shield" size={14} strokeWidth={2} />
               WaveGuard {customer.tier || 'Member'}
             </div>
             <h1 style={{
@@ -2390,7 +1081,7 @@ function DashboardTab({ customer, onSwitchTab }) {
               lineHeight: 1.1,
               letterSpacing: 0,
             }}>
-              Hi, {customer.firstName}.
+              Hi, {customer.firstName || 'there'}.
             </h1>
             <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
               {customer.address?.line1}
@@ -2399,12 +1090,15 @@ function DashboardTab({ customer, onSwitchTab }) {
             </div>
             {propertyLine && <div style={{ marginTop: 4, fontSize: 14, color: muted }}>{propertyLine}</div>}
           </div>
-          <div style={{
+          <button type="button" onClick={() => onSwitchTab?.('billing')} style={{
             minWidth: compact ? '100%' : 180,
             padding: '14px 16px',
             borderRadius: 8,
             background: balanceReady ? (hasBalance ? '#FFF7ED' : '#F0FDF4') : '#F8FAFC',
             border: `1px solid ${balanceReady ? (hasBalance ? '#FED7AA' : '#BBF7D0') : '#E1E7EF'}`,
+            cursor: 'pointer',
+            textAlign: 'left',
+            fontFamily: FONTS.body,
           }}>
             <div style={{ fontSize: 12, color: balanceReady ? (hasBalance ? '#9A3412' : '#047857') : muted, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0 }}>
               {balanceLabel}
@@ -2412,24 +1106,15 @@ function DashboardTab({ customer, onSwitchTab }) {
             <div style={{ marginTop: 3, fontSize: 24, fontWeight: 800, color: B.blueDeeper }}>
               {balanceValue}
             </div>
-          </div>
+          </button>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr 1fr' : 'repeat(4, 1fr)', gap: 10, marginTop: 22 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: compact ? 8 : 10, marginTop: 22 }}>
           {quickActions.map((item) => (
-            <button key={item.label} type="button" onClick={item.action} style={{
-              border: '1px solid #E1E7EF',
-              borderRadius: 8,
-              background: '#F8FAFC',
-              padding: 14,
-              textAlign: 'left',
-              cursor: 'pointer',
-              minHeight: 78,
-              fontFamily: FONTS.body,
-            }}>
-              <Icon name={item.icon} size={19} strokeWidth={1.8} />
-              <div style={{ marginTop: 8, fontSize: 14, fontWeight: 800, color: B.blueDeeper }}>{item.label}</div>
-              <div style={{ marginTop: 2, fontSize: 12, color: muted }}>{item.sub}</div>
+            <button key={item.label} type="button" onClick={item.action} style={dashboardActionCard}>
+              <ShellIconTile icon={item.icon} size={compact ? 30 : 34} />
+              <div style={{ fontSize: compact ? 12 : 14, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading, lineHeight: 1.15 }}>{item.label}</div>
+              {!compact && <div style={{ marginTop: 2, fontSize: 12, color: muted }}>{item.sub}</div>}
             </button>
           ))}
         </div>
@@ -2440,25 +1125,26 @@ function DashboardTab({ customer, onSwitchTab }) {
           {satPhase === 'rate' && (
             <>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
-                <div>
-                  <div style={{ fontSize: 16, fontWeight: 800, color: B.blueDeeper }}>How was your visit?</div>
-                  <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
-                    {pendingSatisfaction.service_type || pendingSatisfaction.serviceType}
-                    {pendingSatisfaction.technician_name || pendingSatisfaction.technicianName ? ` · ${pendingSatisfaction.technician_name || pendingSatisfaction.technicianName}` : ''}
+                <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
+                  <ShellIconTile icon="star" tone="success" size={38} />
+                  <div style={{ minWidth: 0 }}>
+                    <div style={dashboardLabel}>Visit Feedback</div>
+                    <div style={{ marginTop: 4, fontSize: 17, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>How was your visit?</div>
+                    <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+                      {pendingSatisfaction.service_type || pendingSatisfaction.serviceType}
+                      {pendingSatisfaction.technician_name || pendingSatisfaction.technicianName ? ` · ${pendingSatisfaction.technician_name || pendingSatisfaction.technicianName}` : ''}
+                    </div>
                   </div>
                 </div>
-                <button type="button" onClick={() => setSatDismissed(true)} style={{
-                  border: 'none', background: 'transparent', color: muted, cursor: 'pointer',
-                  width: 34, height: 34, borderRadius: 8, fontSize: 20,
-                }}>×</button>
+                <ShellCloseButton onClick={() => setSatDismissed(true)} label="Dismiss feedback prompt" />
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(10, minmax(0, 1fr))', gap: 4, marginTop: 14 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: compact ? 'repeat(5, minmax(0, 1fr))' : 'repeat(10, minmax(0, 1fr))', gap: 4, marginTop: 14 }}>
                 {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => {
                   const active = n <= (satHover || satRating);
                   const color = n <= 3 ? B.red : n <= 7 ? B.orange : B.green;
                   return (
                     <button key={n} type="button" onMouseEnter={() => setSatHover(n)} onMouseLeave={() => setSatHover(0)} onClick={() => handleSatRating(n)} disabled={satSubmitting} style={{
-                      height: 38, borderRadius: 8, border: 'none',
+                      minWidth: 0, height: 38, borderRadius: 8, border: 'none',
                       background: active ? color : '#F1F5F9',
                       color: active ? '#fff' : B.grayMid,
                       fontWeight: 800, cursor: satSubmitting ? 'wait' : 'pointer',
@@ -2517,18 +1203,21 @@ function DashboardTab({ customer, onSwitchTab }) {
       <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'minmax(0, 1.35fr) minmax(280px, .65fr)', gap: 16, alignItems: 'start' }}>
         <section style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: 20, borderBottom: '1px solid #E1E7EF', display: 'flex', justifyContent: 'space-between', gap: 16 }}>
-            <div>
-              <div style={{ fontSize: 12, fontWeight: 800, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Next Visit</div>
-              <div style={{ marginTop: 8, fontSize: 26, fontWeight: 800, color: B.blueDeeper }}>{nextDateLabel}</div>
-              <div style={{ marginTop: 6, fontSize: 15, fontWeight: 700, color: B.navy }}>
-                {nextService?.serviceType || 'Request service when you need us.'}
-              </div>
-              {nextService?.windowStart && (
-                <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
-                  {formatTime(nextService.windowStart)} – {formatTime(nextService.windowEnd)}
-                  {nextService.technician ? ` · ${nextService.technician}` : ''}
+            <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
+              <ShellIconTile icon="calendar" size={38} />
+              <div style={{ minWidth: 0 }}>
+                <div style={dashboardLabel}>Next Visit</div>
+                <div style={{ marginTop: 8, fontSize: 26, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>{nextDateLabel}</div>
+                <div style={{ marginTop: 6, fontSize: 15, fontWeight: 700, color: B.navy }}>
+                  {nextService?.serviceType || 'Request service when you need us.'}
                 </div>
-              )}
+                {nextService?.windowStart && (
+                  <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
+                    {formatTime(nextService.windowStart)} - {formatTime(nextService.windowEnd)}
+                    {nextService.technician ? ` · ${nextService.technician}` : ''}
+                  </div>
+                )}
+              </div>
             </div>
             {daysUntilNextService != null && (
               <div style={{ textAlign: 'center', minWidth: 76 }}>
@@ -2547,8 +1236,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                     setNextService({ ...nextService, customerConfirmed: true, status: 'confirmed' });
                   });
                 }} style={{
-                  ...PORTAL_BUTTON_BASE, background: B.blueDeeper, color: '#fff', boxShadow: 'none',
-                  borderRadius: 8, padding: '11px 18px', fontSize: 14,
+                  ...dashboardPrimaryButton,
                 }}>
                   Confirm Visit
                 </button>
@@ -2559,16 +1247,14 @@ function DashboardTab({ customer, onSwitchTab }) {
                 }}>Confirmed</span>
               )}
               <a href={`sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${nextService.serviceType || 'service'} visit.`} style={{
-                ...PORTAL_BUTTON_BASE, background: '#fff', color: B.blueDeeper, boxShadow: 'none',
-                border: '1px solid #CBD5E1', borderRadius: 8, padding: '11px 18px',
-                textDecoration: 'none', fontSize: 14,
+                ...dashboardSecondaryButton,
+                textDecoration: 'none',
               }}>Reschedule</a>
             </div>
           ) : nextServiceReady ? (
             <div style={{ padding: 20 }}>
               <button type="button" onClick={() => onSwitchTab?.('request')} style={{
-                ...PORTAL_BUTTON_BASE, background: B.blueDeeper, color: '#fff', boxShadow: 'none',
-                borderRadius: 8, padding: '11px 18px', fontSize: 14,
+                ...dashboardPrimaryButton,
               }}>
                 Request Service
               </button>
@@ -2583,7 +1269,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         </section>
 
         <section style={{ ...card, padding: 18 }}>
-          <div style={{ fontSize: 12, fontWeight: 800, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>At a glance</div>
+          <div style={dashboardLabel}>At a glance</div>
           <div style={{ display: 'grid', gap: 12, marginTop: 14 }}>
             {[
               { label: 'Monthly rate', value: customer.monthlyRate ? `$${customer.monthlyRate}` : '—', sub: `${tier?.discount || '0%'} discount` },
@@ -2604,24 +1290,60 @@ function DashboardTab({ customer, onSwitchTab }) {
 
       <ServiceTracker />
 
-      {lastService && (
+      {lastServiceStatus === 'loading' ? (
+        <section style={{ ...card, padding: 20 }}>
+          <PortalInlineState
+            icon="clipboard"
+            title="Loading last visit"
+            message="Checking the latest completed service report."
+          />
+        </section>
+      ) : lastServiceStatus === 'error' ? (
+        <section style={{ ...card, padding: 20 }}>
+          <PortalInlineState
+            icon="warning"
+            tone="danger"
+            title="Could not load last visit"
+            message="Visit history is still available from the Visits tab."
+          />
+        </section>
+      ) : lastService ? (
         <section style={{ ...card, padding: 20 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'flex-start' }}>
-            <div>
-              <div style={{ fontSize: 12, fontWeight: 800, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Last Visit</div>
-              <div style={{ marginTop: 7, fontSize: 17, fontWeight: 800, color: B.blueDeeper }}>{lastService.type || lastService.serviceType}</div>
-              <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
-                {fmtDate(lastService.date, { weekday: 'short', month: 'short', day: 'numeric' })} · {lastService.technician || 'Waves Team'}
+            <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
+              <ShellIconTile icon="clipboard" tone="success" size={38} />
+              <div style={{ minWidth: 0 }}>
+                <div style={dashboardLabel}>Last Visit</div>
+                <div style={{ marginTop: 7, fontSize: 17, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>{lastService.type || lastService.serviceType}</div>
+                <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
+                  {fmtDate(lastService.date, { weekday: 'short', month: 'short', day: 'numeric' })} · {lastService.technician || 'Waves Team'}
+                </div>
               </div>
             </div>
-            <span style={{ borderRadius: 999, background: '#ECFDF5', color: '#047857', fontSize: 12, fontWeight: 800, padding: '5px 9px' }}>Completed</span>
+            <span style={{ borderRadius: 8, background: '#ECFDF5', color: '#047857', border: '1px solid #BBF7D0', fontSize: 12, fontWeight: 850, padding: '5px 9px' }}>Completed</span>
           </div>
-          {(lastService.notes || lastService.technician_notes) && (
+          {(lastService.notes || lastService.technician_notes) ? (
             <p style={{ margin: '12px 0 0', color: B.grayDark, fontSize: 14, lineHeight: 1.6 }}>
               {((lastService.notes || lastService.technician_notes) || '').slice(0, 220)}
               {((lastService.notes || lastService.technician_notes) || '').length > 220 ? '...' : ''}
             </p>
+          ) : (
+            <div style={{ marginTop: 12 }}>
+              <PortalInlineState
+                icon="document"
+                title="Report available"
+                message="Open Visits for the full service summary and documents."
+              />
+            </div>
           )}
+        </section>
+      ) : (
+        <section style={{ ...card, padding: 20 }}>
+          <PortalInlineState
+            icon="calendar"
+            title="No completed visits yet"
+            message="Your first completed service report will appear here after the appointment."
+          />
         </section>
       )}
 
@@ -2637,30 +1359,34 @@ function DashboardTab({ customer, onSwitchTab }) {
           neighborBenchmark={lawnHealth.neighborBenchmark}
         />
       )}
+      {!lawnHealth.loading && lawnHealth.hasLawnCare && (!lawnHealth.scores || !lawnHealth.initialScores) && (
+        <section style={{ ...card, padding: 20 }}>
+          <PortalInlineState
+            icon="sprout"
+            title="Lawn health tracking will start soon"
+            message="Scores and progress photos will appear after the first lawn assessment."
+          />
+        </section>
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 16 }}>
-        <section style={{ ...card, padding: 18 }}>
-          <div style={{ fontSize: 16, fontWeight: 800, color: B.blueDeeper }}>WaveGuard Rewards</div>
-          <div style={{ marginTop: 5, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
-            ${renewalCredit} renewal credit · ${referralCredits} referral credits
-          </div>
-          <div style={{ marginTop: 10, fontSize: 22, fontWeight: 850, color: B.blueDeeper }}>${renewalCredit + referralCredits}</div>
-        </section>
-        <section style={{ ...card, padding: 18 }}>
-          <div style={{ fontSize: 16, fontWeight: 800, color: B.blueDeeper }}>
-            {referralStats?.totalReferrals ? `${referralStats.totalReferrals} referrals sent` : 'Give $25, get $25'}
-          </div>
-          <div style={{ marginTop: 5, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
-            {referralStats?.totalReferrals
-              ? `$${referralTotal} earned so far.`
-              : 'Share Waves with a neighbor and you both get credit.'}
-          </div>
-          <button type="button" onClick={() => onSwitchTab?.('refer')} style={{
-            ...PORTAL_BUTTON_BASE, marginTop: 12, background: '#fff', color: B.blueDeeper,
-            boxShadow: 'none', border: '1px solid #CBD5E1', borderRadius: 8,
-            padding: '10px 14px', fontSize: 14,
-          }}>Open referrals</button>
-        </section>
+        {rewardCards.map(item => (
+          <section key={item.label} style={{ ...card, padding: 18, display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+              <ShellIconTile icon={item.icon} size={38} />
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>{item.label}</div>
+                <div style={{ marginTop: 5, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>{item.sub}</div>
+              </div>
+              <div style={{ fontSize: 22, fontWeight: 850, color: B.blueDeeper, whiteSpace: 'nowrap' }}>{item.value}</div>
+            </div>
+            {item.actionLabel && (
+              <button type="button" onClick={() => onSwitchTab?.('refer')} style={dashboardSecondaryButton}>
+                {item.actionLabel}
+              </button>
+            )}
+          </section>
+        ))}
       </div>
 
       <MyRequestsCard />
@@ -10915,7 +9641,6 @@ export default function PortalPage() {
   const [requestRefreshKey, setRequestRefreshKey] = useState(0);
   const [switchingPropertyId, setSwitchingPropertyId] = useState(null);
   const menuRef = useRef(null);
-  const portalBadgeData = useBadges();
 
   // Close menu on outside click
   useEffect(() => {
