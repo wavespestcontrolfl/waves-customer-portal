@@ -10110,23 +10110,34 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
       aria-current={isActive ? 'page' : undefined}
       style={{
         flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
-        justifyContent: 'center', gap: 2, padding: '6px 2px', border: 'none',
-        background: 'transparent', cursor: 'pointer', minHeight: 56,
-        color: isActive ? B.wavesBlue : B.grayMid,
+        justifyContent: 'center', gap: 3, padding: '6px 2px', border: 'none',
+        background: 'transparent', cursor: 'pointer', minHeight: 58,
+        color: isActive ? B.blueDeeper : B.grayMid,
         fontFamily: FONTS.heading, transition: 'color 0.15s ease',
+        position: 'relative',
       }}
     >
-      <Icon name={t.icon} size={22} strokeWidth={isActive ? 2.25 : 1.75} />
-      <span style={{ fontSize: 10, fontWeight: isActive ? 700 : 600, letterSpacing: 0.2 }}>{t.label}</span>
+      {isActive && <span aria-hidden="true" style={{
+        position: 'absolute',
+        top: 4,
+        width: 22,
+        height: 3,
+        borderRadius: 999,
+        background: B.wavesBlue,
+      }} />}
+      <Icon name={t.icon} size={21} strokeWidth={isActive ? 2.25 : 1.75} />
+      <span style={{ fontSize: 10, fontWeight: isActive ? 850 : 700, letterSpacing: 0 }}>{t.label}</span>
     </button>
   );
   return (
     <nav aria-label="Main" style={{
-      position: 'fixed', bottom: 60, left: 0, right: 0, zIndex: 98,
+      position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 98,
       background: 'rgba(255,255,255,0.98)', backdropFilter: 'blur(12px)',
-      borderTop: `1px solid ${B.grayLight}`,
-      boxShadow: '0 -2px 10px rgba(0,0,0,0.04)',
+      borderTop: '1px solid #E1E7EF',
+      boxShadow: '0 -8px 24px rgba(15,23,42,0.08)',
       display: 'flex', maxWidth: 700, margin: '0 auto',
+      padding: '4px 8px max(6px, env(safe-area-inset-bottom))',
+      boxSizing: 'border-box',
     }}>
       {PRIMARY_TABS.map(t => button(t, () => onSelect(t.id), activeTab === t.id))}
       {button(
@@ -10609,23 +10620,24 @@ export default function PortalPage() {
         onClick={() => switchTab(tab.id)}
         aria-current={isActive ? 'page' : undefined}
         style={{
-          border: 'none',
-          borderRadius: 999,
-          minHeight: 36,
-          padding: '8px 12px',
+          border: `1px solid ${isActive ? '#A7DDF8' : 'transparent'}`,
+          borderRadius: 8,
+          minHeight: 38,
+          padding: '8px 10px',
           display: 'inline-flex',
           alignItems: 'center',
           gap: 6,
           flex: '0 0 auto',
-          background: isActive ? '#EEF6FF' : 'transparent',
+          background: isActive ? '#fff' : 'transparent',
           color: isActive ? B.blueDeeper : B.grayMid,
           fontFamily: FONTS.heading,
           fontSize: 12,
-          fontWeight: 700,
+          fontWeight: 850,
           cursor: 'pointer',
+          boxShadow: isActive ? '0 1px 2px rgba(15,23,42,0.05)' : 'none',
         }}
       >
-        <Icon name={tab.icon} size={15} strokeWidth={1.75} />
+        <Icon name={tab.icon} size={15} strokeWidth={isActive ? 2.1 : 1.75} />
         {tab.label}
       </button>
     );
@@ -10640,16 +10652,23 @@ export default function PortalPage() {
   // Close menu on outside click
   useEffect(() => {
     if (!showMenu) return;
-    const handler = (e) => {
+    const onPointer = (e) => {
       if (menuRef.current && !menuRef.current.contains(e.target)) setShowMenu(false);
     };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
+    const onKey = (e) => {
+      if (e.key === 'Escape') setShowMenu(false);
+    };
+    document.addEventListener('mousedown', onPointer);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onPointer);
+      document.removeEventListener('keydown', onKey);
+    };
   }, [showMenu]);
 
   if (!customer) return null;
 
-  const initials = `${customer.firstName?.[0] || ''}${customer.lastName?.[0] || ''}`;
+  const initials = `${customer.firstName?.[0] || ''}${customer.lastName?.[0] || ''}` || 'W';
   const portalProperties = Array.isArray(properties) ? properties : [];
   const canSwitchProperties = portalProperties.length > 1;
   const propertyRenderKey = `${customer.id}:${requestRefreshKey}`;
@@ -10683,6 +10702,8 @@ export default function PortalPage() {
     { icon: 'wrench', label: 'Request', action: () => setShowReportIssue(true) },
     { icon: 'bot', label: 'Chat', action: () => setShowChat(true) },
   ];
+  const shellMaxWidth = activeTab === 'dashboard' ? 960 : 700;
+  const customerName = [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Account';
 
   return (
     <div style={{
@@ -10696,12 +10717,13 @@ export default function PortalPage() {
         backdropFilter: 'blur(12px)',
         borderBottom: '1px solid #E1E7EF',
         boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
-        padding: '12px 20px',
+        padding: '10px 16px',
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        gap: 12,
         position: 'sticky', top: 0, zIndex: 100,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <img src="/waves-logo.png" alt="Waves" style={{ height: 34, width: 'auto' }} />
+          <img src="/waves-logo.png" alt="Waves" style={{ height: 32, width: 'auto' }} />
           <div>
             <div style={{ fontSize: 14, fontWeight: 800, color: B.blueDeeper, fontFamily: FONTS.heading }}>WAVES</div>
             <div style={{ fontSize: 12, color: B.grayMid, fontWeight: 600, letterSpacing: 0, textTransform: 'uppercase' }}>Customer Portal</div>
@@ -10711,32 +10733,69 @@ export default function PortalPage() {
           <nav aria-label="Customer portal" style={{
             flex: 1, minWidth: 0, margin: '0 18px',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            gap: 4, overflowX: 'auto', scrollbarWidth: 'none',
+            gap: 3, overflowX: 'auto', scrollbarWidth: 'none',
+            background: '#F8FAFC',
+            border: '1px solid #E1E7EF',
+            borderRadius: 8,
+            padding: 4,
           }}>
             {headerNavItems.map(headerNavButton)}
           </nav>
         )}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <NotificationBell type="customer" />
           <div ref={menuRef} style={{ position: 'relative' }}>
           <button
+            type="button"
             onClick={() => setShowMenu(!showMenu)}
             aria-label="Account menu"
-            aria-haspopup="menu"
+            aria-haspopup="dialog"
             aria-expanded={showMenu}
             style={{
-              width: 36, height: 36, borderRadius: '50%',
-              background: B.blueDeeper, border: 'none', padding: 0,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              color: B.white, fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: FONTS.heading,
+              minHeight: 38,
+              width: isMobileShell ? 38 : 'auto',
+              borderRadius: 8,
+              background: B.white,
+              border: '1px solid #CBD5E1',
+              padding: isMobileShell ? 0 : '4px 8px 4px 4px',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 8,
+              color: B.blueDeeper,
+              fontSize: 14,
+              fontWeight: 850,
+              cursor: 'pointer',
+              fontFamily: FONTS.heading,
+              boxShadow: showMenu ? '0 0 0 3px rgba(0,156,222,0.14)' : 'none',
             }}
-          >{initials}</button>
+          >
+            <span style={{
+              width: 30,
+              height: 30,
+              borderRadius: 8,
+              background: B.blueDeeper,
+              color: '#fff',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: 12,
+              fontWeight: 850,
+              flexShrink: 0,
+            }}>{initials}</span>
+            {!isMobileShell && (
+              <>
+                <span style={{ maxWidth: 132, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{customerName}</span>
+                <Icon name="chevronDown" size={15} strokeWidth={2} />
+              </>
+            )}
+          </button>
           {showMenu && (
-            <div style={{
+            <div role="dialog" aria-label="Account menu" style={{
               position: 'absolute',
               right: 0,
-              top: 44,
-              width: 340,
+              top: 46,
+              width: 360,
               maxWidth: 'calc(100vw - 24px)',
               background: '#F8FAFC',
               borderRadius: 8,
@@ -10748,6 +10807,9 @@ export default function PortalPage() {
               zIndex: 200,
             }}>
               <div style={{ padding: 14, background: B.white, borderBottom: '1px solid #E1E7EF' }}>
+                <div style={{ fontSize: 12, color: '#64748B', fontWeight: 850, letterSpacing: 0, textTransform: 'uppercase', marginBottom: 10 }}>
+                  Account
+                </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                   <span style={{
                     width: 42,
@@ -10765,7 +10827,7 @@ export default function PortalPage() {
                   }}>{initials}</span>
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontSize: 15, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>
-                      {customer.firstName} {customer.lastName}
+                      {customerName}
                     </div>
                     <div style={{ fontSize: 12, color: '#64748B', marginTop: 2 }}>{formatPhoneDisplay(customer.phone)}</div>
                     {activePropertyAddress && (
@@ -10969,9 +11031,8 @@ export default function PortalPage() {
         </div>
       </div>
 
-      {/* Content — bottom padding clears the CTA bar (60px) + bottom nav
-          (60px) stack so fixed UI doesn't hide the last section. */}
-      <div style={{ padding: `16px 16px ${isMobileShell ? 150 : 32}px`, maxWidth: activeTab === 'dashboard' ? 960 : 700, margin: '0 auto' }}>
+      {/* Content — bottom padding clears the mobile nav so fixed UI doesn't hide the last section. */}
+      <div style={{ padding: `16px 16px ${isMobileShell ? 92 : 32}px`, maxWidth: shellMaxWidth, margin: '0 auto' }}>
         {activeTab !== 'dashboard' && <h1 style={VISUALLY_HIDDEN}>{TAB_TITLES[activeTab] || 'Customer Portal'}</h1>}
         {activeTab === 'dashboard' && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} />}
@@ -10984,9 +11045,9 @@ export default function PortalPage() {
       </div>
 
       <footer style={{
-        maxWidth: activeTab === 'dashboard' ? 960 : 700,
+        maxWidth: shellMaxWidth,
         margin: '0 auto',
-        padding: `10px 20px ${isMobileShell ? 96 : 44}px`,
+        padding: `10px 20px ${isMobileShell ? 88 : 44}px`,
         borderTop: '1px solid #D9E2EC',
         color: B.grayMid,
         fontSize: 12,
@@ -10999,8 +11060,7 @@ export default function PortalPage() {
         <span>Lakewood Ranch · Sarasota · Venice</span>
       </footer>
 
-      {/* Bottom nav — primary destinations pinned as icons, rest behind
-          "More". Sits above the CTA bar (which stays anchored at bottom:0). */}
+      {/* Bottom nav — primary destinations pinned as icons, rest behind "More". */}
       {isMobileShell && (
         <BottomNav
           activeTab={activeTab}
@@ -11018,39 +11078,6 @@ export default function PortalPage() {
           onChat={() => setShowChat(true)}
         />
       )}
-
-      {/* Bottom CTA */}
-      {isMobileShell && <div style={{
-        position: 'fixed', bottom: 0, left: 0, right: 0,
-        background: 'rgba(255,255,255,0.97)', backdropFilter: 'blur(12px)',
-        borderTop: `1px solid ${B.grayLight}`, padding: '10px 12px',
-        display: 'flex', gap: 6, justifyContent: 'center', zIndex: 100,
-      }}>
-        <a href="tel:+19412975749" style={{
-          ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
-          background: '#fff', color: B.blueDeeper, fontSize: 12, textAlign: 'center',
-          boxShadow: 'none', border: '1px solid #E1E7EF', minHeight: 44,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}><Icon name="phone" size={16} strokeWidth={1.75} /> Call</a>
-        <a href="sms:+19412975749" style={{
-          ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
-          background: '#fff', color: B.blueDeeper, fontSize: 12,
-          textAlign: 'center', boxShadow: 'none', border: '1px solid #E1E7EF', minHeight: 44,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}><Icon name="chat" size={16} strokeWidth={1.75} /> Text</a>
-        <button onClick={() => setShowChat(true)} style={{
-          ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
-          background: '#fff', color: B.blueDeeper, fontSize: 12,
-          textAlign: 'center', boxShadow: 'none', border: '1px solid #E1E7EF', minHeight: 44,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}><Icon name="bot" size={16} strokeWidth={1.75} /> Chat</button>
-        <button type="button" onClick={() => setShowReportIssue(true)} style={{
-          ...BUTTON_BASE, flex: 1, maxWidth: 150, padding: '10px 4px',
-          background: B.blueDeeper, color: '#fff', fontSize: 12,
-          textAlign: 'center', boxShadow: 'none', minHeight: 44,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}><Icon name="wrench" size={16} strokeWidth={1.75} /> Request</button>
-      </div>}
 
       {/* AI Chat Widget */}
       {showChat && <ChatWidget customer={customer} onClose={() => setShowChat(false)} />}
