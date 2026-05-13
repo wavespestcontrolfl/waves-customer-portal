@@ -5779,7 +5779,7 @@ function MyPlanTab({ customer }) {
 
       <div style={{
         display: 'grid',
-        gridTemplateColumns: compact ? '1fr' : 'minmax(0, 1.35fr) minmax(300px, .65fr)',
+        gridTemplateColumns: '1fr',
         gap: 16,
         alignItems: 'start',
       }}>
@@ -6968,6 +6968,8 @@ function ServiceTracker() {
 // =========================================================================
 // REFER & EARN TAB
 // =========================================================================
+const PENDING_REFERRAL_STATUSES = ['pending', 'contacted', 'estimated', 'sms_failed'];
+
 function ReferTab({ customer, onSwitchTab }) {
   const compact = useIsMobile(760);
   const [data, setData] = useState(null);
@@ -6978,13 +6980,33 @@ function ReferTab({ customer, onSwitchTab }) {
   const [notice, setNotice] = useState(null);
   const [copied, setCopied] = useState(false);
 
-  const fetchData = () => {
-    setLoading(true);
+  const fetchData = ({ silent = false } = {}) => {
+    if (!silent) setLoading(true);
     setLoadError('');
     api.getReferrals()
-      .then(d => { setData(d); setLoading(false); })
+      .then(d => {
+        setData(prev => {
+          if (!silent || !prev?.referrals?.length) return d;
+          const incoming = d.referrals || [];
+          const incomingIds = new Set(incoming.map(r => r.id).filter(Boolean));
+          const localPending = (prev.referrals || []).filter(r => r._optimistic && !incomingIds.has(r.id));
+          if (!localPending.length) return d;
+          const mergedReferrals = [...localPending, ...incoming];
+          return {
+            ...d,
+            referrals: mergedReferrals,
+            stats: {
+              ...(d.stats || {}),
+              totalReferrals: Math.max(Number(d.stats?.totalReferrals || 0), mergedReferrals.length),
+              pending: mergedReferrals.filter(r => PENDING_REFERRAL_STATUSES.includes(r.status)).length,
+            },
+          };
+        });
+        setLoading(false);
+      })
       .catch(err => {
-        setLoadError(err?.message || 'Could not load referral details.');
+        if (!silent) setLoadError(err?.message || 'Could not load referral details.');
+        else console.error(err);
         setLoading(false);
       });
   };
@@ -6993,7 +7015,7 @@ function ReferTab({ customer, onSwitchTab }) {
 
   const flash = (text, type = 'success') => {
     setNotice({ text, type });
-    window.setTimeout(() => setNotice(null), 3600);
+    window.setTimeout(() => setNotice(null), 6000);
   };
 
   const handleCopy = async (value) => {
@@ -7014,10 +7036,44 @@ function ReferTab({ customer, onSwitchTab }) {
     if (!friendName || !friendPhone) return;
     setSubmitting(true);
     try {
-      await api.submitReferral({ name: friendName, phone: friendPhone });
+      const result = await api.submitReferral({ name: friendName, phone: friendPhone });
+      const referral = result?.referral;
+      const smsSent = referral?.smsSent !== false;
+      const displayName = referral?.name || friendName;
+      const optimisticReferral = {
+        id: referral?.id || `pending-${Date.now()}`,
+        name: displayName,
+        phone: referral?.phone || '••• ••• ••••',
+        status: referral?.status || (smsSent ? 'contacted' : 'sms_failed'),
+        rewardStatus: 'pending',
+        createdAt: referral?.createdAt || new Date().toISOString(),
+        _optimistic: true,
+      };
+      setData(prev => {
+        if (!prev) return prev;
+        const existing = prev.referrals || [];
+        const nextReferrals = [
+          optimisticReferral,
+          ...existing.filter(r => r.id !== optimisticReferral.id),
+        ];
+        return {
+          ...prev,
+          referrals: nextReferrals,
+          stats: {
+            ...(prev.stats || {}),
+            totalReferrals: Math.max(Number(prev.stats?.totalReferrals || 0), nextReferrals.length),
+            pending: nextReferrals.filter(r => PENDING_REFERRAL_STATUSES.includes(r.status)).length,
+          },
+        };
+      });
       setForm({ name: '', phone: '' });
-      flash('Invite sent. We texted them your referral.');
-      fetchData();
+      flash(
+        smsSent
+          ? `Your referral to ${displayName.split(/\s+/)[0]} is on the way!`
+          : `Your referral to ${displayName.split(/\s+/)[0]} is saved, but the text did not send automatically. We will follow up.`,
+        smsSent ? 'success' : 'error',
+      );
+      fetchData({ silent: true });
     } catch (err) {
       flash(err?.message || 'Could not submit your referral. Please try again.', 'error');
     } finally {
@@ -7089,12 +7145,12 @@ function ReferTab({ customer, onSwitchTab }) {
   }
 
   const referralCode = data?.referralCode || customer?.referralCode || '';
-  const shareLink = data?.referralLink || data?.shareLink || (referralCode ? `https://wavespestcontrol.com/r/${referralCode}` : 'https://wavespestcontrol.com');
+  const shareLink = data?.referralLink || data?.shareLink || (referralCode ? `https://portal.wavespestcontrol.com/r/${referralCode}` : 'https://portal.wavespestcontrol.com');
   const stats = data?.stats || { totalReferrals: 0, converted: 0, totalEarned: 0 };
   const referrals = data?.referrals || [];
   const totalReferrals = Number(stats.totalReferrals || referrals.length || 0);
   const converted = Number(stats.converted ?? stats.totalConverted ?? 0);
-  const pending = Number(stats.pending ?? referrals.filter(r => ['pending', 'contacted', 'estimated'].includes(r.status)).length);
+  const pending = Number(stats.pending ?? referrals.filter(r => PENDING_REFERRAL_STATUSES.includes(r.status)).length);
   const clicks = Number(stats.totalClicks || 0);
   const rewardPerReferral = Number(data?.rewardPerReferral || 50);
   const lifetimeEarned = data?.totalEarned != null
@@ -7106,11 +7162,12 @@ function ReferTab({ customer, onSwitchTab }) {
   const customerFirstName = customer?.firstName || customer?.first_name || 'your friend';
 
   const statusConfig = {
-    pending: { label: 'Invited', color: muted, bg: '#F1F5F9' },
+    pending: { label: 'Pending', color: muted, bg: '#F1F5F9' },
     contacted: { label: 'Contacted', color: B.wavesBlue, bg: '#EEF6FF' },
     estimated: { label: 'Estimated', color: B.orange, bg: `${B.orange}14` },
     signed_up: { label: 'Signed up', color: B.green, bg: '#F0FDF4' },
     credited: { label: 'Credit applied', color: B.green, bg: '#F0FDF4' },
+    sms_failed: { label: 'Text failed', color: B.red, bg: `${B.red}10` },
     rejected: { label: 'Closed', color: B.red, bg: `${B.red}10` },
     lost: { label: 'Closed', color: B.red, bg: `${B.red}10` },
   };
@@ -7130,6 +7187,19 @@ function ReferTab({ customer, onSwitchTab }) {
   const milestoneThreshold = Number(nextMilestone?.threshold || 0);
   const milestoneProgress = milestoneThreshold ? Math.min(100, Math.round((converted / milestoneThreshold) * 100)) : 100;
   const milestoneRemaining = Number(nextMilestone?.remaining ?? Math.max(0, milestoneThreshold - converted));
+  const openShareUrl = (url, backupText) => {
+    navigator.clipboard?.writeText(shareLink).catch(() => {});
+    window.location.href = url;
+    flash(backupText);
+  };
+  const handleSmsShare = () => {
+    openShareUrl(`sms:?body=${encodeURIComponent(shareText)}`, 'Text message opened. Referral link copied as a backup.');
+  };
+  const handleEmailShare = () => {
+    const subject = encodeURIComponent('Waves Pest Control referral');
+    const body = encodeURIComponent(`${shareText}\n\nThanks!`);
+    openShareUrl(`mailto:?subject=${subject}&body=${body}`, 'Email draft opened. Referral link copied as a backup.');
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -7271,12 +7341,12 @@ function ReferTab({ customer, onSwitchTab }) {
             {shareLink}
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
-            <a href={`sms:?body=${encodeURIComponent(shareText)}`} style={{ ...secondaryButton, flex: '1 1 120px', justifyContent: 'center', textDecoration: 'none' }}>
+            <button type="button" onClick={handleSmsShare} style={{ ...secondaryButton, flex: '1 1 120px', justifyContent: 'center' }}>
               <Icon name="message" size={15} strokeWidth={2} style={{ marginRight: 6 }} /> Text
-            </a>
-            <a href={`mailto:?subject=${encodeURIComponent('Waves Pest Control referral')}&body=${encodeURIComponent(shareText)}`} style={{ ...secondaryButton, flex: '1 1 120px', justifyContent: 'center', textDecoration: 'none' }}>
+            </button>
+            <button type="button" onClick={handleEmailShare} style={{ ...secondaryButton, flex: '1 1 120px', justifyContent: 'center' }}>
               <Icon name="mail" size={15} strokeWidth={2} style={{ marginRight: 6 }} /> Email
-            </a>
+            </button>
           </div>
         </section>
 
@@ -9604,7 +9674,7 @@ export default function PortalPage() {
     if (id === 'request') { setShowReportIssue(true); return; }
     setActiveTab(id);
   };
-  const headerNavItems = PRIMARY_TABS;
+  const headerNavItems = [...PRIMARY_TABS, ...MORE_TABS];
   const headerNavButton = (tab) => {
     const isActive = activeTab === tab.id;
     return (
@@ -9695,7 +9765,7 @@ export default function PortalPage() {
     { icon: 'wrench', label: 'Request', action: () => setShowReportIssue(true) },
     { icon: 'bot', label: 'Chat', action: () => setShowChat(true) },
   ];
-  const shellMaxWidth = activeTab === 'dashboard' ? 960 : 700;
+  const shellMaxWidth = 960;
   const customerName = [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Account';
 
   return (

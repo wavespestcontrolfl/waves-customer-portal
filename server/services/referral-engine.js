@@ -28,6 +28,66 @@ function generateCode(len = 8) {
   return code;
 }
 
+const FALLBACK_REFERRAL_BASE_URL = 'https://portal.wavespestcontrol.com/r/';
+const FALLBACK_PORTAL_HOME_URL = 'https://portal.wavespestcontrol.com';
+const DEFAULT_REFERRAL_BASE_URL = process.env.REFERRAL_BASE_URL
+  || process.env.PORTAL_REFERRAL_BASE_URL
+  || FALLBACK_REFERRAL_BASE_URL;
+
+function normalizeReferralBaseUrl(baseUrl) {
+  const raw = String(baseUrl || '').trim() || DEFAULT_REFERRAL_BASE_URL;
+  try {
+    const url = new URL(raw.endsWith('/') ? raw : `${raw}/`);
+    if (url.hostname === 'wavespestcontrol.com' || url.hostname === 'www.wavespestcontrol.com') {
+      url.hostname = 'portal.wavespestcontrol.com';
+      url.protocol = 'https:';
+    }
+    if (!url.pathname.startsWith('/r/')) url.pathname = '/r/';
+    if (!url.pathname.endsWith('/')) url.pathname = `${url.pathname}/`;
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return FALLBACK_REFERRAL_BASE_URL;
+  }
+}
+
+function referralLinkForCode(code, baseUrl) {
+  return `${normalizeReferralBaseUrl(baseUrl)}${code}`;
+}
+
+function referralCodeFromLink(link) {
+  try {
+    const url = new URL(String(link || '').trim());
+    const match = url.pathname.match(/^\/r\/([^/]+)/);
+    return match?.[1] ? decodeURIComponent(match[1]) : '';
+  } catch {
+    return '';
+  }
+}
+
+function linkUsesReferralRoute(link) {
+  try {
+    const url = new URL(String(link || '').trim());
+    return url.pathname === '/r' || url.pathname.startsWith('/r/');
+  } catch {
+    return false;
+  }
+}
+
+function getPromoterReferralLink(promoter, settings = {}) {
+  const current = String(promoter?.referral_link || '').trim();
+  const currentCode = referralCodeFromLink(current);
+  const code = String(promoter?.referral_code || currentCode || '').trim();
+  if (!code) return FALLBACK_PORTAL_HOME_URL;
+  if (current && !/^https?:\/\/(www\.)?wavespestcontrol\.com\/r\//i.test(current)) {
+    if (currentCode && currentCode !== code) return referralLinkForCode(code, settings.base_url);
+    if (currentCode) return current;
+    if (!linkUsesReferralRoute(current)) return current;
+  }
+  return referralLinkForCode(code, settings.base_url);
+}
+
 async function generateUniqueCode() {
   for (let attempt = 0; attempt < 5; attempt++) {
     const code = `WAVES-${generateCode(8)}`;
@@ -78,16 +138,39 @@ async function sendSMS(to, body, options = {}) {
 async function enrollPromoter(customerId) {
   const customer = await db('customers').where({ id: customerId }).first();
   if (!customer) throw new Error('Customer not found');
+  const settings = await getSettings();
 
   // Check if already enrolled
   const existing = await db('referral_promoters').where({ customer_id: customerId }).first();
   if (existing) {
-    return { promoter: existing, alreadyEnrolled: true };
+    let code = String(existing.referral_code || customer.referral_code || referralCodeFromLink(existing.referral_link) || '').trim();
+    if (!code) {
+      code = await generateUniqueCode();
+    } else {
+      const conflict = await db('referral_promoters')
+        .where({ referral_code: code })
+        .where('id', '!=', existing.id)
+        .first();
+      if (conflict) code = await generateUniqueCode();
+    }
+
+    const referralLink = getPromoterReferralLink({ ...existing, referral_code: code }, settings);
+    const updates = {};
+    if (!existing.referral_code || existing.referral_code !== code) updates.referral_code = code;
+    if (existing.referral_link !== referralLink) updates.referral_link = referralLink;
+    if (Object.keys(updates).length) {
+      updates.updated_at = new Date();
+      await db('referral_promoters').where({ id: existing.id }).update(updates);
+    }
+    if (!customer.referral_code) {
+      await db('customers').where({ id: customerId }).update({ referral_code: code });
+    }
+
+    return { promoter: { ...existing, ...updates, referral_code: code, referral_link: referralLink }, alreadyEnrolled: true };
   }
 
-  const settings = await getSettings();
   const code = customer.referral_code || (await generateUniqueCode());
-  const link = `${settings.base_url}${code}`;
+  const link = referralLinkForCode(code, settings.base_url);
 
   // Ensure customer has a referral_code
   if (!customer.referral_code) {
@@ -132,6 +215,7 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
   if (!promoter) throw new Error('Promoter not found');
 
   const settings = await getSettings();
+  const referralLink = getPromoterReferralLink(promoter, settings);
 
   // --- Fraud checks ---
 
@@ -249,7 +333,7 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
     {
       referee_name: firstName,
       referrer_name: promoter.first_name,
-      referral_link: promoter.referral_link || `${settings.base_url}${promoter.referral_code}`,
+      referral_link: referralLink,
     }
   );
   const smsSent = await sendSMS(normalizedPhone || phone.trim(), smsBody, {
@@ -272,7 +356,7 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
   }
 
   logger.info(`[ReferralEngine] Referral ${referral.id} submitted by promoter ${promoterId}`);
-  return { ...referral, lead_id: leadId, sms_sent: smsSent };
+  return { ...referral, lead_id: leadId, status: smsSent ? 'contacted' : 'sms_failed', sms_sent: smsSent };
 }
 
 // ---------------------------------------------------------------------------
@@ -487,13 +571,13 @@ async function checkMilestones(promoterId) {
 async function getSettings() {
   try {
     const row = await db('referral_program_settings').where({ id: 1 }).first();
-    if (row) return row;
+    if (row) return { ...row, base_url: normalizeReferralBaseUrl(row.base_url) };
   } catch { /* table may not exist yet */ }
 
   // Defaults
   return {
     program_active: true,
-    base_url: 'https://wavespestcontrol.com/r/',
+    base_url: normalizeReferralBaseUrl(DEFAULT_REFERRAL_BASE_URL),
     referrer_reward_cents: 5000,
     referee_discount_cents: 2500,
     bonus_silver_cents: 5000,
@@ -606,7 +690,7 @@ async function getProgramAnalytics(startDate, endDate) {
       .where('created_at', '<=', end)
       .select(
         db.raw("COUNT(*) as total"),
-        db.raw("COUNT(*) FILTER (WHERE status = 'pending' OR status = 'contacted') as pending"),
+        db.raw("COUNT(*) FILTER (WHERE status IN ('pending','contacted','estimated','sms_failed')) as pending"),
         db.raw("COUNT(*) FILTER (WHERE status = 'signed_up' OR status = 'credited') as converted"),
         db.raw("COUNT(*) FILTER (WHERE status = 'rejected' OR lost_reason IS NOT NULL) as lost"),
         db.raw("COALESCE(SUM(CASE WHEN status IN ('signed_up','credited') THEN referrer_reward_amount ELSE 0 END), 0) as total_rewards_dollars"),
@@ -691,4 +775,9 @@ module.exports = {
   updateSettings,
   getPromoterStats,
   getProgramAnalytics,
+  getPromoterReferralLink,
+  _internals: {
+    normalizeReferralBaseUrl,
+    referralLinkForCode,
+  },
 };

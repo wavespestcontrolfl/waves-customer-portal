@@ -30,7 +30,7 @@ function Stat({ label, value, sub, color }) {
 }
 
 function Badge({ status }) {
-  const c = { pending: D.amber, contacted: D.teal, estimated: D.purple, signed_up: D.green, credited: D.green, rejected: D.red, expired: D.muted, active: D.green, applied: D.green, pending_service: D.amber, earned: D.green, paid: D.green }[status] || D.muted;
+  const c = { pending: D.amber, contacted: D.teal, estimated: D.purple, sms_failed: D.red, signed_up: D.green, credited: D.green, rejected: D.red, expired: D.muted, active: D.green, applied: D.green, pending_service: D.amber, earned: D.green, paid: D.green }[status] || D.muted;
   return <span style={{ fontSize: 10, fontFamily: MONO, textTransform: 'uppercase', padding: '2px 8px', borderRadius: 6, background: `${c}22`, color: c, letterSpacing: 0.5 }}>{status?.replace('_', ' ')}</span>;
 }
 
@@ -285,8 +285,8 @@ export default function ReferralsPageV2() {
                       <td style={tdSt}><Badge status={r.status} /></td>
                       <td style={tdR}>
                         <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
-                          {r.status === 'pending' && <button onClick={() => handleStatusChange(r.id, 'contacted')} style={btnSmall(D.teal)}>Contacted</button>}
-                          {['contacted', 'estimated', 'pending'].includes(r.status) && (
+                          {['pending', 'sms_failed'].includes(r.status) && <button onClick={() => handleStatusChange(r.id, 'contacted')} style={btnSmall(D.teal)}>Contacted</button>}
+                          {['contacted', 'estimated', 'pending', 'sms_failed'].includes(r.status) && (
                             <button onClick={() => setConvertModal({ id: r.id, name: r.referee_name || r.referral_first_name, customerId: '', tier: '', monthlyValue: '' })} style={btnSmall(D.green)}>Convert</button>
                           )}
                           {!['signed_up', 'credited', 'rejected'].includes(r.status) && <button onClick={() => handleStatusChange(r.id, 'rejected')} style={btnSmall(`${D.red}aa`)}>Reject</button>}
