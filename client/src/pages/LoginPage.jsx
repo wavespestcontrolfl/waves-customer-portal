@@ -10,6 +10,13 @@ const SUPPORT_LINKS = [
   { label: 'Estimate', href: '/estimate', icon: 'arrowRight' },
 ];
 
+const LOGIN_TOOLS = [
+  { icon: 'plan', label: 'Plan', text: 'Services and coverage' },
+  { icon: 'calendar', label: 'Visits', text: 'Upcoming and completed work' },
+  { icon: 'card', label: 'Billing', text: 'Cards, autopay, and history' },
+  { icon: 'document', label: 'Documents', text: 'Agreements and reports' },
+];
+
 function normalizeAuthError(error) {
   if (!error) return '';
   if (error === 'No account found for this phone number') {
@@ -22,7 +29,7 @@ function normalizeAuthError(error) {
 }
 
 export default function LoginPage() {
-  const { sendCode, verifyCode, error, isAuthenticated } = useAuth();
+  const { sendCode, verifyCode, error, isAuthenticated, loading } = useAuth();
   const navigate = useNavigate();
   const [phone, setPhone] = useState('');
   const [code, setCode] = useState('');
@@ -74,6 +81,7 @@ export default function LoginPage() {
   const codeReady = code.length === 6;
   const submitDisabled = step === 'phone' ? !phoneReady || sending : !codeReady || sending;
   const friendlyError = normalizeAuthError(error);
+  const busyLabel = step === 'phone' ? 'Sending code...' : 'Verifying code...';
 
   if (isAuthenticated) return null;
 
@@ -85,8 +93,9 @@ export default function LoginPage() {
         '--login-brand': B.wavesBlue,
         '--login-yellow': B.yellow,
         '--login-text': B.grayDark,
-        '--login-muted': B.grayMid,
+        '--login-muted': '#64748B',
         '--login-border': '#E1E7EF',
+        '--login-border-strong': '#CBD5E1',
         '--login-soft': '#EEF6FF',
         '--login-bg': '#F8FAFC',
         '--login-card': B.white,
@@ -106,9 +115,9 @@ export default function LoginPage() {
           box-sizing: border-box;
         }
         .portal-login-shell {
-          width: min(1040px, 100%);
+          width: min(1060px, 100%);
           display: grid;
-          grid-template-columns: minmax(280px, 0.92fr) minmax(340px, 420px);
+          grid-template-columns: minmax(280px, 0.9fr) minmax(340px, 430px);
           gap: 24px;
           align-items: center;
         }
@@ -128,9 +137,17 @@ export default function LoginPage() {
           height: 42px;
           object-fit: contain;
         }
+        .portal-login-logo span {
+          font-family: ${FONTS.heading};
+          font-size: 15px;
+          font-weight: 850;
+          letter-spacing: 0;
+        }
         .portal-login-eyebrow {
-          margin-top: 30px;
-          display: inline-flex;
+          margin-top: 28px;
+          display: flex;
+          width: fit-content;
+          max-width: 100%;
           align-items: center;
           gap: 8px;
           padding: 6px 10px;
@@ -141,11 +158,11 @@ export default function LoginPage() {
           font-weight: 850;
         }
         .portal-login-brand h1 {
-          margin: 14px 0 10px;
+          margin: 14px 0 12px;
           color: var(--login-blue);
           font-family: ${FONTS.heading};
-          font-size: 52px;
-          line-height: 1.02;
+          font-size: 44px;
+          line-height: 1.06;
           letter-spacing: 0;
         }
         .portal-login-brand p {
@@ -153,8 +170,52 @@ export default function LoginPage() {
           max-width: 480px;
           color: var(--login-muted);
           font-size: 16px;
-          line-height: 1.6;
+          line-height: 1.55;
           font-weight: 500;
+        }
+        .portal-login-tools {
+          margin-top: 22px;
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 10px;
+          max-width: 520px;
+        }
+        .portal-login-tool {
+          min-width: 0;
+          border: 1px solid var(--login-border);
+          border-radius: 8px;
+          background: var(--login-card);
+          padding: 12px;
+          box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+          display: flex;
+          gap: 10px;
+          align-items: flex-start;
+        }
+        .portal-login-tool-icon {
+          width: 34px;
+          height: 34px;
+          border-radius: 8px;
+          background: var(--login-soft);
+          color: var(--login-blue);
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          flex-shrink: 0;
+        }
+        .portal-login-tool-title {
+          display: block;
+          color: var(--login-blue);
+          font-family: ${FONTS.heading};
+          font-size: 14px;
+          font-weight: 850;
+          line-height: 1.2;
+        }
+        .portal-login-tool-text {
+          display: block;
+          color: var(--login-muted);
+          font-size: 12px;
+          line-height: 1.35;
+          margin-top: 2px;
         }
         .portal-login-panel {
           min-width: 0;
@@ -202,6 +263,33 @@ export default function LoginPage() {
           line-height: 1.45;
           font-weight: 500;
         }
+        .portal-login-step {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 6px;
+          margin-bottom: 18px;
+          padding: 4px;
+          border: 1px solid var(--login-border);
+          border-radius: 8px;
+          background: var(--login-bg);
+        }
+        .portal-login-step-item {
+          min-height: 34px;
+          border-radius: 7px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 7px;
+          color: var(--login-muted);
+          font-family: ${FONTS.heading};
+          font-size: 12px;
+          font-weight: 850;
+        }
+        .portal-login-step-item.active {
+          background: var(--login-card);
+          color: var(--login-blue);
+          box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+        }
         .portal-login-field {
           display: grid;
           gap: 7px;
@@ -217,7 +305,7 @@ export default function LoginPage() {
           width: 100%;
           height: 52px;
           box-sizing: border-box;
-          border: 1px solid #CBD5E1;
+          border: 1px solid var(--login-border-strong);
           border-radius: 8px;
           background: #fff;
           color: var(--login-blue);
@@ -270,13 +358,33 @@ export default function LoginPage() {
         }
         .portal-login-secondary {
           margin-top: 8px;
-          border: 1px solid #CBD5E1;
+          border: 1px solid var(--login-border-strong);
           background: #fff;
           color: var(--login-blue);
+        }
+        .portal-login-submit:focus-visible,
+        .portal-login-secondary:focus-visible,
+        .portal-login-help a:focus-visible {
+          outline: 3px solid rgba(0, 156, 222, 0.2);
+          outline-offset: 2px;
         }
         .portal-login-secondary:hover {
           border-color: #94A3B8;
           background: #F8FAFC;
+        }
+        .portal-login-note {
+          margin-top: 12px;
+          padding: 10px 12px;
+          border-radius: 8px;
+          background: var(--login-soft);
+          border: 1px solid #CDEAFE;
+          color: var(--login-blue);
+          font-size: 13px;
+          line-height: 1.45;
+          font-weight: 700;
+          display: flex;
+          gap: 8px;
+          align-items: flex-start;
         }
         .portal-login-error {
           margin-top: 14px;
@@ -314,6 +422,10 @@ export default function LoginPage() {
           font-weight: 850;
           background: #fff;
         }
+        .portal-login-help a:hover {
+          border-color: #94A3B8;
+          background: #F8FAFC;
+        }
         .portal-login-footer {
           margin-top: 18px;
           color: var(--login-muted);
@@ -327,7 +439,7 @@ export default function LoginPage() {
         @media (max-width: 820px) {
           .portal-login-page {
             align-items: flex-start;
-            padding: 18px;
+            padding: 16px;
           }
           .portal-login-shell {
             grid-template-columns: 1fr;
@@ -340,10 +452,20 @@ export default function LoginPage() {
             margin-top: 20px;
           }
           .portal-login-brand h1 {
-            font-size: 34px;
+            font-size: 32px;
+          }
+          .portal-login-brand p {
+            font-size: 15px;
+          }
+          .portal-login-tools {
+            grid-template-columns: 1fr;
+            margin-top: 16px;
           }
           .portal-login-card {
             padding: 18px;
+          }
+          .portal-login-help {
+            grid-template-columns: 1fr;
           }
         }
       `}</style>
@@ -352,21 +474,27 @@ export default function LoginPage() {
         <section className="portal-login-brand" aria-labelledby="portal-login-heading">
           <a className="portal-login-logo" href="https://wavespestcontrol.com">
             <img src="/waves-logo.png" alt="Waves" />
-            <span style={{
-              fontFamily: FONTS.heading,
-              fontSize: 15,
-              fontWeight: 850,
-              letterSpacing: 0,
-            }}>
-              Waves Pest Control
-            </span>
+            <span>Waves Pest Control</span>
           </a>
           <div className="portal-login-eyebrow">
             <Icon name="lock" size={15} strokeWidth={2.2} />
             Secure customer access
           </div>
           <h1 id="portal-login-heading">Customer Portal</h1>
-          <p>Sign in with the phone number on your Waves account.</p>
+          <p>Sign in with the phone number on your Waves account to manage service, billing, documents, and property details.</p>
+          <div className="portal-login-tools" aria-label="Portal tools">
+            {LOGIN_TOOLS.map(item => (
+              <div className="portal-login-tool" key={item.label}>
+                <span className="portal-login-tool-icon">
+                  <Icon name={item.icon} size={17} strokeWidth={2} />
+                </span>
+                <span>
+                  <span className="portal-login-tool-title">{item.label}</span>
+                  <span className="portal-login-tool-text">{item.text}</span>
+                </span>
+              </div>
+            ))}
+          </div>
         </section>
 
         <section className="portal-login-panel" aria-label="Sign in">
@@ -387,12 +515,30 @@ export default function LoginPage() {
               </div>
             </div>
 
+            <div className="portal-login-step" aria-label="Sign in progress">
+              <span className={`portal-login-step-item ${step === 'phone' ? 'active' : ''}`}>
+                <Icon name="smartphone" size={14} strokeWidth={2} />
+                Phone
+              </span>
+              <span className={`portal-login-step-item ${step === 'code' ? 'active' : ''}`}>
+                <Icon name="key" size={14} strokeWidth={2} />
+                Code
+              </span>
+            </div>
+
+            {loading ? (
+              <div className="portal-login-note" role="status">
+                <Icon name="waves" size={16} strokeWidth={2} style={{ marginTop: 1 }} />
+                <span>Checking your saved session...</span>
+              </div>
+            ) : (
             <form onSubmit={onSubmit}>
               {step === 'phone' ? (
                 <div className="portal-login-field">
                   <label htmlFor="waves-login-phone">Phone number</label>
                   <input
                     id="waves-login-phone"
+                    name="phone"
                     className="portal-login-input"
                     type="tel"
                     autoComplete="tel"
@@ -400,13 +546,18 @@ export default function LoginPage() {
                     value={phone}
                     onChange={(e) => setPhone(formatPhone(e.target.value))}
                     placeholder="(941) 555-0147"
+                    aria-describedby="waves-login-phone-help"
                   />
+                  <span id="waves-login-phone-help" style={{ fontSize: 12, color: 'var(--login-muted)', lineHeight: 1.35 }}>
+                    Use the mobile number linked to your Waves account.
+                  </span>
                 </div>
               ) : (
                 <div className="portal-login-field">
                   <label htmlFor="waves-login-code">Verification code</label>
                   <input
                     id="waves-login-code"
+                    name="code"
                     className="portal-login-input code"
                     type="text"
                     autoComplete="one-time-code"
@@ -416,7 +567,11 @@ export default function LoginPage() {
                     placeholder="000000"
                     maxLength={6}
                     autoFocus
+                    aria-describedby="waves-login-code-help"
                   />
+                  <span id="waves-login-code-help" style={{ fontSize: 12, color: 'var(--login-muted)', lineHeight: 1.35 }}>
+                    Codes are 6 digits and usually arrive within a few seconds.
+                  </span>
                 </div>
               )}
 
@@ -427,7 +582,7 @@ export default function LoginPage() {
                 aria-live="polite"
               >
                 {sending
-                  ? (step === 'phone' ? 'Sending...' : 'Verifying...')
+                  ? busyLabel
                   : (step === 'phone' ? 'Send Code' : 'Sign In')}
                 {!sending && <Icon name="arrowRight" size={16} strokeWidth={2.2} />}
               </button>
@@ -453,6 +608,7 @@ export default function LoginPage() {
                 </>
               )}
             </form>
+            )}
 
             {friendlyError && (
               <div className="portal-login-error" role="alert">

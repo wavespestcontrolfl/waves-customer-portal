@@ -1,7 +1,8 @@
 import React, { Component } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { AuthProvider, useAuth } from './hooks/useAuth';
-import { COLORS, FONTS } from './theme';
+import { COLORS, FONTS } from './theme-brand';
+import Icon from './components/Icon';
 
 class PageErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { error: null }; }
@@ -10,16 +11,55 @@ class PageErrorBoundary extends Component {
   render() {
     if (this.state.error) {
       return (
-        <div style={{ padding: 60, textAlign: 'center' }}>
-          <div style={{ fontSize: 48, marginBottom: 16 }}>{'⚠️'}</div>
-          <div style={{ fontSize: 18, fontWeight: 700, color: '#e2e8f0', marginBottom: 8 }}>Something went wrong</div>
-          <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 20, maxWidth: 400, margin: '0 auto 20px' }}>
+        <div style={{
+          minHeight: '100vh',
+          background: '#F8FAFC',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: 24,
+          fontFamily: FONTS.body,
+          boxSizing: 'border-box',
+        }}>
+          <div style={{
+            width: 'min(420px, 100%)',
+            background: '#fff',
+            border: '1px solid #E1E7EF',
+            borderRadius: 8,
+            padding: 24,
+            textAlign: 'center',
+            boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+          }}>
+            <div style={{
+              width: 46,
+              height: 46,
+              borderRadius: 8,
+              margin: '0 auto 14px',
+              background: `${COLORS.red}10`,
+              color: COLORS.red,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}>
+              <Icon name="warning" size={22} strokeWidth={2} />
+            </div>
+            <div style={{ fontSize: 18, fontWeight: 850, color: COLORS.blueDeeper, marginBottom: 8, fontFamily: FONTS.heading }}>Something went wrong</div>
+            <div style={{ fontSize: 13, color: '#64748B', marginBottom: 20, lineHeight: 1.5 }}>
             {this.state.error.message}
+            </div>
+            <button onClick={() => { this.setState({ error: null }); window.location.reload(); }} style={{
+              minHeight: 42,
+              padding: '0 18px',
+              background: COLORS.blueDeeper,
+              color: '#fff',
+              border: 'none',
+              borderRadius: 8,
+              fontSize: 14,
+              fontWeight: 850,
+              fontFamily: FONTS.heading,
+              cursor: 'pointer',
+            }}>Reload Page</button>
           </div>
-          <button onClick={() => { this.setState({ error: null }); window.location.reload(); }} style={{
-            padding: '10px 24px', background: '#0ea5e9', color: '#fff', border: 'none',
-            borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer',
-          }}>Reload Page</button>
         </div>
       );
     }
@@ -163,24 +203,43 @@ function ProtectedRoute({ children }) {
     return (
       <div style={{
         minHeight: '100vh',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        background: `linear-gradient(135deg, ${COLORS.navy}, ${COLORS.navyLight})`,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: '#F8FAFC',
         fontFamily: FONTS.body,
+        padding: 24,
+        boxSizing: 'border-box',
       }}>
-        <div style={{ textAlign: 'center', color: '#fff' }}>
+        <div style={{
+          width: 'min(360px, 100%)',
+          background: '#fff',
+          border: '1px solid #E1E7EF',
+          borderRadius: 8,
+          padding: 24,
+          textAlign: 'center',
+          color: COLORS.blueDeeper,
+          boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+        }}>
           <div style={{
-            width: 56, height: 56, borderRadius: 14, margin: '0 auto 16px',
-            background: `linear-gradient(135deg, ${COLORS.wavesBlue}, ${COLORS.blueBright})`,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 26, fontWeight: 800, fontFamily: FONTS.heading,
-            animation: 'pulse 1.5s ease infinite',
-          }}>W</div>
-          <p style={{ fontSize: 14, opacity: 0.7 }}>Loading your portal...</p>
+            width: 48,
+            height: 48,
+            borderRadius: 8,
+            margin: '0 auto 14px',
+            background: '#EEF6FF',
+            color: COLORS.blueDeeper,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            animation: 'portalPulse 1.4s ease infinite',
+          }}><Icon name="waves" size={24} strokeWidth={2} /></div>
+          <div style={{ fontSize: 17, fontWeight: 850, fontFamily: FONTS.heading }}>Loading your portal</div>
+          <p style={{ fontSize: 14, color: '#64748B', margin: '6px 0 0', lineHeight: 1.45 }}>Checking your secure session.</p>
         </div>
         <style>{`
-          @keyframes pulse {
+          @keyframes portalPulse {
             0%, 100% { transform: scale(1); opacity: 1; }
-            50% { transform: scale(1.05); opacity: 0.8; }
+            50% { transform: scale(1.04); opacity: 0.76; }
           }
         `}</style>
       </div>

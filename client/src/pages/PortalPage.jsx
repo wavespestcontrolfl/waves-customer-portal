@@ -118,6 +118,116 @@ function ShellCloseButton({ onClick, label = 'Close' }) {
   );
 }
 
+const PORTAL_CARD_STYLE = {
+  background: PORTAL_SHELL.surface,
+  border: `1px solid ${PORTAL_SHELL.border}`,
+  borderRadius: 8,
+  boxShadow: PORTAL_SHELL.shadowSoft,
+};
+
+const PORTAL_SECONDARY_ACTION = {
+  ...BUTTON_BASE,
+  background: PORTAL_SHELL.surface,
+  color: PORTAL_SHELL.text,
+  border: `1px solid ${PORTAL_SHELL.borderStrong}`,
+  borderRadius: 8,
+  boxShadow: 'none',
+  padding: '10px 14px',
+  fontSize: 14,
+  fontFamily: FONTS.heading,
+};
+
+const PORTAL_PRIMARY_ACTION = {
+  ...PORTAL_SECONDARY_ACTION,
+  background: B.blueDeeper,
+  color: '#fff',
+  border: 'none',
+};
+
+function PortalStatePanel({
+  icon = 'waves',
+  tone = 'brand',
+  eyebrow,
+  title,
+  message,
+  children,
+  actionLabel,
+  onAction,
+  actionStyle = PORTAL_SECONDARY_ACTION,
+}) {
+  return (
+    <section style={{
+      ...PORTAL_CARD_STYLE,
+      padding: 24,
+      textAlign: 'center',
+      color: PORTAL_SHELL.text,
+    }}>
+      <ShellIconTile icon={icon} tone={tone} size={46} />
+      {eyebrow && (
+        <div style={{
+          marginTop: 14,
+          fontSize: 12,
+          fontWeight: 850,
+          color: PORTAL_SHELL.muted,
+          textTransform: 'uppercase',
+          letterSpacing: 0,
+          fontFamily: FONTS.heading,
+        }}>
+          {eyebrow}
+        </div>
+      )}
+      <div style={{
+        marginTop: eyebrow ? 5 : 14,
+        fontSize: 20,
+        fontWeight: 850,
+        color: PORTAL_SHELL.text,
+        fontFamily: FONTS.heading,
+        lineHeight: 1.2,
+      }}>
+        {title}
+      </div>
+      {message && (
+        <div style={{
+          margin: '7px auto 0',
+          maxWidth: 460,
+          fontSize: 14,
+          color: PORTAL_SHELL.muted,
+          lineHeight: 1.55,
+        }}>
+          {message}
+        </div>
+      )}
+      {children}
+      {actionLabel && onAction && (
+        <button type="button" onClick={onAction} style={{ ...actionStyle, marginTop: 16 }}>
+          {actionLabel}
+        </button>
+      )}
+    </section>
+  );
+}
+
+function PortalInlineState({ icon = 'document', title, message, tone = 'brand' }) {
+  return (
+    <div style={{
+      padding: 16,
+      borderRadius: 8,
+      background: PORTAL_SHELL.page,
+      border: `1px solid ${PORTAL_SHELL.border}`,
+      display: 'flex',
+      gap: 12,
+      alignItems: 'flex-start',
+      color: PORTAL_SHELL.text,
+    }}>
+      <ShellIconTile icon={icon} tone={tone} size={34} />
+      <div>
+        <div style={{ fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading }}>{title}</div>
+        {message && <div style={{ marginTop: 3, fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.45 }}>{message}</div>}
+      </div>
+    </div>
+  );
+}
+
 // Wave divider SVG — used between sections
 function WaveDivider() {
   return (
@@ -2560,6 +2670,7 @@ function ServicesTab() {
   const compact = useIsMobile(760);
   const [services, setServices] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [expanded, setExpanded] = useState(null);
   const [typeFilter, setTypeFilter] = useState('All');
   const [yearFilter, setYearFilter] = useState('All');
@@ -2567,9 +2678,21 @@ function ServicesTab() {
   const [photoMap, setPhotoMap] = useState({});
   const [lightbox, setLightbox] = useState(null);
 
-  useEffect(() => {
-    api.getServices({ limit: 100 }).then(d => { setServices(d.services || []); setLoading(false); }).catch(console.error);
+  const loadServices = useCallback(() => {
+    setLoading(true);
+    setLoadError('');
+    api.getServices({ limit: 100 })
+      .then(d => { setServices(d.services || []); })
+      .catch(err => {
+        console.error(err);
+        setLoadError(err?.message || 'Could not load service history.');
+      })
+      .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    loadServices();
+  }, [loadServices]);
 
   const toggleExpand = (svc) => {
     const next = expanded === svc.id ? null : svc.id;
@@ -2609,9 +2732,26 @@ function ServicesTab() {
 
   if (loading) {
     return (
-      <div style={{ ...card, padding: 28, textAlign: 'center', color: muted }}>
-        Loading service history...
-      </div>
+      <PortalStatePanel
+        icon="calendar"
+        eyebrow="Completed Visits"
+        title="Loading service history"
+        message="Pulling visit notes, product details, photos, and reports."
+      />
+    );
+  }
+
+  if (loadError) {
+    return (
+      <PortalStatePanel
+        icon="warning"
+        tone="danger"
+        eyebrow="Completed Visits"
+        title="Could not load service history"
+        message={loadError}
+        actionLabel="Try Again"
+        onAction={loadServices}
+      />
     );
   }
 
@@ -2785,11 +2925,17 @@ function ServicesTab() {
 
       {/* Empty state */}
       {filtered.length === 0 && (
-        <div style={{ ...card, padding: 28, textAlign: 'center', color: muted, fontSize: 14 }}>
-          {services.length === 0
-            ? "We haven't logged any visits yet. Your service history will appear here after your first appointment."
-            : 'No services match your filters. Try clearing the year or type filter above.'}
-        </div>
+        <PortalStatePanel
+          icon={services.length === 0 ? 'calendar' : 'search'}
+          eyebrow="Completed Visits"
+          title={services.length === 0 ? 'No completed visits yet' : 'No visits match those filters'}
+          message={services.length === 0
+            ? "Your completed service reports will appear here after your first appointment."
+            : 'Try clearing the year, type, or search filters to see more visit history.'}
+          actionLabel={services.length === 0 ? undefined : 'Clear Filters'}
+          onAction={services.length === 0 ? undefined : () => { setTypeFilter('All'); setYearFilter('All'); setSearchTerm(''); }}
+          actionStyle={PORTAL_SECONDARY_ACTION}
+        />
       )}
 
       {/* 4. Monthly grouped list */}
@@ -3127,11 +3273,14 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const [prefs, setPrefs] = useState(null);
   const [propertyPrefs, setPropertyPrefs] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
   const [confirmingIds, setConfirmingIds] = useState({});
   const [prefsLocked, setPrefsLocked] = useState({});
 
-  useEffect(() => {
+  const loadSchedule = useCallback(() => {
+    setLoading(true);
+    setLoadError('');
     Promise.all([
       api.getSchedule(90),
       api.getNotificationPrefs(),
@@ -3140,9 +3289,15 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       setUpcoming(schedData.upcoming || []);
       setPrefs(prefsData);
       setPropertyPrefs(propertyPrefsData.properties || []);
-      setLoading(false);
-    }).catch(console.error);
+    }).catch(err => {
+      console.error(err);
+      setLoadError(err?.message || 'Could not load your schedule.');
+    }).finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    loadSchedule();
+  }, [loadSchedule]);
 
   const handleToggle = async (key) => {
     if (prefsLocked[key]) return;
@@ -3306,9 +3461,26 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
 
   if (loading) {
     return (
-      <div style={{ ...card, padding: 28, textAlign: 'center', color: muted }}>
-        Loading schedule...
-      </div>
+      <PortalStatePanel
+        icon="calendar"
+        eyebrow="Upcoming Visits"
+        title="Loading schedule"
+        message="Checking upcoming appointments, reminders, and confirmation status."
+      />
+    );
+  }
+
+  if (loadError) {
+    return (
+      <PortalStatePanel
+        icon="warning"
+        tone="danger"
+        eyebrow="Upcoming Visits"
+        title="Could not load your schedule"
+        message={loadError}
+        actionLabel="Try Again"
+        onAction={loadSchedule}
+      />
     );
   }
 
@@ -3541,7 +3713,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           <div style={{ minWidth: 0 }}>
             <div style={sectionTitle}>Upcoming Visits</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>
-              {upcomingOnly.length ? `${upcomingOnly.length} scheduled` : 'Nothing scheduled right now'}
+              {upcomingOnly.length ? `${upcomingOnly.length} scheduled` : 'Schedule status'}
             </div>
             <div style={{ marginTop: 5, fontSize: 14, color: B.grayDark, lineHeight: 1.55 }}>
               Appointment timing, confirmation status, reminders, and reschedule options.
@@ -3555,23 +3727,15 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
 
       {/* Empty state */}
       {upcomingOnly.length === 0 && (
-        <div style={{
-          ...card,
-          padding: 28,
-          textAlign: 'center',
-        }}>
-          <div style={{ width: 42, height: 42, borderRadius: 8, margin: '0 auto 12px', background: subtle, border: '1px solid #E1E7EF', color: B.blueDeeper, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <Icon name="leaf" size={20} strokeWidth={1.8} />
-          </div>
-          <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading, marginBottom: 8 }}>No upcoming services scheduled</div>
-          <div style={{ fontSize: 14, color: muted, lineHeight: 1.6 }}>
-            Your next quarterly pest treatment will be in {nextQuarterName}.
-            {mosquitoResumes && <><br />Your mosquito service resumes in {mosquitoResumes}.</>}
-          </div>
-          <button type="button" onClick={onRequestVisit} style={{
-            ...primaryButton, marginTop: 16,
-          }}>Request a Visit</button>
-        </div>
+        <PortalStatePanel
+          icon="leaf"
+          eyebrow="Upcoming Visits"
+          title="No upcoming services scheduled"
+          message={`Your next quarterly pest treatment will be in ${nextQuarterName}.${mosquitoResumes ? ` Mosquito service resumes in ${mosquitoResumes}.` : ''}`}
+          actionLabel="Request a Visit"
+          onAction={onRequestVisit}
+          actionStyle={primaryButton}
+        />
       )}
 
       {/* Service cards — time-based rendering */}
@@ -3844,6 +4008,7 @@ function BillingTab({ customer }) {
   const [cards, setCards] = useState([]);
   const [autopay, setAutopay] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [yearFilter, setYearFilter] = useState('All');
   const [typeFilter, setTypeFilter] = useState('All');
   const [billingEmail, setBillingEmail] = useState('');
@@ -3863,7 +4028,9 @@ function BillingTab({ customer }) {
 
   const refreshCards = () => api.getCards().then(d => setCards(d.cards)).catch(console.error);
 
-  useEffect(() => {
+  const loadBilling = useCallback(() => {
+    setLoading(true);
+    setLoadError('');
     Promise.all([
       api.getPayments(),
       api.getBalance(),
@@ -3879,8 +4046,16 @@ function BillingTab({ customer }) {
           setPaymentSmsEnabled(prefsData.paymentConfirmationSms !== false);
         }
         setLoading(false);
-      }).catch(console.error);
+      }).catch(err => {
+        console.error(err);
+        setLoadError(err?.message || 'Could not load billing details.');
+        setLoading(false);
+      });
   }, []);
+
+  useEffect(() => {
+    loadBilling();
+  }, [loadBilling]);
 
   const handleAddCard = async () => {
     setStripeLoading(true);
@@ -4004,15 +4179,39 @@ function BillingTab({ customer }) {
 
   if (loading) {
     return (
-      <div style={{ ...card, padding: 28, textAlign: 'center', color: muted }}>
-        Loading billing...
-      </div>
+      <PortalStatePanel
+        icon="card"
+        eyebrow="Billing"
+        title="Loading billing"
+        message="Checking your balance, saved methods, autopay status, and payment history."
+      />
+    );
+  }
+
+  if (loadError) {
+    return (
+      <PortalStatePanel
+        icon="warning"
+        tone="danger"
+        eyebrow="Billing"
+        title="Could not load billing"
+        message={loadError}
+        actionLabel="Try Again"
+        onAction={loadBilling}
+      />
     );
   }
 
   // Compute upcoming auto-pay info
   const nextCharge = balance?.nextCharge;
-  const autopayState = autopay?.state || (autopay?.autopay_enabled ? 'active' : 'unknown');
+  const rawAutopayState = autopay?.state || (autopay?.autopay_enabled ? 'active' : '');
+  const autopayState = ['active', 'paused', 'disabled'].includes(rawAutopayState)
+    ? rawAutopayState
+    : autopay?.loadError
+      ? 'unknown'
+      : autopay?.autopay_enabled
+        ? 'active'
+        : 'disabled';
   const amountDue = Number(autopayState === 'active'
     ? (autopay?.next_charge_amount ?? autopay?.monthly_rate ?? 0)
     : (nextCharge?.amount ?? balance?.currentBalance ?? customer?.monthlyRate ?? 0));
@@ -4414,9 +4613,11 @@ function BillingTab({ customer }) {
         ))}
 
         {cards.length === 0 && (
-          <div style={{ padding: 20, textAlign: 'center', color: muted, fontSize: 14, background: subtle, borderRadius: 8, border: '1px solid #E1E7EF' }}>
-            No payment methods on file. Add a card to enable Auto Pay.
-          </div>
+          <PortalInlineState
+            icon="card"
+            title="No payment methods on file"
+            message="Add a saved method to enable Auto Pay and keep service billing current."
+          />
         )}
 
         {stripeError && !showAddCard && (
@@ -4561,7 +4762,11 @@ function BillingTab({ customer }) {
         </div>
 
         {filteredPayments.length === 0 && (
-          <div style={{ padding: 20, textAlign: 'center', color: muted, fontSize: 14 }}>No payments match your filters</div>
+          <PortalInlineState
+            icon="search"
+            title="No payments match your filters"
+            message="Try a different year or payment type to view more billing history."
+          />
         )}
         {filteredPayments.map(p => (
           <div key={p.id} style={{
@@ -4940,16 +5145,26 @@ function PropertyTab({ customer }) {
   const compact = useIsMobile(760);
   const [prefs, setPrefs] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [saveStatus, setSaveStatus] = useState(null); // null | 'saving' | 'saved' | 'error'
   const debounceRef = useRef(null);
   const pendingRef = useRef({});
   const lastSavedRef = useRef(null);
 
-  useEffect(() => {
+  const loadPropertyPreferences = useCallback(() => {
+    setLoading(true);
+    setLoadError('');
     api.getPropertyPreferences()
       .then(d => { setPrefs(d.preferences); lastSavedRef.current = d.preferences; setLoading(false); })
-      .catch(() => setLoading(false));
+      .catch(err => {
+        setLoadError(err?.message || 'Could not load property preferences.');
+        setLoading(false);
+      });
   }, []);
+
+  useEffect(() => {
+    loadPropertyPreferences();
+  }, [loadPropertyPreferences]);
 
   const updateField = useCallback((field, value) => {
     setPrefs(prev => ({ ...prev, [field]: value }));
@@ -5023,14 +5238,27 @@ function PropertyTab({ customer }) {
     gap: 12,
   };
 
-  if (loading) return <div style={{ ...card, padding: 28, textAlign: 'center', color: muted }}>Loading property info...</div>;
-  if (!prefs) {
+  if (loading) {
     return (
-      <div style={{ ...card, padding: 24 }}>
-        <div style={sectionTitle}>My Property</div>
-        <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>Unable to load preferences</div>
-        <div style={{ marginTop: 6, fontSize: 14, color: muted }}>Refresh the portal and try again.</div>
-      </div>
+      <PortalStatePanel
+        icon="house"
+        eyebrow="My Property"
+        title="Loading property info"
+        message="Checking your gate, pets, scheduling, HOA, and service-day notes."
+      />
+    );
+  }
+  if (loadError || !prefs) {
+    return (
+      <PortalStatePanel
+        icon="warning"
+        tone="danger"
+        eyebrow="My Property"
+        title="Unable to load preferences"
+        message={loadError || 'Refresh the portal and try again.'}
+        actionLabel="Try Again"
+        onAction={loadPropertyPreferences}
+      />
     );
   }
 
@@ -5618,9 +5846,12 @@ function WeatherPestWidget({ customer, nextService }) {
   const subtle = '#F8FAFC';
 
   if (loading) return (
-    <div style={{ ...card, padding: 24, color: muted, textAlign: 'center', fontSize: 14 }}>
-      Loading local conditions...
-    </div>
+    <PortalStatePanel
+      icon="cloud"
+      eyebrow="Local Conditions"
+      title="Loading local conditions"
+      message="Checking weather and seasonal pest pressure for your area."
+    />
   );
 
   if (!weather) return null;
@@ -6111,9 +6342,11 @@ function LearnTab({ customer }) {
           ))}
         </div>
       ) : (
-        <div style={{ padding: 16, borderRadius: 8, background: subtle, border: '1px solid #E1E7EF', fontSize: 14, color: muted }}>
-          {emptyText}
-        </div>
+        <PortalInlineState
+          icon={icon}
+          title="Nothing new yet"
+          message={emptyText}
+        />
       )}
     </section>
   );
@@ -6319,16 +6552,11 @@ function LearnTab({ customer }) {
             )}
           </div>
         ) : (
-          <div style={{
-            padding: 18,
-            borderRadius: 8,
-            background: subtle,
-            border: '1px solid #E1E7EF',
-            fontSize: 14,
-            color: muted,
-          }}>
-            New Waves articles and newsletter issues will appear here.
-          </div>
+          <PortalInlineState
+            icon="waves"
+            title="No Waves articles loaded"
+            message="New Waves articles and newsletter issues will appear here."
+          />
         )}
 
         <div style={{
@@ -6404,9 +6632,11 @@ function LearnTab({ customer }) {
           </div>
 
           {filteredFaq.length === 0 && faqSearch.trim() && (
-            <div style={{ textAlign: 'center', padding: 20, color: muted, fontSize: 14 }}>
-              No results for "{faqSearch}". Try different keywords or text us below.
-            </div>
+            <PortalInlineState
+              icon="search"
+              title="No matching answers"
+              message={`No results for "${faqSearch}". Try different keywords or text us below.`}
+            />
           )}
 
           {filteredFaq.map(cat => (
@@ -8010,6 +8240,7 @@ function ReferTab({ customer, onSwitchTab }) {
   const [copied, setCopied] = useState(false);
 
   const fetchData = () => {
+    setLoading(true);
     setLoadError('');
     api.getReferrals()
       .then(d => { setData(d); setLoading(false); })
@@ -8095,20 +8326,26 @@ function ReferTab({ customer, onSwitchTab }) {
 
   if (loading) {
     return (
-      <div style={{ ...card, padding: 28, textAlign: 'center', color: muted }}>
-        Loading referrals...
-      </div>
+      <PortalStatePanel
+        icon="gift"
+        eyebrow="Referrals"
+        title="Loading referrals"
+        message="Checking your referral link, credits, and recent invites."
+      />
     );
   }
 
   if (loadError) {
     return (
-      <div style={{ ...card, padding: 24 }}>
-        <div style={sectionTitle}>Referrals</div>
-        <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>Could not load referrals</div>
-        <div style={{ marginTop: 6, fontSize: 14, color: muted }}>{loadError}</div>
-        <button type="button" onClick={fetchData} style={{ ...secondaryButton, marginTop: 16 }}>Try again</button>
-      </div>
+      <PortalStatePanel
+        icon="warning"
+        tone="danger"
+        eyebrow="Referrals"
+        title="Could not load referrals"
+        message={loadError}
+        actionLabel="Try Again"
+        onAction={fetchData}
+      />
     );
   }
 
@@ -8690,20 +8927,26 @@ function DocumentsTab({ customer, onSwitchTab }) {
 
   if (loading) {
     return (
-      <div style={{ ...card, padding: 28, textAlign: 'center', color: muted }}>
-        Loading documents...
-      </div>
+      <PortalStatePanel
+        icon="document"
+        eyebrow="Documents"
+        title="Loading documents"
+        message="Checking agreements, inspection reports, insurance certificates, and compliance paperwork."
+      />
     );
   }
 
   if (loadError) {
     return (
-      <div style={{ ...card, padding: 24 }}>
-        <div style={sectionTitle}>Documents</div>
-        <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>Could not load documents</div>
-        <div style={{ marginTop: 6, fontSize: 14, color: muted }}>{loadError}</div>
-        <button type="button" onClick={loadDocuments} style={{ ...secondaryButton, marginTop: 16 }}>Try again</button>
-      </div>
+      <PortalStatePanel
+        icon="warning"
+        tone="danger"
+        eyebrow="Documents"
+        title="Could not load documents"
+        message={loadError}
+        actionLabel="Try Again"
+        onAction={loadDocuments}
+      />
     );
   }
 
@@ -9129,33 +9372,11 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
       {open && (
         <div style={{ padding: '0 18px 16px' }}>
           {items.length === 0 ? (
-            <div style={{
-              padding: 16,
-              borderRadius: 8,
-              background: subtle,
-              border: '1px solid #E1E7EF',
-              display: 'flex',
-              gap: 12,
-              alignItems: 'flex-start',
-            }}>
-              <span style={{
-                width: 34,
-                height: 34,
-                borderRadius: 8,
-                background: '#EEF6FF',
-                color: B.blueDeeper,
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                flexShrink: 0,
-              }}>
-                <Icon name="document" size={17} strokeWidth={2} />
-              </span>
-              <div>
-                <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Nothing here yet</div>
-                <div style={{ marginTop: 3, fontSize: 14, color: muted, lineHeight: 1.45 }}>{emptyMessage}</div>
-              </div>
-            </div>
+            <PortalInlineState
+              icon="document"
+              title="Nothing here yet"
+              message={emptyMessage}
+            />
           ) : (
             <div style={{ borderTop: '1px solid #E1E7EF' }}>
               {items.map((doc, idx) => {

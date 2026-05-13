@@ -106,17 +106,20 @@ export default function AutopayCard({ onStateChange }) {
   if (loading) return null;
   if (!data) return null;
 
-  const { state, next_charge_date, next_charge_amount, monthly_rate, payment_methods = [], paused_until } = data;
+  const rawState = data.state;
+  const state = ['active', 'paused', 'disabled'].includes(rawState) ? rawState : 'disabled';
+  const { next_charge_date, next_charge_amount, monthly_rate, payment_methods = [], paused_until } = data;
   const nextChargeAmount = Number(next_charge_amount ?? monthly_rate ?? 0);
   const activeCard = payment_methods.find((p) => p.id === data.autopay_payment_method_id)
     || payment_methods.find((p) => p.is_default)
     || payment_methods[0];
 
-  const theme = {
+  const themeMap = {
     active: { bg: '#F0FDF4', border: '#BBF7D0', dot: B.green, label: 'Active' },
     paused: { bg: `${B.orange}10`, border: `${B.orange}33`, dot: B.orange, label: 'Paused' },
     disabled: { bg: '#F8FAFC', border: '#E1E7EF', dot: B.grayMid, label: 'Off' },
-  }[state];
+  };
+  const theme = themeMap[state];
 
   const formatDate = (s) => {
     if (!s) return 'Not scheduled';
