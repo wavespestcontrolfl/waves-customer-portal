@@ -60,6 +60,72 @@ function loadStripeJs(publishableKey) {
   });
 }
 
+const AUTOPAY_CARD_STYLE = {
+  background: B.white,
+  border: '1px solid #E1E7EF',
+  borderRadius: 8,
+  boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+  padding: 20,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 14,
+  fontFamily: FONTS.body,
+};
+
+function AutopayStateCard({ icon = 'card', tone = 'brand', title, message, actionLabel, onAction }) {
+  const iconTone = tone === 'danger'
+    ? { background: `${B.red}10`, color: B.red }
+    : { background: '#EEF6FF', color: B.blueDeeper };
+  return (
+    <div style={AUTOPAY_CARD_STYLE}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+        <span style={{
+          width: 38,
+          height: 38,
+          borderRadius: 8,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexShrink: 0,
+          ...iconTone,
+        }}>
+          <Icon name={icon} size={18} strokeWidth={2} />
+        </span>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: 12, fontWeight: 850, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0 }}>
+            Auto Pay
+          </div>
+          <div style={{ marginTop: 4, fontSize: 17, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading, lineHeight: 1.3 }}>
+            {title}
+          </div>
+          {message && (
+            <div style={{ marginTop: 4, fontSize: 14, color: B.grayMid, lineHeight: 1.45 }}>
+              {message}
+            </div>
+          )}
+        </div>
+      </div>
+      {actionLabel && onAction && (
+        <button type="button" onClick={onAction} style={{
+          alignSelf: 'flex-start',
+          minHeight: 36,
+          padding: '9px 13px',
+          borderRadius: 8,
+          border: '1px solid #CBD5E1',
+          background: '#fff',
+          color: B.blueDeeper,
+          fontSize: 14,
+          fontWeight: 850,
+          fontFamily: FONTS.heading,
+          cursor: 'pointer',
+        }}>
+          {actionLabel}
+        </button>
+      )}
+    </div>
+  );
+}
+
 /**
  * AutopayCard — customer-facing autopay transparency + controls.
  *
@@ -103,8 +169,33 @@ export default function AutopayCard({ onStateChange }) {
     if (modal !== 'card' && addingCard) resetAddCard();
   }, [modal]);
 
-  if (loading) return null;
-  if (!data) return null;
+  const retryLoad = () => {
+    setLoading(true);
+    setErr('');
+    load();
+  };
+
+  if (loading) {
+    return (
+      <AutopayStateCard
+        icon="card"
+        title="Loading Auto Pay"
+        message="Checking saved payment method and billing schedule."
+      />
+    );
+  }
+  if (!data) {
+    return (
+      <AutopayStateCard
+        icon="warning"
+        tone="danger"
+        title="Could not load Auto Pay"
+        message={err || 'Try again to view and manage automatic billing.'}
+        actionLabel="Try Again"
+        onAction={retryLoad}
+      />
+    );
+  }
 
   const rawState = data.state;
   const state = ['active', 'paused', 'disabled'].includes(rawState) ? rawState : 'disabled';
@@ -231,17 +322,7 @@ export default function AutopayCard({ onStateChange }) {
     setSaving(false);
   };
 
-  const card = {
-    background: B.white,
-    border: '1px solid #E1E7EF',
-    borderRadius: 8,
-    boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
-    padding: 20,
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 14,
-    fontFamily: FONTS.body,
-  };
+  const card = AUTOPAY_CARD_STYLE;
 
   const btn = (kind = 'primary') => ({
     padding: '10px 14px', borderRadius: 8, fontSize: 14, fontWeight: 800,
@@ -265,7 +346,7 @@ export default function AutopayCard({ onStateChange }) {
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
             <span style={{ width: 10, height: 10, borderRadius: 5, background: theme.dot, display: 'inline-block' }} />
-            <span style={{ fontSize: 12, fontWeight: 850, color: B.grayMid, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+            <span style={{ fontSize: 12, fontWeight: 850, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0 }}>
               Auto Pay / {theme.label}
             </span>
           </div>
@@ -274,7 +355,7 @@ export default function AutopayCard({ onStateChange }) {
               ? `Next charge: $${nextChargeAmount.toFixed(2)} on ${formatDate(next_charge_date)}`
               : state === 'paused'
                 ? `Paused until ${formatDate(paused_until)}`
-                : 'Auto Pay is off - charges will not run automatically'}
+                : 'Auto Pay is off. Charges will not run automatically.'}
           </div>
           {activeCard && state !== 'disabled' && (
             <div style={{ fontSize: 14, color: B.grayMid, marginTop: 5 }}>
@@ -429,8 +510,9 @@ function Modal({ title, children, onClose }) {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>{title}</div>
           <button type="button" aria-label="Close" onClick={onClose} style={{
-            background: 'transparent',
-            border: 'none',
+            background: '#fff',
+            border: '1px solid #CBD5E1',
+            borderRadius: 8,
             cursor: 'pointer',
             color: B.grayMid,
             width: 36,
