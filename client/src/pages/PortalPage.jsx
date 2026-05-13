@@ -2494,6 +2494,7 @@ function DashboardTab({ customer, onSwitchTab }) {
 // SERVICES TAB
 // =========================================================================
 function ServicesTab() {
+  const compact = useIsMobile(760);
   const [services, setServices] = useState([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState(null);
@@ -2517,7 +2518,39 @@ function ServicesTab() {
     }
   };
 
-  if (loading) return <div style={{ padding: 40, textAlign: 'center', color: B.grayMid }}>Loading service history...</div>;
+  const card = {
+    background: B.white,
+    border: '1px solid #E1E7EF',
+    borderRadius: 8,
+    boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+  };
+  const muted = '#64748B';
+  const subtle = '#F8FAFC';
+  const sectionTitle = {
+    fontSize: 14,
+    fontWeight: 850,
+    color: muted,
+    textTransform: 'uppercase',
+    letterSpacing: '0.08em',
+  };
+  const primaryButton = {
+    ...BUTTON_BASE,
+    background: B.blueDeeper,
+    color: '#fff',
+    border: 'none',
+    borderRadius: 8,
+    boxShadow: 'none',
+    padding: '10px 14px',
+    fontSize: 14,
+  };
+
+  if (loading) {
+    return (
+      <div style={{ ...card, padding: 28, textAlign: 'center', color: muted }}>
+        Loading service history...
+      </div>
+    );
+  }
 
   // --- Helpers ---
   const classifyType = (type) => {
@@ -2537,14 +2570,14 @@ function ServicesTab() {
 
   const statusBadge = (status) => {
     const styles = {
-      Completed: { bg: `${B.green}20`, color: B.green },
-      Callback: { bg: B.blueSurface, color: B.wavesBlue },
-      Rescheduled: { bg: B.offWhite, color: B.grayMid },
+      Completed: { bg: '#F0FDF4', color: B.green, border: '#BBF7D0' },
+      Callback: { bg: '#EEF6FF', color: B.wavesBlue, border: '#BFDBFE' },
+      Rescheduled: { bg: subtle, color: muted, border: '#E1E7EF' },
     };
     const st = styles[status] || styles.Completed;
     return (
-      <span style={{ fontSize: 12, padding: '3px 10px', borderRadius: 6, background: st.bg, color: st.color, fontWeight: 700, whiteSpace: 'nowrap' }}>
-        {status}{status === 'Callback' && <span style={{ fontWeight: 500, fontSize: 10 }}> — Included with WaveGuard</span>}
+      <span style={{ fontSize: 12, padding: '5px 9px', borderRadius: 8, background: st.bg, color: st.color, border: `1px solid ${st.border}`, fontWeight: 850, whiteSpace: 'nowrap' }}>
+        {status}
       </span>
     );
   };
@@ -2607,80 +2640,91 @@ function ServicesTab() {
   // --- Available years ---
   const years = [...new Set(services.map(s => parseDate(s.date).getFullYear()))].sort((a, b) => b - a);
 
-  const thSt = { padding: '8px 10px', fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: B.grayMid, textAlign: 'left', borderBottom: `1px solid ${B.grayLight}` };
-  const tdSt = { padding: '8px 10px', fontSize: 12, color: B.navy, borderBottom: `1px solid ${B.offWhite}`, verticalAlign: 'top' };
+  const thSt = { padding: '9px 10px', fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: '0.06em', color: muted, textAlign: 'left', borderBottom: '1px solid #E1E7EF', background: subtle };
+  const tdSt = { padding: '10px', fontSize: 12, color: B.blueDeeper, borderBottom: '1px solid #EEF2F7', verticalAlign: 'top' };
 
   const pillStyle = (active) => ({
-    padding: '6px 14px', borderRadius: 20, border: 'none', cursor: 'pointer',
-    fontSize: 12, fontWeight: active ? 700 : 600, fontFamily: FONTS.ui,
-    background: active ? B.wavesBlue : B.offWhite,
-    color: active ? B.white : B.grayMid,
-    transition: 'all 0.2s ease',
+    padding: '7px 12px',
+    borderRadius: 8,
+    border: `1px solid ${active ? B.wavesBlue : '#CBD5E1'}`,
+    cursor: 'pointer',
+    fontSize: 12,
+    fontWeight: 850,
+    fontFamily: FONTS.heading,
+    background: active ? '#EEF6FF' : '#fff',
+    color: active ? B.blueDeeper : muted,
+    minHeight: 34,
   });
 
   const typeOptions = ['All', 'Pest Control', 'Lawn Care', 'Mosquito', 'Other'];
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      {/* 1. Header */}
-      <SectionHeading>Your Service History</SectionHeading>
-      <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.6 }}>
-        Every visit documented — what we applied, what we found, and what's next for your property.
-      </div>
-
-      {/* 3. Aggregate summary */}
-      {thisYearServices.length > 0 && (
-        <div style={{
-          display: 'flex', flexWrap: 'wrap', gap: 8, padding: '12px 16px',
-          background: B.blueSurface, borderRadius: 12, border: `1px solid ${B.bluePale}`,
-        }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <section style={{ ...card, padding: compact ? 20 : 24 }}>
+        <div style={sectionTitle}>Completed Visits</div>
+        <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>
+          Service reports and visit history
+        </div>
+        <div style={{ marginTop: 5, fontSize: 14, color: B.grayDark, lineHeight: 1.55 }}>
+          What we applied, what we found, photos, and service reports for completed work.
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr 1fr' : 'repeat(4, 1fr)', gap: 10, marginTop: 18 }}>
           {[
-            { val: thisYearServices.length, label: `visit${thisYearServices.length !== 1 ? 's' : ''} in ${currentYear}` },
-            { val: totalProducts, label: 'products applied' },
-            { val: uniqueTechs, label: `technician${uniqueTechs !== 1 ? 's' : ''}` },
-            ...(avgMinutes > 0 ? [{ val: `${avgMinutes} min`, label: 'avg visit' }] : []),
-          ].map((stat, i, arr) => (
-            <span key={stat.label} style={{ fontSize: 12, color: B.navy, fontFamily: FONTS.ui }}>
-              <strong style={{ fontWeight: 800, color: B.wavesBlue }}>{stat.val}</strong>{' '}{stat.label}
-              {i < arr.length - 1 && <span style={{ margin: '0 4px', color: B.grayLight }}>·</span>}
-            </span>
+            { val: thisYearServices.length, label: `${currentYear} visits` },
+            { val: totalProducts, label: 'Products applied' },
+            { val: uniqueTechs, label: 'Technicians' },
+            { val: avgMinutes > 0 ? `${avgMinutes} min` : 'N/A', label: 'Avg visit' },
+          ].map((stat) => (
+            <div key={stat.label} style={{ padding: 12, borderRadius: 8, background: subtle, border: '1px solid #E1E7EF', minHeight: 70 }}>
+              <div style={{ fontSize: 18, fontWeight: 850, color: B.blueDeeper, lineHeight: 1.1 }}>{stat.val}</div>
+              <div style={{ marginTop: 5, fontSize: 12, color: muted, fontWeight: 800 }}>{stat.label}</div>
+            </div>
           ))}
         </div>
-      )}
+      </section>
 
-      {/* 2. Filter row */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {/* Type pills */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-          {typeOptions.map(t => (
-            <button key={t} onClick={() => setTypeFilter(t)} style={pillStyle(typeFilter === t)}>{t}</button>
-          ))}
+      <section style={{ ...card, padding: 16 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {typeOptions.map(t => (
+              <button type="button" key={t} onClick={() => setTypeFilter(t)} style={pillStyle(typeFilter === t)}>{t}</button>
+            ))}
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+            {['All', ...years.map(String)].map(y => (
+              <button type="button" key={y} onClick={() => setYearFilter(y)} style={pillStyle(yearFilter === y)}>{y}</button>
+            ))}
+            <input
+              id="portal-service-history-search"
+              name="serviceHistorySearch"
+              type="search"
+              placeholder="Search notes..."
+              aria-label="Search service notes"
+              value={searchTerm}
+              onChange={e => setSearchTerm(e.target.value)}
+              style={{
+                marginLeft: compact ? 0 : 'auto',
+                padding: '9px 12px',
+                borderRadius: 8,
+                border: '1px solid #CBD5E1',
+                fontSize: 14,
+                fontFamily: FONTS.body,
+                color: B.blueDeeper,
+                background: '#fff',
+                outline: 'none',
+                minWidth: compact ? '100%' : 180,
+                flex: compact ? '1 1 100%' : '0 1 220px',
+              }}
+            />
+          </div>
         </div>
-        {/* Year pills + search */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
-          {['All', ...years.map(String)].map(y => (
-            <button key={y} onClick={() => setYearFilter(y)} style={pillStyle(yearFilter === y)}>{y}</button>
-          ))}
-          <input
-            type="text"
-            placeholder="Search notes..."
-            aria-label="Search service notes"
-            value={searchTerm}
-            onChange={e => setSearchTerm(e.target.value)}
-            style={{
-              marginLeft: 'auto', padding: '6px 12px', borderRadius: 20,
-              border: `1px solid ${B.grayLight}`, fontSize: 12, fontFamily: FONTS.ui,
-              color: B.navy, background: B.white, outline: 'none', minWidth: 120, maxWidth: 200,
-            }}
-          />
-        </div>
-      </div>
+      </section>
 
       {/* Empty state */}
       {filtered.length === 0 && (
-        <div style={{ padding: 30, textAlign: 'center', color: B.grayMid, fontSize: 14 }}>
+        <div style={{ ...card, padding: 28, textAlign: 'center', color: muted, fontSize: 14 }}>
           {services.length === 0
-            ? "We haven't logged any visits yet — your service history will appear here after your first appointment."
+            ? "We haven't logged any visits yet. Your service history will appear here after your first appointment."
             : 'No services match your filters. Try clearing the year or type filter above.'}
         </div>
       )}
@@ -2694,11 +2738,15 @@ function ServicesTab() {
           <div key={monthKey}>
             {/* Month header */}
             <div style={{
-              fontSize: 14, fontWeight: 700, color: B.grayMid, fontFamily: FONTS.heading,
-              padding: '8px 0 6px', borderBottom: `1px solid ${B.grayLight}`, marginBottom: 10,
-              letterSpacing: -0.2,
+              ...sectionTitle,
+              padding: '2px 0 0',
+              color: muted,
+              display: 'flex',
+              justifyContent: 'space-between',
+              gap: 12,
             }}>
-              {monthLabel} — {monthServices.length} visit{monthServices.length !== 1 ? 's' : ''}
+              <span>{monthLabel}</span>
+              <span>{monthServices.length} visit{monthServices.length !== 1 ? 's' : ''}</span>
             </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -2708,58 +2756,60 @@ function ServicesTab() {
                 const tip = aftercareTips[cat];
                 return (
                   <div key={s.id} style={{
-                    background: B.white, borderRadius: 14, overflow: 'hidden',
-                    border: `1px solid ${expanded === s.id ? B.wavesBlue + '44' : B.grayLight}`,
-                    transition: 'all 0.3s ease',
+                    ...card,
+                    overflow: 'hidden',
+                    border: `1px solid ${expanded === s.id ? '#BFDBFE' : '#E1E7EF'}`,
                   }}>
                     {/* Header — always visible */}
-                    <div onClick={() => toggleExpand(s)}
-                      style={{ padding: '16px 18px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <button type="button" onClick={() => toggleExpand(s)}
+                      style={{ width: '100%', padding: '16px 18px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 14, flexWrap: compact ? 'wrap' : 'nowrap', border: 'none', background: '#fff', textAlign: 'left', fontFamily: FONTS.body }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0, flex: '1 1 280px' }}>
                         <div style={{
-                          width: 40, height: 40, borderRadius: 10,
-                          background: `linear-gradient(135deg, ${B.wavesBlue}, ${B.blueDark})`,
-                          display: 'flex', alignItems: 'center', justifyContent: 'center',
-                          color: '#fff', fontSize: 16, fontWeight: 800, fontFamily: FONTS.heading,
+                          width: 50, height: 50, borderRadius: 8,
+                          background: subtle,
+                          border: '1px solid #E1E7EF',
+                          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
                           flexShrink: 0,
-                        }}>{(s.technician || 'W')[0]}</div>
-                        <div>
-                          <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>
+                        }}>
+                          <div style={{ fontSize: 18, fontWeight: 850, color: B.blueDeeper, lineHeight: 1 }}>
+                            {parseDate(s.date).getDate()}
+                          </div>
+                          <div style={{ fontSize: 10, fontWeight: 850, color: muted, textTransform: 'uppercase', marginTop: 2 }}>
+                            {parseDate(s.date).toLocaleDateString('en-US', { month: 'short' })}
+                          </div>
+                        </div>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: 15, fontWeight: 850, color: B.blueDeeper, lineHeight: 1.25 }}>
                             {s.type}
                             {s._visitNum && <span style={{ fontSize: 12, fontWeight: 600, color: B.grayMid, marginLeft: 6 }}>#{s._visitNum}{s._visitTotal ? ` of ${s._visitTotal}` : ''}</span>}
                           </div>
-                          <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
-                            {parseDate(s.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })} · {s.technician}
+                          <div style={{ fontSize: 14, color: muted, marginTop: 3 }}>
+                            {parseDate(s.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
+                            {s.technician ? ` - ${s.technician}` : ''}
                           </div>
                         </div>
                       </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: compact ? 62 : 0 }}>
                         {statusBadge(status)}
-                        <span style={{ fontSize: 18, color: B.grayMid, transition: 'transform 0.3s', transform: expanded === s.id ? 'rotate(180deg)' : 'rotate(0)' }}>{'▾'}</span>
+                        <Icon name="chevronDown" size={18} strokeWidth={2} style={{ color: muted, transform: expanded === s.id ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s ease' }} />
                       </div>
-                    </div>
+                    </button>
 
                     {/* Expanded detail — full service inspection report */}
                     {expanded === s.id && (
-                      <div style={{ borderTop: `1px solid ${B.grayLight}` }}>
+                      <div style={{ borderTop: '1px solid #E1E7EF' }}>
 
                         {/* Technician Notes — speech bubble at top */}
                         {s.notes && (
-                          <div style={{ padding: '14px 18px', borderBottom: `1px solid ${B.grayLight}` }}>
+                          <div style={{ padding: '14px 18px', borderBottom: '1px solid #E1E7EF' }}>
                             <div style={{
-                              position: 'relative', padding: '12px 16px', borderRadius: 14,
-                              background: B.blueSurface, border: `1px solid ${B.bluePale}`,
+                              padding: '12px 14px', borderRadius: 8,
+                              background: subtle, border: '1px solid #E1E7EF',
                             }}>
-                              <div style={{
-                                position: 'absolute', top: -6, left: 20, width: 12, height: 12,
-                                background: B.blueSurface, border: `1px solid ${B.bluePale}`,
-                                borderRight: 'none', borderBottom: 'none',
-                                transform: 'rotate(45deg)',
-                              }} />
-                              <div style={{ fontSize: 12, fontWeight: 700, color: B.wavesBlue, marginBottom: 4, fontFamily: FONTS.heading }}>
+                              <div style={{ fontSize: 12, fontWeight: 850, color: muted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
                                 {s.technician || 'Technician'} says:
                               </div>
-                              <div style={{ fontSize: 16, color: B.navy, lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{s.notes}</div>
+                              <div style={{ fontSize: 15, color: B.blueDeeper, lineHeight: 1.65, whiteSpace: 'pre-wrap' }}>{s.notes}</div>
                             </div>
                           </div>
                         )}
@@ -2768,9 +2818,9 @@ function ServicesTab() {
                         {status === 'Callback' && (
                           <div style={{ padding: '0 18px 0', marginTop: -4 }}>
                             <div style={{
-                              padding: '8px 14px', borderRadius: 10, background: B.blueSurface,
-                              border: `1px solid ${B.bluePale}`, fontSize: 12, color: B.wavesBlue,
-                              fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6,
+                              padding: '9px 12px', borderRadius: 8, background: '#EEF6FF',
+                              border: '1px solid #BFDBFE', fontSize: 12, color: B.blueDeeper,
+                              fontWeight: 800, display: 'flex', alignItems: 'center', gap: 6,
                               marginBottom: 10,
                             }}>
                               <Icon name="refresh" size={16} strokeWidth={1.75} /> Callback — included with your WaveGuard Gold
@@ -2779,38 +2829,38 @@ function ServicesTab() {
                         )}
 
                         {/* Service Info Bar */}
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 0, borderBottom: `1px solid ${B.grayLight}`, background: B.offWhite }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(4, 1fr)', gap: 8, padding: 18, borderBottom: '1px solid #E1E7EF', background: subtle }}>
                           {[
                             { label: 'Date', value: parseDate(s.date).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' }) },
                             { label: 'Technician', value: s.technician },
                             { label: 'Duration', value: s.serviceTimeMinutes ? `${s.serviceTimeMinutes} min` : '—' },
                             { label: 'Status', value: status },
                           ].map((item, i) => (
-                            <div key={i} style={{ padding: '10px 14px', borderRight: i % 2 === 0 ? `1px solid ${B.grayLight}` : 'none', borderBottom: i < 2 ? `1px solid ${B.grayLight}` : 'none' }}>
-                              <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.grayMid }}>{item.label}</div>
-                              <div style={{ fontSize: 14, fontWeight: 600, color: B.navy, marginTop: 2, wordBreak: 'break-word' }}>{item.value}</div>
+                            <div key={i} style={{ padding: 12, borderRadius: 8, border: '1px solid #E1E7EF', background: '#fff' }}>
+                              <div style={{ fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: '0.06em', color: muted }}>{item.label}</div>
+                              <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, marginTop: 4, wordBreak: 'break-word' }}>{item.value || 'N/A'}</div>
                             </div>
                           ))}
                         </div>
 
                         {/* Conditions */}
                         {(s.soilTemp || s.soilPh || s.thatchMeasurement || s.soilMoisture) && (
-                          <div style={{ padding: '12px 18px', background: B.blueSurface, borderBottom: `1px solid ${B.grayLight}` }}>
-                            <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.wavesBlue, marginBottom: 6 }}>Conditions & Measurements</div>
+                          <div style={{ padding: '14px 18px', background: '#fff', borderBottom: '1px solid #E1E7EF' }}>
+                            <div style={{ ...sectionTitle, marginBottom: 8 }}>Conditions & Measurements</div>
                             <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-                              {s.soilTemp && <div style={{ fontSize: 12, color: B.navy }}><Icon name="thermometer" size={16} strokeWidth={1.75} /> Soil Temp: <strong>{s.soilTemp}°F</strong></div>}
-                              {s.soilPh && <div style={{ fontSize: 12, color: B.navy }}><Icon name="flask" size={16} strokeWidth={1.75} /> pH: <strong>{s.soilPh}</strong></div>}
-                              {s.thatchMeasurement && <div style={{ fontSize: 12, color: B.navy }}><Icon name="ruler" size={16} strokeWidth={1.75} /> Thatch: <strong>{s.thatchMeasurement}"</strong></div>}
-                              {s.soilMoisture && <div style={{ fontSize: 12, color: B.navy }}><Icon name="droplet" size={16} strokeWidth={1.75} /> Moisture: <strong>{s.soilMoisture}</strong></div>}
+                              {s.soilTemp && <div style={{ fontSize: 14, color: B.blueDeeper, display: 'inline-flex', alignItems: 'center', gap: 6 }}><Icon name="thermometer" size={16} strokeWidth={1.75} /> Soil Temp: <strong>{s.soilTemp}F</strong></div>}
+                              {s.soilPh && <div style={{ fontSize: 14, color: B.blueDeeper, display: 'inline-flex', alignItems: 'center', gap: 6 }}><Icon name="flask" size={16} strokeWidth={1.75} /> pH: <strong>{s.soilPh}</strong></div>}
+                              {s.thatchMeasurement && <div style={{ fontSize: 14, color: B.blueDeeper, display: 'inline-flex', alignItems: 'center', gap: 6 }}><Icon name="ruler" size={16} strokeWidth={1.75} /> Thatch: <strong>{s.thatchMeasurement}"</strong></div>}
+                              {s.soilMoisture && <div style={{ fontSize: 14, color: B.blueDeeper, display: 'inline-flex', alignItems: 'center', gap: 6 }}><Icon name="droplet" size={16} strokeWidth={1.75} /> Moisture: <strong>{s.soilMoisture}</strong></div>}
                             </div>
                           </div>
                         )}
 
                         {/* Products Applied — full table */}
                         {s.products?.length > 0 && (
-                          <div style={{ padding: '14px 18px', borderBottom: `1px solid ${B.grayLight}` }}>
-                            <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.green, marginBottom: 10 }}>Products Applied</div>
-                            <div style={{ overflowX: 'auto' }}>
+                          <div style={{ padding: '14px 18px', borderBottom: '1px solid #E1E7EF' }}>
+                            <div style={{ ...sectionTitle, marginBottom: 10 }}>Products Applied</div>
+                            <div style={{ overflowX: 'auto', border: '1px solid #E1E7EF', borderRadius: 8 }}>
                               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                                 <thead>
                                   <tr>
@@ -2843,30 +2893,30 @@ function ServicesTab() {
 
                         {/* What's Next — aftercare tips */}
                         {tip && (
-                          <div style={{ padding: '12px 18px', background: '#F1F8E9', borderBottom: `1px solid ${B.grayLight}` }}>
-                            <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.green, marginBottom: 6 }}>What's Next</div>
-                            <div style={{ fontSize: 16, color: B.navy, lineHeight: 1.6 }}>{tip}</div>
+                          <div style={{ padding: '14px 18px', background: '#F0FDF4', borderBottom: '1px solid #BBF7D0' }}>
+                            <div style={{ ...sectionTitle, color: B.green, marginBottom: 6 }}>What's Next</div>
+                            <div style={{ fontSize: 14, color: B.blueDeeper, lineHeight: 1.6 }}>{tip}</div>
                           </div>
                         )}
 
                         {/* Photos */}
                         {s.hasPhotos && (
-                          <div style={{ padding: '14px 18px', borderBottom: `1px solid ${B.grayLight}` }}>
-                            <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.wavesBlue, marginBottom: 8 }}>
+                          <div style={{ padding: '14px 18px', borderBottom: '1px solid #E1E7EF' }}>
+                            <div style={{ ...sectionTitle, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
                               <Icon name="camera" size={16} strokeWidth={1.75} /> Service Photos ({s.photoCount})
                             </div>
                             {!photoMap[s.id] ? (
-                              <div style={{ fontSize: 12, color: B.grayMid }}>Loading photos…</div>
+                              <div style={{ fontSize: 12, color: muted }}>Loading photos...</div>
                             ) : photoMap[s.id].length === 0 ? (
-                              <div style={{ fontSize: 12, color: B.grayMid }}>No photos available.</div>
+                              <div style={{ fontSize: 12, color: muted }}>No photos available.</div>
                             ) : (
                               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(110px, 1fr))', gap: 8 }}>
                                 {photoMap[s.id].map((p) => (
                                   <div key={p.id}
                                     onClick={() => setLightbox(p)}
                                     style={{
-                                      position: 'relative', cursor: 'pointer', borderRadius: 10, overflow: 'hidden',
-                                      border: `1px solid ${B.grayLight}`, aspectRatio: '1 / 1', background: B.offWhite,
+                                      position: 'relative', cursor: 'pointer', borderRadius: 8, overflow: 'hidden',
+                                      border: '1px solid #E1E7EF', aspectRatio: '1 / 1', background: subtle,
                                     }}>
                                     <img src={p.url} alt={p.caption || p.type || 'service photo'}
                                       style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
@@ -2885,29 +2935,29 @@ function ServicesTab() {
                         )}
 
                         {/* Precautions */}
-                        <div style={{ padding: '12px 18px', background: `${B.yellow}20`, borderBottom: `1px solid ${B.grayLight}` }}>
-                          <div style={{ fontSize: 12, color: '#F57F17', lineHeight: 1.5 }}>
+                        <div style={{ padding: '12px 18px', background: '#FFFBEB', borderBottom: '1px solid #FDE68A' }}>
+                          <div style={{ fontSize: 12, color: '#92400E', lineHeight: 1.5, display: 'flex', alignItems: 'flex-start', gap: 8 }}>
                             <Icon name="warning" size={16} strokeWidth={1.75} /> Keep people and pets away from treated surfaces until dry. Do not contact treated surfaces until dry. For questions about products applied, contact us at (941) 297-5749.
                           </div>
                         </div>
 
                         {/* Footer with Download PDF */}
                         <div style={{ padding: '12px 18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-                          <div style={{ fontSize: 10, color: B.grayMid }}>Report generated automatically from service data</div>
+                          <div style={{ fontSize: 12, color: muted }}>Report generated automatically from service data</div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                             <a
                               href={api.getServiceReportUrl(s.id)}
                               target="_blank"
                               rel="noopener noreferrer"
                               style={{
-                                ...BUTTON_BASE, padding: '6px 14px', fontSize: 12,
-                                background: B.wavesBlue, color: B.white, textDecoration: 'none',
+                                ...primaryButton, padding: '7px 12px', fontSize: 12,
+                                textDecoration: 'none',
                                 borderRadius: 8,
                               }}
                             >
                               <Icon name="document" size={16} strokeWidth={1.75} /> Download PDF
                             </a>
-                            <div style={{ fontSize: 10, color: B.grayMid }}>Waves Pest Control · (941) 297-5749</div>
+                            <div style={{ fontSize: 12, color: muted }}>Waves Pest Control · (941) 297-5749</div>
                           </div>
                         </div>
                       </div>
@@ -3009,6 +3059,7 @@ function formatPropertyAddress(property) {
 }
 
 function ScheduleTab({ customer, properties = [], onRequestVisit }) {
+  const compact = useIsMobile(760);
   const [upcoming, setUpcoming] = useState([]);
   const [prefs, setPrefs] = useState(null);
   const [propertyPrefs, setPropertyPrefs] = useState([]);
@@ -3154,7 +3205,49 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       ts.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
   };
 
-  if (loading) return <div style={{ padding: 40, textAlign: 'center', color: B.grayMid }}>Loading schedule...</div>;
+  const card = {
+    background: B.white,
+    border: '1px solid #E1E7EF',
+    borderRadius: 8,
+    boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+  };
+  const muted = '#64748B';
+  const subtle = '#F8FAFC';
+  const sectionTitle = {
+    fontSize: 14,
+    fontWeight: 850,
+    color: muted,
+    textTransform: 'uppercase',
+    letterSpacing: '0.08em',
+  };
+  const primaryButton = {
+    ...BUTTON_BASE,
+    background: B.blueDeeper,
+    color: '#fff',
+    border: 'none',
+    borderRadius: 8,
+    boxShadow: 'none',
+    padding: '10px 14px',
+    fontSize: 14,
+  };
+  const secondaryButton = {
+    ...BUTTON_BASE,
+    background: '#fff',
+    color: B.blueDeeper,
+    border: '1px solid #CBD5E1',
+    borderRadius: 8,
+    boxShadow: 'none',
+    padding: '10px 14px',
+    fontSize: 14,
+  };
+
+  if (loading) {
+    return (
+      <div style={{ ...card, padding: 28, textAlign: 'center', color: muted }}>
+        Loading schedule...
+      </div>
+    );
+  }
 
   // Compute time-awareness for each service
   const now = new Date();
@@ -3194,7 +3287,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     if (s.windowStart) return null;
     const prefTime = customer?.preferredTimeWindow;
     return (
-      <div style={{ fontSize: 12, color: B.orange, marginTop: 4, fontStyle: 'italic' }}>
+      <div style={{ fontSize: 12, color: '#92400E', marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#FFFBEB', border: '1px solid #FDE68A' }}>
         {prefTime
           ? `We'll aim for your preferred ${prefTime.toLowerCase()} window`
           : "We'll confirm your time window 72 hours before this visit"}
@@ -3209,9 +3302,9 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       return (
         <span style={{
           flex: compact ? undefined : 1,
-          padding: compact ? '6px 14px' : '9px 18px',
-          borderRadius: 50, background: `${B.green}20`,
-          color: B.green, fontSize: 12, fontWeight: 700, textAlign: 'center',
+          padding: compact ? '7px 12px' : '10px 14px',
+          borderRadius: 8, background: '#F0FDF4',
+          color: B.green, border: '1px solid #BBF7D0', fontSize: 12, fontWeight: 850, textAlign: 'center',
           display: 'inline-flex', alignItems: 'center', gap: 4,
         }}>
           <Icon name="check" size={16} strokeWidth={1.75} /> Confirmed{ts ? ` ${formatConfirmTs(ts)}` : ''}
@@ -3220,11 +3313,11 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     }
     const busy = !!confirmingIds[s.id];
     return (
-      <button onClick={() => handleConfirm(s.id)} disabled={busy} style={{
-        ...BUTTON_BASE, padding: compact ? '6px 14px' : '9px 18px', flex: compact ? undefined : 1,
-        background: B.yellow, color: B.blueDeeper, fontSize: 12,
+      <button type="button" onClick={() => handleConfirm(s.id)} disabled={busy} style={{
+        ...primaryButton, padding: compact ? '7px 12px' : '10px 14px', flex: compact ? undefined : 1,
+        fontSize: 12,
         opacity: busy ? 0.6 : 1, cursor: busy ? 'wait' : 'pointer',
-      }}>{busy ? 'Confirming…' : <><Icon name="check" size={16} strokeWidth={1.75} /> Confirm</>}</button>
+      }}>{busy ? 'Confirming...' : <><Icon name="check" size={16} strokeWidth={1.75} /> Confirm</>}</button>
     );
   };
 
@@ -3232,60 +3325,59 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const renderFeaturedCard = (s) => {
     const isGreen = s.isToday;
     const isOrange = s.isSoon;
-    const headerBg = isGreen
-      ? `linear-gradient(135deg, ${B.green}, ${B.blueDark})`
-      : isOrange
-        ? `linear-gradient(135deg, ${B.orange}, ${B.blueDark})`
-        : `linear-gradient(135deg, ${B.wavesBlue}, ${B.blueDark})`;
-    const borderColor = isGreen ? B.green : isOrange ? B.orange : B.wavesBlue;
+    const toneColor = isGreen ? B.green : isOrange ? B.orange : B.wavesBlue;
+    const toneBg = isGreen ? '#F0FDF4' : isOrange ? '#FFF7ED' : '#EEF6FF';
+    const toneBorder = isGreen ? '#BBF7D0' : isOrange ? '#FED7AA' : '#BFDBFE';
 
     return (
       <div key={s.id} style={{
-        background: B.white, borderRadius: 16, overflow: 'hidden',
-        border: `2px solid ${borderColor}22`,
-        boxShadow: '0 4px 20px rgba(0,0,0,0.06)',
+        ...card,
+        overflow: 'hidden',
+        border: `1px solid ${toneBorder}`,
       }}>
         <div style={{
-          background: headerBg, padding: '14px 18px', color: '#fff',
-          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          background: toneBg, padding: '16px 18px', color: B.blueDeeper,
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 14,
+          borderBottom: `1px solid ${toneBorder}`,
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            {isGreen ? (
-              <span style={{
-                width: 12, height: 12, borderRadius: '50%', background: '#fff',
-                animation: 'schedPulse 2s ease-in-out infinite', flexShrink: 0,
-              }} />
-            ) : (
-              <span style={{ fontSize: 22 }}>{isOrange ? '⏰' : ''}</span>
-            )}
+            <span style={{
+              width: 34, height: 34, borderRadius: 8, background: '#fff',
+              border: `1px solid ${toneBorder}`,
+              color: toneColor, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              animation: isGreen ? 'schedPulse 2s ease-in-out infinite' : 'none',
+              flexShrink: 0,
+            }}>
+              <Icon name={isGreen ? 'truck' : isOrange ? 'clock' : 'calendar'} size={18} strokeWidth={1.9} />
+            </span>
             <div>
-              <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1, opacity: 0.85 }}>
+              <div style={{ fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: '0.06em', color: toneColor }}>
                 {isGreen ? 'Service Today' : isOrange ? 'Service Tomorrow' : 'Next Up'}
               </div>
-              <div style={{ fontSize: 16, fontWeight: 800, fontFamily: FONTS.heading }}>
+              <div style={{ marginTop: 3, fontSize: 18, fontWeight: 850, fontFamily: FONTS.heading, color: B.blueDeeper }}>
                 {s.svcDate.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}
               </div>
             </div>
           </div>
           {!isGreen && (
             <div style={{ textAlign: 'right' }}>
-              <div style={{ fontSize: 20, fontWeight: 800, fontFamily: FONTS.ui }}>{s.daysUntil}</div>
-              <div style={{ fontSize: 9, opacity: 0.75, textTransform: 'uppercase' }}>{s.daysUntil === 1 ? 'day' : 'days'}</div>
+              <div style={{ fontSize: 24, fontWeight: 850, fontFamily: FONTS.ui, color: B.blueDeeper }}>{s.daysUntil}</div>
+              <div style={{ fontSize: 12, color: muted, textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 850 }}>{s.daysUntil === 1 ? 'day' : 'days'}</div>
             </div>
           )}
         </div>
 
         <div style={{ padding: '16px 18px' }}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: B.navy }}>{s.serviceType}</div>
-          <div style={{ fontSize: 12, color: B.grayMid, marginTop: 3 }}>
-            {s.windowStart ? `${formatTime(s.windowStart)} – ${formatTime(s.windowEnd)}` : 'Time TBD'} · {s.technician}
+          <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper }}>{s.serviceType}</div>
+          <div style={{ fontSize: 14, color: muted, marginTop: 3 }}>
+            {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(s.windowEnd)}` : 'Time TBD'}{s.technician ? ` - ${s.technician}` : ''}
           </div>
 
           {/* Service description */}
           <div style={{
-            fontSize: 12, color: B.grayDark, marginTop: 6,
-            padding: '6px 10px', borderRadius: 8,
-            background: `${borderColor}08`, borderLeft: `3px solid ${borderColor}40`,
+            fontSize: 14, color: B.blueDeeper, marginTop: 10,
+            padding: '10px 12px', borderRadius: 8,
+            background: subtle, border: '1px solid #E1E7EF',
           }}>
             Visit #{s.visitNum} — {s.description}
           </div>
@@ -3294,30 +3386,30 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           {/* Communication Timeline */}
           <div style={{
             marginTop: 14, padding: 12, borderRadius: 10,
-            background: B.offWhite, border: `1px solid ${B.grayLight}`,
+            background: subtle, border: '1px solid #E1E7EF',
           }}>
-            <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.grayMid, marginBottom: 8 }}>
+            <div style={{ ...sectionTitle, marginBottom: 8 }}>
               You'll hear from us
             </div>
             {[
               { icon: 'smartphone', label: '72-hour SMS reminder', time: '3 days before your visit', done: s.diffHrs <= 72 },
               { icon: 'smartphone', label: '24-hour SMS reminder', time: 'Day before your visit', done: s.diffHrs <= 24 },
-              { icon: 'truck', label: 'Tech en route', time: '~1 hour before arrival · Live Bouncie GPS', done: false, active: s.isToday },
+              { icon: 'truck', label: 'Tech en route', time: '~1 hour before arrival - live GPS', done: false, active: s.isToday },
               { icon: 'checkCircle', label: 'Service complete report', time: 'Products used + tech notes texted to you', done: false },
             ].map((step, i) => (
               <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: i < 3 ? 8 : 0 }}>
                 <div style={{
                   width: 24, height: 24, borderRadius: '50%', flexShrink: 0,
-                  background: step.done ? `${B.green}18` : step.active ? `${B.orange}18` : B.grayLight,
+                  background: step.done ? '#F0FDF4' : step.active ? '#FFF7ED' : '#fff',
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  color: step.done ? B.green : step.active ? B.orange : B.grayMid,
-                  border: step.done ? `1.5px solid ${B.green}` : step.active ? `1.5px solid ${B.orange}` : 'none',
+                  color: step.done ? B.green : step.active ? B.orange : muted,
+                  border: `1px solid ${step.done ? '#BBF7D0' : step.active ? '#FED7AA' : '#E1E7EF'}`,
                 }}><Icon name={step.icon} size={12} strokeWidth={2} /></div>
                 <div>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: step.done ? B.green : step.active ? B.orange : B.grayDark }}>
+                  <div style={{ fontSize: 12, fontWeight: 850, color: step.done ? B.green : step.active ? B.orange : B.blueDeeper }}>
                     {step.label} {step.done && ''}
                   </div>
-                  <div style={{ fontSize: 10, color: B.grayMid }}>{step.time}</div>
+                  <div style={{ fontSize: 12, color: muted }}>{step.time}</div>
                 </div>
               </div>
             ))}
@@ -3327,9 +3419,8 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
             {renderConfirmBtn(s, false)}
             <a href={`sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} style={{
-              ...BUTTON_BASE, padding: '9px 18px', flex: 1, textDecoration: 'none',
-              background: 'transparent', color: B.wavesBlue, fontSize: 12,
-              border: `1.5px solid ${B.wavesBlue}`,
+              ...secondaryButton, padding: '10px 14px', flex: 1, textDecoration: 'none',
+              fontSize: 12,
             }}>Reschedule</a>
           </div>
         </div>
@@ -3340,38 +3431,38 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   // Compact card for future (3+ days) services
   const renderCompactCard = (s) => (
     <div key={s.id} style={{
-      background: B.white, borderRadius: 14, padding: 16,
-      border: `1px solid ${B.grayLight}`, display: 'flex', gap: 14, alignItems: 'center',
+      ...card,
+      padding: 16,
+      display: 'flex', gap: 14, alignItems: 'center',
+      flexWrap: compact ? 'wrap' : 'nowrap',
     }}>
       <div style={{
-        minWidth: 52, height: 52, borderRadius: 12,
-        background: B.bluePale, border: `1px solid ${B.wavesBlue}22`,
+        minWidth: 52, height: 52, borderRadius: 8,
+        background: subtle, border: '1px solid #E1E7EF',
         display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
       }}>
-        <div style={{ fontSize: 16, fontWeight: 800, color: B.wavesBlue, fontFamily: FONTS.ui }}>
+        <div style={{ fontSize: 18, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.ui, lineHeight: 1 }}>
           {s.svcDate.getDate()}
         </div>
-        <div style={{ fontSize: 10, fontWeight: 600, color: B.grayMid, textTransform: 'uppercase' }}>
+        <div style={{ fontSize: 10, fontWeight: 850, color: muted, textTransform: 'uppercase', marginTop: 2 }}>
           {s.svcDate.toLocaleDateString('en-US', { month: 'short' })}
         </div>
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>{s.serviceType}</div>
-        <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
-          {s.windowStart ? `${formatTime(s.windowStart)} – ${formatTime(s.windowEnd)}` : 'Time TBD'} · {s.technician}
+        <div style={{ fontSize: 15, fontWeight: 850, color: B.blueDeeper }}>{s.serviceType}</div>
+        <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>
+          {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(s.windowEnd)}` : 'Time TBD'}{s.technician ? ` - ${s.technician}` : ''}
         </div>
-        <div style={{ fontSize: 12, color: B.grayDark, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <div style={{ fontSize: 12, color: B.grayDark, marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           Visit #{s.visitNum} — {s.description}
         </div>
         {renderTimeTBD(s)}
         <div style={{ display: 'flex', gap: 8, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 12, color: B.grayMid }}>In {s.daysUntil} {s.daysUntil === 1 ? 'day' : 'days'}</span>
-          <span style={{ color: B.grayLight }}>·</span>
+          <span style={{ fontSize: 12, color: muted, fontWeight: 800 }}>In {s.daysUntil} {s.daysUntil === 1 ? 'day' : 'days'}</span>
           {renderConfirmBtn(s, true)}
           <a href={`sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} style={{
-            ...BUTTON_BASE, padding: '6px 14px', textDecoration: 'none',
-            background: 'transparent', color: B.grayMid, fontSize: 12,
-            border: `1px solid ${B.grayLight}`,
+            ...secondaryButton, padding: '7px 12px', textDecoration: 'none',
+            fontSize: 12,
           }}>Reschedule</a>
         </div>
       </div>
@@ -3382,30 +3473,40 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <style>{pulsingDotCss}</style>
 
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-        <SectionHeading>Upcoming Services</SectionHeading>
-        <button onClick={onRequestVisit} style={{
-          ...BUTTON_BASE, padding: '9px 16px', fontSize: 12,
-          background: B.wavesBlue, color: '#fff', minHeight: 40,
-          flexShrink: 0,
-        }}>Request a Visit</button>
-      </div>
+      <section style={{ ...card, padding: compact ? 20 : 24 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={sectionTitle}>Upcoming Visits</div>
+            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>
+              {upcomingOnly.length ? `${upcomingOnly.length} scheduled` : 'Nothing scheduled right now'}
+            </div>
+            <div style={{ marginTop: 5, fontSize: 14, color: B.grayDark, lineHeight: 1.55 }}>
+              Appointment timing, confirmation status, reminders, and reschedule options.
+            </div>
+          </div>
+          <button type="button" onClick={onRequestVisit} style={{ ...primaryButton, minHeight: 40, flexShrink: 0 }}>
+            Request Visit
+          </button>
+        </div>
+      </section>
 
       {/* Empty state */}
       {upcomingOnly.length === 0 && (
         <div style={{
-          background: B.white, borderRadius: 16, padding: 32, textAlign: 'center',
-          border: `1px solid ${B.grayLight}`, boxShadow: '0 2px 12px rgba(0,0,0,0.04)',
+          ...card,
+          padding: 28,
+          textAlign: 'center',
         }}>
-          <div style={{ fontSize: 40, marginBottom: 12 }}><Icon name="leaf" size={16} strokeWidth={1.75} /></div>
-          <div style={{ fontSize: 16, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 8 }}>No upcoming services scheduled</div>
-          <div style={{ fontSize: 16, color: B.grayMid, lineHeight: 1.6 }}>
+          <div style={{ width: 42, height: 42, borderRadius: 8, margin: '0 auto 12px', background: subtle, border: '1px solid #E1E7EF', color: B.blueDeeper, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Icon name="leaf" size={20} strokeWidth={1.8} />
+          </div>
+          <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading, marginBottom: 8 }}>No upcoming services scheduled</div>
+          <div style={{ fontSize: 14, color: muted, lineHeight: 1.6 }}>
             Your next quarterly pest treatment will be in {nextQuarterName}.
             {mosquitoResumes && <><br />Your mosquito service resumes in {mosquitoResumes}.</>}
           </div>
-          <button onClick={onRequestVisit} style={{
-            ...BUTTON_BASE, padding: '10px 20px', fontSize: 14, marginTop: 16,
-            background: B.wavesBlue, color: '#fff',
+          <button type="button" onClick={onRequestVisit} style={{
+            ...primaryButton, marginTop: 16,
           }}>Request a Visit</button>
         </div>
       )}
@@ -3422,47 +3523,44 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
 
       {/* Recent Completed Visits */}
       {recentCompleted.length > 0 && (
-        <div style={{ marginTop: 4 }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>Recent Visits</div>
+        <section style={{ ...card, padding: 16, marginTop: 4 }}>
+          <div style={sectionTitle}>Recent Visits</div>
           {recentCompleted.map(s => {
             const sDate = parseDate(s.date);
             return (
               <div key={s.id} style={{
-                background: B.offWhite, borderRadius: 12, padding: '12px 16px', marginBottom: 8,
-                border: `1px solid ${B.grayLight}`, display: 'flex', gap: 12, alignItems: 'center',
+                background: subtle, borderRadius: 8, padding: '12px 14px', marginTop: 10,
+                border: '1px solid #E1E7EF', display: 'flex', gap: 12, alignItems: 'center',
               }}>
                 <div style={{
-                  width: 8, height: 8, borderRadius: '50%', background: B.green, flexShrink: 0,
+                  width: 9, height: 9, borderRadius: '50%', background: B.green, flexShrink: 0,
                 }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>{s.serviceType}</div>
-                    <div style={{ fontSize: 12, color: B.grayMid }}>
+                    <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>{s.serviceType}</div>
+                    <div style={{ fontSize: 12, color: muted }}>
                       {sDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                     </div>
                   </div>
-                  <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
+                  <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>
                     {s.technician}{s.productsApplied ? ` · ${s.productsApplied}` : ''}
                   </div>
                 </div>
               </div>
             );
           })}
-        </div>
+        </section>
       )}
 
       {/* Notification Preferences */}
       {prefs && (
-        <div style={{ marginTop: 8, background: B.white, borderRadius: 14, overflow: 'hidden', border: `1px solid ${B.grayLight}` }}>
-          <div style={{
-            background: `linear-gradient(135deg, ${B.blueDark}, ${B.wavesBlue})`,
-            padding: '14px 20px', color: '#fff',
-          }}>
-            <div style={{ fontSize: 15, fontWeight: 700, fontFamily: FONTS.heading }}> SMS Notifications</div>
-            <div style={{ fontSize: 12, color: B.blueLight, marginTop: 2 }}>Powered by Twilio · We'll never show up unannounced</div>
+        <section style={{ ...card, overflow: 'hidden' }}>
+          <div style={{ padding: '16px 18px', borderBottom: '1px solid #E1E7EF' }}>
+            <div style={sectionTitle}>Reminder Settings</div>
+            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>Service notifications</div>
+            <div style={{ marginTop: 4, fontSize: 14, color: muted }}>Messages sent to {formatPhoneDisplay(customer.phone)}</div>
           </div>
-          <div style={{ padding: '6px 20px 16px' }}>
-            <div style={{ fontSize: 12, color: B.grayMid, padding: '10px 0 6px' }}>Messages sent to {formatPhoneDisplay(customer.phone)}</div>
+          <div style={{ padding: '4px 18px 12px' }}>
             {(() => {
               const items = [
                 { key: 'appointmentConfirmation', label: 'New Appointment Confirmation', desc: 'Get a text when a visit is booked or rescheduled', icon: 'checkCircle', locked: false, defaultOn: true },
@@ -3487,15 +3585,18 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 <div key={p.key} style={{
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                   padding: '12px 0',
-                  borderBottom: i < items.length - 1 ? `1px solid ${B.grayLight}` : 'none',
+                  borderBottom: i < items.length - 1 ? '1px solid #E1E7EF' : 'none',
+                  gap: 12,
                 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1 }}>
-                    <Icon name={p.icon} size={18} strokeWidth={1.75} />
+                    <span style={{ width: 34, height: 34, borderRadius: 8, background: subtle, border: '1px solid #E1E7EF', color: B.blueDeeper, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                      <Icon name={p.icon} size={18} strokeWidth={1.75} />
+                    </span>
                     <div>
-                      <div style={{ fontSize: 14, color: B.navy, fontWeight: 600 }}>{p.label}</div>
-                      <div style={{ fontSize: 12, color: B.grayMid }}>{p.desc}</div>
+                      <div style={{ fontSize: 14, color: B.blueDeeper, fontWeight: 850 }}>{p.label}</div>
+                      <div style={{ fontSize: 12, color: muted }}>{p.desc}</div>
                       {p.locked && (
-                        <div style={{ fontSize: 10, color: B.orange, marginTop: 2, fontStyle: 'italic' }}>Required for service coordination</div>
+                        <div style={{ fontSize: 10, color: B.orange, marginTop: 2, fontWeight: 800 }}>Required for service coordination</div>
                       )}
                     </div>
                   </div>
@@ -3503,7 +3604,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                     <div onClick={p.locked ? undefined : () => handleToggle(p.key)} style={{
                       width: 44, height: 24, borderRadius: 12,
                       cursor: p.locked ? 'default' : 'pointer',
-                      background: isOn ? (p.locked ? B.green : B.wavesBlue) : B.grayLight,
+                      background: isOn ? (p.locked ? B.green : B.blueDeeper) : '#CBD5E1',
                       position: 'relative', transition: 'background 0.3s',
                       opacity: p.locked ? 0.85 : 1,
                     }}>
@@ -3514,7 +3615,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                       }} />
                     </div>
                     {p.locked && (
-                      <span style={{ fontSize: 8, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.3 }}> Locked</span>
+                      <span style={{ fontSize: 8, color: muted, textTransform: 'uppercase', letterSpacing: 0.3 }}>Locked</span>
                     )}
                   </div>
                 </div>
@@ -3522,14 +3623,15 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               });
             })()}
           </div>
-        </div>
+        </section>
       )}
 
       {propertyPrefs.length > 1 && (
-        <div style={{ marginTop: 8, background: B.white, borderRadius: 14, overflow: 'hidden', border: `1px solid ${B.grayLight}` }}>
-          <div style={{ padding: '16px 20px', borderBottom: `1px solid ${B.grayLight}` }}>
-            <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Notifications by Property</div>
-            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 3 }}>
+        <section style={{ ...card, overflow: 'hidden' }}>
+          <div style={{ padding: '16px 18px', borderBottom: '1px solid #E1E7EF' }}>
+            <div style={sectionTitle}>Property Notifications</div>
+            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>Notifications by property</div>
+            <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
               Choose which service texts each property receives.
             </div>
           </div>
@@ -3548,21 +3650,21 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               const contactLockKey = `${property.id}:contact`;
               return (
                 <div key={property.id} style={{
-                  border: `1px solid ${B.grayLight}`,
-                  borderRadius: 12,
+                  border: '1px solid #E1E7EF',
+                  borderRadius: 8,
                   padding: 14,
-                  background: property.id === customer.id ? B.bluePale : B.offWhite,
+                  background: property.id === customer.id ? '#EEF6FF' : subtle,
                 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', marginBottom: 10 }}>
                     <div>
-                      <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>{label}</div>
-                      <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>{address || 'No address on file'}</div>
+                      <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>{label}</div>
+                      <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>{address || 'No address on file'}</div>
                     </div>
                     {property.id === customer.id && (
                       <span style={{
-                        fontSize: 10, fontWeight: 700, color: B.wavesBlue,
+                        fontSize: 10, fontWeight: 850, color: B.wavesBlue,
                         background: '#fff', border: `1px solid ${B.wavesBlue}22`,
-                        borderRadius: 999, padding: '4px 8px', whiteSpace: 'nowrap',
+                        borderRadius: 8, padding: '4px 8px', whiteSpace: 'nowrap',
                       }}>Current</span>
                     )}
                   </div>
@@ -3577,37 +3679,37 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                           disabled={!!prefsLocked[lockKey]}
                           onClick={() => handlePropertyPrefToggle(property.id, option.key)}
                           style={{
-                            border: `1px solid ${on ? B.wavesBlue : B.grayLight}`,
-                            borderRadius: 10,
+                            border: `1px solid ${on ? B.wavesBlue : '#CBD5E1'}`,
+                            borderRadius: 8,
                             padding: '9px 6px',
                             background: on ? '#fff' : B.white,
-                            color: on ? B.wavesBlue : B.grayMid,
+                            color: on ? B.blueDeeper : muted,
                             fontSize: 14,
-                            fontWeight: 700,
+                            fontWeight: 850,
                             cursor: prefsLocked[lockKey] ? 'wait' : 'pointer',
                             opacity: prefsLocked[lockKey] ? 0.6 : 1,
                           }}
                         >
                           {option.label}
-                          <div style={{ fontSize: 14, marginTop: 2, color: on ? B.green : B.grayMid }}>{on ? 'On' : 'Off'}</div>
+                          <div style={{ fontSize: 12, marginTop: 2, color: on ? B.green : muted }}>{on ? 'On' : 'Off'}</div>
                         </button>
                       );
                     })}
                   </div>
-                  <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${B.grayLight}` }}>
-                    <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, marginBottom: 8 }}>On-location contact</div>
+                  <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #E1E7EF' }}>
+                    <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, marginBottom: 8 }}>On-location contact</div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8, marginBottom: 8 }}>
                       <input
                         value={contact.firstName || ''}
                         onChange={(e) => handlePropertyContactChange(property.id, 'firstName', e.target.value)}
                         placeholder="First name"
-                        style={{ padding: '10px 12px', borderRadius: 10, border: `1px solid ${B.grayLight}`, fontSize: 16, color: B.navy, fontFamily: FONTS.body }}
+                        style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #CBD5E1', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
                       />
                       <input
                         value={contact.lastName || ''}
                         onChange={(e) => handlePropertyContactChange(property.id, 'lastName', e.target.value)}
                         placeholder="Last name"
-                        style={{ padding: '10px 12px', borderRadius: 10, border: `1px solid ${B.grayLight}`, fontSize: 16, color: B.navy, fontFamily: FONTS.body }}
+                        style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #CBD5E1', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
                       />
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8, marginBottom: 10 }}>
@@ -3616,18 +3718,18 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                         onChange={(e) => handlePropertyContactChange(property.id, 'phone', e.target.value)}
                         placeholder="Phone number"
                         inputMode="tel"
-                        style={{ padding: '10px 12px', borderRadius: 10, border: `1px solid ${B.grayLight}`, fontSize: 16, color: B.navy, fontFamily: FONTS.body }}
+                        style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #CBD5E1', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
                       />
                       <input
                         value={contact.email || ''}
                         onChange={(e) => handlePropertyContactChange(property.id, 'email', e.target.value)}
                         placeholder="Email address"
                         inputMode="email"
-                        style={{ padding: '10px 12px', borderRadius: 10, border: `1px solid ${B.grayLight}`, fontSize: 16, color: B.navy, fontFamily: FONTS.body }}
+                        style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #CBD5E1', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
                       />
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-                      <div style={{ fontSize: 14, color: B.grayMid, lineHeight: 1.4 }}>
+                      <div style={{ fontSize: 14, color: muted, lineHeight: 1.4 }}>
                         This person receives appointment texts for this property. Turn on “Me too” to send those texts to you as well.
                       </div>
                       <button
@@ -3637,9 +3739,11 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                         style={{
                           ...BUTTON_BASE,
                           padding: '9px 14px',
-                          background: B.wavesBlue,
+                          background: B.blueDeeper,
                           color: '#fff',
                           fontSize: 14,
+                          borderRadius: 8,
+                          boxShadow: 'none',
                           flexShrink: 0,
                           opacity: prefsLocked[contactLockKey] ? 0.6 : 1,
                         }}
@@ -3652,7 +3756,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               );
             })}
           </div>
-        </div>
+        </section>
       )}
     </div>
   );
@@ -8516,38 +8620,86 @@ function MoreSheet({ activeTab, onSelect, onClose }) {
 // "Visits" surface — a visit is one object moving from upcoming → completed,
 // so customers shouldn't have to know which tab holds which state.
 function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onRequestVisit }) {
+  const compact = useIsMobile(760);
   const active = subTab === 'completed' ? 'completed' : 'upcoming';
+  const card = {
+    background: B.white,
+    border: '1px solid #E1E7EF',
+    borderRadius: 8,
+    boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+  };
+  const muted = '#64748B';
+  const propertyLine = [
+    customer.address?.line1,
+    customer.address?.city,
+    customer.address?.state,
+    customer.address?.zip,
+  ].filter(Boolean).join(', ');
   const pill = (id, label) => {
     const isActive = active === id;
     return (
       <button
+        type="button"
         key={id}
         onClick={() => onSubTabChange(id)}
         style={{
-          flex: 1, padding: '10px 14px', borderRadius: 10, border: 'none',
-          cursor: 'pointer', fontSize: 14, fontWeight: isActive ? 700 : 600,
+          flex: 1, padding: '9px 14px', borderRadius: 8, border: `1px solid ${isActive ? B.wavesBlue : 'transparent'}`,
+          cursor: 'pointer', fontSize: 14, fontWeight: 850,
           fontFamily: FONTS.heading,
-          background: isActive ? B.wavesBlue : 'transparent',
-          color: isActive ? B.white : B.grayMid,
-          transition: 'all 0.2s ease',
+          background: isActive ? '#EEF6FF' : 'transparent',
+          color: isActive ? B.blueDeeper : muted,
+          minHeight: 38,
         }}
       >{label}</button>
     );
   };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <div style={{
-        display: 'flex', gap: 4, background: B.white, borderRadius: 12,
-        padding: 4, boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
-      }}>
-        {pill('upcoming', 'Upcoming')}
-        {pill('completed', 'Completed')}
-      </div>
-      {active === 'upcoming' && (
-        <div style={{ fontSize: 12, color: B.grayMid, marginTop: -8, paddingLeft: 4 }}>
-          Tap <strong style={{ color: B.navy }}>Completed</strong> above to see your past visits and service reports.
+      <section style={{ ...card, padding: compact ? 20 : 28 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '5px 10px',
+              borderRadius: 999,
+              background: '#EEF6FF',
+              color: B.blueDeeper,
+              fontSize: 12,
+              fontWeight: 850,
+            }}>
+              Service Schedule
+            </div>
+            <h1 style={{
+              margin: '12px 0 8px',
+              color: B.blueDeeper,
+              fontFamily: FONTS.heading,
+              fontSize: compact ? 28 : 34,
+              lineHeight: 1.1,
+              letterSpacing: 0,
+            }}>
+              Visits
+            </h1>
+            <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
+              Upcoming appointments, completed reports, reminders, and service notes.
+            </div>
+            {propertyLine && <div style={{ marginTop: 4, fontSize: 14, color: muted }}>{propertyLine}</div>}
+          </div>
+          <div style={{
+            display: 'flex',
+            gap: 4,
+            background: '#F8FAFC',
+            borderRadius: 8,
+            padding: 4,
+            border: '1px solid #E1E7EF',
+            minWidth: compact ? '100%' : 260,
+          }}>
+            {pill('upcoming', 'Upcoming')}
+            {pill('completed', 'Completed')}
+          </div>
         </div>
-      )}
+      </section>
       {active === 'upcoming' ? <ScheduleTab customer={customer} properties={properties} onRequestVisit={onRequestVisit} /> : <ServicesTab />}
     </div>
   );
