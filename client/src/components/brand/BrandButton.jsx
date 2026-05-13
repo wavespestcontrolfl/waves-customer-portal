@@ -18,13 +18,13 @@ export default function BrandButton({
   const [active, setActive] = useState(false);
 
   const base = {
-    height: 44,
+    minHeight: 46,
     padding: '0 20px',
     borderRadius: 'var(--radius-md)',
     fontFamily: "'Inter', system-ui, sans-serif",
     fontSize: 'var(--text-md)',
-    fontWeight: 500,
-    letterSpacing: '-0.005em',
+    fontWeight: 600,
+    letterSpacing: 0,
     display: 'inline-flex',
     alignItems: 'center',
     justifyContent: 'center',

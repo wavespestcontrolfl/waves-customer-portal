@@ -1,12 +1,20 @@
 import { useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { COLORS as B, FONTS } from '../theme-brand';
-import { isLoginOrCustomerPortalPath } from '../lib/customerPortalChrome';
 
 export default function InstallPrompt() {
   const [deferredPrompt, setDeferredPrompt] = useState(null);
   const [show, setShow] = useState(false);
+  const [mobileEligible, setMobileEligible] = useState(false);
   const { pathname } = useLocation();
+
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 900px)');
+    const sync = () => setMobileEligible(media.matches);
+    sync();
+    media.addEventListener?.('change', sync);
+    return () => media.removeEventListener?.('change', sync);
+  }, []);
 
   useEffect(() => {
     const dismissed = sessionStorage.getItem('pwaPromptDismissed');
@@ -15,9 +23,11 @@ export default function InstallPrompt() {
     function handlePrompt(e) {
       e.preventDefault();
       setDeferredPrompt(e);
-      // Show after 30 seconds, scoped to login + the authenticated customer portal.
+      // Show after 30 seconds on login only; the authenticated portal has
+      // fixed navigation and support actions at the bottom of the screen.
       setTimeout(() => {
-        if (!isLoginOrCustomerPortalPath(window.location.pathname)) return;
+        if (window.location.pathname !== '/login') return;
+        if (!window.matchMedia('(max-width: 900px)').matches) return;
         setShow(true);
       }, 30000);
     }
@@ -27,7 +37,7 @@ export default function InstallPrompt() {
   }, []);
 
   useEffect(() => {
-    if (!isLoginOrCustomerPortalPath(pathname)) setShow(false);
+    if (pathname !== '/login') setShow(false);
   }, [pathname]);
 
   async function handleInstall() {
@@ -45,7 +55,7 @@ export default function InstallPrompt() {
     sessionStorage.setItem('pwaPromptDismissed', '1');
   }
 
-  if (!show || !isLoginOrCustomerPortalPath(pathname)) return null;
+  if (!show || !mobileEligible || pathname !== '/login') return null;
 
   return (
     <div style={{

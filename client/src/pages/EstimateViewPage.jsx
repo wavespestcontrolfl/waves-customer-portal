@@ -23,7 +23,7 @@
  * mobile-first stacked layout, two-column desktop via grid.
  */
 import Icon from '../components/Icon';
-import { COLORS } from '../theme-brand';
+import { COLORS, FONTS } from '../theme-brand';
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
@@ -41,6 +41,10 @@ const FONT_BODY = "'Inter', system-ui, sans-serif";
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
 const WAVES_PHONE_TEL = '+19412975749';
+const ESTIMATE_BG = '#FAF8F3';
+const ESTIMATE_BORDER = '#E7E2D7';
+const ESTIMATE_MUTED = '#6B7280';
+const ESTIMATE_TEXT = '#1B2C5B';
 
 function fmtMoney(n) {
   if (n == null) return '—';
@@ -51,11 +55,32 @@ function fmtMoney(n) {
 function Page({ children }) {
   return (
     <div style={{
-      minHeight: '100vh', background: COLORS.offWhite,
+      minHeight: '100vh', background: ESTIMATE_BG,
       fontFamily: FONT_BODY, color: COLORS.navy,
       display: 'flex', flexDirection: 'column',
     }}>
-      <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 780, width: '100%', margin: '0 auto' }}>
+      <header style={{ background: COLORS.white, borderBottom: `1px solid ${ESTIMATE_BORDER}` }}>
+        <div style={{
+          maxWidth: 960,
+          margin: '0 auto',
+          padding: '16px 24px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 16,
+        }}>
+          <a href={`tel:${WAVES_PHONE_TEL}`} style={{
+            color: ESTIMATE_TEXT,
+            fontSize: 15,
+            fontWeight: 600,
+            textDecoration: 'none',
+          }}>
+            {WAVES_PHONE_DISPLAY}
+          </a>
+          <img src="/waves-logo.png" alt="Waves" style={{ height: 28, display: 'block' }} />
+        </div>
+      </header>
+      <div style={{ flex: 1, padding: '32px 20px 64px', maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
         {children}
       </div>
       <BrandFooter />
@@ -93,17 +118,64 @@ function NotFoundCard() {
   );
 }
 
-function Header({ customerFirstName, address }) {
+function Header({ customerFirstName, address, serviceLabel, canChooseOneTime }) {
+  const firstName = customerFirstName || 'there';
   return (
-    <div style={{ marginBottom: 20, textAlign: 'center' }}>
-      <div style={{ fontSize: 14, color: COLORS.textCaption, letterSpacing: 0.5, textTransform: 'uppercase' }}>
-        Waves Pest Control
+    <div style={{ padding: '8px 0 24px' }}>
+      <div style={{
+        fontSize: 12,
+        color: ESTIMATE_MUTED,
+        letterSpacing: '0.12em',
+        textTransform: 'uppercase',
+        fontWeight: 700,
+        marginBottom: 6,
+      }}>
+        Your estimate{serviceLabel ? ` · ${serviceLabel}` : ''}
       </div>
-      <div style={{ fontSize: 28, fontWeight: 700, color: COLORS.blueDeeper, marginTop: 8 }}>
-        {customerFirstName ? `Hi ${customerFirstName}` : 'Your estimate'}
-      </div>
+      <h1 style={{
+        fontFamily: FONTS.serif,
+        fontSize: 'clamp(34px, 5vw, 48px)',
+        fontWeight: 500,
+        letterSpacing: '-0.01em',
+        lineHeight: 1.1,
+        color: ESTIMATE_TEXT,
+        margin: 0,
+      }}>
+        Hey {firstName}, {canChooseOneTime ? 'choose your pest control option.' : "here's your custom quote."}
+      </h1>
       {address ? (
-        <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4 }}>{address}</div>
+        <div style={{ fontSize: 20, color: '#3F4A65', marginTop: 16, lineHeight: 1.35 }}>{address}</div>
+      ) : null}
+    </div>
+  );
+}
+
+function getServiceLabel(frequency, estimate, pricing) {
+  if (estimate?.showOneTimeOption && (pricing?.anchorOneTimePrice || 0) > 0) {
+    return `${frequency?.label || 'Quarterly'} Pest Control or One-Time Pest Control`;
+  }
+  if (frequency?.label) return `${frequency.label} Pest Control`;
+  return 'Custom quote';
+}
+
+function SetupFeeCard({ fee }) {
+  if (!fee) return null;
+  return (
+    <div style={{
+      marginTop: 12,
+      marginBottom: 18,
+      padding: '14px 16px',
+      border: '1px solid #D4CBB8',
+      borderRadius: 10,
+      background: COLORS.white,
+    }}>
+      <div style={{ fontSize: 16, fontWeight: 700, color: ESTIMATE_TEXT, lineHeight: 1.35 }}>
+        + {fmtMoney(fee.amount)} one-time {fee.label || 'first-visit setup'}
+      </div>
+      {fee.waivedWithPrepay ? (
+        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.45 }}>
+          Waived when you pay the year in full up front.
+        </div>
       ) : null}
     </div>
   );
@@ -122,9 +194,10 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
   };
   return (
     <div style={{
-      background: COLORS.white, borderRadius: 999, padding: 4,
-      border: `1px solid ${COLORS.grayLight}`, marginBottom: 12,
+      background: '#F1F5F9', borderRadius: 999, padding: 4,
+      border: '1px solid #E2E8F0', marginBottom: 18,
       display: 'flex', gap: 4,
+      boxShadow: '0 1px 4px rgba(15,23,42,.04)',
     }}>
       <button
         type="button"
@@ -151,19 +224,16 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
 function OneTimePriceCard({ oneTimePrice }) {
   return (
     <div style={{
-      background: COLORS.white, borderRadius: 16, padding: 24,
-      boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
-      borderTop: `4px solid ${COLORS.yellow}`,
-      marginBottom: 16,
+      padding: '14px 0 24px',
+      marginBottom: 8,
     }}>
-      <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.yellow, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
-        Single visit
-      </div>
-      <div style={{ fontSize: 42, fontWeight: 700, color: COLORS.navy, lineHeight: 1.1 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+        <span style={{ fontFamily: FONTS.serif, fontSize: 56, fontWeight: 500, color: ESTIMATE_TEXT, lineHeight: 1 }}>
         {fmtMoney(oneTimePrice)}
-        <span style={{ fontSize: 18, fontWeight: 500, color: COLORS.textBody, marginLeft: 6 }}>one-time</span>
+        </span>
+        <span style={{ fontSize: 24, fontWeight: 500, color: ESTIMATE_MUTED }}>one-time</span>
       </div>
-      <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 12, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 16, color: '#3F4A65', marginTop: 14, lineHeight: 1.55 }}>
         One visit, pay on service day. No recurring schedule, no tier discount.
         Includes a 30-day callback period if pests return after this visit.
       </div>
@@ -673,7 +743,12 @@ export default function EstimateViewPage() {
 
   return (
     <Page>
-      <Header customerFirstName={estimate.customerFirstName} address={estimate.address} />
+      <Header
+        customerFirstName={estimate.customerFirstName}
+        address={estimate.address}
+        serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
+        canChooseOneTime={estimate.showOneTimeOption && (pricing.anchorOneTimePrice || 0) > 0}
+      />
 
       {ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
         <SlotIssueBanner
@@ -728,23 +803,7 @@ export default function EstimateViewPage() {
               {(pricing.firstVisitFees && pricing.firstVisitFees.length > 0
                 ? pricing.firstVisitFees
                 : (pricing.setupFee ? [pricing.setupFee] : [])
-              ).map((fee, i) => (
-                <div key={`${fee.label || 'fee'}-${i}`} style={{
-                  background: COLORS.white, borderRadius: 12,
-                  padding: '12px 16px', marginBottom: 8,
-                  border: `1px solid rgba(15,23,42,0.08)`,
-                  display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
-                }}>
-                  <div style={{ fontSize: 14, color: COLORS.textBody, lineHeight: 1.4 }}>
-                    <span style={{ fontWeight: 600, color: COLORS.navy }}>+ {fmtMoney(fee.amount)} one-time {fee.label}</span>
-                    {fee.waivedWithPrepay && (
-                      <span style={{ display: 'block', fontSize: 12, color: COLORS.textCaption || COLORS.textBody, marginTop: 2 }}>
-                        Waived when you prepay the year upfront.
-                      </span>
-                    )}
-                  </div>
-                </div>
-              ))}
+              ).map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} />)}
 
               {!estimate.showOneTimeOption ? (
                 <OneTimeBreakdownCard

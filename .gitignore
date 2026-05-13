@@ -7,6 +7,7 @@ client/dist/
 *.swo
 coverage/
 .nyc_output/
+.tmp/
 .claude/*.lock
 .claude/db-schema.txt
 

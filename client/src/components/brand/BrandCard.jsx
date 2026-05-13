@@ -1,6 +1,6 @@
 import React from 'react';
 
-// Surface card primitive — border, radius-xl, shadow-card, 32–36px padding.
+// Surface card primitive — border, compact radius, shadow-card, responsive padding.
 // elevation="flat" drops the shadow (used inside /admin/login's single-card
 // layout). elevation="modal" bumps to --shadow-modal for floating cards like
 // /login's video-hero card.
@@ -19,6 +19,10 @@ export default function BrandCard({
       ? 'none'
       : 'var(--shadow-card)';
 
+  const resolvedPadding = typeof padding === 'number'
+    ? `clamp(20px, 4vw, ${padding}px)`
+    : padding;
+
   return (
     <section
       {...rest}
@@ -27,7 +31,7 @@ export default function BrandCard({
         border: '1px solid var(--border)',
         borderRadius: 'var(--radius-xl)',
         boxShadow: shadow,
-        padding,
+        padding: resolvedPadding,
         maxWidth,
         width: '100%',
         boxSizing: 'border-box',

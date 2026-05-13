@@ -195,7 +195,7 @@ export default function ReceiptPage() {
         }
       `}</style>
 
-      <div className="waves-print-root" style={{ maxWidth: 640, margin: '32px auto 64px', padding: '0 16px' }}>
+      <div className="waves-print-root waves-receipt-page">
         {showFreshBadge && (
           <div
             className="waves-fresh-badge waves-no-print"
@@ -211,7 +211,8 @@ export default function ReceiptPage() {
           >
             <SuccessCheck size={56} />
             <div style={{
-              fontFamily: FONTS.serif,
+              fontFamily: FONTS.body,
+              fontWeight: 650,
               fontSize: 24,
               color: 'var(--text)',
               lineHeight: 1.2,
@@ -263,7 +264,7 @@ export default function ReceiptPage() {
           </div>
         )}
 
-        <BrandCard className="waves-print-card" padding={32} style={{ marginBottom: 20 }}>
+        <BrandCard className="waves-print-card" padding={30} style={{ marginBottom: 20 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
             <div style={{ fontSize: 12, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase' }}>
               {processing ? 'Payment pending' : 'Receipt'} · Invoice {invoice.invoiceNumber}
@@ -562,7 +563,7 @@ export default function ReceiptPage() {
           </div>
         </BrandCard>
 
-        <div className="waves-no-print" style={{ marginTop: 28, textAlign: 'center', fontSize: 16, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+        <div className="waves-no-print waves-customer-help">
           Questions about this receipt? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.
         </div>
       </div>

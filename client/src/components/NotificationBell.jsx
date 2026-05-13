@@ -153,7 +153,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       {/* Bell Button */}
       <button onClick={handleOpen} aria-label={unreadCount > 0 ? `Notifications (${unreadCount} unread)` : 'Notifications'} aria-haspopup="dialog" aria-expanded={open} style={{
         background: 'none', border: 'none', cursor: 'pointer', position: 'relative',
-        padding: 8, fontSize: 20, color: isDark ? '#64748B' : '#fff', minWidth: 44, minHeight: 44,
+        padding: 8, fontSize: 20, color: isDark ? '#64748B' : colors.text, minWidth: 44, minHeight: 44,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}>
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

@@ -1,9 +1,9 @@
 import React, { useEffect, useRef } from 'react';
 import { useWavesShell } from './WavesShellContext';
 
-// Single-use Instrument Serif H1 for customer surfaces. Per §2, exactly one
-// per page. Throws a dev warning if used inside <WavesShell variant="admin">
-// (admin surfaces are Inter-only per §4).
+// Customer-surface H1. The component name is retained for compatibility with
+// existing pages, but the visual treatment is now the cleaner Inter portal
+// heading rather than an ornamental serif.
 export default function SerifHeading({
   children,
   as: Tag = 'h1',
@@ -24,7 +24,7 @@ export default function SerifHeading({
       warned.current = true;
       // eslint-disable-next-line no-console
       console.warn(
-        '[SerifHeading] Instrument Serif is reserved for customer surfaces (§4). ' +
+        '[SerifHeading] Customer display headings are reserved for customer surfaces (§4). ' +
           'Do not use <SerifHeading> inside <WavesShell variant="admin">. ' +
           'Use Inter headings on admin surfaces.',
       );
@@ -35,10 +35,10 @@ export default function SerifHeading({
     <Tag
       {...rest}
       style={{
-        fontFamily: "'Instrument Serif', Georgia, 'Times New Roman', serif",
-        fontWeight: 400,
+        fontFamily: "'Inter', system-ui, sans-serif",
+        fontWeight: 650,
         fontSize: size || 'var(--h1-serif)',
-        letterSpacing: '-0.01em',
+        letterSpacing: 0,
         lineHeight: 1.1,
         color: 'var(--text)',
         margin: 0,
