@@ -1,7 +1,25 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
-import { COLORS as B, FONTS, BUTTON_BASE } from '../theme-brand';
+import { COLORS as B, FONTS } from '../theme-brand';
+import Icon from '../components/Icon';
+
+const SUPPORT_LINKS = [
+  { label: 'Call', href: 'tel:+19412975749', icon: 'phone' },
+  { label: 'Text', href: 'sms:+19412975749', icon: 'chat' },
+  { label: 'Estimate', href: '/estimate', icon: 'arrowRight' },
+];
+
+function normalizeAuthError(error) {
+  if (!error) return '';
+  if (error === 'No account found for this phone number') {
+    return "We do not have that number on file. Call Waves at (941) 297-5749 and we will get it corrected.";
+  }
+  if (error === 'Failed to fetch' || error === 'Network request failed') {
+    return "We cannot reach the server right now. Check your connection and try again.";
+  }
+  return error;
+}
 
 export default function LoginPage() {
   const { sendCode, verifyCode, error, isAuthenticated } = useAuth();
@@ -10,6 +28,10 @@ export default function LoginPage() {
   const [code, setCode] = useState('');
   const [step, setStep] = useState('phone');
   const [sending, setSending] = useState(false);
+
+  useEffect(() => {
+    if (isAuthenticated) navigate('/', { replace: true });
+  }, [isAuthenticated, navigate]);
 
   const formatPhone = (value) => {
     const digits = value.replace(/\D/g, '').slice(0, 10);
@@ -20,11 +42,14 @@ export default function LoginPage() {
 
   const handleSendCode = async () => {
     const digits = phone.replace(/\D/g, '');
-    if (digits.length !== 10) return;
+    if (digits.length !== 10 || sending) return;
     setSending(true);
     const success = await sendCode(`+1${digits}`);
     setSending(false);
-    if (success) setStep('code');
+    if (success) {
+      setCode('');
+      setStep('code');
+    }
   };
 
   const handleVerify = async () => {
@@ -39,257 +64,419 @@ export default function LoginPage() {
     }
   };
 
-  if (isAuthenticated) {
-    navigate('/', { replace: true });
-    return null;
-  }
+  const onSubmit = (e) => {
+    e.preventDefault();
+    if (step === 'phone') handleSendCode();
+    else handleVerify();
+  };
 
   const phoneReady = phone.replace(/\D/g, '').length === 10;
   const codeReady = code.length === 6;
-  const sendDisabled = !phoneReady || sending;
-  const verifyDisabled = !codeReady || sending;
-  const submitButtonStyle = (disabled) => ({
-    ...BUTTON_BASE,
-    width: '100%',
-    minHeight: 52,
-    padding: 16,
-    background: disabled ? B.slate200 : B.yellow,
-    color: disabled ? B.slate600 : B.blueDeeper,
-    fontSize: 15,
-    marginTop: 16,
-    cursor: disabled ? 'not-allowed' : 'pointer',
-    opacity: sending ? 0.72 : 1,
-    boxShadow: disabled ? 'none' : '0 4px 14px rgba(0,0,0,0.15)',
-    transition: 'background-color 150ms cubic-bezier(0.4,0,0.2,1), transform 150ms cubic-bezier(0.4,0,0.2,1), box-shadow 150ms cubic-bezier(0.4,0,0.2,1)',
-  });
+  const submitDisabled = step === 'phone' ? !phoneReady || sending : !codeReady || sending;
+  const friendlyError = normalizeAuthError(error);
+
+  if (isAuthenticated) return null;
 
   return (
-    <div style={{
-      position: 'relative',
-      minHeight: '100vh',
-      overflow: 'hidden',
-      background: B.sky,                              // brand-sky base (matches Astro Hero)
-      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-      fontFamily: FONTS.body,
-      padding: 20,
-    }}>
-      {/* Hero video background — matches wavespestcontrol.com Hero.astro */}
-      <video
-        autoPlay
-        muted
-        loop
-        playsInline
-        preload="none"
-        poster="/brand/waves-hero-service.webp"
-        style={{
-          position: 'absolute', inset: 0, width: '100%', height: '100%',
-          objectFit: 'cover', opacity: 0.3, zIndex: 0, pointerEvents: 'none',
-        }}
-        aria-hidden="true"
-      >
-        <source src="/brand/waves-hero-service.mp4" type="video/mp4" />
-      </video>
-      {/* Gradient overlay: brand-sky/90 → brand-blue/60 → brand-blueLight/40 */}
-      <div style={{
-        position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none',
-        background: 'linear-gradient(135deg, rgba(77,201,246,0.9) 0%, rgba(9,122,189,0.6) 55%, rgba(227,245,253,0.4) 100%)',
-      }} />
+    <main
+      className="portal-login-page"
+      style={{
+        '--login-blue': B.blueDeeper,
+        '--login-brand': B.wavesBlue,
+        '--login-yellow': B.yellow,
+        '--login-text': B.grayDark,
+        '--login-muted': B.grayMid,
+        '--login-border': '#E1E7EF',
+        '--login-soft': '#EEF6FF',
+        '--login-bg': '#F8FAFC',
+        '--login-card': B.white,
+        '--login-red': B.red,
+        fontFamily: FONTS.body,
+      }}
+    >
+      <style>{`
+        .portal-login-page {
+          min-height: 100vh;
+          background: var(--login-bg);
+          color: var(--login-text);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 28px;
+          box-sizing: border-box;
+        }
+        .portal-login-shell {
+          width: min(1040px, 100%);
+          display: grid;
+          grid-template-columns: minmax(280px, 0.92fr) minmax(340px, 420px);
+          gap: 24px;
+          align-items: center;
+        }
+        .portal-login-brand {
+          min-width: 0;
+          padding: 8px 0;
+        }
+        .portal-login-logo {
+          display: inline-flex;
+          align-items: center;
+          gap: 10px;
+          text-decoration: none;
+          color: var(--login-blue);
+        }
+        .portal-login-logo img {
+          width: 42px;
+          height: 42px;
+          object-fit: contain;
+        }
+        .portal-login-eyebrow {
+          margin-top: 30px;
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          padding: 6px 10px;
+          border-radius: 8px;
+          background: var(--login-soft);
+          color: var(--login-blue);
+          font-size: 14px;
+          font-weight: 850;
+        }
+        .portal-login-brand h1 {
+          margin: 14px 0 10px;
+          color: var(--login-blue);
+          font-family: ${FONTS.heading};
+          font-size: 52px;
+          line-height: 1.02;
+          letter-spacing: 0;
+        }
+        .portal-login-brand p {
+          margin: 0;
+          max-width: 480px;
+          color: var(--login-muted);
+          font-size: 16px;
+          line-height: 1.6;
+          font-weight: 500;
+        }
+        .portal-login-panel {
+          min-width: 0;
+        }
+        .portal-login-card,
+        .portal-login-help {
+          background: var(--login-card);
+          border: 1px solid var(--login-border);
+          border-radius: 8px;
+          box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+        }
+        .portal-login-card {
+          padding: 22px;
+        }
+        .portal-login-card-header {
+          display: flex;
+          gap: 12px;
+          align-items: flex-start;
+          margin-bottom: 20px;
+        }
+        .portal-login-icon {
+          width: 42px;
+          height: 42px;
+          border-radius: 8px;
+          background: var(--login-soft);
+          color: var(--login-blue);
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          flex: 0 0 auto;
+        }
+        .portal-login-title {
+          margin: 0;
+          color: var(--login-blue);
+          font-family: ${FONTS.heading};
+          font-size: 20px;
+          line-height: 1.2;
+          font-weight: 850;
+          letter-spacing: 0;
+        }
+        .portal-login-subtitle {
+          margin: 4px 0 0;
+          color: var(--login-muted);
+          font-size: 14px;
+          line-height: 1.45;
+          font-weight: 500;
+        }
+        .portal-login-field {
+          display: grid;
+          gap: 7px;
+        }
+        .portal-login-field label {
+          color: var(--login-blue);
+          font-size: 14px;
+          font-weight: 850;
+          letter-spacing: 0;
+          font-family: ${FONTS.heading};
+        }
+        .portal-login-input {
+          width: 100%;
+          height: 52px;
+          box-sizing: border-box;
+          border: 1px solid #CBD5E1;
+          border-radius: 8px;
+          background: #fff;
+          color: var(--login-blue);
+          font-family: ${FONTS.body};
+          font-size: 18px;
+          font-weight: 700;
+          outline: none;
+          padding: 0 14px;
+          transition: border-color 150ms ease, box-shadow 150ms ease;
+        }
+        .portal-login-input:focus {
+          border-color: var(--login-brand);
+          box-shadow: 0 0 0 3px rgba(0, 156, 222, 0.16);
+        }
+        .portal-login-input.code {
+          text-align: center;
+          font-size: 26px;
+          letter-spacing: 0.2em;
+          font-family: ${FONTS.ui};
+          padding-left: 0.2em;
+        }
+        .portal-login-submit,
+        .portal-login-secondary {
+          width: 100%;
+          min-height: 48px;
+          border-radius: 8px;
+          font-family: ${FONTS.heading};
+          font-size: 14px;
+          font-weight: 850;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+          cursor: pointer;
+          transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+        }
+        .portal-login-submit {
+          margin-top: 16px;
+          border: none;
+          background: var(--login-blue);
+          color: #fff;
+        }
+        .portal-login-submit:not(:disabled):hover {
+          background: #14234C;
+        }
+        .portal-login-submit:disabled {
+          cursor: not-allowed;
+          background: #CBD5E1;
+          color: #fff;
+        }
+        .portal-login-secondary {
+          margin-top: 8px;
+          border: 1px solid #CBD5E1;
+          background: #fff;
+          color: var(--login-blue);
+        }
+        .portal-login-secondary:hover {
+          border-color: #94A3B8;
+          background: #F8FAFC;
+        }
+        .portal-login-error {
+          margin-top: 14px;
+          padding: 12px;
+          border-radius: 8px;
+          background: #FEF2F2;
+          border: 1px solid #FECACA;
+          color: var(--login-red);
+          font-size: 14px;
+          line-height: 1.45;
+          font-weight: 700;
+          display: flex;
+          gap: 9px;
+          align-items: flex-start;
+        }
+        .portal-login-help {
+          margin-top: 12px;
+          padding: 12px;
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 8px;
+        }
+        .portal-login-help a {
+          min-height: 42px;
+          border-radius: 8px;
+          border: 1px solid var(--login-border);
+          color: var(--login-blue);
+          text-decoration: none;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+          font-family: ${FONTS.heading};
+          font-size: 14px;
+          font-weight: 850;
+          background: #fff;
+        }
+        .portal-login-footer {
+          margin-top: 18px;
+          color: var(--login-muted);
+          font-size: 14px;
+          line-height: 1.5;
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          flex-wrap: wrap;
+        }
+        @media (max-width: 820px) {
+          .portal-login-page {
+            align-items: flex-start;
+            padding: 18px;
+          }
+          .portal-login-shell {
+            grid-template-columns: 1fr;
+            gap: 18px;
+          }
+          .portal-login-brand {
+            padding-top: 0;
+          }
+          .portal-login-eyebrow {
+            margin-top: 20px;
+          }
+          .portal-login-brand h1 {
+            font-size: 34px;
+          }
+          .portal-login-card {
+            padding: 18px;
+          }
+        }
+      `}</style>
 
-      {/* Hero branding block — Luckiest Guy title like wavespestcontrol.com heroes */}
-      <div style={{ position: 'relative', zIndex: 2, textAlign: 'center', marginBottom: 32 }}>
-        <img
-          src="/waves-logo.png"
-          alt="Waves"
-          style={{ width: 140, height: 'auto', marginBottom: 14, filter: 'drop-shadow(0 4px 12px rgba(0,0,0,0.3))' }}
-        />
-        <h1 style={{
-          fontSize: 48,                      // matches Astro H1 (--text-5xl)
-          fontFamily: FONTS.display,         // Luckiest Guy
-          fontWeight: 400,                   // Luckiest Guy only has 400
-          color: B.white,
-          letterSpacing: '0.02em',           // 0.96px at 48px
-          lineHeight: 1.05,
-          margin: '0 0 24px',                // Astro H1 mb-6
-          textShadow: '0 2px 12px rgba(0,0,0,0.25)',
-        }}>
-          Client Services Portal
-        </h1>
-      </div>
-
-      {/* Login card */}
-      <div style={{
-        position: 'relative', zIndex: 2,
-        background: B.white,
-        borderRadius: 24,
-        padding: 32,
-        maxWidth: 380,
-        width: '100%',
-        boxShadow: '0 25px 50px -12px rgba(0,0,0,0.25)',
-      }}>
-        {step === 'phone' ? (
-          <>
-            <div style={{
-              fontSize: 20, fontWeight: 700, color: B.blueDeeper,
-              fontFamily: FONTS.heading, letterSpacing: '-0.01em',
-              marginBottom: 6,
+      <div className="portal-login-shell">
+        <section className="portal-login-brand" aria-labelledby="portal-login-heading">
+          <a className="portal-login-logo" href="https://wavespestcontrol.com">
+            <img src="/waves-logo.png" alt="Waves" />
+            <span style={{
+              fontFamily: FONTS.heading,
+              fontSize: 15,
+              fontWeight: 850,
+              letterSpacing: 0,
             }}>
-              Sign in to your account
-            </div>
-            <p style={{
-              fontSize: 14, color: B.grayDark, fontWeight: 500,
-              fontFamily: FONTS.body, marginBottom: 20, lineHeight: 1.6,
-            }}>
-              Enter the phone number on your Waves account. We'll text you a quick verification code.
-            </p>
-            <input
-              type="tel"
-              aria-label="Phone number"
-              autoComplete="tel"
-              inputMode="tel"
-              value={phone}
-              onChange={(e) => setPhone(formatPhone(e.target.value))}
-              placeholder="(941) 555-0147"
-              style={{
-                width: '100%', padding: '14px 16px', borderRadius: 12,
-                border: `1.5px solid ${B.slate200}`, fontSize: 18, fontWeight: 600,
-                fontFamily: FONTS.body, color: B.blueDeeper,
-                outline: 'none', boxSizing: 'border-box', letterSpacing: 1,
-                transition: 'border-color 150ms cubic-bezier(0.4,0,0.2,1), box-shadow 150ms cubic-bezier(0.4,0,0.2,1)',
-              }}
-              onFocus={(e) => {
-                e.target.style.borderColor = B.wavesBlue;
-                e.target.style.boxShadow = `0 0 0 3px rgba(0,156,222,0.15)`;
-              }}
-              onBlur={(e) => {
-                e.target.style.borderColor = B.slate200;
-                e.target.style.boxShadow = 'none';
-              }}
-            />
-            <button
-              onClick={handleSendCode}
-              disabled={sendDisabled}
-              style={submitButtonStyle(sendDisabled)}
-              onMouseEnter={(e) => { if (!sendDisabled) e.currentTarget.style.background = B.yellowHover; }}
-              onMouseLeave={(e) => { e.currentTarget.style.background = sendDisabled ? B.slate200 : B.yellow; }}
-            >
-              {sending ? 'Sending...' : 'Send Verification Code'}
-            </button>
-          </>
-        ) : (
-          <>
-            <div style={{
-              fontSize: 20, fontWeight: 700, color: B.blueDeeper,
-              fontFamily: FONTS.heading, letterSpacing: '-0.01em',
-              marginBottom: 6,
-            }}>
-              Check your texts
-            </div>
-            <p style={{
-              fontSize: 14, color: B.grayDark, fontWeight: 500,
-              fontFamily: FONTS.body, marginBottom: 20, lineHeight: 1.6,
-            }}>
-              We sent a 6-digit code to <strong>{phone}</strong>
-            </p>
-            <input
-              type="text"
-              aria-label="Verification code"
-              autoComplete="one-time-code"
-              inputMode="numeric"
-              value={code}
-              onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-              placeholder="000000"
-              maxLength={6}
-              style={{
-                width: '100%', padding: '14px 16px', borderRadius: 12,
-                border: `1.5px solid ${B.slate200}`, fontSize: 28, fontWeight: 800,
-                fontFamily: FONTS.ui, color: B.blueDeeper,
-                outline: 'none', textAlign: 'center', letterSpacing: 12,
-                boxSizing: 'border-box',
-                transition: 'border-color 150ms cubic-bezier(0.4,0,0.2,1), box-shadow 150ms cubic-bezier(0.4,0,0.2,1)',
-              }}
-              onFocus={(e) => {
-                e.target.style.borderColor = B.wavesBlue;
-                e.target.style.boxShadow = `0 0 0 3px rgba(0,156,222,0.15)`;
-              }}
-              onBlur={(e) => {
-                e.target.style.borderColor = B.slate200;
-                e.target.style.boxShadow = 'none';
-              }}
-              autoFocus
-            />
-            <button
-              onClick={handleVerify}
-              disabled={verifyDisabled}
-              style={submitButtonStyle(verifyDisabled)}
-              onMouseEnter={(e) => { if (!verifyDisabled) e.currentTarget.style.background = B.yellowHover; }}
-              onMouseLeave={(e) => { e.currentTarget.style.background = verifyDisabled ? B.slate200 : B.yellow; }}
-            >
-              {sending ? 'Verifying...' : 'Sign In'}
-            </button>
-            <button
-              onClick={() => { setStep('phone'); setCode(''); }}
-              style={{
-                ...BUTTON_BASE, width: '100%', padding: 12,
-                background: 'transparent', color: B.wavesBlue,
-                fontSize: 14, fontWeight: 600, marginTop: 8,
-              }}
-            >
-              ← Use a different number
-            </button>
-          </>
-        )}
-
-        {error && (
-          <div style={{
-            marginTop: 14, padding: '12px 14px', borderRadius: 10,
-            background: '#FFEBEE', color: B.red, fontSize: 14, fontWeight: 500, lineHeight: 1.5,
-          }}>
-            {error === 'No account found for this phone number'
-              ? "Hmm, we don't have that number on file. Give us a call at (941) 297-5749 and we'll get you set up."
-              : error === 'Failed to fetch'
-              ? "Can't reach the server right now. Check your connection or try again in a moment."
-              : error === 'Network request failed'
-              ? "Can't reach the server right now. Check your connection or try again in a moment."
-              : error}
+              Waves Pest Control
+            </span>
+          </a>
+          <div className="portal-login-eyebrow">
+            <Icon name="lock" size={15} strokeWidth={2.2} />
+            Secure customer access
           </div>
-        )}
-      </div>
+          <h1 id="portal-login-heading">Customer Portal</h1>
+          <p>Sign in with the phone number on your Waves account.</p>
+        </section>
 
-      {/* Bottom links */}
-      <div style={{ position: 'relative', zIndex: 2, marginTop: 28, textAlign: 'center' }}>
-        <div style={{ fontSize: 16, fontWeight: 700, color: '#fff', fontFamily: FONTS.heading }}>
-          Looking for new service?{' '}
-          <a href="/estimate"
-            style={{ color: B.yellow, fontWeight: 800, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', minHeight: 44 }}>
-            Get a Quote
-          </a>
-        </div>
-        <div style={{ fontSize: 16, fontWeight: 700, color: '#fff', marginTop: 12, fontFamily: FONTS.heading }}>
-          Need help?{' '}
-          <a href="tel:+19412975749" style={{ color: B.yellow, fontWeight: 800, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', minHeight: 44 }}>
-            Call (941) 297-5749
-          </a>
-        </div>
-      {/* Social icons */}
-      <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 20 }}>
-        {[
-          { name: 'Facebook', url: 'https://facebook.com/wavespestcontrol', path: 'M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z' },
-          { name: 'Instagram', url: 'https://instagram.com/wavespestcontrol', path: 'M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12s.014 3.668.072 4.948c.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24s3.668-.014 4.948-.072c4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948s-.014-3.667-.072-4.947c-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 100 12.324 6.162 6.162 0 000-12.324zM12 16a4 4 0 110-8 4 4 0 010 8zm6.406-11.845a1.44 1.44 0 100 2.881 1.44 1.44 0 000-2.881z' },
-          { name: 'YouTube', url: 'https://youtube.com/@wavespestcontrol', path: 'M23.498 6.186a3.016 3.016 0 00-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 00.502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 002.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 002.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z' },
-          { name: 'TikTok', url: 'https://tiktok.com/@wavespestcontrol', path: 'M12.525.02c1.31-.02 2.61-.01 3.91-.02.08 1.53.63 3.09 1.75 4.17 1.12 1.11 2.7 1.62 4.24 1.79v4.03c-1.44-.05-2.89-.35-4.2-.97-.57-.26-1.1-.59-1.62-.93-.01 2.92.01 5.84-.02 8.75-.08 1.4-.54 2.79-1.35 3.94-1.31 1.92-3.58 3.17-5.91 3.21-1.43.08-2.86-.31-4.08-1.03-2.02-1.19-3.44-3.37-3.65-5.71-.02-.5-.03-1-.01-1.49.18-1.9 1.12-3.72 2.58-4.96 1.66-1.44 3.98-2.13 6.15-1.72.02 1.48-.04 2.96-.04 4.44-.99-.32-2.15-.23-3.02.37-.63.41-1.11 1.04-1.36 1.75-.21.51-.15 1.07-.14 1.61.24 1.64 1.82 3.02 3.5 2.87 1.12-.01 2.19-.66 2.77-1.61.19-.33.4-.67.41-1.06.1-1.79.06-3.57.07-5.36.01-4.03-.01-8.05.02-12.07z' },
-          { name: 'X', url: 'https://x.com/wavespest', path: 'M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z' },
-        ].map(s => (
-          <a key={s.name} href={s.url} target="_blank" rel="noopener noreferrer" title={s.name} aria-label={`Visit Waves on ${s.name}`} style={{
-            width: 44, height: 44, borderRadius: '50%',
-            background: 'rgba(255,255,255,0.15)', color: B.yellow,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            textDecoration: 'none', transition: 'all 0.2s ease',
-          }}>
-            <svg viewBox="0 0 24 24" width={16} height={16} fill="currentColor"><path d={s.path} /></svg>
-          </a>
-        ))}
+        <section className="portal-login-panel" aria-label="Sign in">
+          <div className="portal-login-card">
+            <div className="portal-login-card-header">
+              <span className="portal-login-icon">
+                <Icon name={step === 'phone' ? 'smartphone' : 'key'} size={20} strokeWidth={2.1} />
+              </span>
+              <div>
+                <h2 className="portal-login-title">
+                  {step === 'phone' ? 'Sign In' : 'Enter Code'}
+                </h2>
+                <p className="portal-login-subtitle">
+                  {step === 'phone'
+                    ? 'We will text a verification code to your account phone.'
+                    : `Code sent to ${phone}.`}
+                </p>
+              </div>
+            </div>
+
+            <form onSubmit={onSubmit}>
+              {step === 'phone' ? (
+                <div className="portal-login-field">
+                  <label htmlFor="waves-login-phone">Phone number</label>
+                  <input
+                    id="waves-login-phone"
+                    className="portal-login-input"
+                    type="tel"
+                    autoComplete="tel"
+                    inputMode="tel"
+                    value={phone}
+                    onChange={(e) => setPhone(formatPhone(e.target.value))}
+                    placeholder="(941) 555-0147"
+                  />
+                </div>
+              ) : (
+                <div className="portal-login-field">
+                  <label htmlFor="waves-login-code">Verification code</label>
+                  <input
+                    id="waves-login-code"
+                    className="portal-login-input code"
+                    type="text"
+                    autoComplete="one-time-code"
+                    inputMode="numeric"
+                    value={code}
+                    onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    placeholder="000000"
+                    maxLength={6}
+                    autoFocus
+                  />
+                </div>
+              )}
+
+              <button
+                type="submit"
+                className="portal-login-submit"
+                disabled={submitDisabled}
+                aria-live="polite"
+              >
+                {sending
+                  ? (step === 'phone' ? 'Sending...' : 'Verifying...')
+                  : (step === 'phone' ? 'Send Code' : 'Sign In')}
+                {!sending && <Icon name="arrowRight" size={16} strokeWidth={2.2} />}
+              </button>
+
+              {step === 'code' && (
+                <>
+                  <button
+                    type="button"
+                    className="portal-login-secondary"
+                    onClick={handleSendCode}
+                    disabled={sending}
+                  >
+                    <Icon name="refresh" size={15} strokeWidth={2} />
+                    Resend Code
+                  </button>
+                  <button
+                    type="button"
+                    className="portal-login-secondary"
+                    onClick={() => { setStep('phone'); setCode(''); }}
+                  >
+                    Use Different Number
+                  </button>
+                </>
+              )}
+            </form>
+
+            {friendlyError && (
+              <div className="portal-login-error" role="alert">
+                <Icon name="warning" size={16} strokeWidth={2} style={{ marginTop: 1 }} />
+                <span>{friendlyError}</span>
+              </div>
+            )}
+          </div>
+
+          <div className="portal-login-help" aria-label="Support links">
+            {SUPPORT_LINKS.map(link => (
+              <a key={link.label} href={link.href}>
+                <Icon name={link.icon} size={15} strokeWidth={2} />
+                {link.label}
+              </a>
+            ))}
+          </div>
+
+          <div className="portal-login-footer">
+            <span>Waves Pest Control</span>
+            <span>Lakewood Ranch, Sarasota, Venice</span>
+          </div>
+        </section>
       </div>
-      </div>
-    </div>
+    </main>
   );
 }
