@@ -4607,25 +4607,60 @@ function BillingTab({ customer }) {
 // =========================================================================
 // MY PROPERTY TAB — access codes, pets, scheduling, irrigation, HOA
 // =========================================================================
-function PropertySection({ title, defaultOpen, children }) {
+function PropertySection({ title, icon = 'document', summary, defaultOpen, children, aside }) {
   const [open, setOpen] = useState(defaultOpen !== false);
   return (
-    <div style={{
-      background: B.white, borderRadius: 14, overflow: 'hidden',
-      border: `1px solid ${B.grayLight}`,
+    <section style={{
+      background: B.white,
+      borderRadius: 8,
+      overflow: 'hidden',
+      border: '1px solid #E1E7EF',
+      boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
     }}>
-      <div onClick={() => setOpen(!open)} style={{
-        padding: '14px 18px', cursor: 'pointer',
-        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-      }}>
-        <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{title}</div>
-        <span style={{
-          fontSize: 18, color: B.grayMid, transition: 'transform 0.3s',
-          transform: open ? 'rotate(180deg)' : 'rotate(0)',
-        }}>▾</span>
-      </div>
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        style={{
+          width: '100%',
+          border: 'none',
+          background: '#fff',
+          padding: '16px 18px',
+          cursor: 'pointer',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          gap: 12,
+          textAlign: 'left',
+          fontFamily: FONTS.body,
+        }}
+      >
+        <span style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+          <span style={{
+            width: 34,
+            height: 34,
+            borderRadius: 8,
+            background: '#EEF6FF',
+            color: B.blueDeeper,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flexShrink: 0,
+          }}>
+            <Icon name={icon} size={17} strokeWidth={2} />
+          </span>
+          <span style={{ minWidth: 0 }}>
+            <span style={{ display: 'block', fontSize: 15, fontWeight: 850, color: B.blueDeeper }}>{title}</span>
+            {summary && <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: '#64748B', lineHeight: 1.35 }}>{summary}</span>}
+          </span>
+        </span>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          {aside}
+          <Icon name="chevronDown" size={18} strokeWidth={2} style={{ color: '#64748B', transform: open ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s ease' }} />
+        </span>
+      </button>
       {open && <div style={{ padding: '0 18px 18px' }}>{children}</div>}
-    </div>
+    </section>
   );
 }
 
@@ -4633,8 +4668,8 @@ function PasswordField({ value, onChange, placeholder, label }) {
   const [show, setShow] = useState(false);
   const inputLabel = label || placeholder || 'Secure field';
   return (
-    <div style={{ marginBottom: 12 }}>
-      {label && <label style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4, display: 'block' }}>{label}</label>}
+    <div>
+      {label && <label style={{ fontSize: 12, fontWeight: 850, color: '#64748B', marginBottom: 6, display: 'block', textTransform: 'uppercase', letterSpacing: 0 }}>{label}</label>}
       <div style={{ position: 'relative' }}>
         <input
           type={show ? 'text' : 'password'}
@@ -4643,18 +4678,25 @@ function PasswordField({ value, onChange, placeholder, label }) {
           placeholder={placeholder}
           aria-label={inputLabel}
           style={{
-            width: '100%', padding: '11px 40px 11px 14px', borderRadius: 10,
-            border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
-            color: B.navy, outline: 'none', boxSizing: 'border-box',
+            width: '100%',
+            padding: '10px 42px 10px 12px',
+            borderRadius: 8,
+            border: '1px solid #CBD5E1',
+            fontSize: 14,
+            fontFamily: FONTS.body,
+            color: B.blueDeeper,
+            outline: 'none',
+            boxSizing: 'border-box',
+            background: '#fff',
           }}
           onFocus={e => e.target.style.borderColor = B.wavesBlue}
-          onBlur={e => e.target.style.borderColor = B.grayLight}
+          onBlur={e => e.target.style.borderColor = '#CBD5E1'}
         />
         <button type="button" onClick={() => setShow(!show)} aria-label={show ? `Hide ${inputLabel}` : `Show ${inputLabel}`} style={{
           position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
-          background: 'none', border: 'none', cursor: 'pointer', fontSize: 16,
-          color: B.grayMid, padding: 4, width: 36, height: 36,
-        }}><Icon name={show ? 'eyeOff' : 'eye'} size={18} strokeWidth={1.75} /></button>
+          background: 'transparent', border: 'none', cursor: 'pointer',
+          color: '#64748B', padding: 4, width: 32, height: 32,
+        }}><Icon name={show ? 'eyeOff' : 'eye'} size={18} strokeWidth={2} /></button>
       </div>
     </div>
   );
@@ -4662,13 +4704,19 @@ function PasswordField({ value, onChange, placeholder, label }) {
 
 function PillSelector({ options, value, onChange }) {
   return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
       {options.map(o => (
-        <button key={o.value} onClick={() => onChange(o.value)} style={{
-          ...BUTTON_BASE, padding: '7px 14px', fontSize: 12, borderRadius: 20,
-          background: value === o.value ? B.wavesBlue : B.offWhite,
-          color: value === o.value ? '#fff' : B.grayDark,
-          border: value === o.value ? 'none' : `1px solid ${B.grayLight}`,
+        <button key={o.value} type="button" onClick={() => onChange(o.value)} aria-pressed={value === o.value} style={{
+          ...BUTTON_BASE,
+          minHeight: 36,
+          padding: '8px 12px',
+          fontSize: 14,
+          borderRadius: 8,
+          letterSpacing: 0,
+          boxShadow: 'none',
+          background: value === o.value ? '#EEF6FF' : '#fff',
+          color: value === o.value ? B.blueDeeper : '#64748B',
+          border: `1px solid ${value === o.value ? B.wavesBlue : '#CBD5E1'}`,
         }}>{o.label}</button>
       ))}
     </div>
@@ -4680,17 +4728,54 @@ function NumberStepper({ value, onChange, min = 0, max = 99, label = 'Value' }) 
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
       <button type="button" onClick={() => onChange(Math.max(min, v - 1))} aria-label={`Decrease ${label}`} style={{
-        width: 40, height: 40, borderRadius: '50%', border: `1px solid ${B.grayLight}`,
-        background: B.offWhite, cursor: 'pointer', fontSize: 16, color: B.navy,
+        width: 38, height: 38, borderRadius: 8, border: '1px solid #CBD5E1',
+        background: '#fff', cursor: 'pointer', color: B.blueDeeper,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
-      }}>−</button>
-      <span style={{ fontSize: 18, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui, minWidth: 24, textAlign: 'center' }}>{v}</span>
+      }}><Icon name="minus" size={16} strokeWidth={2} /></button>
+      <span style={{ fontSize: 20, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.ui, minWidth: 28, textAlign: 'center' }}>{v}</span>
       <button type="button" onClick={() => onChange(Math.min(max, v + 1))} aria-label={`Increase ${label}`} style={{
-        width: 40, height: 40, borderRadius: '50%', border: `1px solid ${B.grayLight}`,
-        background: B.offWhite, cursor: 'pointer', fontSize: 16, color: B.navy,
+        width: 38, height: 38, borderRadius: 8, border: '1px solid #CBD5E1',
+        background: '#fff', cursor: 'pointer', color: B.blueDeeper,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
-      }}>+</button>
+      }}><Icon name="plus" size={16} strokeWidth={2} /></button>
     </div>
+  );
+}
+
+function ToggleSwitch({ checked, onChange, disabled, label }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={!!checked}
+      aria-label={label}
+      onClick={onChange}
+      disabled={disabled}
+      style={{
+        width: 50,
+        height: 30,
+        borderRadius: 999,
+        border: 'none',
+        cursor: disabled ? 'wait' : 'pointer',
+        background: checked ? B.wavesBlue : '#CBD5E1',
+        position: 'relative',
+        flexShrink: 0,
+        transition: 'background 0.18s ease',
+        opacity: disabled ? 0.7 : 1,
+      }}
+    >
+      <span style={{
+        position: 'absolute',
+        top: 4,
+        left: checked ? 24 : 4,
+        width: 22,
+        height: 22,
+        borderRadius: 999,
+        background: '#fff',
+        boxShadow: '0 1px 3px rgba(15,23,42,0.22)',
+        transition: 'left 0.18s ease',
+      }} />
+    </button>
   );
 }
 
@@ -4730,45 +4815,56 @@ function ServicePrefsSection() {
   if (!prefs) return null;
 
   const rows = [
-    { key: 'interior_spray', title: 'Interior spraying', desc: 'Tech treats the inside of the home on each visit. Toggle off for exterior-only service.' },
-    { key: 'exterior_sweep', title: 'Exterior eave sweep', desc: 'Tech sweeps cobwebs from eaves and exterior corners on each visit.' },
+    { key: 'interior_spray', icon: 'home', title: 'Interior spraying', desc: 'Treat inside the home on each visit. Turn off for exterior-only service.' },
+    { key: 'exterior_sweep', icon: 'sparkles', title: 'Exterior eave sweep', desc: 'Sweep cobwebs from eaves and exterior corners during recurring service.' },
   ];
 
   return (
-    <PropertySection title=" Service preferences">
-      <div style={{ fontSize: 16, color: B.grayDark, marginBottom: 10, lineHeight: 1.5 }}>
-        Both on by default. Toggle either off if you'd rather skip it — we'll update your next work order and the office will be notified.
+    <PropertySection
+      title="Service preferences"
+      icon="wrench"
+      summary="Choose what is included on each recurring pest control visit."
+    >
+      <div style={{ fontSize: 14, color: '#64748B', marginBottom: 12, lineHeight: 1.5 }}>
+        These update your next work order automatically, so the office and technician see the same preference.
       </div>
       {rows.map((r) => {
         const on = prefs[r.key] !== false;
         return (
           <div key={r.key} style={{
-            display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
-            gap: 14, padding: '12px 0',
-            borderBottom: `1px solid ${B.grayLight}`,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 14,
+            padding: '14px 0',
+            borderTop: '1px solid #E1E7EF',
           }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>{r.title}</div>
-              <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2, lineHeight: 1.5 }}>{r.desc}</div>
-            </div>
-            <button
-              type="button"
-              onClick={() => toggle(r.key)}
-              disabled={busy === r.key}
-              aria-label={`${r.title} ${on ? 'enabled' : 'disabled'}`}
-              style={{
-                position: 'relative', width: 50, height: 32, borderRadius: 32,
-                background: on ? B.wavesBlue : B.grayLight,
-                border: 'none', cursor: busy === r.key ? 'wait' : 'pointer',
-                flexShrink: 0, transition: 'background .15s',
-              }}
-            >
+            <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', flex: 1, minWidth: 0 }}>
               <span style={{
-                position: 'absolute', top: 6, left: on ? 26 : 4,
-                width: 20, height: 20, borderRadius: '50%', background: '#fff',
-                boxShadow: '0 1px 2px rgba(0,0,0,0.15)', transition: 'left .15s',
-              }} />
-            </button>
+                width: 34,
+                height: 34,
+                borderRadius: 8,
+                background: on ? '#EEF6FF' : '#F8FAFC',
+                color: on ? B.blueDeeper : '#64748B',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                flexShrink: 0,
+                border: '1px solid #E1E7EF',
+              }}>
+                <Icon name={r.icon} size={17} strokeWidth={2} />
+              </span>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>{r.title}</div>
+                <div style={{ fontSize: 14, color: '#64748B', marginTop: 2, lineHeight: 1.45 }}>{r.desc}</div>
+              </div>
+            </div>
+            <ToggleSwitch
+              checked={on}
+              onChange={() => toggle(r.key)}
+              disabled={busy === r.key}
+              label={`${r.title} ${on ? 'enabled' : 'disabled'}`}
+            />
           </div>
         );
       })}
@@ -4778,6 +4874,7 @@ function ServicePrefsSection() {
 }
 
 function PropertyTab({ customer }) {
+  const compact = useIsMobile(760);
   const [prefs, setPrefs] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saveStatus, setSaveStatus] = useState(null); // null | 'saving' | 'saved' | 'error'
@@ -4817,171 +4914,333 @@ function PropertyTab({ customer }) {
           setPrefs(lastSavedRef.current);
         }
         setSaveStatus('error');
-        alert('Could not save your property details. Please check your connection and try again.');
       }
     }, 1000);
   }, []);
 
-  if (loading) return <div style={{ padding: 40, textAlign: 'center', color: B.grayMid }}>Loading property info...</div>;
-  if (!prefs) return <div style={{ padding: 40, textAlign: 'center', color: B.grayMid }}>Unable to load preferences.</div>;
+  const card = {
+    background: B.white,
+    border: '1px solid #E1E7EF',
+    borderRadius: 8,
+    boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+  };
+  const muted = '#64748B';
+  const subtle = '#F8FAFC';
+  const sectionTitle = {
+    fontSize: 12,
+    fontWeight: 850,
+    color: muted,
+    textTransform: 'uppercase',
+    letterSpacing: 0,
+  };
+  const labelStyle = {
+    fontSize: 12,
+    fontWeight: 850,
+    color: muted,
+    marginBottom: 6,
+    display: 'block',
+    textTransform: 'uppercase',
+    letterSpacing: 0,
+  };
+  const inputStyle = {
+    width: '100%',
+    padding: '10px 12px',
+    borderRadius: 8,
+    border: '1px solid #CBD5E1',
+    fontSize: 14,
+    fontFamily: FONTS.body,
+    color: B.blueDeeper,
+    outline: 'none',
+    boxSizing: 'border-box',
+    background: '#fff',
+  };
+  const fieldGrid = {
+    display: 'grid',
+    gridTemplateColumns: compact ? '1fr' : 'repeat(2, minmax(0, 1fr))',
+    gap: 12,
+  };
+
+  if (loading) return <div style={{ ...card, padding: 28, textAlign: 'center', color: muted }}>Loading property info...</div>;
+  if (!prefs) {
+    return (
+      <div style={{ ...card, padding: 24 }}>
+        <div style={sectionTitle}>My Property</div>
+        <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>Unable to load preferences</div>
+        <div style={{ marginTop: 6, fontSize: 14, color: muted }}>Refresh the portal and try again.</div>
+      </div>
+    );
+  }
 
   const updatedAt = prefs.updatedAt ? (() => {
     const d = new Date(prefs.updatedAt);
+    if (isNaN(d)) return null;
     const diff = Math.floor((Date.now() - d) / (1000 * 60 * 60 * 24));
     if (diff === 0) return 'Updated today';
     if (diff === 1) return 'Updated yesterday';
     return `Updated ${diff} days ago`;
   })() : null;
 
-  const textArea = (field, placeholder, rows = 2, label) => (
+  const focusBorder = e => { e.target.style.borderColor = B.wavesBlue; };
+  const blurBorder = e => { e.target.style.borderColor = '#CBD5E1'; };
+  const textArea = (field, placeholder, rows = 2, label, valueOverride) => (
     <textarea
-      value={prefs[field] || ''}
+      value={valueOverride ?? prefs[field] ?? ''}
       onChange={e => updateField(field, e.target.value)}
       placeholder={placeholder}
       aria-label={label || placeholder}
       rows={rows}
-      style={{
-        width: '100%', padding: '11px 14px', borderRadius: 10,
-        border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
-        color: B.navy, outline: 'none', boxSizing: 'border-box', resize: 'vertical',
-      }}
-      onFocus={e => e.target.style.borderColor = B.wavesBlue}
-      onBlur={e => e.target.style.borderColor = B.grayLight}
+      style={{ ...inputStyle, minHeight: rows * 28 + 34, resize: 'vertical', lineHeight: 1.45 }}
+      onFocus={focusBorder}
+      onBlur={blurBorder}
     />
   );
 
-  const textInput = (field, placeholder, label) => (
-    <div style={{ marginBottom: 12 }}>
-      {label && <label style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4, display: 'block' }}>{label}</label>}
+  const textInput = (field, placeholder, label, type = 'text') => (
+    <div>
+      {label && <label style={labelStyle}>{label}</label>}
       <input
-        type="text"
+        type={type}
         value={prefs[field] || ''}
         onChange={e => updateField(field, e.target.value)}
         placeholder={placeholder}
         aria-label={label || placeholder}
-        style={{
-          width: '100%', padding: '11px 14px', borderRadius: 10,
-          border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
-          color: B.navy, outline: 'none', boxSizing: 'border-box',
-        }}
-        onFocus={e => e.target.style.borderColor = B.wavesBlue}
-        onBlur={e => e.target.style.borderColor = B.grayLight}
+        style={inputStyle}
+        onFocus={focusBorder}
+        onBlur={blurBorder}
       />
     </div>
   );
 
+  const dateValue = (value) => {
+    if (!value) return '';
+    if (typeof value === 'string') return value.slice(0, 10);
+    const d = new Date(value);
+    return isNaN(d) ? '' : etDateString(d);
+  };
+
+  const dateInput = (field, label) => (
+    <div>
+      <label style={labelStyle}>{label}</label>
+      <input
+        type="date"
+        value={dateValue(prefs[field])}
+        onChange={e => updateField(field, e.target.value || null)}
+        aria-label={label}
+        style={inputStyle}
+        onFocus={focusBorder}
+        onBlur={blurBorder}
+      />
+    </div>
+  );
+
+  const sqft = (n) => {
+    const num = Number(n || 0);
+    return num > 0 ? `${num.toLocaleString()} sq ft` : 'Not set';
+  };
+  const displayChoice = (value, fallback = 'No preference') => {
+    if (!value || value === 'no_preference') return fallback;
+    return String(value).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  };
+  const fullAddress = formatPropertyAddress(customer);
+  const cleanTurf = (customer.property?.lawnType || '').replace(/\s*(Full Sun|Shade|Sun\/Shade)\s*/gi, '').trim() || 'Not set';
+  const homeSqFt = Number(customer.property?.propertySqFt || 0);
+  const bedSqFt = Number(customer.property?.bedSqFt || 0);
+  const treatedSqFt = homeSqFt ? Math.max(0, homeSqFt - bedSqFt) : 0;
+  const accessReady = [
+    prefs.neighborhoodGateCode,
+    prefs.propertyGateCode,
+    prefs.garageCode,
+    prefs.lockboxCode,
+    prefs.sideGateAccess,
+  ].some(Boolean);
+  const petCount = Math.max(0, Number(prefs.petCount || 0));
+  const petPlan = prefs.petsSecuredPlan ?? prefs.petSecuredPlan ?? '';
+  const petSummary = petCount > 0 ? `${petCount} pet${petCount === 1 ? '' : 's'} on file` : 'No pets listed';
+  const scheduleSummary = `${displayChoice(prefs.preferredDay)}, ${displayChoice(prefs.preferredTime).toLowerCase()}`;
+  const irrigationSummary = prefs.irrigationSystem ? `${prefs.irrigationZones || 'Unknown'} zone${Number(prefs.irrigationZones) === 1 ? '' : 's'}${prefs.rainSensor ? ' with rain sensor' : ''}` : 'No irrigation system listed';
+  const hoaSummary = prefs.hoaName || prefs.hoaCompany || 'No HOA details listed';
+  const mapsKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+  const staticMapUrl = mapsKey && customer.address?.line1
+    ? `https://maps.googleapis.com/maps/api/staticmap?center=${encodeURIComponent(`${customer.address.line1}, ${customer.address.city}, ${customer.address.state} ${customer.address.zip}`)}&zoom=19&size=640x280&scale=2&maptype=satellite&key=${mapsKey}`
+    : '';
+  const saveText = saveStatus === 'saving'
+    ? 'Saving changes'
+    : saveStatus === 'saved'
+      ? 'Saved'
+      : saveStatus === 'error'
+        ? 'Save failed'
+        : 'Auto-save on';
+  const saveColor = saveStatus === 'error' ? B.red : saveStatus === 'saved' ? B.green : B.blueDeeper;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, position: 'relative' }}>
-      {/* Save toast */}
       {saveStatus && (
         <div style={{
-          position: 'fixed', top: 70, left: '50%', transform: 'translateX(-50%)',
-          padding: '8px 20px', borderRadius: 20, zIndex: 200,
-          background: saveStatus === 'saved' ? B.green : saveStatus === 'error' ? B.red : B.wavesBlue,
-          color: '#fff', fontSize: 14, fontWeight: 600,
-          boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
-          transition: 'opacity 0.3s',
-          opacity: saveStatus ? 1 : 0,
+          padding: '12px 14px',
+          borderRadius: 8,
+          border: `1px solid ${saveStatus === 'error' ? `${B.red}33` : '#BBF7D0'}`,
+          background: saveStatus === 'error' ? `${B.red}10` : '#F0FDF4',
+          color: saveStatus === 'error' ? B.red : B.green,
+          fontSize: 14,
+          fontWeight: 800,
         }}>
-          {saveStatus === 'saving' ? 'Saving...' : saveStatus === 'error' ? 'Save failed — try again' : 'Saved '}
+          {saveStatus === 'saving' ? 'Saving property details...' : saveStatus === 'error' ? 'Could not save. Please check your connection and try again.' : 'Property details saved.'}
         </div>
       )}
 
-      <SectionHeading>My Property</SectionHeading>
-
-      {/* Property overview from customer profile */}
-      <div style={{
-        borderRadius: 16, overflow: 'hidden', border: `1px solid ${B.grayLight}`,
-      }}>
-        {/* Satellite image */}
-        {customer.address?.line1 && (
-          <div style={{ width: '100%', height: 180, overflow: 'hidden', position: 'relative' }}>
+      <section style={{ ...card, overflow: 'hidden' }}>
+        {staticMapUrl && (
+          <div style={{ width: '100%', height: compact ? 140 : 170, overflow: 'hidden', background: subtle }}>
             <img
-              src={`https://maps.googleapis.com/maps/api/staticmap?center=${encodeURIComponent(`${customer.address.line1}, ${customer.address.city}, ${customer.address.state} ${customer.address.zip}`)}&zoom=19&size=640x300&maptype=satellite&key=${import.meta.env.VITE_GOOGLE_MAPS_API_KEY || ''}`}
+              src={staticMapUrl}
               alt="Property satellite view"
               style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-              onError={e => { e.target.style.display = 'none'; }}
+              onError={e => { e.currentTarget.style.display = 'none'; }}
             />
-            <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 40, background: 'linear-gradient(transparent, rgba(0,0,0,0.5))' }} />
           </div>
         )}
-        <div style={{
-          background: `linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark})`,
-          backgroundImage: `${HALFTONE_PATTERN}, linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark})`,
-          backgroundSize: `${HALFTONE_SIZE}, 100% 100%`,
-          padding: 20, color: '#fff',
-        }}>
-          <div style={{ fontSize: 16, fontWeight: 800, fontFamily: FONTS.heading }}>
-            {customer.address?.line1}
+        <div style={{ padding: compact ? 20 : 28 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+            <div style={{ minWidth: 0, flex: '1 1 300px' }}>
+              <div style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '5px 10px',
+                borderRadius: 999,
+                background: '#EEF6FF',
+                color: B.blueDeeper,
+                fontSize: 12,
+                fontWeight: 850,
+              }}>
+                <Icon name="house" size={14} strokeWidth={2} />
+                Property Profile
+              </div>
+              <h1 style={{
+                margin: '12px 0 8px',
+                color: B.blueDeeper,
+                fontFamily: FONTS.heading,
+                fontSize: compact ? 28 : 34,
+                lineHeight: 1.1,
+                letterSpacing: 0,
+              }}>
+                My Property
+              </h1>
+              <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
+                Access notes, pets, scheduling preferences, irrigation, and HOA details for your service team.
+              </div>
+              {fullAddress && <div style={{ marginTop: 4, fontSize: 14, color: muted }}>{fullAddress}</div>}
+            </div>
+            <div style={{
+              minWidth: compact ? '100%' : 210,
+              padding: '14px 16px',
+              borderRadius: 8,
+              background: subtle,
+              border: '1px solid #E1E7EF',
+              boxSizing: 'border-box',
+            }}>
+              <div style={{ ...sectionTitle, color: saveColor }}>Status</div>
+              <div style={{ marginTop: 3, fontSize: 20, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.ui }}>
+                {saveText}
+              </div>
+              <div style={{ marginTop: 2, fontSize: 12, color: muted }}>
+                {updatedAt || 'Ready for updates'}
+              </div>
+            </div>
           </div>
-          <div style={{ fontSize: 14, opacity: 0.8, marginTop: 4 }}>
-            {customer.address?.city}, {customer.address?.state} {customer.address?.zip}
-          </div>
-          <div style={{ display: 'flex', gap: 16, marginTop: 14, flexWrap: 'wrap' }}>
+
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: compact ? '1fr 1fr' : 'repeat(4, 1fr)',
+            gap: 10,
+            marginTop: 22,
+          }}>
             {[
-              { label: 'Turf', value: (customer.property?.lawnType || '—').replace(/\s*(Full Sun|Shade|Sun\/Shade)\s*/gi, '') || '—' },
-              { label: 'Home', value: customer.property?.propertySqFt ? `${customer.property.propertySqFt.toLocaleString()} sq ft` : '—' },
-              { label: 'Treated Area', value: customer.property?.bedSqFt ? `${(customer.property.propertySqFt - (customer.property.bedSqFt || 0)).toLocaleString()} sq ft` : (customer.property?.propertySqFt ? `${customer.property.propertySqFt.toLocaleString()} sq ft` : '—') },
-              { label: 'Lot', value: customer.property?.lotSqFt ? `${customer.property.lotSqFt.toLocaleString()} sq ft` : '—' },
-            ].map(p => (
-              <div key={p.label}>
-                <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.8, color: B.blueLight }}>{p.label}</div>
-                <div style={{ fontSize: 14, fontWeight: 700, marginTop: 2 }}>{p.value}</div>
+              { label: 'Turf', value: cleanTurf, sub: 'Lawn profile' },
+              { label: 'Home', value: sqft(homeSqFt), sub: 'Property size' },
+              { label: 'Treated Area', value: treatedSqFt ? sqft(treatedSqFt) : sqft(homeSqFt), sub: 'Estimated service area' },
+              { label: 'Lot', value: sqft(customer.property?.lotSqFt), sub: 'Parcel size' },
+            ].map((item) => (
+              <div key={item.label} style={{
+                border: '1px solid #E1E7EF',
+                borderRadius: 8,
+                background: subtle,
+                padding: 14,
+                minHeight: 78,
+                boxSizing: 'border-box',
+              }}>
+                <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>{item.label}</div>
+                <div style={{
+                  marginTop: 6,
+                  color: B.blueDeeper,
+                  fontSize: 16,
+                  fontWeight: 850,
+                  lineHeight: 1.2,
+                  fontFamily: FONTS.ui,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}>{item.value}</div>
+                <div style={{ marginTop: 3, color: muted, fontSize: 12 }}>{item.sub}</div>
               </div>
             ))}
           </div>
-          {updatedAt && (
-            <div style={{ fontSize: 12, color: B.blueLight, marginTop: 12 }}>{updatedAt}</div>
-          )}
         </div>
-      </div>
+      </section>
 
-      {/* SECTION 1a — Service preferences (interior spray + exterior sweep) */}
       <ServicePrefsSection />
 
-      {/* SECTION 1 — Access & Gate Codes */}
-      <PropertySection title=" Access & Gate Codes">
-        <PasswordField
-          label="Neighborhood / Community Gate Code"
-          value={prefs.neighborhoodGateCode}
-          onChange={v => updateField('neighborhoodGateCode', v)}
-          placeholder="e.g., #1234 or press 5 for visitor"
-        />
-        <PasswordField
-          label="Property Gate Code"
-          value={prefs.propertyGateCode}
-          onChange={v => updateField('propertyGateCode', v)}
-          placeholder="e.g., Combination lock: 4821"
-        />
-        <PasswordField
-          label="Garage Code"
-          value={prefs.garageCode}
-          onChange={v => updateField('garageCode', v)}
-          placeholder="e.g., Keypad code: 9876"
-        />
-        <PasswordField
-          label="Lockbox Code"
-          value={prefs.lockboxCode}
-          onChange={v => updateField('lockboxCode', v)}
-          placeholder="e.g., Lockbox on back door: 0000"
-        />
-        {textInput('sideGateAccess', 'e.g., Side gate - lift latch, no code needed', 'Side Gate / Backyard Access')}
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>Parking Notes</div>
+      <PropertySection
+        title="Access"
+        icon="key"
+        summary={accessReady ? 'Technician access details are on file.' : 'Add gate or parking details before the next visit.'}
+        aside={<span style={{ fontSize: 12, fontWeight: 850, color: accessReady ? B.green : muted }}>{accessReady ? 'Ready' : 'Needs details'}</span>}
+      >
+        <div style={fieldGrid}>
+          <PasswordField
+            label="Community Gate"
+            value={prefs.neighborhoodGateCode}
+            onChange={v => updateField('neighborhoodGateCode', v)}
+            placeholder="e.g., #1234 or press 5"
+          />
+          <PasswordField
+            label="Property Gate"
+            value={prefs.propertyGateCode}
+            onChange={v => updateField('propertyGateCode', v)}
+            placeholder="e.g., Combination lock: 4821"
+          />
+          <PasswordField
+            label="Garage Code"
+            value={prefs.garageCode}
+            onChange={v => updateField('garageCode', v)}
+            placeholder="e.g., Keypad code: 9876"
+          />
+          <PasswordField
+            label="Lockbox Code"
+            value={prefs.lockboxCode}
+            onChange={v => updateField('lockboxCode', v)}
+            placeholder="e.g., Back door lockbox: 0000"
+          />
+          {textInput('sideGateAccess', 'e.g., Side gate - lift latch, no code needed', 'Side Gate / Backyard Access')}
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <label style={labelStyle}>Parking Notes</label>
           {textArea('parkingNotes', 'e.g., Park in driveway, HOA enforces no street parking')}
         </div>
-        <div style={{ fontSize: 12, color: B.grayMid, fontStyle: 'italic', marginTop: 4 }}>
-           Only visible to your assigned technician on service day
+        <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'flex-start', color: muted, fontSize: 12, lineHeight: 1.45 }}>
+          <Icon name="lock" size={15} strokeWidth={2} style={{ marginTop: 1 }} />
+          <span>Access codes are only shown to the assigned technician on service day.</span>
         </div>
       </PropertySection>
 
-      {/* SECTION 2 — Pets */}
-      <PropertySection title=" Pets">
-        <div style={{ marginBottom: 14 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 8 }}>How many pets?</div>
+      <PropertySection title="Pets" icon="paw" summary={petSummary}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 14, padding: 14, borderRadius: 8, background: subtle, border: '1px solid #E1E7EF', marginBottom: 14 }}>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Pets at this property</div>
+            <div style={{ marginTop: 2, fontSize: 14, color: muted }}>Helps technicians plan safe entry and treatment timing.</div>
+          </div>
           <NumberStepper value={prefs.petCount} onChange={v => {
             updateField('petCount', v);
-            // Resize structured pets array to match count
             const current = Array.isArray(prefs.petsStructured) ? prefs.petsStructured : [];
             if (v > current.length) {
               const extended = [...current];
@@ -4994,9 +5253,9 @@ function PropertyTab({ customer }) {
             }
           }} max={10} />
         </div>
-        {(prefs.petCount || 0) > 0 && (
+        {petCount > 0 && (
           <>
-            {Array.from({ length: prefs.petCount }).map((_, idx) => {
+            {Array.from({ length: petCount }).map((_, idx) => {
               const pet = (Array.isArray(prefs.petsStructured) ? prefs.petsStructured : [])[idx] || {};
               const updatePet = (key, val) => {
                 const arr = Array.isArray(prefs.petsStructured) ? [...prefs.petsStructured] : [];
@@ -5006,283 +5265,229 @@ function PropertyTab({ customer }) {
               };
               return (
                 <div key={idx} style={{
-                  marginBottom: 14, padding: 14, borderRadius: 12,
-                  background: B.offWhite, border: `1px solid ${B.grayLight}`,
+                  marginBottom: 14,
+                  padding: 14,
+                  borderRadius: 8,
+                  background: '#fff',
+                  border: '1px solid #E1E7EF',
                 }}>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, marginBottom: 10 }}>
+                  <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, marginBottom: 12 }}>
                     Pet {idx + 1}
                   </div>
-                  <div style={{ marginBottom: 10 }}>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>Name</div>
-                    <input
-                      type="text"
-                      value={pet.name || ''}
-                      onChange={e => updatePet('name', e.target.value)}
-                      placeholder="e.g., Max"
-                      aria-label={`Pet ${idx + 1} name`}
-                      style={{
-                        width: '100%', padding: '11px 14px', borderRadius: 10,
-                        border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
-                        color: B.navy, outline: 'none', boxSizing: 'border-box',
-                      }}
-                      onFocus={e => e.target.style.borderColor = B.wavesBlue}
-                      onBlur={e => e.target.style.borderColor = B.grayLight}
-                    />
-                  </div>
-                  <div style={{ marginBottom: 10 }}>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 6 }}>Type</div>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                      {['Dog', 'Cat', 'Other'].map(t => (
-                        <button key={t} onClick={() => updatePet('type', t)} style={{
-                          ...BUTTON_BASE, padding: '7px 14px', fontSize: 12, borderRadius: 20,
-                          background: pet.type === t ? B.wavesBlue : B.white,
-                          color: pet.type === t ? '#fff' : B.grayDark,
-                          border: pet.type === t ? 'none' : `1px solid ${B.grayLight}`,
-                        }}>{t}</button>
-                      ))}
+                  <div style={fieldGrid}>
+                    <div>
+                      <label style={labelStyle}>Name</label>
+                      <input
+                        type="text"
+                        value={pet.name || ''}
+                        onChange={e => updatePet('name', e.target.value)}
+                        placeholder="e.g., Max"
+                        aria-label={`Pet ${idx + 1} name`}
+                        style={inputStyle}
+                        onFocus={focusBorder}
+                        onBlur={blurBorder}
+                      />
+                    </div>
+                    <div>
+                      <label style={labelStyle}>Breed</label>
+                      <input
+                        type="text"
+                        value={pet.breed || ''}
+                        onChange={e => updatePet('breed', e.target.value)}
+                        placeholder="e.g., Golden Retriever"
+                        aria-label={`Pet ${idx + 1} breed`}
+                        style={inputStyle}
+                        onFocus={focusBorder}
+                        onBlur={blurBorder}
+                      />
                     </div>
                   </div>
-                  <div style={{ marginBottom: 10 }}>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>Breed (optional)</div>
-                    <input
-                      type="text"
-                      value={pet.breed || ''}
-                      onChange={e => updatePet('breed', e.target.value)}
-                      placeholder="e.g., Golden Retriever"
-                      aria-label={`Pet ${idx + 1} breed`}
-                      style={{
-                        width: '100%', padding: '11px 14px', borderRadius: 10,
-                        border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
-                        color: B.navy, outline: 'none', boxSizing: 'border-box',
-                      }}
-                      onFocus={e => e.target.style.borderColor = B.wavesBlue}
-                      onBlur={e => e.target.style.borderColor = B.grayLight}
-                    />
-                  </div>
-                  <div style={{ marginBottom: 10 }}>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 6 }}>Indoor / Outdoor</div>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                      {['Indoor', 'Outdoor', 'Both'].map(t => (
-                        <button key={t} onClick={() => updatePet('indoor', t)} style={{
-                          ...BUTTON_BASE, padding: '7px 14px', fontSize: 12, borderRadius: 20,
-                          background: pet.indoor === t ? B.wavesBlue : B.white,
-                          color: pet.indoor === t ? '#fff' : B.grayDark,
-                          border: pet.indoor === t ? 'none' : `1px solid ${B.grayLight}`,
-                        }}>{t}</button>
-                      ))}
+                  <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(3, minmax(0, 1fr))', gap: 12, marginTop: 12 }}>
+                    <div>
+                      <label style={labelStyle}>Type</label>
+                      <PillSelector value={pet.type} onChange={v => updatePet('type', v)} options={['Dog', 'Cat', 'Other'].map(t => ({ value: t, label: t }))} />
                     </div>
-                  </div>
-                  <div>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 6 }}>Temperament</div>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                      {['Friendly', 'Cautious', 'Aggressive'].map(t => (
-                        <button key={t} onClick={() => updatePet('temperament', t)} style={{
-                          ...BUTTON_BASE, padding: '7px 14px', fontSize: 12, borderRadius: 20,
-                          background: pet.temperament === t ? B.wavesBlue : B.white,
-                          color: pet.temperament === t ? '#fff' : B.grayDark,
-                          border: pet.temperament === t ? 'none' : `1px solid ${B.grayLight}`,
-                        }}>{t}</button>
-                      ))}
+                    <div>
+                      <label style={labelStyle}>Location</label>
+                      <PillSelector value={pet.indoor} onChange={v => updatePet('indoor', v)} options={['Indoor', 'Outdoor', 'Both'].map(t => ({ value: t, label: t }))} />
+                    </div>
+                    <div>
+                      <label style={labelStyle}>Temperament</label>
+                      <PillSelector value={pet.temperament} onChange={v => updatePet('temperament', v)} options={['Friendly', 'Cautious', 'Aggressive'].map(t => ({ value: t, label: t }))} />
                     </div>
                   </div>
                 </div>
               );
             })}
             <div>
-              <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>Pet Plan for Service Day</div>
-              {textArea('petSecuredPlan', 'e.g., Dogs will be inside. Please text 15 min before so I can secure them.', 2)}
+              <label style={labelStyle}>Service Day Plan</label>
+              {textArea('petsSecuredPlan', 'e.g., Dogs will be inside. Please text 15 min before so I can secure them.', 2, 'Service day pet plan', petPlan)}
             </div>
           </>
         )}
       </PropertySection>
 
-      {/* SECTION 3 — Scheduling Preferences */}
-      <PropertySection title="⏰ Scheduling Preferences">
-        <div style={{ marginBottom: 14 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 8 }}>Preferred Day</div>
-          <PillSelector
-            value={prefs.preferredDay}
-            onChange={v => updateField('preferredDay', v)}
-            options={[
-              { value: 'monday', label: 'Mon' }, { value: 'tuesday', label: 'Tue' },
-              { value: 'wednesday', label: 'Wed' }, { value: 'thursday', label: 'Thu' },
-              { value: 'friday', label: 'Fri' }, { value: 'no_preference', label: 'No Preference' },
-            ]}
-          />
+      <PropertySection title="Scheduling" icon="calendar" summary={scheduleSummary}>
+        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(3, minmax(0, 1fr))', gap: 14 }}>
+          <div>
+            <label style={labelStyle}>Preferred Day</label>
+            <PillSelector
+              value={prefs.preferredDay}
+              onChange={v => updateField('preferredDay', v)}
+              options={[
+                { value: 'monday', label: 'Mon' }, { value: 'tuesday', label: 'Tue' },
+                { value: 'wednesday', label: 'Wed' }, { value: 'thursday', label: 'Thu' },
+                { value: 'friday', label: 'Fri' }, { value: 'no_preference', label: 'Any' },
+              ]}
+            />
+          </div>
+          <div>
+            <label style={labelStyle}>Preferred Time</label>
+            <PillSelector
+              value={prefs.preferredTime}
+              onChange={v => updateField('preferredTime', v)}
+              options={[
+                { value: 'early_morning', label: '7-9' }, { value: 'morning', label: '9-11' },
+                { value: 'midday', label: '11-1' }, { value: 'afternoon', label: '1-4' },
+                { value: 'no_preference', label: 'Any' },
+              ]}
+            />
+          </div>
+          <div>
+            <label style={labelStyle}>Contact</label>
+            <PillSelector
+              value={prefs.contactPreference}
+              onChange={v => updateField('contactPreference', v)}
+              options={[
+                { value: 'call', label: 'Call' }, { value: 'text', label: 'Text' },
+                { value: 'email', label: 'Email' },
+              ]}
+            />
+          </div>
         </div>
-        <div style={{ marginBottom: 14 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 8 }}>Preferred Time</div>
-          <PillSelector
-            value={prefs.preferredTime}
-            onChange={v => updateField('preferredTime', v)}
-            options={[
-              { value: 'early_morning', label: 'Early AM (7-9)' }, { value: 'morning', label: 'Morning (9-11)' },
-              { value: 'midday', label: 'Midday (11-1)' }, { value: 'afternoon', label: 'Afternoon (1-4)' },
-              { value: 'no_preference', label: 'No Preference' },
-            ]}
-          />
-        </div>
-        <div style={{ marginBottom: 14 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 8 }}>Contact Preference</div>
-          <PillSelector
-            value={prefs.contactPreference}
-            onChange={v => updateField('contactPreference', v)}
-            options={[
-              { value: 'call', label: ' Call' }, { value: 'text', label: ' Text' },
-              { value: 'email', label: ' Email' },
-            ]}
-          />
-        </div>
-        <div style={{
-          padding: 14, borderRadius: 12, background: B.offWhite,
-          border: `1px solid ${B.grayLight}`,
-        }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, marginBottom: 4 }}>Blackout Dates</div>
-          <div style={{ fontSize: 12, color: B.grayMid, marginBottom: 10 }}>
+        <div style={{ marginTop: 16, padding: 14, borderRadius: 8, background: subtle, border: '1px solid #E1E7EF' }}>
+          <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, marginBottom: 4 }}>Blackout dates</div>
+          <div style={{ fontSize: 14, color: muted, marginBottom: 12 }}>
             Do not service between these dates (vacation, events, etc.)
           </div>
-          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-            <div style={{ flex: 1, minWidth: 130 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>Start Date</div>
-              <input
-                type="date"
-                value={prefs.blackoutStart || ''}
-                onChange={e => updateField('blackoutStart', e.target.value || null)}
-                aria-label="Blackout start date"
-                style={{
-                  width: '100%', padding: '11px 14px', borderRadius: 10,
-                  border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
-                  color: B.navy, outline: 'none', boxSizing: 'border-box',
-                }}
-                onFocus={e => e.target.style.borderColor = B.wavesBlue}
-                onBlur={e => e.target.style.borderColor = B.grayLight}
-              />
-            </div>
-            <div style={{ flex: 1, minWidth: 130 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>End Date</div>
-              <input
-                type="date"
-                value={prefs.blackoutEnd || ''}
-                onChange={e => updateField('blackoutEnd', e.target.value || null)}
-                aria-label="Blackout end date"
-                style={{
-                  width: '100%', padding: '11px 14px', borderRadius: 10,
-                  border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
-                  color: B.navy, outline: 'none', boxSizing: 'border-box',
-                }}
-                onFocus={e => e.target.style.borderColor = B.wavesBlue}
-                onBlur={e => e.target.style.borderColor = B.grayLight}
-              />
-            </div>
+          <div style={fieldGrid}>
+            {dateInput('blackoutStart', 'Start Date')}
+            {dateInput('blackoutEnd', 'End Date')}
           </div>
         </div>
       </PropertySection>
 
-      {/* SECTION 4 — Irrigation */}
-      <PropertySection title=" Irrigation">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>Has irrigation system?</div>
-          <div onClick={() => updateField('irrigationSystem', !prefs.irrigationSystem)} style={{
-            width: 44, height: 24, borderRadius: 12, cursor: 'pointer',
-            background: prefs.irrigationSystem ? B.wavesBlue : B.grayLight,
-            position: 'relative', transition: 'background 0.3s',
-          }}>
-            <div style={{
-              position: 'absolute', top: 2, width: 20, height: 20,
-              borderRadius: '50%', background: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
-              left: prefs.irrigationSystem ? 22 : 2, transition: 'left 0.3s',
-            }} />
+      <PropertySection title="Irrigation" icon="droplet" summary={irrigationSummary}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Irrigation system</div>
+            <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>Watering timing can affect lawn and pest applications.</div>
           </div>
+          <ToggleSwitch checked={!!prefs.irrigationSystem} onChange={() => updateField('irrigationSystem', !prefs.irrigationSystem)} label="Irrigation system" />
         </div>
         {prefs.irrigationSystem && (
           <>
-            {textInput('irrigationControllerLocation', 'e.g., Left side of garage, gray box', 'Controller Location')}
-            <div style={{ marginBottom: 12 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 8 }}>Number of Zones</div>
-              <NumberStepper value={prefs.irrigationZones} onChange={v => updateField('irrigationZones', v)} max={20} />
+            <div style={fieldGrid}>
+              {textInput('irrigationControllerLocation', 'e.g., Left side of garage, gray box', 'Controller Location')}
+              <div>
+                <label style={labelStyle}>Number of Zones</label>
+                <NumberStepper value={prefs.irrigationZones} onChange={v => updateField('irrigationZones', v)} max={20} label="Irrigation zones" />
+              </div>
             </div>
-            <div style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 8 }}>Watering Days</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            <div style={{ marginTop: 14 }}>
+              <label style={labelStyle}>Watering Days</label>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(day => {
                   const days = Array.isArray(prefs.wateringDays) ? prefs.wateringDays : [];
                   const active = days.includes(day);
                   return (
-                    <button key={day} onClick={() => {
+                    <button key={day} type="button" aria-pressed={active} onClick={() => {
                       const next = active ? days.filter(d => d !== day) : [...days, day];
                       updateField('wateringDays', next);
                     }} style={{
-                      ...BUTTON_BASE, padding: '7px 14px', fontSize: 12, borderRadius: 20,
-                      background: active ? B.wavesBlue : B.offWhite,
-                      color: active ? '#fff' : B.grayDark,
-                      border: active ? 'none' : `1px solid ${B.grayLight}`,
+                      ...BUTTON_BASE,
+                      minWidth: 44,
+                      padding: '8px 10px',
+                      fontSize: 14,
+                      borderRadius: 8,
+                      letterSpacing: 0,
+                      boxShadow: 'none',
+                      background: active ? '#EEF6FF' : '#fff',
+                      color: active ? B.blueDeeper : muted,
+                      border: `1px solid ${active ? B.wavesBlue : '#CBD5E1'}`,
                     }}>{day}</button>
                   );
                 })}
               </div>
             </div>
-            <div style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 8 }}>System Type</div>
-              <PillSelector
-                value={prefs.irrigationSystemType}
-                onChange={v => updateField('irrigationSystemType', v)}
-                options={[
-                  { value: 'spray', label: 'In-ground Spray' },
-                  { value: 'drip', label: 'Drip' },
-                  { value: 'rotor', label: 'Rotor' },
-                ]}
-              />
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>Rain sensor installed?</div>
-              <div onClick={() => updateField('rainSensor', !prefs.rainSensor)} style={{
-                width: 44, height: 24, borderRadius: 12, cursor: 'pointer',
-                background: prefs.rainSensor ? B.wavesBlue : B.grayLight,
-                position: 'relative', transition: 'background 0.3s',
-              }}>
-                <div style={{
-                  position: 'absolute', top: 2, width: 20, height: 20,
-                  borderRadius: '50%', background: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
-                  left: prefs.rainSensor ? 22 : 2, transition: 'left 0.3s',
-                }} />
+            <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 220px', gap: 14, marginTop: 14, alignItems: 'end' }}>
+              <div>
+                <label style={labelStyle}>System Type</label>
+                <PillSelector
+                  value={prefs.irrigationSystemType}
+                  onChange={v => updateField('irrigationSystemType', v)}
+                  options={[
+                    { value: 'spray', label: 'In-ground Spray' },
+                    { value: 'drip', label: 'Drip' },
+                    { value: 'rotor', label: 'Rotor' },
+                  ]}
+                />
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: '10px 12px', border: '1px solid #E1E7EF', borderRadius: 8, background: subtle }}>
+                <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Rain sensor</div>
+                <ToggleSwitch checked={!!prefs.rainSensor} onChange={() => updateField('rainSensor', !prefs.rainSensor)} label="Rain sensor installed" />
               </div>
             </div>
-            <div style={{ marginBottom: 12 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>Schedule Notes</div>
-              {textArea('irrigationScheduleNotes', 'e.g., Runs Mon/Wed/Fri at 4am. Zone 3 seems to run too long.', 3)}
-            </div>
-            <div>
-              <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>Known Issues</div>
-              {textArea('irrigationIssues', "e.g., Zone 4 doesn't reach the back corner", 2)}
+            <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 12, marginTop: 14 }}>
+              <div>
+                <label style={labelStyle}>Schedule Notes</label>
+                {textArea('irrigationScheduleNotes', 'e.g., Runs Mon/Wed/Fri at 4am. Zone 3 seems to run too long.', 3)}
+              </div>
+              <div>
+                <label style={labelStyle}>Known Issues</label>
+                {textArea('irrigationIssues', "e.g., Zone 4 doesn't reach the back corner", 3)}
+              </div>
             </div>
           </>
         )}
       </PropertySection>
 
-      {/* SECTION 5 — HOA Information */}
-      <PropertySection title=" HOA Information">
-        {textInput('hoaName', 'e.g., Sandpiper Bay HOA', 'HOA Name')}
-        {textInput('hoaCompany', 'e.g., FirstService Residential', 'HOA Management Company')}
-        {textInput('hoaPhone', 'e.g., (239) 555-0100', 'HOA Contact Phone')}
-        {textInput('hoaEmail', 'e.g., manager@sandpiperhoa.com', 'HOA Contact Email')}
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, marginBottom: 4 }}>HOA Restrictions</div>
-          {textArea('hoaRestrictions', 'e.g., No signs in yard, must notify management 24hr before exterior treatment, no parking on street', 3)}
+      <PropertySection title="HOA" icon="building" summary={hoaSummary}>
+        <div style={fieldGrid}>
+          {textInput('hoaName', 'e.g., Sandpiper Bay HOA', 'HOA Name')}
+          {textInput('hoaCompany', 'e.g., FirstService Residential', 'Management Company')}
+          {textInput('hoaPhone', 'e.g., (239) 555-0100', 'Contact Phone', 'tel')}
+          {textInput('hoaEmail', 'e.g., manager@sandpiperhoa.com', 'Contact Email', 'email')}
+          {textInput('hoaLawnHeight', 'e.g., Must be mowed below 4 inches', 'Lawn Height Requirement')}
+          {textInput('hoaInspectionPeriod', 'e.g., March and October', 'Inspection Period')}
         </div>
-        {textInput('hoaLawnHeight', 'e.g., Must be mowed below 4 inches', 'Lawn Height Requirement')}
-        {textInput('hoaSignageRules', 'e.g., No lawn signs allowed', 'Treatment Signage Rules')}
-        {textInput('hoaTimingRestrictions', 'e.g., No spray before 9 AM near pool', 'Application Timing Restrictions')}
-        {textInput('hoaInspectionPeriod', 'e.g., March and October', 'Annual Inspection Period')}
+        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 12, marginTop: 12 }}>
+          <div>
+            <label style={labelStyle}>HOA Restrictions</label>
+            {textArea('hoaRestrictions', 'e.g., No signs in yard, must notify management 24hr before exterior treatment, no parking on street', 3)}
+          </div>
+          <div>
+            <label style={labelStyle}>Treatment Signage</label>
+            {textArea('hoaSignageRules', 'e.g., No lawn signs allowed', 3)}
+          </div>
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <label style={labelStyle}>Application Timing Restrictions</label>
+          {textArea('hoaTimingRestrictions', 'e.g., No spray before 9 AM near pool', 2)}
+        </div>
       </PropertySection>
 
-      {/* SECTION 6 — Access Notes */}
-      <PropertySection title=" Access Notes">
-        {textArea('accessNotes', "e.g., Please don't ring doorbell — baby sleeping during morning appointments", 2)}
-      </PropertySection>
-
-      {/* SECTION 7 — Anything Else */}
-      <PropertySection title=" Anything Else">
-        {textArea('specialInstructions', 'Anything else your technician should know about your property...', 4)}
+      <PropertySection title="Technician notes" icon="clipboard" summary="Doorbell, access, and special instructions for the service day.">
+        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 12 }}>
+          <div>
+            <label style={labelStyle}>Access Notes</label>
+            {textArea('accessNotes', "e.g., Please don't ring doorbell - baby sleeping during morning appointments", 3)}
+          </div>
+          <div>
+            <label style={labelStyle}>Anything Else</label>
+            {textArea('specialInstructions', 'Anything else your technician should know about your property...', 3)}
+          </div>
+        </div>
       </PropertySection>
     </div>
   );
@@ -7264,8 +7469,8 @@ function ServiceTracker() {
             propertyPrefs?.neighborhoodGateCode || propertyPrefs?.propertyGateCode
               ? { icon: 'checkCircle', text: 'Gate code on file', ok: true }
               : { icon: 'warning', text: 'No gate code on file', ok: false },
-            propertyPrefs?.petCount > 0 && propertyPrefs?.petSecuredPlan
-              ? { icon: 'checkCircle', text: `Pet plan: ${propertyPrefs.petSecuredPlan.slice(0, 40)}`, ok: true }
+            propertyPrefs?.petCount > 0 && (propertyPrefs?.petsSecuredPlan || propertyPrefs?.petSecuredPlan)
+              ? { icon: 'checkCircle', text: `Pet plan: ${(propertyPrefs.petsSecuredPlan || propertyPrefs.petSecuredPlan).slice(0, 40)}`, ok: true }
               : { icon: 'warning', text: 'Secure pets before tech arrives', ok: false },
             { icon: 'unlock', text: 'Ensure gates are unlocked', ok: true },
             ...(isLawn ? [
