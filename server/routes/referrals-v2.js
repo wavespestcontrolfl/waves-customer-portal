@@ -62,10 +62,17 @@ router.get('/', async (req, res, next) => {
       .orderBy('created_at', 'desc');
 
     const settings = await engine.getSettings();
+    const referralLink = engine.getPromoterReferralLink(promoter, settings);
+    if (promoter.referral_link !== referralLink) {
+      void db('referral_promoters')
+        .where({ id: promoter.id })
+        .update({ referral_link: referralLink, updated_at: new Date() })
+        .catch(err => logger.warn(`[referrals-v2] referral link repair failed for promoter ${promoter.id}: ${err.message}`));
+    }
 
     const total = referrals.length;
     const converted = referrals.filter(r => ['signed_up', 'credited'].includes(r.status)).length;
-    const pending = referrals.filter(r => ['pending', 'contacted'].includes(r.status)).length;
+    const pending = referrals.filter(r => ['pending', 'contacted', 'estimated', 'sms_failed'].includes(r.status)).length;
 
     // Milestone progress
     const milestones = [
@@ -80,7 +87,7 @@ router.get('/', async (req, res, next) => {
 
     res.json({
       referralCode: promoter.referral_code,
-      referralLink: promoter.referral_link,
+      referralLink,
       milestoneLevel: currentLevel,
       nextMilestone: nextMilestone ? {
         level: nextMilestone.level,
@@ -130,13 +137,16 @@ router.get('/stats', async (req, res, next) => {
       });
     }
 
+    const settings = await engine.getSettings();
+    const referralLink = engine.getPromoterReferralLink(promoter, settings);
+
     res.json({
       totalReferrals: promoter.total_referrals_sent || 0,
       totalConverted: promoter.total_referrals_converted || 0,
       totalEarned: promoter.total_earned_cents || 0,
       availableBalance: promoter.available_balance_cents || 0,
       referralCode: promoter.referral_code,
-      referralLink: promoter.referral_link,
+      referralLink,
       milestoneLevel: promoter.milestone_level || 'none',
       enrolled: true,
     });
@@ -164,8 +174,10 @@ router.post('/', submitLimiter, async (req, res, next) => {
       referral: {
         id: referral.id,
         name: referral.referee_name,
-        status: referral.status || 'contacted',
+        status: referral.status || (referral.sms_sent ? 'contacted' : 'sms_failed'),
         smsSent: referral.sms_sent,
+        phone: maskPhone(referral.referee_phone || referral.referral_phone),
+        createdAt: referral.created_at,
       },
     });
   } catch (err) {
@@ -187,6 +199,7 @@ router.post('/invite', inviteLimiter, async (req, res, next) => {
 
     const { promoter } = await engine.enrollPromoter(req.customerId);
     const settings = await engine.getSettings();
+    const referralLink = engine.getPromoterReferralLink(promoter, settings);
 
     // Cooldown: same promoter+phone within 24 hours = no-op (idempotent double-tap protection)
     const cleanPhone = phone.replace(/\s+/g, '');
@@ -202,7 +215,7 @@ router.post('/invite', inviteLimiter, async (req, res, next) => {
     }
 
     const friendly = friendName ? ` ${friendName.replace(/[<>]/g, '')}` : '';
-    const body = `Hi${friendly}! ${promoter.first_name} thinks you'd love Waves Pest Control. Get a free quote: ${promoter.referral_link || settings.base_url + promoter.referral_code} or call (941) 318-7612`;
+    const body = `Hi${friendly}! ${promoter.first_name} thinks you'd love Waves Pest Control. Get a free quote: ${referralLink} or call (941) 318-7612`;
 
     const smsResult = await sendCustomerMessage({
       to: cleanPhone,

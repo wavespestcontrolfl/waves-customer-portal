@@ -22,7 +22,7 @@ router.get('/stats', async (req, res, next) => {
       ).first(),
       db('referrals').select(
         db.raw("COUNT(*) as total"),
-        db.raw("COUNT(*) FILTER (WHERE status = 'pending' OR status = 'contacted') as pending"),
+        db.raw("COUNT(*) FILTER (WHERE status IN ('pending','contacted','estimated','sms_failed')) as pending"),
         db.raw("COUNT(*) FILTER (WHERE status = 'signed_up' OR status = 'credited') as converted"),
         db.raw("COALESCE(SUM(CASE WHEN referrer_reward_status IN ('earned','paid') THEN referrer_reward_amount ELSE 0 END), 0) as total_rewards"),
         db.raw("COALESCE(SUM(CASE WHEN status IN ('signed_up','credited') THEN converted_monthly_value ELSE 0 END), 0) as total_monthly_value"),
@@ -124,7 +124,7 @@ router.get('/queue', async (req, res, next) => {
     if (status) {
       query = query.where('referrals.status', status);
     } else {
-      query = query.whereIn('referrals.status', ['pending', 'contacted', 'estimated']);
+      query = query.whereIn('referrals.status', ['pending', 'contacted', 'estimated', 'sms_failed']);
     }
 
     const referrals = await query;
