@@ -9640,9 +9640,9 @@ const PRIMARY_TABS = [
   { id: 'refer', label: 'Refer', icon: 'gift' },
 ];
 const MORE_TABS = [
-  { id: 'documents', label: 'Documents', icon: 'document' },
-  { id: 'property', label: 'My Property', icon: 'house' },
-  { id: 'learn', label: 'Learn', icon: 'bulb' },
+  { id: 'documents', label: 'Documents', icon: 'document', description: 'Reports, invoices, and agreements' },
+  { id: 'property', label: 'My Property', icon: 'house', description: 'Property details and service notes' },
+  { id: 'learn', label: 'Learn', icon: 'bulb', description: 'Local tips, articles, and FAQs' },
 ];
 const TAB_TITLES = {
   dashboard: 'Customer Dashboard',
@@ -9693,50 +9693,151 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
   );
 }
 
-function MoreSheet({ activeTab, onSelect, onClose }) {
+function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
   // Close on Esc for keyboard users.
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
+
+  const muted = '#64748B';
+  const card = {
+    background: B.white,
+    border: '1px solid #E1E7EF',
+    borderRadius: 8,
+    boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+  };
+  const iconTile = {
+    width: 38,
+    height: 38,
+    borderRadius: 8,
+    background: '#EEF6FF',
+    color: B.blueDeeper,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  };
+  const supportActionStyle = {
+    minHeight: 44,
+    borderRadius: 8,
+    border: '1px solid #CBD5E1',
+    background: B.white,
+    color: B.blueDeeper,
+    fontFamily: FONTS.heading,
+    fontSize: 14,
+    fontWeight: 850,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+    textDecoration: 'none',
+    cursor: 'pointer',
+  };
+
   return (
     <div
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
       style={{
         position: 'fixed', inset: 0, zIndex: 150,
-        background: 'rgba(0,0,0,0.4)',
+        background: 'rgba(15,23,42,0.42)',
         display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
       }}
     >
       <div role="dialog" aria-modal="true" aria-label="More navigation" style={{
-        background: B.white, borderRadius: '20px 20px 0 0', padding: '18px 20px 28px',
-        boxShadow: '0 -4px 30px rgba(0,0,0,0.15)',
+        background: '#F8FAFC',
+        borderRadius: '20px 20px 0 0',
+        padding: '12px 14px max(18px, env(safe-area-inset-bottom))',
+        boxShadow: '0 -8px 40px rgba(15,23,42,0.18)',
         animation: 'moreSheetUp 0.25s ease',
+        borderTop: '1px solid #E1E7EF',
+        maxHeight: 'calc(100vh - 16px)',
+        overflowY: 'auto',
+        WebkitOverflowScrolling: 'touch',
       }}>
         <style>{`@keyframes moreSheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }`}</style>
         <div style={{
-          width: 36, height: 4, borderRadius: 2, background: B.grayLight,
-          margin: '0 auto 14px',
+          width: 36, height: 4, borderRadius: 999, background: '#CBD5E1',
+          margin: '0 auto 12px',
         }} />
-        <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 12 }}>More</div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
+          <div>
+            <div style={{ fontSize: 20, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading, lineHeight: 1.15 }}>More</div>
+            <div style={{ marginTop: 3, fontSize: 14, color: muted }}>Documents, property tools, and help from Waves.</div>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close more menu" style={{
+            width: 34,
+            height: 34,
+            borderRadius: 8,
+            border: '1px solid #CBD5E1',
+            background: '#fff',
+            color: B.blueDeeper,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            cursor: 'pointer',
+            flexShrink: 0,
+          }}>
+            <Icon name="close" size={16} strokeWidth={2} />
+          </button>
+        </div>
+
+        <section style={{ ...card, padding: 8, marginBottom: 10 }}>
           {MORE_TABS.map(t => {
             const isActive = activeTab === t.id;
             return (
               <button key={t.id} onClick={() => onSelect(t.id)} style={{
-                display: 'flex', alignItems: 'center', gap: 14, padding: '12px 14px',
-                border: 'none', background: isActive ? `${B.wavesBlue}10` : 'transparent',
-                borderRadius: 12, cursor: 'pointer', textAlign: 'left',
-                color: isActive ? B.wavesBlue : B.navy,
-                fontFamily: FONTS.body, fontSize: 14, fontWeight: isActive ? 700 : 500,
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+                padding: '11px 10px',
+                border: 'none',
+                background: isActive ? '#EEF6FF' : 'transparent',
+                borderRadius: 8,
+                cursor: 'pointer',
+                textAlign: 'left',
+                color: isActive ? B.blueDeeper : B.grayDark,
+                fontFamily: FONTS.body,
               }}>
-                <Icon name={t.icon} size={20} strokeWidth={1.75} />
-                <span>{t.label}</span>
+                <span style={{ ...iconTile, background: isActive ? '#fff' : '#EEF6FF' }}>
+                  <Icon name={t.icon} size={18} strokeWidth={2} />
+                </span>
+                <span style={{ minWidth: 0, flex: 1 }}>
+                  <span style={{ display: 'block', fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>{t.label}</span>
+                  <span style={{ display: 'block', marginTop: 2, fontSize: 12, color: muted, lineHeight: 1.35 }}>{t.description}</span>
+                </span>
+                <Icon name="chevronRight" size={17} strokeWidth={2} style={{ color: muted }} />
               </button>
             );
           })}
-        </div>
+        </section>
+
+        <section style={{ ...card, padding: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={iconTile}><Icon name="sos" size={18} strokeWidth={2} /></span>
+            <div>
+              <div style={{ fontSize: 12, color: muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Support</div>
+              <div style={{ marginTop: 2, fontSize: 14, color: B.blueDeeper, fontWeight: 850 }}>Need help with service?</div>
+            </div>
+          </div>
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+            gap: 8,
+            marginTop: 12,
+          }}>
+            <a href="tel:+19412975749" onClick={onClose} style={supportActionStyle}><Icon name="phone" size={15} strokeWidth={2} /> Call</a>
+            <a href="sms:+19412975749" onClick={onClose} style={supportActionStyle}><Icon name="chat" size={15} strokeWidth={2} /> Text</a>
+            <button type="button" onClick={() => { onRequest?.(); onClose(); }} style={supportActionStyle}>
+              <Icon name="wrench" size={15} strokeWidth={2} /> Request
+            </button>
+            <button type="button" onClick={() => { onChat?.(); onClose(); }} style={supportActionStyle}>
+              <Icon name="bot" size={15} strokeWidth={2} /> Chat
+            </button>
+          </div>
+        </section>
       </div>
     </div>
   );
@@ -9835,8 +9936,9 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
 // AI CHAT WIDGET
 // =========================================================================
 function ChatWidget({ customer, onClose }) {
+  const firstName = customer?.firstName || customer?.first_name || '';
   const [messages, setMessages] = useState([
-    { role: 'assistant', content: `Hi${customer?.first_name ? ` ${customer.first_name}` : ''}! I'm the Waves AI assistant. How can I help you today?` },
+    { role: 'assistant', content: `Hi${firstName ? ` ${firstName}` : ''}! I'm the Waves AI assistant. How can I help you today?` },
   ]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -9878,57 +9980,84 @@ function ChatWidget({ customer, onClose }) {
   return (
     <div style={{
       position: 'fixed', bottom: 0, left: 0, right: 0, top: 0, zIndex: 200,
-      background: 'rgba(0,0,0,0.4)', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
+      background: 'rgba(15,23,42,0.42)', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
     }} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
       <div style={{
-        background: B.white, borderRadius: '20px 20px 0 0', maxHeight: '85vh',
-        display: 'flex', flexDirection: 'column', boxShadow: '0 -4px 30px rgba(0,0,0,0.15)',
+        background: B.white,
+        borderRadius: '20px 20px 0 0',
+        maxHeight: '85vh',
+        maxWidth: 640,
+        width: '100%',
+        margin: '0 auto',
+        display: 'flex',
+        flexDirection: 'column',
+        boxShadow: '0 -8px 40px rgba(15,23,42,0.18)',
         animation: 'chatSlideUp 0.3s ease',
+        border: '1px solid #E1E7EF',
+        borderBottom: 'none',
       }}>
         <style>{`@keyframes chatSlideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }`}</style>
 
         {/* Header */}
         <div style={{
-          padding: '16px 20px', borderBottom: `1px solid ${B.grayLight}`,
+          padding: '16px 18px',
+          borderBottom: '1px solid #E1E7EF',
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          background: `linear-gradient(135deg, ${B.wavesBlue}, ${B.blueDark})`, borderRadius: '20px 20px 0 0',
+          background: '#fff',
+          borderRadius: '20px 20px 0 0',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <div style={{
-              width: 36, height: 36, borderRadius: 18, background: 'rgba(255,255,255,0.2)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
-            }}><Icon name="waves" size={16} strokeWidth={1.75} /></div>
+              width: 40,
+              height: 40,
+              borderRadius: 8,
+              background: '#EEF6FF',
+              color: B.blueDeeper,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: 18,
+            }}><Icon name="waves" size={18} strokeWidth={2} /></div>
             <div>
-              <div style={{ fontSize: 15, fontWeight: 700, color: '#fff' }}>Waves Assistant</div>
-              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.7)' }}>Usually replies instantly</div>
+              <div style={{ fontSize: 15, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>Waves Assistant</div>
+              <div style={{ fontSize: 12, color: '#64748B', marginTop: 2 }}>Usually replies instantly</div>
             </div>
           </div>
           <button onClick={onClose} aria-label="Close chat" style={{
-            background: 'rgba(255,255,255,0.2)', border: 'none', color: '#fff',
-            width: 32, height: 32, borderRadius: 16, cursor: 'pointer',
+            background: '#fff',
+            border: '1px solid #CBD5E1',
+            color: B.blueDeeper,
+            width: 34,
+            height: 34,
+            borderRadius: 8,
+            cursor: 'pointer',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-          }}><Icon name="close" size={16} strokeWidth={1.75} /></button>
+          }}><Icon name="close" size={16} strokeWidth={2} /></button>
         </div>
 
         {/* Messages */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', minHeight: 300, maxHeight: '60vh' }}>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 18px', minHeight: 300, maxHeight: '60vh', background: '#F8FAFC' }}>
           {messages.map((msg, i) => (
             <div key={i} style={{
               display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
               marginBottom: 10,
             }}>
               <div style={{
-                maxWidth: '80%', padding: '10px 14px', borderRadius: 16,
-                fontSize: 16, lineHeight: 1.5, fontFamily: FONTS.body,
+                maxWidth: '84%',
+                padding: '10px 13px',
+                borderRadius: 8,
+                fontSize: 15,
+                lineHeight: 1.5,
+                fontFamily: FONTS.body,
+                boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
                 ...(msg.role === 'user' ? {
-                  background: B.wavesBlue, color: '#fff',
-                  borderBottomRightRadius: 4,
+                  background: B.blueDeeper, color: '#fff',
                 } : msg.role === 'system' ? {
-                  background: B.offWhite, color: B.grayMid, fontSize: 12, fontStyle: 'italic',
-                  borderRadius: 8,
+                  background: '#EEF6FF', color: B.blueDeeper, fontSize: 12, fontWeight: 700,
+                  border: '1px solid #CDEAFE',
                 } : {
-                  background: B.offWhite, color: B.navy,
-                  borderBottomLeftRadius: 4,
+                  background: '#fff', color: B.blueDeeper,
+                  border: '1px solid #E1E7EF',
                 }),
               }}>
                 {msg.content}
@@ -9937,7 +10066,7 @@ function ChatWidget({ customer, onClose }) {
           ))}
           {sending && (
             <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10 }}>
-              <div style={{ background: B.offWhite, padding: '10px 18px', borderRadius: 16, fontSize: 14, color: B.grayMid }}>
+              <div style={{ background: '#fff', padding: '10px 14px', borderRadius: 8, fontSize: 14, color: '#64748B', border: '1px solid #E1E7EF' }}>
                 <span style={{ animation: 'pulse 1.5s ease infinite' }}>{'•••'}</span>
               </div>
             </div>
@@ -9947,7 +10076,8 @@ function ChatWidget({ customer, onClose }) {
 
         {/* Input */}
         <div style={{
-          padding: '12px 16px', borderTop: `1px solid ${B.grayLight}`,
+          padding: '12px 16px',
+          borderTop: '1px solid #E1E7EF',
           display: 'flex', gap: 8, alignItems: 'center', paddingBottom: 'max(12px, env(safe-area-inset-bottom))',
         }}>
           <input
@@ -9957,18 +10087,30 @@ function ChatWidget({ customer, onClose }) {
             placeholder="Type a message..."
             aria-label="Chat message"
             style={{
-              flex: 1, padding: '10px 14px', borderRadius: 24, border: `1px solid ${B.grayLight}`,
-              fontSize: 14, fontFamily: FONTS.body, outline: 'none', background: B.offWhite,
+              flex: 1,
+              minWidth: 0,
+              height: 44,
+              padding: '0 14px',
+              borderRadius: 8,
+              border: '1px solid #CBD5E1',
+              fontSize: 14,
+              fontFamily: FONTS.body,
+              outline: 'none',
+              background: '#fff',
+              color: B.blueDeeper,
             }}
             autoFocus
           />
           <button onClick={send} disabled={sending || !input.trim()} style={{
-            width: 40, height: 40, borderRadius: 20, border: 'none',
-            background: input.trim() ? B.wavesBlue : B.grayLight,
+            width: 44,
+            height: 44,
+            borderRadius: 8,
+            border: 'none',
+            background: input.trim() ? B.blueDeeper : '#CBD5E1',
             color: '#fff', cursor: input.trim() ? 'pointer' : 'default',
             display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
             transition: 'background 0.15s',
-          }}>{'↑'}</button>
+          }} aria-label="Send message"><Icon name="arrowUp" size={18} strokeWidth={2.2} /></button>
         </div>
       </div>
     </div>
@@ -10079,6 +10221,23 @@ export default function PortalPage() {
       setRequestRefreshKey(key => key + 1);
     }
   };
+  const activePropertyAddress = formatPropertyAddress(customer);
+  const accountMenuItems = [
+    { icon: 'home', label: 'Home', sub: 'Portal overview', tab: 'dashboard', action: () => switchTab('dashboard') },
+    { icon: 'plan', label: 'My Plan', sub: 'Services and bundle savings', tab: 'plan', action: () => switchTab('plan') },
+    { icon: 'calendar', label: 'Visits', sub: 'Upcoming and completed service', tab: 'visits', action: () => switchTab('visits') },
+    { icon: 'card', label: 'Billing', sub: 'Payments, cards, and history', tab: 'billing', action: () => switchTab('billing') },
+    { icon: 'gift', label: 'Refer & Earn', sub: 'Share Waves with neighbors', tab: 'refer', action: () => switchTab('refer') },
+    { icon: 'document', label: 'Documents', sub: 'Reports and agreements', tab: 'documents', action: () => switchTab('documents') },
+    { icon: 'house', label: 'My Property', sub: 'Property profile and notes', tab: 'property', action: () => switchTab('property') },
+    { icon: 'bulb', label: 'Learn', sub: 'Tips, local alerts, and FAQ', tab: 'learn', action: () => switchTab('learn') },
+  ];
+  const accountSupportActions = [
+    { icon: 'phone', label: 'Call', href: 'tel:+19412975749' },
+    { icon: 'chat', label: 'Text', href: 'sms:+19412975749' },
+    { icon: 'wrench', label: 'Request', action: () => setShowReportIssue(true) },
+    { icon: 'bot', label: 'Chat', action: () => setShowChat(true) },
+  ];
 
   return (
     <div style={{
@@ -10129,24 +10288,62 @@ export default function PortalPage() {
           >{initials}</button>
           {showMenu && (
             <div style={{
-              position: 'absolute', right: 0, top: 44, minWidth: 200,
-              background: B.white, borderRadius: 14, overflow: 'hidden',
-              boxShadow: '0 8px 30px rgba(0,0,0,0.12)', border: `1px solid ${B.grayLight}`,
+              position: 'absolute',
+              right: 0,
+              top: 44,
+              width: 340,
+              maxWidth: 'calc(100vw - 24px)',
+              background: '#F8FAFC',
+              borderRadius: 8,
+              overflow: 'hidden',
+              maxHeight: 'calc(100vh - 72px)',
+              overflowY: 'auto',
+              boxShadow: '0 18px 45px rgba(15,23,42,0.18)',
+              border: '1px solid #E1E7EF',
               zIndex: 200,
             }}>
-              <div style={{ padding: '14px 16px', borderBottom: `1px solid ${B.grayLight}` }}>
-                <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>{customer.firstName} {customer.lastName}</div>
-                <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>{formatPhoneDisplay(customer.phone)}</div>
+              <div style={{ padding: 14, background: B.white, borderBottom: '1px solid #E1E7EF' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <span style={{
+                    width: 42,
+                    height: 42,
+                    borderRadius: 8,
+                    background: B.blueDeeper,
+                    color: '#fff',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: 15,
+                    fontWeight: 850,
+                    fontFamily: FONTS.heading,
+                    flexShrink: 0,
+                  }}>{initials}</span>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 15, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>
+                      {customer.firstName} {customer.lastName}
+                    </div>
+                    <div style={{ fontSize: 12, color: '#64748B', marginTop: 2 }}>{formatPhoneDisplay(customer.phone)}</div>
+                    {activePropertyAddress && (
+                      <div style={{ fontSize: 12, color: '#64748B', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {activePropertyAddress}
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
               {canSwitchProperties && (
-                <div style={{ padding: '10px 10px 8px', borderBottom: `1px solid ${B.grayLight}` }}>
+                <div style={{ padding: 12, borderBottom: '1px solid #E1E7EF' }}>
                   <div style={{
-                    fontSize: 10, color: B.grayMid, fontWeight: 800, letterSpacing: 0.5,
-                    textTransform: 'uppercase', padding: '0 6px 6px',
+                    fontSize: 12,
+                    color: '#64748B',
+                    fontWeight: 850,
+                    letterSpacing: 0,
+                    textTransform: 'uppercase',
+                    padding: '0 2px 8px',
                   }}>
                     Service Property
                   </div>
-                  <div style={{ display: 'grid', gap: 4 }}>
+                  <div style={{ display: 'grid', gap: 6 }}>
                     {portalProperties.map(property => {
                       const active = property.id === customer.id;
                       const address = formatPropertyAddress(property);
@@ -10157,22 +10354,27 @@ export default function PortalPage() {
                           onClick={() => selectProperty(property.id)}
                           disabled={active || !!switchingPropertyId}
                           style={{
-                            width: '100%', border: 'none', borderRadius: 8, textAlign: 'left',
-                            padding: '9px 8px', cursor: active || switchingPropertyId ? 'default' : 'pointer',
-                            background: active ? B.offWhite : B.white,
-                            color: B.navy, fontFamily: FONTS.body,
+                            width: '100%',
+                            border: `1px solid ${active ? '#A7DDF8' : '#E1E7EF'}`,
+                            borderRadius: 8,
+                            textAlign: 'left',
+                            padding: '9px 10px',
+                            cursor: active || switchingPropertyId ? 'default' : 'pointer',
+                            background: active ? '#EEF6FF' : B.white,
+                            color: B.blueDeeper,
+                            fontFamily: FONTS.body,
                           }}
                         >
                           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                             <span style={{ fontSize: 14, fontWeight: 800, minWidth: 0 }}>
                               {property.profileLabel || (property.isPrimaryProfile ? 'Primary' : 'Property')}
                             </span>
-                            {active && <span style={{ fontSize: 10, color: B.wavesBlue, fontWeight: 800 }}>Current</span>}
-                            {switchingPropertyId === property.id && <span style={{ fontSize: 10, color: B.grayMid, fontWeight: 800 }}>Switching</span>}
+                            {active && <span style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 850 }}>Current</span>}
+                            {switchingPropertyId === property.id && <span style={{ fontSize: 12, color: '#64748B', fontWeight: 850 }}>Switching</span>}
                           </div>
                           {address && (
                             <div style={{
-                              fontSize: 12, color: B.grayMid, marginTop: 2,
+                              fontSize: 12, color: '#64748B', marginTop: 2,
                               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                             }}>
                               {address}
@@ -10184,34 +10386,137 @@ export default function PortalPage() {
                   </div>
                 </div>
               )}
-              {[
-                { icon: 'home', label: 'Home', action: () => { switchTab('dashboard'); setShowMenu(false); } },
-                { icon: 'plan', label: 'My Plan', action: () => { switchTab('plan'); setShowMenu(false); } },
-                { icon: 'calendar', label: 'Visits', action: () => { switchTab('schedule'); setShowMenu(false); } },
-                { icon: 'card', label: 'Billing', action: () => { switchTab('billing'); setShowMenu(false); } },
-                { icon: 'sos', label: 'Request Service', action: () => { switchTab('request'); setShowMenu(false); } },
-                { icon: 'gift', label: 'Refer & Earn', action: () => { switchTab('refer'); setShowMenu(false); } },
-                { icon: 'document', label: 'Documents', action: () => { switchTab('documents'); setShowMenu(false); } },
-                { icon: 'house', label: 'My Property', action: () => { switchTab('property'); setShowMenu(false); } },
-                { icon: 'bulb', label: 'Learn', action: () => { switchTab('learn'); setShowMenu(false); } },
-              ].map(item => (
-                <div key={item.label} onClick={item.action} style={{
-                  padding: '11px 16px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10,
-                  transition: 'background 0.15s',
-                }} onMouseEnter={e => e.currentTarget.style.background = B.offWhite}
-                   onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-                  <Icon name={item.icon} size={18} strokeWidth={1.75} />
-                  <span style={{ fontSize: 14, fontWeight: 500, color: B.navy }}>{item.label}</span>
+              <div style={{ padding: 12, borderBottom: '1px solid #E1E7EF' }}>
+                <div style={{
+                  fontSize: 12,
+                  color: '#64748B',
+                  fontWeight: 850,
+                  textTransform: 'uppercase',
+                  letterSpacing: 0,
+                  padding: '0 2px 8px',
+                }}>Support</div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 6 }}>
+                  {accountSupportActions.map(action => {
+                    const sharedStyle = {
+                      minHeight: 54,
+                      borderRadius: 8,
+                      border: '1px solid #E1E7EF',
+                      background: B.white,
+                      color: B.blueDeeper,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: 5,
+                      fontFamily: FONTS.heading,
+                      fontSize: 12,
+                      fontWeight: 850,
+                      textDecoration: 'none',
+                      cursor: 'pointer',
+                    };
+                    const content = (
+                      <>
+                        <Icon name={action.icon} size={16} strokeWidth={2} />
+                        <span>{action.label}</span>
+                      </>
+                    );
+                    if (action.href) {
+                      return (
+                        <a key={action.label} href={action.href} onClick={() => setShowMenu(false)} style={sharedStyle}>
+                          {content}
+                        </a>
+                      );
+                    }
+                    return (
+                      <button
+                        key={action.label}
+                        type="button"
+                        onClick={() => { action.action(); setShowMenu(false); }}
+                        style={sharedStyle}
+                      >
+                        {content}
+                      </button>
+                    );
+                  })}
                 </div>
-              ))}
-              <div style={{ borderTop: `1px solid ${B.grayLight}` }}>
-                <div onClick={() => { logout(); setShowMenu(false); }} style={{
-                  padding: '11px 16px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10,
-                }} onMouseEnter={e => e.currentTarget.style.background = B.offWhite}
-                   onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-                  <Icon name="hand" size={16} strokeWidth={1.75} />
-                  <span style={{ fontSize: 14, fontWeight: 500, color: B.red }}>Sign Out</span>
-                </div>
+              </div>
+              <div style={{ padding: 8, background: B.white }}>
+                {accountMenuItems.map(item => {
+                  const isActive = activeTab === item.tab;
+                  return (
+                    <button
+                      key={item.label}
+                      type="button"
+                      onClick={() => { item.action(); setShowMenu(false); }}
+                      style={{
+                        width: '100%',
+                        border: 'none',
+                        background: isActive ? '#EEF6FF' : 'transparent',
+                        borderRadius: 8,
+                        padding: '10px 8px',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 10,
+                        textAlign: 'left',
+                        fontFamily: FONTS.body,
+                      }}
+                    >
+                      <span style={{
+                        width: 34,
+                        height: 34,
+                        borderRadius: 8,
+                        background: isActive ? '#fff' : '#EEF6FF',
+                        color: B.blueDeeper,
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        flexShrink: 0,
+                      }}>
+                        <Icon name={item.icon} size={16} strokeWidth={2} />
+                      </span>
+                      <span style={{ minWidth: 0, flex: 1 }}>
+                        <span style={{ display: 'block', fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>{item.label}</span>
+                        <span style={{ display: 'block', marginTop: 1, fontSize: 12, color: '#64748B', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.sub}</span>
+                      </span>
+                      {isActive && <Icon name="check" size={15} strokeWidth={2.2} style={{ color: B.wavesBlue }} />}
+                    </button>
+                  );
+                })}
+                <button
+                  type="button"
+                  onClick={() => { logout(); setShowMenu(false); }}
+                  style={{
+                    width: '100%',
+                    marginTop: 6,
+                    padding: '11px 8px',
+                    border: 'none',
+                    borderTop: '1px solid #E1E7EF',
+                    background: 'transparent',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    color: B.red,
+                    fontFamily: FONTS.body,
+                    textAlign: 'left',
+                  }}
+                >
+                  <span style={{
+                    width: 34,
+                    height: 34,
+                    borderRadius: 8,
+                    background: `${B.red}10`,
+                    color: B.red,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flexShrink: 0,
+                  }}>
+                    <Icon name="door" size={16} strokeWidth={2} />
+                  </span>
+                  <span style={{ fontSize: 14, fontWeight: 850 }}>Sign Out</span>
+                </button>
               </div>
             </div>
           )}
@@ -10264,6 +10569,8 @@ export default function PortalPage() {
           activeTab={activeTab}
           onSelect={(id) => { switchTab(id); setShowMoreSheet(false); }}
           onClose={() => setShowMoreSheet(false)}
+          onRequest={() => setShowReportIssue(true)}
+          onChat={() => setShowChat(true)}
         />
       )}
 
