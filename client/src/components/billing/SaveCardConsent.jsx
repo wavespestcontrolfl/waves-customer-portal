@@ -25,9 +25,9 @@ export default function SaveCardConsent({
       style={{
         display: 'flex', gap: 10, alignItems: 'flex-start',
         padding: '12px 14px',
-        background: '#F8F8F8',
-        border: '1px solid #E5E5E5',
-        borderRadius: 10,
+        background: '#F8FAFC',
+        border: '1px solid #E1E7EF',
+        borderRadius: 8,
         cursor: locked ? 'default' : 'pointer',
         ...style,
       }}
@@ -38,16 +38,16 @@ export default function SaveCardConsent({
         disabled={locked}
         onChange={(e) => !locked && onChange?.(e.target.checked)}
         style={{
-          width: 18, height: 18, accentColor: '#111',
+          width: 18, height: 18, accentColor: '#1B2C5B',
           marginTop: 2, flexShrink: 0,
           cursor: locked ? 'default' : 'pointer',
         }}
       />
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 14, fontWeight: 600, color: '#111', lineHeight: 1.35 }}>
+        <div style={{ fontSize: 14, fontWeight: 800, color: '#1B2C5B', lineHeight: 1.35 }}>
           {headline}
         </div>
-        <div style={{ fontSize: 12, color: '#525252', marginTop: 6, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 12, color: '#64748B', marginTop: 6, lineHeight: 1.5 }}>
           {CONSENT_TEXT}
         </div>
       </div>

@@ -3682,6 +3682,7 @@ function BillingTab({ customer }) {
   const [billingEmail, setBillingEmail] = useState('');
   const [paymentSmsEnabled, setPaymentSmsEnabled] = useState(true);
   const [billingPrefsSaving, setBillingPrefsSaving] = useState(false);
+  const compact = useIsMobile(760);
 
   // Stripe card management state
   const [showAddCard, setShowAddCard] = useState(false);
@@ -3790,13 +3791,71 @@ function BillingTab({ customer }) {
     }
   };
 
-  if (loading) return <div style={{ padding: 40, textAlign: 'center', color: B.grayMid }}>Loading billing...</div>;
+  const card = {
+    background: B.white,
+    border: '1px solid #E1E7EF',
+    borderRadius: 8,
+    boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+  };
+  const muted = '#64748B';
+  const subtle = '#F8FAFC';
+  const sectionTitle = {
+    fontSize: 14,
+    fontWeight: 850,
+    color: muted,
+    textTransform: 'uppercase',
+    letterSpacing: '0.08em',
+  };
+  const primaryButton = {
+    ...BUTTON_BASE,
+    background: B.blueDeeper,
+    color: '#fff',
+    border: 'none',
+    borderRadius: 8,
+    boxShadow: 'none',
+    padding: '10px 14px',
+    fontSize: 14,
+  };
+  const secondaryButton = {
+    ...BUTTON_BASE,
+    background: '#fff',
+    color: B.blueDeeper,
+    border: '1px solid #CBD5E1',
+    borderRadius: 8,
+    boxShadow: 'none',
+    padding: '10px 14px',
+    fontSize: 14,
+  };
+  const money = (n, digits = 2) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+  const methodLast4 = (method) => method?.lastFour || method?.last4 || '';
+  const methodLabel = (method) => {
+    if (!method) return 'No method on file';
+    const last4 = methodLast4(method);
+    if (method.methodType === 'ach') return `${method.bankName || 'Bank account'}${last4 ? ` ending in ${last4}` : ''}`;
+    return `${method.brand || 'Card'}${last4 ? ` ending in ${last4}` : ''}`;
+  };
+
+  if (loading) {
+    return (
+      <div style={{ ...card, padding: 28, textAlign: 'center', color: muted }}>
+        Loading billing...
+      </div>
+    );
+  }
 
   // Compute upcoming auto-pay info
   const nextCharge = balance?.nextCharge;
-  const amountDue = nextCharge?.amount || balance?.currentBalance || 247.02;
-  const dueDate = nextCharge?.date ? parseDate(nextCharge.date) : (() => { const d = new Date(); d.setDate(d.getDate() + 5); return d; })();
-  const daysUntilDue = Math.max(0, Math.ceil((dueDate - new Date()) / 86400000));
+  const autopayState = autopay?.state || (autopay?.autopay_enabled ? 'active' : 'unknown');
+  const amountDue = Number(autopayState === 'active'
+    ? (autopay?.next_charge_amount ?? autopay?.monthly_rate ?? 0)
+    : (nextCharge?.amount ?? balance?.currentBalance ?? customer?.monthlyRate ?? 0));
+  const dueDate = autopayState === 'active'
+    ? (autopay?.next_charge_date ? parseDate(autopay.next_charge_date) : null)
+    : nextCharge?.date ? parseDate(nextCharge.date) : balance?.dueDate ? parseDate(balance.dueDate) : null;
+  const daysUntilDue = dueDate ? Math.max(0, Math.ceil((dueDate - parseDate(etDateString())) / 86400000)) : null;
+  const dueDateLabel = dueDate && !isNaN(dueDate)
+    ? dueDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+    : 'Not scheduled';
   const defaultCard = cards.find(c => c.isDefault) || cards[0];
   const lastPaymentFailed = balance?.lastPaymentFailed || false;
   const tierName = customer?.tier || 'Bronze';
@@ -3820,7 +3879,6 @@ function BillingTab({ customer }) {
   })();
 
   // Banner state: red (failed) > amber (expiring) > green (all good)
-  const autopayState = autopay?.state || (autopay?.autopay_enabled ? 'active' : 'unknown');
   const bannerState = lastPaymentFailed
     ? 'failed'
     : cardExpiringSoon
@@ -3834,28 +3892,48 @@ function BillingTab({ customer }) {
             : 'unknown';
   const bannerConfig = {
     failed: {
-      bg: `${B.red}20`, border: `${B.red}33`, iconBg: B.red,
-      icon: '!', titleColor: B.red, subtitleColor: B.grayDark,
+      bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',
+      badge: 'Action needed', titleColor: B.red, subtitleColor: B.grayDark,
+      title: 'Payment failed - update your payment method',
+      detail: 'Your last payment could not be processed. Update your card to avoid service interruption.',
     },
     expiring: {
-      bg: `${B.orange}20`, border: `${B.orange}33`, iconBg: B.orange,
-      icon: '!', titleColor: B.orange, subtitleColor: B.grayDark,
+      bg: `${B.orange}10`, border: `${B.orange}33`, icon: 'warning',
+      badge: 'Card expiring', titleColor: B.orange, subtitleColor: B.grayDark,
+      title: `Card ending in ${cardExpiringSoon?.last4 || ''} expires in ${cardExpiringSoon?.months || 0} month${cardExpiringSoon?.months === 1 ? '' : 's'}`,
+      detail: 'Update your payment method to avoid any disruption to service.',
     },
     active: {
-      bg: `${B.green}20`, border: `${B.green}33`, iconBg: B.green,
-      icon: '\u2713', titleColor: B.green, subtitleColor: B.grayDark,
+      bg: '#F0FDF4', border: '#BBF7D0', icon: 'check',
+      badge: 'Auto Pay active', titleColor: B.green, subtitleColor: B.grayDark,
+      title: daysUntilDue === 0
+        ? 'Auto Pay is processing today'
+        : `Next charge ${money(amountDue)} on ${dueDateLabel}`,
+      detail: daysUntilDue === 0
+        ? `Amount: ${money(amountDue)}`
+        : `Amount due ${money(amountDue)}${dueDate ? ` - due ${dueDateLabel}` : ''}`,
     },
     paused: {
-      bg: `${B.orange}20`, border: `${B.orange}33`, iconBg: B.orange,
-      icon: '!', titleColor: B.orange, subtitleColor: B.grayDark,
+      bg: `${B.orange}10`, border: `${B.orange}33`, icon: 'clock',
+      badge: 'Auto Pay paused', titleColor: B.orange, subtitleColor: B.grayDark,
+      title: 'Auto Pay is paused',
+      detail: autopay?.paused_until
+        ? `Automatic charges resume after ${parseDate(autopay.paused_until).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}.`
+        : 'Automatic charges are paused until you resume Auto Pay.',
     },
     disabled: {
-      bg: B.offWhite, border: B.grayLight, iconBg: B.grayMid,
-      icon: 'i', titleColor: B.navy, subtitleColor: B.grayDark,
+      bg: subtle, border: '#E1E7EF', icon: 'card',
+      badge: 'Auto Pay off', titleColor: B.blueDeeper, subtitleColor: B.grayDark,
+      title: 'Auto Pay is off',
+      detail: balance?.currentBalance > 0
+        ? `Balance due: ${money(balance.currentBalance)}. Add or enable Auto Pay below to run future charges automatically.`
+        : 'Charges will not run automatically unless you enable Auto Pay below.',
     },
     unknown: {
-      bg: B.offWhite, border: B.grayLight, iconBg: B.grayMid,
-      icon: 'i', titleColor: B.navy, subtitleColor: B.grayDark,
+      bg: subtle, border: '#E1E7EF', icon: 'alert',
+      badge: 'Status unavailable', titleColor: B.blueDeeper, subtitleColor: B.grayDark,
+      title: 'Auto Pay status unavailable',
+      detail: 'We could not load your Auto Pay status. Your saved settings have not been changed.',
     },
   }[bannerState];
 
@@ -3873,7 +3951,7 @@ function BillingTab({ customer }) {
   };
 
   // Year-to-date summary
-  const currentYear = new Date().getFullYear();
+  const currentYear = parseDate(etDateString()).getFullYear();
   const ytdPayments = payments.filter(p => {
     const yr = parseDate(p.date).getFullYear();
     return yr === currentYear && p.status === 'paid';
@@ -3881,6 +3959,10 @@ function BillingTab({ customer }) {
   const ytdTotal = ytdPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
   const ytdRecurring = ytdPayments.filter(p => p.type === 'recurring').reduce((sum, p) => sum + (p.amount || 0), 0);
   const ytdOneTime = ytdPayments.filter(p => p.type === 'one_time').reduce((sum, p) => sum + (p.amount || 0), 0);
+  const paymentYears = Array.from(new Set([
+    currentYear,
+    ...payments.map(p => parseDate(p.date).getFullYear()).filter(Number.isFinite),
+  ])).sort((a, b) => b - a).map(String);
 
   // Filtered payments
   const filteredPayments = payments.filter(p => {
@@ -3906,17 +3988,38 @@ function BillingTab({ customer }) {
   const platinumSavings = totalFullPrice * platinumDiscount;
   const additionalSavings = platinumSavings - annualSavings;
 
-  // Pill filter helper
+  const currentBalance = Number(balance?.currentBalance || 0);
+  const balanceState = currentBalance > 0 ? 'Balance due' : 'Current';
+  const balanceTone = currentBalance > 0 ? B.orange : B.green;
+  const autopayLabel = bannerConfig.badge;
+  const defaultMethodLabel = methodLabel(defaultCard);
+  const historyDescription = filteredPayments.length === payments.length
+    ? `${payments.length} total payment${payments.length === 1 ? '' : 's'}`
+    : `${filteredPayments.length} of ${payments.length} payment${payments.length === 1 ? '' : 's'}`;
+
+  // Segmented filter helper
   const PillFilter = ({ options, value, onChange }) => (
     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
       {options.map(opt => (
-        <button key={opt} onClick={() => onChange(opt)} style={{
-          padding: '6px 14px', borderRadius: 20, border: `1px solid ${value === opt ? B.wavesBlue : B.grayLight}`,
-          background: value === opt ? `${B.wavesBlue}15` : 'transparent',
-          color: value === opt ? B.wavesBlue : B.grayMid,
-          fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: FONTS.heading,
-          transition: 'all 0.2s ease', minHeight: 36,
-        }}>{opt}</button>
+        <button
+          key={opt}
+          type="button"
+          onClick={() => onChange(opt)}
+          style={{
+            padding: '7px 12px',
+            borderRadius: 8,
+            border: `1px solid ${value === opt ? B.wavesBlue : '#CBD5E1'}`,
+            background: value === opt ? '#EEF6FF' : '#fff',
+            color: value === opt ? B.blueDeeper : muted,
+            fontSize: 12,
+            fontWeight: 800,
+            cursor: 'pointer',
+            fontFamily: FONTS.heading,
+            minHeight: 34,
+          }}
+        >
+          {opt}
+        </button>
       ))}
     </div>
   );
@@ -3930,213 +4033,227 @@ function BillingTab({ customer }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <SectionHeading>Billing</SectionHeading>
+      <section style={{ ...card, padding: compact ? 20 : 28 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '5px 10px',
+              borderRadius: 999,
+              background: tier ? `${tier.color}18` : '#EEF6FF',
+              color: B.blueDeeper,
+              fontSize: 12,
+              fontWeight: 850,
+            }}>
+              WaveGuard {tierName}
+            </div>
+            <h1 style={{
+              margin: '12px 0 8px',
+              color: B.blueDeeper,
+              fontFamily: FONTS.heading,
+              fontSize: compact ? 28 : 34,
+              lineHeight: 1.1,
+              letterSpacing: 0,
+            }}>
+              Billing
+            </h1>
+            <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
+              Payment methods, Auto Pay, receipts, and billing preferences.
+            </div>
+          </div>
+          <div style={{
+            minWidth: compact ? '100%' : 190,
+            padding: '14px 16px',
+            borderRadius: 8,
+            background: currentBalance > 0 ? `${B.orange}10` : '#F0FDF4',
+            border: `1px solid ${currentBalance > 0 ? `${B.orange}33` : '#BBF7D0'}`,
+            boxSizing: 'border-box',
+          }}>
+            <div style={{ fontSize: 12, color: balanceTone, fontWeight: 850, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              {balanceState}
+            </div>
+            <div style={{ marginTop: 3, fontSize: 24, fontWeight: 850, color: B.blueDeeper }}>
+              {money(currentBalance)}
+            </div>
+            <div style={{ marginTop: 2, fontSize: 12, color: muted }}>
+              {dueDate && currentBalance > 0 ? `Due ${dueDateLabel}` : 'Account balance'}
+            </div>
+          </div>
+        </div>
 
-      {/* ── 1. Status Banner — conditional states ── */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: compact ? '1fr 1fr' : 'repeat(4, 1fr)',
+          gap: 10,
+          marginTop: 22,
+        }}>
+          {[
+            { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? `Next ${dueDateLabel}` : 'Manage below' },
+            { label: 'Default method', value: defaultMethodLabel, sub: cards.length ? `${cards.length} saved` : 'None saved' },
+            { label: 'Monthly plan', value: money(monthlyRate), sub: `WaveGuard ${tierName}` },
+            { label: `${currentYear} paid`, value: money(ytdTotal), sub: `${ytdPayments.length} payment${ytdPayments.length === 1 ? '' : 's'}` },
+          ].map((item) => (
+            <div key={item.label} style={{
+              border: '1px solid #E1E7EF',
+              borderRadius: 8,
+              background: subtle,
+              padding: 14,
+              minHeight: 74,
+            }}>
+              <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>{item.label}</div>
+              <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 16, fontWeight: 850, lineHeight: 1.15 }}>{item.value}</div>
+              <div style={{ marginTop: 3, color: muted, fontSize: 12 }}>{item.sub}</div>
+            </div>
+          ))}
+        </div>
+      </section>
+
       <div style={{
-        background: bannerConfig.bg, borderRadius: 14, padding: '16px 20px',
-        border: `1px solid ${bannerConfig.border}`, display: 'flex', alignItems: 'center', gap: 14,
+        background: bannerConfig.bg,
+        borderRadius: 8,
+        padding: 16,
+        border: `1px solid ${bannerConfig.border}`,
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: 12,
       }}>
         <div style={{
-          width: 40, height: 40, borderRadius: 20, background: bannerConfig.iconBg,
-          display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+          width: 36,
+          height: 36,
+          borderRadius: 8,
+          background: '#fff',
+          color: bannerConfig.titleColor,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexShrink: 0,
+          border: `1px solid ${bannerConfig.border}`,
         }}>
-          <span style={{ color: '#fff', fontSize: 18, fontWeight: 700 }}>{bannerConfig.icon}</span>
+          <Icon name={bannerConfig.icon} size={18} strokeWidth={2} />
         </div>
-        <div style={{ flex: 1 }}>
-          {bannerState === 'failed' && (
-            <>
-              <div style={{ fontSize: 14, fontWeight: 700, color: bannerConfig.titleColor }}>
-                Payment failed — please update your payment method
-              </div>
-              <div style={{ fontSize: 14, color: bannerConfig.subtitleColor, marginTop: 2 }}>
-                Your last payment could not be processed. Update your card to avoid service interruption.
-              </div>
-            </>
-          )}
-          {bannerState === 'expiring' && (
-            <>
-              <div style={{ fontSize: 14, fontWeight: 700, color: bannerConfig.titleColor }}>
-                Your card ending in {cardExpiringSoon.last4} expires in {cardExpiringSoon.months} month{cardExpiringSoon.months !== 1 ? 's' : ''} — update now
-              </div>
-              <div style={{ fontSize: 14, color: bannerConfig.subtitleColor, marginTop: 2 }}>
-                Update your payment method to avoid any disruption to your service.
-              </div>
-            </>
-          )}
-          {bannerState === 'active' && (
-            <>
-              <div style={{ fontSize: 14, fontWeight: 700, color: bannerConfig.titleColor }}>
-                {daysUntilDue === 0
-                  ? 'Auto Pay is active — your payment is processing today'
-                  : `Auto Pay is active — your next charge of $${amountDue.toFixed(2)} processes on ${dueDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' })}`
-                }
-              </div>
-              <div style={{ fontSize: 14, color: bannerConfig.subtitleColor, marginTop: 2 }}>
-                {daysUntilDue === 0
-                  ? `Amount: $${amountDue.toFixed(2)}`
-                  : `Amount due: $${amountDue.toFixed(2)} · Due ${dueDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}`
-                }
-              </div>
-            </>
-          )}
-          {bannerState === 'paused' && (
-            <>
-              <div style={{ fontSize: 14, fontWeight: 700, color: bannerConfig.titleColor }}>
-                Auto Pay is paused
-              </div>
-              <div style={{ fontSize: 14, color: bannerConfig.subtitleColor, marginTop: 2 }}>
-                {autopay?.paused_until
-                  ? `Automatic charges resume after ${parseDate(autopay.paused_until).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}.`
-                  : 'Automatic charges are paused until you resume Auto Pay.'}
-              </div>
-            </>
-          )}
-          {bannerState === 'disabled' && (
-            <>
-              <div style={{ fontSize: 14, fontWeight: 700, color: bannerConfig.titleColor }}>
-                Auto Pay is off
-              </div>
-              <div style={{ fontSize: 14, color: bannerConfig.subtitleColor, marginTop: 2 }}>
-                {balance?.currentBalance > 0
-                  ? `Balance due: $${balance.currentBalance.toFixed(2)}. Add or enable Auto Pay below to run future charges automatically.`
-                  : 'Charges will not run automatically unless you enable Auto Pay below.'}
-              </div>
-            </>
-          )}
-          {bannerState === 'unknown' && (
-            <>
-              <div style={{ fontSize: 14, fontWeight: 700, color: bannerConfig.titleColor }}>
-                Auto Pay status unavailable
-              </div>
-              <div style={{ fontSize: 14, color: bannerConfig.subtitleColor, marginTop: 2 }}>
-                We could not load your Auto Pay status. Your saved settings have not been changed.
-              </div>
-            </>
-          )}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 12, color: bannerConfig.titleColor, fontWeight: 850, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+            {bannerConfig.badge}
+          </div>
+          <div style={{ marginTop: 3, fontSize: 15, fontWeight: 850, color: B.blueDeeper, lineHeight: 1.3 }}>
+            {bannerConfig.title}
+          </div>
+          <div style={{ fontSize: 14, color: bannerConfig.subtitleColor, marginTop: 3, lineHeight: 1.45 }}>
+            {bannerConfig.detail}
+          </div>
         </div>
       </div>
 
-      {/* ── 1b. Autopay Control Card ── */}
       <AutopayCard onStateChange={setAutopay} />
 
-      {/* ── 2. Balance Card with context ── */}
-      {balance && (
-        <div style={{ background: `linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark})`, borderRadius: 16, padding: 22, color: '#fff' }}>
-          <div style={{ fontSize: 12, color: B.blueLight, fontFamily: FONTS.body }}>Current Balance</div>
-          <div style={{ fontSize: 36, fontWeight: 700, fontFamily: FONTS.ui }}>${balance.currentBalance.toFixed(2)}</div>
-          {balance.currentBalance === 0 ? (
-            <div style={{ fontSize: 14, color: '#81C784', marginTop: 4, fontWeight: 600 }}>
-              All payments current — you're in good standing
-            </div>
-          ) : (
-            <div style={{ fontSize: 12, color: B.blueLight, marginTop: 4 }}>
-              {balance.balanceDescription || `Balance for WaveGuard ${tierName} membership`}
-              {balance.dueDate && ` · Due ${parseDate(balance.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`}
-            </div>
-          )}
-          {nextCharge && balance.currentBalance === 0 && (
-            <div style={{ fontSize: 12, color: B.blueLight, marginTop: 4 }}>
-              Next charge: ${nextCharge.amount.toFixed(2)} on {parseDate(nextCharge.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── 7. WaveGuard Membership Summary Card ── */}
       <div style={{
-        background: `linear-gradient(135deg, ${tier?.gradientFrom || B.navy}22, ${tier?.gradientTo || B.navyLight}15)`,
-        borderRadius: 16, padding: 20, border: `1.5px solid ${tier?.color || B.navy}44`,
-        position: 'relative', overflow: 'hidden',
+        ...card,
+        padding: 20,
       }}>
-        <div style={{ position: 'absolute', top: -20, right: -20, fontSize: 80, opacity: 0.08 }}></div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+          <div>
+            <div style={sectionTitle}>Plan Charges</div>
+            <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 20, fontWeight: 850 }}>
+              WaveGuard {tierName}
+            </div>
+          </div>
           <span style={{
-            fontSize: 12, fontWeight: 800, letterSpacing: 0.5, textTransform: 'uppercase',
-            padding: '4px 12px', borderRadius: 20,
-            background: `${tier?.color || B.navy}22`,
-            color: tier?.darkText ? B.navy : (tier?.color || B.navy),
-          }}>WaveGuard {tierName}</span>
-          <span style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui }}>${monthlyRate}/mo</span>
+            fontSize: 18,
+            fontWeight: 850,
+            color: B.blueDeeper,
+            fontFamily: FONTS.ui,
+          }}>{money(monthlyRate)}/mo</span>
         </div>
-        <div style={{ fontSize: 14, fontWeight: 600, color: B.navy, marginBottom: 8, fontFamily: FONTS.heading }}>Included Services</div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{ display: 'grid', gap: 8, marginTop: 16 }}>
           {includedServices.map(svc => (
-            <div key={svc.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: B.grayDark }}>
-              <Icon name={svc.icon} size={16} strokeWidth={1.75} style={{ color: B.wavesBlue }} />
-              <span>{svc.name}</span>
+            <div key={svc.id} style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              padding: '10px 12px',
+              borderRadius: 8,
+              background: subtle,
+              border: '1px solid #E1E7EF',
+              fontSize: 14,
+              color: B.grayDark,
+            }}>
+              <Icon name={svc.icon} size={16} strokeWidth={1.8} style={{ color: B.blueDeeper }} />
+              <span style={{ minWidth: 0, flex: 1 }}>{svc.name}</span>
               {discount > 0 && (
-                <span style={{ fontSize: 12, color: B.green, fontWeight: 600, marginLeft: 'auto' }}>
-                  ${(svc.basePrice * (1 - discount)).toFixed(0)}/mo <span style={{ textDecoration: 'line-through', color: B.grayMid }}>${svc.basePrice}</span>
+                <span style={{ fontSize: 14, color: B.green, fontWeight: 850, whiteSpace: 'nowrap' }}>
+                  {money(svc.basePrice * (1 - discount), 0)}/mo
                 </span>
               )}
             </div>
           ))}
         </div>
         {annualSavings > 0 && (
-          <div style={{ marginTop: 12, padding: '8px 12px', background: `${B.green}12`, borderRadius: 8, fontSize: 12, color: B.green, fontWeight: 600 }}>
-            Saving ${annualSavings.toFixed(0)}/year with your {tierName} bundle
+          <div style={{ marginTop: 12, padding: '10px 12px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, fontSize: 14, color: B.green, fontWeight: 850 }}>
+            Saving {money(annualSavings, 0)}/year with your {tierName} bundle
           </div>
         )}
         {tierName !== 'Platinum' && additionalSavings > 0 && (
-          <div style={{ marginTop: 10, fontSize: 12, color: B.wavesBlue, fontWeight: 600, cursor: 'pointer' }}>
-            Explore Platinum — save {Math.round(((platinumDiscount - discount) / (1 - discount)) * 100)}% more on services
+          <div style={{ marginTop: 10, fontSize: 14, color: muted, fontWeight: 700 }}>
+            Platinum would add {money(additionalSavings, 0)}/year in bundle savings.
           </div>
         )}
       </div>
 
-      {/* ── Manage Payment Methods ── */}
-      <div style={{ background: B.white, borderRadius: 14, padding: 20, border: `1px solid ${B.grayLight}` }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Manage Payment Methods</div>
-          <button onClick={handleAddCard} disabled={stripeLoading} style={{
-            padding: '6px 14px', borderRadius: 8, border: `1px solid ${B.wavesBlue}`,
-            background: 'transparent', color: B.wavesBlue, fontSize: 12, fontWeight: 600, cursor: 'pointer',
-            opacity: stripeLoading ? 0.6 : 1, minHeight: 36,
-          }}>{stripeLoading && !showAddCard ? 'Loading...' : '+ Add New'}</button>
+      <div style={{ ...card, padding: 20 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', marginBottom: 14, flexWrap: 'wrap' }}>
+          <div>
+            <div style={sectionTitle}>Payment Methods</div>
+            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>Saved methods</div>
+          </div>
+          <button
+            type="button"
+            onClick={handleAddCard}
+            disabled={stripeLoading}
+            style={{ ...secondaryButton, opacity: stripeLoading ? 0.6 : 1, cursor: stripeLoading ? 'wait' : 'pointer' }}
+          >
+            <Icon name="plus" size={15} strokeWidth={2} style={{ marginRight: 6 }} />
+            {stripeLoading && !showAddCard ? 'Loading...' : 'Add method'}
+          </button>
         </div>
 
         {cards.map(c => (
           <div key={c.id} style={{
             display: 'flex', alignItems: 'center', gap: 14, padding: '14px 16px',
-            background: B.offWhite, borderRadius: 10, marginBottom: 8,
+            background: subtle, borderRadius: 8, marginBottom: 8, border: '1px solid #E1E7EF',
+            flexWrap: 'wrap',
           }}>
             <div style={{
               width: 48, height: 32, borderRadius: 6,
-              background: `linear-gradient(135deg, ${B.navy}, ${B.navyLight})`,
+              background: B.blueDeeper,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               color: '#fff', fontSize: 10, fontWeight: 800, letterSpacing: 1, fontFamily: FONTS.ui,
             }}>{c.brand || 'CARD'}</div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>{c.brand || 'Card'} ending in {c.lastFour}</div>
-              {c.expMonth && <div style={{ fontSize: 12, color: B.grayMid }}>Expires {c.expMonth}/{c.expYear}</div>}
-              {c.methodType === 'ach' && c.bankName && <div style={{ fontSize: 12, color: B.grayMid }}>{c.bankName}</div>}
+            <div style={{ flex: 1, minWidth: 180 }}>
+              <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>{methodLabel(c)}</div>
+              {c.expMonth && <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Expires {c.expMonth}/{c.expYear}</div>}
+              {c.methodType === 'ach' && c.bankName && <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>{c.bankName}</div>}
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               {c.isDefault ? (
-                <span style={{ fontSize: 12, fontWeight: 600, color: B.green, background: `${B.green}15`, padding: '3px 8px', borderRadius: 6 }}>Default</span>
+                <span style={{ fontSize: 12, fontWeight: 850, color: B.green, background: '#F0FDF4', padding: '5px 9px', borderRadius: 8, border: '1px solid #BBF7D0' }}>Default</span>
               ) : (
-                <button onClick={() => handleSetDefault(c.id)} style={{
-                  padding: '4px 10px', borderRadius: 6, border: `1px solid ${B.wavesBlue}`,
-                  background: 'transparent', color: B.wavesBlue, fontSize: 12, cursor: 'pointer', minHeight: 36,
-                }}>Set Default</button>
+                <button type="button" onClick={() => handleSetDefault(c.id)} style={{ ...secondaryButton, padding: '8px 10px', fontSize: 12 }}>Set default</button>
               )}
-              <button onClick={() => handleRemoveCard(c.id)} style={{
-                padding: '4px 10px', borderRadius: 6, border: `1px solid ${B.grayLight}`,
-                background: 'transparent', color: B.red, fontSize: 12, cursor: 'pointer', minHeight: 36,
-              }}>Remove</button>
+              <button type="button" onClick={() => handleRemoveCard(c.id)} style={{ ...secondaryButton, padding: '8px 10px', fontSize: 12, color: B.red }}>Remove</button>
             </div>
           </div>
         ))}
 
         {cards.length === 0 && (
-          <div style={{ padding: 20, textAlign: 'center', color: B.grayMid, fontSize: 14 }}>
+          <div style={{ padding: 20, textAlign: 'center', color: muted, fontSize: 14, background: subtle, borderRadius: 8, border: '1px solid #E1E7EF' }}>
             No payment methods on file. Add a card to enable Auto Pay.
           </div>
         )}
 
         {stripeError && !showAddCard && (
-          <div style={{ padding: 10, background: `${B.red}20`, borderRadius: 8, fontSize: 14, color: B.red, marginTop: 8 }}>
+          <div style={{ padding: 10, background: `${B.red}10`, border: `1px solid ${B.red}33`, borderRadius: 8, fontSize: 14, color: B.red, marginTop: 8 }}>
             {stripeError}
           </div>
         )}
@@ -4150,18 +4267,20 @@ function BillingTab({ customer }) {
           zIndex: 9999, padding: 20,
         }} onClick={(e) => { if (e.target === e.currentTarget) { setShowAddCard(false); paymentElementRef.current = null; elementsRef.current = null; } }}>
           <div style={{
-            background: '#fff', borderRadius: 16, padding: 28, width: '100%', maxWidth: 440,
+            background: '#fff', borderRadius: 8, padding: 24, width: '100%', maxWidth: 460,
             boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+            border: '1px solid #E1E7EF',
           }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-              <div style={{ fontSize: 18, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Add Payment Method</div>
-              <button onClick={() => { setShowAddCard(false); paymentElementRef.current = null; elementsRef.current = null; }} style={{
-                background: 'none', border: 'none', fontSize: 22, cursor: 'pointer', color: B.grayMid, lineHeight: 1,
-              }}>x</button>
+              <div style={{ fontSize: 18, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>Add Payment Method</div>
+              <button type="button" aria-label="Close" onClick={() => { setShowAddCard(false); paymentElementRef.current = null; elementsRef.current = null; }} style={{
+                background: 'transparent', border: 'none', cursor: 'pointer', color: muted, lineHeight: 1,
+                width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              }}><Icon name="close" size={20} strokeWidth={2} /></button>
             </div>
             <div ref={cardMountRef} style={{ minHeight: 120, marginBottom: 16 }} />
             {stripeError && (
-              <div style={{ padding: 10, background: `${B.red}20`, borderRadius: 8, fontSize: 14, color: B.red, marginBottom: 12 }}>
+              <div style={{ padding: 10, background: `${B.red}10`, border: `1px solid ${B.red}33`, borderRadius: 8, fontSize: 14, color: B.red, marginBottom: 12 }}>
                 {stripeError}
               </div>
             )}
@@ -4172,29 +4291,41 @@ function BillingTab({ customer }) {
               <SaveCardConsent locked onChange={() => {}} />
             </div>
             <button onClick={handleConfirmCard} disabled={stripeLoading || !stripeReady} style={{
-              ...BUTTON_BASE, width: '100%', padding: 14, fontSize: 15,
-              background: stripeReady ? B.wavesBlue : B.grayLight,
+              ...primaryButton,
+              width: '100%',
+              padding: 14,
+              background: stripeReady ? B.blueDeeper : B.grayLight,
               color: stripeReady ? '#fff' : B.grayMid,
               opacity: stripeLoading ? 0.6 : 1,
+              cursor: stripeLoading || !stripeReady ? 'not-allowed' : 'pointer',
             }}>{stripeLoading ? 'Saving...' : 'Save Card'}</button>
-            <div style={{ fontSize: 12, color: B.textCaption, marginTop: 10, textAlign: 'center' }}>
+            <div style={{ fontSize: 12, color: muted, marginTop: 10, textAlign: 'center' }}>
               Secured by Stripe. We never store your card details directly.
             </div>
           </div>
         </div>
       )}
 
-      {/* ── 8. Credits & Adjustments ── */}
       {(totalCredits > 0 || credits.length > 0) && (
-        <div style={{ background: B.white, borderRadius: 14, padding: 20, border: `1px solid ${B.grayLight}` }}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 14 }}>Credits & Adjustments</div>
+        <div style={{ ...card, padding: 20 }}>
+          <div style={sectionTitle}>Credits</div>
+          <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper, marginBottom: 14 }}>Adjustments</div>
           {totalCredits > 0 && (
             <div style={{
-              padding: '10px 14px', background: `${B.green}10`, borderRadius: 10, marginBottom: 12,
-              fontSize: 14, fontWeight: 700, color: B.green, display: 'flex', justifyContent: 'space-between',
+              padding: '10px 14px',
+              background: '#F0FDF4',
+              border: '1px solid #BBF7D0',
+              borderRadius: 8,
+              marginBottom: 12,
+              fontSize: 14,
+              fontWeight: 850,
+              color: B.green,
+              display: 'flex',
+              justifyContent: 'space-between',
+              gap: 12,
             }}>
               <span>Total Account Credit</span>
-              <span>${totalCredits.toFixed(2)}</span>
+              <span>{money(totalCredits)}</span>
             </div>
           )}
           {[
@@ -4203,82 +4334,99 @@ function BillingTab({ customer }) {
             { label: 'Promo Credits', items: promoCredits, icon: 'party' },
           ].filter(g => g.items.length > 0).map(group => (
             <div key={group.label} style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <div style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
                 <Icon name={group.icon} size={12} strokeWidth={2} /> {group.label}
               </div>
               {group.items.map((cr, i) => (
                 <div key={i} style={{
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                  padding: '8px 14px', background: B.offWhite, borderRadius: 8, marginBottom: 4,
+                  padding: '10px 12px', background: subtle, borderRadius: 8, marginBottom: 4, border: '1px solid #E1E7EF',
                 }}>
                   <span style={{ fontSize: 14, color: B.grayDark }}>{cr.description || group.label}</span>
-                  <span style={{ fontSize: 14, fontWeight: 700, color: B.green, fontFamily: FONTS.ui }}>${(cr.amount || 0).toFixed(2)}</span>
+                  <span style={{ fontSize: 14, fontWeight: 850, color: B.green, fontFamily: FONTS.ui }}>{money(cr.amount || 0)}</span>
                 </div>
               ))}
             </div>
           ))}
           {credits.length === 0 && (
-            <div style={{ padding: 16, textAlign: 'center', color: B.grayMid, fontSize: 14 }}>No credits on your account</div>
+            <div style={{ padding: 16, textAlign: 'center', color: muted, fontSize: 14 }}>No credits on your account</div>
           )}
         </div>
       )}
 
-      {/* ── 4. Year-to-Date Summary ── */}
-      <div style={{ background: B.white, borderRadius: 14, padding: 20, border: `1px solid ${B.grayLight}` }}>
-        <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>
-          {currentYear} Summary
+      <div style={{ ...card, padding: 20 }}>
+        <div style={sectionTitle}>{currentYear} Summary</div>
+        <div style={{ marginTop: 8, fontSize: 28, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.ui }}>
+          {money(ytdTotal)}
         </div>
-        <div style={{ fontSize: 22, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui }}>
-          ${ytdTotal.toFixed(2)} <span style={{ fontSize: 14, fontWeight: 500, color: B.grayMid }}>across {ytdPayments.length} payment{ytdPayments.length !== 1 ? 's' : ''}</span>
+        <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
+          Across {ytdPayments.length} payment{ytdPayments.length !== 1 ? 's' : ''}
         </div>
-        <div style={{ fontSize: 14, color: B.grayDark, marginTop: 4 }}>
-          ${ytdRecurring.toFixed(2)} WaveGuard {tierName} · ${ytdOneTime.toFixed(2)} one-time services
+        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 10, marginTop: 14 }}>
+          <div style={{ padding: 12, background: subtle, border: '1px solid #E1E7EF', borderRadius: 8 }}>
+            <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>WaveGuard {tierName}</div>
+            <div style={{ marginTop: 5, color: B.blueDeeper, fontSize: 18, fontWeight: 850 }}>{money(ytdRecurring)}</div>
+          </div>
+          <div style={{ padding: 12, background: subtle, border: '1px solid #E1E7EF', borderRadius: 8 }}>
+            <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>One-time services</div>
+            <div style={{ marginTop: 5, color: B.blueDeeper, fontSize: 18, fontWeight: 850 }}>{money(ytdOneTime)}</div>
+          </div>
         </div>
       </div>
 
-      {/* ── 5. Payment History with filters ── */}
-      <div style={{ background: B.white, borderRadius: 14, padding: 20, border: `1px solid ${B.grayLight}` }}>
-        <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 14 }}>Payment History</div>
+      <div style={{ ...card, padding: 20 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
+          <div>
+            <div style={sectionTitle}>Payment History</div>
+            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>{historyDescription}</div>
+          </div>
+        </div>
 
-        {/* Filters */}
         <div style={{ display: 'flex', gap: 16, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 12, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5 }}>Year</span>
-            <PillFilter options={['2025', '2026', 'All']} value={yearFilter} onChange={setYearFilter} />
+            <span style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Year</span>
+            <PillFilter options={[...paymentYears, 'All']} value={yearFilter} onChange={setYearFilter} />
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 12, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5 }}>Type</span>
+            <span style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Type</span>
             <PillFilter options={['All', 'Recurring', 'One-Time']} value={typeFilter} onChange={setTypeFilter} />
           </div>
         </div>
 
         {filteredPayments.length === 0 && (
-          <div style={{ padding: 20, textAlign: 'center', color: B.grayMid, fontSize: 14 }}>No payments match your filters</div>
+          <div style={{ padding: 20, textAlign: 'center', color: muted, fontSize: 14 }}>No payments match your filters</div>
         )}
         {filteredPayments.map(p => (
           <div key={p.id} style={{
-            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-            padding: '12px 0', borderBottom: `1px solid ${B.grayLight}`,
+            display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
+            gap: 12,
+            padding: '14px 0',
+            borderBottom: `1px solid #E1E7EF`,
           }}>
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>{p.description}</div>
-              <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>{p.description}</div>
+              <div style={{ fontSize: 12, color: muted, marginTop: 3 }}>
                 {parseDate(p.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                {p.lastFour && ` · ${p.cardBrand} ••••${p.lastFour}`}
+                {p.lastFour && ` - ${p.cardBrand || 'Card'} ending in ${p.lastFour}`}
               </div>
-              {/* 6. Failed payments inline action */}
               {p.status === 'failed' && (
-                <button style={{
-                  marginTop: 6, padding: '4px 12px', borderRadius: 6, border: `1px solid ${B.red}`,
-                  background: 'transparent', color: B.red, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                <button type="button" style={{
+                  marginTop: 8, padding: '7px 10px', borderRadius: 8, border: `1px solid ${B.red}`,
+                  background: '#fff', color: B.red, fontSize: 12, fontWeight: 800, cursor: 'pointer',
                 }}>Update Payment Method</button>
               )}
             </div>
-            <div style={{ textAlign: 'right' }}>
-              <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui }}>${p.amount.toFixed(2)}</div>
+            <div style={{ textAlign: 'right', flexShrink: 0 }}>
+              <div style={{ fontSize: 15, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.ui }}>{money(p.amount)}</div>
               <span style={{
-                fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5,
-                padding: '3px 8px', borderRadius: 20,
+                display: 'inline-flex',
+                marginTop: 5,
+                fontSize: 14,
+                fontWeight: 850,
+                textTransform: 'uppercase',
+                letterSpacing: '0.06em',
+                padding: '4px 8px',
+                borderRadius: 999,
                 ...statusBadge(p.status),
               }}>{p.status}</span>
             </div>
@@ -4286,39 +4434,41 @@ function BillingTab({ customer }) {
         ))}
       </div>
 
-      {/* ── 9. Billing Preferences ── */}
-      <div style={{ background: B.white, borderRadius: 14, padding: 20, border: `1px solid ${B.grayLight}` }}>
-        <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 14 }}>Billing Preferences</div>
+      <div style={{ ...card, padding: 20 }}>
+        <div style={sectionTitle}>Billing Preferences</div>
+        <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper, marginBottom: 14 }}>Notifications</div>
 
-        {/* Billing email */}
         <div style={{ marginBottom: 14 }}>
-          <label style={{ fontSize: 12, fontWeight: 600, color: B.grayMid, display: 'block', marginBottom: 6 }}>
-            Billing Email (optional — separate from account email)
+          <label htmlFor="portal-billing-email" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+            Billing Email
           </label>
           <input
+            id="portal-billing-email"
+            name="billingEmail"
             type="email"
             value={billingEmail}
             onChange={e => setBillingEmail(e.target.value)}
             placeholder={customer?.email || 'billing@example.com'}
             aria-label="Billing email"
             style={{
-              width: '100%', padding: '10px 14px', borderRadius: 10, border: `1px solid ${B.grayLight}`,
-              fontSize: 14, fontFamily: FONTS.body, color: B.navy, background: B.offWhite,
+              width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #CBD5E1',
+              fontSize: 14, fontFamily: FONTS.body, color: B.blueDeeper, background: '#fff',
               outline: 'none', boxSizing: 'border-box',
             }}
           />
+          <div style={{ marginTop: 5, color: muted, fontSize: 12 }}>Optional - separate from account email.</div>
         </div>
 
-        {/* SMS toggle */}
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '14px 16px', background: B.offWhite, borderRadius: 10, marginBottom: 14,
+          padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E1E7EF', gap: 12,
         }}>
-          <div>
-            <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>Payment confirmation texts</div>
-            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>Get a text when your payment processes</div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Payment confirmation texts</div>
+            <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Get a text when your payment processes.</div>
           </div>
           <button
+            type="button"
             onClick={() => setPaymentSmsEnabled(!paymentSmsEnabled)}
             aria-label={`Payment confirmation texts ${paymentSmsEnabled ? 'enabled' : 'disabled'}`}
             style={{
@@ -4337,9 +4487,11 @@ function BillingTab({ customer }) {
           </button>
         </div>
 
-        <button onClick={saveBillingPrefs} disabled={billingPrefsSaving} style={{
-          ...BUTTON_BASE, padding: '10px 20px', background: B.wavesBlue, color: '#fff',
-          fontSize: 14, opacity: billingPrefsSaving ? 0.6 : 1, width: '100%',
+        <button type="button" onClick={saveBillingPrefs} disabled={billingPrefsSaving} style={{
+          ...primaryButton,
+          opacity: billingPrefsSaving ? 0.6 : 1,
+          width: '100%',
+          cursor: billingPrefsSaving ? 'wait' : 'pointer',
         }}>
           {billingPrefsSaving ? 'Saving...' : 'Save Billing Preferences'}
         </button>
