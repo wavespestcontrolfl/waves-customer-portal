@@ -161,6 +161,7 @@ router.get('/:token', loadSession, async (req, res, next) => {
         hoaRestrictions: prefs.hoa_restrictions,
         specialInstructions: prefs.special_instructions,
         chemicalSensitivities: prefs.chemical_sensitivities,
+        chemicalSensitivityDetails: prefs.chemical_sensitivity_details,
         specialFeatures: prefs.special_features || [],
       } : {},
     });
