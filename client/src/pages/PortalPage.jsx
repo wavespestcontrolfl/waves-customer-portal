@@ -5545,12 +5545,18 @@ function WeatherPestWidget({ customer, nextService }) {
       .catch(() => setLoading(false));
   }, []);
 
+  const card = {
+    background: B.white,
+    border: '1px solid #E1E7EF',
+    borderRadius: 8,
+    boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+  };
+  const muted = '#64748B';
+  const subtle = '#F8FAFC';
+
   if (loading) return (
-    <div style={{
-      background: `linear-gradient(135deg, ${B.navy}, ${B.navyLight})`,
-      borderRadius: 16, padding: 24, color: '#fff', textAlign: 'center',
-    }}>
-      <div style={{ fontSize: 14, opacity: 0.7 }}>Loading weather data...</div>
+    <div style={{ ...card, padding: 24, color: muted, textAlign: 'center', fontSize: 14 }}>
+      Loading local conditions...
     </div>
   );
 
@@ -5581,62 +5587,106 @@ function WeatherPestWidget({ customer, nextService }) {
     return actions[type]?.[level] || null;
   };
 
+  const pressure = weather.pestPressure || {};
   const pressureItems = [
-    { label: 'Mosquito Pressure', ...weather.pestPressure.mosquito, icon: 'bug', type: 'mosquito' },
-    { label: 'Fungus Risk', ...weather.pestPressure.fungus, icon: null, type: 'fungus' },
-    { label: 'Chinch Bug Risk', ...weather.pestPressure.chinch, icon: 'bug', type: 'chinch' },
+    { label: 'Mosquito Pressure', icon: 'bug', type: 'mosquito', level: pressure.mosquito?.level || 'LOW', color: pressure.mosquito?.color || B.green },
+    { label: 'Fungus Risk', icon: 'leaf', type: 'fungus', level: pressure.fungus?.level || 'LOW', color: pressure.fungus?.color || B.green },
+    { label: 'Chinch Bug Risk', icon: 'bug', type: 'chinch', level: pressure.chinch?.level || 'LOW', color: pressure.chinch?.color || B.green },
   ];
+  const irrigation = weather.irrigationRecommendation || {};
+  const irrigationInches = Number(irrigation.inches ?? 0);
+  const irrigationAmount = Number.isFinite(irrigationInches)
+    ? String(Number(irrigationInches.toFixed(2)))
+    : '0';
+  const updatedAt = weather.updatedAt ? new Date(weather.updatedAt) : null;
+  const updatedText = updatedAt && !isNaN(updatedAt)
+    ? updatedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+    : null;
 
   return (
-    <div style={{
-      background: `linear-gradient(135deg, ${B.navy}, ${B.navyLight}, #1a3a5c)`,
-      borderRadius: 16, overflow: 'hidden', color: '#fff',
-    }}>
-      {/* Weather header */}
-      <div style={{ padding: '18px 20px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-        <div>
-          <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1, color: B.blueLight }}>
+    <section style={{ ...card, padding: 18 }}>
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        gap: 18,
+        alignItems: 'flex-start',
+        flexWrap: 'wrap',
+      }}>
+        <div style={{ minWidth: 0, flex: '1 1 260px' }}>
+          <div style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '5px 10px',
+            borderRadius: 999,
+            background: '#EEF6FF',
+            color: B.blueDeeper,
+            fontSize: 12,
+            fontWeight: 850,
+          }}>
+            <Icon name="sun" size={14} strokeWidth={2} />
+            Local Conditions
+          </div>
+          <div style={{ marginTop: 10, fontSize: 18, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>
             {localizedLocation}
           </div>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 4 }}>
-            <span style={{ fontSize: 42, fontWeight: 800, fontFamily: FONTS.ui }}>{weather.temp}°</span>
-            <span style={{ fontSize: 14, opacity: 0.8 }}>F</span>
-          </div>
-          <div style={{ fontSize: 14, color: '#fff', marginTop: 2 }}>{weather.forecast}</div>
-          <div style={{ fontSize: 12, color: B.blueLight, marginTop: 2 }}>
-            Tonight: {weather.nightTemp}° · Humidity: {weather.humidity}% · Wind: {weather.wind}
+          <div style={{ marginTop: 3, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+            {weather.forecast || 'Current local weather'}{updatedText ? ` - updated ${updatedText}` : ''}
           </div>
         </div>
-        <div style={{ fontSize: 48, lineHeight: 1 }}>
-          {weather.forecast?.toLowerCase().includes('rain') || weather.forecast?.toLowerCase().includes('storm') ? '' :
-           weather.forecast?.toLowerCase().includes('cloud') ? '' :
-           weather.forecast?.toLowerCase().includes('sunny') || weather.forecast?.toLowerCase().includes('clear') ? '' : ''}
+        <div style={{
+          minWidth: 152,
+          padding: '12px 14px',
+          borderRadius: 8,
+          background: subtle,
+          border: '1px solid #E1E7EF',
+          textAlign: 'right',
+        }}>
+          <div style={{ fontSize: 40, lineHeight: 1, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.ui }}>
+            {weather.temp}°
+          </div>
+          <div style={{ marginTop: 4, fontSize: 12, color: muted }}>
+            Tonight {weather.nightTemp}° · {weather.humidity}% humidity
+          </div>
         </div>
       </div>
 
-      {/* Pest pressure bars with action items */}
-      <div style={{ padding: '0 20px 14px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+        gap: 10,
+        marginTop: 16,
+      }}>
         {pressureItems.map(p => {
           const action = getActionItem(p.type, p.level);
           return (
-            <div key={p.label}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                <span style={{ fontSize: 12, opacity: 0.9, display: 'inline-flex', alignItems: 'center', gap: 6 }}><Icon name={p.icon} size={14} strokeWidth={2} /> {p.label}</span>
+            <div key={p.label} style={{
+              border: '1px solid #E1E7EF',
+              borderRadius: 8,
+              background: subtle,
+              padding: 12,
+              minHeight: 112,
+              boxSizing: 'border-box',
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', marginBottom: 8 }}>
+                <span style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+                  <Icon name={p.icon} size={15} strokeWidth={2} /> {p.label}
+                </span>
                 <span style={{
                   fontSize: 12, fontWeight: 800, letterSpacing: 0.5,
-                  padding: '2px 8px', borderRadius: 10,
+                  padding: '3px 7px', borderRadius: 8,
                   background: `${p.color}33`, color: p.color,
                 }}>{p.level}</span>
               </div>
-              <div style={{ height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.15)' }}>
+              <div style={{ height: 5, borderRadius: 999, background: '#E2E8F0' }}>
                 <div style={{
-                  height: '100%', borderRadius: 2, background: p.color,
+                  height: '100%', borderRadius: 999, background: p.color,
                   width: p.level === 'HIGH' ? '100%' : p.level === 'MODERATE' ? '60%' : '25%',
                   transition: 'width 1s ease-out',
                 }} />
               </div>
               {action && (
-                <div style={{ fontSize: 12, color: B.blueLight, marginTop: 4, lineHeight: 1.4, paddingLeft: 2 }}>
+                <div style={{ fontSize: 12, color: muted, marginTop: 8, lineHeight: 1.45 }}>
                   {action}
                 </div>
               )}
@@ -5645,26 +5695,35 @@ function WeatherPestWidget({ customer, nextService }) {
         })}
       </div>
 
-      {/* Irrigation recommendation */}
       <div style={{
-        margin: '0 12px 12px', padding: '12px 16px', borderRadius: 12,
-        background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.15)',
+        marginTop: 10,
+        padding: 14,
+        borderRadius: 8,
+        background: '#EEF6FF',
+        border: '1px solid #CDEAFE',
         display: 'flex', alignItems: 'center', gap: 12,
       }}>
-        <Icon name="droplet" size={24} strokeWidth={1.75} />
-        <div>
-          <div style={{ fontSize: 12, fontWeight: 700 }}>
-            Irrigation: {weather.irrigationRecommendation.inches}" recommended
+        <span style={{
+          width: 36,
+          height: 36,
+          borderRadius: 8,
+          background: '#fff',
+          color: B.blueDeeper,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexShrink: 0,
+        }}>
+          <Icon name="droplet" size={18} strokeWidth={2} />
+        </span>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>
+            Irrigation: {irrigationAmount}" recommended
           </div>
-          <div style={{ fontSize: 12, color: B.blueLight }}>{weather.irrigationRecommendation.note}</div>
+          <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.4 }}>{irrigation.note || 'Adjust watering around rainfall and local restrictions.'}</div>
         </div>
       </div>
-
-      {/* Updated timestamp */}
-      <div style={{ padding: '0 20px 12px', fontSize: 10, opacity: 0.4, textAlign: 'right' }}>
-        Updated {new Date(weather.updatedAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
-      </div>
-    </div>
+    </section>
   );
 }
 
@@ -5716,10 +5775,17 @@ function FeedSection({ title, icon, fetchFn, emptyMsg }) {
   );
 }
 
-function ContentCard({ post, large }) {
+function ContentCard({ post, large, compact }) {
   const pubDate = post.pubDate ? new Date(post.pubDate) : null;
-  const sourceColors = { blog: B.wavesBlue, newsletter: B.yellow, ifas: B.green, local: B.grayMid };
-  const srcColor = sourceColors[post.source] || B.grayMid;
+  const sourceMeta = {
+    blog: { color: B.wavesBlue, label: 'Waves', icon: 'waves' },
+    newsletter: { color: B.orange, label: 'Newsletter', icon: 'newspaper' },
+    ifas: { color: B.green, label: 'UF/IFAS', icon: 'leaf' },
+    local: { color: B.grayMid, label: 'Local', icon: 'map' },
+  };
+  const meta = sourceMeta[post.source] || { color: B.grayMid, label: post.sourceName || 'Article', icon: 'document' };
+  const srcColor = meta.color;
+  const sourceLabel = post.sourceName || meta.label;
 
   // Defense in depth — server already filters, but never trust a URL
   // coming off an external RSS feed. Only http(s) links are rendered, and
@@ -5744,45 +5810,114 @@ function ContentCard({ post, large }) {
 
   return (
     <a href={safeHref} target="_blank" rel="noopener noreferrer" style={{
-      background: B.white, borderRadius: 14, overflow: 'hidden',
-      border: `1px solid ${B.bluePale}`, textDecoration: 'none',
-      display: 'block', transition: 'box-shadow 0.2s',
+      background: B.white,
+      borderRadius: 8,
+      overflow: 'hidden',
+      border: '1px solid #E1E7EF',
+      textDecoration: 'none',
+      display: 'flex',
+      flexDirection: large ? 'column' : 'row',
+      minHeight: large ? 0 : 104,
+      boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
     }}>
       {safeImg && large && (
         <div style={{
-          height: 140, background: `url("${safeImg}") center/cover no-repeat`,
-          borderBottom: `1px solid ${B.grayLight}`,
+          height: compact ? 130 : 170,
+          background: `url("${safeImg}") center/cover no-repeat`,
+          borderBottom: '1px solid #E1E7EF',
         }} />
       )}
-      <div style={{ padding: large ? '14px 16px' : '12px 14px', display: 'flex', gap: 12 }}>
+      {!safeImg && large && (
+        <div style={{
+          height: compact ? 92 : 124,
+          background: '#EEF6FF',
+          borderBottom: '1px solid #E1E7EF',
+          color: B.blueDeeper,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}>
+          <Icon name={meta.icon} size={30} strokeWidth={1.8} />
+        </div>
+      )}
+      <div style={{
+        padding: large ? 16 : 14,
+        display: 'flex',
+        gap: 12,
+        flex: 1,
+        minWidth: 0,
+      }}>
         {safeImg && !large && (
           <div style={{
-            width: 56, height: 56, borderRadius: 10, flexShrink: 0,
+            width: 64,
+            height: 64,
+            borderRadius: 8,
+            flexShrink: 0,
             background: `url("${safeImg}") center/cover no-repeat, ${B.blueSurface}`,
           }} />
         )}
+        {!safeImg && !large && (
+          <span style={{
+            width: 40,
+            height: 40,
+            borderRadius: 8,
+            background: '#EEF6FF',
+            color: B.blueDeeper,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flexShrink: 0,
+          }}>
+            <Icon name={meta.icon} size={18} strokeWidth={2} />
+          </span>
+        )}
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 7, flexWrap: 'wrap' }}>
             <span style={{
-              fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5,
-              padding: '2px 7px', borderRadius: 8,
-              background: `${srcColor}18`, color: srcColor,
-            }}>{post.sourceName}</span>
+              fontSize: 12,
+              fontWeight: 850,
+              padding: '4px 7px',
+              borderRadius: 8,
+              background: `${srcColor}18`,
+              color: srcColor,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 5,
+            }}>
+              <Icon name={meta.icon} size={12} strokeWidth={2} />
+              {sourceLabel}
+            </span>
             {pubDate && !isNaN(pubDate) && (
-              <span style={{ fontSize: 10, color: B.textCaption }}>
+              <span style={{ fontSize: 12, color: '#64748B' }}>
                 {pubDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
               </span>
             )}
           </div>
           <div style={{
-            fontSize: large ? 15 : 13, fontWeight: 700, color: B.navy, lineHeight: 1.4,
-            overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
+            fontSize: large ? 17 : 14,
+            fontWeight: 850,
+            color: B.blueDeeper,
+            lineHeight: 1.35,
+            overflow: 'hidden',
+            display: '-webkit-box',
+            WebkitLineClamp: large ? 2 : 3,
+            WebkitBoxOrient: 'vertical',
           }}>{post.title}</div>
-          {post.description && large && (
-            <div style={{ fontSize: 16, color: B.grayDark, marginTop: 4, lineHeight: 1.5,
-              overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
+          {post.description && (large || !safeImg) && (
+            <div style={{
+              fontSize: 14,
+              color: '#64748B',
+              marginTop: 7,
+              lineHeight: 1.45,
+              overflow: 'hidden',
+              display: '-webkit-box',
+              WebkitLineClamp: large ? 3 : 2,
+              WebkitBoxOrient: 'vertical',
             }}>{post.description}</div>
           )}
+          <div style={{ marginTop: 10, fontSize: 12, color: B.blueDeeper, fontWeight: 850, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+            Read article <Icon name="arrowRight" size={13} strokeWidth={2} />
+          </div>
         </div>
       </div>
     </a>
@@ -5790,6 +5925,7 @@ function ContentCard({ post, large }) {
 }
 
 function LearnTab({ customer }) {
+  const compact = useIsMobile(760);
   const [alerts, setAlerts] = useState([]);
   const [blogPosts, setBlogPosts] = useState([]);
   const [newsletterPosts, setNewsletterPosts] = useState([]);
@@ -5813,19 +5949,60 @@ function LearnTab({ customer }) {
     api.getNextService().then(d => setNextService(d.next || null)).catch(() => {});
   }, []);
 
+  const card = {
+    background: B.white,
+    border: '1px solid #E1E7EF',
+    borderRadius: 8,
+    boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+  };
+  const muted = '#64748B';
+  const subtle = '#F8FAFC';
+  const sectionTitle = {
+    fontSize: 12,
+    fontWeight: 850,
+    color: muted,
+    textTransform: 'uppercase',
+    letterSpacing: 0,
+  };
+  const secondaryButton = {
+    ...BUTTON_BASE,
+    background: '#fff',
+    color: B.blueDeeper,
+    border: '1px solid #CBD5E1',
+    borderRadius: 8,
+    boxShadow: 'none',
+    padding: '9px 12px',
+    fontSize: 14,
+    letterSpacing: 0,
+  };
+  const iconTile = {
+    width: 38,
+    height: 38,
+    borderRadius: 8,
+    background: '#EEF6FF',
+    color: B.blueDeeper,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  };
   const alertColors = { urgent: B.red, seasonal: B.orange, info: B.wavesBlue };
-
+  const postLimit = compact ? 3 : 4;
   const allWavesPosts = [...blogPosts, ...newsletterPosts]
     .sort((a, b) => new Date(b.pubDate || 0) - new Date(a.pubDate || 0));
-  const wavesPosts = showAllPosts ? allWavesPosts : allWavesPosts.slice(0, 4);
-  const hasMorePosts = allWavesPosts.length > 4;
+  const wavesPosts = showAllPosts ? allWavesPosts : allWavesPosts.slice(0, postLimit);
+  const hasMorePosts = allWavesPosts.length > postLimit;
+  const allContent = [...allWavesPosts, ...expertPosts, ...localNews]
+    .sort((a, b) => new Date(b.pubDate || 0) - new Date(a.pubDate || 0));
+  const latestContent = allContent[0];
+  const totalFaqQuestions = faq.reduce((sum, cat) => sum + (cat.questions?.length || 0), 0);
 
-  // Build customer plan service names for tip personalization
   const tierName = customer?.tier || 'Bronze';
   const numServices = TIER_SERVICES[tierName] || 1;
-  const customerServiceNames = SERVICE_CATALOG.slice(0, numServices).map(s => s.name.replace(/ Program| Barrier Treatment/g, '').replace('Quarterly ', ''));
+  const customerServiceNames = SERVICE_CATALOG
+    .slice(0, numServices)
+    .map(s => s.name.replace(/ Program| Barrier Treatment/g, '').replace('Quarterly ', ''));
 
-  // FAQ search filter
   const filteredFaq = faqSearch.trim()
     ? faq.map(cat => ({
         ...cat,
@@ -5835,7 +6012,6 @@ function LearnTab({ customer }) {
       })).filter(cat => cat.questions.length > 0)
     : faq;
 
-  // Personalize FAQ answer text with tier references
   const personalizeFaqAnswer = (answer) => {
     if (!answer || !tierName) return answer;
     return answer
@@ -5844,196 +6020,386 @@ function LearnTab({ customer }) {
       .replace(/callback guarantee/gi, `callback guarantee (${tierName} benefit)`);
   };
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      <SectionHeading>Learn & Stay Informed</SectionHeading>
+  const faqIconFor = (category = '') => {
+    const text = category.toLowerCase();
+    if (text.includes('lawn') || text.includes('grass')) return 'sprout';
+    if (text.includes('billing') || text.includes('payment')) return 'card';
+    if (text.includes('termite')) return 'shield';
+    if (text.includes('schedule') || text.includes('service')) return 'calendar';
+    if (text.includes('mosquito') || text.includes('pest')) return 'bug';
+    return 'bulb';
+  };
 
-      {/* Weather & Pest Pressure Widget */}
+  const renderFeedSection = (title, icon, posts, emptyText) => (
+    <section style={{ ...card, padding: 18, minWidth: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+          <span style={iconTile}><Icon name={icon} size={18} strokeWidth={2} /></span>
+          <div>
+            <div style={sectionTitle}>{title}</div>
+            <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{posts.length} item{posts.length === 1 ? '' : 's'}</div>
+          </div>
+        </div>
+      </div>
+      {posts.length ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {posts.slice(0, 4).map((p, i) => (
+            <ContentCard key={`${title}-${i}`} post={p} compact={compact} />
+          ))}
+        </div>
+      ) : (
+        <div style={{ padding: 16, borderRadius: 8, background: subtle, border: '1px solid #E1E7EF', fontSize: 14, color: muted }}>
+          {emptyText}
+        </div>
+      )}
+    </section>
+  );
+
+  const latestDate = latestContent?.pubDate ? new Date(latestContent.pubDate) : null;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <section style={{ ...card, padding: compact ? 20 : 28 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+          <div style={{ minWidth: 0, flex: '1 1 320px' }}>
+            <div style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '5px 10px',
+              borderRadius: 999,
+              background: '#EEF6FF',
+              color: B.blueDeeper,
+              fontSize: 12,
+              fontWeight: 850,
+            }}>
+              <Icon name="bulb" size={14} strokeWidth={2} />
+              Learning Center
+            </div>
+            <h1 style={{
+              margin: '12px 0 8px',
+              color: B.blueDeeper,
+              fontFamily: FONTS.heading,
+              fontSize: compact ? 28 : 34,
+              lineHeight: 1.1,
+              letterSpacing: 0,
+            }}>
+              Learn
+            </h1>
+            <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
+              Seasonal pest and lawn guidance for Southwest Florida, plus answers tied to your WaveGuard plan.
+            </div>
+          </div>
+          <div style={{
+            minWidth: compact ? '100%' : 220,
+            padding: '14px 16px',
+            borderRadius: 8,
+            background: subtle,
+            border: '1px solid #E1E7EF',
+            boxSizing: 'border-box',
+          }}>
+            <div style={sectionTitle}>Your Plan</div>
+            <div style={{ marginTop: 3, fontSize: 22, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.ui }}>
+              WaveGuard {tierName}
+            </div>
+            <div style={{ marginTop: 2, fontSize: 12, color: muted }}>
+              {numServices} included service{numServices === 1 ? '' : 's'} in your guidance.
+            </div>
+          </div>
+        </div>
+
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: compact ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))',
+          gap: 10,
+          marginTop: 22,
+        }}>
+          {[
+            { label: 'Waves Articles', value: allWavesPosts.length, sub: 'Blog and newsletter' },
+            { label: 'Expert Sources', value: expertPosts.length, sub: 'UF/IFAS and references' },
+            { label: 'FAQ Answers', value: totalFaqQuestions, sub: 'Service and lawn topics' },
+            {
+              label: 'Latest',
+              value: latestDate && !isNaN(latestDate) ? latestDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'None',
+              sub: latestContent?.title || 'No articles loaded yet',
+            },
+          ].map(item => (
+            <div key={item.label} style={{
+              border: '1px solid #E1E7EF',
+              borderRadius: 8,
+              background: subtle,
+              padding: 14,
+              minHeight: 78,
+              minWidth: 0,
+              boxSizing: 'border-box',
+            }}>
+              <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>{item.label}</div>
+              <div style={{
+                marginTop: 6,
+                color: B.blueDeeper,
+                fontSize: typeof item.value === 'number' ? 20 : 16,
+                fontWeight: 850,
+                lineHeight: 1.2,
+                fontFamily: FONTS.ui,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}>{item.value}</div>
+              <div style={{ marginTop: 3, color: muted, fontSize: 12, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {item.sub}
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
       <WeatherPestWidget customer={customer} nextService={nextService} />
 
-      {/* SECTION 1 — SWFL Alerts */}
       {alerts.length > 0 && (
-        <div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>
-             SWFL Alerts
+        <section style={{ ...card, padding: 18 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+            <span style={iconTile}><Icon name="warning" size={18} strokeWidth={2} /></span>
+            <div>
+              <div style={sectionTitle}>SWFL Alerts</div>
+              <div style={{ marginTop: 2, fontSize: 14, color: muted }}>Local pest and lawn notices.</div>
+            </div>
           </div>
-          <div style={{ display: 'flex', gap: 10, overflowX: 'auto', WebkitOverflowScrolling: 'touch', paddingBottom: 4 }}>
+          <div style={{
+            display: 'grid',
+            gridAutoFlow: compact ? 'column' : 'row',
+            gridAutoColumns: compact ? 'minmax(260px, 82%)' : undefined,
+            gridTemplateColumns: compact ? undefined : 'repeat(auto-fit, minmax(220px, 1fr))',
+            gap: 10,
+            overflowX: compact ? 'auto' : 'visible',
+            WebkitOverflowScrolling: 'touch',
+            paddingBottom: compact ? 2 : 0,
+          }}>
             {alerts.map((a, i) => (
               <div key={i} style={{
-                flex: '0 0 260px', background: B.white, borderRadius: 12, padding: '12px 14px',
+                background: subtle,
+                borderRadius: 8,
+                padding: 14,
+                border: '1px solid #E1E7EF',
                 borderLeft: `4px solid ${alertColors[a.type] || B.wavesBlue}`,
-                border: `1px solid ${B.grayLight}`,
-                borderLeftWidth: 4, borderLeftColor: alertColors[a.type] || B.wavesBlue,
               }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                  <span style={{ fontSize: 16 }}>{a.icon}</span>
-                  <span style={{ fontSize: 12, fontWeight: 700, color: B.navy }}>{a.title}</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5 }}>
+                  <Icon name={a.type === 'urgent' ? 'warning' : a.type === 'seasonal' ? 'sun' : 'bell'} size={16} strokeWidth={2} style={{ color: alertColors[a.type] || B.wavesBlue }} />
+                  <span style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>{a.title}</span>
                 </div>
-                <div style={{ fontSize: 12, color: B.grayDark, lineHeight: 1.5 }}>{a.desc}</div>
+                <div style={{ fontSize: 14, color: muted, lineHeight: 1.45 }}>{a.desc}</div>
               </div>
             ))}
           </div>
-        </div>
+        </section>
       )}
 
-      {/* SECTION 2 — From Waves */}
-      {wavesPosts.length > 0 && (
-        <div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>
-               From Waves
+      {monthlyTip && (
+        <section style={{ ...card, padding: 18 }}>
+          <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+            <span style={iconTile}><Icon name="sparkles" size={18} strokeWidth={2} /></span>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={sectionTitle}>{monthlyTip.month} Homeowner Tip</div>
+              <div style={{ marginTop: 5, fontSize: 18, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading, lineHeight: 1.25 }}>
+                {monthlyTip.title}
+              </div>
+              <div style={{ marginTop: 7, fontSize: 14, color: B.grayDark, lineHeight: 1.6 }}>
+                {monthlyTip.tip}
+              </div>
+              {customerServiceNames.length > 0 && (
+                <div style={{
+                  marginTop: 12,
+                  padding: 12,
+                  borderRadius: 8,
+                  background: subtle,
+                  border: '1px solid #E1E7EF',
+                  fontSize: 14,
+                  color: muted,
+                  lineHeight: 1.45,
+                }}>
+                  Your {tierName} plan includes {customerServiceNames.join(', ')}.
+                </div>
+              )}
             </div>
-            {hasMorePosts && !showAllPosts && (
-              <button onClick={() => setShowAllPosts(true)} style={{
-                ...BUTTON_BASE, padding: '5px 12px', fontSize: 12,
-                background: 'transparent', color: B.wavesBlue, border: `1px solid ${B.wavesBlue}`,
-              }}>View all ({allWavesPosts.length})</button>
+          </div>
+        </section>
+      )}
+
+      <section style={{ ...card, padding: 18 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={iconTile}><Icon name="waves" size={18} strokeWidth={2} /></span>
+            <div>
+              <div style={sectionTitle}>From Waves</div>
+              <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{allWavesPosts.length} article{allWavesPosts.length === 1 ? '' : 's'} and newsletter issue{allWavesPosts.length === 1 ? '' : 's'}</div>
+            </div>
+          </div>
+          {hasMorePosts && (
+            <button type="button" onClick={() => setShowAllPosts(v => !v)} style={secondaryButton}>
+              {showAllPosts ? 'Show less' : `View all (${allWavesPosts.length})`}
+            </button>
+          )}
+        </div>
+
+        {wavesPosts.length > 0 ? (
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: compact || wavesPosts.length < 2 ? '1fr' : 'minmax(0, 1.15fr) minmax(280px, 0.85fr)',
+            gap: 10,
+          }}>
+            <ContentCard post={wavesPosts[0]} large compact={compact} />
+            {wavesPosts.length > 1 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {wavesPosts.slice(1).map((p, i) => (
+                  <ContentCard key={`waves-${i}`} post={p} compact={compact} />
+                ))}
+              </div>
             )}
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {wavesPosts.map((p, i) => (
-              <ContentCard key={i} post={p} />
-            ))}
-          </div>
-          {showAllPosts && hasMorePosts && (
-            <button onClick={() => setShowAllPosts(false)} style={{
-              ...BUTTON_BASE, padding: '5px 12px', fontSize: 12, marginTop: 8,
-              background: 'transparent', color: B.grayMid, border: `1px solid ${B.grayLight}`,
-              display: 'block', margin: '8px auto 0',
-            }}>Show less</button>
-          )}
+        ) : (
           <div style={{
-            marginTop: 14,
-            padding: '16px 14px',
-            background: B.sand,
-            border: `1px solid ${B.grayLight}`,
-            borderRadius: 12,
+            padding: 18,
+            borderRadius: 8,
+            background: subtle,
+            border: '1px solid #E1E7EF',
+            fontSize: 14,
+            color: muted,
           }}>
-            <NewsletterSignup
-              variant="light"
-              source="portal_learn"
-              heading="Get the next issue in your inbox"
-              blurb="Local SWFL events, seasonal pest tips, and the occasional deal — straight from the truck."
-            />
+            New Waves articles and newsletter issues will appear here.
           </div>
-        </div>
-      )}
+        )}
 
-      {/* SECTION 3 — From the Experts */}
-      {expertPosts.length > 0 && (
-        <div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>
-             From the Experts
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {expertPosts.map((p, i) => (
-              <ContentCard key={i} post={p} />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* SECTION 4 — Local Suncoast News */}
-      {localNews.length > 0 && (
-        <div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>
-             Local Suncoast News
-          </div>
-          <div style={{ fontSize: 12, color: B.grayMid, marginBottom: 10 }}>What's happening in SWFL that affects your home</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {localNews.map((p, i) => (
-              <ContentCard key={i} post={p} />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* SECTION 5 — Monthly Tip (tied to customer's plan) */}
-      {monthlyTip && (
         <div style={{
-          background: `linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark})`,
-          backgroundImage: `${HALFTONE_PATTERN}, linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark})`,
-          backgroundSize: `${HALFTONE_SIZE}, 100% 100%`,
-          borderRadius: 16, padding: 20, color: '#fff',
+          marginTop: 14,
+          padding: 16,
+          background: B.sand,
+          border: '1px solid #E1E7EF',
+          borderRadius: 8,
         }}>
-          <div style={{ fontSize: 12, color: B.blueLight, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8 }}>
-             {monthlyTip.month} Homeowner Tip
-          </div>
-          <div style={{ fontSize: 16, fontWeight: 800, fontFamily: FONTS.heading, marginTop: 6 }}>
-            {monthlyTip.title}
-          </div>
-          <div style={{ fontSize: 16, color: '#fff', lineHeight: 1.65, marginTop: 8 }}>
-            {monthlyTip.tip}
-          </div>
-          {customerServiceNames.length > 0 && (
-            <div style={{
-              marginTop: 12, padding: '10px 14px', borderRadius: 10,
-              background: 'rgba(255,255,255,0.12)', fontSize: 12, color: B.blueLight, lineHeight: 1.5,
-            }}>
-              Your {tierName} plan includes {customerServiceNames.join(', ')} — we handle the heavy lifting so you can focus on these tips.
-            </div>
-          )}
+          <NewsletterSignup
+            variant="light"
+            source="portal_learn"
+            heading="Get the next issue in your inbox"
+            blurb="Local SWFL events, seasonal pest tips, and the occasional deal - straight from the truck."
+          />
         </div>
-      )}
+      </section>
 
-      {/* SECTION 6 — FAQ */}
-      {filteredFaq.length > 0 || faqSearch.trim() ? (
-        <div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>
-             Pest & Lawn FAQ
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: compact ? '1fr' : 'repeat(2, minmax(0, 1fr))',
+        gap: 16,
+      }}>
+        {renderFeedSection('From the Experts', 'leaf', expertPosts, 'Expert pest and lawn references will appear here.')}
+        {renderFeedSection('Local Suncoast News', 'map', localNews, 'Local Suncoast updates will appear here.')}
+      </div>
+
+      {(filteredFaq.length > 0 || faqSearch.trim()) && (
+        <section style={{ ...card, padding: 18 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={iconTile}><Icon name="message" size={18} strokeWidth={2} /></span>
+              <div>
+                <div style={sectionTitle}>Pest & Lawn FAQ</div>
+                <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{totalFaqQuestions} answer{totalFaqQuestions === 1 ? '' : 's'} available</div>
+              </div>
+            </div>
+            <a href="sms:+19412975749" style={{
+              ...secondaryButton,
+              textDecoration: 'none',
+              display: 'inline-flex',
+              gap: 7,
+              alignItems: 'center',
+            }}>
+              <Icon name="message" size={14} strokeWidth={2} /> Text Us
+            </a>
           </div>
+
           <div style={{ position: 'relative', marginBottom: 12 }}>
-            <Icon name="search" size={14} strokeWidth={1.75} />
+            <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: muted, pointerEvents: 'none' }}>
+              <Icon name="search" size={16} strokeWidth={2} />
+            </span>
             <input
-              type="text" value={faqSearch} onChange={e => setFaqSearch(e.target.value)}
+              type="text"
+              value={faqSearch}
+              onChange={e => setFaqSearch(e.target.value)}
               placeholder="Search questions..."
               aria-label="Search pest and lawn questions"
               style={{
-                width: '100%', padding: '10px 14px 10px 36px', borderRadius: 10,
-                border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
-                color: B.navy, outline: 'none', boxSizing: 'border-box',
+                width: '100%',
+                padding: '10px 14px 10px 38px',
+                borderRadius: 8,
+                border: '1px solid #CBD5E1',
+                fontSize: 14,
+                fontFamily: FONTS.body,
+                color: B.blueDeeper,
+                outline: 'none',
+                boxSizing: 'border-box',
               }}
               onFocus={e => e.target.style.borderColor = B.wavesBlue}
-              onBlur={e => e.target.style.borderColor = B.grayLight}
+              onBlur={e => e.target.style.borderColor = '#CBD5E1'}
             />
           </div>
 
           {filteredFaq.length === 0 && faqSearch.trim() && (
-            <div style={{ textAlign: 'center', padding: 20, color: B.grayMid, fontSize: 14 }}>
+            <div style={{ textAlign: 'center', padding: 20, color: muted, fontSize: 14 }}>
               No results for "{faqSearch}". Try different keywords or text us below.
             </div>
           )}
 
           {filteredFaq.map(cat => (
             <div key={cat.category} style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: B.grayDark, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span>{cat.icon}</span> {cat.category}
+              <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ ...iconTile, width: 30, height: 30 }}>
+                  <Icon name={faqIconFor(cat.category)} size={15} strokeWidth={2} />
+                </span>
+                {cat.category}
               </div>
               {cat.questions.map((q, qi) => {
                 const faqId = `${cat.category}-${qi}`;
                 const isOpen = expandedFaq === faqId;
                 return (
                   <div key={qi} style={{
-                    background: B.white, borderRadius: 10, marginBottom: 6,
-                    border: `1px solid ${isOpen ? B.wavesBlue + '44' : B.grayLight}`,
+                    background: isOpen ? subtle : B.white,
+                    borderRadius: 8,
+                    marginBottom: 8,
+                    border: `1px solid ${isOpen ? '#A7DDF8' : '#E1E7EF'}`,
                     overflow: 'hidden',
                   }}>
-                    <div onClick={() => setExpandedFaq(isOpen ? null : faqId)} style={{
-                      padding: '12px 14px', cursor: 'pointer',
-                      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                    }}>
-                      <div style={{ fontSize: 14, fontWeight: 600, color: B.navy, flex: 1, paddingRight: 10 }}>{q.q}</div>
-                      <span style={{ fontSize: 14, color: B.grayMid, transform: isOpen ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s' }}>▾</span>
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setExpandedFaq(isOpen ? null : faqId)}
+                      aria-expanded={isOpen}
+                      style={{
+                        width: '100%',
+                        padding: '13px 14px',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: 12,
+                        border: 'none',
+                        background: 'transparent',
+                        textAlign: 'left',
+                        fontFamily: FONTS.body,
+                      }}
+                    >
+                      <span style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, flex: 1 }}>{q.q}</span>
+                      <Icon name="chevronDown" size={18} strokeWidth={2} style={{ color: muted, transform: isOpen ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s ease' }} />
+                    </button>
                     {isOpen && (
-                      <div style={{ padding: '0 14px 14px', borderTop: `1px solid ${B.grayLight}` }}>
-                        <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.7, marginTop: 10 }}>
+                      <div style={{ padding: '0 14px 14px', borderTop: '1px solid #E1E7EF' }}>
+                        <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.65, marginTop: 10 }}>
                           {personalizeFaqAnswer(q.a)}
                         </div>
                         {(q.a?.toLowerCase().includes('callback') || q.a?.toLowerCase().includes('guarantee')) && (
                           <div style={{
-                            marginTop: 8, padding: '8px 12px', borderRadius: 8,
-                            background: `${B.green}10`, fontSize: 12, color: B.green, fontWeight: 600,
+                            marginTop: 10,
+                            padding: '9px 11px',
+                            borderRadius: 8,
+                            background: `${B.green}10`,
+                            fontSize: 12,
+                            color: B.green,
+                            fontWeight: 850,
                           }}>
                             As a {tierName} member, you have unlimited callbacks between services.
                           </div>
@@ -6045,19 +6411,8 @@ function LearnTab({ customer }) {
               })}
             </div>
           ))}
-
-          <div style={{
-            textAlign: 'center', padding: 16, background: B.blueSurface, borderRadius: 12, marginTop: 8,
-          }}>
-            <div style={{ fontSize: 14, color: B.grayDark }}>Still have questions?</div>
-            <a href="sms:+19412975749" style={{
-              ...BUTTON_BASE, padding: '9px 20px', fontSize: 14, marginTop: 8,
-              borderRadius: 9999, background: B.yellow, color: B.blueDeeper, textDecoration: 'none',
-              display: 'inline-flex',
-            }}> Text Us</a>
-          </div>
-        </div>
-      ) : null}
+        </section>
+      )}
     </div>
   );
 }
