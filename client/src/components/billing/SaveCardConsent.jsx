@@ -24,7 +24,7 @@ export default function SaveCardConsent({
     <label
       style={{
         display: 'flex', gap: 10, alignItems: 'flex-start',
-        padding: '12px 14px',
+        padding: 14,
         background: '#F8FAFC',
         border: '1px solid #E1E7EF',
         borderRadius: 8,
@@ -44,10 +44,10 @@ export default function SaveCardConsent({
         }}
       />
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 14, fontWeight: 800, color: '#1B2C5B', lineHeight: 1.35 }}>
+        <div style={{ fontSize: 14, fontWeight: 850, color: '#1B2C5B', lineHeight: 1.35 }}>
           {headline}
         </div>
-        <div style={{ fontSize: 12, color: '#64748B', marginTop: 6, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 14, color: '#64748B', marginTop: 6, lineHeight: 1.5 }}>
           {CONSENT_TEXT}
         </div>
       </div>

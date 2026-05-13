@@ -35,6 +35,7 @@
 import { FONTS } from '../theme-brand';
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
+import Icon from '../components/Icon';
 import {
   WavesShell,
   BrandCard,
@@ -61,6 +62,98 @@ function fmtDate(d) {
     : new Date(d);
   if (Number.isNaN(dt.getTime())) return '';
   return dt.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
+}
+
+const subtlePanel = {
+  background: '#F8FAFC',
+  border: '1px solid #E1E7EF',
+  borderRadius: 8,
+};
+
+const eyebrow = {
+  fontSize: 12,
+  color: 'var(--text-muted)',
+  fontWeight: 850,
+  letterSpacing: 0,
+  textTransform: 'uppercase',
+};
+
+function fullName(customer = {}) {
+  return [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Waves customer';
+}
+
+function cityStateZip(customer = {}) {
+  const region = [customer.state || (customer.city ? 'FL' : ''), customer.zip].filter(Boolean).join(' ');
+  return [customer.city, region].filter(Boolean).join(customer.city && region ? ', ' : '');
+}
+
+function StatusPill({ tone = 'neutral', children }) {
+  const tones = {
+    paid: { bg: '#F0FDF4', color: 'var(--success)', border: '#BBF7D0' },
+    processing: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
+    refunded: { bg: 'rgba(200,16,46,0.08)', color: 'var(--danger)', border: 'rgba(200,16,46,0.22)' },
+    partial: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
+    neutral: { bg: '#F8FAFC', color: 'var(--text)', border: '#E1E7EF' },
+  };
+  const t = tones[tone] || tones.neutral;
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 6,
+      minHeight: 28,
+      padding: '5px 9px',
+      borderRadius: 8,
+      background: t.bg,
+      border: `1px solid ${t.border}`,
+      color: t.color,
+      fontSize: 12,
+      fontWeight: 850,
+      letterSpacing: 0,
+      textTransform: 'uppercase',
+      whiteSpace: 'nowrap',
+    }}>
+      {children}
+    </span>
+  );
+}
+
+function DetailBlock({ label, children }) {
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div style={{ ...eyebrow, marginBottom: 7 }}>{label}</div>
+      <div style={{ fontSize: 14, color: 'var(--text)', lineHeight: 1.55 }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function SummaryRow({ label, value, strong, danger }) {
+  return (
+    <div style={{
+      display: 'flex',
+      justifyContent: 'space-between',
+      gap: 16,
+      padding: strong ? '12px 0 0' : '7px 0',
+      marginTop: strong ? 8 : 0,
+      borderTop: strong ? '1px solid var(--border)' : 'none',
+      color: danger ? 'var(--danger)' : strong ? 'var(--text)' : 'var(--text-muted)',
+      fontSize: strong ? 16 : 14,
+      fontWeight: strong ? 850 : danger ? 750 : 500,
+      fontFamily: FONTS.body,
+    }}>
+      <span>{label}</span>
+      <span style={{
+        color: danger ? 'var(--danger)' : 'var(--text)',
+        fontFamily: FONTS.mono,
+        fontWeight: strong ? 850 : 650,
+        whiteSpace: 'nowrap',
+      }}>
+        {value}
+      </span>
+    </div>
+  );
 }
 
 // Inline success checkmark — navy ring, white tick. Used in the fresh-payment
@@ -166,6 +259,35 @@ export default function ReceiptPage() {
       : (invoice.cardBrand && invoice.cardLastFour
         ? `${invoice.cardBrand.toUpperCase()} ···· ${invoice.cardLastFour}`
         : null));
+  const serviceLabel = invoice.title || service.type || 'Service';
+  const serviceDateLabel = service.date ? fmtDate(service.date) : null;
+  const locationLine = cityStateZip(customer);
+  const statusTone = refundState === 'fully_refunded'
+    ? 'refunded'
+    : refundState === 'partially_refunded'
+      ? 'partial'
+      : processing
+        ? 'processing'
+        : paid
+          ? 'paid'
+          : 'neutral';
+  const statusLabel = refundState === 'fully_refunded'
+    ? 'Refunded'
+    : refundState === 'partially_refunded'
+      ? 'Partial refund'
+      : processing
+        ? 'Processing'
+        : paid
+          ? 'Paid'
+          : 'Receipt';
+  const heading = processing ? 'Bank payment submitted' : paid ? 'Payment received' : 'Receipt';
+  const statusDetail = processing
+    ? 'Bank payments usually take 3-5 business days to clear. We will send the final receipt after the payment settles.'
+    : refundState === 'fully_refunded'
+      ? 'This payment has been fully refunded.'
+      : refundState === 'partially_refunded'
+        ? `${fmtCurrency(payment.refundAmount)} has been refunded. Net paid: ${fmtCurrency(payment.remainingPaid)}.`
+        : 'Keep this receipt for your records.';
 
   return (
     <WavesShell variant="customer" topBar="solid">
@@ -212,17 +334,17 @@ export default function ReceiptPage() {
             <SuccessCheck size={56} />
             <div style={{
               fontFamily: FONTS.body,
-              fontWeight: 650,
+              fontWeight: 750,
               fontSize: 24,
               color: 'var(--text)',
               lineHeight: 1.2,
             }}>
-              {processing ? 'Bank payment submitted' : 'Payment received'}
+              {heading}
             </div>
             <div style={{ fontSize: 14, color: 'var(--text-muted)' }}>
               {processing
-                ? `Thanks, ${customer.firstName || 'there'} — your bank payment is processing.`
-                : `Thanks, ${customer.firstName || 'there'} — a receipt is on its way to you.`}
+                ? `Thanks, ${customer.firstName || 'there'} - your bank payment is processing.`
+                : `Thanks, ${customer.firstName || 'there'} - a receipt is on its way to you.`}
             </div>
           </div>
         )}
@@ -230,147 +352,137 @@ export default function ReceiptPage() {
         {refundState === 'fully_refunded' && (
           <div className="waves-no-print" style={{
             marginBottom: 16,
-            padding: '12px 16px',
-            borderRadius: 'var(--radius-md)',
+            padding: 14,
+            borderRadius: 8,
             background: 'rgba(200,16,46,0.06)',
-            border: '1px solid var(--danger)',
+            border: '1px solid rgba(200,16,46,0.28)',
             color: 'var(--danger)',
             fontSize: 14,
-            fontWeight: 500,
+            fontWeight: 750,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
           }}>
-            This payment has been fully refunded
-            {payment?.refundedAt ? ` on ${fmtDate(payment.refundedAt)}` : ''}.
+            <Icon name="warning" size={17} strokeWidth={2} />
+            <span>
+              This payment has been fully refunded
+              {payment?.refundedAt ? ` on ${fmtDate(payment.refundedAt)}` : ''}.
+            </span>
           </div>
         )}
 
         {refundState === 'partially_refunded' && (
           <div className="waves-no-print" style={{
             marginBottom: 16,
-            padding: '12px 16px',
-            borderRadius: 'var(--radius-md)',
-            background: 'rgba(0,156,222,0.08)',
-            border: '1px solid rgba(0,156,222,0.35)',
+            padding: 14,
+            borderRadius: 8,
+            background: '#EEF6FF',
+            border: '1px solid #BFE4F8',
             color: 'var(--text)',
             fontSize: 14,
             lineHeight: 1.5,
+            display: 'flex',
+            gap: 10,
+            alignItems: 'flex-start',
           }}>
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>Partial refund issued</div>
-            <div style={{ color: 'var(--text-muted)' }}>
-              {fmtCurrency(payment.refundAmount)} refunded
-              {payment.refundedAt ? ` on ${fmtDate(payment.refundedAt)}` : ''}
-              {' · '}
-              Net paid: {fmtCurrency(payment.remainingPaid)}
+            <Icon name="refresh" size={17} strokeWidth={2} style={{ color: '#065A8C', marginTop: 1 }} />
+            <div>
+              <div style={{ fontWeight: 850, color: '#065A8C', marginBottom: 3 }}>Partial refund issued</div>
+              <div style={{ color: 'var(--text-muted)' }}>
+                {fmtCurrency(payment.refundAmount)} refunded
+                {payment.refundedAt ? ` on ${fmtDate(payment.refundedAt)}` : ''}
+                {' · '}
+                Net paid: {fmtCurrency(payment.remainingPaid)}
+              </div>
             </div>
           </div>
         )}
 
-        <BrandCard className="waves-print-card" padding={30} style={{ marginBottom: 20 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
-            <div style={{ fontSize: 12, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase' }}>
-              {processing ? 'Payment pending' : 'Receipt'} · Invoice {invoice.invoiceNumber}
+        <BrandCard className="waves-print-card" padding={28} style={{ marginBottom: 20 }}>
+          <div style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            gap: 16,
+            alignItems: 'flex-start',
+            flexWrap: 'wrap',
+            marginBottom: 18,
+          }}>
+            <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start', minWidth: 0 }}>
+              <span style={{
+                width: 46,
+                height: 46,
+                borderRadius: 8,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                flexShrink: 0,
+                background: statusTone === 'refunded' ? 'rgba(200,16,46,0.08)' : (statusTone === 'processing' || statusTone === 'partial') ? '#EEF6FF' : '#F0FDF4',
+                color: statusTone === 'refunded' ? 'var(--danger)' : (statusTone === 'processing' || statusTone === 'partial') ? '#065A8C' : 'var(--success)',
+                border: `1px solid ${statusTone === 'refunded' ? 'rgba(200,16,46,0.22)' : (statusTone === 'processing' || statusTone === 'partial') ? '#BFE4F8' : '#BBF7D0'}`,
+              }}>
+                <Icon name={statusTone === 'processing' ? 'clock' : (statusTone === 'refunded' || statusTone === 'partial') ? 'refresh' : 'check'} size={22} strokeWidth={2.4} />
+              </span>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ ...eyebrow, marginBottom: 8 }}>
+                  {processing ? 'Payment pending' : 'Receipt'} · Invoice {invoice.invoiceNumber}
+                </div>
+                <SerifHeading style={{ marginBottom: 8 }}>{heading}</SerifHeading>
+                <p style={{ margin: 0, fontSize: 15, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                  {serviceLabel}
+                  {serviceDateLabel ? ` · ${serviceDateLabel}` : ''}
+                </p>
+              </div>
             </div>
-            {paid && !refundState && (
-              <span style={{
-                display: 'inline-block',
-                padding: '4px 10px',
-                borderRadius: 999,
-                background: 'rgba(4,120,87,0.1)',
-                color: 'var(--success)',
-                fontSize: 12,
-                fontWeight: 600,
-                letterSpacing: '0.08em',
-                textTransform: 'uppercase',
-              }}>
-                Paid
-              </span>
-            )}
-            {refundState === 'fully_refunded' && (
-              <span style={{
-                display: 'inline-block',
-                padding: '4px 10px',
-                borderRadius: 999,
-                background: 'rgba(200,16,46,0.08)',
-                color: 'var(--danger)',
-                fontSize: 12,
-                fontWeight: 600,
-                letterSpacing: '0.08em',
-                textTransform: 'uppercase',
-              }}>
-                Refunded
-              </span>
-            )}
-            {refundState === 'partially_refunded' && (
-              <span style={{
-                display: 'inline-block',
-                padding: '4px 10px',
-                borderRadius: 999,
-                background: 'rgba(0,156,222,0.1)',
-                color: '#065A8C',
-                fontSize: 12,
-                fontWeight: 600,
-                letterSpacing: '0.08em',
-                textTransform: 'uppercase',
-              }}>
-                Partial refund
-              </span>
-            )}
-            {processing && (
-              <span style={{
-                display: 'inline-block',
-                padding: '4px 10px',
-                borderRadius: 999,
-                background: 'rgba(0,156,222,0.1)',
-                color: '#065A8C',
-                fontSize: 12,
-                fontWeight: 600,
-                letterSpacing: '0.08em',
-                textTransform: 'uppercase',
-              }}>
-                Processing
-              </span>
-            )}
+            <StatusPill tone={statusTone}>{statusLabel}</StatusPill>
           </div>
 
-          <SerifHeading style={{ marginBottom: 4 }}>
-            {processing ? 'Bank payment submitted' : paid ? 'Payment received' : 'Receipt'}
-          </SerifHeading>
-          {processing && (
-            <p style={{ margin: '0 0 18px', fontSize: 15, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-              Bank payments usually take 3–5 business days to clear. We will send the final receipt after the payment settles.
-            </p>
-          )}
-          <p style={{ margin: '0 0 24px', fontSize: 16, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-            {invoice.title || service.type || 'Service'}
-            {service.date ? ` · ${fmtDate(service.date)}` : ''}
-          </p>
+          <div style={{
+            ...subtlePanel,
+            padding: 18,
+            marginBottom: 20,
+            display: 'grid',
+            gridTemplateColumns: 'minmax(0, 1fr) auto',
+            gap: 18,
+            alignItems: 'center',
+          }}>
+            <div>
+              <div style={eyebrow}>{processing ? 'Submitted amount' : 'Receipt total'}</div>
+              <div style={{ marginTop: 6, fontSize: 34, lineHeight: 1, fontWeight: 850, color: 'var(--text)', fontFamily: FONTS.body }}>
+                {fmtCurrency(payment?.amount || invoice.total)}
+              </div>
+              <div style={{ marginTop: 8, fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.45 }}>
+                {statusDetail}
+              </div>
+            </div>
+            <span style={{
+              width: 42,
+              height: 42,
+              borderRadius: 8,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: 'var(--brand)',
+              background: '#FFFFFF',
+              border: '1px solid var(--border)',
+            }}>
+              <Icon name="document" size={20} strokeWidth={2} />
+            </span>
+          </div>
 
-          {/* Receipt meta grid — bill-to + payment details, two columns on wide,
-              stacks on mobile */}
           <div style={{
             display: 'grid',
             gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-            gap: 24,
-            marginBottom: 24,
-            fontSize: 14,
-            lineHeight: 1.6,
-            color: 'var(--text)',
+            gap: 16,
+            marginBottom: 20,
           }}>
-            <div>
-              <div style={{ fontSize: 12, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>
-                Billed to
-              </div>
-              <div style={{ fontWeight: 600 }}>{customer.firstName} {customer.lastName}</div>
+            <DetailBlock label="Billed to">
+              <div style={{ fontWeight: 800 }}>{fullName(customer)}</div>
               {customer.address && <div>{customer.address}</div>}
-              {(customer.city || customer.state || customer.zip) && (
-                <div>{customer.city}{customer.city ? ', ' : ''}{customer.state || 'FL'} {customer.zip || ''}</div>
-              )}
+              {locationLine && <div>{locationLine}</div>}
               {customer.email && <div style={{ color: 'var(--text-muted)' }}>{customer.email}</div>}
-            </div>
+            </DetailBlock>
 
-            <div>
-              <div style={{ fontSize: 12, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>
-                Payment details
-              </div>
+            <DetailBlock label="Payment details">
               {paidAt && (
                 <div>
                   <span style={{ color: 'var(--text-muted)' }}>{processing ? 'Submitted: ' : 'Paid: '}</span>
@@ -391,145 +503,111 @@ export default function ReceiptPage() {
               )}
               <div>
                 <span style={{ color: 'var(--text-muted)' }}>Receipt #: </span>
-                <span style={{ fontFamily: FONTS.mono, fontSize: 14 }}>
-                  {invoice.invoiceNumber}
-                </span>
+                <span style={{ fontFamily: FONTS.mono, fontSize: 14 }}>{invoice.invoiceNumber}</span>
               </div>
-            </div>
+            </DetailBlock>
           </div>
 
-          {/* Line items — mirrors PayPageV2 for visual continuity */}
           {visibleLineItems.length > 0 && (
-            <div style={{ marginBottom: 20, borderTop: '1px solid var(--border)' }}>
-              <div style={{
-                display: 'grid',
-                gridTemplateColumns: '1fr auto auto',
-                gap: '0 16px',
-                padding: '12px 0 8px',
-                fontSize: 12,
-                color: 'var(--text-muted)',
-                letterSpacing: '0.08em',
-                textTransform: 'uppercase',
-                borderBottom: '1px solid var(--border)',
-              }}>
-                <div>Description</div>
-                <div style={{ textAlign: 'right' }}>Qty</div>
-                <div style={{ textAlign: 'right', minWidth: 80 }}>Amount</div>
-              </div>
-              {visibleLineItems.map((item, idx) => (
-                <div
-                  key={idx}
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: '1fr auto auto',
-                    gap: '0 16px',
-                    padding: '12px 0',
-                    borderBottom: idx < visibleLineItems.length - 1 ? '1px solid var(--border)' : 'none',
-                    fontSize: 14,
-                    color: 'var(--text)',
-                  }}
-                >
-                  <div style={{ lineHeight: 1.4 }}>{item.description}</div>
-                  <div style={{ textAlign: 'right', fontFamily: FONTS.mono }}>
-                    {item.quantity || 1}
-                  </div>
-                  <div style={{ textAlign: 'right', fontFamily: FONTS.mono, minWidth: 80 }}>
-                    {fmtCurrency(item.amount ?? (item.quantity || 1) * (item.unit_price || 0))}
-                  </div>
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ ...eyebrow, marginBottom: 8 }}>Receipt items</div>
+              <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: '1fr auto auto',
+                  gap: '0 14px',
+                  padding: '10px 12px',
+                  fontSize: 12,
+                  color: 'var(--text-muted)',
+                  fontWeight: 850,
+                  textTransform: 'uppercase',
+                  background: '#F8FAFC',
+                  borderBottom: '1px solid var(--border)',
+                }}>
+                  <div>Description</div>
+                  <div style={{ textAlign: 'right' }}>Qty</div>
+                  <div style={{ textAlign: 'right', minWidth: 82 }}>Amount</div>
                 </div>
-              ))}
+                {visibleLineItems.map((item, idx) => (
+                  <div
+                    key={idx}
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: '1fr auto auto',
+                      gap: '0 14px',
+                      padding: '12px',
+                      borderBottom: idx < visibleLineItems.length - 1 ? '1px solid var(--border)' : 'none',
+                      fontSize: 14,
+                      color: 'var(--text)',
+                      alignItems: 'start',
+                    }}
+                  >
+                    <div style={{ lineHeight: 1.45, minWidth: 0 }}>{item.description}</div>
+                    <div style={{ textAlign: 'right', fontFamily: FONTS.mono }}>{item.quantity || 1}</div>
+                    <div style={{ textAlign: 'right', fontFamily: FONTS.mono, minWidth: 82, fontWeight: 650 }}>
+                      {fmtCurrency(item.amount ?? (item.quantity || 1) * (item.unit_price || 0))}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
-          {/* Totals + refund breakdown (original transaction is never hidden) */}
-          <div style={{ fontSize: 14, fontFamily: FONTS.mono }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
-              <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
-                Subtotal
-              </span>
-              <span>{fmtCurrency(invoice.subtotal)}</span>
-            </div>
+          <div style={{ ...subtlePanel, padding: 16 }}>
+            <SummaryRow label="Subtotal" value={fmtCurrency(invoice.subtotal)} />
             {invoice.discountAmount > 0 && (
-              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
-                <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
-                  {invoice.discountLabel || 'Discount'}
-                </span>
-                <span>− {fmtCurrency(invoice.discountAmount)}</span>
-              </div>
+              <SummaryRow label={invoice.discountLabel || 'Discount'} value={`− ${fmtCurrency(invoice.discountAmount)}`} />
             )}
             {invoice.taxAmount > 0 && customer?.isCommercial && (
-              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
-                <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
-                  Tax ({(Number(invoice.taxRate || 0) * 100).toFixed(2)}%)
-                </span>
-                <span>{fmtCurrency(invoice.taxAmount)}</span>
-              </div>
+              <SummaryRow label={`Tax (${(Number(invoice.taxRate || 0) * 100).toFixed(2)}%)`} value={fmtCurrency(invoice.taxAmount)} />
             )}
-            <div style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              padding: '12px 0 0',
-              marginTop: 8,
-              borderTop: '1px solid var(--border)',
-              fontSize: 20,
-              fontWeight: 700,
-              color: 'var(--text)',
-            }}>
-              <span style={{ fontFamily: FONTS.body, letterSpacing: '0.06em', textTransform: 'uppercase', fontSize: 14 }}>
-                {processing ? 'Total submitted' : 'Total charged'}
-              </span>
-              <span>{fmtCurrency(payment?.amount || invoice.total)}</span>
-            </div>
+            <SummaryRow label={processing ? 'Total submitted' : 'Total charged'} value={fmtCurrency(payment?.amount || invoice.total)} strong />
 
             {refundState && payment?.refundAmount > 0 && (
               <>
-                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0 6px' }}>
-                  <span style={{ color: 'var(--danger)', fontFamily: FONTS.body, fontWeight: 500 }}>
-                    Refunded
-                    {payment.refundedAt ? ` · ${fmtDate(payment.refundedAt)}` : ''}
-                  </span>
-                  <span style={{ color: 'var(--danger)' }}>− {fmtCurrency(payment.refundAmount)}</span>
-                </div>
-                <div style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  padding: '10px 0 0',
-                  marginTop: 4,
-                  borderTop: '1px solid var(--border)',
-                  fontSize: 16,
-                  fontWeight: 700,
-                  color: 'var(--text)',
-                }}>
-                  <span style={{ fontFamily: FONTS.body, letterSpacing: '0.06em', textTransform: 'uppercase', fontSize: 12 }}>
-                    Net paid
-                  </span>
-                  <span>{fmtCurrency(payment.remainingPaid)}</span>
-                </div>
+                <SummaryRow
+                  label={`Refunded${payment.refundedAt ? ` · ${fmtDate(payment.refundedAt)}` : ''}`}
+                  value={`− ${fmtCurrency(payment.refundAmount)}`}
+                  danger
+                />
+                <SummaryRow label="Net paid" value={fmtCurrency(payment.remainingPaid)} strong />
               </>
             )}
           </div>
 
           {invoice.notes && (
-            <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
-              <div style={{ fontSize: 12, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>
-                Notes
-              </div>
-              <p style={{ margin: 0, fontSize: 16, color: 'var(--text)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+            <div style={{ marginTop: 18, ...subtlePanel, padding: 16 }}>
+              <div style={{ ...eyebrow, marginBottom: 8 }}>Notes</div>
+              <p style={{ margin: 0, fontSize: 15, color: 'var(--text)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
                 {invoice.notes}
               </p>
             </div>
           )}
 
-          <div className="waves-no-print" style={{ marginTop: 24, display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 14 }}>
+          <div className="waves-no-print" style={{ marginTop: 22, display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 14 }}>
             {paid ? (
               <a
                 href={`${API_BASE}/receipt/${token}/pdf`}
-                style={{ color: 'var(--brand)', textDecoration: 'underline', textUnderlineOffset: 3 }}
+                style={{
+                  minHeight: 40,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '0 12px',
+                  borderRadius: 8,
+                  border: '1px solid var(--border-strong)',
+                  color: 'var(--brand)',
+                  textDecoration: 'none',
+                  fontSize: 14,
+                  fontWeight: 800,
+                  background: '#FFFFFF',
+                }}
               >
-                Download receipt PDF
+                <Icon name="download" size={16} strokeWidth={2} />
+                Receipt PDF
               </a>
             ) : processing ? (
-              <span style={{ color: 'var(--text-muted)' }}>
+              <span style={{ color: 'var(--text-muted)', alignSelf: 'center' }}>
                 Receipt PDF available after bank payment clears
               </span>
             ) : null}
@@ -537,17 +615,22 @@ export default function ReceiptPage() {
               type="button"
               onClick={() => window.print()}
               style={{
-                background: 'none',
-                border: 'none',
-                padding: 0,
+                minHeight: 40,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '0 12px',
+                borderRadius: 8,
+                border: '1px solid var(--border-strong)',
                 color: 'var(--brand)',
-                textDecoration: 'underline',
-                textUnderlineOffset: 3,
+                background: '#FFFFFF',
                 fontSize: 14,
+                fontWeight: 800,
                 cursor: 'pointer',
                 fontFamily: FONTS.body,
               }}
             >
+              <Icon name="print" size={16} strokeWidth={2} />
               Print
             </button>
             {invoice.stripeReceiptUrl && (
@@ -555,7 +638,19 @@ export default function ReceiptPage() {
                 href={invoice.stripeReceiptUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                style={{ color: 'var(--text-muted)', textDecoration: 'underline', textUnderlineOffset: 3 }}
+                style={{
+                  minHeight: 40,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  padding: '0 12px',
+                  borderRadius: 8,
+                  border: '1px solid var(--border)',
+                  color: 'var(--text-muted)',
+                  textDecoration: 'none',
+                  fontSize: 14,
+                  fontWeight: 750,
+                  background: '#FFFFFF',
+                }}
               >
                 Stripe receipt
               </a>

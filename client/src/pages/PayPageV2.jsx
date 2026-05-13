@@ -128,6 +128,97 @@ function fmtDate(d) {
   return formatInvoiceDate(d);
 }
 
+const subtlePanel = {
+  background: '#F8FAFC',
+  border: '1px solid #E1E7EF',
+  borderRadius: 8,
+};
+
+const eyebrow = {
+  fontSize: 12,
+  color: 'var(--text-muted)',
+  fontWeight: 850,
+  letterSpacing: 0,
+  textTransform: 'uppercase',
+};
+
+function fullName(customer = {}) {
+  return [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Waves customer';
+}
+
+function cityStateZip(customer = {}) {
+  const region = [customer.state || (customer.city ? 'FL' : ''), customer.zip].filter(Boolean).join(' ');
+  return [customer.city, region].filter(Boolean).join(customer.city && region ? ', ' : '');
+}
+
+function StatusPill({ tone = 'neutral', children }) {
+  const tones = {
+    neutral: { bg: '#F8FAFC', color: 'var(--text)', border: '#E1E7EF' },
+    due: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
+    overdue: { bg: 'rgba(200,16,46,0.08)', color: 'var(--danger)', border: 'rgba(200,16,46,0.22)' },
+    secure: { bg: '#F0FDF4', color: 'var(--success)', border: '#BBF7D0' },
+  };
+  const t = tones[tone] || tones.neutral;
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 6,
+      minHeight: 28,
+      padding: '5px 9px',
+      borderRadius: 8,
+      background: t.bg,
+      border: `1px solid ${t.border}`,
+      color: t.color,
+      fontSize: 12,
+      fontWeight: 850,
+      letterSpacing: 0,
+      textTransform: 'uppercase',
+      whiteSpace: 'nowrap',
+    }}>
+      {children}
+    </span>
+  );
+}
+
+function DetailBlock({ label, children }) {
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div style={{ ...eyebrow, marginBottom: 7 }}>{label}</div>
+      <div style={{ fontSize: 14, color: 'var(--text)', lineHeight: 1.55 }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function SummaryRow({ label, value, strong, muted }) {
+  return (
+    <div style={{
+      display: 'flex',
+      justifyContent: 'space-between',
+      gap: 16,
+      padding: strong ? '12px 0 0' : '7px 0',
+      marginTop: strong ? 8 : 0,
+      borderTop: strong ? '1px solid var(--border)' : 'none',
+      color: strong ? 'var(--text)' : 'var(--text-muted)',
+      fontSize: strong ? 16 : 14,
+      fontWeight: strong ? 850 : 500,
+      fontFamily: strong ? FONTS.body : FONTS.body,
+    }}>
+      <span>{label}</span>
+      <span style={{
+        color: muted ? 'var(--text-muted)' : 'var(--text)',
+        fontFamily: FONTS.mono,
+        fontWeight: strong ? 850 : 650,
+        whiteSpace: 'nowrap',
+      }}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
 // ── Stripe Payment Element wrapper ─────────────────────────────────
 function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, saveCard, onSaveCardChange }) {
   const mountRef = useRef(null);
@@ -395,37 +486,52 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   };
 
   const disabled = !ready || processing || syncingAmount || amountSyncError;
+  const methodControlsDisabled = !ready || processing || syncingAmount;
+  const methodOptions = [
+    { value: 'card', title: 'Card or wallet', detail: `${pct}% processing fee`, icon: 'card' },
+    { value: 'us_bank_account', title: 'Bank account', detail: 'No added fee', icon: 'building' },
+  ];
 
   return (
-    <div>
+    <div style={{ display: 'grid', gap: 16 }}>
       <div style={{
-        display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 16,
-        padding: '12px 14px', borderRadius: 'var(--radius-md)',
-        background: 'rgba(0,156,222,0.08)', border: '1px solid rgba(0,156,222,0.24)',
-        fontSize: 16, lineHeight: 1.5, color: 'var(--text)',
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: 12,
+        padding: 14,
+        borderRadius: 8,
+        background: '#EEF6FF',
+        border: '1px solid #BFE4F8',
+        fontSize: 14,
+        lineHeight: 1.5,
+        color: 'var(--text)',
       }}>
-        <Icon name="card" size={16} strokeWidth={2} />
+        <span style={{
+          width: 32,
+          height: 32,
+          borderRadius: 8,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexShrink: 0,
+          background: '#FFFFFF',
+          color: '#065A8C',
+          border: '1px solid #BFE4F8',
+        }}>
+          <Icon name="card" size={17} strokeWidth={2} />
+        </span>
         <span>
           A {pct}% processing fee is added to credit/debit card and wallet payments.
           Bank transfers (ACH) pay the quoted amount with no added fee.
         </span>
       </div>
 
-      <div style={{ marginBottom: 16 }}>
-        <div style={{
-          fontSize: 12,
-          color: 'var(--text-muted)',
-          letterSpacing: '0.08em',
-          textTransform: 'uppercase',
-          marginBottom: 8,
-        }}>
+      <div>
+        <div style={{ ...eyebrow, marginBottom: 8 }}>
           Payment method
         </div>
-        <div role="group" aria-label="Payment method" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-          {[
-            { value: 'card', title: 'Card / wallet', detail: `${pct}% fee` },
-            { value: 'us_bank_account', title: 'Bank account', detail: 'No added fee' },
-          ].map((method) => {
+        <div role="group" aria-label="Payment method" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10 }}>
+          {methodOptions.map((method) => {
             const active = selectedMethod === method.value;
             return (
               <button
@@ -433,24 +539,44 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
                 type="button"
                 aria-pressed={active}
                 onClick={() => selectPaymentMethod(method.value)}
-                disabled={!ready || processing || syncingAmount}
+                disabled={methodControlsDisabled}
                 style={{
-                  minHeight: 62,
-                  borderRadius: 'var(--radius-md)',
-                  border: active ? `2px solid ${COLORS.blueDeeper}` : '1px solid var(--border)',
-                  background: active ? 'rgba(0,156,222,0.08)' : COLORS.white,
+                  minHeight: 72,
+                  borderRadius: 8,
+                  border: `1px solid ${active ? COLORS.blueDeeper : 'var(--border)'}`,
+                  background: active ? '#EEF6FF' : COLORS.white,
                   color: 'var(--text)',
-                  padding: '10px 12px',
+                  padding: 12,
                   textAlign: 'left',
-                  cursor: !ready || processing || syncingAmount ? 'not-allowed' : 'pointer',
-                  opacity: !ready || processing || syncingAmount ? 0.72 : 1,
+                  cursor: methodControlsDisabled ? 'not-allowed' : 'pointer',
+                  opacity: methodControlsDisabled ? 0.72 : 1,
+                  boxShadow: active ? '0 0 0 3px rgba(0,156,222,0.13)' : 'none',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
                 }}
               >
-                <span style={{ display: 'block', fontWeight: 700, fontSize: 14, marginBottom: 3 }}>
-                  {method.title}
+                <span style={{
+                  width: 34,
+                  height: 34,
+                  borderRadius: 8,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  flexShrink: 0,
+                  background: active ? '#FFFFFF' : '#F8FAFC',
+                  border: '1px solid #E1E7EF',
+                  color: active ? COLORS.blueDeeper : 'var(--text-muted)',
+                }}>
+                  <Icon name={method.icon} size={17} strokeWidth={2} />
                 </span>
-                <span style={{ display: 'block', fontSize: 12, color: 'var(--text-muted)' }}>
-                  {method.detail}
+                <span style={{ minWidth: 0 }}>
+                  <span style={{ display: 'block', fontWeight: 850, fontSize: 14, marginBottom: 3 }}>
+                    {method.title}
+                  </span>
+                  <span style={{ display: 'block', fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.3 }}>
+                    {method.detail}
+                  </span>
                 </span>
               </button>
             );
@@ -463,11 +589,11 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           customer actually has a wallet set up, so this div will be
           empty for most desktop Chrome users without a Google Pay card
           on file. That's the Stripe-recommended behavior. */}
-      <div ref={expressMountRef} style={{ marginBottom: isCardFamily ? 16 : 0, display: isCardFamily ? 'block' : 'none' }} />
-      <div ref={mountRef} style={{ minHeight: 90, marginBottom: 16 }} />
+      <div ref={expressMountRef} style={{ display: isCardFamily ? 'block' : 'none' }} />
+      <div ref={mountRef} style={{ minHeight: 90 }} />
 
       {/* Save-card opt-in */}
-      <div style={{ marginBottom: 16 }}>
+      <div>
         <SaveCardConsent
           checked={!!saveCard}
           onChange={(v) => onSaveCardChange?.(v)}
@@ -478,8 +604,10 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       </div>
 
       <div style={{
-        marginBottom: 16, padding: 14, borderRadius: 'var(--radius-md)',
-        background: '#F8FAFB', border: '1px solid var(--border)',
+        padding: 16,
+        borderRadius: 8,
+        background: '#F8FAFC',
+        border: '1px solid var(--border)',
         fontFamily: FONTS.mono,
         fontSize: 14,
       }}>
@@ -513,11 +641,10 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         <div style={{
           background: 'rgba(200,16,46,0.06)',
           border: '1px solid var(--danger)',
-          borderRadius: 'var(--radius-md)',
+          borderRadius: 8,
           padding: '12px 14px',
           fontSize: 14,
           color: 'var(--danger)',
-          marginBottom: 16,
         }}>
           {elementError}
         </div>
@@ -535,8 +662,16 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
                 : `Pay ${fmtCurrency(buttonAmount)}`}
       </BrandButton>
 
-      <div style={{ textAlign: 'center', marginTop: 12, fontSize: 12, color: 'var(--text-muted)' }}>
-        256-bit encrypted · Processed by Stripe
+      <div style={{
+        display: 'flex',
+        justifyContent: 'center',
+        alignItems: 'center',
+        gap: 7,
+        fontSize: 14,
+        color: 'var(--text-muted)',
+      }}>
+        <Icon name="lock" size={14} strokeWidth={2} />
+        <span>256-bit encrypted · Processed by Stripe</span>
       </div>
     </div>
   );
@@ -585,6 +720,7 @@ export default function PayPageV2() {
     if (!data || data.invoice.status === 'paid' || data.invoice.status === 'processing') return;
     if (!data.stripe?.available || !data.stripe?.publishableKey) {
       setPaymentError('Payment processing is temporarily unavailable. Please call (941) 297-5749.');
+      setPaymentState('error');
       return;
     }
     setPaymentState('setup');
@@ -665,185 +801,233 @@ export default function PayPageV2() {
   const visibleLineItems = (invoice.lineItems || []).filter(item => !isDiscountLineItem(item));
   const isOverdue = invoice.status !== 'paid'
     && isInvoiceDueDateOverdue(invoice.dueDate);
+  const serviceLabel = invoice.title || service.type || 'Service';
+  const dueLabel = invoice.dueDate ? fmtDate(invoice.dueDate) : null;
+  const serviceDateLabel = service.date ? fmtDate(service.date) : null;
+  const locationLine = cityStateZip(customer);
 
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div style={{ maxWidth: 640, margin: '32px auto 64px', padding: '0 16px' }}>
+      <div className="waves-customer-page waves-pay-page">
         {isOverdue && (
           <div style={{
             marginBottom: 16,
-            padding: '12px 16px',
-            borderRadius: 'var(--radius-md)',
+            padding: 14,
+            borderRadius: 8,
             background: 'rgba(200,16,46,0.08)',
-            border: '1px solid var(--danger)',
+            border: '1px solid rgba(200,16,46,0.28)',
             color: 'var(--danger)',
             fontSize: 14,
-            fontWeight: 500,
+            fontWeight: 750,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
           }}>
-            This invoice is overdue. Please pay at your earliest convenience.
+            <Icon name="warning" size={17} strokeWidth={2} />
+            <span>This invoice is overdue. Please pay at your earliest convenience.</span>
           </div>
         )}
 
-        <BrandCard padding={32} style={{ marginBottom: 20 }}>
-          <div style={{ marginBottom: 8, fontSize: 12, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase' }}>
-            Invoice {invoice.invoiceNumber}
-          </div>
-          <SerifHeading style={{ marginBottom: 4 }}>
-            Your invoice from Waves
-          </SerifHeading>
-          <p style={{ margin: '0 0 24px', fontSize: 16, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-            {invoice.title || service.type || 'Service'}
-            {service.date ? ` · ${fmtDate(service.date)}` : ''}
-            {invoice.dueDate ? ` · Due ${fmtDate(invoice.dueDate)}` : ''}
-          </p>
-
-          {/* Bill-to block */}
-          <div style={{ fontSize: 16, lineHeight: 1.6, color: 'var(--text)', marginBottom: 20 }}>
-            <div style={{ fontSize: 12, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 4 }}>
-              Billed to
-            </div>
-            <div style={{ fontWeight: 600 }}>{customer.firstName} {customer.lastName}</div>
-            {customer.address && <div>{customer.address}</div>}
-            {(customer.city || customer.state || customer.zip) && (
-              <div>{customer.city}{customer.city ? ', ' : ''}{customer.state || 'FL'} {customer.zip || ''}</div>
-            )}
-          </div>
-
-          {/* Line items */}
-          {visibleLineItems.length > 0 && (
-            <div style={{ marginBottom: 20, borderTop: '1px solid var(--border)' }}>
-              <div style={{
-                display: 'grid',
-                gridTemplateColumns: '1fr auto auto',
-                gap: '0 16px',
-                padding: '12px 0 8px',
-                fontSize: 12,
-                color: 'var(--text-muted)',
-                letterSpacing: '0.08em',
-                textTransform: 'uppercase',
-                borderBottom: '1px solid var(--border)',
-              }}>
-                <div>Description</div>
-                <div style={{ textAlign: 'right' }}>Qty</div>
-                <div style={{ textAlign: 'right', minWidth: 80 }}>Amount</div>
+        <div className="waves-billing-grid">
+          <BrandCard padding={28}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 18 }}>
+              <div>
+                <div style={{ ...eyebrow, marginBottom: 8 }}>Invoice {invoice.invoiceNumber}</div>
+                <SerifHeading style={{ marginBottom: 8 }}>Review and pay</SerifHeading>
+                <div style={{ fontSize: 15, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                  {serviceLabel}
+                  {serviceDateLabel ? ` · ${serviceDateLabel}` : ''}
+                </div>
               </div>
-              {visibleLineItems.map((item, idx) => (
-                <div
-                  key={idx}
-                  style={{
+              <StatusPill tone={isOverdue ? 'overdue' : 'due'}>
+                {isOverdue ? 'Overdue' : dueLabel ? `Due ${dueLabel}` : 'Due now'}
+              </StatusPill>
+            </div>
+
+            <div style={{
+              ...subtlePanel,
+              padding: 18,
+              marginBottom: 18,
+              display: 'grid',
+              gridTemplateColumns: 'minmax(0, 1fr) auto',
+              gap: 18,
+              alignItems: 'center',
+            }}>
+              <div>
+                <div style={eyebrow}>Amount due</div>
+                <div style={{ marginTop: 6, fontSize: 34, lineHeight: 1, fontWeight: 850, color: 'var(--text)', fontFamily: FONTS.body }}>
+                  {fmtCurrency(invoice.total)}
+                </div>
+              </div>
+              <span style={{
+                width: 42,
+                height: 42,
+                borderRadius: 8,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: 'var(--brand)',
+                background: '#FFFFFF',
+                border: '1px solid var(--border)',
+              }}>
+                <Icon name="document" size={20} strokeWidth={2} />
+              </span>
+            </div>
+
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+              gap: 16,
+              marginBottom: 20,
+            }}>
+              <DetailBlock label="Billed to">
+                <div style={{ fontWeight: 800 }}>{fullName(customer)}</div>
+                {customer.address && <div>{customer.address}</div>}
+                {locationLine && <div>{locationLine}</div>}
+              </DetailBlock>
+              <DetailBlock label="Service">
+                <div style={{ fontWeight: 800 }}>{serviceLabel}</div>
+                {serviceDateLabel && <div>{serviceDateLabel}</div>}
+                {service.techName && <div style={{ color: 'var(--text-muted)' }}>Technician: {service.techName}</div>}
+              </DetailBlock>
+            </div>
+
+            {visibleLineItems.length > 0 && (
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ ...eyebrow, marginBottom: 8 }}>Invoice items</div>
+                <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+                  <div style={{
                     display: 'grid',
                     gridTemplateColumns: '1fr auto auto',
-                    gap: '0 16px',
-                    padding: '12px 0',
-                    borderBottom: idx < visibleLineItems.length - 1 ? '1px solid var(--border)' : 'none',
-                    fontSize: 14,
-                    color: 'var(--text)',
-                  }}
-                >
-                  <div style={{ lineHeight: 1.4 }}>{item.description}</div>
-                  <div style={{ textAlign: 'right', fontFamily: FONTS.mono }}>
-                    {item.quantity || 1}
+                    gap: '0 14px',
+                    padding: '10px 12px',
+                    fontSize: 12,
+                    color: 'var(--text-muted)',
+                    fontWeight: 850,
+                    textTransform: 'uppercase',
+                    background: '#F8FAFC',
+                    borderBottom: '1px solid var(--border)',
+                  }}>
+                    <div>Description</div>
+                    <div style={{ textAlign: 'right' }}>Qty</div>
+                    <div style={{ textAlign: 'right', minWidth: 82 }}>Amount</div>
                   </div>
-                  <div style={{ textAlign: 'right', fontFamily: FONTS.mono, minWidth: 80 }}>
-                    {fmtCurrency(item.amount ?? (item.quantity || 1) * (item.unit_price || 0))}
-                  </div>
+                  {visibleLineItems.map((item, idx) => (
+                    <div
+                      key={idx}
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '1fr auto auto',
+                        gap: '0 14px',
+                        padding: '12px',
+                        borderBottom: idx < visibleLineItems.length - 1 ? '1px solid var(--border)' : 'none',
+                        fontSize: 14,
+                        color: 'var(--text)',
+                        alignItems: 'start',
+                      }}
+                    >
+                      <div style={{ lineHeight: 1.45, minWidth: 0 }}>{item.description}</div>
+                      <div style={{ textAlign: 'right', fontFamily: FONTS.mono }}>
+                        {item.quantity || 1}
+                      </div>
+                      <div style={{ textAlign: 'right', fontFamily: FONTS.mono, minWidth: 82, fontWeight: 650 }}>
+                        {fmtCurrency(item.amount ?? (item.quantity || 1) * (item.unit_price || 0))}
+                      </div>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-          )}
+              </div>
+            )}
 
-          {/* Totals */}
-          <div style={{ fontSize: 14, fontFamily: FONTS.mono }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
-              <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
-                Subtotal
-              </span>
-              <span>{fmtCurrency(invoice.subtotal)}</span>
+            <div style={{ ...subtlePanel, padding: 16 }}>
+              <SummaryRow label="Subtotal" value={fmtCurrency(invoice.subtotal)} />
+              {invoice.discountAmount > 0 && (
+                <SummaryRow label={invoice.discountLabel || 'Discount'} value={`− ${fmtCurrency(invoice.discountAmount)}`} />
+              )}
+              {invoice.taxAmount > 0 && customer?.isCommercial && (
+                <SummaryRow label={`Tax (${(Number(invoice.taxRate || 0) * 100).toFixed(2)}%)`} value={fmtCurrency(invoice.taxAmount)} />
+              )}
+              <SummaryRow label="Total due" value={fmtCurrency(invoice.total)} strong />
             </div>
-            {invoice.discountAmount > 0 && (
-              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
-                <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
-                  {invoice.discountLabel || 'Discount'}
-                </span>
-                <span>− {fmtCurrency(invoice.discountAmount)}</span>
-              </div>
-            )}
-            {invoice.taxAmount > 0 && customer?.isCommercial && (
-              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
-                <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
-                  Tax ({(Number(invoice.taxRate || 0) * 100).toFixed(2)}%)
-                </span>
-                <span>{fmtCurrency(invoice.taxAmount)}</span>
-              </div>
-            )}
+
+            <div style={{ marginTop: 16 }}>
+              <a
+                href={`${API_BASE}/pay/${token}/invoice.pdf`}
+                style={{
+                  minHeight: 40,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '0 12px',
+                  borderRadius: 8,
+                  border: '1px solid var(--border-strong)',
+                  color: 'var(--brand)',
+                  textDecoration: 'none',
+                  fontSize: 14,
+                  fontWeight: 800,
+                  background: '#FFFFFF',
+                }}
+              >
+                <Icon name="document" size={16} strokeWidth={2} />
+                Invoice PDF
+              </a>
+            </div>
+          </BrandCard>
+
+          <BrandCard padding={24} style={{ position: 'sticky', top: 84 }}>
             <div style={{
               display: 'flex',
+              alignItems: 'center',
               justifyContent: 'space-between',
-              padding: '12px 0 0',
-              marginTop: 8,
-              borderTop: '1px solid var(--border)',
-              fontSize: 20,
-              fontWeight: 700,
-              color: 'var(--text)',
-            }}>
-              <span style={{ fontFamily: FONTS.body, letterSpacing: '0.06em', textTransform: 'uppercase', fontSize: 14 }}>
-                Total
-              </span>
-              <span>{fmtCurrency(invoice.total)}</span>
-            </div>
-          </div>
-
-          <div style={{ marginTop: 20 }}>
-            <a
-              href={`${API_BASE}/pay/${token}/invoice.pdf`}
-              style={{
-                fontSize: 14,
-                color: 'var(--brand)',
-                textDecoration: 'underline',
-                textUnderlineOffset: 3,
-              }}
-            >
-              Download invoice PDF
-            </a>
-          </div>
-        </BrandCard>
-
-        <BrandCard padding={28}>
-          <div style={{ fontSize: 12, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 12 }}>
-            Pay securely
-          </div>
-          {paymentError && (
-            <div style={{
-              background: 'rgba(200,16,46,0.06)',
-              border: '1px solid var(--danger)',
-              borderRadius: 'var(--radius-md)',
-              padding: '12px 14px',
-              fontSize: 14,
-              color: 'var(--danger)',
+              gap: 12,
               marginBottom: 16,
             }}>
-              {paymentError}
+              <div>
+                <div style={{ ...eyebrow, marginBottom: 6 }}>Pay securely</div>
+                <div style={{ fontSize: 20, fontWeight: 850, color: 'var(--text)', lineHeight: 1.2 }}>
+                  {fmtCurrency(invoice.total)}
+                </div>
+              </div>
+              <StatusPill tone="secure">
+                <Icon name="lock" size={13} strokeWidth={2} />
+                Secure
+              </StatusPill>
             </div>
-          )}
-          {paymentState === 'ready' && stripeSetup ? (
-            <PaymentForm
-              publishableKey={stripeSetup.publishableKey}
-              clientSecret={stripeSetup.clientSecret}
-              amount={stripeSetup.baseAmount}
-              paymentIntentId={stripeSetup.paymentIntentId}
-              token={token}
-              cardSurchargeRate={stripeSetup.cardSurchargeRate}
-              onSuccess={handlePaymentSuccess}
-              onError={(msg) => setPaymentError(msg)}
-              saveCard={saveCard}
-              onSaveCardChange={setSaveCard}
-            />
-          ) : paymentState === 'error' ? null : (
-            <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 14 }}>
-              Loading payment form…
-            </div>
-          )}
-        </BrandCard>
+
+            {paymentError && (
+              <div style={{
+                background: 'rgba(200,16,46,0.06)',
+                border: '1px solid var(--danger)',
+                borderRadius: 8,
+                padding: '12px 14px',
+                fontSize: 14,
+                color: 'var(--danger)',
+                marginBottom: 16,
+                lineHeight: 1.45,
+              }}>
+                {paymentError}
+              </div>
+            )}
+            {paymentState === 'ready' && stripeSetup ? (
+              <PaymentForm
+                publishableKey={stripeSetup.publishableKey}
+                clientSecret={stripeSetup.clientSecret}
+                amount={stripeSetup.baseAmount}
+                paymentIntentId={stripeSetup.paymentIntentId}
+                token={token}
+                cardSurchargeRate={stripeSetup.cardSurchargeRate}
+                onSuccess={handlePaymentSuccess}
+                onError={(msg) => setPaymentError(msg)}
+                saveCard={saveCard}
+                onSaveCardChange={setSaveCard}
+              />
+            ) : paymentState === 'error' ? null : (
+              <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 14 }}>
+                Loading payment form…
+              </div>
+            )}
+          </BrandCard>
+        </div>
 
         <div style={{ marginTop: 28, textAlign: 'center', fontSize: 16, color: 'var(--text-muted)', lineHeight: 1.6 }}>
           Questions about this invoice? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.
