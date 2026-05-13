@@ -40,7 +40,7 @@ function fmtDate(d, opts) {
 // SECTION HEADING HELPER
 // =========================================================================
 function SectionHeading({ children }) {
-  return <div style={{ fontSize: 22, fontWeight: 400, color: B.navy, fontFamily: FONTS.display, letterSpacing: '0.02em' }}>{children}</div>;
+  return <div style={{ fontSize: 22, fontWeight: 400, color: B.navy, fontFamily: FONTS.display, letterSpacing: 0 }}>{children}</div>;
 }
 
 const VISUALLY_HIDDEN = {
@@ -69,6 +69,11 @@ const PORTAL_SHELL = {
   successText: '#047857',
   shadow: '0 18px 45px rgba(15,23,42,0.14)',
   shadowSoft: '0 1px 2px rgba(15,23,42,0.04)',
+};
+
+const PORTAL_BUTTON_BASE = {
+  ...BUTTON_BASE,
+  letterSpacing: 0,
 };
 
 function ShellIconTile({ icon, active = false, tone = 'brand', size = 36 }) {
@@ -126,7 +131,7 @@ const PORTAL_CARD_STYLE = {
 };
 
 const PORTAL_SECONDARY_ACTION = {
-  ...BUTTON_BASE,
+  ...PORTAL_BUTTON_BASE,
   background: PORTAL_SHELL.surface,
   color: PORTAL_SHELL.text,
   border: `1px solid ${PORTAL_SHELL.borderStrong}`,
@@ -614,7 +619,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
         <div style={{ marginBottom: 16 }}>
           <div style={{
             fontSize: 12, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading,
-            marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.8,
+            marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0,
           }}>
             Latest Visit — {scores.assessmentDate ? fmtDate(scores.assessmentDate, { month: 'short', day: 'numeric', year: 'numeric' }) : 'Recent'}
           </div>
@@ -675,7 +680,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
               cursor: 'pointer', padding: '8px 0',
             }}
           >
-            <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, fontFamily: FONTS.ui, textTransform: 'uppercase', letterSpacing: 0.8 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, fontFamily: FONTS.ui, textTransform: 'uppercase', letterSpacing: 0 }}>
               Progress Over Time ({trend.length} visits)
             </div>
             <span style={{ fontSize: 12, color: B.teal, fontWeight: 600 }}>{showTrend ? '▾ Hide' : '▸ Show'}</span>
@@ -745,7 +750,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
         <div style={{ marginTop: 18 }}>
           <div style={{
             fontSize: 12, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading,
-            marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.8,
+            marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0,
             display: 'flex', justifyContent: 'space-between', alignItems: 'center',
           }}>
             <span>Before &amp; After</span>
@@ -772,7 +777,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
         <div style={{ marginTop: 18 }}>
           <div style={{
             fontSize: 12, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading,
-            marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.8,
+            marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0,
           }}>
             Before &amp; After
           </div>
@@ -937,7 +942,7 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
         borderRadius: 16, padding: 20, color: '#fff', textAlign: 'center',
       }}>
         <div style={{ fontSize: 32 }}></div>
-        <div style={{ fontSize: 22, fontWeight: 400, fontFamily: FONTS.display, letterSpacing: '0.02em', marginTop: 4 }}>{earnedCount} Badges Earned</div>
+        <div style={{ fontSize: 22, fontWeight: 400, fontFamily: FONTS.display, letterSpacing: 0, marginTop: 4 }}>{earnedCount} Badges Earned</div>
         <div style={{ fontSize: 14, color: B.blueLight, marginTop: 4 }}>out of {badges.length} total</div>
         <div style={{
           marginTop: 12, height: 6, borderRadius: 3, background: 'rgba(255,255,255,0.15)',
@@ -1034,7 +1039,7 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
             <div style={{ fontSize: 18, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, marginTop: 12 }}>
               {selected.title}
             </div>
-            <div style={{ fontSize: 10, color: B.wavesBlue, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, marginTop: 4 }}>
+            <div style={{ fontSize: 10, color: B.wavesBlue, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0, marginTop: 4 }}>
               {selected.categoryLabel}
             </div>
             <div style={{ fontSize: 16, color: B.grayDark, marginTop: 10, lineHeight: 1.6 }}>
@@ -1090,14 +1095,14 @@ function BadgeShowcase({ badges, categories, categoryOrder }) {
                 marginTop: 14, padding: '10px 14px', borderRadius: 10,
                 background: B.offWhite, border: `1px solid ${B.grayLight}`,
               }}>
-                <div style={{ fontSize: 10, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5 }}>Next badge</div>
+                <div style={{ fontSize: 10, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0 }}>Next badge</div>
                 <div style={{ fontSize: 12, fontWeight: 600, color: B.navy, marginTop: 2 }}>{selected.nextBadgeInCategory.title}</div>
                 <div style={{ fontSize: 12, color: B.orange, marginTop: 1 }}>{selected.nextBadgeInCategory.remaining}</div>
               </div>
             )}
 
             <button onClick={() => setSelected(null)} style={{
-              ...BUTTON_BASE, marginTop: 16, padding: '9px 24px', fontSize: 14,
+              ...PORTAL_BUTTON_BASE, marginTop: 16, padding: '9px 24px', fontSize: 14,
               background: B.offWhite, color: B.grayDark, border: `1px solid ${B.grayLight}`,
             }}>Close</button>
           </div>
@@ -1330,7 +1335,7 @@ function PromotionCards() {
                   onClick={() => handleInterest(promo)}
                   disabled={interacting === promo.id}
                   style={{
-                    ...BUTTON_BASE, width: '100%', padding: 13, marginTop: 12, fontSize: 14,
+                    ...PORTAL_BUTTON_BASE, width: '100%', padding: 13, marginTop: 12, fontSize: 14,
                     background: B.yellow,
                     color: B.blueDeeper,
                     boxShadow: `0 4px 15px ${B.yellow}55`,
@@ -1475,7 +1480,7 @@ function HeroSlider({ onSwitchTab }) {
                 <button
                   onClick={() => onSwitchTab(slide.cta.tab)}
                   style={{
-                    ...BUTTON_BASE, padding: '8px 18px', fontSize: 12,
+                    ...PORTAL_BUTTON_BASE, padding: '8px 18px', fontSize: 12,
                     background: B.yellow, color: '#000',
                     border: 'none',
                     alignSelf: 'flex-start',
@@ -1756,12 +1761,12 @@ function LegacyDashboardTab({ customer, onSwitchTab }) {
                   </div>
                   <div style={{ display: 'flex', gap: 10, marginTop: 16, justifyContent: 'center', flexWrap: 'wrap' }}>
                     <a href={satReviewLink} target="_blank" rel="noopener noreferrer" style={{
-                      ...BUTTON_BASE, padding: '11px 22px', fontSize: 14,
+                      ...PORTAL_BUTTON_BASE, padding: '11px 22px', fontSize: 14,
                       background: `linear-gradient(135deg, ${B.yellow}, ${B.orange})`,
                       color: B.navy, textDecoration: 'none',
                     }}>Leave a Review ⭐</a>
                     <button onClick={() => setSatDismissed(true)} style={{
-                      ...BUTTON_BASE, padding: '11px 22px', fontSize: 14,
+                      ...PORTAL_BUTTON_BASE, padding: '11px 22px', fontSize: 14,
                       background: 'transparent', color: B.grayMid,
                       border: `1px solid ${B.grayLight}`,
                     }}>Maybe Later</button>
@@ -1804,12 +1809,12 @@ function LegacyDashboardTab({ customer, onSwitchTab }) {
                   />
                   <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
                     <button onClick={handleSatFeedback} disabled={satSubmitting} style={{
-                      ...BUTTON_BASE, padding: '10px 20px', flex: 1, fontSize: 14,
+                      ...PORTAL_BUTTON_BASE, padding: '10px 20px', flex: 1, fontSize: 14,
                       background: B.yellow, color: B.blueDeeper,
                       opacity: satSubmitting ? 0.7 : 1,
                     }}>{satSubmitting ? 'Sending...' : 'Send Feedback'}</button>
                     <button onClick={() => setSatPhase('thanks')} style={{
-                      ...BUTTON_BASE, padding: '10px 20px', fontSize: 14,
+                      ...PORTAL_BUTTON_BASE, padding: '10px 20px', fontSize: 14,
                       background: 'transparent', color: B.grayMid,
                       border: `1px solid ${B.grayLight}`,
                     }}>Skip</button>
@@ -1832,7 +1837,7 @@ function LegacyDashboardTab({ customer, onSwitchTab }) {
                         : "Thank you for being a valued Waves customer!"}
                   </div>
                   <button onClick={() => setSatDismissed(true)} style={{
-                    ...BUTTON_BASE, padding: '8px 20px', fontSize: 12, marginTop: 12,
+                    ...PORTAL_BUTTON_BASE, padding: '8px 20px', fontSize: 12, marginTop: 12,
                     background: B.offWhite, color: B.grayDark, border: `1px solid ${B.grayLight}`,
                   }}>Dismiss</button>
                 </div>
@@ -1867,7 +1872,7 @@ function LegacyDashboardTab({ customer, onSwitchTab }) {
           position: 'relative', zIndex: 1,
           fontFamily: FONTS.display, fontWeight: 400,
           fontSize: 'clamp(32px, 7vw, 44px)', color: '#fff',
-          letterSpacing: '0.02em', lineHeight: 1.05,
+          letterSpacing: 0, lineHeight: 1.05,
           margin: 0,
           textShadow: '0 2px 12px rgba(0,0,0,0.25)',
         }}>
@@ -1902,7 +1907,7 @@ function LegacyDashboardTab({ customer, onSwitchTab }) {
           { icon: 'gift', label: 'Refer a Friend', action: () => onSwitchTab?.('refer') },
         ].map((item, i) => (
           <button key={i} onClick={item.action} style={{
-            ...BUTTON_BASE, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
+            ...PORTAL_BUTTON_BASE, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
             padding: '14px 8px', borderRadius: 14,
             background: B.white, border: `1.5px solid ${B.bluePale}`,
             color: B.navy, fontSize: 12, fontWeight: 600, fontFamily: FONTS.ui,
@@ -1945,7 +1950,7 @@ function LegacyDashboardTab({ customer, onSwitchTab }) {
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                 <span style={{ fontSize: 26 }}>{isToday ? '' : isTomorrow ? '⏰' : ''}</span>
                 <div>
-                  <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, opacity: 0.85, fontFamily: FONTS.ui }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0, opacity: 0.85, fontFamily: FONTS.ui }}>
                     {isToday ? "Today's Service" : isTomorrow ? 'Tomorrow' : 'Your Next Visit'}
                   </div>
                   <div style={{ fontSize: 18, fontWeight: 800, fontFamily: FONTS.heading }}>
@@ -1956,7 +1961,7 @@ function LegacyDashboardTab({ customer, onSwitchTab }) {
               {!isToday && (
                 <div style={{ textAlign: 'right' }}>
                   <div style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.ui }}>{daysUntil}</div>
-                  <div style={{ fontSize: 10, opacity: 0.75, textTransform: 'uppercase', letterSpacing: 0.5 }}>{daysUntil === 1 ? 'day away' : 'days away'}</div>
+                  <div style={{ fontSize: 10, opacity: 0.75, textTransform: 'uppercase', letterSpacing: 0 }}>{daysUntil === 1 ? 'day away' : 'days away'}</div>
                 </div>
               )}
             </div>
@@ -1990,7 +1995,7 @@ function LegacyDashboardTab({ customer, onSwitchTab }) {
                 marginTop: 16, padding: 14, borderRadius: 12,
                 background: B.offWhite, border: `1px solid ${B.grayLight}`,
               }}>
-                <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: B.grayMid, marginBottom: 10 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0, color: B.grayMid, marginBottom: 10 }}>
                   Communication Timeline
                 </div>
                 {[
@@ -2025,7 +2030,7 @@ function LegacyDashboardTab({ customer, onSwitchTab }) {
                       setNextService({ ...nextService, customerConfirmed: true, status: 'confirmed' });
                     });
                   }} style={{
-                    ...BUTTON_BASE, padding: '10px 20px', flex: 1,
+                    ...PORTAL_BUTTON_BASE, padding: '10px 20px', flex: 1,
                     background: B.green, color: '#fff', fontSize: 14,
                     boxShadow: `0 3px 10px ${B.green}30`,
                   }}> Confirm Appointment</button>
@@ -2036,7 +2041,7 @@ function LegacyDashboardTab({ customer, onSwitchTab }) {
                   }}> Confirmed</span>
                 )}
                 <a href={`sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${nextService.serviceType} on ${svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} style={{
-                  ...BUTTON_BASE, padding: '10px 20px', flex: 1, textDecoration: 'none',
+                  ...PORTAL_BUTTON_BASE, padding: '10px 20px', flex: 1, textDecoration: 'none',
                   background: 'transparent', color: B.wavesBlue, fontSize: 14,
                   border: `1.5px solid ${B.wavesBlue}`,
                 }}>Reschedule</a>
@@ -2153,7 +2158,7 @@ function LegacyDashboardTab({ customer, onSwitchTab }) {
             border: `1px solid ${B.bluePale}`,
           }}>
             <div style={{ marginBottom: 6, color: B.wavesBlue }}><Icon name={s.icon} size={22} strokeWidth={1.75} /></div>
-            <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8, color: B.grayDark, fontFamily: FONTS.ui }}>{s.label}</div>
+            <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0, color: B.grayDark, fontFamily: FONTS.ui }}>{s.label}</div>
             <div style={{ fontSize: 20, fontWeight: 700, color: B.navy, marginTop: 2, fontFamily: FONTS.ui }}>{s.value}</div>
             <div style={{ fontSize: 12, color: B.green, fontWeight: 600, marginTop: 2 }}>{s.sub}</div>
           </div>
@@ -2207,7 +2212,7 @@ function LegacyDashboardTab({ customer, onSwitchTab }) {
           </div>
         </div>
         <button onClick={() => onSwitchTab?.('refer')} style={{
-          ...BUTTON_BASE, padding: '9px 16px', fontSize: 12, flexShrink: 0,
+          ...PORTAL_BUTTON_BASE, padding: '9px 16px', fontSize: 12, flexShrink: 0,
           background: B.yellow, color: B.blueDeeper,
         }}>Refer Now</button>
       </div>
@@ -2401,7 +2406,7 @@ function DashboardTab({ customer, onSwitchTab }) {
             background: balanceReady ? (hasBalance ? '#FFF7ED' : '#F0FDF4') : '#F8FAFC',
             border: `1px solid ${balanceReady ? (hasBalance ? '#FED7AA' : '#BBF7D0') : '#E1E7EF'}`,
           }}>
-            <div style={{ fontSize: 12, color: balanceReady ? (hasBalance ? '#9A3412' : '#047857') : muted, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+            <div style={{ fontSize: 12, color: balanceReady ? (hasBalance ? '#9A3412' : '#047857') : muted, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0 }}>
               {balanceLabel}
             </div>
             <div style={{ marginTop: 3, fontSize: 24, fontWeight: 800, color: B.blueDeeper }}>
@@ -2471,11 +2476,11 @@ function DashboardTab({ customer, onSwitchTab }) {
               </div>
               <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 14, flexWrap: 'wrap' }}>
                 <a href={satReviewLink} target="_blank" rel="noopener noreferrer" style={{
-                  ...BUTTON_BASE, textDecoration: 'none', background: B.blueDeeper, color: '#fff', padding: '10px 18px',
+                  ...PORTAL_BUTTON_BASE, textDecoration: 'none', background: B.blueDeeper, color: '#fff', padding: '10px 18px',
                   boxShadow: 'none', borderRadius: 8,
                 }}>Open Google</a>
                 <button type="button" onClick={() => setSatDismissed(true)} style={{
-                  ...BUTTON_BASE, background: '#fff', color: B.blueDeeper, padding: '10px 18px',
+                  ...PORTAL_BUTTON_BASE, background: '#fff', color: B.blueDeeper, padding: '10px 18px',
                   boxShadow: 'none', border: '1px solid #E1E7EF', borderRadius: 8,
                 }}>Done</button>
               </div>
@@ -2496,7 +2501,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                 }}
               />
               <button type="button" onClick={handleSatFeedback} disabled={satSubmitting} style={{
-                ...BUTTON_BASE, marginTop: 10, width: '100%', background: B.blueDeeper,
+                ...PORTAL_BUTTON_BASE, marginTop: 10, width: '100%', background: B.blueDeeper,
                 color: '#fff', boxShadow: 'none', borderRadius: 8,
               }}>{satSubmitting ? 'Sending...' : 'Send feedback'}</button>
             </div>
@@ -2513,7 +2518,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         <section style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: 20, borderBottom: '1px solid #E1E7EF', display: 'flex', justifyContent: 'space-between', gap: 16 }}>
             <div>
-              <div style={{ fontSize: 12, fontWeight: 800, color: muted, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Next Visit</div>
+              <div style={{ fontSize: 12, fontWeight: 800, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Next Visit</div>
               <div style={{ marginTop: 8, fontSize: 26, fontWeight: 800, color: B.blueDeeper }}>{nextDateLabel}</div>
               <div style={{ marginTop: 6, fontSize: 15, fontWeight: 700, color: B.navy }}>
                 {nextService?.serviceType || 'Request service when you need us.'}
@@ -2530,7 +2535,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                 <div style={{ fontSize: 34, fontWeight: 850, color: B.blueDeeper, lineHeight: 1 }}>
                   {daysUntilNextService}
                 </div>
-                <div style={{ marginTop: 4, fontSize: 12, color: muted, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.06em' }}>days</div>
+                <div style={{ marginTop: 4, fontSize: 12, color: muted, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0 }}>days</div>
               </div>
             )}
           </div>
@@ -2542,7 +2547,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                     setNextService({ ...nextService, customerConfirmed: true, status: 'confirmed' });
                   });
                 }} style={{
-                  ...BUTTON_BASE, background: B.blueDeeper, color: '#fff', boxShadow: 'none',
+                  ...PORTAL_BUTTON_BASE, background: B.blueDeeper, color: '#fff', boxShadow: 'none',
                   borderRadius: 8, padding: '11px 18px', fontSize: 14,
                 }}>
                   Confirm Visit
@@ -2554,7 +2559,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                 }}>Confirmed</span>
               )}
               <a href={`sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${nextService.serviceType || 'service'} visit.`} style={{
-                ...BUTTON_BASE, background: '#fff', color: B.blueDeeper, boxShadow: 'none',
+                ...PORTAL_BUTTON_BASE, background: '#fff', color: B.blueDeeper, boxShadow: 'none',
                 border: '1px solid #CBD5E1', borderRadius: 8, padding: '11px 18px',
                 textDecoration: 'none', fontSize: 14,
               }}>Reschedule</a>
@@ -2562,7 +2567,7 @@ function DashboardTab({ customer, onSwitchTab }) {
           ) : nextServiceReady ? (
             <div style={{ padding: 20 }}>
               <button type="button" onClick={() => onSwitchTab?.('request')} style={{
-                ...BUTTON_BASE, background: B.blueDeeper, color: '#fff', boxShadow: 'none',
+                ...PORTAL_BUTTON_BASE, background: B.blueDeeper, color: '#fff', boxShadow: 'none',
                 borderRadius: 8, padding: '11px 18px', fontSize: 14,
               }}>
                 Request Service
@@ -2578,7 +2583,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         </section>
 
         <section style={{ ...card, padding: 18 }}>
-          <div style={{ fontSize: 12, fontWeight: 800, color: muted, textTransform: 'uppercase', letterSpacing: '0.08em' }}>At a glance</div>
+          <div style={{ fontSize: 12, fontWeight: 800, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>At a glance</div>
           <div style={{ display: 'grid', gap: 12, marginTop: 14 }}>
             {[
               { label: 'Monthly rate', value: customer.monthlyRate ? `$${customer.monthlyRate}` : '—', sub: `${tier?.discount || '0%'} discount` },
@@ -2603,7 +2608,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         <section style={{ ...card, padding: 20 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'flex-start' }}>
             <div>
-              <div style={{ fontSize: 12, fontWeight: 800, color: muted, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Last Visit</div>
+              <div style={{ fontSize: 12, fontWeight: 800, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Last Visit</div>
               <div style={{ marginTop: 7, fontSize: 17, fontWeight: 800, color: B.blueDeeper }}>{lastService.type || lastService.serviceType}</div>
               <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
                 {fmtDate(lastService.date, { weekday: 'short', month: 'short', day: 'numeric' })} · {lastService.technician || 'Waves Team'}
@@ -2651,7 +2656,7 @@ function DashboardTab({ customer, onSwitchTab }) {
               : 'Share Waves with a neighbor and you both get credit.'}
           </div>
           <button type="button" onClick={() => onSwitchTab?.('refer')} style={{
-            ...BUTTON_BASE, marginTop: 12, background: '#fff', color: B.blueDeeper,
+            ...PORTAL_BUTTON_BASE, marginTop: 12, background: '#fff', color: B.blueDeeper,
             boxShadow: 'none', border: '1px solid #CBD5E1', borderRadius: 8,
             padding: '10px 14px', fontSize: 14,
           }}>Open referrals</button>
@@ -2717,10 +2722,10 @@ function ServicesTab() {
     fontWeight: 850,
     color: muted,
     textTransform: 'uppercase',
-    letterSpacing: '0.08em',
+    letterSpacing: 0,
   };
   const primaryButton = {
-    ...BUTTON_BASE,
+    ...PORTAL_BUTTON_BASE,
     background: B.blueDeeper,
     color: '#fff',
     border: 'none',
@@ -2843,7 +2848,7 @@ function ServicesTab() {
   // --- Available years ---
   const years = [...new Set(services.map(s => parseDate(s.date).getFullYear()))].sort((a, b) => b - a);
 
-  const thSt = { padding: '9px 10px', fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: '0.06em', color: muted, textAlign: 'left', borderBottom: '1px solid #E1E7EF', background: subtle };
+  const thSt = { padding: '9px 10px', fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0, color: muted, textAlign: 'left', borderBottom: '1px solid #E1E7EF', background: subtle };
   const tdSt = { padding: '10px', fontSize: 12, color: B.blueDeeper, borderBottom: '1px solid #EEF2F7', verticalAlign: 'top' };
 
   const pillStyle = (active) => ({
@@ -3015,7 +3020,7 @@ function ServicesTab() {
                               padding: '12px 14px', borderRadius: 8,
                               background: subtle, border: '1px solid #E1E7EF',
                             }}>
-                              <div style={{ fontSize: 12, fontWeight: 850, color: muted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                              <div style={{ fontSize: 12, fontWeight: 850, color: muted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0 }}>
                                 {s.technician || 'Technician'} says:
                               </div>
                               <div style={{ fontSize: 15, color: B.blueDeeper, lineHeight: 1.65, whiteSpace: 'pre-wrap' }}>{s.notes}</div>
@@ -3046,7 +3051,7 @@ function ServicesTab() {
                             { label: 'Status', value: status },
                           ].map((item, i) => (
                             <div key={i} style={{ padding: 12, borderRadius: 8, border: '1px solid #E1E7EF', background: '#fff' }}>
-                              <div style={{ fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: '0.06em', color: muted }}>{item.label}</div>
+                              <div style={{ fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0, color: muted }}>{item.label}</div>
                               <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, marginTop: 4, wordBreak: 'break-word' }}>{item.value || 'N/A'}</div>
                             </div>
                           ))}
@@ -3115,9 +3120,17 @@ function ServicesTab() {
                               <Icon name="camera" size={16} strokeWidth={1.75} /> Service Photos ({s.photoCount})
                             </div>
                             {!photoMap[s.id] ? (
-                              <div style={{ fontSize: 12, color: muted }}>Loading photos...</div>
+                              <PortalInlineState
+                                icon="camera"
+                                title="Loading photos"
+                                message="Fetching service photos for this visit."
+                              />
                             ) : photoMap[s.id].length === 0 ? (
-                              <div style={{ fontSize: 12, color: muted }}>No photos available.</div>
+                              <PortalInlineState
+                                icon="camera"
+                                title="No photos available"
+                                message="There are no uploaded photos for this service."
+                              />
                             ) : (
                               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(110px, 1fr))', gap: 8 }}>
                                 {photoMap[s.id].map((p) => (
@@ -3133,7 +3146,7 @@ function ServicesTab() {
                                       <div style={{
                                         position: 'absolute', top: 4, left: 4, padding: '2px 6px', borderRadius: 6,
                                         background: 'rgba(0,0,0,0.6)', color: B.white, fontSize: 9, fontWeight: 700,
-                                        textTransform: 'uppercase', letterSpacing: 0.5,
+                                        textTransform: 'uppercase', letterSpacing: 0,
                                       }}>{p.type}</div>
                                     )}
                                   </div>
@@ -3436,10 +3449,10 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     fontWeight: 850,
     color: muted,
     textTransform: 'uppercase',
-    letterSpacing: '0.08em',
+    letterSpacing: 0,
   };
   const primaryButton = {
-    ...BUTTON_BASE,
+    ...PORTAL_BUTTON_BASE,
     background: B.blueDeeper,
     color: '#fff',
     border: 'none',
@@ -3449,7 +3462,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     fontSize: 14,
   };
   const secondaryButton = {
-    ...BUTTON_BASE,
+    ...PORTAL_BUTTON_BASE,
     background: '#fff',
     color: B.blueDeeper,
     border: '1px solid #CBD5E1',
@@ -3586,7 +3599,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               <Icon name={isGreen ? 'truck' : isOrange ? 'clock' : 'calendar'} size={18} strokeWidth={1.9} />
             </span>
             <div>
-              <div style={{ fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: '0.06em', color: toneColor }}>
+              <div style={{ fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0, color: toneColor }}>
                 {isGreen ? 'Service Today' : isOrange ? 'Service Tomorrow' : 'Next Up'}
               </div>
               <div style={{ marginTop: 3, fontSize: 18, fontWeight: 850, fontFamily: FONTS.heading, color: B.blueDeeper }}>
@@ -3597,7 +3610,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           {!isGreen && (
             <div style={{ textAlign: 'right' }}>
               <div style={{ fontSize: 24, fontWeight: 850, fontFamily: FONTS.ui, color: B.blueDeeper }}>{s.daysUntil}</div>
-              <div style={{ fontSize: 12, color: muted, textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 850 }}>{s.daysUntil === 1 ? 'day' : 'days'}</div>
+              <div style={{ fontSize: 12, color: muted, textTransform: 'uppercase', letterSpacing: 0, fontWeight: 850 }}>{s.daysUntil === 1 ? 'day' : 'days'}</div>
             </div>
           )}
         </div>
@@ -3842,7 +3855,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                       }} />
                     </div>
                     {p.locked && (
-                      <span style={{ fontSize: 8, color: muted, textTransform: 'uppercase', letterSpacing: 0.3 }}>Locked</span>
+                      <span style={{ fontSize: 8, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Locked</span>
                     )}
                   </div>
                 </div>
@@ -3964,7 +3977,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                         onClick={() => handlePropertyContactSave(property.id)}
                         disabled={!!prefsLocked[contactLockKey]}
                         style={{
-                          ...BUTTON_BASE,
+                          ...PORTAL_BUTTON_BASE,
                           padding: '9px 14px',
                           background: B.blueDeeper,
                           color: '#fff',
@@ -4146,10 +4159,10 @@ function BillingTab({ customer }) {
     fontWeight: 850,
     color: muted,
     textTransform: 'uppercase',
-    letterSpacing: '0.08em',
+    letterSpacing: 0,
   };
   const primaryButton = {
-    ...BUTTON_BASE,
+    ...PORTAL_BUTTON_BASE,
     background: B.blueDeeper,
     color: '#fff',
     border: 'none',
@@ -4159,7 +4172,7 @@ function BillingTab({ customer }) {
     fontSize: 14,
   };
   const secondaryButton = {
-    ...BUTTON_BASE,
+    ...PORTAL_BUTTON_BASE,
     background: '#fff',
     color: B.blueDeeper,
     border: '1px solid #CBD5E1',
@@ -4437,7 +4450,7 @@ function BillingTab({ customer }) {
             border: `1px solid ${currentBalance > 0 ? `${B.orange}33` : '#BBF7D0'}`,
             boxSizing: 'border-box',
           }}>
-            <div style={{ fontSize: 12, color: balanceTone, fontWeight: 850, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+            <div style={{ fontSize: 12, color: balanceTone, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
               {balanceState}
             </div>
             <div style={{ marginTop: 3, fontSize: 24, fontWeight: 850, color: B.blueDeeper }}>
@@ -4500,7 +4513,7 @@ function BillingTab({ customer }) {
           <Icon name={bannerConfig.icon} size={18} strokeWidth={2} />
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 12, color: bannerConfig.titleColor, fontWeight: 850, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+          <div style={{ fontSize: 12, color: bannerConfig.titleColor, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
             {bannerConfig.badge}
           </div>
           <div style={{ marginTop: 3, fontSize: 15, fontWeight: 850, color: B.blueDeeper, lineHeight: 1.3 }}>
@@ -4594,7 +4607,7 @@ function BillingTab({ customer }) {
               width: 48, height: 32, borderRadius: 6,
               background: B.blueDeeper,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              color: '#fff', fontSize: 10, fontWeight: 800, letterSpacing: 1, fontFamily: FONTS.ui,
+              color: '#fff', fontSize: 10, fontWeight: 800, letterSpacing: 0, fontFamily: FONTS.ui,
             }}>{c.brand || 'CARD'}</div>
             <div style={{ flex: 1, minWidth: 180 }}>
               <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>{methodLabel(c)}</div>
@@ -4702,7 +4715,7 @@ function BillingTab({ customer }) {
             { label: 'Promo Credits', items: promoCredits, icon: 'party' },
           ].filter(g => g.items.length > 0).map(group => (
             <div key={group.label} style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <div style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: 0, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
                 <Icon name={group.icon} size={12} strokeWidth={2} /> {group.label}
               </div>
               {group.items.map((cr, i) => (
@@ -4752,11 +4765,11 @@ function BillingTab({ customer }) {
 
         <div style={{ display: 'flex', gap: 16, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Year</span>
+            <span style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Year</span>
             <PillFilter options={[...paymentYears, 'All']} value={yearFilter} onChange={setYearFilter} />
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Type</span>
+            <span style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Type</span>
             <PillFilter options={['All', 'Recurring', 'One-Time']} value={typeFilter} onChange={setTypeFilter} />
           </div>
         </div>
@@ -4796,7 +4809,7 @@ function BillingTab({ customer }) {
                 fontSize: 14,
                 fontWeight: 850,
                 textTransform: 'uppercase',
-                letterSpacing: '0.06em',
+                letterSpacing: 0,
                 padding: '4px 8px',
                 borderRadius: 999,
                 ...statusBadge(p.status),
@@ -4811,7 +4824,7 @@ function BillingTab({ customer }) {
         <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper, marginBottom: 14 }}>Notifications</div>
 
         <div style={{ marginBottom: 14 }}>
-          <label htmlFor="portal-billing-email" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+          <label htmlFor="portal-billing-email" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
             Billing Email
           </label>
           <input
@@ -4975,7 +4988,7 @@ function PillSelector({ options, value, onChange }) {
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
       {options.map(o => (
         <button key={o.value} type="button" onClick={() => onChange(o.value)} aria-pressed={value === o.value} style={{
-          ...BUTTON_BASE,
+          ...PORTAL_BUTTON_BASE,
           minHeight: 36,
           padding: '8px 12px',
           fontSize: 14,
@@ -5696,7 +5709,7 @@ function PropertyTab({ customer }) {
                       const next = active ? days.filter(d => d !== day) : [...days, day];
                       updateField('wateringDays', next);
                     }} style={{
-                      ...BUTTON_BASE,
+                      ...PORTAL_BUTTON_BASE,
                       minWidth: 44,
                       padding: '8px 10px',
                       fontSize: 14,
@@ -5967,7 +5980,7 @@ function WeatherPestWidget({ customer, nextService }) {
                   <Icon name={p.icon} size={15} strokeWidth={2} /> {p.label}
                 </span>
                 <span style={{
-                  fontSize: 12, fontWeight: 800, letterSpacing: 0.5,
+                  fontSize: 12, fontWeight: 800, letterSpacing: 0,
                   padding: '3px 7px', borderRadius: 8,
                   background: `${p.color}33`, color: p.color,
                 }}>{p.level}</span>
@@ -6259,7 +6272,7 @@ function LearnTab({ customer }) {
     letterSpacing: 0,
   };
   const secondaryButton = {
-    ...BUTTON_BASE,
+    ...PORTAL_BUTTON_BASE,
     background: '#fff',
     color: B.blueDeeper,
     border: '1px solid #CBD5E1',
@@ -6929,10 +6942,10 @@ function MyPlanTab({ customer }) {
     fontWeight: 850,
     color: muted,
     textTransform: 'uppercase',
-    letterSpacing: '0.08em',
+    letterSpacing: 0,
   };
   const primaryButton = {
-    ...BUTTON_BASE,
+    ...PORTAL_BUTTON_BASE,
     background: B.blueDeeper,
     color: '#fff',
     border: 'none',
@@ -6942,7 +6955,7 @@ function MyPlanTab({ customer }) {
     fontSize: 14,
   };
   const secondaryButton = {
-    ...BUTTON_BASE,
+    ...PORTAL_BUTTON_BASE,
     background: '#fff',
     color: B.blueDeeper,
     border: '1px solid #CBD5E1',
@@ -7001,7 +7014,7 @@ function MyPlanTab({ customer }) {
             border: '1px solid #BBF7D0',
             boxSizing: 'border-box',
           }}>
-            <div style={{ fontSize: 12, color: '#047857', fontWeight: 850, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+            <div style={{ fontSize: 12, color: '#047857', fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
               Active plan
             </div>
             <div style={{ marginTop: 3, fontSize: 24, fontWeight: 850, color: B.blueDeeper }}>
@@ -7279,7 +7292,7 @@ function MyPlanTab({ customer }) {
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
                       <div style={{ fontSize: 15, color: B.blueDeeper, fontWeight: 850 }}>{tn}</div>
                       {isCurrent && (
-                        <span style={{ fontSize: 10, color: B.green, fontWeight: 850, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                        <span style={{ fontSize: 10, color: B.green, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
                           Current
                         </span>
                       )}
@@ -7759,10 +7772,10 @@ function EnRouteLiveMap({ techPosition, customerLocation, techName }) {
       style={{
         width: '100%',
         height: 320,
-        borderRadius: 16,
+        borderRadius: 8,
         overflow: 'hidden',
         background: B.blueLight,
-        boxShadow: '0 2px 12px rgba(15, 23, 42, 0.08)',
+        border: '1px solid #E1E7EF',
       }}
     />
   );
@@ -7876,22 +7889,21 @@ function ServiceTracker() {
 
   const cardBase = {
     background: B.white,
-    borderRadius: 16,
+    borderRadius: 8,
     padding: 20,
-    boxShadow: '0 2px 12px rgba(15, 23, 42, 0.06)',
+    border: '1px solid #E1E7EF',
+    boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
   };
   const subCardBase = {
     background: B.white,
-    borderRadius: 12,
+    borderRadius: 8,
     padding: '14px 16px',
     border: `1px solid ${B.slate200 || '#E2E8F0'}`,
+    boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
   };
 
   return (
     <div style={{
-      background: B.sand,
-      borderRadius: 20,
-      padding: 16,
       display: 'flex', flexDirection: 'column', gap: 12,
     }}>
       {/* Status pill + weather strip. The pill is the authoritative
@@ -7901,9 +7913,10 @@ function ServiceTracker() {
         <div style={{
           display: 'inline-block',
           fontSize: 12, fontWeight: 700,
-          letterSpacing: '0.1em', textTransform: 'uppercase',
+          letterSpacing: 0, textTransform: 'uppercase',
           color: status.color, background: `${status.color}1A`,
-          padding: '6px 12px', borderRadius: 9999,
+          padding: '6px 12px', borderRadius: 8,
+          border: `1px solid ${status.color}33`,
         }}>
           <span style={{
             display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
@@ -7952,7 +7965,7 @@ function ServiceTracker() {
                 fontWeight: 700,
                 color: B.blueDeeper,
                 lineHeight: 1,
-                letterSpacing: '0.02em',
+                letterSpacing: 0,
                 display: 'flex',
                 alignItems: 'baseline',
                 gap: 12,
@@ -7961,7 +7974,7 @@ function ServiceTracker() {
                 {eta != null && eta >= 1 && (
                   <span style={{
                     fontSize: 22, color: B.textCaption,
-                    fontFamily: FONTS.body, fontWeight: 600, letterSpacing: '0.02em',
+                    fontFamily: FONTS.body, fontWeight: 600, letterSpacing: 0,
                   }}>min</span>
                 )}
               </div>
@@ -7990,7 +8003,7 @@ function ServiceTracker() {
             ) : (
               <div style={{
                 marginTop: 20, padding: 14, background: B.blueSurface || B.blueLight,
-                borderRadius: 10, fontSize: 14, color: B.textBody,
+                borderRadius: 8, fontSize: 14, color: B.textBody,
               }}>
                 {techFirst} is on the way. We'll update once GPS reconnects.
               </div>
@@ -8100,7 +8113,7 @@ function ServiceTracker() {
         {step === 3 && office?.phone && (
           <a
             href={`sms:${office.phone.replace(/\D/g, '')}`}
-            style={{ ...GOLD_CTA, width: '100%', marginTop: 20, boxSizing: 'border-box' }}
+            style={{ ...GOLD_CTA, width: '100%', marginTop: 20, boxSizing: 'border-box', borderRadius: 8, boxShadow: 'none', letterSpacing: 0 }}
           >
             TEXT WAVES
           </a>
@@ -8153,7 +8166,7 @@ function ServiceTracker() {
       {notes.length > 0 && (
         <div style={subCardBase}>
           <div style={{
-            fontSize: 12, fontWeight: 700, letterSpacing: '0.1em',
+            fontSize: 12, fontWeight: 700, letterSpacing: 0,
             textTransform: 'uppercase', color: B.wavesBlue, marginBottom: 8,
           }}>Live updates</div>
           {notes.map((n, i) => (
@@ -8184,11 +8197,11 @@ function ServiceTracker() {
         <div style={{ display: 'flex', gap: 8 }}>
           <a
             href={`tel:${office.phone.replace(/\D/g, '')}`}
-            style={{ ...BUTTON_BASE, flex: 1, padding: '12px 16px', fontSize: 14, background: B.yellow, color: B.blueDeeper, textDecoration: 'none' }}
+            style={{ ...PORTAL_BUTTON_BASE, flex: 1, padding: '12px 16px', fontSize: 14, background: B.yellow, color: B.blueDeeper, textDecoration: 'none', borderRadius: 8, boxShadow: 'none' }}
           >Call</a>
           <a
             href={`sms:${office.phone.replace(/\D/g, '')}`}
-            style={{ ...BUTTON_BASE, flex: 1, padding: '12px 16px', fontSize: 14, background: B.wavesBlue, color: '#fff', textDecoration: 'none' }}
+            style={{ ...PORTAL_BUTTON_BASE, flex: 1, padding: '12px 16px', fontSize: 14, background: B.wavesBlue, color: '#fff', textDecoration: 'none', borderRadius: 8, boxShadow: 'none' }}
           >Text</a>
         </div>
       </div>
@@ -8196,7 +8209,7 @@ function ServiceTracker() {
       {/* Completion summary at step 7 */}
       {step === 7 && summary && (
         <div style={{ ...subCardBase, background: `${B.green}14`, borderColor: `${B.green}33` }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: B.green, letterSpacing: '0.05em', marginBottom: 8, textTransform: 'uppercase' }}>Service summary</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: B.green, letterSpacing: 0, marginBottom: 8, textTransform: 'uppercase' }}>Service summary</div>
           {summary.productsApplied?.length > 0 && (
             <div style={{ marginBottom: 10 }}>
               <div style={{ fontSize: 14, color: B.textBody, fontWeight: 600, marginBottom: 6 }}>Products</div>
@@ -8302,7 +8315,7 @@ function ReferTab({ customer, onSwitchTab }) {
     letterSpacing: 0,
   };
   const primaryButton = {
-    ...BUTTON_BASE,
+    ...PORTAL_BUTTON_BASE,
     background: B.blueDeeper,
     color: '#fff',
     border: 'none',
@@ -8312,7 +8325,7 @@ function ReferTab({ customer, onSwitchTab }) {
     fontSize: 14,
   };
   const secondaryButton = {
-    ...BUTTON_BASE,
+    ...PORTAL_BUTTON_BASE,
     background: '#fff',
     color: B.blueDeeper,
     border: '1px solid #CBD5E1',
@@ -8799,7 +8812,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
     letterSpacing: 0,
   };
   const primaryButton = {
-    ...BUTTON_BASE,
+    ...PORTAL_BUTTON_BASE,
     background: B.blueDeeper,
     color: '#fff',
     border: 'none',
@@ -8810,7 +8823,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
     letterSpacing: 0,
   };
   const secondaryButton = {
-    ...BUTTON_BASE,
+    ...PORTAL_BUTTON_BASE,
     background: '#fff',
     color: B.blueDeeper,
     border: '1px solid #CBD5E1',
@@ -9307,7 +9320,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
     letterSpacing: 0,
   };
   const actionButton = {
-    ...BUTTON_BASE,
+    ...PORTAL_BUTTON_BASE,
     background: '#fff',
     color: B.blueDeeper,
     border: '1px solid #CBD5E1',
@@ -10409,7 +10422,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
       position: 'fixed', bottom: 8, left: 10, right: 10, zIndex: 98,
       background: 'rgba(255,255,255,0.98)', backdropFilter: 'blur(16px)',
       border: `1px solid ${PORTAL_SHELL.border}`,
-      borderRadius: 16,
+      borderRadius: 8,
       boxShadow: '0 14px 32px rgba(15,23,42,0.16)',
       display: 'flex', maxWidth: 700, margin: '0 auto',
       padding: '4px 8px max(6px, env(safe-area-inset-bottom))',
@@ -10480,7 +10493,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
     >
       <div role="dialog" aria-modal="true" aria-label="More navigation" style={{
         background: PORTAL_SHELL.page,
-        borderRadius: '18px 18px 0 0',
+        borderRadius: '8px 8px 0 0',
         padding: '12px 14px max(18px, env(safe-area-inset-bottom))',
         boxShadow: '0 -8px 40px rgba(15,23,42,0.18)',
         animation: 'moreSheetUp 0.25s ease',
@@ -10710,7 +10723,7 @@ function ChatWidget({ customer, onClose }) {
         aria-label="Waves assistant"
         style={{
           background: PORTAL_SHELL.surface,
-          borderRadius: compact ? '18px 18px 0 0' : 8,
+          borderRadius: compact ? '8px 8px 0 0' : 8,
           maxHeight: compact ? '85vh' : 'min(760px, calc(100vh - 48px))',
           maxWidth: 640,
           width: '100%',
