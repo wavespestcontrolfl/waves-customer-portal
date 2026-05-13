@@ -7377,349 +7377,534 @@ function ServiceTracker() {
 // REFER & EARN TAB
 // =========================================================================
 function ReferTab({ customer, onSwitchTab }) {
+  const compact = useIsMobile(760);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [name, setName] = useState('');
-  const [phone, setPhone] = useState('');
+  const [loadError, setLoadError] = useState('');
+  const [form, setForm] = useState({ name: '', phone: '' });
   const [submitting, setSubmitting] = useState(false);
-  const [submitted, setSubmitted] = useState(false);
+  const [notice, setNotice] = useState(null);
   const [copied, setCopied] = useState(false);
-  const [showPreview, setShowPreview] = useState(false);
 
   const fetchData = () => {
+    setLoadError('');
     api.getReferrals()
       .then(d => { setData(d); setLoading(false); })
-      .catch(() => setLoading(false));
+      .catch(err => {
+        setLoadError(err?.message || 'Could not load referral details.');
+        setLoading(false);
+      });
   };
 
   useEffect(() => { fetchData(); }, []);
 
-  const handleCopy = () => {
-    navigator.clipboard?.writeText(data?.shareLink || '').then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
+  const flash = (text, type = 'success') => {
+    setNotice({ text, type });
+    window.setTimeout(() => setNotice(null), 3600);
   };
 
-  const handleSubmit = async () => {
-    if (!name.trim() || !phone.trim()) return;
+  const handleCopy = async (value) => {
+    if (!value) return;
+    try {
+      await navigator.clipboard?.writeText(value);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      flash('Could not copy the referral link.', 'error');
+    }
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    const friendName = form.name.trim();
+    const friendPhone = form.phone.trim();
+    if (!friendName || !friendPhone) return;
     setSubmitting(true);
     try {
-      await api.submitReferral({ name: name.trim(), phone: phone.trim() });
-      setSubmitted(true);
-      setName(''); setPhone('');
-      setShowPreview(false);
+      await api.submitReferral({ name: friendName, phone: friendPhone });
+      setForm({ name: '', phone: '' });
+      flash('Invite sent. We texted them your referral.');
       fetchData();
-      setTimeout(() => setSubmitted(false), 3000);
     } catch (err) {
-      console.error(err);
-      const msg = err?.response?.data?.error || err?.message || 'Could not submit your referral. Please try again or call our office at (941) 297-5749.';
-      alert(msg);
+      flash(err?.message || 'Could not submit your referral. Please try again.', 'error');
+    } finally {
+      setSubmitting(false);
     }
-    setSubmitting(false);
   };
 
-  if (loading) return <div style={{ padding: 40, textAlign: 'center', color: B.grayMid }}>Loading referrals...</div>;
+  const card = {
+    background: B.white,
+    border: '1px solid #E1E7EF',
+    borderRadius: 8,
+    boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+  };
+  const muted = '#64748B';
+  const subtle = '#F8FAFC';
+  const sectionTitle = {
+    fontSize: 12,
+    fontWeight: 850,
+    color: muted,
+    textTransform: 'uppercase',
+    letterSpacing: 0,
+  };
+  const primaryButton = {
+    ...BUTTON_BASE,
+    background: B.blueDeeper,
+    color: '#fff',
+    border: 'none',
+    borderRadius: 8,
+    boxShadow: 'none',
+    padding: '10px 14px',
+    fontSize: 14,
+  };
+  const secondaryButton = {
+    ...BUTTON_BASE,
+    background: '#fff',
+    color: B.blueDeeper,
+    border: '1px solid #CBD5E1',
+    borderRadius: 8,
+    boxShadow: 'none',
+    padding: '10px 14px',
+    fontSize: 14,
+  };
+  const money = (n, digits = 0) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+  const cents = (n, digits = 0) => money(Number(n || 0) / 100, digits);
 
-  const referralCode = data?.referralCode || customer.referralCode || '';
-  const shareLink = data?.shareLink || `https://wavespestcontrol.com?ref=${referralCode}`;
+  if (loading) {
+    return (
+      <div style={{ ...card, padding: 28, textAlign: 'center', color: muted }}>
+        Loading referrals...
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div style={{ ...card, padding: 24 }}>
+        <div style={sectionTitle}>Referrals</div>
+        <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>Could not load referrals</div>
+        <div style={{ marginTop: 6, fontSize: 14, color: muted }}>{loadError}</div>
+        <button type="button" onClick={fetchData} style={{ ...secondaryButton, marginTop: 16 }}>Try again</button>
+      </div>
+    );
+  }
+
+  const referralCode = data?.referralCode || customer?.referralCode || '';
+  const shareLink = data?.referralLink || data?.shareLink || (referralCode ? `https://wavespestcontrol.com/r/${referralCode}` : 'https://wavespestcontrol.com');
   const stats = data?.stats || { totalReferrals: 0, converted: 0, totalEarned: 0 };
   const referrals = data?.referrals || [];
-
-  // Fix stats math: ensure earned = signups * 25
-  const computedEarned = stats.converted * 25;
-  const lifetimeTotal = Math.max(computedEarned, stats.totalEarned || 0);
-
-  const shareText = `Hey! I use Waves Pest Control for my lawn and pest service — they're the best in SW Florida. Use my referral link and we both get $25 off: ${shareLink}`;
-
-  // Preview text the friend will receive
-  const invitePreviewText = name.trim()
-    ? `Hey ${name.trim()}! Your friend ${customer.firstName || 'a Waves customer'} referred you to Waves Pest Control. Sign up for any WaveGuard plan and you both get $25 off your next bill. Learn more: ${shareLink}`
-    : `Hey! Your friend referred you to Waves Pest Control. Sign up for any WaveGuard plan and you both get $25 off your next bill. Learn more: ${shareLink}`;
-
-  // Milestone progress
-  const milestones = [
-    { count: 3, title: 'Referral Pro' },
-    { count: 5, title: 'Neighborhood Champion' },
-    { count: 10, title: 'Referral Legend' },
-  ];
-  const nextMilestone = milestones.find(m => stats.totalReferrals < m.count);
-  const referralsToNext = nextMilestone ? nextMilestone.count - stats.totalReferrals : 0;
+  const totalReferrals = Number(stats.totalReferrals || referrals.length || 0);
+  const converted = Number(stats.converted ?? stats.totalConverted ?? 0);
+  const pending = Number(stats.pending ?? referrals.filter(r => ['pending', 'contacted', 'estimated'].includes(r.status)).length);
+  const clicks = Number(stats.totalClicks || 0);
+  const rewardPerReferral = Number(data?.rewardPerReferral || 50);
+  const lifetimeEarned = data?.totalEarned != null
+    ? Number(data.totalEarned || 0) / 100
+    : Number(stats.totalEarned || 0);
+  const availableBalance = Number(data?.availableBalance || 0) / 100;
+  const pendingEarnings = Number(data?.pendingEarnings || 0) / 100;
+  const shareText = `I use Waves Pest Control and thought you might want their info. Here is my referral link: ${shareLink}`;
+  const customerFirstName = customer?.firstName || customer?.first_name || 'your friend';
 
   const statusConfig = {
-    pending: { label: 'Invited', color: B.grayMid, bg: B.grayLight },
-    contacted: { label: 'Contacted', color: B.wavesBlue, bg: B.bluePale },
-    signed_up: { label: 'Signed Up', color: B.orange, bg: `${B.orange}20` },
-    credited: { label: 'Credit Applied', color: B.green, bg: `${B.green}20` },
+    pending: { label: 'Invited', color: muted, bg: '#F1F5F9' },
+    contacted: { label: 'Contacted', color: B.wavesBlue, bg: '#EEF6FF' },
+    estimated: { label: 'Estimated', color: B.orange, bg: `${B.orange}14` },
+    signed_up: { label: 'Signed up', color: B.green, bg: '#F0FDF4' },
+    credited: { label: 'Credit applied', color: B.green, bg: '#F0FDF4' },
+    rejected: { label: 'Closed', color: B.red, bg: `${B.red}10` },
+    lost: { label: 'Closed', color: B.red, bg: `${B.red}10` },
   };
-
-  const STATUS_ORDER = ['pending', 'contacted', 'signed_up', 'credited'];
+  const milestoneMeta = {
+    none: { label: 'Getting started', next: 'advocate' },
+    advocate: { label: 'Advocate', next: 'ambassador' },
+    ambassador: { label: 'Ambassador', next: 'champion' },
+    champion: { label: 'Champion', next: null },
+  };
+  const currentMilestone = data?.milestoneLevel || (converted >= 10 ? 'champion' : converted >= 5 ? 'ambassador' : converted >= 3 ? 'advocate' : 'none');
+  const fallbackMilestone = [
+    { level: 'advocate', threshold: 3, bonus: 2500 },
+    { level: 'ambassador', threshold: 5, bonus: 5000 },
+    { level: 'champion', threshold: 10, bonus: 10000 },
+  ].find(m => converted < m.threshold);
+  const nextMilestone = data?.nextMilestone || fallbackMilestone;
+  const milestoneThreshold = Number(nextMilestone?.threshold || 0);
+  const milestoneProgress = milestoneThreshold ? Math.min(100, Math.round((converted / milestoneThreshold) * 100)) : 100;
+  const milestoneRemaining = Number(nextMilestone?.remaining ?? Math.max(0, milestoneThreshold - converted));
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {/* Hero Banner */}
-      <div style={{
-        background: `linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark}, ${B.wavesBlue})`,
-        backgroundImage: `${HALFTONE_PATTERN}, linear-gradient(135deg, ${B.blueDeeper}, ${B.blueDark}, ${B.wavesBlue})`,
-        backgroundSize: `${HALFTONE_SIZE}, 100% 100%`,
-        borderRadius: 20, padding: '28px 24px', color: '#fff', textAlign: 'center',
-        position: 'relative', overflow: 'hidden',
-      }}>
-        <div style={{ fontSize: 40, marginBottom: 8 }}></div>
-        <div style={{ fontSize: 28, fontWeight: 400, fontFamily: FONTS.display, letterSpacing: '0.02em' }}>Give $25, Get $25</div>
-        <div style={{ fontSize: 16, opacity: 0.85, marginTop: 8, lineHeight: 1.6 }}>
-          Refer anyone in Southwest Florida to Waves Pest Control. When they sign up for any WaveGuard plan, you both get a <strong>$25 credit</strong> on your next bill.
+      {notice && (
+        <div style={{
+          padding: '12px 14px',
+          borderRadius: 8,
+          border: `1px solid ${notice.type === 'error' ? `${B.red}33` : '#BBF7D0'}`,
+          background: notice.type === 'error' ? `${B.red}10` : '#F0FDF4',
+          color: notice.type === 'error' ? B.red : B.green,
+          fontSize: 14,
+          fontWeight: 800,
+        }}>
+          {notice.text}
         </div>
-        {/* Stats pills */}
-        <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 18 }}>
-          {[
-            { value: stats.totalReferrals, label: 'Referred' },
-            { value: stats.converted, label: 'Signed Up' },
-            { value: `$${computedEarned}`, label: 'Earned' },
-          ].map(s => (
-            <div key={s.label} style={{
-              padding: '8px 16px', borderRadius: 12,
-              background: 'rgba(255,255,255,0.12)', border: '1px solid rgba(255,255,255,0.15)',
-              textAlign: 'center',
+      )}
+
+      <section style={{ ...card, padding: compact ? 20 : 28 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+          <div style={{ minWidth: 0, flex: '1 1 300px' }}>
+            <div style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '5px 10px',
+              borderRadius: 999,
+              background: '#EEF6FF',
+              color: B.blueDeeper,
+              fontSize: 12,
+              fontWeight: 850,
             }}>
-              <div style={{ fontSize: 20, fontWeight: 800, fontFamily: FONTS.ui }}>{s.value}</div>
-              <div style={{ fontSize: 10, color: B.blueLight, marginTop: 1 }}>{s.label}</div>
+              <Icon name="gift" size={14} strokeWidth={2} />
+              Referral Program
+            </div>
+            <h1 style={{
+              margin: '12px 0 8px',
+              color: B.blueDeeper,
+              fontFamily: FONTS.heading,
+              fontSize: compact ? 28 : 34,
+              lineHeight: 1.1,
+              letterSpacing: 0,
+            }}>
+              Refer and Earn
+            </h1>
+            <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
+              Share your Waves link with neighbors. You earn {money(rewardPerReferral)} account credit when a referral starts service.
+            </div>
+          </div>
+          <div style={{
+            minWidth: compact ? '100%' : 210,
+            padding: '14px 16px',
+            borderRadius: 8,
+            background: availableBalance > 0 ? '#F0FDF4' : subtle,
+            border: `1px solid ${availableBalance > 0 ? '#BBF7D0' : '#E1E7EF'}`,
+            boxSizing: 'border-box',
+          }}>
+            <div style={{ fontSize: 12, color: availableBalance > 0 ? B.green : muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
+              Available credit
+            </div>
+            <div style={{ marginTop: 3, fontSize: 24, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.ui }}>
+              {money(availableBalance)}
+            </div>
+            <div style={{ marginTop: 2, fontSize: 12, color: muted }}>
+              {money(lifetimeEarned)} earned all time
+            </div>
+          </div>
+        </div>
+
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: compact ? '1fr 1fr' : 'repeat(4, 1fr)',
+          gap: 10,
+          marginTop: 22,
+        }}>
+          {[
+            { label: 'Sent', value: totalReferrals, sub: pending ? `${pending} in progress` : 'Ready to share' },
+            { label: 'Started', value: converted, sub: `${Math.round(totalReferrals ? (converted / totalReferrals) * 100 : 0)}% conversion` },
+            { label: 'Pending', value: money(pendingEarnings), sub: 'Awaiting first service' },
+            { label: 'Clicks', value: clicks, sub: clicks ? 'Link traffic' : 'No clicks yet' },
+          ].map((item) => (
+            <div key={item.label} style={{
+              border: '1px solid #E1E7EF',
+              borderRadius: 8,
+              background: subtle,
+              padding: 14,
+              minHeight: 74,
+              boxSizing: 'border-box',
+            }}>
+              <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>{item.label}</div>
+              <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 17, fontWeight: 850, lineHeight: 1.15, fontFamily: FONTS.ui }}>{item.value}</div>
+              <div style={{ marginTop: 3, color: muted, fontSize: 12 }}>{item.sub}</div>
             </div>
           ))}
         </div>
-        {/* Lifetime total */}
-        <div style={{ fontSize: 12, opacity: 0.7, marginTop: 10 }}>
-          Total earned: ${lifetimeTotal} all-time
-        </div>
-      </div>
+      </section>
 
-      {/* Social proof */}
-      <div style={{
-        textAlign: 'center', padding: '10px 16px', borderRadius: 12,
-        background: `${B.green}08`, border: `1px solid ${B.green}22`,
-      }}>
-        <div style={{ fontSize: 14, color: B.green, fontWeight: 600 }}>
-          247 Waves customers have referred neighbors this year
-        </div>
-      </div>
-
-      {/* Milestone progress */}
-      {nextMilestone && (
-        <div style={{
-          background: B.white, borderRadius: 14, padding: '14px 18px',
-          border: `1px solid ${B.grayLight}`,
-          display: 'flex', alignItems: 'center', gap: 12,
-        }}>
-          <div style={{ fontSize: 28 }}></div>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>
-              You're {referralsToNext} referral{referralsToNext !== 1 ? 's' : ''} away from {nextMilestone.title}!
-            </div>
-            <div style={{
-              height: 6, borderRadius: 3, background: B.grayLight, marginTop: 6, overflow: 'hidden',
-            }}>
-              <div style={{
-                height: '100%', borderRadius: 3,
-                background: `linear-gradient(90deg, ${B.wavesBlue}, ${B.teal})`,
-                width: `${Math.min(100, (stats.totalReferrals / nextMilestone.count) * 100)}%`,
-                transition: 'width 0.5s',
-              }} />
-            </div>
-            <div style={{ fontSize: 10, color: B.grayMid, marginTop: 4 }}>
-              {stats.totalReferrals} / {nextMilestone.count} referrals
-            </div>
+      <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 16, alignItems: 'stretch' }}>
+        <section style={{ ...card, padding: 20 }}>
+          <div style={sectionTitle}>Share Link</div>
+          <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>Your referral code</div>
+          <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+            Send the link directly or copy it into your own message.
           </div>
-        </div>
-      )}
-
-      {/* Your Referral Code + Share Channels */}
-      <div style={{
-        background: B.white, borderRadius: 16, padding: 20,
-        border: `1px solid ${B.grayLight}`,
-      }}>
-        <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 10 }}>Your Referral Code</div>
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 10,
-          background: B.offWhite, borderRadius: 12, padding: '12px 16px',
-          border: `1px solid ${B.grayLight}`,
-        }}>
-          <div style={{ flex: 1, fontSize: 20, fontWeight: 800, fontFamily: FONTS.ui, color: B.navy, letterSpacing: 2 }}>
-            {referralCode}
-          </div>
-          <button onClick={handleCopy} style={{
-            ...BUTTON_BASE, padding: '8px 16px', fontSize: 12,
-            background: copied ? B.green : B.red, color: '#fff',
-          }}>{copied ? 'Copied!' : 'Copy Link'}</button>
-        </div>
-        {/* Share channels: Text, Email, WhatsApp */}
-        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-          <a href={`sms:?body=${encodeURIComponent(shareText)}`} style={{
-            ...BUTTON_BASE, flex: 1, padding: '10px 12px', fontSize: 12,
-            background: B.yellow, color: B.blueDeeper, textDecoration: 'none', textAlign: 'center',
-          }}> Text</a>
-          <a href={`mailto:?subject=${encodeURIComponent('$25 off Waves Pest Control')}&body=${encodeURIComponent(shareText)}`} style={{
-            ...BUTTON_BASE, flex: 1, padding: '10px 12px', fontSize: 12,
-            background: B.wavesBlue, color: '#fff', textDecoration: 'none', textAlign: 'center',
-          }}> Email</a>
-          <a href={`https://wa.me/?text=${encodeURIComponent(shareText)}`} target="_blank" rel="noopener noreferrer" style={{
-            ...BUTTON_BASE, flex: 1, padding: '10px 12px', fontSize: 12,
-            background: '#25D366', color: '#fff', textDecoration: 'none', textAlign: 'center',
-          }}>WhatsApp</a>
-        </div>
-        <div style={{ fontSize: 12, color: B.grayMid, marginTop: 8, textAlign: 'center' }}>
-          Share link: {shareLink}
-        </div>
-      </div>
-
-      {/* Quick Refer Form */}
-      <div style={{
-        background: B.white, borderRadius: 16, padding: 20,
-        border: `1px solid ${B.grayLight}`,
-      }}>
-        <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>Send an Invite</div>
-        <div style={{ fontSize: 12, color: B.grayMid, marginBottom: 14 }}>
-          Enter their name and number — we'll text them on your behalf.
-        </div>
-
-        {submitted && (
           <div style={{
-            padding: 14, borderRadius: 12, background: `${B.green}20`, marginBottom: 14,
-            fontSize: 14, fontWeight: 600, color: B.green,
-          }}>Invite sent! We texted them your referral.</div>
-        )}
-
-        <input
-          type="text" value={name} onChange={e => setName(e.target.value)}
-          placeholder="Friend's name"
-          aria-label="Friend's name"
-          style={{
-            width: '100%', padding: '11px 14px', borderRadius: 10, marginBottom: 10,
-            border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
-            color: B.navy, outline: 'none', boxSizing: 'border-box',
-          }}
-          onFocus={e => e.target.style.borderColor = B.wavesBlue}
-          onBlur={e => e.target.style.borderColor = B.grayLight}
-        />
-        <input
-          type="tel" value={phone} onChange={e => setPhone(e.target.value)}
-          placeholder="Their phone number"
-          aria-label="Friend's phone number"
-          style={{
-            width: '100%', padding: '11px 14px', borderRadius: 10, marginBottom: 14,
-            border: `1px solid ${B.grayLight}`, fontSize: 14, fontFamily: FONTS.body,
-            color: B.navy, outline: 'none', boxSizing: 'border-box',
-          }}
-          onFocus={e => e.target.style.borderColor = B.wavesBlue}
-          onBlur={e => e.target.style.borderColor = B.grayLight}
-        />
-
-        {/* Invite preview toggle */}
-        {(name.trim() || phone.trim()) && (
-          <div style={{ marginBottom: 12 }}>
-            <button onClick={() => setShowPreview(!showPreview)} style={{
-              ...BUTTON_BASE, padding: '6px 12px', fontSize: 12, borderRadius: 8,
-              background: B.offWhite, color: B.grayDark, border: `1px solid ${B.grayLight}`,
-            }}>{showPreview ? 'Hide preview' : 'Preview what they will receive'}</button>
-            {showPreview && (
-              <div style={{
-                marginTop: 8, padding: 14, borderRadius: 12,
-                background: B.offWhite, border: `1px solid ${B.grayLight}`,
-                fontSize: 12, color: B.grayDark, lineHeight: 1.6, fontStyle: 'italic',
-              }}>
-                {invitePreviewText}
+            marginTop: 16,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '12px 14px',
+            borderRadius: 8,
+            background: subtle,
+            border: '1px solid #E1E7EF',
+          }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>Code</div>
+              <div style={{ marginTop: 3, fontSize: 18, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.ui, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {referralCode || 'Auto-assigned'}
               </div>
-            )}
+            </div>
+            <button type="button" onClick={() => handleCopy(shareLink)} style={{
+              ...primaryButton,
+              background: copied ? B.green : B.blueDeeper,
+              whiteSpace: 'nowrap',
+            }}>
+              <Icon name={copied ? 'check' : 'share'} size={15} strokeWidth={2} style={{ marginRight: 6 }} />
+              {copied ? 'Copied' : 'Copy'}
+            </button>
           </div>
-        )}
+          <div style={{
+            marginTop: 10,
+            padding: '10px 12px',
+            borderRadius: 8,
+            border: '1px solid #E1E7EF',
+            color: muted,
+            fontSize: 12,
+            lineHeight: 1.45,
+            overflowWrap: 'anywhere',
+          }}>
+            {shareLink}
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
+            <a href={`sms:?body=${encodeURIComponent(shareText)}`} style={{ ...secondaryButton, flex: '1 1 120px', justifyContent: 'center', textDecoration: 'none' }}>
+              <Icon name="message" size={15} strokeWidth={2} style={{ marginRight: 6 }} /> Text
+            </a>
+            <a href={`mailto:?subject=${encodeURIComponent('Waves Pest Control referral')}&body=${encodeURIComponent(shareText)}`} style={{ ...secondaryButton, flex: '1 1 120px', justifyContent: 'center', textDecoration: 'none' }}>
+              <Icon name="mail" size={15} strokeWidth={2} style={{ marginRight: 6 }} /> Email
+            </a>
+          </div>
+        </section>
 
-        <button onClick={handleSubmit} disabled={!name.trim() || !phone.trim() || submitting} style={{
-          ...BUTTON_BASE, width: '100%', padding: 13, fontSize: 14,
-          background: (name.trim() && phone.trim()) ? B.red : B.grayLight,
-          color: (name.trim() && phone.trim()) ? '#fff' : B.grayMid,
-          opacity: submitting ? 0.7 : 1,
-        }}>
-          {submitting ? 'Sending...' : 'Send Invite'}
-        </button>
+        <section style={{ ...card, padding: 20 }}>
+          <div style={sectionTitle}>Send Invite</div>
+          <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>Text a friend</div>
+          <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+            We will send a short referral text from {customerFirstName}.
+          </div>
+          <form onSubmit={handleSubmit} style={{ marginTop: 16 }}>
+            <label htmlFor="portal-referral-name" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
+              Friend's Name
+            </label>
+            <input
+              id="portal-referral-name"
+              name="referralName"
+              type="text"
+              value={form.name}
+              onChange={e => setForm(prev => ({ ...prev, name: e.target.value }))}
+              placeholder="Jane Smith"
+              autoComplete="name"
+              style={{
+                width: '100%',
+                padding: '10px 12px',
+                borderRadius: 8,
+                border: '1px solid #CBD5E1',
+                fontSize: 14,
+                fontFamily: FONTS.body,
+                color: B.blueDeeper,
+                background: '#fff',
+                outline: 'none',
+                boxSizing: 'border-box',
+                marginBottom: 12,
+              }}
+            />
+            <label htmlFor="portal-referral-phone" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
+              Phone Number
+            </label>
+            <input
+              id="portal-referral-phone"
+              name="referralPhone"
+              type="tel"
+              inputMode="tel"
+              value={form.phone}
+              onChange={e => setForm(prev => ({ ...prev, phone: e.target.value }))}
+              placeholder="(941) 555-0123"
+              autoComplete="tel"
+              style={{
+                width: '100%',
+                padding: '10px 12px',
+                borderRadius: 8,
+                border: '1px solid #CBD5E1',
+                fontSize: 14,
+                fontFamily: FONTS.body,
+                color: B.blueDeeper,
+                background: '#fff',
+                outline: 'none',
+                boxSizing: 'border-box',
+                marginBottom: 14,
+              }}
+            />
+            <button type="submit" disabled={!form.name.trim() || !form.phone.trim() || submitting} style={{
+              ...primaryButton,
+              width: '100%',
+              opacity: submitting || !form.name.trim() || !form.phone.trim() ? 0.65 : 1,
+              cursor: submitting || !form.name.trim() || !form.phone.trim() ? 'not-allowed' : 'pointer',
+            }}>
+              <Icon name="phone" size={15} strokeWidth={2} style={{ marginRight: 6 }} />
+              {submitting ? 'Sending...' : 'Send Invite'}
+            </button>
+          </form>
+        </section>
       </div>
 
-      {/* Referral Tracker */}
-      {referrals.length > 0 && (
-        <div style={{
-          background: B.white, borderRadius: 16, padding: 20,
-          border: `1px solid ${B.grayLight}`,
-        }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>
-            Your Referrals
+      <section style={{ ...card, padding: 20 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
+          <div>
+            <div style={sectionTitle}>Milestone</div>
+            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>
+              {milestoneMeta[currentMilestone]?.label || 'Getting started'}
+            </div>
           </div>
-          <div style={{ fontSize: 12, color: B.green, fontWeight: 600, marginBottom: 14 }}>
-            You've referred {stats.totalReferrals} friend{stats.totalReferrals !== 1 ? 's' : ''} and earned ${computedEarned}!
-          </div>
+          {nextMilestone ? (
+            <div style={{ color: muted, fontSize: 14, lineHeight: 1.4, textAlign: compact ? 'left' : 'right' }}>
+              {milestoneRemaining} more converted referral{milestoneRemaining === 1 ? '' : 's'} to {milestoneMeta[nextMilestone.level]?.label || 'the next level'}
+              {nextMilestone.bonus ? <div style={{ color: B.green, fontWeight: 850 }}>Bonus {cents(nextMilestone.bonus)}</div> : null}
+            </div>
+          ) : (
+            <div style={{ color: B.green, fontSize: 14, fontWeight: 850 }}>Top referral level reached</div>
+          )}
+        </div>
+        <div style={{ height: 8, borderRadius: 999, background: subtle, overflow: 'hidden', border: '1px solid #E1E7EF' }}>
+          <div style={{
+            width: `${milestoneProgress}%`,
+            height: '100%',
+            background: B.wavesBlue,
+            borderRadius: 999,
+            transition: 'width 0.4s ease',
+          }} />
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 7, color: muted, fontSize: 12 }}>
+          <span>{converted} converted</span>
+          <span>{milestoneThreshold ? `${milestoneThreshold} target` : 'Complete'}</span>
+        </div>
+      </section>
 
-          {referrals.map(r => {
-            const s = statusConfig[r.status] || statusConfig.pending;
-            return (
-              <div key={r.id} style={{
-                padding: '14px 0',
-                borderBottom: `1px solid ${B.grayLight}`,
-              }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: B.navy }}>{r.refereeName}</div>
-                    <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>
-                      {r.refereePhone} · {new Date(r.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+      <section style={{ ...card, padding: 20 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
+          <div>
+            <div style={sectionTitle}>Referral Activity</div>
+            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>
+              {referrals.length ? `${referrals.length} referral${referrals.length === 1 ? '' : 's'}` : 'No referrals yet'}
+            </div>
+          </div>
+          <div style={{ fontSize: 14, color: muted, fontWeight: 700 }}>{money(rewardPerReferral)} per signup</div>
+        </div>
+
+        {referrals.length === 0 ? (
+          <div style={{
+            padding: 18,
+            background: subtle,
+            border: '1px solid #E1E7EF',
+            borderRadius: 8,
+            display: 'flex',
+            gap: 12,
+            alignItems: 'flex-start',
+          }}>
+            <span style={{
+              width: 36,
+              height: 36,
+              borderRadius: 8,
+              background: '#EEF6FF',
+              color: B.blueDeeper,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0,
+            }}>
+              <Icon name="gift" size={18} strokeWidth={2} />
+            </span>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Start with one neighbor</div>
+              <div style={{ marginTop: 3, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+                Copy your link or send an invite above. New referrals will appear here as they move through the signup process.
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            {referrals.map((r, idx) => {
+              const s = statusConfig[r.status] || statusConfig.pending;
+              const nameLabel = r.name || r.refereeName || 'Referral';
+              const phoneLabel = r.phone || r.refereePhone || '';
+              const created = r.createdAt ? new Date(r.createdAt) : null;
+              const reward = Number(r.rewardAmount ?? r.creditAmount ?? 0);
+              const rewardEarned = r.rewardStatus === 'earned' || r.rewardStatus === 'paid' || r.referrerCredited;
+              return (
+                <div key={r.id || `${nameLabel}-${idx}`} style={{
+                  padding: '14px 0',
+                  borderTop: idx === 0 ? 'none' : '1px solid #E1E7EF',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  gap: 12,
+                  alignItems: 'flex-start',
+                }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>{nameLabel}</div>
+                    <div style={{ marginTop: 3, fontSize: 12, color: muted }}>
+                      {[phoneLabel, created && !isNaN(created) ? created.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : null].filter(Boolean).join(' - ')}
                     </div>
+                    {rewardEarned && reward > 0 && (
+                      <div style={{ marginTop: 6, fontSize: 12, color: B.green, fontWeight: 850 }}>
+                        {money(reward)} credit earned
+                      </div>
+                    )}
                   </div>
                   <span style={{
-                    fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5,
-                    padding: '4px 10px', borderRadius: 20,
-                    background: s.bg, color: s.color,
+                    flexShrink: 0,
+                    fontSize: 12,
+                    fontWeight: 850,
+                    padding: '5px 9px',
+                    borderRadius: 8,
+                    background: s.bg,
+                    color: s.color,
+                    border: `1px solid ${s.color}22`,
                   }}>{s.label}</span>
                 </div>
-                {/* Status progress */}
-                <div style={{ display: 'flex', gap: 3, marginTop: 8 }}>
-                  {STATUS_ORDER.map((st, i) => (
-                    <div key={st} style={{
-                      flex: 1, height: 3, borderRadius: 2,
-                      background: STATUS_ORDER.indexOf(r.status) >= i ? s.color : B.grayLight,
-                    }} />
-                  ))}
-                </div>
-                {r.referrerCredited && (
-                  <div style={{ fontSize: 12, color: B.green, fontWeight: 600, marginTop: 6 }}>
-                    ${r.creditAmount} credit applied to your bill
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* How it works */}
-      <div style={{
-        background: B.offWhite, borderRadius: 14, padding: 18,
-        border: `1px solid ${B.grayLight}`,
-      }}>
-        <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, marginBottom: 10 }}>How it works</div>
-        {[
-          { step: '1', text: 'Share your code or send an invite from above' },
-          { step: '2', text: 'Your friend gets a text with your referral and $25 off' },
-          { step: '3', text: 'When they sign up for any WaveGuard plan, you both get credited' },
-          { step: '4', text: '$25 auto-applied to your next monthly bill' },
-        ].map(s => (
-          <div key={s.step} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-            <div style={{
-              width: 24, height: 24, borderRadius: '50%', fontSize: 12, fontWeight: 700,
-              background: `${B.wavesBlue}15`, color: B.wavesBlue,
-              display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-            }}>{s.step}</div>
-            <div style={{ fontSize: 12, color: B.grayDark }}>{s.text}</div>
+              );
+            })}
           </div>
-        ))}
-        <div style={{ fontSize: 12, color: B.grayMid, marginTop: 8 }}>
-          No limit on referrals — the more you share, the more you save.
+        )}
+      </section>
+
+      <section style={{ ...card, padding: 20 }}>
+        <div style={sectionTitle}>How It Works</div>
+        <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(3, 1fr)', gap: 10 }}>
+          {[
+            { icon: 'share', title: 'Share', text: 'Send your code or referral link to a neighbor.' },
+            { icon: 'checkCircle', title: 'They start', text: 'We track the referral when they become a Waves customer.' },
+            { icon: 'coins', title: 'You earn', text: `${money(rewardPerReferral)} credit is applied after their qualifying first service.` },
+          ].map(item => (
+            <div key={item.title} style={{
+              padding: 14,
+              background: subtle,
+              border: '1px solid #E1E7EF',
+              borderRadius: 8,
+              minHeight: 108,
+              boxSizing: 'border-box',
+            }}>
+              <span style={{
+                width: 34,
+                height: 34,
+                borderRadius: 8,
+                background: '#EEF6FF',
+                color: B.blueDeeper,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}>
+                <Icon name={item.icon} size={17} strokeWidth={2} />
+              </span>
+              <div style={{ marginTop: 10, fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>{item.title}</div>
+              <div style={{ marginTop: 3, fontSize: 14, color: muted, lineHeight: 1.45 }}>{item.text}</div>
+            </div>
+          ))}
         </div>
-      </div>
+      </section>
     </div>
   );
 }
