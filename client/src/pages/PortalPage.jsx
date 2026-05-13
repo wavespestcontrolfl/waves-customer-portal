@@ -5685,8 +5685,6 @@ const HIDDEN_BADGE_TYPES = ['portal_regular', 'document_downloader', 'doc_downlo
 function MyPlanTab({ customer }) {
   const [expandedService, setExpandedService] = useState(null);
   const [expandedAddon, setExpandedAddon] = useState(null);
-  const [expandedCoverage, setExpandedCoverage] = useState(null);
-  const [stats, setStats] = useState(null);
   const [nextService, setNextService] = useState(null);
   const [serviceHistory, setServiceHistory] = useState([]);
   const [addonRequested, setAddonRequested] = useState({});
@@ -5703,11 +5701,10 @@ function MyPlanTab({ customer }) {
   const [cancelSubmitting, setCancelSubmitting] = useState(false);
   const [upgradeRequested, setUpgradeRequested] = useState({});
   const [upgradeSubmitting, setUpgradeSubmitting] = useState({});
-  const badgeData = useBadges();
   const lawnHealth = useLawnHealth(customer.id);
+  const compact = useIsMobile(760);
 
   useEffect(() => {
-    api.getServiceStats().then(setStats).catch(console.error);
     api.getNextService().then(d => setNextService(d.next || null)).catch(console.error);
     api.getServices({ limit: 50 }).then(d => {
       if (d.services) setServiceHistory(d.services);
@@ -5764,7 +5761,7 @@ function MyPlanTab({ customer }) {
   planTimeline.sort((a, b) => a.date - b.date);
 
   // Current month for calendar
-  const now = new Date();
+  const now = parseDate(etDateString());
   const currentMonth = now.getMonth();
   const currentYear = now.getFullYear();
 
@@ -5795,773 +5792,731 @@ function MyPlanTab({ customer }) {
 
   // Filter add-ons that are NOT already included in the plan
   const availableAddOns = ADD_ONS.filter(addon => {
-    // Map add-on IDs to service IDs they might overlap with
-    const overlapMap = { palm_injection: 'tree_shrub', rodent: 'pest_control' };
-    const overlaps = overlapMap[addon.id];
-    // Don't filter based on overlap — just exclude exact matches
+    // Don't filter based on overlap; just exclude exact matches.
     return !includedServiceIds.includes(addon.id);
   });
 
-  // Curated badges — filter out engagement-tracking ones
-  const curatedBadges = badgeData.data?.badges?.filter(b =>
-    !HIDDEN_BADGE_TYPES.includes(b.badgeType)
-  ) || [];
-  const recentEarnedBadges = curatedBadges
-    .filter(b => b.earned)
-    .sort((a, b) => new Date(b.earnedAt) - new Date(a.earnedAt))
-    .slice(0, 4);
+  const money = (n, digits = 2) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+  const nextDate = nextService ? parseDate(nextService.date) : null;
+  const nextVisitLabel = nextDate && !isNaN(nextDate)
+    ? nextDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+    : 'No visit scheduled';
+  const memberSinceLabel = customer.memberSince
+    ? parseDate(customer.memberSince).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
+    : 'Not set';
+  const currentAnnual = totalFullPrice - annualSavings;
+  const renewalCredit = Math.min(75, Math.round(memberMonths * 6.25));
 
-  const Card = ({ children, style: s }) => (
-    <div style={{ background: B.white, borderRadius: 16, padding: 20, border: `1px solid ${B.grayLight}`, ...s }}>{children}</div>
-  );
+  const card = {
+    background: B.white,
+    border: '1px solid #E1E7EF',
+    borderRadius: 8,
+    boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+  };
+  const muted = '#64748B';
+  const subtle = '#F8FAFC';
+  const sectionTitle = {
+    fontSize: 14,
+    fontWeight: 850,
+    color: muted,
+    textTransform: 'uppercase',
+    letterSpacing: '0.08em',
+  };
+  const primaryButton = {
+    ...BUTTON_BASE,
+    background: B.blueDeeper,
+    color: '#fff',
+    border: 'none',
+    borderRadius: 8,
+    boxShadow: 'none',
+    padding: '10px 14px',
+    fontSize: 14,
+  };
+  const secondaryButton = {
+    ...BUTTON_BASE,
+    background: '#fff',
+    color: B.blueDeeper,
+    border: '1px solid #CBD5E1',
+    borderRadius: 8,
+    boxShadow: 'none',
+    padding: '10px 14px',
+    fontSize: 14,
+  };
+  const smallLinkButton = {
+    border: 'none',
+    background: 'transparent',
+    color: muted,
+    cursor: 'pointer',
+    fontSize: 12,
+    fontWeight: 700,
+    fontFamily: FONTS.body,
+    textDecoration: 'underline',
+    textUnderlineOffset: 3,
+    padding: '8px 10px',
+    minHeight: 36,
+  };
+  const iconName = (name) => (typeof name === 'string' && /^[a-z]/i.test(name) ? name : 'shield');
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-
-      {/* Section 1 — Plan Summary Hero Card */}
-      <div style={{
-        background: `linear-gradient(135deg, ${tier?.gradientFrom || B.navy}, ${tier?.gradientTo || B.navyLight})`,
-        borderRadius: 20, padding: '28px 24px', color: tier?.darkText ? B.navy : '#fff',
-        position: 'relative', overflow: 'hidden',
-      }}>
-        <div style={{ position: 'absolute', top: -30, right: -30, fontSize: 120, opacity: 0.1 }}></div>
-        <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1.5, opacity: 0.8 }}>Your Plan</div>
-        <div style={{ fontSize: 32, fontWeight: 400, fontFamily: FONTS.display, letterSpacing: '0.02em', marginTop: 4 }}>
-          WaveGuard {tierName}
-        </div>
-
-        {/* Bundled services one-liner */}
-        <div style={{
-          fontSize: 14, fontWeight: 600, marginTop: 6, opacity: 0.9,
-          display: 'flex', alignItems: 'center', gap: 6,
-        }}>
-          {bundleSummary} — {numServices} service{numServices > 1 ? 's' : ''} bundled
-        </div>
-
-        {/* Next service date */}
-        {nextService && (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <section style={{ ...card, padding: compact ? 20 : 28 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8,
+              padding: '5px 10px', borderRadius: 999,
+              background: tier ? `${tier.color}18` : '#EEF6FF',
+              color: B.blueDeeper, fontSize: 12, fontWeight: 850,
+            }}>
+              WaveGuard {tierName}
+            </div>
+            <h1 style={{
+              margin: '12px 0 8px',
+              color: B.blueDeeper,
+              fontFamily: FONTS.heading,
+              fontSize: compact ? 28 : 34,
+              lineHeight: 1.1,
+              letterSpacing: 0,
+            }}>
+              Your plan
+            </h1>
+            <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
+              {bundleSummary || 'Recurring service'} - {numServices} service{numServices > 1 ? 's' : ''} bundled
+            </div>
+          </div>
           <div style={{
-            marginTop: 10, padding: '8px 14px', borderRadius: 10,
-            background: 'rgba(255,255,255,0.15)', backdropFilter: 'blur(4px)',
-            display: 'inline-flex', alignItems: 'center', gap: 8,
-            fontSize: 14, fontWeight: 600,
+            minWidth: compact ? '100%' : 190,
+            padding: '14px 16px',
+            borderRadius: 8,
+            background: '#F0FDF4',
+            border: '1px solid #BBF7D0',
+            boxSizing: 'border-box',
           }}>
-            <Icon name="calendar" size={16} strokeWidth={1.75} />
-            Next visit: {parseDate(nextService.date).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}
-            {nextService.serviceType ? ` (${nextService.serviceType})` : ''}
-          </div>
-        )}
-
-        <div style={{ display: 'flex', gap: 20, marginTop: 16, flexWrap: 'wrap' }}>
-          <div>
-            <div style={{ fontSize: 12, color: tier?.darkText ? B.grayMid : B.blueLight }}>Monthly Rate</div>
-            <div style={{ fontSize: 24, fontWeight: 700, fontFamily: FONTS.ui }}>${Number(monthlyRate || 0).toFixed(2)}</div>
-          </div>
-          <div>
-            <div style={{ fontSize: 12, color: tier?.darkText ? B.grayMid : B.blueLight }}>Bundle Discount</div>
-            <div style={{ fontSize: 24, fontWeight: 700, fontFamily: FONTS.ui }}>{Math.round(discount * 100)}%</div>
-          </div>
-          <div>
-            <div style={{ fontSize: 12, color: tier?.darkText ? B.grayMid : B.blueLight }}>Member Since</div>
-            <div style={{ fontSize: 16, fontWeight: 700 }}>{customer.memberSince ? parseDate(customer.memberSince).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '—'}</div>
-          </div>
-          <div>
-            <div style={{ fontSize: 12, color: tier?.darkText ? B.grayMid : B.blueLight }}>Loyalty</div>
-            <div style={{ fontSize: 16, fontWeight: 700 }}>{memberMonths} months</div>
+            <div style={{ fontSize: 12, color: '#047857', fontWeight: 850, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              Active plan
+            </div>
+            <div style={{ marginTop: 3, fontSize: 24, fontWeight: 850, color: B.blueDeeper }}>
+              {money(monthlyRate)}
+            </div>
+            <div style={{ marginTop: 2, fontSize: 12, color: muted }}>per month</div>
           </div>
         </div>
 
-        {/* Recent badges strip */}
-        {recentEarnedBadges.length > 0 && (
-          <div style={{ display: 'flex', gap: 6, marginTop: 16 }}>
-            {recentEarnedBadges.map(b => (
-              <div key={b.badgeType} title={b.title} style={{
-                width: 32, height: 32, borderRadius: '50%', flexShrink: 0,
-                background: 'rgba(255,255,255,0.2)', backdropFilter: 'blur(4px)',
-                border: '1.5px solid rgba(255,255,255,0.3)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: 15,
-              }}>{b.icon}</div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Section 2 — Included Services Breakdown */}
-      <SectionHeading>Your Included Services</SectionHeading>
-      <div style={{ fontSize: 14, color: B.grayMid }}>{tierName} includes {numServices} recurring service{numServices > 1 ? 's' : ''}</div>
-
-      {includedServices.map(svc => {
-        const completedMonths = getCompletedMonths(svc.id);
-        const scheduleMonths = SERVICE_SCHEDULE_MONTHS[svc.id] || [];
-        const totalVisits = scheduleMonths.length;
-        const completedVisits = scheduleMonths.filter(m => completedMonths.has(m)).length;
-        const annualSavingsForService = svc.basePrice * 12 * discount;
-        const coverage = SERVICE_COVERAGE[svc.id];
-
-        return (
-          <Card key={svc.id}>
-            <div onClick={() => setExpandedService(expandedService === svc.id ? null : svc.id)}
-              style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <span style={{ color: B.wavesBlue, display: 'inline-flex' }}><Icon name={svc.icon} size={28} strokeWidth={1.75} /></span>
-                <div>
-                  <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{svc.name}</div>
-                  <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2 }}>{svc.frequencies[0]}</div>
-                  {/* Service cycle tracker */}
-                  <div style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 600, marginTop: 3 }}>
-                    {completedVisits} of {totalVisits} visits completed this year
-                  </div>
-                  {/* Inline lawn health indicator for lawn care */}
-                  {svc.id === 'lawn_care' && !lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (() => {
-                    const avg = Math.round((lawnHealth.scores.turfDensity + lawnHealth.scores.weedSuppression + lawnHealth.scores.fungusControl + lawnHealth.scores.thatchScore) / 4);
-                    const initialAvg = Math.round((lawnHealth.initialScores.turfDensity + lawnHealth.initialScores.weedSuppression + lawnHealth.initialScores.fungusControl + lawnHealth.initialScores.thatchScore) / 4);
-                    const improving = avg >= initialAvg;
-                    return (
-                      <div style={{
-                        fontSize: 12, fontWeight: 700, marginTop: 3,
-                        color: improving ? B.green : B.orange,
-                      }}>
-                         Lawn health: {avg}% {improving ? `(up from ${initialAvg}%)` : `(from ${initialAvg}%)`}
-                      </div>
-                    );
-                  })()}
-                </div>
-              </div>
-              <div style={{ textAlign: 'right' }}>
-                <div style={{ fontSize: 12, color: B.grayMid, textDecoration: 'line-through' }}>${(svc.basePrice * 12).toFixed(2)}/yr</div>
-                <div style={{ fontSize: 16, fontWeight: 700, color: B.green, fontFamily: FONTS.ui }}>
-                  ${annualSavingsForService > 0 ? `${annualSavingsForService.toFixed(2)}/yr saved` : `${(svc.basePrice * 12).toFixed(2)}/yr`}
-                </div>
-              </div>
-            </div>
-
-            {/* Cycle progress bar */}
-            <div style={{ marginTop: 10, height: 4, borderRadius: 2, background: B.grayLight, overflow: 'hidden' }}>
-              <div style={{
-                height: '100%', borderRadius: 2, background: B.wavesBlue,
-                width: `${totalVisits > 0 ? (completedVisits / totalVisits) * 100 : 0}%`,
-                transition: 'width 0.6s ease-out',
-              }} />
-            </div>
-
-            {expandedService === svc.id && (
-              <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${B.grayLight}` }}>
-                <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.7 }}>{svc.description}</div>
-                <div style={{ marginTop: 12, fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1, color: B.grayMid }}>Products Used</div>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
-                  {svc.products.map((p, i) => (
-                    <span key={i} style={{
-                      padding: '4px 10px', borderRadius: 8, fontSize: 12, fontWeight: 600,
-                      background: `${B.wavesBlue}12`, color: B.wavesBlue, border: `1px solid ${B.wavesBlue}22`,
-                    }}>{p}</span>
-                  ))}
-                </div>
-                <div style={{ marginTop: 12, padding: '10px 14px', borderRadius: 10, background: `${B.green}20`, fontSize: 12, color: B.green, fontWeight: 600 }}>
-                   You save ${annualSavingsForService.toFixed(2)}/year on {svc.name} with your {tierName} discount
-                </div>
-
-                {/* What's Covered — collapsible */}
-                {coverage && (
-                  <div style={{ marginTop: 12 }}>
-                    <div
-                      onClick={(e) => { e.stopPropagation(); setExpandedCoverage(expandedCoverage === svc.id ? null : svc.id); }}
-                      style={{
-                        cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                        padding: '10px 14px', borderRadius: 10, background: `${B.wavesBlue}08`,
-                        border: `1px solid ${B.wavesBlue}18`,
-                      }}
-                    >
-                      <span style={{ fontSize: 12, fontWeight: 700, color: B.wavesBlue }}>What's Covered</span>
-                      <span style={{ fontSize: 12, color: B.wavesBlue, transform: expandedCoverage === svc.id ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s' }}>▼</span>
-                    </div>
-                    {expandedCoverage === svc.id && (
-                      <div style={{ padding: '12px 14px', borderRadius: '0 0 10px 10px', background: `${B.wavesBlue}05`, borderTop: 'none' }}>
-                        <div style={{ fontSize: 12, color: B.grayDark, fontWeight: 600, marginBottom: 8 }}>{coverage.summary}</div>
-                        <ul style={{ margin: 0, paddingLeft: 18 }}>
-                          {coverage.details.map((d, i) => (
-                            <li key={i} style={{ fontSize: 12, color: B.grayDark, lineHeight: 1.8 }}>{d}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-          </Card>
-        );
-      })}
-
-      {/* Section — Service Calendar (Year-at-a-Glance) */}
-      <SectionHeading>Service Calendar</SectionHeading>
-      <Card>
-        <div style={{ fontSize: 12, color: B.grayMid, marginBottom: 14 }}>Your {currentYear} service schedule at a glance</div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          {includedServices.map(svc => {
-            const scheduleMonths = SERVICE_SCHEDULE_MONTHS[svc.id] || [];
-            const completedMonths = getCompletedMonths(svc.id);
-            return (
-              <div key={svc.id}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <Icon name={svc.icon} size={14} strokeWidth={1.75} /> {svc.name.replace(/ Program| Barrier Treatment/g, '')}
-                </div>
-                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                  {MONTH_LABELS.map((month, mi) => {
-                    const isScheduled = scheduleMonths.includes(mi);
-                    const isCompleted = completedMonths.has(mi);
-                    const isCurrentMonth = mi === currentMonth;
-                    const isPast = mi < currentMonth;
-                    // Determine dot state
-                    let dotColor = B.grayLight;
-                    let dotBorder = B.grayLight;
-                    let dotFill = 'transparent';
-                    let label = '';
-                    if (!isScheduled) {
-                      dotColor = B.grayLight;
-                      dotFill = 'transparent';
-                      dotBorder = B.grayLight;
-                    } else if (isCompleted) {
-                      dotColor = B.green;
-                      dotFill = B.green;
-                      dotBorder = B.green;
-                      label = 'Completed';
-                    } else if (isCurrentMonth) {
-                      dotColor = B.wavesBlue;
-                      dotFill = B.wavesBlue;
-                      dotBorder = B.wavesBlue;
-                      label = 'This month';
-                    } else if (isPast && isScheduled) {
-                      dotColor = B.orange;
-                      dotFill = B.orange;
-                      dotBorder = B.orange;
-                      label = 'Missed/Pending';
-                    } else {
-                      dotColor = B.grayMid;
-                      dotFill = 'transparent';
-                      dotBorder = B.grayMid;
-                      label = 'Upcoming';
-                    }
-                    return (
-                      <div key={mi} title={isScheduled ? `${month}: ${label}` : `${month}: No service`} style={{
-                        display: 'flex', flexDirection: 'column', alignItems: 'center', width: 28,
-                      }}>
-                        <div style={{
-                          width: 14, height: 14, borderRadius: '50%',
-                          background: dotFill,
-                          border: `2px solid ${dotBorder}`,
-                          opacity: isScheduled ? 1 : 0.3,
-                          transition: 'all 0.2s',
-                          boxShadow: isCurrentMonth && isScheduled ? `0 0 0 3px ${B.wavesBlue}30` : 'none',
-                        }} />
-                        <div style={{ fontSize: 9, color: B.grayMid, marginTop: 2, fontWeight: isCurrentMonth ? 700 : 400 }}>{month.slice(0, 1)}</div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-        {/* Legend */}
-        <div style={{ display: 'flex', gap: 14, marginTop: 14, flexWrap: 'wrap' }}>
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: compact ? '1fr 1fr' : 'repeat(4, 1fr)',
+          gap: 10,
+          marginTop: 22,
+        }}>
           {[
-            { color: B.green, fill: true, label: 'Completed' },
-            { color: B.wavesBlue, fill: true, label: 'This Month' },
-            { color: B.grayMid, fill: false, label: 'Upcoming' },
-          ].map(l => (
-            <div key={l.label} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <div style={{ width: 10, height: 10, borderRadius: '50%', background: l.fill ? l.color : 'transparent', border: `2px solid ${l.color}` }} />
-              <span style={{ fontSize: 10, color: B.grayMid }}>{l.label}</span>
+            { label: 'Next visit', value: nextVisitLabel, sub: nextService?.serviceType || 'Schedule' },
+            { label: 'Bundle discount', value: `${Math.round(discount * 100)}%`, sub: `${money(annualSavings)}/yr saved` },
+            { label: 'Member since', value: memberSinceLabel, sub: `${memberMonths} month${memberMonths === 1 ? '' : 's'}` },
+            { label: 'Renewal credit', value: money(renewalCredit, 0), sub: 'Month 13' },
+          ].map((item) => (
+            <div key={item.label} style={{
+              border: '1px solid #E1E7EF',
+              borderRadius: 8,
+              background: subtle,
+              padding: 14,
+              minHeight: 74,
+            }}>
+              <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>{item.label}</div>
+              <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 18, fontWeight: 850, lineHeight: 1.1 }}>{item.value}</div>
+              <div style={{ marginTop: 3, color: muted, fontSize: 12 }}>{item.sub}</div>
             </div>
           ))}
         </div>
-      </Card>
+      </section>
 
-      {/* Section 3 — Available Add-Ons */}
-      <SectionHeading>Available Add-Ons</SectionHeading>
-      <div style={{ fontSize: 14, color: B.grayMid }}>Enhance your plan — your {Math.round(discount * 100)}% {tierName} discount applies</div>
-
-      {availableAddOns.map(addon => (
-        <Card key={addon.id}>
-          <div onClick={() => setExpandedAddon(expandedAddon === addon.id ? null : addon.id)}
-            style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <span style={{ color: B.wavesBlue, display: 'inline-flex' }}><Icon name={addon.icon} size={24} strokeWidth={1.75} /></span>
-              <div>
-                <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>{addon.name}</div>
-                <div style={{ fontSize: 12, color: B.grayMid }}>{addon.min}</div>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: compact ? '1fr' : 'minmax(0, 1.35fr) minmax(300px, .65fr)',
+        gap: 16,
+        alignItems: 'start',
+      }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <section style={{ ...card, overflow: 'hidden' }}>
+            <div style={{ padding: 20, borderBottom: '1px solid #E1E7EF' }}>
+              <div style={sectionTitle}>Included Services</div>
+              <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 20, fontWeight: 850 }}>
+                {tierName} covers {numServices} recurring service{numServices > 1 ? 's' : ''}
               </div>
             </div>
-            <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui }}>
-              ${discount > 0 && addon.id !== 'wdo_inspection' ? (addon.price * (1 - discount)).toFixed(2) : Number(addon.price).toFixed(2)}{addon.unit}
-            </div>
-          </div>
-          {expandedAddon === addon.id && (
-            <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${B.grayLight}` }}>
-              <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.7 }}>{addon.desc}</div>
-              {discount > 0 && addon.id !== 'wdo_inspection' && (
-                <div style={{ fontSize: 12, color: B.green, fontWeight: 600, marginTop: 8 }}>
-                  Your price: ${(addon.price * (1 - discount)).toFixed(2)}{addon.unit} (was ${Number(addon.price).toFixed(2)}{addon.unit})
-                </div>
-              )}
-              {addonRequested[addon.id] ? (
-                <div style={{
-                  marginTop: 12, padding: '10px 18px', borderRadius: 12, fontSize: 14,
-                  background: `${B.green}20`, color: B.green, fontWeight: 600,
-                  display: 'flex', alignItems: 'center', gap: 8,
-                }}>
-                  <Icon name="check" size={16} strokeWidth={1.75} />
-                  Request sent — we'll call to confirm
-                </div>
-              ) : (
-                <button
-                  disabled={addonSubmitting[addon.id]}
-                  onClick={async () => {
-                    if (addonSubmitting[addon.id]) return;
-                    setAddonSubmitting(prev => ({ ...prev, [addon.id]: true }));
-                    try {
-                      await api.createRequest?.({ category: 'add_service', subject: `Add ${addon.name} to my plan`, description: `Customer requested to add ${addon.name} via portal.` });
-                      setAddonRequested(prev => ({ ...prev, [addon.id]: true }));
-                      setExpandedAddon(null);
-                    } catch (err) {
-                      alert(`Couldn't send request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
-                    } finally {
-                      setAddonSubmitting(prev => ({ ...prev, [addon.id]: false }));
-                    }
-                  }}
-                  style={{
-                    ...BUTTON_BASE, marginTop: 12, padding: '9px 18px', fontSize: 14,
-                    background: B.yellow, color: B.blueDeeper,
-                    opacity: addonSubmitting[addon.id] ? 0.6 : 1,
-                    cursor: addonSubmitting[addon.id] ? 'wait' : 'pointer',
-                  }}>{addonSubmitting[addon.id] ? 'Sending…' : 'Add to My Plan'}</button>
-              )}
-            </div>
-          )}
-        </Card>
-      ))}
 
-      {/* Section 4 — Tier Comparison Matrix */}
-      <SectionHeading>Compare WaveGuard Tiers</SectionHeading>
-      <div style={{ fontSize: 12, color: B.grayMid, marginTop: -12, marginBottom: 4 }}>
-        Each row is a service. Check marks show which tier already includes it — no need to pay extra if it's covered by your plan.
-      </div>
-      <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch', borderRadius: 14, border: `1px solid ${B.grayLight}`, background: B.white }}>
-        <div style={{ minWidth: 640 }}>
-          {/* Header row — tier name, price, discount, current-plan badge */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1.4fr repeat(4, 1fr)' }}>
-            <div style={{ padding: '14px 14px 10px', fontSize: 14, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.5, borderBottom: `1px solid ${B.grayLight}` }}>
-              What's included
-            </div>
-            {TIER_ORDER.map(tn => {
-              const t = TIER[tn];
-              const isCurrent = tn === tierName;
-              const disc = TIER_DISCOUNTS[tn];
-              const tierMonthly = SERVICE_CATALOG.slice(0, TIER_SERVICES[tn]).reduce((sum, s) => sum + s.basePrice * (1 - disc), 0);
-              return (
-                <div key={tn} style={{
-                  padding: '12px 8px 10px', textAlign: 'center',
-                  background: isCurrent ? `${t.color}12` : 'transparent',
-                  borderLeft: `1px solid ${B.grayLight}`,
-                  borderBottom: `1px solid ${B.grayLight}`,
-                }}>
-                  <div style={{ fontSize: 14, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, textTransform: 'uppercase', letterSpacing: 0.4 }}>{tn}</div>
-                  <div style={{ fontSize: 18, fontWeight: 700, color: B.navy, fontFamily: FONTS.ui, marginTop: 2 }}>
-                    ${tierMonthly.toFixed(0)}<span style={{ fontSize: 14, color: B.grayMid, fontWeight: 400 }}>/mo</span>
-                  </div>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: disc > 0 ? B.green : B.grayMid, marginTop: 2 }}>
-                    {disc > 0 ? `${Math.round(disc * 100)}% bundle discount` : 'No bundle discount'}
-                  </div>
-                  {isCurrent && (
-                    <div style={{ fontSize: 12, fontWeight: 700, color: B.green, background: `${B.green}20`, padding: '2px 8px', borderRadius: 12, marginTop: 5, display: 'inline-block' }}>
-                      YOUR PLAN
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Service rows — checkmark icon where the service is included in that tier */}
-          {SERVICE_CATALOG.slice(0, 4).map((svc, rowIdx) => (
-            <div key={svc.id} style={{ display: 'grid', gridTemplateColumns: '1.4fr repeat(4, 1fr)' }}>
-              <div style={{ padding: '12px 14px', fontSize: 14, color: B.navy, fontWeight: 600, borderBottom: `1px solid ${B.grayLight}` }}>
-                {svc.name}
-                <div style={{ fontSize: 12, color: B.grayMid, fontWeight: 400, marginTop: 2, lineHeight: 1.4 }}>
-                  {svc.description}
-                </div>
-              </div>
-              {TIER_ORDER.map((tn, colIdx) => {
-                const isCurrent = tn === tierName;
-                const includes = colIdx >= rowIdx;
+            <div>
+              {includedServices.map((svc, index) => {
+                const completedMonths = getCompletedMonths(svc.id);
+                const scheduleMonths = SERVICE_SCHEDULE_MONTHS[svc.id] || [];
+                const totalVisits = scheduleMonths.length;
+                const completedVisits = scheduleMonths.filter(m => completedMonths.has(m)).length;
+                const annualSavingsForService = svc.basePrice * 12 * discount;
+                const progress = totalVisits > 0 ? Math.round((completedVisits / totalVisits) * 100) : 0;
+                const coverage = SERVICE_COVERAGE[svc.id];
+                const expanded = expandedService === svc.id;
                 return (
-                  <div key={tn} style={{
-                    padding: '12px 8px', textAlign: 'center',
-                    background: isCurrent ? `${TIER[tn].color}08` : 'transparent',
-                    borderLeft: `1px solid ${B.grayLight}`,
-                    borderBottom: `1px solid ${B.grayLight}`,
-                    color: includes ? B.green : B.grayLight,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  <div key={svc.id} style={{
+                    borderTop: index === 0 ? 'none' : '1px solid #E1E7EF',
+                    padding: 18,
                   }}>
-                    {includes ? <Icon name="check" size={20} strokeWidth={2.5} /> : <span style={{ fontSize: 18, fontWeight: 700 }}>{'—'}</span>}
+                    <button
+                      type="button"
+                      onClick={() => setExpandedService(expanded ? null : svc.id)}
+                      aria-expanded={expanded}
+                      style={{
+                        border: 'none',
+                        background: 'transparent',
+                        padding: 0,
+                        width: '100%',
+                        textAlign: 'left',
+                        cursor: 'pointer',
+                        fontFamily: FONTS.body,
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'flex-start' }}>
+                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, minWidth: 0 }}>
+                          <span style={{
+                            width: 38,
+                            height: 38,
+                            borderRadius: 8,
+                            background: '#EEF6FF',
+                            color: B.blueDeeper,
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            flexShrink: 0,
+                          }}>
+                            <Icon name={iconName(svc.icon)} size={20} strokeWidth={1.8} />
+                          </span>
+                          <span style={{ minWidth: 0 }}>
+                            <span style={{ display: 'block', fontSize: 16, fontWeight: 850, color: B.blueDeeper }}>{svc.name}</span>
+                            <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: muted }}>{svc.frequencies[0]}</span>
+                            {svc.id === 'lawn_care' && !lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (() => {
+                              const avg = Math.round((lawnHealth.scores.turfDensity + lawnHealth.scores.weedSuppression + lawnHealth.scores.fungusControl + lawnHealth.scores.thatchScore) / 4);
+                              const initialAvg = Math.round((lawnHealth.initialScores.turfDensity + lawnHealth.initialScores.weedSuppression + lawnHealth.initialScores.fungusControl + lawnHealth.initialScores.thatchScore) / 4);
+                              const improving = avg >= initialAvg;
+                              return (
+                                <span style={{ display: 'block', marginTop: 3, fontSize: 12, color: improving ? B.green : B.orange, fontWeight: 800 }}>
+                                  Lawn health {avg}% {improving ? `(up from ${initialAvg}%)` : `(from ${initialAvg}%)`}
+                                </span>
+                              );
+                            })()}
+                          </span>
+                        </div>
+                        <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                          <div style={{ fontSize: 12, color: muted }}>{completedVisits}/{totalVisits || 0} visits</div>
+                          <div style={{ marginTop: 4, fontSize: 14, color: annualSavingsForService > 0 ? B.green : muted, fontWeight: 850 }}>
+                            {annualSavingsForService > 0 ? `${money(annualSavingsForService)}/yr saved` : `${money(svc.basePrice * 12)}/yr`}
+                          </div>
+                        </div>
+                      </div>
+                    </button>
+
+                    <div style={{ marginTop: 12, height: 5, borderRadius: 999, background: '#E8EEF5', overflow: 'hidden' }}>
+                      <div style={{
+                        height: '100%',
+                        width: `${Math.max(0, Math.min(100, progress))}%`,
+                        borderRadius: 999,
+                        background: B.wavesBlue,
+                      }} />
+                    </div>
+
+                    {expanded && (
+                      <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #E1E7EF' }}>
+                        <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55 }}>{svc.description}</div>
+                        {coverage && (
+                          <div style={{ marginTop: 12, padding: 12, borderRadius: 8, background: subtle, border: '1px solid #E1E7EF' }}>
+                            <div style={{ fontSize: 14, color: B.blueDeeper, fontWeight: 850 }}>{coverage.summary}</div>
+                            <div style={{ display: 'grid', gap: 6, marginTop: 8 }}>
+                              {coverage.details.map((detail) => (
+                                <div key={detail} style={{ display: 'flex', gap: 8, color: B.grayDark, fontSize: 14, lineHeight: 1.45 }}>
+                                  <Icon name="check" size={14} strokeWidth={2} style={{ color: B.green, marginTop: 2 }} />
+                                  <span>{detail}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {svc.products?.length ? (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 12 }}>
+                            {svc.products.map((product) => (
+                              <span key={product} style={{
+                                padding: '4px 9px',
+                                borderRadius: 999,
+                                background: '#EEF6FF',
+                                color: B.blueDeeper,
+                                fontSize: 12,
+                                fontWeight: 700,
+                              }}>{product}</span>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
                   </div>
                 );
               })}
             </div>
-          ))}
+          </section>
 
-          {/* Member perks row — applies to all tiers */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1.4fr repeat(4, 1fr)' }}>
-            <div style={{ padding: '12px 14px', fontSize: 14, color: B.navy, fontWeight: 600 }}>
-              Unlimited callbacks
-              <div style={{ fontSize: 12, color: B.grayMid, fontWeight: 400, marginTop: 2, lineHeight: 1.4 }}>
-                Free re-treatment if pests return between scheduled visits
-              </div>
+          <section style={{ ...card, padding: 20 }}>
+            <div style={sectionTitle}>Add To Plan</div>
+            <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 20, fontWeight: 850 }}>Common upgrades</div>
+            <div style={{ marginTop: 4, color: muted, fontSize: 14 }}>
+              {Math.round(discount * 100)}% {tierName} discount applies where eligible.
             </div>
-            {TIER_ORDER.map(tn => (
-              <div key={tn} style={{
-                padding: '12px 8px', textAlign: 'center',
-                background: tn === tierName ? `${TIER[tn].color}08` : 'transparent',
-                borderLeft: `1px solid ${B.grayLight}`,
-                color: B.green,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-              }}>
-                <Icon name="check" size={20} strokeWidth={2.5} />
-              </div>
-            ))}
-          </div>
-
-          {/* CTA row */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1.4fr repeat(4, 1fr)', borderTop: `2px solid ${B.grayLight}` }}>
-            <div style={{ padding: '14px' }} />
-            {TIER_ORDER.map((tn, i) => {
-              const isCurrent = tn === tierName;
-              const isUpgrade = i > tierIdx;
-              return (
-                <div key={tn} style={{
-                  padding: '12px 6px', textAlign: 'center',
-                  background: isCurrent ? `${TIER[tn].color}12` : 'transparent',
-                  borderLeft: `1px solid ${B.grayLight}`,
-                }}>
-                  {isCurrent ? (
-                    <div style={{ fontSize: 12, fontWeight: 700, color: B.green }}>Current</div>
-                  ) : isUpgrade ? (
-                    upgradeRequested[tn] ? (
-                      <div style={{ fontSize: 12, fontWeight: 600, color: B.green }}>Request sent</div>
-                    ) : (
-                      <>
+            <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10, marginTop: 16 }}>
+              {availableAddOns.map((addon) => {
+                const eligibleDiscount = discount > 0 && addon.id !== 'wdo_inspection';
+                const planPrice = eligibleDiscount ? addon.price * (1 - discount) : addon.price;
+                const expanded = expandedAddon === addon.id;
+                return (
+                  <div key={addon.id} style={{ border: '1px solid #E1E7EF', borderRadius: 8, padding: 14, background: subtle }}>
+                    <div style={{ display: 'flex', gap: 10, minWidth: 0, alignItems: 'flex-start' }}>
+                      <span style={{ color: B.blueDeeper, display: 'inline-flex', marginTop: 1, flexShrink: 0 }}>
+                        <Icon name={iconName(addon.icon)} size={18} strokeWidth={1.8} />
+                      </span>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, lineHeight: 1.25 }}>{addon.name}</div>
+                        <div style={{ marginTop: 2, fontSize: 12, color: muted, lineHeight: 1.35 }}>{addon.min}</div>
+                        <div style={{ marginTop: 8, color: B.blueDeeper, fontSize: 14, fontWeight: 850, lineHeight: 1.25 }}>
+                          {money(planPrice)}{addon.unit}
+                        </div>
+                      </div>
+                    </div>
+                    {expanded && (
+                      <div style={{ marginTop: 10, color: B.grayDark, fontSize: 14, lineHeight: 1.5 }}>
+                        {addon.desc}
+                        {eligibleDiscount && (
+                          <div style={{ color: B.green, fontWeight: 800, marginTop: 6 }}>
+                            Was {money(addon.price)}{addon.unit}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
+                      <button
+                        type="button"
+                        onClick={() => setExpandedAddon(expanded ? null : addon.id)}
+                        style={{ ...secondaryButton, padding: '8px 11px', fontSize: 12 }}
+                      >
+                        {expanded ? 'Hide' : 'Details'}
+                      </button>
+                      {addonRequested[addon.id] ? (
+                        <span style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          minHeight: 34,
+                          padding: '0 10px',
+                          color: B.green,
+                          fontSize: 12,
+                          fontWeight: 850,
+                        }}>
+                          <Icon name="check" size={14} strokeWidth={2} /> Request sent
+                        </span>
+                      ) : (
                         <button
-                          disabled={upgradeSubmitting[tn]}
+                          type="button"
+                          disabled={addonSubmitting[addon.id]}
                           onClick={async () => {
-                            if (upgradeSubmitting[tn]) return;
-                            setUpgradeSubmitting(prev => ({ ...prev, [tn]: true }));
+                            if (addonSubmitting[addon.id]) return;
+                            setAddonSubmitting(prev => ({ ...prev, [addon.id]: true }));
                             try {
-                              await api.createRequest?.({ category: 'upgrade', subject: `Upgrade to WaveGuard ${tn}`, description: `Customer requested tier upgrade from ${tierName} to ${tn}.` });
-                              setUpgradeRequested(prev => ({ ...prev, [tn]: true }));
+                              await api.createRequest?.({ category: 'add_service', subject: `Add ${addon.name} to my plan`, description: `Customer requested to add ${addon.name} via portal.` });
+                              setAddonRequested(prev => ({ ...prev, [addon.id]: true }));
                             } catch (err) {
-                              alert(`Couldn't send upgrade request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
+                              alert(`Couldn't send request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
                             } finally {
-                              setUpgradeSubmitting(prev => ({ ...prev, [tn]: false }));
+                              setAddonSubmitting(prev => ({ ...prev, [addon.id]: false }));
                             }
                           }}
                           style={{
-                            ...BUTTON_BASE, padding: '6px 10px', fontSize: 12,
-                            background: B.yellow, color: B.blueDeeper, width: '100%',
-                            opacity: upgradeSubmitting[tn] ? 0.6 : 1,
-                            cursor: upgradeSubmitting[tn] ? 'wait' : 'pointer',
-                          }}>{upgradeSubmitting[tn] ? '…' : 'Upgrade'}</button>
-                        {tierIdx >= 1 && i === tierIdx + 1 && (
-                          <div style={{ fontSize: 9, color: B.green, fontWeight: 600, marginTop: 4, lineHeight: 1.3 }}>
-                            ${tierIdx >= 2 ? 100 : 50} loyalty credit applies
+                            ...primaryButton,
+                            padding: '8px 11px',
+                            fontSize: 12,
+                            opacity: addonSubmitting[addon.id] ? 0.65 : 1,
+                            cursor: addonSubmitting[addon.id] ? 'wait' : 'pointer',
+                          }}
+                        >
+                          {addonSubmitting[addon.id] ? 'Sending...' : 'Request'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+
+          <section style={{ ...card, padding: 20 }}>
+            <div style={sectionTitle}>Compare Plans</div>
+            <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 20, fontWeight: 850 }}>WaveGuard tiers</div>
+            <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(auto-fit, minmax(155px, 1fr))', gap: 10, marginTop: 16 }}>
+              {TIER_ORDER.map((tn, i) => {
+                const t = TIER[tn];
+                const isCurrent = tn === tierName;
+                const isUpgrade = i > tierIdx;
+                const disc = TIER_DISCOUNTS[tn];
+                const services = TIER_SERVICE_NAMES[tn] || [];
+                const tierMonthly = SERVICE_CATALOG.slice(0, TIER_SERVICES[tn]).reduce((sum, s) => sum + s.basePrice * (1 - disc), 0);
+                return (
+                  <div key={tn} style={{
+                    border: `1px solid ${isCurrent ? B.wavesBlue : '#E1E7EF'}`,
+                    borderRadius: 8,
+                    background: isCurrent ? '#EEF6FF' : '#fff',
+                    padding: 14,
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
+                      <div style={{ fontSize: 15, color: B.blueDeeper, fontWeight: 850 }}>{tn}</div>
+                      {isCurrent && (
+                        <span style={{ fontSize: 10, color: B.green, fontWeight: 850, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                          Current
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ marginTop: 8, fontSize: 22, color: B.blueDeeper, fontWeight: 850 }}>
+                      {money(tierMonthly, 0)}<span style={{ fontSize: 12, color: muted, fontWeight: 600 }}>/mo</span>
+                    </div>
+                    <div style={{ marginTop: 3, color: disc > 0 ? B.green : muted, fontSize: 12, fontWeight: 800 }}>
+                      {disc > 0 ? `${Math.round(disc * 100)}% bundle discount` : 'Base plan'}
+                    </div>
+                    <div style={{ display: 'grid', gap: 5, marginTop: 12 }}>
+                      {services.slice(0, 4).map((svcName) => (
+                        <div key={svcName} style={{ display: 'flex', gap: 6, fontSize: 12, color: B.grayDark, lineHeight: 1.35 }}>
+                          <Icon name="check" size={13} strokeWidth={2} style={{ color: B.green, marginTop: 1 }} />
+                          <span>{svcName.replace(/ Program| Barrier Treatment/g, '')}</span>
+                        </div>
+                      ))}
+                      <div style={{ display: 'flex', gap: 6, fontSize: 12, color: B.grayDark, lineHeight: 1.35 }}>
+                        <Icon name="check" size={13} strokeWidth={2} style={{ color: B.green, marginTop: 1 }} />
+                        <span>Unlimited callbacks</span>
+                      </div>
+                    </div>
+                    <div style={{ marginTop: 14 }}>
+                      {isCurrent ? (
+                        <span style={{ display: 'inline-flex', minHeight: 34, alignItems: 'center', color: B.green, fontSize: 12, fontWeight: 850 }}>
+                          Active
+                        </span>
+                      ) : isUpgrade ? (
+                        upgradeRequested[tn] ? (
+                          <span style={{ display: 'inline-flex', minHeight: 34, alignItems: 'center', color: B.green, fontSize: 12, fontWeight: 850 }}>
+                            Request sent
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={upgradeSubmitting[tn]}
+                            onClick={async () => {
+                              if (upgradeSubmitting[tn]) return;
+                              setUpgradeSubmitting(prev => ({ ...prev, [tn]: true }));
+                              try {
+                                await api.createRequest?.({ category: 'upgrade', subject: `Upgrade to WaveGuard ${tn}`, description: `Customer requested tier upgrade from ${tierName} to ${tn}.` });
+                                setUpgradeRequested(prev => ({ ...prev, [tn]: true }));
+                              } catch (err) {
+                                alert(`Couldn't send upgrade request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
+                              } finally {
+                                setUpgradeSubmitting(prev => ({ ...prev, [tn]: false }));
+                              }
+                            }}
+                            style={{
+                              ...primaryButton,
+                              width: '100%',
+                              padding: '8px 10px',
+                              fontSize: 12,
+                              opacity: upgradeSubmitting[tn] ? 0.65 : 1,
+                              cursor: upgradeSubmitting[tn] ? 'wait' : 'pointer',
+                            }}
+                          >
+                            {upgradeSubmitting[tn] ? 'Sending...' : 'Upgrade'}
+                          </button>
+                        )
+                      ) : (
+                        <a href="sms:+19412975749?body=Hi Waves, I'd like to discuss adjusting my WaveGuard plan." style={{
+                          ...secondaryButton,
+                          minHeight: 34,
+                          padding: '8px 10px',
+                          fontSize: 12,
+                          textDecoration: 'none',
+                          width: '100%',
+                        }}>Contact</a>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        </div>
+
+        <aside style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <section style={{ ...card, padding: 20 }}>
+            <div style={sectionTitle}>Year At A Glance</div>
+            <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 20, fontWeight: 850 }}>{currentYear} service calendar</div>
+            <div style={{ display: 'grid', gap: 15, marginTop: 16 }}>
+              {includedServices.map((svc) => {
+                const scheduleMonths = SERVICE_SCHEDULE_MONTHS[svc.id] || [];
+                const completedMonths = getCompletedMonths(svc.id);
+                return (
+                  <div key={svc.id}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, color: B.blueDeeper, fontSize: 14, fontWeight: 850, marginBottom: 8 }}>
+                      <Icon name={iconName(svc.icon)} size={14} strokeWidth={1.8} />
+                      <span>{svc.name.replace(/ Program| Barrier Treatment/g, '')}</span>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, minmax(0, 1fr))', gap: 3 }}>
+                      {MONTH_LABELS.map((month, mi) => {
+                        const isScheduled = scheduleMonths.includes(mi);
+                        const isCompleted = completedMonths.has(mi);
+                        const isCurrentMonth = mi === currentMonth;
+                        const isOverdue = isScheduled && !isCompleted && mi < currentMonth;
+                        const fill = isCompleted ? B.green : isOverdue ? B.orange : isCurrentMonth && isScheduled ? B.wavesBlue : isScheduled ? '#CBD5E1' : 'transparent';
+                        const border = isScheduled ? fill : '#E1E7EF';
+                        const title = isScheduled
+                          ? `${month}: ${isCompleted ? 'Completed' : isOverdue ? 'Pending or missed' : isCurrentMonth ? 'This month' : 'Scheduled'}`
+                          : `${month}: No service`;
+                        return (
+                          <div key={month} title={title} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3 }}>
+                            <div style={{
+                              width: 12,
+                              height: 12,
+                              borderRadius: 999,
+                              background: fill,
+                              border: `1px solid ${border}`,
+                              opacity: isScheduled ? 1 : 0.45,
+                              boxShadow: isCurrentMonth && isScheduled ? `0 0 0 3px ${B.wavesBlue}18` : 'none',
+                            }} />
+                            <div style={{ fontSize: 9, color: muted }}>{month[0]}</div>
                           </div>
-                        )}
-                      </>
-                    )
-                  ) : (
-                    <a href="sms:+19412975749?body=Hi Waves, I'd like to discuss adjusting my WaveGuard plan." style={{
-                      fontSize: 10, color: B.wavesBlue, fontWeight: 600, textDecoration: 'none',
-                      minHeight: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                    }}>Contact us</a>
-                  )}
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+
+          <section style={{ ...card, padding: 20 }}>
+            <div style={sectionTitle}>Savings</div>
+            <div style={{ marginTop: 8, color: B.green, fontSize: 34, fontWeight: 850, lineHeight: 1 }}>
+              {money(annualSavings)}
+            </div>
+            <div style={{ marginTop: 6, color: muted, fontSize: 14, lineHeight: 1.5 }}>
+              Full price {money(totalFullPrice)}/yr. Your current bundle is {money(currentAnnual)}/yr.
+            </div>
+          </section>
+
+          {tier && (
+            <section style={{ ...card, padding: 20 }}>
+              <div style={sectionTitle}>Loyalty</div>
+              <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
+                {[
+                  { text: `${money(renewalCredit, 0)} annual renewal credit`, icon: 'money' },
+                  tierIdx < TIER_ORDER.length - 1 && {
+                    text: `${money(tierIdx >= 2 ? 100 : tierIdx >= 1 ? 50 : 25, 0)} upgrade credit toward ${TIER_ORDER[tierIdx + 1]}`,
+                    icon: 'upgrade',
+                  },
+                  tierIdx >= 2 && { text: 'Priority hurricane scheduling', icon: 'tornado' },
+                ].filter(Boolean).map((item) => (
+                  <div key={item.text} style={{ display: 'flex', gap: 9, color: B.grayDark, fontSize: 14, lineHeight: 1.45 }}>
+                    <Icon name={item.icon} size={16} strokeWidth={1.8} style={{ color: B.blueDeeper, marginTop: 1 }} />
+                    <span>{item.text}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          <section style={{ ...card, padding: 20 }}>
+            <div style={sectionTitle}>Plan History</div>
+            <div style={{ display: 'grid', gap: 12, marginTop: 14 }}>
+              {planTimeline.map((event) => (
+                <div key={`${event.label}-${event.date}`} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 999, background: B.wavesBlue, marginTop: 6, flexShrink: 0 }} />
+                  <span>
+                    <span style={{ display: 'block', color: muted, fontSize: 12, fontWeight: 700 }}>
+                      {!isNaN(event.date) ? event.date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : 'Date unavailable'}
+                    </span>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2, color: B.blueDeeper, fontSize: 14, fontWeight: 800 }}>
+                      <Icon name={iconName(event.icon)} size={14} strokeWidth={1.8} /> {event.label}
+                    </span>
+                  </span>
                 </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-
-      {/* Section 5 — Annual Savings Summary */}
-      <Card style={{ background: `linear-gradient(135deg, ${B.green}12, #E8F5E9)`, border: `1.5px solid ${B.green}33` }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
-          <Icon name="money" size={28} strokeWidth={1.75} />
-          <div>
-            <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>Your Annual Savings</div>
-            <div style={{ fontSize: 12, color: B.grayMid }}>With your WaveGuard {tierName} bundle</div>
-          </div>
-        </div>
-        <div style={{ fontSize: 36, fontWeight: 700, color: B.green, fontFamily: FONTS.ui }}>
-          ${annualSavings.toFixed(2)}<span style={{ fontSize: 16 }}>/year</span>
-        </div>
-        <div style={{ fontSize: 16, color: B.grayDark, marginTop: 8, lineHeight: 1.6 }}>
-          Full price for {numServices} service{numServices > 1 ? 's' : ''}: <strong>${totalFullPrice.toFixed(2)}/yr</strong><br/>
-          Your {Math.round(discount * 100)}% bundle rate: <strong>${(totalFullPrice - annualSavings).toFixed(2)}/yr</strong> (~${((totalFullPrice - annualSavings) / 12).toFixed(2)}/mo)<br/>
-          You keep <strong style={{ color: B.green }}>${annualSavings.toFixed(2)}</strong> in your pocket.
-        </div>
-      </Card>
-
-      {/* Section 5b — Loyalty Rewards */}
-      {tier && (
-        <Card style={{ border: `1.5px solid ${tier.color}33`, background: `${tier.color}08` }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
-            <Icon name="medal" size={28} strokeWidth={1.75} />
-            <div>
-              <div style={{ fontSize: 16, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>Loyalty Rewards</div>
-              <div style={{ fontSize: 12, color: B.grayMid }}>Your {tierName} membership rewards</div>
-            </div>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 14 }}>
-            {[
-              { text: `$${Math.min(75, Math.round(memberMonths * 6.25))} annual renewal credit (applied to month 13)`, icon: 'money' },
-              tierIdx < TIER_ORDER.length - 1 && {
-                text: `$${tierIdx >= 2 ? 100 : tierIdx >= 1 ? 50 : 25} upgrade credit toward ${TIER_ORDER[tierIdx + 1]}`,
-                icon: 'upgrade',
-              },
-              tierIdx >= 2 && { text: 'Priority hurricane scheduling', icon: 'tornado' },
-            ].filter(Boolean).map((item, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 16, color: B.grayDark, lineHeight: 1.5 }}>
-                <Icon name={item.icon} size={16} strokeWidth={1.75} style={{ flexShrink: 0 }} />
-                {item.text}
-              </div>
-            ))}
-          </div>
-          <button onClick={() => {}} style={{
-            ...BUTTON_BASE, padding: '8px 16px', fontSize: 12,
-            background: 'none', color: B.wavesBlue, border: `1px solid ${B.wavesBlue}33`,
-          }}>See full program →</button>
-        </Card>
-      )}
-
-      {/* Section 6 — Plan History Timeline */}
-      <Card>
-        <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 16 }}>Plan History</div>
-        <div style={{ position: 'relative', paddingLeft: 28 }}>
-          {/* Vertical line */}
-          <div style={{
-            position: 'absolute', left: 9, top: 4, bottom: 4, width: 2,
-            background: `linear-gradient(to bottom, ${B.wavesBlue}, ${B.grayLight})`,
-            borderRadius: 1,
-          }} />
-          {planTimeline.map((event, idx) => (
-            <div key={idx} style={{
-              position: 'relative', paddingBottom: idx < planTimeline.length - 1 ? 20 : 0,
-              display: 'flex', flexDirection: 'column',
-            }}>
-              {/* Dot on timeline */}
-              <div style={{
-                position: 'absolute', left: -23, top: 2,
-                width: 14, height: 14, borderRadius: '50%',
-                background: idx === planTimeline.length - 1 ? B.wavesBlue : B.white,
-                border: `2.5px solid ${idx === planTimeline.length - 1 ? B.wavesBlue : B.blueLight}`,
-                zIndex: 1,
-              }} />
-              <div style={{ fontSize: 12, color: B.grayMid, fontWeight: 600 }}>
-                {!isNaN(event.date) ? event.date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '—'}
-              </div>
-              <div style={{ fontSize: 14, fontWeight: 600, color: B.navy, marginTop: 2, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <Icon name={event.icon} size={14} strokeWidth={1.75} /> {event.label}
+              ))}
+              <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                <span style={{ width: 10, height: 10, borderRadius: 999, background: B.green, marginTop: 5, flexShrink: 0 }} />
+                <span>
+                  <span style={{ display: 'block', color: muted, fontSize: 12, fontWeight: 700 }}>Now</span>
+                  <span style={{ display: 'block', marginTop: 2, color: B.green, fontSize: 14, fontWeight: 850 }}>
+                    Active - WaveGuard {tierName}
+                  </span>
+                </span>
               </div>
             </div>
-          ))}
-          {/* Current status */}
-          <div style={{ position: 'relative', paddingTop: planTimeline.length > 0 ? 0 : 0 }}>
-            <div style={{
-              position: 'absolute', left: -25, top: 2,
-              width: 18, height: 18, borderRadius: '50%',
-              background: B.green, border: `3px solid #E8F5E9`,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              zIndex: 1,
-            }}>
-              <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#fff' }} />
-            </div>
-            <div style={{ paddingTop: planTimeline.length > 0 ? 20 : 0 }}>
-              <div style={{ fontSize: 12, color: B.grayMid, fontWeight: 600 }}>Now</div>
-              <div style={{ fontSize: 14, fontWeight: 600, color: B.green, marginTop: 2 }}>
-                Active — WaveGuard {tierName} · No contract
+          </section>
+
+          <section style={{ ...card, padding: 20 }}>
+            <div style={sectionTitle}>Account Options</div>
+            {!showPauseForm && !showCancelForm && !pauseSubmitted && !cancelSubmitted && (
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 12 }}>
+                <button type="button" onClick={() => setShowPauseForm(true)} style={smallLinkButton}>Pause My Plan</button>
+                <button type="button" onClick={() => setShowCancelForm(true)} style={smallLinkButton}>Cancel</button>
               </div>
-            </div>
-          </div>
-        </div>
-      </Card>
+            )}
 
-
-      {/* Section — Pause / Cancel Controls */}
-      <div style={{ textAlign: 'center', padding: '8px 0 4px' }}>
-        {!showPauseForm && !showCancelForm && !pauseSubmitted && !cancelSubmitted && (
-          <div style={{ display: 'flex', justifyContent: 'center', gap: 16, alignItems: 'center' }}>
-            <button onClick={() => setShowPauseForm(true)} style={{
-              background: 'none', border: 'none', cursor: 'pointer',
-              fontSize: 12, color: B.grayMid, fontWeight: 600, fontFamily: FONTS.body,
-              textDecoration: 'underline', textUnderlineOffset: 3, padding: '8px 10px', minHeight: 36,
-            }}>Pause My Plan</button>
-            <span style={{ color: B.grayLight }}>|</span>
-            <button onClick={() => setShowCancelForm(true)} style={{
-              background: 'none', border: 'none', cursor: 'pointer',
-              fontSize: 12, color: B.grayMid, fontWeight: 500, fontFamily: FONTS.body,
-              textDecoration: 'underline', textUnderlineOffset: 3, padding: '8px 10px', minHeight: 36,
-            }}>Cancel</button>
-          </div>
-        )}
-
-        {/* Pause Form */}
-        {showPauseForm && !pauseSubmitted && (
-          <Card style={{ textAlign: 'left', border: `1px solid ${B.orange}33` }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 12 }}>Pause My Plan</div>
-            <div style={{ fontSize: 12, color: B.grayDark, marginBottom: 12 }}>
-              We'll hold your services and billing. Your spot stays reserved.
-            </div>
-            <div style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>Duration</div>
-              <div style={{ display: 'flex', gap: 8 }}>
-                {['1', '2'].map(d => (
-                  <button key={d} onClick={() => setPauseDuration(d)} style={{
-                    padding: '8px 18px', borderRadius: 10, fontSize: 14, fontWeight: 600,
-                    border: `1.5px solid ${pauseDuration === d ? B.wavesBlue : B.grayLight}`,
-                    background: pauseDuration === d ? `${B.wavesBlue}12` : B.white,
-                    color: pauseDuration === d ? B.wavesBlue : B.grayMid,
-                    cursor: 'pointer', fontFamily: FONTS.body,
-                  }}>{d} month{d === '2' ? 's' : ''}</button>
-                ))}
+            {showPauseForm && !pauseSubmitted && (
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontSize: 15, color: B.blueDeeper, fontWeight: 850 }}>Pause My Plan</div>
+                <div style={{ fontSize: 14, color: muted, marginTop: 4, lineHeight: 1.45 }}>
+                  We will hold services and billing while your spot stays reserved.
+                </div>
+                <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                  {['1', '2'].map(d => (
+                    <button key={d} type="button" onClick={() => setPauseDuration(d)} style={{
+                      border: `1px solid ${pauseDuration === d ? B.wavesBlue : '#CBD5E1'}`,
+                      background: pauseDuration === d ? '#EEF6FF' : '#fff',
+                      color: pauseDuration === d ? B.blueDeeper : B.grayDark,
+                      borderRadius: 8,
+                      padding: '8px 12px',
+                      cursor: 'pointer',
+                      fontSize: 14,
+                      fontWeight: 800,
+                      fontFamily: FONTS.body,
+                    }}>
+                      {d} month{d === '2' ? 's' : ''}
+                    </button>
+                  ))}
+                </div>
+                <input
+                  value={pauseReason}
+                  onChange={e => setPauseReason(e.target.value)}
+                  placeholder="Reason (optional)"
+                  aria-label="Pause reason"
+                  style={{
+                    width: '100%',
+                    marginTop: 10,
+                    padding: '10px 12px',
+                    borderRadius: 8,
+                    fontSize: 14,
+                    border: '1px solid #CBD5E1',
+                    fontFamily: FONTS.body,
+                    outline: 'none',
+                    boxSizing: 'border-box',
+                  }}
+                />
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
+                  <button
+                    type="button"
+                    disabled={pauseSubmitting}
+                    onClick={async () => {
+                      if (pauseSubmitting) return;
+                      setPauseSubmitting(true);
+                      try {
+                        await api.createRequest?.({
+                          category: 'pause',
+                          subject: `Pause plan for ${pauseDuration} month(s)`,
+                          description: `Customer requested to pause their WaveGuard ${tierName} plan for ${pauseDuration} month(s). Reason: ${pauseReason || 'Not specified'}`,
+                        });
+                        setPauseSubmitted(true);
+                        setShowPauseForm(false);
+                      } catch (err) {
+                        alert(`Couldn't submit pause request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
+                      } finally {
+                        setPauseSubmitting(false);
+                      }
+                    }}
+                    style={{ ...primaryButton, opacity: pauseSubmitting ? 0.65 : 1, cursor: pauseSubmitting ? 'wait' : 'pointer' }}
+                  >
+                    {pauseSubmitting ? 'Sending...' : 'Submit Pause'}
+                  </button>
+                  <button type="button" onClick={() => setShowPauseForm(false)} style={secondaryButton}>Never mind</button>
+                </div>
               </div>
-            </div>
-            <div style={{ marginBottom: 12 }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>Reason (optional)</div>
-              <input
-                value={pauseReason}
-                onChange={e => setPauseReason(e.target.value)}
-                placeholder="Traveling, seasonal, etc."
-                aria-label="Pause reason"
-                style={{
-                  width: '100%', padding: '10px 14px', borderRadius: 10, fontSize: 14,
-                  border: `1px solid ${B.grayLight}`, fontFamily: FONTS.body, outline: 'none',
-                  boxSizing: 'border-box',
-                }}
-              />
-            </div>
-            <div style={{ display: 'flex', gap: 10 }}>
-              <button
-                disabled={pauseSubmitting}
-                onClick={async () => {
-                  if (pauseSubmitting) return;
-                  setPauseSubmitting(true);
-                  try {
-                    await api.createRequest?.({
-                      category: 'pause',
-                      subject: `Pause plan for ${pauseDuration} month(s)`,
-                      description: `Customer requested to pause their WaveGuard ${tierName} plan for ${pauseDuration} month(s). Reason: ${pauseReason || 'Not specified'}`,
-                    });
-                    setPauseSubmitted(true);
-                    setShowPauseForm(false);
-                  } catch (err) {
-                    alert(`Couldn't submit pause request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
-                  } finally {
-                    setPauseSubmitting(false);
-                  }
-                }}
-                style={{
-                  ...BUTTON_BASE, padding: '9px 18px', fontSize: 14,
-                  background: B.orange, color: '#fff',
-                  opacity: pauseSubmitting ? 0.6 : 1,
-                  cursor: pauseSubmitting ? 'wait' : 'pointer',
-                }}>{pauseSubmitting ? 'Sending…' : 'Submit Pause Request'}</button>
-              <button onClick={() => setShowPauseForm(false)} style={{
-                ...BUTTON_BASE, padding: '9px 18px', fontSize: 14,
-                background: B.offWhite, color: B.grayDark, border: `1px solid ${B.grayLight}`,
-              }}>Never mind</button>
-            </div>
-          </Card>
-        )}
+            )}
 
-        {pauseSubmitted && (
-          <div style={{ padding: '12px 18px', borderRadius: 12, background: `${B.green}20`, fontSize: 14, color: B.green, fontWeight: 600 }}>
-             Pause request submitted — we'll confirm within 1 business day.
-          </div>
-        )}
-
-        {/* Cancel Form */}
-        {showCancelForm && !cancelSubmitted && (
-          <Card style={{ textAlign: 'left', border: `1px solid ${B.red}33` }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading, marginBottom: 4 }}>We're sorry to see you go</div>
-            <div style={{ fontSize: 12, color: B.grayDark, marginBottom: 14 }}>
-              Before you cancel, would you consider pausing instead? Your discount and spot stay reserved.
-            </div>
-            <div style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>Tell us why</div>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                {['Moving', 'Cost', 'Not satisfied', 'Switching providers', 'Other'].map(r => (
-                  <button key={r} onClick={() => setCancelReason(r)} style={{
-                    padding: '6px 14px', borderRadius: 20, fontSize: 12, fontWeight: 600,
-                    border: `1.5px solid ${cancelReason === r ? B.red : B.grayLight}`,
-                    background: cancelReason === r ? `${B.red}10` : B.white,
-                    color: cancelReason === r ? B.red : B.grayMid,
-                    cursor: 'pointer', fontFamily: FONTS.body,
-                  }}>{r}</button>
-                ))}
+            {pauseSubmitted && (
+              <div style={{ marginTop: 12, color: B.green, fontSize: 14, fontWeight: 850, lineHeight: 1.5 }}>
+                Pause request submitted. We will confirm within 1 business day.
               </div>
-            </div>
-            <div style={{ marginBottom: 12 }}>
-              <textarea
-                value={cancelDetails}
-                onChange={e => setCancelDetails(e.target.value)}
-                placeholder="Anything else you'd like us to know?"
-                aria-label="Cancellation details"
-                rows={3}
-                style={{
-                  width: '100%', padding: '10px 14px', borderRadius: 10, fontSize: 14,
-                  border: `1px solid ${B.grayLight}`, fontFamily: FONTS.body, outline: 'none',
-                  resize: 'vertical', boxSizing: 'border-box',
-                }}
-              />
-            </div>
-            <div style={{ display: 'flex', gap: 10 }}>
-              <button
-                disabled={cancelSubmitting}
-                onClick={async () => {
-                  if (cancelSubmitting) return;
-                  setCancelSubmitting(true);
-                  try {
-                    await api.createRequest?.({
-                      category: 'cancellation',
-                      subject: `Cancel WaveGuard ${tierName} plan`,
-                      description: `Customer requested cancellation. Reason: ${cancelReason || 'Not specified'}. Details: ${cancelDetails || 'None'}`,
-                    });
-                    setCancelSubmitted(true);
-                    setShowCancelForm(false);
-                  } catch (err) {
-                    alert(`Couldn't submit cancellation request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
-                  } finally {
-                    setCancelSubmitting(false);
-                  }
-                }}
-                style={{
-                  ...BUTTON_BASE, padding: '9px 18px', fontSize: 14,
-                  background: B.grayMid, color: '#fff',
-                  opacity: cancelSubmitting ? 0.6 : 1,
-                  cursor: cancelSubmitting ? 'wait' : 'pointer',
-                }}>{cancelSubmitting ? 'Sending…' : 'Submit Cancellation Request'}</button>
-              <button onClick={() => setShowCancelForm(false)} style={{
-                ...BUTTON_BASE, padding: '9px 18px', fontSize: 14,
-                background: B.offWhite, color: B.grayDark, border: `1px solid ${B.grayLight}`,
-              }}>Keep My Plan</button>
-            </div>
-          </Card>
-        )}
+            )}
 
-        {cancelSubmitted && (
-          <div style={{ padding: '12px 18px', borderRadius: 12, background: `${B.grayMid}15`, fontSize: 14, color: B.grayDark, fontWeight: 600 }}>
-             Cancellation request received — we'll reach out to finalize.
-          </div>
-        )}
+            {showCancelForm && !cancelSubmitted && (
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontSize: 15, color: B.blueDeeper, fontWeight: 850 }}>Cancellation Request</div>
+                <div style={{ fontSize: 14, color: muted, marginTop: 4, lineHeight: 1.45 }}>
+                  Pausing keeps your discount and service spot reserved.
+                </div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 12 }}>
+                  {['Moving', 'Cost', 'Not satisfied', 'Switching providers', 'Other'].map(r => (
+                    <button key={r} type="button" onClick={() => setCancelReason(r)} style={{
+                      padding: '7px 11px',
+                      borderRadius: 999,
+                      fontSize: 12,
+                      fontWeight: 800,
+                      border: `1px solid ${cancelReason === r ? B.red : '#CBD5E1'}`,
+                      background: cancelReason === r ? `${B.red}10` : '#fff',
+                      color: cancelReason === r ? B.red : B.grayDark,
+                      cursor: 'pointer',
+                      fontFamily: FONTS.body,
+                    }}>{r}</button>
+                  ))}
+                </div>
+                <textarea
+                  value={cancelDetails}
+                  onChange={e => setCancelDetails(e.target.value)}
+                  placeholder="Anything else you'd like us to know?"
+                  aria-label="Cancellation details"
+                  rows={3}
+                  style={{
+                    width: '100%',
+                    marginTop: 10,
+                    padding: '10px 12px',
+                    borderRadius: 8,
+                    fontSize: 14,
+                    border: '1px solid #CBD5E1',
+                    fontFamily: FONTS.body,
+                    outline: 'none',
+                    resize: 'vertical',
+                    boxSizing: 'border-box',
+                  }}
+                />
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
+                  <button
+                    type="button"
+                    disabled={cancelSubmitting}
+                    onClick={async () => {
+                      if (cancelSubmitting) return;
+                      setCancelSubmitting(true);
+                      try {
+                        await api.createRequest?.({
+                          category: 'cancellation',
+                          subject: `Cancel WaveGuard ${tierName} plan`,
+                          description: `Customer requested cancellation. Reason: ${cancelReason || 'Not specified'}. Details: ${cancelDetails || 'None'}`,
+                        });
+                        setCancelSubmitted(true);
+                        setShowCancelForm(false);
+                      } catch (err) {
+                        alert(`Couldn't submit cancellation request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
+                      } finally {
+                        setCancelSubmitting(false);
+                      }
+                    }}
+                    style={{ ...primaryButton, background: B.grayMid, opacity: cancelSubmitting ? 0.65 : 1, cursor: cancelSubmitting ? 'wait' : 'pointer' }}
+                  >
+                    {cancelSubmitting ? 'Sending...' : 'Submit Request'}
+                  </button>
+                  <button type="button" onClick={() => setShowCancelForm(false)} style={secondaryButton}>Keep My Plan</button>
+                </div>
+              </div>
+            )}
+
+            {cancelSubmitted && (
+              <div style={{ marginTop: 12, color: B.grayDark, fontSize: 14, fontWeight: 850, lineHeight: 1.5 }}>
+                Cancellation request received. We will reach out to finalize.
+              </div>
+            )}
+          </section>
+        </aside>
       </div>
     </div>
   );
