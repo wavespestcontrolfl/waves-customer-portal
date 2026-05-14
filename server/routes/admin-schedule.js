@@ -361,6 +361,140 @@ function httpError(status, message) {
   return err;
 }
 
+const ASSIGNMENT_SCOPES = new Set(['this_only', 'following', 'series']);
+const ASSIGNMENT_TERMINAL_STATUSES = ['completed', 'cancelled', 'rescheduled', 'skipped'];
+
+function normalizeAssignmentScope(scope) {
+  const normalized = scope || 'this_only';
+  if (!ASSIGNMENT_SCOPES.has(normalized)) {
+    throw httpError(400, 'assignmentScope must be this_only, following, or series');
+  }
+  return normalized;
+}
+
+function dateOnly(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString().split('T')[0];
+  return String(value).split('T')[0];
+}
+
+function recurringTemplateTechnicianId(parent) {
+  if (parent?.recurring_technician_override) return parent.recurring_technician_id || null;
+  return parent?.recurring_technician_id || parent?.technician_id || null;
+}
+
+function shouldPreserveParentTemplateForThisOnlyAssignment(job, technicianId) {
+  if (technicianId === undefined || (technicianId !== null && typeof technicianId !== 'string')) return false;
+  if (!job?.is_recurring || job.recurring_parent_id || job.recurring_technician_override) return false;
+  return (job.technician_id || null) !== (technicianId || null);
+}
+
+async function getAssignmentTargetIds(conn, jobId, assignmentScope) {
+  const scope = normalizeAssignmentScope(assignmentScope);
+  const job = await conn('scheduled_services')
+    .where({ id: jobId })
+    .first('id', 'scheduled_date', 'recurring_parent_id', 'is_recurring', 'technician_id');
+  if (!job) throw httpError(404, 'Service not found');
+
+  const isSeriesJob = !!(job.recurring_parent_id || job.is_recurring);
+  const parentId = job.recurring_parent_id || job.id;
+  if (scope === 'this_only' || !isSeriesJob) {
+    return { scope: 'this_only', job, parentId, targetIds: [jobId] };
+  }
+  const query = conn('scheduled_services')
+    .where(function () {
+      this.where({ id: parentId }).orWhere({ recurring_parent_id: parentId });
+    })
+    .whereNotIn('status', ASSIGNMENT_TERMINAL_STATUSES);
+
+  if (scope === 'following') {
+    query.where('scheduled_date', '>=', dateOnly(job.scheduled_date));
+  }
+
+  const rows = await query
+    .orderBy('scheduled_date', 'asc')
+    .orderBy('window_start', 'asc')
+    .select('id');
+
+  const targetIds = [...new Set(rows.map((row) => row.id))];
+  return { scope, job, parentId, targetIds: targetIds.length ? targetIds : [jobId] };
+}
+
+async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScope = 'this_only', trx }) {
+  const conn = trx || db;
+  const { scope, job, parentId, targetIds } = await getAssignmentTargetIds(conn, jobId, assignmentScope);
+  const changedJobIds = [];
+  let templateChanged = false;
+  let technicianName = null;
+  let scheduleColumns = null;
+  const getScheduleColumns = async () => {
+    if (!scheduleColumns) scheduleColumns = await conn('scheduled_services').columnInfo();
+    return scheduleColumns;
+  };
+
+  if (scope === 'this_only' && parentId && shouldPreserveParentTemplateForThisOnlyAssignment(job, technicianId)) {
+    const cols = await getScheduleColumns();
+    if (cols.recurring_technician_id && cols.recurring_technician_override) {
+      const parent = await conn('scheduled_services')
+        .where({ id: parentId })
+        .first('is_recurring', 'recurring_parent_id', 'technician_id', 'recurring_technician_id', 'recurring_technician_override');
+      if (shouldPreserveParentTemplateForThisOnlyAssignment(parent, technicianId)) {
+        const updated = await conn('scheduled_services')
+          .where({ id: parentId })
+          .where(function () {
+            this.whereNull('recurring_technician_override')
+              .orWhere({ recurring_technician_override: false });
+          })
+          .update({
+            recurring_technician_id: recurringTemplateTechnicianId(parent),
+            recurring_technician_override: true,
+            updated_at: new Date(),
+          });
+        templateChanged = updated > 0;
+      }
+    }
+  }
+
+  for (const targetId of targetIds) {
+    const assignment = await assignDispatchJob({
+      jobId: targetId,
+      technicianId,
+      actorId,
+      emit: false,
+      trx: conn,
+    });
+    if (assignment.technicianName) technicianName = assignment.technicianName;
+    if (assignment.changed) changedJobIds.push(targetId);
+  }
+
+  if (scope !== 'this_only' && parentId) {
+    const cols = await getScheduleColumns();
+    if (cols.recurring_technician_id && cols.recurring_technician_override) {
+      const updated = await conn('scheduled_services')
+        .where({ id: parentId })
+        .where(function () {
+          this.whereRaw('recurring_technician_id IS DISTINCT FROM ?', [technicianId || null])
+            .orWhere({ recurring_technician_override: false });
+        })
+        .update({
+          recurring_technician_id: technicianId || null,
+          recurring_technician_override: true,
+          updated_at: new Date(),
+        });
+      templateChanged = updated > 0;
+    }
+  }
+
+  return {
+    scope,
+    targetIds,
+    changedJobIds,
+    templateChanged,
+    changed: changedJobIds.length > 0 || templateChanged,
+    technicianName,
+  };
+}
+
 function parseMoneyInput(value, fieldName) {
   if (value === null || value === undefined || value === '') return null;
   const num = Number(value);
@@ -722,6 +856,8 @@ router.get('/', async (req, res, next) => {
         actualDuration: s.actual_duration_minutes,
         weatherAdvisory: s.weather_advisory,
         isRecurring: s.is_recurring,
+        recurringParentId: s.recurring_parent_id || null,
+        recurringPattern: s.recurring_pattern || null,
       };
     }));
 
@@ -814,6 +950,8 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.technician_id',
           'scheduled_services.zone', 'scheduled_services.route_order',
           'scheduled_services.is_recurring',
+          'scheduled_services.recurring_parent_id',
+          'scheduled_services.recurring_pattern',
           'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
           'customers.monthly_rate', 'customers.autopay_enabled', 'customers.autopay_paused_until',
           'customers.autopay_payment_method_id',
@@ -874,6 +1012,8 @@ router.get('/week', async (req, res, next) => {
           technicianId: s.technician_id,
           technicianName: s.tech_name,
           isRecurring: s.is_recurring,
+          recurringParentId: s.recurring_parent_id || null,
+          recurringPattern: s.recurring_pattern || null,
         };
       }));
 
@@ -927,6 +1067,8 @@ router.get('/month', async (req, res, next) => {
         'scheduled_services.window_start', 'scheduled_services.zone',
         'scheduled_services.technician_id', 'scheduled_services.estimated_duration_minutes',
         'scheduled_services.is_recurring',
+        'scheduled_services.recurring_parent_id',
+        'scheduled_services.recurring_pattern',
         'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
         'customers.city', 'customers.zip',
         'technicians.name as tech_name'
@@ -963,6 +1105,8 @@ router.get('/month', async (req, res, next) => {
         windowStart: s.window_start,
         duration: s.estimated_duration_minutes || 30,
         isRecurring: s.is_recurring,
+        recurringParentId: s.recurring_parent_id || null,
+        recurringPattern: s.recurring_pattern || null,
       });
     });
 
@@ -1357,6 +1501,7 @@ router.put('/:id/update-details', async (req, res, next) => {
     const {
       serviceType, estimatedDuration, scheduledDate,
       windowStart, windowEnd, technicianId, notes, routeOrder, zone,
+      assignmentScope,
       isRecurring, recurringPattern, recurringCount, recurringOngoing,
       recurringNth, recurringWeekday, recurringIntervalDays,
       skipWeekends, weekendShift,
@@ -1375,7 +1520,9 @@ router.put('/:id/update-details', async (req, res, next) => {
     if (zone !== undefined) updates.zone = zone;
     const hasTechnicianIdUpdate = technicianId !== undefined;
     const requestedTechnicianId = hasTechnicianIdUpdate ? (technicianId || null) : undefined;
+    const normalizedAssignmentScope = normalizeAssignmentScope(assignmentScope);
     let assignmentNeedsChange = false;
+    let assignmentShouldRun = false;
     if (hasTechnicianIdUpdate) {
       if (technicianId !== null && typeof technicianId !== 'string') {
         return res.status(400).json({ error: 'technicianId must be a UUID string or null' });
@@ -1385,7 +1532,8 @@ router.put('/:id/update-details', async (req, res, next) => {
         .first('id', 'technician_id');
       if (!existingAssignment) return res.status(404).json({ error: 'Service not found' });
       assignmentNeedsChange = (existingAssignment.technician_id || null) !== requestedTechnicianId;
-      if (assignmentNeedsChange && req.techRole !== 'admin') {
+      assignmentShouldRun = assignmentNeedsChange || normalizedAssignmentScope !== 'this_only';
+      if (assignmentShouldRun && req.techRole !== 'admin') {
         return res.status(403).json({ error: 'Admin access required' });
       }
     }
@@ -1493,18 +1641,20 @@ router.put('/:id/update-details', async (req, res, next) => {
     }
     const detailsChanged = Object.keys(updates).length > 0;
     let assignmentChanged = false;
+    let assignmentUpdatedJobIds = [];
     let recurringCreated = 0;
 
     await db.transaction(async (trx) => {
-      if (assignmentNeedsChange) {
-        const assignment = await assignDispatchJob({
+      if (assignmentShouldRun) {
+        const assignment = await assignScheduleJobs({
           jobId: req.params.id,
           technicianId: requestedTechnicianId,
           actorId: req.technicianId,
-          emit: false,
           trx,
+          assignmentScope: normalizedAssignmentScope,
         });
         assignmentChanged = !!assignment.changed;
+        assignmentUpdatedJobIds = assignment.changedJobIds || [];
       }
 
       if (detailsChanged) {
@@ -1567,7 +1717,7 @@ router.put('/:id/update-details', async (req, res, next) => {
             seenChildDates.add(nextDateStr);
             const childData = {
               customer_id: parent.customer_id,
-              technician_id: parent.technician_id,
+              technician_id: recurringTemplateTechnicianId(parent),
               scheduled_date: nextDateStr,
               window_start: parent.window_start,
               window_end: parent.window_end,
@@ -1625,7 +1775,12 @@ router.put('/:id/update-details', async (req, res, next) => {
 
     if (assignmentChanged || detailsChanged) {
       try {
-        await emitDispatchJobUpdate({ jobId: req.params.id, actorId: req.technicianId });
+        const broadcastJobIds = new Set(detailsChanged ? [req.params.id] : []);
+        for (const id of assignmentUpdatedJobIds) broadcastJobIds.add(id);
+        if (broadcastJobIds.size === 0) broadcastJobIds.add(req.params.id);
+        await Promise.all([...broadcastJobIds].map((jobId) =>
+          emitDispatchJobUpdate({ jobId, actorId: req.technicianId })
+        ));
       } catch (e) {
         logger.error(`[schedule/update-details] dispatch board broadcast failed: ${e.message}`);
       }
@@ -1636,7 +1791,12 @@ router.put('/:id/update-details', async (req, res, next) => {
       await refreshAnnualPrepayTermsForCustomer(touched?.customer_id);
     }
 
-    res.json({ success: true, recurringCreated });
+    res.json({
+      success: true,
+      recurringCreated,
+      assignmentScope: normalizedAssignmentScope,
+      assignmentUpdatedCount: assignmentUpdatedJobIds.length,
+    });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     next(err);
@@ -1646,20 +1806,39 @@ router.put('/:id/update-details', async (req, res, next) => {
 // PUT /api/admin/schedule/:id/assign — assign technician
 router.put('/:id/assign', requireAdmin, async (req, res, next) => {
   try {
-    const result = await assignDispatchJob({
-      jobId: req.params.id,
-      technicianId: req.body ? req.body.technicianId : undefined,
-      actorId: req.technicianId,
+    const requestedTechnicianId = req.body ? req.body.technicianId : undefined;
+    const assignmentScope = normalizeAssignmentScope(req.body?.assignmentScope || req.body?.scope);
+    let result;
+    await db.transaction(async (trx) => {
+      result = await assignScheduleJobs({
+        jobId: req.params.id,
+        technicianId: requestedTechnicianId,
+        actorId: req.technicianId,
+        assignmentScope,
+        trx,
+      });
     });
-    if (result.job.technician_id === null) {
+
+    const job = await db('scheduled_services').where({ id: req.params.id }).first();
+    for (const jobId of result.changedJobIds || []) {
+      try {
+        await emitDispatchJobUpdate({ jobId, actorId: req.technicianId });
+      } catch (e) {
+        logger.error(`[schedule/assign] dispatch board broadcast failed for ${jobId}: ${e.message}`);
+      }
+    }
+
+    if (job?.technician_id === null) {
       logger.info(`[schedule] Unassigned service ${req.params.id}`);
     } else {
-      logger.info(`[schedule] Assigned service ${req.params.id} to ${result.technicianName || result.job.technician_id}`);
+      logger.info(`[schedule] Assigned service ${req.params.id} to ${result.technicianName || job?.technician_id}`);
     }
     res.json({
       success: true,
       technicianName: result.technicianName,
-      job: result.job,
+      assignmentScope,
+      assignmentUpdatedCount: result.changedJobIds?.length || 0,
+      job,
     });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
@@ -2207,7 +2386,7 @@ router.put('/:id/status', async (req, res, next) => {
               } else {
                 const nextData = {
                   customer_id: parent.customer_id,
-                  technician_id: parent.technician_id,
+                  technician_id: recurringTemplateTechnicianId(parent),
                   scheduled_date: nextStr,
                   window_start: parent.window_start, window_end: parent.window_end,
                   service_type: parent.service_type, status: 'pending',
@@ -3226,7 +3405,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         seen.add(nd);
         const data = {
           customer_id: parent.customer_id,
-          technician_id: parent.technician_id,
+          technician_id: recurringTemplateTechnicianId(parent),
           scheduled_date: nd,
           window_start: parent.window_start, window_end: parent.window_end,
           service_type: parent.service_type, status: 'pending',
@@ -3273,7 +3452,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         seen.add(nd);
         const data = {
           customer_id: parent.customer_id,
-          technician_id: parent.technician_id,
+          technician_id: recurringTemplateTechnicianId(parent),
           scheduled_date: nd,
           window_start: parent.window_start, window_end: parent.window_end,
           service_type: parent.service_type, status: 'pending',
@@ -3330,6 +3509,10 @@ router._test = {
   buildTechStatusQuery,
   formatAssignedVehicleLocation,
   calculateAssignedScheduleEta,
+  normalizeAssignmentScope,
+  getAssignmentTargetIds,
+  recurringTemplateTechnicianId,
+  shouldPreserveParentTemplateForThisOnlyAssignment,
 };
 
 module.exports = router;
