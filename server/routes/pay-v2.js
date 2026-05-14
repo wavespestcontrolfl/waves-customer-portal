@@ -194,13 +194,21 @@ router.post('/:token/confirm', async (req, res, next) => {
 });
 
 // =========================================================================
-// POST /api/pay/:token/consent — Record card-on-file authorization
+// POST /api/pay/:token/consent — Record save-payment-method authorization
 //
 // Called by the client right after a successful confirmPayment when the
-// customer ticked the "Save this card on file" box. The Stripe webhook
-// will create the payment_methods row asynchronously; this endpoint only
+// customer ticked the save-payment-method box. The Stripe webhook will
+// create the payment_methods row asynchronously; this endpoint only
 // records the consent (verbatim copy + version + IP/UA) and leaves the
 // FK to payment_methods null for the webhook to back-fill.
+//
+// Method type (card vs ACH) is derived server-side from the invoice's
+// own Stripe PaymentIntent, not from the request body. We also verify
+// that the client-submitted stripePaymentMethodId is the same PM the
+// PaymentIntent actually charged — that defends against a tampered
+// client submitting an unrelated PM id. The endpoint fails closed if
+// any of those checks can't be confirmed, since recording the wrong
+// authorization variant defeats the entire snapshot audit trail.
 // =========================================================================
 router.post('/:token/consent', async (req, res, next) => {
   try {
@@ -210,11 +218,68 @@ router.post('/:token/consent', async (req, res, next) => {
     const invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     if (!invoice.customer_id) return res.status(400).json({ error: 'Invoice has no customer' });
+    if (!invoice.stripe_payment_intent_id) {
+      return res.status(409).json({ error: 'Invoice has no PaymentIntent — cannot verify payment method' });
+    }
+
+    let pi;
+    try {
+      pi = await StripeService.retrievePaymentIntent(invoice.stripe_payment_intent_id, {
+        expand: ['latest_charge'],
+      });
+    } catch (err) {
+      logger.error(`[pay-v2] PI retrieve failed for consent on invoice ${invoice.id}: ${err.message}`);
+      return res.status(502).json({ error: 'Could not verify payment with Stripe' });
+    }
+    if (!pi) {
+      return res.status(503).json({ error: 'Payment processing temporarily unavailable' });
+    }
+
+    if (pi.payment_method !== stripePaymentMethodId) {
+      logger.warn(`[pay-v2] Consent PM mismatch: client=${stripePaymentMethodId} pi.payment_method=${pi.payment_method} invoice=${invoice.id}`);
+      return res.status(409).json({ error: 'PaymentMethod does not match the invoice charge' });
+    }
+
+    // PI status acceptable for consent: succeeded (cards / wallets) or
+    // processing (ACH, which clears asynchronously). Anything else means
+    // the customer hasn't actually authorized a charge against this PM
+    // on this invoice yet.
+    if (pi.status !== 'succeeded' && pi.status !== 'processing') {
+      return res.status(409).json({ error: `PaymentIntent not in a consent-eligible state (status=${pi.status})` });
+    }
+
+    // The customer must have opted to save the payment method when the
+    // PI was set up. Both signals are written together by stripe.js
+    // when saveCard is true on /setup or /update-amount:
+    // setup_future_usage becomes 'off_session' and metadata.save_card_opt_in
+    // becomes 'true'. Without those, a tampered client could otherwise
+    // call /consent after any one-time payment and fabricate an
+    // authorization row that the customer never actually agreed to.
+    const optedIn = pi.setup_future_usage === 'off_session'
+      && pi?.metadata?.save_card_opt_in === 'true';
+    if (!optedIn) {
+      logger.warn(`[pay-v2] Consent rejected — PI ${pi.id} not configured for save-on-file (setup_future_usage=${pi.setup_future_usage}, save_card_opt_in=${pi?.metadata?.save_card_opt_in})`);
+      return res.status(409).json({ error: 'Save-on-file was not requested on this payment' });
+    }
+
+    // Prefer the verified charge.payment_method_details.type — that's
+    // the method that actually ran. Fall back to pi.payment_method_types
+    // only when there's no charge yet (rare for processing ACH).
+    const pmdType = pi.latest_charge?.payment_method_details?.type || null;
+    const fallbackType = Array.isArray(pi.payment_method_types) && pi.payment_method_types.length === 1
+      ? pi.payment_method_types[0]
+      : null;
+    const verifiedMethodType = pmdType || fallbackType;
+    if (!verifiedMethodType) {
+      logger.warn(`[pay-v2] Could not determine method type for consent on invoice ${invoice.id}`);
+      return res.status(409).json({ error: 'Could not determine payment method type' });
+    }
 
     const row = await ConsentService.recordConsent({
       customerId: invoice.customer_id,
       stripePaymentMethodId,
       source: 'pay_page',
+      methodType: verifiedMethodType,
       ip: req.ip,
       userAgent: req.get('user-agent') || null,
     });

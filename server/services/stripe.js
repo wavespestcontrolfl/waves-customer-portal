@@ -242,6 +242,26 @@ const StripeService = {
   },
 
   // =========================================================================
+  // RESOLVE PAYMENT METHOD TYPE (via Stripe)
+  // =========================================================================
+
+  /**
+   * Retrieve a PaymentIntent with optional Stripe `expand` keys.
+   * Returns null if Stripe isn't configured. Throws on Stripe errors so
+   * callers can decide whether to fail closed or degrade.
+   *
+   * Used by routes that need server-verified PaymentIntent facts (e.g.
+   * consent snapshotting on the public /pay endpoint) where trusting
+   * client-supplied fields would defeat the audit trail.
+   */
+  async retrievePaymentIntent(paymentIntentId, options = {}) {
+    if (!paymentIntentId) return null;
+    const stripe = getStripe();
+    if (!stripe) return null;
+    return stripe.paymentIntents.retrieve(paymentIntentId, options);
+  },
+
+  // =========================================================================
   // REMOVE CARD
   // =========================================================================
 
