@@ -1894,7 +1894,7 @@ function ServicesTab() {
                           <div style={{ fontSize: 12, color: muted }}>Report generated automatically from service data</div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                             <a
-                              href={api.getServiceReportUrl(s.id)}
+                              href={s.reportUrl || api.getServiceReportUrl(s.id)}
                               target="_blank"
                               rel="noopener noreferrer"
                               style={{
