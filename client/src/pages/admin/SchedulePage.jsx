@@ -5163,6 +5163,7 @@ export function CompletionPanel({
                 alignItems: "center",
                 justifyContent: "center",
                 padding: 0,
+                fontFamily: font,
                 fontSize: 20,
                 lineHeight: 1,
                 color: M.ink,
