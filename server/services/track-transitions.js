@@ -20,6 +20,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const TwilioService = require('./twilio');
 const { setTechJobStatus, clearTechCurrentJob } = require('./tech-status');
+const { calculateBoundedTrackingEta, finiteNumber } = require('./customer-tracking-eta');
 
 function portalOrigin() {
   return process.env.CLIENT_URL
@@ -31,6 +32,43 @@ async function loadService(serviceId) {
   return db('scheduled_services')
     .where({ id: serviceId })
     .first();
+}
+
+// Best-effort ETA for the en-route SMS. Mirrors track-public.js
+// buildVehicle: needs a fresh tech_status GPS ping AND a geocoded
+// customer address. Returns null on any missing-data or upstream
+// failure path so the SMS still fires (without the ETA line).
+async function resolveEnRouteEtaMinutes({ technicianId, customerId }) {
+  if (!technicianId || !customerId) return null;
+  try {
+    const [ts, customer] = await Promise.all([
+      db('tech_status')
+        .where({ tech_id: technicianId })
+        .first('lat', 'lng', 'location_updated_at'),
+      db('customers')
+        .where({ id: customerId })
+        .first('latitude', 'longitude'),
+    ]);
+    const techLat = finiteNumber(ts?.lat);
+    const techLng = finiteNumber(ts?.lng);
+    const custLat = finiteNumber(customer?.latitude);
+    const custLng = finiteNumber(customer?.longitude);
+    if (techLat == null || techLng == null) return null;
+    if (custLat == null || custLng == null) return null;
+
+    const eta = await calculateBoundedTrackingEta({
+      techLat,
+      techLng,
+      customerLat: custLat,
+      customerLng: custLng,
+      techUpdatedAt: ts.location_updated_at,
+      logPrefix: 'track-transitions',
+    });
+    return eta?.minutes ?? null;
+  } catch (err) {
+    logger.warn(`[track-transitions] en-route ETA resolve failed: ${err.message}`);
+    return null;
+  }
 }
 
 async function syncOperationalStatus(svc, toStatus, actorId) {
@@ -156,10 +194,18 @@ async function markEnRoute(serviceId, opts = {}) {
       const techName = tech?.name || 'Your Waves technician';
       const trackToken = svc.track_view_token;
 
+      // Best-effort live ETA from tech_status → customer geocode.
+      // Returns null when tech GPS is stale/missing or the customer
+      // address isn't geocoded — SMS still fires without the ETA line.
+      const etaMinutes = await resolveEnRouteEtaMinutes({
+        technicianId: svc.technician_id,
+        customerId: svc.customer_id,
+      });
+
       const result = await TwilioService.sendTechEnRoute(
         svc.customer_id,
         techName,
-        null,           // etaMinutes — Phase 1 ships without DistanceMatrix
+        etaMinutes,
         trackToken
       );
 
