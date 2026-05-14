@@ -259,9 +259,10 @@ export function calculateEstimate(inputs) {
 
   function estimateLegacyTurfArea() {
     let hardscapeEstimate = 800;
-    if (propertyType === 'TOWNHOME') hardscapeEstimate = 400;
-    else if (propertyType === 'CONDO') hardscapeEstimate = 200;
-    else if (propertyType === 'COMMERCIAL') hardscapeEstimate = lotSqFt * 0.15;
+    const propertyTypeKey = String(propertyType || '').toLowerCase();
+    if (propertyTypeKey.includes('townhome') || propertyTypeKey.includes('duplex')) hardscapeEstimate = 400;
+    else if (propertyTypeKey.includes('condo')) hardscapeEstimate = 200;
+    else if (propertyTypeKey.includes('commercial')) hardscapeEstimate = lotSqFt * 0.15;
     else {
       if (lotSqFt > 7500) hardscapeEstimate += (Math.min(lotSqFt, 15000) - 7500) * 0.03;
       if (lotSqFt > 15000) hardscapeEstimate += (lotSqFt - 15000) * 0.05;
