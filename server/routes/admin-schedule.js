@@ -39,6 +39,16 @@ function finiteNumber(value) {
   return Number.isFinite(num) ? num : null;
 }
 
+async function refreshAnnualPrepayTermsForCustomer(customerId) {
+  if (!customerId) return;
+  try {
+    const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+    await AnnualPrepayRenewals.refreshActiveTermsForCustomer(customerId);
+  } catch (e) {
+    logger.warn(`[annual-prepay] term refresh skipped: ${e.message}`);
+  }
+}
+
 const STALE_TECH_STATUS_MS = 5 * 60 * 1000;
 
 function buildAssignedScheduleEtaQuery(knex, serviceId) {
@@ -1325,6 +1335,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
       await AppointmentTagger.onServiceScheduled(svc.id);
     } catch (e) { logger.error(`Appointment tagger failed: ${e.message}`); }
 
+    await refreshAnnualPrepayTermsForCustomer(customerId);
+
     // Keep the live dispatch board in sync when a same-day job is created
     // while dispatchers already have the Board tab open.
     try {
@@ -1615,6 +1627,11 @@ router.put('/:id/update-details', async (req, res, next) => {
       } catch (e) {
         logger.error(`[schedule/update-details] dispatch board broadcast failed: ${e.message}`);
       }
+    }
+
+    if (detailsChanged || recurringCreated > 0) {
+      const touched = await db('scheduled_services').where({ id: req.params.id }).first('customer_id');
+      await refreshAnnualPrepayTermsForCustomer(touched?.customer_id);
     }
 
     res.json({ success: true, recurringCreated });
@@ -3033,6 +3050,33 @@ router.get('/recurring-alerts', async (req, res, next) => {
       }
     } catch (e) { logger.warn(`[recurring-alerts] derived scan failed: ${e.message}`); }
 
+    // 3. Annual prepay terms: surface renewal/cancel/switch-plan touchpoints
+    // when either the term end or the last scheduled service is close.
+    try {
+      const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+      const annualAlerts = await AnnualPrepayRenewals.getOpenRenewalAlerts({ daysAhead: 30 });
+      alerts.push(...annualAlerts.map((a) => ({
+        id: `annual-${a.id}`,
+        source: 'annual_prepay',
+        parentId: null,
+        termId: a.id,
+        customerId: a.customerId,
+        customerName: a.customerName,
+        phone: a.phone,
+        email: a.email,
+        serviceType: a.planLabel || 'Annual Prepay',
+        alertType: 'annual_prepay_renewal',
+        lastVisitDate: a.lastScheduledServiceDate || a.termEnd,
+        pattern: 'annual prepay',
+        remainingVisits: null,
+        termStart: a.termStart,
+        termEnd: a.termEnd,
+        daysUntilTermEnd: a.daysUntilTermEnd,
+        daysUntilLastService: a.daysUntilLastService,
+        createdAt: a.createdAt,
+      })));
+    } catch (e) { logger.warn(`[recurring-alerts] annual prepay scan failed: ${e.message}`); }
+
     res.json({ alerts, total: alerts.length });
   } catch (err) { next(err); }
 });
@@ -3041,8 +3085,38 @@ router.get('/recurring-alerts', async (req, res, next) => {
 // body: { action: 'extend' | 'convert_ongoing' | 'let_lapse', count?: number }
 router.post('/recurring-alerts/:id/action', async (req, res, next) => {
   try {
-    const { action, count } = req.body;
+    const { action, count, notes } = req.body;
     const idParam = String(req.params.id);
+
+    if (idParam.startsWith('annual-')) {
+      if (!['contacted', 'renew', 'cancel', 'switch_plan'].includes(action)) {
+        return res.status(400).json({ error: 'invalid annual prepay action' });
+      }
+      const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+      const termId = idParam.replace(/^annual-/, '');
+      const term = await AnnualPrepayRenewals.recordDecision({
+        termId,
+        action,
+        adminUserId: req.adminUserId || req.technicianId || null,
+        notes: notes || null,
+      });
+      if (!term) {
+        let existing = null;
+        try {
+          existing = await db('annual_prepay_terms')
+            .where({ id: termId })
+            .first('id', 'status', 'renewal_decision');
+        } catch {
+          existing = null;
+        }
+        if (existing) {
+          return res.status(409).json({ error: 'annual prepay term already decided or no longer open' });
+        }
+        return res.status(404).json({ error: 'annual prepay term not found' });
+      }
+      return res.json({ success: true, action, term });
+    }
+
     if (!['extend', 'convert_ongoing', 'let_lapse'].includes(action)) {
       return res.status(400).json({ error: 'invalid action' });
     }
@@ -3242,6 +3316,8 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         });
       } catch {}
     }
+
+    await refreshAnnualPrepayTermsForCustomer(parent.customer_id);
 
     res.json({ success: true, action, created });
   } catch (err) { next(err); }
