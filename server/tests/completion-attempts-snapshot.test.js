@@ -65,15 +65,30 @@ describe('storeResolvedSnapshot', () => {
     expect(payload.updated_at).toBeInstanceOf(Date);
   });
 
-  test('honors a precomputed snapshotHash when caller supplied one (preview handshake)', async () => {
+  test('accepts a caller-supplied snapshotHash when it matches hash(snapshot)', async () => {
     const knex = makeKnex([{}]);
+    const matching = hashResolvedSnapshot(VALID_ONE_TAP.snapshot);
     const result = await storeResolvedSnapshot(
       { id: 'attempt-1' },
-      { ...VALID_ONE_TAP, snapshotHash: 'precomputed-hash' },
+      { ...VALID_ONE_TAP, snapshotHash: matching },
       knex
     );
-    expect(result.snapshotHash).toBe('precomputed-hash');
-    expect(knex.calls[0].op.updatePayload.resolved_completion_snapshot_hash).toBe('precomputed-hash');
+    expect(result.snapshotHash).toBe(matching);
+    expect(knex.calls[0].op.updatePayload.resolved_completion_snapshot_hash).toBe(matching);
+  });
+
+  test('rejects an unverified caller-supplied snapshotHash that does not match (codex P1 #3)', async () => {
+    const knex = makeKnex([]);
+    await expect(storeResolvedSnapshot(
+      { id: 'attempt-1' },
+      { ...VALID_ONE_TAP, snapshotHash: 'attacker-supplied-or-stale-hash' },
+      knex
+    )).rejects.toMatchObject({
+      message: expect.stringMatching(/does not match hash\(snapshot\)/),
+      code: 'snapshot_hash_mismatch',
+    });
+    // No DB write attempted.
+    expect(knex.calls).toHaveLength(0);
   });
 
   test('detailed_form does not require a protocol template', async () => {

@@ -225,31 +225,68 @@ exports.up = async function (knex) {
     FOR EACH ROW EXECUTE FUNCTION protocol_templates_protect_active();
   `);
 
-  // Child tables: block UPDATE/DELETE when parent is active or retired.
+  // Child tables: block INSERT/UPDATE/DELETE whenever the (old or new)
+  // parent template is active or retired.
+  //
+  // Three attack vectors covered:
+  //   1. INSERT a fresh child row under an active parent — would silently
+  //      add a product/area/action to an active protocol's content.
+  //   2. UPDATE a child row's protocol_template_id to move it from an
+  //      active parent to a draft parent — would silently remove a row
+  //      from the active protocol's content. The trigger must check the
+  //      OLD parent, not just NEW. Belt-and-suspenders: we forbid
+  //      protocol_template_id changes on UPDATE outright, since a child
+  //      row legitimately belongs to one template version forever.
+  //   3. DELETE a child row under an active or retired parent — already
+  //      covered by the prior trigger, retained here.
   await knex.raw(`
     CREATE OR REPLACE FUNCTION protocol_template_child_protect()
     RETURNS trigger AS $$
     DECLARE
-      parent_id uuid;
-      parent_status text;
+      old_parent_status text;
+      new_parent_status text;
     BEGIN
+      IF (TG_OP = 'INSERT') THEN
+        SELECT status INTO new_parent_status
+        FROM protocol_templates
+        WHERE id = NEW.protocol_template_id;
+        IF new_parent_status IN ('active', 'retired') THEN
+          RAISE EXCEPTION
+            'INSERT on % blocked: parent protocol_template % is %.',
+            TG_TABLE_NAME, NEW.protocol_template_id, new_parent_status;
+        END IF;
+        RETURN NEW;
+      END IF;
+
+      IF (TG_OP = 'UPDATE') THEN
+        IF NEW.protocol_template_id IS DISTINCT FROM OLD.protocol_template_id THEN
+          RAISE EXCEPTION
+            'UPDATE on % blocked: protocol_template_id is immutable (child rows belong to a single template version).',
+            TG_TABLE_NAME;
+        END IF;
+        SELECT status INTO old_parent_status
+        FROM protocol_templates
+        WHERE id = OLD.protocol_template_id;
+        IF old_parent_status IN ('active', 'retired') THEN
+          RAISE EXCEPTION
+            'UPDATE on % blocked: parent protocol_template % is %.',
+            TG_TABLE_NAME, OLD.protocol_template_id, old_parent_status;
+        END IF;
+        RETURN NEW;
+      END IF;
+
       IF (TG_OP = 'DELETE') THEN
-        parent_id := OLD.protocol_template_id;
-      ELSE
-        parent_id := COALESCE(NEW.protocol_template_id, OLD.protocol_template_id);
+        SELECT status INTO old_parent_status
+        FROM protocol_templates
+        WHERE id = OLD.protocol_template_id;
+        IF old_parent_status IN ('active', 'retired') THEN
+          RAISE EXCEPTION
+            'DELETE on % blocked: parent protocol_template % is %.',
+            TG_TABLE_NAME, OLD.protocol_template_id, old_parent_status;
+        END IF;
+        RETURN OLD;
       END IF;
 
-      SELECT status INTO parent_status
-      FROM protocol_templates
-      WHERE id = parent_id;
-
-      IF parent_status IN ('active', 'retired') THEN
-        RAISE EXCEPTION
-          '% on % blocked: parent protocol_template % is %.',
-          TG_OP, TG_TABLE_NAME, parent_id, parent_status;
-      END IF;
-
-      IF (TG_OP = 'DELETE') THEN RETURN OLD; END IF;
       RETURN NEW;
     END;
     $$ LANGUAGE plpgsql;
@@ -258,7 +295,7 @@ exports.up = async function (knex) {
   for (const child of ['protocol_template_products', 'protocol_template_areas', 'protocol_template_actions']) {
     await knex.raw(`
       CREATE TRIGGER ${child}_protect_trg
-      BEFORE UPDATE OR DELETE ON ${child}
+      BEFORE INSERT OR UPDATE OR DELETE ON ${child}
       FOR EACH ROW EXECUTE FUNCTION protocol_template_child_protect();
     `);
   }

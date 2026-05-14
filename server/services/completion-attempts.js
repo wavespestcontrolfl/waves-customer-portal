@@ -426,7 +426,18 @@ async function storeResolvedSnapshot(
   if (!snapshot) throw new Error('storeResolvedSnapshot requires a snapshot');
   if (!completionSource) throw new Error('storeResolvedSnapshot requires completion_source');
 
-  const computedHash = snapshotHash || hashResolvedSnapshot(snapshot);
+  // Always compute the hash from the snapshot. If a caller supplied a
+  // hash, verify it matches and throw on mismatch — never store an
+  // unverified hash. A route accidentally forwarding the client's
+  // expectedSnapshotHash next to a server-resolved snapshot would
+  // weaken the preview-stale guard and the audit trail (the persisted
+  // hash would no longer hash to the persisted snapshot).
+  const computedHash = hashResolvedSnapshot(snapshot);
+  if (snapshotHash && snapshotHash !== computedHash) {
+    const err = new Error('storeResolvedSnapshot supplied snapshotHash does not match hash(snapshot)');
+    err.code = 'snapshot_hash_mismatch';
+    throw err;
+  }
   if (completionSource === 'one_tap_completion' && (!protocolTemplateId || !protocolTemplateVersion)) {
     throw new Error('storeResolvedSnapshot one_tap_completion requires protocol_template_id and version');
   }

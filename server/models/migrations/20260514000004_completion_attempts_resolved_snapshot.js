@@ -37,16 +37,26 @@ exports.up = async function (knex) {
     )
   `);
 
-  // Snapshot integrity: if any one of the snapshot fields is set, the
-  // others must be too. This prevents partially-populated rows that
-  // would replay an incomplete state.
+  // Snapshot integrity: a row is either fully pre-resolution (every
+  // snapshot/source/template field NULL) or fully post-resolution
+  // (snapshot + hash + written_at + completion_source all NOT NULL).
+  //
+  // The all-NULL branch must include completion_source and the template
+  // fields. Without that, a row could carry completion_source='one_tap_
+  // completion' + protocol_template_id + protocol_template_version but
+  // no snapshot bytes — the one_tap_has_template CHECK would happily
+  // approve it, defeating the "snapshot persisted before service_record"
+  // invariant that this PR is built on.
   await knex.raw(`
     ALTER TABLE service_completion_attempts
     ADD CONSTRAINT service_completion_attempts_snapshot_coherence
     CHECK (
       (resolved_completion_snapshot IS NULL
         AND resolved_completion_snapshot_hash IS NULL
-        AND snapshot_written_at IS NULL)
+        AND snapshot_written_at IS NULL
+        AND completion_source IS NULL
+        AND protocol_template_id IS NULL
+        AND protocol_template_version IS NULL)
       OR (resolved_completion_snapshot IS NOT NULL
         AND resolved_completion_snapshot_hash IS NOT NULL
         AND snapshot_written_at IS NOT NULL
