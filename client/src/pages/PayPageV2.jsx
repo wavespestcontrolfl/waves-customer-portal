@@ -760,21 +760,40 @@ export default function PayPageV2() {
     // type, so we don't pass methodType from the client. The Stripe
     // webhook handles persisting the payment_methods row asynchronously
     // and back-fills the FK on the consent record.
+    //
+    // We check res.ok and retry once on transient failure — the server
+    // can return 409/502/503 if it cannot verify the PaymentIntent or
+    // method type. Payment has already succeeded by this point, so on
+    // persistent failure we flag it via a query param on the receipt
+    // redirect so the receipt page can surface the issue. The card may
+    // be saved by Stripe (setup_future_usage) without a matching consent
+    // row in that window — flagging it ensures the customer sees the
+    // problem and Waves can reach out to re-confirm authorization.
+    let consentFailed = false;
     if (saveCard && paymentIntent.payment_method) {
+      const postConsent = () => fetch(`${API_BASE}/pay/${token}/consent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stripePaymentMethodId: paymentIntent.payment_method }),
+      });
       try {
-        await fetch(`${API_BASE}/pay/${token}/consent`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            stripePaymentMethodId: paymentIntent.payment_method,
-          }),
-        });
+        let res = await postConsent();
+        if (!res.ok) {
+          await new Promise((r) => setTimeout(r, 800));
+          res = await postConsent();
+        }
+        if (!res.ok) {
+          consentFailed = true;
+          console.error(`Consent record failed: HTTP ${res.status}`);
+        }
       } catch (err) {
+        consentFailed = true;
         console.error('Consent record failed:', err);
       }
     }
 
-    navigate(`/receipt/${token}?fresh=1`, { replace: true });
+    const params = consentFailed ? '?fresh=1&consent_failed=1' : '?fresh=1';
+    navigate(`/receipt/${token}${params}`, { replace: true });
   };
 
   if (loading) {
