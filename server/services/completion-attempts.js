@@ -442,6 +442,23 @@ async function markCompletionAttemptSideEffectsPending(attempt, { record, respon
   });
 }
 
+// Volatile fields that exist on the snapshot for audit purposes but
+// MUST NOT influence the preview→submit handshake hash. Without this
+// canonicalization, the resolver-side hash (preview at T=0) and the
+// storeResolvedSnapshot-side hash (submit at T=30s) would always
+// diverge on resolvedAt and fire completion_preview_stale on every
+// legitimate submit.
+const HASH_VOLATILE_KEYS = ['resolvedAt'];
+
+function canonicalSnapshotForHash(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return snapshot;
+  const projection = {};
+  for (const key of Object.keys(snapshot)) {
+    if (!HASH_VOLATILE_KEYS.includes(key)) projection[key] = snapshot[key];
+  }
+  return projection;
+}
+
 // Stable hash for a resolved completion snapshot. Used by the preview
 // → submit handshake: the client receives the hash on the preview
 // endpoint and sends it back as expectedSnapshotHash. If the resolver
@@ -449,9 +466,14 @@ async function markCompletionAttemptSideEffectsPending(attempt, { record, respon
 // changed between preview and submit), the route returns 409
 // completion_preview_stale so the tech reopens the modal and reviews
 // the updated protocol.
+//
+// Both the resolver (preview) and storeResolvedSnapshot (submit-side
+// persistence) call THIS helper, so the hash inputs are guaranteed
+// to be identical: canonicalSnapshotForHash strips volatile keys
+// in one place rather than each caller doing it independently.
 function hashResolvedSnapshot(snapshot) {
   return crypto.createHash('sha256')
-    .update(JSON.stringify(sortObjectKeys(snapshot)))
+    .update(JSON.stringify(sortObjectKeys(canonicalSnapshotForHash(snapshot))))
     .digest('hex');
 }
 

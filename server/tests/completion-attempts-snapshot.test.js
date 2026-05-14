@@ -46,6 +46,26 @@ describe('hashResolvedSnapshot', () => {
     const b = { products: ['alpine', 'demand'] };
     expect(hashResolvedSnapshot(a)).not.toBe(hashResolvedSnapshot(b));
   });
+
+  test('strips resolvedAt internally — preview and persist call sites agree (codex PR #2 round 2)', () => {
+    // Resolver-side (preview) computes hash from a full snapshot that
+    // includes resolvedAt. storeResolvedSnapshot (submit-side) computes
+    // hash from a full snapshot that may have a different resolvedAt
+    // (re-resolve at submit time). Both must produce the SAME hash
+    // when deterministic content matches — otherwise the preview→
+    // submit handshake fires snapshot_hash_mismatch on every legitimate
+    // submit. Canonicalization lives in the helper so both call sites
+    // can pass the full snapshot.
+    const previewSnapshot = { protocol: 'gp', products: ['demand'], resolvedAt: '2026-05-14T15:00:00.000Z' };
+    const submitSnapshot  = { protocol: 'gp', products: ['demand'], resolvedAt: '2026-05-14T15:00:30.000Z' };
+    expect(hashResolvedSnapshot(previewSnapshot)).toBe(hashResolvedSnapshot(submitSnapshot));
+  });
+
+  test('a snapshot WITHOUT resolvedAt produces the same hash as one with resolvedAt (deterministic-content equivalence)', () => {
+    const withTimestamp    = { protocol: 'gp', products: ['demand'], resolvedAt: '2026-05-14T15:00:00.000Z' };
+    const withoutTimestamp = { protocol: 'gp', products: ['demand'] };
+    expect(hashResolvedSnapshot(withTimestamp)).toBe(hashResolvedSnapshot(withoutTimestamp));
+  });
 });
 
 describe('storeResolvedSnapshot', () => {

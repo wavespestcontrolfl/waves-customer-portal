@@ -21,13 +21,12 @@ function makeKnex(ops) {
     calls.push({ table, op });
     const chain = {
       where: jest.fn(() => chain),
+      andWhere: jest.fn(() => chain),
       leftJoin: jest.fn(() => chain),
+      join: jest.fn(() => chain),
       orderBy: jest.fn(() => chain),
       select: jest.fn(() => chain),
       first: jest.fn(async () => op.first),
-      // Make the chain itself awaitable. `await knex(...).where().select()`
-      // resolves to op.select (the array case); chains that terminate
-      // with .first() use the explicit method above.
       then: (resolve, reject) => Promise.resolve(op.select ?? []).then(resolve, reject),
     };
     op.chain = chain;
@@ -76,10 +75,18 @@ const GP_PERIM_ACTIONS = [
   { action_key: 'glue_boards_utility', action_label: 'Glue boards in garage',              required: false, sort_order: 5 },
 ];
 
+// Resolver query sequence after the alias-table refactor:
+//   1. scheduled_services join customers      → .first()  (service)
+//   2. protocol_template_service_types JOIN   → .first()  (alias hit returns template, or undefined to fall through)
+//   3. protocol_templates exact-match         → .first()  (only consulted if #2 returns undefined)
+//   4-6. products / areas / actions arrays    → awaited via .then
+//
+// happyPathKnex puts the active template behind the alias lookup at
+// step 2, leaving step 3 unreachable (skipped because step 2 found it).
 function happyPathKnex(overrides = {}) {
   return makeKnex([
     { first: overrides.service ?? VENICE_SERVICE },
-    { first: overrides.template ?? GP_PERIM_TEMPLATE },
+    { first: overrides.aliasTemplate ?? (overrides.template === null ? undefined : (overrides.template ?? GP_PERIM_TEMPLATE)) },
     { select: overrides.products ?? GP_PERIM_PRODUCTS },
     { select: overrides.areas ?? GP_PERIM_AREAS },
     { select: overrides.actions ?? GP_PERIM_ACTIONS },
@@ -115,11 +122,11 @@ describe('resolveStandardCompletionDefaults', () => {
     // Attestation text composed from template + product/area names.
     expect(result.snapshot.techAttestationText)
       .toBe('I performed the Exterior General Pest Perimeter protocol on this visit: Demand CS, Alpine WSG, and Advion WDG Granular applied to Perimeter, Garage, and Entry points.');
-    // Hash is computed via the same helper as storeResolvedSnapshot,
-    // but on the snapshot MINUS resolvedAt — see the dedicated test
-    // below for why volatile timestamps are excluded.
-    const { resolvedAt: _omit, ...hashable } = result.snapshot;
-    expect(result.snapshotHash).toBe(hashResolvedSnapshot(hashable));
+    // Hash is computed via the same helper as storeResolvedSnapshot.
+    // The helper canonicalizes inputs (strips volatile fields like
+    // resolvedAt internally) so the resolver-side hash and the
+    // storeResolvedSnapshot-side hash agree on the same FULL snapshot.
+    expect(result.snapshotHash).toBe(hashResolvedSnapshot(result.snapshot));
   });
 
   test('Venice address → review_gbp_resolved = "venice", routingReason includes service city', async () => {
@@ -198,7 +205,8 @@ describe('resolveStandardCompletionDefaults', () => {
   test('no active template for service_type → reason: no_active_protocol_template', async () => {
     const knex = makeKnex([
       { first: { ...VENICE_SERVICE, service_type: 'WaveGuard Lawn' } },
-      { first: undefined },
+      { first: undefined },   // alias lookup miss
+      { first: undefined },   // legacy exact-match fallback also miss
     ]);
     const result = await resolveStandardCompletionDefaults({
       serviceId: 'svc-1',
@@ -390,6 +398,52 @@ describe('resolveStandardCompletionDefaults', () => {
     expect(r1.snapshotHash).not.toBe(r2.snapshotHash);
     expect(r1.snapshot.customerInteraction).toBe('not_home_full_access');
     expect(r2.snapshot.customerInteraction).toBe('tech_home_spoke_with_them');
+  });
+
+  test('resolves a variant service_type via the alias table (codex PR #2 round 2 P1.1)', async () => {
+    // The seed migration registers 'General Pest Control (Quarterly)',
+    // '(Bi-Monthly)', '(Monthly)', 'Recurring Pest Control' and others
+    // as aliases for the same Exterior General Pest Perimeter template.
+    // The resolver must find the template through the alias join even
+    // when scheduled_services.service_type is one of these variants.
+    const quarterlyService = { ...VENICE_SERVICE, service_type: 'General Pest Control (Quarterly)' };
+    const knex = happyPathKnex({ service: quarterlyService });
+    const result = await resolveStandardCompletionDefaults({
+      serviceId: 'svc-1',
+      customerInteractionChoice: 'not_home_full_access',
+      now: FIXED_NOW,
+      trx: knex,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.snapshot.protocolKey).toBe('ext_gp_perim');
+    expect(result.snapshot.protocolName).toBe('Exterior General Pest Perimeter');
+    // The first DB call after .first()-on-service is the alias-table join,
+    // verifying the resolver consults the alias table at all.
+    expect(knex.calls[1].table).toBe('protocol_template_service_types as pst');
+  });
+
+  test('falls back to exact service_type match when alias misses (legacy template path)', async () => {
+    // A template seeded BEFORE the alias table existed (or one whose
+    // alias rows were forgotten) is still findable via the legacy
+    // exact-match query against protocol_templates.service_type.
+    const knex = makeKnex([
+      { first: VENICE_SERVICE },
+      { first: undefined },              // alias join → miss
+      { first: GP_PERIM_TEMPLATE },      // legacy exact-match → hit
+      { select: GP_PERIM_PRODUCTS },
+      { select: GP_PERIM_AREAS },
+      { select: GP_PERIM_ACTIONS },
+    ]);
+    const result = await resolveStandardCompletionDefaults({
+      serviceId: 'svc-1',
+      customerInteractionChoice: 'not_home_full_access',
+      now: FIXED_NOW,
+      trx: knex,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.snapshot.protocolKey).toBe('ext_gp_perim');
+    expect(knex.calls[1].table).toBe('protocol_template_service_types as pst');
+    expect(knex.calls[2].table).toBe('protocol_templates');
   });
 
   test('snapshot.products preserves sort order and exposes both id and name', async () => {

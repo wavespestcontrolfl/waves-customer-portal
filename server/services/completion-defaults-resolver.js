@@ -94,6 +94,24 @@ function resolveReviewRouting(customer) {
 }
 
 async function loadActiveTemplate(serviceType, knex) {
+  // Real-world routine pest jobs use a wide range of service_type
+  // labels — 'General Pest Control', 'General Pest Control (Quarterly)',
+  // '(Bi-Monthly)', '(Monthly)', 'Quarterly Pest Control', 'Recurring
+  // Pest Control', etc. Look up via the alias table so one
+  // protocol_template can cover the full set without seeding a
+  // separate template row per variant.
+  //
+  // Falls back to the legacy exact-match on protocol_templates.service_type
+  // for any future templates that get seeded directly without an alias
+  // row — e.g. a one-off mosquito or termite protocol whose service_type
+  // is unambiguous.
+  const aliased = await knex('protocol_template_service_types as pst')
+    .join('protocol_templates as pt', 'pt.id', 'pst.protocol_template_id')
+    .where('pst.service_type', serviceType)
+    .andWhere('pt.status', 'active')
+    .orderBy('pt.activated_at', 'desc')   // newest active wins on duplicate alias
+    .first('pt.*');
+  if (aliased) return aliased;
   return knex('protocol_templates')
     .where({ service_type: serviceType, status: 'active' })
     .first();
@@ -278,19 +296,16 @@ async function resolveStandardCompletionDefaults({
     recapMode: 'templated_sms_async_report',
   };
 
-  // Hash deterministic content only. resolvedAt is a wall-clock
-  // timestamp computed on each call; including it would make two
-  // preview→submit calls produce different hashes even when nothing
-  // about the underlying protocol/customer/review data changed,
-  // causing the planned expectedSnapshotHash check (PR #3) to fire
-  // completion_preview_stale on every legitimate submit. resolvedAt
-  // stays in the snapshot for audit (service_records keeps the
-  // long-term copy) but is excluded from the handshake hash.
-  const { resolvedAt: _resolvedAt, ...hashableSnapshot } = snapshot;
+  // hashResolvedSnapshot strips volatile fields (resolvedAt) internally,
+  // so the resolver-side preview hash and storeResolvedSnapshot's submit-
+  // side persistence hash are byte-identical given the same deterministic
+  // content. Without that symmetry the preview→submit handshake (PR #3)
+  // would fire snapshot_hash_mismatch on every legitimate submit because
+  // the wall-clock resolvedAt differs by 30 seconds.
   return {
     ok: true,
     snapshot,
-    snapshotHash: hashResolvedSnapshot(hashableSnapshot),
+    snapshotHash: hashResolvedSnapshot(snapshot),
   };
 }
 
