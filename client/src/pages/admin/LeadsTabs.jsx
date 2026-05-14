@@ -41,7 +41,15 @@ const STATUS_COLORS = {
   duplicate: '#A1A1AA',        // zinc-400 (mirrors unresponsive)
 };
 const STATUSES = ['new','contacted','estimate_sent','estimate_viewed','negotiating','won','lost','unresponsive','disqualified','duplicate'];
+const CLOSED_STATUSES = ['won','lost','unresponsive','disqualified','duplicate'];
+const BOARD_STAGES = ['new','contacted','estimate_sent','negotiating','won','lost'];
 const LEAD_TYPES = ['inbound_call','inbound_sms','form_submission','chat_widget','walk_in','referral','ai_agent','voicemail','email_inquiry'];
+
+function daysSinceContact(lead) {
+  if (!lead.first_contact_at) return null;
+  const ms = Date.now() - new Date(lead.first_contact_at).getTime();
+  return Math.floor(ms / 86400000);
+}
 
 function leadEstimateParams(lead) {
   const params = new URLSearchParams({ tab: 'new' });
@@ -58,6 +66,15 @@ function leadEstimateParams(lead) {
 function Badge({ label, color, style }) {
   return <span style={{ display:'inline-block', padding:'2px 10px', borderRadius:9999, fontSize:11, fontWeight:600,
     backgroundColor:color+'22', color, border:`1px solid ${color}44`, whiteSpace:'nowrap', ...style }}>{label}</span>;
+}
+
+function AgingBadge({ lead }) {
+  if (CLOSED_STATUSES.includes(lead.status)) return null;
+  const days = daysSinceContact(lead);
+  if (days == null) return null;
+  const color = days < 1 ? '#15803D' : days < 3 ? '#71717A' : days < 7 ? '#A16207' : '#991B1B';
+  const label = days < 1 ? 'today' : days === 1 ? '1d' : `${days}d`;
+  return <Badge label={label} color={color} />;
 }
 
 function Card({ children, style, onClick }) {
@@ -188,7 +205,6 @@ export function LeadsSection() {
   const [leads, setLeads] = useState([]);
   const [leadsTotal, setLeadsTotal] = useState(0);
   const [sources, setSources] = useState([]);
-  const [campaigns, setCampaigns] = useState([]);
   const [overview, setOverview] = useState(null);
   const [funnel, setFunnel] = useState([]);
   const [bySource, setBySource] = useState([]);
@@ -202,6 +218,8 @@ export function LeadsSection() {
   const [showModal, setShowModal] = useState(null);
   const [formData, setFormData] = useState({});
   const [filters, setFilters] = useState({ status:'', search:'', sort:'first_contact_at', page:1 });
+  const [pipelineView, setPipelineView] = useState('table');
+  const [draggingLeadId, setDraggingLeadId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(null);
   const [techs, setTechs] = useState([]);
@@ -227,14 +245,6 @@ export function LeadsSection() {
       const data = await adminFetch('/admin/leads/sources');
       setSources(data.sources || []);
     } catch (e) { console.error('loadSources', e); setLoadError(e); }
-  }, []);
-
-  const loadCampaigns = useCallback(async () => {
-    try {
-      setLoadError(null);
-      const data = await adminFetch('/admin/leads/campaigns');
-      setCampaigns(data.campaigns || []);
-    } catch (e) { console.error('loadCampaigns', e); setLoadError(e); }
   }, []);
 
   const loadAnalytics = useCallback(async () => {
@@ -271,9 +281,8 @@ export function LeadsSection() {
   useEffect(() => {
     if (tab === 'pipeline') { loadLeads(); loadAnalytics(); }
     if (tab === 'sources') loadSources();
-    if (tab === 'campaigns') loadCampaigns();
     if (tab === 'analytics') loadAnalytics();
-  }, [tab, loadLeads, loadSources, loadCampaigns, loadAnalytics]);
+  }, [tab, loadLeads, loadSources, loadAnalytics]);
 
   const expandLead = async (lead) => {
     if (expandedLead === lead.id) { setExpandedLead(null); return; }
@@ -299,7 +308,6 @@ export function LeadsSection() {
     setLoadError(null);
     if (tab === 'pipeline') { loadLeads(); loadAnalytics(); }
     if (tab === 'sources') loadSources();
-    if (tab === 'campaigns') loadCampaigns();
     if (tab === 'analytics') loadAnalytics();
   };
 
@@ -312,9 +320,6 @@ export function LeadsSection() {
       } else if (showModal === 'newSource') {
         await adminFetch('/admin/leads/sources', { method:'POST', body:formData });
         loadSources();
-      } else if (showModal === 'newCampaign') {
-        await adminFetch('/admin/leads/campaigns', { method:'POST', body:formData });
-        loadCampaigns();
       } else if (showModal === 'convert') {
         if (!formData.customer_id) {
           alert('Customer ID is required to convert a lead.');
@@ -348,6 +353,14 @@ export function LeadsSection() {
       .map(s => funnel.find(f => f.stage === s) || { stage:s, label:s.replace(/_/g, ' '), count:0 })
       .filter(f => f.count > 0 || ['new','contacted','estimate_sent','won','lost'].includes(f.stage));
     const maxPipelineCount = Math.max(...funnelData.map(d => d.count), 1);
+    const draggingLead = draggingLeadId ? leads.find(lead => lead.id === draggingLeadId) : null;
+    const handleBoardDrop = (event, stage) => {
+      event.preventDefault();
+      const droppedId = event.dataTransfer.getData('text/plain');
+      const lead = leads.find(item => String(item.id) === droppedId);
+      if (lead && lead.status !== stage) updateLeadStatus(lead.id, stage);
+      setDraggingLeadId(null);
+    };
 
     return <>
       {/* Metric Cards */}
@@ -379,25 +392,39 @@ export function LeadsSection() {
 
       {/* Filters + Actions */}
       <div style={{ display:'flex', gap:12, marginBottom:16, flexWrap:'wrap', alignItems:'center' }}>
-        <select value={filters.status} onChange={e=>setFilters(f=>({...f, status:e.target.value, page:1}))}
+        <div style={{ display:'flex', background:'#F4F4F5', borderRadius:8, padding:3, border:`1px solid ${C.border}` }}>
+          {['table','board'].map(view => (
+            <button key={view} type="button" onClick={() => {
+              setPipelineView(view);
+              if (view === 'board') setFilters(f => ({ ...f, status:'', page:1 }));
+            }} style={{
+              background:pipelineView===view ? C.heading : 'transparent',
+              color:pipelineView===view ? C.white : C.muted,
+              padding:'5px 14px', borderRadius:6, border:'none', cursor:'pointer',
+              fontSize:13, fontWeight:600, textTransform:'capitalize', fontFamily:ROBOTO,
+            }}>{view}</button>
+          ))}
+        </div>
+        {pipelineView === 'table' && <select value={filters.status} onChange={e=>setFilters(f=>({...f, status:e.target.value, page:1}))}
           style={{ backgroundColor:C.input, border:`1px solid ${C.inputBorder}`, borderRadius:8, padding:'6px 12px', color:C.text, fontSize:13 }}>
           <option value="">All Statuses</option>
           {STATUSES.map(s => <option key={s} value={s}>{s.replace(/_/g,' ')}</option>)}
-        </select>
+        </select>}
         <input placeholder="Search by name, phone, email" value={filters.search} onChange={e=>setFilters(f=>({...f, search:e.target.value, page:1}))}
           style={{ backgroundColor:C.input, border:`1px solid ${C.inputBorder}`, borderRadius:8, padding:'8px 12px', color:C.text, fontSize:14, minWidth:200 }} />
-        <select value={filters.sort} onChange={e=>setFilters(f=>({...f, sort:e.target.value}))}
+        {pipelineView === 'table' && <select value={filters.sort} onChange={e=>setFilters(f=>({...f, sort:e.target.value}))}
           style={{ backgroundColor:C.input, border:`1px solid ${C.inputBorder}`, borderRadius:8, padding:'6px 12px', color:C.text, fontSize:13 }}>
           <option value="first_contact_at">Newest First</option>
           <option value="name">Name</option>
           <option value="status">Status</option>
           <option value="response_time">Response Time</option>
           <option value="monthly_value">Value</option>
-        </select>
+        </select>}
         <div style={{ flex:1 }} />
         <Btn onClick={() => { if (sources.length === 0) loadSources(); setFormData({}); setShowModal('newLead'); }}>+ New Lead</Btn>
       </div>
 
+      {pipelineView === 'table' && <>
       {/* Leads Table */}
       <Card style={{ padding:0, overflow:'hidden' }}>
         <table style={{ width:'100%', borderCollapse:'collapse' }}>
@@ -415,7 +442,10 @@ export function LeadsSection() {
                 <tr onClick={()=>expandLead(lead)} style={{ borderBottom:`1px solid ${C.border}`, cursor:'pointer',
                   backgroundColor:isExpanded?C.cardHover:'transparent', transition:'background 0.15s' }}>
                   <td style={{ padding:'12px 16px' }}>
-                    <div style={{ color:C.heading, fontSize:14, fontWeight:500 }}>{[lead.first_name,lead.last_name].filter(Boolean).join(' ') || 'Unknown'}</div>
+                    <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                      <span style={{ color:C.heading, fontSize:14, fontWeight:500 }}>{[lead.first_name,lead.last_name].filter(Boolean).join(' ') || 'Unknown'}</span>
+                      <AgingBadge lead={lead} />
+                    </div>
                     <div style={{ color:C.muted, fontSize:12, ...mono }}>{lead.phone || lead.email || '--'}</div>
                   </td>
                   <td style={{ padding:'12px 16px' }}>
@@ -582,6 +612,49 @@ export function LeadsSection() {
         </span>
         <Btn small disabled={filters.page>=Math.ceil(leadsTotal/50)} onClick={()=>setFilters(f=>({...f, page:f.page+1}))}>Next</Btn>
       </div>}
+      </>}
+
+      {pipelineView === 'board' && <div style={{ display:'flex', gap:12, overflowX:'auto', paddingBottom:8 }}>
+        {BOARD_STAGES.map(stage => {
+          const stageLeads = leads.filter(lead => lead.status === stage);
+          const isDropTarget = draggingLead && draggingLead.status !== stage;
+          return <div key={stage}
+            onDragOver={e=>e.preventDefault()}
+            onDrop={e=>handleBoardDrop(e, stage)}
+            style={{ flex:'0 0 260px', minWidth:240, backgroundColor:C.bg, border:`1px solid ${isDropTarget ? STATUS_COLORS[stage] : C.border}`, borderRadius:10, padding:10 }}>
+            <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:10 }}>
+              <span style={{ width:9, height:9, borderRadius:9999, backgroundColor:STATUS_COLORS[stage]||C.muted, display:'inline-block' }} />
+              <span style={{ color:C.heading, fontSize:11, fontWeight:700, letterSpacing:'0.08em', textTransform:'uppercase', flex:1 }}>{stage.replace(/_/g,' ')}</span>
+              <span style={{ color:C.muted, fontSize:12, ...mono }}>{stageLeads.length}</span>
+            </div>
+            <div style={{ maxHeight:'70vh', overflowY:'auto', display:'flex', flexDirection:'column', gap:8 }}>
+              {stageLeads.map(lead => (
+                <div key={lead.id}
+                  draggable
+                  onDragStart={e=>{ e.dataTransfer.setData('text/plain', String(lead.id)); setDraggingLeadId(lead.id); }}
+                  onDragEnd={()=>setDraggingLeadId(null)}
+                  onClick={()=>{ setPipelineView('table'); expandLead(lead); }}
+                  style={{ backgroundColor:C.card, border:`1px solid ${C.border}`, borderRadius:8, padding:10, cursor:'grab', opacity:draggingLeadId===lead.id?0.4:1 }}>
+                  <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
+                    <div style={{ color:C.heading, fontSize:13, fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', flex:1 }}>
+                      {[lead.first_name,lead.last_name].filter(Boolean).join(' ') || 'Unknown'}
+                    </div>
+                    <AgingBadge lead={lead} />
+                  </div>
+                  <div style={{ color:C.muted, fontSize:12, ...mono, marginBottom:5, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{lead.phone || lead.email || '--'}</div>
+                  <div style={{ color:C.text, fontSize:12, marginBottom:8, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{lead.service_interest || '--'}</div>
+                  <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap' }}>
+                    {lead.source_name && <Badge label={lead.source_name.length > 16 ? lead.source_name.slice(0,13)+'...' : lead.source_name} color={C.teal} />}
+                    {lead.urgency && lead.urgency !== 'normal' && <Badge label={lead.urgency} color={lead.urgency==='urgent'?C.red:C.amber} />}
+                    {lead.assigned_name && <span style={{ color:C.muted, fontSize:11, marginLeft:'auto', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{lead.assigned_name}</span>}
+                  </div>
+                </div>
+              ))}
+              {stageLeads.length === 0 && <div style={{ color:C.muted, fontSize:12, fontStyle:'italic', padding:'12px 4px', textAlign:'center' }}>Drop here</div>}
+            </div>
+          </div>;
+        })}
+      </div>}
     </>;
   };
 
@@ -664,57 +737,6 @@ export function LeadsSection() {
           </tbody>
         </table>
       </Card>
-    </>;
-  };
-
-  // ═════════════════════════════════════════════════════════════════════════
-  // CAMPAIGNS TAB
-  // ═════════════════════════════════════════════════════════════════════════
-  const renderCampaigns = () => {
-    return <>
-      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
-        <h2 style={{ margin:0, color:C.heading, fontSize:12, fontWeight:500, fontFamily:ROBOTO, letterSpacing:'0.02em' }}>Marketing Campaigns ({campaigns.length})</h2>
-        <Btn onClick={()=>{ setFormData({ channel:'website_organic' }); setShowModal('newCampaign'); }}>+ New Campaign</Btn>
-      </div>
-      <div style={{ display:'flex', gap:16, flexWrap:'wrap' }}>
-        {campaigns.map(camp => {
-          const budget = parseFloat(camp.budget||0);
-          const spend = parseFloat(camp.spend_to_date||0);
-          const spendPct = budget > 0 ? Math.min(100, spend/budget*100) : 0;
-          const statusColor = camp.status==='active'?C.green:camp.status==='paused'?C.amber:C.muted;
-          return <Card key={camp.id} style={{ flex:'1 1 300px', maxWidth:400 }}>
-            <div style={{ display:'flex', justifyContent:'space-between', marginBottom:8 }}>
-              <h4 style={{ margin:0, color:C.heading, fontSize:14 }}>{camp.name}</h4>
-              <Badge label={camp.status} color={statusColor} />
-            </div>
-            <div style={{ display:'flex', gap:8, marginBottom:12 }}>
-              <Badge label={camp.channel||'--'} color={C.teal} />
-              {camp.source_name && <Badge label={camp.source_name} color={C.purple} />}
-            </div>
-            <div style={{ fontSize:12, color:C.muted, marginBottom:8 }}>
-              {camp.start_date ? new Date(camp.start_date).toLocaleDateString() : '?'} - {camp.end_date ? new Date(camp.end_date).toLocaleDateString() : 'ongoing'}
-            </div>
-            {/* Budget bar */}
-            <div style={{ marginBottom:8 }}>
-              <div style={{ display:'flex', justifyContent:'space-between', fontSize:12, marginBottom:4 }}>
-                <span style={{ color:C.muted }}>Budget</span>
-                <span style={{ color:C.text, ...mono }}>{fmtMoney(spend)} / {fmtMoney(budget)}</span>
-              </div>
-              <div style={{ height:6, backgroundColor:C.border, borderRadius:3, overflow:'hidden' }}>
-                <div style={{ width:`${spendPct}%`, height:'100%', backgroundColor:spendPct>90?C.red:spendPct>70?C.amber:C.green, borderRadius:3 }} />
-              </div>
-            </div>
-            <div style={{ display:'flex', gap:16, fontSize:13 }}>
-              <div><span style={{ color:C.muted }}>Leads: </span><span style={{ color:C.heading, ...mono }}>{camp.actual_leads||0}{camp.target_leads ? `/${camp.target_leads}`:''}</span></div>
-              <div><span style={{ color:C.muted }}>Conv: </span><span style={{ color:C.green, ...mono }}>{camp.actual_conversions||0}{camp.target_conversions ? `/${camp.target_conversions}`:''}</span></div>
-            </div>
-            {camp.offer_details && <div style={{ fontSize:12, color:C.muted, marginTop:8, fontStyle:'italic' }}>{camp.offer_details}</div>}
-          </Card>;
-        })}
-        {campaigns.length === 0 && <Card style={{ flex:1, textAlign:'center', padding:40 }}>
-          <div style={{ color:C.muted }}>No campaigns yet</div>
-        </Card>}
-      </div>
     </>;
   };
 
@@ -960,28 +982,6 @@ export function LeadsSection() {
       <Btn onClick={submitForm} disabled={loading}>{loading?'Creating...':'Create Source'}</Btn>
     </Modal>;
 
-    if (showModal === 'newCampaign') return <Modal title="New Campaign" onClose={()=>setShowModal(null)}>
-      <Input label="Campaign Name" value={formData.name} onChange={v=>setFormData(f=>({...f,name:v}))} />
-      <Input label="Channel" value={formData.channel} onChange={v=>setFormData(f=>({...f,channel:v}))} placeholder="e.g. google_ads, facebook, direct_mail" />
-      <Input label="Lead Source" value={formData.lead_source_id} onChange={v=>setFormData(f=>({...f,lead_source_id:v}))}
-        options={sources.map(s=>({ value:s.id, label:s.name }))} />
-      <div style={{ display:'flex', gap:12 }}>
-        <div style={{ flex:1 }}><Input label="Start Date" value={formData.start_date} onChange={v=>setFormData(f=>({...f,start_date:v}))} type="date" /></div>
-        <div style={{ flex:1 }}><Input label="End Date" value={formData.end_date} onChange={v=>setFormData(f=>({...f,end_date:v}))} type="date" /></div>
-      </div>
-      <Input label="Budget ($)" value={formData.budget} onChange={v=>setFormData(f=>({...f,budget:v}))} type="number" />
-      <div style={{ display:'flex', gap:12 }}>
-        <div style={{ flex:1 }}><Input label="Target Leads" value={formData.target_leads} onChange={v=>setFormData(f=>({...f,target_leads:v}))} type="number" /></div>
-        <div style={{ flex:1 }}><Input label="Target Conversions" value={formData.target_conversions} onChange={v=>setFormData(f=>({...f,target_conversions:v}))} type="number" /></div>
-      </div>
-      <Input label="Offer Details" value={formData.offer_details} onChange={v=>setFormData(f=>({...f,offer_details:v}))} placeholder="Special offer or promo description" />
-      <div style={{ display:'flex', gap:8 }}>
-        <div style={{ flex:1 }}><Input label="UTM Source" value={formData.utm_source} onChange={v=>setFormData(f=>({...f,utm_source:v}))} /></div>
-        <div style={{ flex:1 }}><Input label="UTM Medium" value={formData.utm_medium} onChange={v=>setFormData(f=>({...f,utm_medium:v}))} /></div>
-        <div style={{ flex:1 }}><Input label="UTM Campaign" value={formData.utm_campaign} onChange={v=>setFormData(f=>({...f,utm_campaign:v}))} /></div>
-      </div>
-      <Btn onClick={submitForm} disabled={loading}>{loading?'Creating...':'Create Campaign'}</Btn>
-    </Modal>;
 
     if (showModal === 'logCost') return <Modal title="Log Source Cost" onClose={()=>setShowModal(null)}>
       <Input label="Month" value={formData.month} onChange={v=>setFormData(f=>({...f,month:v}))} type="date" />
@@ -1002,7 +1002,6 @@ export function LeadsSection() {
     <TabBar tabs={[
       { key:'pipeline', label:'Pipeline' },
       { key:'sources', label:'Sources' },
-      { key:'campaigns', label:'Campaigns' },
       { key:'analytics', label:'ROI Analytics' },
     ]} active={tab} onChange={setTab} />
 
@@ -1013,7 +1012,6 @@ export function LeadsSection() {
 
     {tab === 'pipeline' && renderPipeline()}
     {tab === 'sources' && renderSources()}
-    {tab === 'campaigns' && renderCampaigns()}
     {tab === 'analytics' && renderAnalytics()}
 
     {renderModal()}
