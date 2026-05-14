@@ -101,6 +101,17 @@
   font-family: "Roboto", system-ui, sans-serif !important;
 }
 
+/* Form controls don't inherit font-family by default — every browser's UA
+   stylesheet sets <button>/<input>/<select>/<textarea> to its own system font
+   (Arial on macOS). That breaks portal-rendered admin modals that mount
+   outside .admin-shell-v2: the modal wrapper sets fontFamily on its
+   outer div, but the form controls inside still render Arial. Resetting
+   to `inherit` makes them pick up whatever family the parent sets, on
+   admin AND customer surfaces. */
+button, input, select, textarea, optgroup {
+  font-family: inherit;
+}
+
 /* Global focus-visible ring for interactive elements. The .btn system in
    buttons.css already has its own focus style; this catches every inline
    <button> and <a> (customer portal is full of them) so keyboard users

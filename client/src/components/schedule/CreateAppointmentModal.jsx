@@ -932,7 +932,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             borderBottom: `1px solid ${D.border}`,
           }}>
             <div style={{ position: 'relative', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <h1 style={{ fontSize: 17, fontWeight: 700, color: '#18181B', margin: 0, maxWidth: 'calc(100% - 148px)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <h1 style={{ fontFamily: ROBOTO_STACK, fontSize: 17, fontWeight: 700, color: '#18181B', margin: 0, maxWidth: 'calc(100% - 148px)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 New Appointment
               </h1>
               <button
@@ -965,7 +965,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           </div>
         ) : (
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-            <h1 style={{ fontSize: 28, fontWeight: 400, color: '#18181B', margin: 0 }}>New Appointment</h1>
+            <h1 style={{ fontFamily: ROBOTO_STACK, fontSize: 28, fontWeight: 400, color: '#18181B', margin: 0 }}>New Appointment</h1>
             <button onClick={onClose} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 22, cursor: 'pointer', minWidth: 48, minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
           </div>
         )}
