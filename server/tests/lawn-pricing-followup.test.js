@@ -163,6 +163,40 @@ describe('lawn pricing production follow-up', () => {
     });
   });
 
+  test('large one-time lawn only quote carries custom quote warning and extrapolated baseline source', () => {
+    const estimate = generateEstimate(baseInput({
+      measuredTurfSf: 25000,
+      services: { oneTimeLawn: { treatmentType: 'weed', lawnFreq: 9 } },
+    }));
+    const otLawn = estimate.lineItems.find(i => i.service === 'one_time_lawn');
+
+    expect(otLawn.customQuoteFlag).toBe(true);
+    expect(otLawn.baselinePricingBasis).toBe('EXTRAPOLATED_ABOVE_TABLE_MAX');
+    expect(otLawn.baselinePricingSource).toBe('EXTRAPOLATED_TABLE');
+    expect(estimate.notes).toContainEqual({
+      type: 'LAWN_CUSTOM_QUOTE',
+      text: 'Turf area exceeds 20,000 sq ft. Pricing was extrapolated and requires field verification/custom quote.',
+      priority: 'HIGH',
+    });
+  });
+
+  test('turf field verification only surfaces when turf-priced services are selected', () => {
+    const pestOnly = generateEstimate(baseInput({
+      measuredTurfSf: 0,
+      estimatedTurfSf: 0,
+      services: { pest: { frequency: 'quarterly' } },
+    }));
+    const lawn = generateEstimate(baseInput({
+      measuredTurfSf: 0,
+      estimatedTurfSf: 0,
+      services: { lawn: { track: 'st_augustine', lawnFreq: 9 } },
+    }));
+
+    expect(pestOnly.property.turfFlags).toContain('FIELD_VERIFY_TURF_SQFT');
+    expect(pestOnly.fieldVerify).not.toContain('FIELD_VERIFY_TURF_SQFT');
+    expect(lawn.fieldVerify).toContain('FIELD_VERIFY_TURF_SQFT');
+  });
+
   test('cost-floor pricing source is explicit per tier and selected tier', () => {
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4000 }));
     const market = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9, useLawnCostFloor: false });

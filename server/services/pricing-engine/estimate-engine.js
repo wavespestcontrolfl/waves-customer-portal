@@ -498,14 +498,21 @@ function generateEstimate(input) {
   // ── 7. Validate margins ────────────────────────────────────
   const marginWarnings = validateEstimateDiscounts(lineItems, waveGuardTier);
   const notes = [];
-  const lawnLine = lineItems.find(i => i.service === 'lawn_care');
-  if (lawnLine?.customQuoteFlag) {
+  const lawnCustomQuoteLine = lineItems.find(i => i.customQuoteFlag);
+  if (lawnCustomQuoteLine) {
     notes.push({
       type: 'LAWN_CUSTOM_QUOTE',
       text: 'Turf area exceeds 20,000 sq ft. Pricing was extrapolated and requires field verification/custom quote.',
       priority: 'HIGH',
     });
   }
+  const turfPricedServicesSelected = !!(
+    services.lawn ||
+    services.oneTimeLawn ||
+    services.topDressing ||
+    services.dethatching ||
+    services.plugging
+  );
 
   // ── 8. Build estimate output ───────────────────────────────
   return {
@@ -552,7 +559,7 @@ function generateEstimate(input) {
 
     // Warnings
     marginWarnings,
-    fieldVerify: Array.from(new Set(property.turfFlags || [])),
+    fieldVerify: turfPricedServicesSelected ? Array.from(new Set(property.turfFlags || [])) : [],
 
     // Property-driven modifiers & structural notes (v2 port)
     modifiers,

@@ -741,7 +741,10 @@ function priceOneTimeLawn(property, options = {}) {
     afterHours,
     isRecurringCustomer,
     baselinePerApp: lawnResult.perApp,
-    baselinePricingSource: 'MARKET_TABLE',
+    baselinePricingBasis: lawnResult.pricingBasis,
+    baselinePricingSource: lawnResult.pricingSource,
+    customQuoteFlag: lawnResult.customQuoteFlag,
+    notes: lawnResult.notes || [],
   };
 }
 
