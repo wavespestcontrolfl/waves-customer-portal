@@ -47,8 +47,8 @@ class ReferralNudge {
 
     setTimeout(async () => {
       try {
-        // Pull editable body from sms_templates (referral_nudge). Fall back to
-        // a minimal inline string if the template row is missing.
+        // Body sourced from sms_templates.referral_nudge. If the row is
+        // missing/disabled, skip the send rather than fall back to inline copy.
         let body = null;
         try {
           const tpl = require('../../routes/admin-sms-templates');
@@ -56,10 +56,10 @@ class ReferralNudge {
             first_name: customer.first_name || '',
             referral_link: referralLink || `Use code ${referralCode}`,
           });
-        } catch { /* fall through to inline */ }
+        } catch { /* template lookup failed → null */ }
         if (!body) {
-          const shareText = referralLink ? referralLink : `Use code ${referralCode}`;
-          body = `Hello ${customer.first_name}! Share your Waves referral link with a friend: ${shareText}`;
+          logger.info(`[referral] referral_nudge template missing/disabled — skipping nudge for customer ${customerId}`);
+          return;
         }
 
         const smsResult = await sendCustomerMessage({

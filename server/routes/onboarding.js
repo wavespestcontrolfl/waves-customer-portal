@@ -6,6 +6,7 @@ const TwilioService = require('../services/twilio');
 const logger = require('../services/logger');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { renderSmsTemplate } = require('../services/sms-template-renderer');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
 
@@ -474,13 +475,23 @@ router.post('/:token/complete', loadSession, async (req, res, next) => {
 
     // Welcome SMS
     try {
-      const smsResult = await sendOnboardingSms(
-        c,
-        `Welcome to Waves, ${c.first_name}! Your first ${s.service_type} is ${svcDate}${svc ? ` with ${svc.tech_name}` : ''}. Log into your portal anytime: portal.wavespestcontrol.com`,
-        { original_message_type: 'onboarding_complete_welcome', onboarding_session_id: s.id, appointment_id: svc?.id }
-      );
-      if (!smsResult.sent) {
-        logger.warn(`[onboarding] Welcome SMS blocked/failed for customer ${c.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+      const welcomeBody = await renderSmsTemplate('onboarding_welcome', {
+        first_name: c.first_name || 'there',
+        service_type: s.service_type,
+        service_date: svcDate,
+        tech_clause: svc ? ` with ${svc.tech_name}` : '',
+      });
+      if (!welcomeBody) {
+        logger.warn(`[onboarding] onboarding_welcome template missing/disabled — skipping welcome SMS for customer ${c.id}`);
+      } else {
+        const smsResult = await sendOnboardingSms(c, welcomeBody, {
+          original_message_type: 'onboarding_complete_welcome',
+          onboarding_session_id: s.id,
+          appointment_id: svc?.id,
+        });
+        if (!smsResult.sent) {
+          logger.warn(`[onboarding] Welcome SMS blocked/failed for customer ${c.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+        }
       }
     } catch (e) { logger.error(`Welcome SMS failed: ${e.message}`); }
 

@@ -708,11 +708,13 @@ router.post('/confirm', async (req, res, next) => {
           time: timeLabel,
           address: addressLabel,
           confirmation_code: confCode,
-        },
-        `Hello ${customer.first_name || 'there'}! Your Waves appointment is confirmed for ${dateLabel}, ${timeLabel} at ${addressLabel}. Confirmation: ${confCode}.\n\nNeed to change it? Reply RESCHEDULE. Questions or requests? Reply to this message.`
+        }
       );
+      if (!smsBody) {
+        logger.warn(`[booking:confirm] self_booking_confirmation template missing/disabled — skipping SMS for customer ${custId}`);
+      }
 
-      const customerSms = await sendCustomerMessage({
+      const customerSms = smsBody ? await sendCustomerMessage({
         to: customer.phone,
         body: smsBody,
         channel: 'sms',
@@ -722,8 +724,8 @@ router.post('/confirm', async (req, res, next) => {
         appointmentId: serviceRow?.id,
         identityTrustLevel: 'phone_matches_customer',
         metadata: { original_message_type: 'booking_confirmation', source: source || 'portal' },
-      });
-      if (!customerSms.sent) {
+      }) : null;
+      if (customerSms && !customerSms.sent) {
         logger.warn(`[booking:confirm] Customer SMS blocked/failed for customer ${custId}: ${customerSms.code || customerSms.reason || 'unknown'}`);
       }
 

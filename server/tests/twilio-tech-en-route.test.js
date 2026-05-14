@@ -70,7 +70,7 @@ describe('TwilioService.sendTechEnRoute', () => {
       first_name: 'Sam',
       tech_name: 'Bryan',
       eta_line: '',
-      track_url: 'https://portal.wavespestcontrol.com/l/abc23',
+      track_clause: 'Track live: https://portal.wavespestcontrol.com/l/abc23\n\n',
     });
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
       to: '+15551112222',
@@ -88,10 +88,17 @@ describe('TwilioService.sendTechEnRoute', () => {
     getAppointmentContacts.mockReturnValue([
       { phone: '+15551112222', name: 'Sam', role: 'primary' },
     ]);
+    smsTemplates.getTemplate.mockResolvedValue(
+      'Hello Sam! Bryan has arrived and is servicing your property.\n\nQuestions or requests? Reply to this message. Reply STOP to opt out.'
+    );
     sendCustomerMessage.mockResolvedValue({ sent: true });
 
     const result = await TwilioService.sendTechArrived('cust-1', 'Bryan');
 
+    expect(smsTemplates.getTemplate).toHaveBeenCalledWith('tech_arrived', {
+      first_name: 'Sam',
+      tech_name: 'Bryan',
+    });
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
       to: '+15551112222',
       body: expect.stringContaining('has arrived and is servicing your property'),

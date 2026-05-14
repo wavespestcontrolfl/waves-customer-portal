@@ -2079,8 +2079,12 @@ router.put('/:token/accept', async (req, res, next) => {
           invoiceId = inv?.id || null;
           if (invoiceId) {
             try {
-              await InvoiceService.sendViaSMS(invoiceId);
-              invoiceLinkDelivered = true;
+              const smsResult = await InvoiceService.sendViaSMS(invoiceId);
+              if (smsResult?.sent) {
+                invoiceLinkDelivered = true;
+              } else {
+                logger.error(`[estimate-accept] Invoice SMS not sent: ${smsResult?.code || smsResult?.reason || 'unknown'}`);
+              }
             }
             catch (smsErr) { logger.error(`[estimate-accept] Invoice SMS failed: ${smsErr.message}`); }
             try {
