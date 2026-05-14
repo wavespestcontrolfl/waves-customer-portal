@@ -292,47 +292,32 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
       }
 
       // Same-key retry where the resolver already persisted a snapshot
-      // under this key — original attempt crashed (or is still running)
-      // between snapshot write and service_record creation. Resume is
-      // only legal once the original is stale; otherwise the original
-      // may still be mid-flight and a concurrent resume would run the
-      // side-effects (service_record, invoice, SMS, review) a second
-      // time. Even with staleness, the claim must be atomic so two
-      // simultaneous stale retries don't both win.
+      // under this key. The audit-correct recovery here is "resume the
+      // side-effects portion from resolved_completion_snapshot" — but
+      // no caller in PR #1 knows how to read that snapshot and build
+      // a service_record from it. Surfacing a resume_from_snapshot
+      // action that callers don't handle would let the route fall
+      // through to the fresh-completion path and defeat the snapshot
+      // invariant. Until PR #2 wires the route handler + the
+      // storeResolvedSnapshot caller path together, return 409 with a
+      // stable code instead. PR #2 will swap this 409 for the proper
+      // resume action.
+      //
+      // In PR #1's runtime this branch is unreachable: no path writes
+      // resolved_completion_snapshot, so existing.snapshot_written_at
+      // is always NULL on a same-key retry. The guard ships as
+      // documentation of the future contract.
       if (existing.snapshot_written_at) {
-        const snapshotResumeCutoff = new Date(Date.now() - STALE_PENDING_MS);
-        if (new Date(existing.updated_at) >= snapshotResumeCutoff) {
-          return {
-            action: 'conflict',
-            status: 409,
-            payload: {
-              error: 'Completion is in progress and has a persisted snapshot; the original request has not yet completed.',
-              code: 'completion_pending_with_snapshot',
-            },
-          };
-        }
-        // Atomic claim — bump updated_at conditional on still-stale +
-        // still-pending state. The loser of any concurrent resume
-        // race comes back with zero rows and gets a 409 below.
-        const [claimed] = await knex('service_completion_attempts')
-          .where({ id: existing.id, status: 'pending' })
-          .andWhere('updated_at', '<', snapshotResumeCutoff)
-          .update({ updated_at: new Date() })
-          .returning('*');
-        if (!claimed) {
-          return {
-            action: 'conflict',
-            status: 409,
-            payload: {
-              error: 'Concurrent snapshot resume already claimed this attempt.',
-              code: 'completion_pending_with_snapshot',
-            },
-          };
-        }
-        logger.warn(
-          `[completion-attempts] resuming stale snapshot attempt ${claimed.id} for service ${serviceId}`
-        );
-        return { action: 'resume_from_snapshot', attempt: claimed };
+        return {
+          action: 'conflict',
+          status: 409,
+          payload: {
+            error: 'Completion attempt has a persisted resolved snapshot; snapshot resume will be wired in PR #2.',
+            code: 'completion_snapshot_resume_not_yet_supported',
+            attemptId: existing.id,
+            snapshotHash: existing.resolved_completion_snapshot_hash || null,
+          },
+        };
       }
 
       const staleCutoff = new Date(Date.now() - STALE_PENDING_MS);
@@ -392,36 +377,27 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
         };
       }
       // Failed-with-snapshot: the original attempt wrote a snapshot
-      // (audit truth) and THEN failed during service_record creation
-      // or some other side effect. Flipping the row back to 'pending'
-      // and re-running the resolver would either hit
-      // snapshot_write_not_eligible (round-2 guard) or worse — clear
-      // the snapshot and re-resolve against a possibly-newer template,
-      // discarding the tech's attestation. Atomically claim the
-      // failed-with-snapshot row for resume and return
-      // resume_from_snapshot. Note: no staleness gate here because a
-      // 'failed' row is by definition not running anywhere — markFailed
-      // is the terminal signal that the caller gave up.
+      // (audit truth) and THEN failed during service_record creation.
+      // The audit-correct recovery is to resume the side-effects from
+      // the persisted snapshot — but again, no caller in PR #1 knows
+      // how to do that. Falling through to the failed-retry reset
+      // would also be wrong: storeResolvedSnapshot's pending-only
+      // guard (round-2) would reject the re-resolution, leaving the
+      // retry stuck. Until PR #2 wires the resume handler, return 409.
+      //
+      // In PR #1's runtime this branch is unreachable for the same
+      // reason as the same-key branch above (no snapshot writer).
       if (existing.snapshot_written_at) {
-        const [resumed] = await knex('service_completion_attempts')
-          .where({ id: existing.id, status: 'failed' })
-          .update({ status: 'pending', error: null, updated_at: new Date() })
-          .returning('*');
-        if (!resumed) {
-          // Another retry won the race.
-          return {
-            action: 'conflict',
-            status: 409,
-            payload: {
-              error: 'Concurrent resume already claimed this attempt.',
-              code: 'completion_pending_with_snapshot',
-            },
-          };
-        }
-        logger.warn(
-          `[completion-attempts] resuming failed-with-snapshot attempt ${resumed.id} for service ${serviceId}`
-        );
-        return { action: 'resume_from_snapshot', attempt: resumed };
+        return {
+          action: 'conflict',
+          status: 409,
+          payload: {
+            error: 'Completion attempt failed after persisting a resolved snapshot; snapshot resume will be wired in PR #2.',
+            code: 'completion_snapshot_resume_not_yet_supported',
+            attemptId: existing.id,
+            snapshotHash: existing.resolved_completion_snapshot_hash || null,
+          },
+        };
       }
       const [row] = await knex('service_completion_attempts')
         .where({ id: existing.id, status: 'failed' })
