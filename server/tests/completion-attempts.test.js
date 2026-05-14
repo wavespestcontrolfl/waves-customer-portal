@@ -362,26 +362,29 @@ describe('completion attempts', () => {
     expect(knex.calls[7].op.updatePayload.status).toBe('failed');
   });
 
-  test('same-key retry with persisted snapshot returns resume_from_snapshot (codex P1 round 6)', async () => {
-    // The original same-key attempt crashed between snapshot write
-    // and service_record creation. A legitimate retry under that same
-    // key must resume from the snapshot, not bounce through the
-    // resolver (storeResolvedSnapshot's pending-only guard would
-    // reject the second write).
-    const pendingWithSnapshot = {
+  test('same-key stale retry with persisted snapshot atomically claims and returns resume_from_snapshot (codex P1 round 6/7)', async () => {
+    // Original same-key attempt wrote snapshot, then crashed.
+    // 12 minutes later the same caller retries. The snapshot is the
+    // audit truth; the right behavior is to resume. The claim must
+    // be atomic (conditional UPDATE) so two concurrent stale retries
+    // don't both win.
+    const stalePendingWithSnapshot = {
       id: 'attempt-1',
       idempotency_key: 'key-1',
       status: 'pending',
       request_hash: 'hash-1',
-      snapshot_written_at: new Date(Date.now() - 30 * 1000),
+      updated_at: new Date(Date.now() - 12 * 60 * 1000),
+      snapshot_written_at: new Date(Date.now() - 12 * 60 * 1000),
       resolved_completion_snapshot_hash: 'snap-hash-abc',
     };
+    const claimed = { ...stalePendingWithSnapshot, updated_at: new Date() };
     const knex = makeKnex([
       noPriorSuccess(),
       noResumableCompletion(),
       noCompletedRecord(),
       { insertError: uniqueViolation() },
-      { first: pendingWithSnapshot },
+      { first: stalePendingWithSnapshot },
+      { returning: [claimed] },                  // atomic claim wins
     ]);
 
     const result = await claimCompletionAttempt({
@@ -391,21 +394,25 @@ describe('completion attempts', () => {
     }, knex);
 
     expect(result.action).toBe('resume_from_snapshot');
-    expect(result.attempt).toBe(pendingWithSnapshot);
-    // No UPDATE attempted — the snapshot row is untouched.
-    expect(knex.calls).toHaveLength(5);
+    expect(result.attempt).toBe(claimed);
+    // Atomic UPDATE was scoped to id + status='pending' + updated_at<cutoff
+    expect(knex.calls[5].op.whereCriteria).toEqual({ id: 'attempt-1', status: 'pending' });
+    expect(knex.calls[5].op.andWhereArgs[0]).toBe('updated_at');
   });
 
-  test('same-key retry with snapshot fires resume_from_snapshot regardless of staleness', async () => {
-    // Snapshot presence beats the stale-cutoff check — a fresh retry
-    // under the same key with a snapshot resumes immediately.
+  test('same-key FRESH retry with snapshot returns 409 (codex P1 round 7: prevent concurrent resume vs original)', async () => {
+    // Original same-key attempt wrote snapshot and is STILL RUNNING
+    // (creating service_record/invoice/SMS right now). A double-tap
+    // or network retry hits the API milliseconds later. We must NOT
+    // return resume_from_snapshot — that would let the duplicate run
+    // side effects concurrently.
     const freshPendingWithSnapshot = {
       id: 'attempt-1',
       idempotency_key: 'key-1',
       status: 'pending',
       request_hash: 'hash-1',
-      updated_at: new Date(),
-      snapshot_written_at: new Date(),
+      updated_at: new Date(),                            // fresh
+      snapshot_written_at: new Date(Date.now() - 500),   // 500ms ago
     };
     const knex = makeKnex([
       noPriorSuccess(),
@@ -421,7 +428,104 @@ describe('completion attempts', () => {
       requestHash: 'hash-1',
     }, knex);
 
+    expect(result.action).toBe('conflict');
+    expect(result.status).toBe(409);
+    expect(result.payload.code).toBe('completion_pending_with_snapshot');
+    // No UPDATE attempted.
+    expect(knex.calls).toHaveLength(5);
+  });
+
+  test('same-key stale retry with snapshot returns 409 if atomic claim loses to a concurrent resume', async () => {
+    const stalePendingWithSnapshot = {
+      id: 'attempt-1',
+      idempotency_key: 'key-1',
+      status: 'pending',
+      request_hash: 'hash-1',
+      updated_at: new Date(Date.now() - 12 * 60 * 1000),
+      snapshot_written_at: new Date(Date.now() - 12 * 60 * 1000),
+    };
+    const knex = makeKnex([
+      noPriorSuccess(),
+      noResumableCompletion(),
+      noCompletedRecord(),
+      { insertError: uniqueViolation() },
+      { first: stalePendingWithSnapshot },
+      { returning: [] },                       // another caller already claimed
+    ]);
+
+    const result = await claimCompletionAttempt({
+      serviceId: 'svc-1',
+      idempotencyKey: 'key-1',
+      requestHash: 'hash-1',
+    }, knex);
+
+    expect(result.action).toBe('conflict');
+    expect(result.status).toBe(409);
+    expect(result.payload.code).toBe('completion_pending_with_snapshot');
+  });
+
+  test('failed-with-snapshot retry returns resume_from_snapshot (codex P1 round 7)', async () => {
+    // Original attempt wrote snapshot, then failed during service_record
+    // creation. markCompletionAttemptFailed left status=failed but kept
+    // the snapshot intact. The next retry must NOT flip the row back
+    // to fresh pending (which would defeat snapshot_write_not_eligible).
+    // It must resume from the snapshot directly.
+    const failedWithSnapshot = {
+      id: 'attempt-1',
+      idempotency_key: 'key-1',
+      status: 'failed',
+      request_hash: 'hash-1',
+      snapshot_written_at: new Date(Date.now() - 60 * 1000),
+      resolved_completion_snapshot_hash: 'snap-hash-abc',
+    };
+    const resumed = { ...failedWithSnapshot, status: 'pending', error: null };
+    const knex = makeKnex([
+      noPriorSuccess(),
+      noResumableCompletion(),
+      noCompletedRecord(),
+      { insertError: uniqueViolation() },
+      { first: failedWithSnapshot },
+      { returning: [resumed] },
+    ]);
+
+    const result = await claimCompletionAttempt({
+      serviceId: 'svc-1',
+      idempotencyKey: 'key-1',
+      requestHash: 'hash-1',
+    }, knex);
+
     expect(result.action).toBe('resume_from_snapshot');
+    expect(result.attempt).toBe(resumed);
+    expect(knex.calls[5].op.whereCriteria).toEqual({ id: 'attempt-1', status: 'failed' });
+    expect(knex.calls[5].op.updatePayload).toMatchObject({ status: 'pending', error: null });
+  });
+
+  test('failed-with-snapshot retry returns 409 if concurrent resume wins the race', async () => {
+    const failedWithSnapshot = {
+      id: 'attempt-1',
+      idempotency_key: 'key-1',
+      status: 'failed',
+      request_hash: 'hash-1',
+      snapshot_written_at: new Date(),
+    };
+    const knex = makeKnex([
+      noPriorSuccess(),
+      noResumableCompletion(),
+      noCompletedRecord(),
+      { insertError: uniqueViolation() },
+      { first: failedWithSnapshot },
+      { returning: [] },                      // race lost
+    ]);
+
+    const result = await claimCompletionAttempt({
+      serviceId: 'svc-1',
+      idempotencyKey: 'key-1',
+      requestHash: 'hash-1',
+    }, knex);
+
+    expect(result.action).toBe('conflict');
+    expect(result.status).toBe(409);
+    expect(result.payload.code).toBe('completion_pending_with_snapshot');
   });
 
   test('different key refuses to reclaim a stale pending with a persisted snapshot (codex P1 round 5)', async () => {
