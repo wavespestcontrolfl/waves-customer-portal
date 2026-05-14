@@ -30,6 +30,12 @@
  */
 
 exports.up = async function (knex) {
+  // pgcrypto provides gen_random_uuid() used by the .defaultTo() below
+  // and by the child tables. The repo's convention (every migration
+  // that calls gen_random_uuid()) is to ensure the extension defensively
+  // rather than rely on an earlier migration having enabled it.
+  await knex.raw('CREATE EXTENSION IF NOT EXISTS pgcrypto');
+
   // ─── Parent table ────────────────────────────────────────────────
   await knex.schema.createTable('protocol_templates', (t) => {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
@@ -193,6 +199,12 @@ exports.up = async function (knex) {
               'protocol_templates row is active and immutable except for retire transition (id=%, version=%).',
               OLD.id, OLD.version;
           END IF;
+          -- Only status, retired_at, retired_by, and effective_to may
+          -- change on the retire transition. Every other column —
+          -- including created_at and updated_at — must remain pinned
+          -- to its prior value, so the row's audit timestamps reflect
+          -- creation/last-pre-retire state, not the retirement event
+          -- (retired_at carries that signal explicitly).
           IF NEW.protocol_key IS DISTINCT FROM OLD.protocol_key
              OR NEW.version IS DISTINCT FROM OLD.version
              OR NEW.supersedes_protocol_template_id IS DISTINCT FROM OLD.supersedes_protocol_template_id
@@ -206,6 +218,8 @@ exports.up = async function (knex) {
              OR NEW.attestation_template IS DISTINCT FROM OLD.attestation_template
              OR NEW.attestation_template_version IS DISTINCT FROM OLD.attestation_template_version
              OR NEW.notes IS DISTINCT FROM OLD.notes
+             OR NEW.created_at IS DISTINCT FROM OLD.created_at
+             OR NEW.updated_at IS DISTINCT FROM OLD.updated_at
           THEN
             RAISE EXCEPTION
               'protocol_templates active row content is immutable; only status/retired_at/retired_by/effective_to may change (id=%, version=%).',
