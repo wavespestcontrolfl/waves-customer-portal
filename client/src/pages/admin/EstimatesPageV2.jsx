@@ -4,6 +4,7 @@
 //   - PATCH /admin/estimates/:id            (isPriority, status, declineReason)
 //   - POST  /admin/estimates/:id/send
 //   - POST  /admin/estimates/:id/follow-up
+//   - POST  /admin/estimates/:id/mark-accepted
 // Scope (post PR #5c):
 //   PR #5a → tab chrome + Pipeline tab (stats bar + filter pills + list rows)
 //   PR #5b → Create Estimate tab now renders EstimateToolViewV2 (monochrome
@@ -1281,6 +1282,30 @@ function EstimatePipelineViewV2() {
     [patchEstimateToggle],
   );
 
+  const markEstimateAccepted = useCallback(
+    async (e) => {
+      if (
+        !window.confirm(
+          `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and does not text the customer.`,
+        )
+      )
+        return;
+      try {
+        const result = await adminFetch(`/admin/estimates/${e.id}/mark-accepted`, {
+          method: "POST",
+          body: JSON.stringify({ source: "verbal_yes" }),
+        });
+        refreshEstimates();
+        if (result?.warnings?.length) {
+          window.alert(`Marked accepted, but:\n\n${result.warnings.join("\n")}`);
+        }
+      } catch (err) {
+        window.alert("Mark accepted failed: " + err.message);
+      }
+    },
+    [refreshEstimates],
+  );
+
   if (loading) {
     return (
       <div className="p-10 text-center text-13 text-ink-secondary">
@@ -1864,6 +1889,17 @@ function EstimatePipelineViewV2() {
                           </Button>
                         )}
 
+                        {canMarkEstimateWon(e) && (
+                          <Button
+                            size="sm"
+                            variant="primary"
+                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                            onClick={() => markEstimateAccepted(e)}
+                          >
+                            Mark Won
+                          </Button>
+                        )}
+
                         {(e.status === "sent" || e.status === "viewed") && (
                           <Button
                             size="sm"
@@ -2193,6 +2229,15 @@ function mobileStatusClass(status) {
   return "text-ink-tertiary";
 }
 
+function canMarkEstimateWon(estimate) {
+  return (
+    ["sent", "viewed"].includes(estimate.status) &&
+    !!estimate.customerId &&
+    !estimate.billByInvoice &&
+    !estimate.showOneTimeOption
+  );
+}
+
 // Row in the mobile list. Mirrors CustomersPageV2 directory row: 64px white
 // bordered card, name + sub left, trailing Call / Text actions when phone is
 // present. Row tap is currently a no-op — action sheet will land in a
@@ -2203,6 +2248,7 @@ function MobileEstimateRow({
   onCreateFromAddress,
   onOpenCustomerPanel,
   onSend,
+  onMarkAccepted,
   onDeleted,
   onAudit,
   v3Flag = false,
@@ -2482,6 +2528,21 @@ function MobileEstimateRow({
           <Send size={16} strokeWidth={1.75} />{" "}
         </button>
       )}
+      {canMarkEstimateWon(estimate) && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onMarkAccepted?.(estimate);
+          }}
+          aria-label={`Mark ${customerName} accepted from verbal yes`}
+          title="Mark accepted from verbal yes"
+          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+        >
+          {" "}
+          <Check size={16} strokeWidth={1.75} />{" "}
+        </button>
+      )}
       {estimate.status === "draft" && (
         <button
           type="button"
@@ -2592,6 +2653,30 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
     setLoading(true);
     refreshEstimates();
   }, [refreshEstimates]);
+
+  const markEstimateAccepted = useCallback(
+    async (e) => {
+      if (
+        !window.confirm(
+          `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and does not text the customer.`,
+        )
+      )
+        return;
+      try {
+        const result = await adminFetch(`/admin/estimates/${e.id}/mark-accepted`, {
+          method: "POST",
+          body: JSON.stringify({ source: "verbal_yes" }),
+        });
+        refreshEstimates();
+        if (result?.warnings?.length) {
+          window.alert(`Marked accepted, but:\n\n${result.warnings.join("\n")}`);
+        }
+      } catch (err) {
+        window.alert("Mark accepted failed: " + err.message);
+      }
+    },
+    [refreshEstimates],
+  );
 
   const groups = useMemo(() => {
     const now = Date.now();
@@ -2796,6 +2881,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
               onCreateFromAddress={onCreateFromAddress}
               onOpenCustomerPanel={setCustomerPanelId}
               onSend={refreshEstimates}
+              onMarkAccepted={markEstimateAccepted}
               onDeleted={refreshEstimates}
               onAudit={(estimate, focus = "all") =>
                 setAuditTarget({ estimate, focus })

@@ -9,6 +9,7 @@ const { shortenOrPassthrough } = require('../services/short-url');
 const { wrapEmail, plainText } = require('../services/email-template');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { validateEstimateDeliveryOptions } = require('../services/estimate-delivery-options');
+const { clearRouteCacheForRequest } = require('../utils/route-cache');
 const {
   buildEstimatePricingAudit,
   buildEstimatePricingRiskBatch,
@@ -19,6 +20,7 @@ const {
   attachLeadToEstimate,
   markLinkedLeadEstimateSent,
 } = require('../services/lead-estimate-link');
+const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
 
 const ESTIMATE_LIST_LIMIT = 500;
 
@@ -591,6 +593,24 @@ router.post('/:id/follow-up', async (req, res, next) => {
 
     res.json({ success: true });
   } catch (err) { next(err); }
+});
+
+// POST /api/admin/estimates/:id/mark-accepted — admin records a verbal yes.
+// This is intentionally separate from PATCH status edits so accepted_at is
+// stamped for funnel reporting and acceptance side effects run once.
+router.post('/:id/mark-accepted', async (req, res, next) => {
+  try {
+    const result = await markEstimateManuallyAccepted({
+      estimateId: req.params.id,
+      adminUserId: req.technicianId,
+      source: req.body?.source || 'verbal_yes',
+    });
+    clearRouteCacheForRequest(req, ['/admin/dashboard']);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
 });
 
 // PATCH /api/admin/estimates/:id — update priority, decline reason, status
