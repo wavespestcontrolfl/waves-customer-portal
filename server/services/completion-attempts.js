@@ -398,10 +398,57 @@ async function markCompletionAttemptSideEffectsPending(attempt, { record, respon
   });
 }
 
+// Stable hash for a resolved completion snapshot. Used by the preview
+// → submit handshake: the client receives the hash on the preview
+// endpoint and sends it back as expectedSnapshotHash. If the resolver
+// produces a different hash at submit time (active protocol template
+// changed between preview and submit), the route returns 409
+// completion_preview_stale so the tech reopens the modal and reviews
+// the updated protocol.
+function hashResolvedSnapshot(snapshot) {
+  return crypto.createHash('sha256')
+    .update(JSON.stringify(sortObjectKeys(snapshot)))
+    .digest('hex');
+}
+
+// Persist the resolver's output on the completion attempt row before
+// any service_record is created. Mandatory for one-tap completions
+// (CHECK constraint enforces completion_source='one_tap_completion'
+// requires protocol_template_id + version). On replay/resume, the
+// route reads this snapshot back rather than re-running the resolver
+// — that's the whole point of snapshot ownership living here.
+async function storeResolvedSnapshot(
+  attempt,
+  { snapshot, snapshotHash, completionSource, protocolTemplateId, protocolTemplateVersion },
+  knex = db
+) {
+  if (!attempt?.id) throw new Error('storeResolvedSnapshot requires a claimed attempt');
+  if (!snapshot) throw new Error('storeResolvedSnapshot requires a snapshot');
+  if (!completionSource) throw new Error('storeResolvedSnapshot requires completion_source');
+
+  const computedHash = snapshotHash || hashResolvedSnapshot(snapshot);
+  if (completionSource === 'one_tap_completion' && (!protocolTemplateId || !protocolTemplateVersion)) {
+    throw new Error('storeResolvedSnapshot one_tap_completion requires protocol_template_id and version');
+  }
+
+  await knex('service_completion_attempts').where({ id: attempt.id }).update({
+    resolved_completion_snapshot: JSON.stringify(snapshot),
+    resolved_completion_snapshot_hash: computedHash,
+    completion_source: completionSource,
+    protocol_template_id: protocolTemplateId || null,
+    protocol_template_version: protocolTemplateVersion || null,
+    snapshot_written_at: new Date(),
+    updated_at: new Date(),
+  });
+  return { snapshotHash: computedHash };
+}
+
 module.exports = {
   claimCompletionAttempt,
   hashCompletionRequest,
+  hashResolvedSnapshot,
   markCompletionAttemptFailed,
   markCompletionAttemptSucceeded,
   markCompletionAttemptSideEffectsPending,
+  storeResolvedSnapshot,
 };
