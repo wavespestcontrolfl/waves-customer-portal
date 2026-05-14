@@ -917,6 +917,86 @@ router.put('/:serviceId/status', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dispatch/:serviceId/complete-preview
+//
+// Read-only preview for the one-tap "Complete — Protocol Performed"
+// flow. Resolves the standard protocol defaults for the service
+// without writing anything, and returns the bundle the tech would be
+// attesting to plus a stable snapshot hash. PR #3 will add the
+// submit-side handshake: the client sends back this hash as
+// expectedSnapshotHash, and the route returns 409 completion_preview_
+// stale if the resolver computes a different hash at submit time
+// (active protocol template changed between preview and submit).
+//
+// Response shape:
+//   200 { available: true, mode: 'one_tap_available',
+//         snapshotHash, buttonCopy, attestationText, summary }
+//   200 { available: false, reason: '<resolver reason>', ...details }
+//
+// Both branches return 200 — the `available` flag drives the client.
+// The route returns 4xx only for service-not-found, auth, or input
+// validation errors.
+router.get('/:serviceId/complete-preview', async (req, res, next) => {
+  try {
+    const { resolveStandardCompletionDefaults, CUSTOMER_INTERACTION_CHOICES } =
+      require('../services/completion-defaults-resolver');
+
+    const customerInteractionChoice = req.query.customerInteraction || null;
+    if (customerInteractionChoice
+      && !CUSTOMER_INTERACTION_CHOICES.includes(customerInteractionChoice)
+    ) {
+      return res.status(400).json({
+        error: 'Invalid customerInteraction value.',
+        code: 'customer_interaction_invalid',
+        validChoices: CUSTOMER_INTERACTION_CHOICES,
+      });
+    }
+
+    const result = await resolveStandardCompletionDefaults({
+      serviceId: req.params.serviceId,
+      customerInteractionChoice,
+      now: new Date(),
+    });
+
+    if (!result.ok) {
+      if (result.reason === 'service_not_found') {
+        return res.status(404).json({ error: 'Service not found', code: 'service_not_found' });
+      }
+      return res.json({
+        available: false,
+        reason: result.reason,
+        // Surface the reason-specific detail fields the resolver
+        // returned without re-listing them here — the resolver owns
+        // the shape per reason, the route is just a pass-through.
+        ...result,
+        ok: undefined,
+      });
+    }
+
+    const { snapshot, snapshotHash } = result;
+    return res.json({
+      available: true,
+      mode: 'one_tap_available',
+      snapshotHash,
+      buttonCopy: 'Complete — Protocol Performed',
+      attestationText: snapshot.techAttestationText,
+      summary: {
+        protocolName: snapshot.protocolName,
+        protocolKey: snapshot.protocolKey,
+        protocolTemplateVersion: snapshot.protocolTemplateVersion,
+        products: snapshot.products.map((p) => p.productName),
+        areas: snapshot.areas.map((a) => a.label),
+        actions: snapshot.actions.map((a) => ({ label: a.label, required: a.required })),
+        customerInteraction: snapshot.customerInteraction,
+        customerInteractionSource: snapshot.customerInteractionSource,
+        sendSms: snapshot.sendSms,
+        review: snapshot.review,
+        recapMode: snapshot.recapMode,
+      },
+    });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/:serviceId/complete
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
