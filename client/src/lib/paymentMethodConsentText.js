@@ -19,9 +19,10 @@ export const ACH_CONSENT_TEXT = [
   'its due date (or on the Auto Pay billing day I have selected),',
   'until I revoke this authorization. I may revoke by writing to',
   'contact@wavespestcontrol.com or calling (941) 318-7612 at least',
-  '3 business days before the next scheduled debit. A copy of this',
-  'authorization will be emailed to me for my records. I can manage',
-  'or remove saved payment methods anytime in my customer portal.',
+  '3 business days before the next scheduled debit. I may request a',
+  'copy of this authorization at any time by contacting Waves at the',
+  'email or phone above. I can manage or remove saved payment methods',
+  'anytime in my customer portal.',
 ].join(' ');
 
 // Back-compat alias. Anything that imports CONSENT_TEXT without a method

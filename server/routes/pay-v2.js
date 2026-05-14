@@ -204,18 +204,25 @@ router.post('/:token/confirm', async (req, res, next) => {
 // =========================================================================
 router.post('/:token/consent', async (req, res, next) => {
   try {
-    const { stripePaymentMethodId, methodType } = req.body || {};
+    const { stripePaymentMethodId } = req.body || {};
     if (!stripePaymentMethodId) return res.status(400).json({ error: 'stripePaymentMethodId required' });
 
     const invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     if (!invoice.customer_id) return res.status(400).json({ error: 'Invoice has no customer' });
 
+    // Derive method type from Stripe — never trust the client. A stale
+    // or tampered pay-page could otherwise associate ACH copy with a
+    // card PM (or vice versa). Fallback to 'card' only if Stripe lookup
+    // fails, since the card variant is the more permissive default.
+    const stripeMethodType = await StripeService.getPaymentMethodType(stripePaymentMethodId);
+    const resolvedMethodType = stripeMethodType || 'card';
+
     const row = await ConsentService.recordConsent({
       customerId: invoice.customer_id,
       stripePaymentMethodId,
       source: 'pay_page',
-      methodType: methodType || 'card',
+      methodType: resolvedMethodType,
       ip: req.ip,
       userAgent: req.get('user-agent') || null,
     });

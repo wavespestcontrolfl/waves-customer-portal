@@ -392,7 +392,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
               return;
             }
             if (paymentIntent && (paymentIntent.status === 'succeeded' || paymentIntent.status === 'processing')) {
-              onSuccess?.(paymentIntent, selectedMethodRef.current);
+              onSuccess?.(paymentIntent);
             } else if (paymentIntent && paymentIntent.status === 'requires_action') {
               setElementError('Additional verification required. Please follow the prompts.');
             }
@@ -472,12 +472,12 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       }
 
       if (paymentIntent && (paymentIntent.status === 'succeeded' || paymentIntent.status === 'processing')) {
-        onSuccess?.(paymentIntent, selectedMethodRef.current);
+        onSuccess?.(paymentIntent);
       } else if (paymentIntent && paymentIntent.status === 'requires_action') {
         setElementError('Additional verification required. Please follow the prompts.');
         setProcessing(false);
       } else {
-        onSuccess?.(paymentIntent, selectedMethodRef.current);
+        onSuccess?.(paymentIntent);
       }
     } catch (err) {
       setElementError(err.message || 'Payment failed');
@@ -742,7 +742,7 @@ export default function PayPageV2() {
       });
   }, [data, token]);
 
-  const handlePaymentSuccess = async (paymentIntent, methodType) => {
+  const handlePaymentSuccess = async (paymentIntent) => {
     try {
       await fetch(`${API_BASE}/pay/${token}/confirm`, {
         method: 'POST',
@@ -755,10 +755,11 @@ export default function PayPageV2() {
     }
 
     // Record save-payment-method consent if the customer opted in. The
-    // Stripe webhook handles persisting the payment_methods row
-    // asynchronously and will back-fill the FK on the consent record.
-    // methodType lets the server snapshot the correct authorization
-    // variant (card vs ACH — they differ for NACHA/Reg E reasons).
+    // server derives the correct authorization variant (card vs ACH —
+    // they differ for NACHA/Reg E reasons) from the Stripe PaymentMethod
+    // type, so we don't pass methodType from the client. The Stripe
+    // webhook handles persisting the payment_methods row asynchronously
+    // and back-fills the FK on the consent record.
     if (saveCard && paymentIntent.payment_method) {
       try {
         await fetch(`${API_BASE}/pay/${token}/consent`, {
@@ -766,7 +767,6 @@ export default function PayPageV2() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             stripePaymentMethodId: paymentIntent.payment_method,
-            methodType: methodType || 'card',
           }),
         });
       } catch (err) {
