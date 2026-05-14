@@ -6,6 +6,8 @@ describe('admin schedule assigned-tech ETA helpers', () => {
     buildAssignedScheduleEtaQuery,
     buildTechStatusQuery,
     formatAssignedVehicleLocation,
+    recurringTemplateTechnicianId,
+    shouldPreserveParentTemplateForThisOnlyAssignment,
   } = adminScheduleRouter._test;
 
   test('ETA lookup joins the assigned tech status and canonical customer geocode', () => {
@@ -33,6 +35,49 @@ describe('admin schedule assigned-tech ETA helpers', () => {
     expect(sql).toContain('"location_updated_at"');
     expect(sql).not.toContain('"updated_at"');
     expect(bindings).toEqual(['tech-1', 1]);
+  });
+
+  test('recurring template technician preserves explicit unassigned override', () => {
+    expect(recurringTemplateTechnicianId({
+      technician_id: 'old-tech',
+      recurring_technician_id: 'new-tech',
+      recurring_technician_override: true,
+    })).toBe('new-tech');
+
+    expect(recurringTemplateTechnicianId({
+      technician_id: 'old-tech',
+      recurring_technician_id: null,
+      recurring_technician_override: true,
+    })).toBeNull();
+
+    expect(recurringTemplateTechnicianId({
+      technician_id: 'old-tech',
+      recurring_technician_id: null,
+      recurring_technician_override: false,
+    })).toBe('old-tech');
+  });
+
+  test('parent-only recurring reassignment snapshots the prior template', () => {
+    expect(shouldPreserveParentTemplateForThisOnlyAssignment({
+      is_recurring: true,
+      recurring_parent_id: null,
+      technician_id: 'old-tech',
+      recurring_technician_override: false,
+    }, 'new-tech')).toBe(true);
+
+    expect(shouldPreserveParentTemplateForThisOnlyAssignment({
+      is_recurring: true,
+      recurring_parent_id: null,
+      technician_id: 'old-tech',
+      recurring_technician_override: true,
+    }, 'new-tech')).toBe(false);
+
+    expect(shouldPreserveParentTemplateForThisOnlyAssignment({
+      is_recurring: true,
+      recurring_parent_id: 'parent-id',
+      technician_id: 'old-tech',
+      recurring_technician_override: false,
+    }, 'new-tech')).toBe(false);
   });
 
   beforeEach(() => {

@@ -555,6 +555,11 @@ const EDIT_FALLBACK_SERVICES = [
 ];
 
 export function EditServiceModal({ service, technicians, onClose, onSaved }) {
+  const serviceHasSeries = !!(
+    service.isRecurring ||
+    service.recurringParentId ||
+    service.recurring_parent_id
+  );
   const [form, setForm] = useState({
     scheduledDate: service.scheduledDate
       ? String(service.scheduledDate).split("T")[0]
@@ -586,6 +591,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
   const [recurringNth, setRecurringNth] = useState(3);
   const [recurringWeekday, setRecurringWeekday] = useState(3);
   const [recurringIntervalDays, setRecurringIntervalDays] = useState(30);
+  const [assignmentScope, setAssignmentScope] = useState(() =>
+    serviceHasSeries ? "following" : "this_only",
+  );
   const [discountType, setDiscountType] = useState("");
   const [discountAmount, setDiscountAmount] = useState("");
   const [discountPresets, setDiscountPresets] = useState([]);
@@ -719,6 +727,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
               ? parseFloat(form.price)
               : undefined,
           createInvoice: takePayment || createInvoice,
+          assignmentScope:
+            form.technicianId !== (service.technicianId || "")
+              ? assignmentScope
+              : undefined,
         }),
       });
       onSaved?.();
@@ -1423,6 +1435,32 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                         </option>
                       ))}
                     </select>{" "}
+                    {serviceHasSeries &&
+                      form.technicianId !== (service.technicianId || "") && (
+                        <div style={{ marginTop: 10 }}>
+                          <label style={labelStyle}>
+                            Apply staff change to
+                          </label>
+                          <select
+                            value={assignmentScope}
+                            onChange={(e) =>
+                              setAssignmentScope(e.target.value)
+                            }
+                            className="font-bold"
+                            style={inputStyle}
+                          >
+                            <option value="this_only">
+                              This appointment only
+                            </option>
+                            <option value="following">
+                              This and following appointments
+                            </option>
+                            <option value="series">
+                              All appointments in series
+                            </option>
+                          </select>
+                        </div>
+                      )}
                   </div>{" "}
                   <div>
                     {" "}

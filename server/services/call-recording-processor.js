@@ -156,6 +156,99 @@ async function findExistingCallAppointment({ customerId, call, scheduledDate, wi
   return query.first();
 }
 
+const UNSUPPORTED_CALL_RE = /\b(seo|organic traffic|google ranking|search engine optimization|lead generation|construction company|construction business|contractor leads?)\b/i;
+const UNSUPPORTED_MARKETING_CONTEXT_RE = /\b(?:marketing|advertising|social media)\s+(?:advice|consult(?:ing)?|strategy|campaign|management|services?)\b|\b(?:advice|consult(?:ing)?|strategy|campaign|management|services?)\s+(?:for|about|on|around)?\s*(?:marketing|advertising|social media)\b|\bads?\s+(?:campaign|consult(?:ing)?|management|strategy)\b|\b(?:campaign|consult(?:ing)?|management|strategy)\s+(?:for|about|on|around)?\s*ads?\b/i;
+const UNSUPPORTED_WEBSITE_CONTEXT_RE = /\b(?:website|web site|webpage|web page)\b.{0,80}\b(?:seo|ranking|traffic|design|development|redesign|optimi[sz]ation|build|builder|audit)\b|\b(?:seo|ranking|traffic|design|development|redesign|optimi[sz]ation|build|builder|audit)\b.{0,80}\b(?:website|web site|webpage|web page)\b/i;
+
+function compactText(...parts) {
+  return parts.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+}
+
+function canonicalWavesService(value) {
+  const text = String(value || '').toLowerCase();
+  if (!text) return null;
+  if (/\bwdo\b|wood destroying organism/.test(text)) return 'WDO Inspection';
+  if (/\bbed\s*bugs?\b|\bbedbugs?\b/.test(text)) return 'Bed Bug Treatment';
+  if (/\brodents?\b|\brats?\b|\bmouse\b|\bmice\b|\bbait stations?\b/.test(text)) return 'Rodent Control';
+  if (/\bmosquito(?:es|s)?\b/.test(text)) return 'Mosquito Control';
+  if (/\btermites?\b/.test(text)) return 'Termite Inspection';
+  if (/\btrees?\b|\bshrubs?\b|\bornamentals?\b|\bpalms?\b/.test(text)) return 'Tree & Shrub Care';
+  if (/\blawns?\b|\bturf\b|\bgrass\b|\bfertili[sz](e|er|ation|ing)?\b|\bweeds?\b|\bchinch\b|\bsod\b|\bfungus\b|\bfungal\b/.test(text)) return 'Lawn Care';
+  if (/\bpest(s| control)?\b|\bbugs?\b|\binsects?\b|\broach(?:es)?\b|\bcockroach(?:es)?\b|\bants?\b|\bspiders?\b|\bwasps?\b|\bhornets?\b|\bfleas?\b|\bticks?\b|\bsilverfish\b|\bearwigs?\b|\bmillipedes?\b|\bcentipedes?\b|\bpalmetto bugs?\b/.test(text)) return 'General Pest Control';
+  return null;
+}
+
+function hasUnsupportedCallContext(value) {
+  const text = String(value || '');
+  return UNSUPPORTED_CALL_RE.test(text)
+    || UNSUPPORTED_MARKETING_CONTEXT_RE.test(text)
+    || UNSUPPORTED_WEBSITE_CONTEXT_RE.test(text);
+}
+
+function resolveSchedulableCallService(extracted = {}) {
+  const detailText = compactText(
+    extracted.requested_service,
+    extracted.call_summary,
+    extracted.pain_points
+  );
+  const detailService = canonicalWavesService(detailText);
+  if (hasUnsupportedCallContext(detailText)) {
+    return { ok: false, reason: 'unsupported_service', service: null };
+  }
+
+  const service = canonicalWavesService(extracted.matched_service)
+    || canonicalWavesService(extracted.requested_service)
+    || detailService;
+  if (!service) return { ok: false, reason: 'unsupported_service', service: null };
+  return { ok: true, reason: null, service };
+}
+
+function hasUsablePhone(value) {
+  return String(value || '').replace(/\D/g, '').length >= 10;
+}
+
+function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, callerPhone = null) {
+  const merged = {
+    firstName: customer.first_name || extracted.first_name || null,
+    lastName: customer.last_name || extracted.last_name || null,
+    phone: customer.phone || extracted.phone || callerPhone || null,
+    email: customer.email || extracted.email || null,
+    streetAddress: customer.address_line1 || extracted.address_line1 || null,
+    city: customer.city || extracted.city || null,
+    state: customer.state || extracted.state || null,
+    zip: customer.zip || extracted.zip || null,
+  };
+
+  const missing = [];
+  if (!String(merged.firstName || '').trim()) missing.push('first_name');
+  if (!String(merged.lastName || '').trim()) missing.push('last_name');
+  if (!hasUsablePhone(merged.phone)) missing.push('phone');
+  if (!EMAIL_RE.test(String(merged.email || '').trim().toLowerCase())) missing.push('email');
+  if (!String(merged.streetAddress || '').trim()) missing.push('street_address');
+  if (!String(merged.city || '').trim()) missing.push('city');
+  if (!String(merged.state || '').trim()) missing.push('state');
+  if (!String(merged.zip || '').trim()) missing.push('zip');
+
+  return { ok: missing.length === 0, missing, details: merged };
+}
+
+async function backfillCustomerFromAppointmentContact(customerId, customer = {}, extracted = {}, callerPhone = null) {
+  if (!customerId) return customer;
+  const updates = {};
+  if (!customer.first_name && extracted.first_name) updates.first_name = capitalizeName(extracted.first_name);
+  if (!customer.last_name && extracted.last_name) updates.last_name = capitalizeName(extracted.last_name);
+  if (!customer.phone && (extracted.phone || callerPhone)) updates.phone = extracted.phone || callerPhone;
+  if (!customer.email && extracted.email) updates.email = extracted.email;
+  if (!customer.address_line1 && extracted.address_line1) updates.address_line1 = extracted.address_line1;
+  if (!customer.city && extracted.city) updates.city = extracted.city;
+  if (!customer.state && extracted.state) updates.state = extracted.state;
+  if (!customer.zip && extracted.zip) updates.zip = extracted.zip;
+  if (Object.keys(updates).length === 0) return customer;
+  updates.updated_at = new Date();
+  await db('customers').where({ id: customerId }).update(updates);
+  return { ...customer, ...updates };
+}
+
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
@@ -238,6 +331,8 @@ async function extractCallData(transcription, callerPhone, opts = {}) {
 
   const prompt = `Analyze this phone call transcript for Waves Pest Control (pest control + lawn care, SW Florida).
 
+Waves only schedules pest control, lawn care, mosquito, termite, rodent, bed bug, WDO, and tree/shrub services. Calls about unrelated work such as website SEO, organic traffic, marketing, advertising, or a construction company are not Waves appointments.
+
 Caller phone: ${callerPhone || 'unknown'}
 Call date in Eastern Time: ${callDateET}
 
@@ -273,6 +368,7 @@ IMPORTANT — appointment_confirmed rules:
 - If the agent says "I'll text you" or "let me check" without the caller confirming a specific time slot, appointment_confirmed must be false.
 - preferred_date_time must include the confirmed time, not just a date.
 - Resolve relative dates against the call date above in Eastern Time. "Today" means ${callDateET}; do not invent a prior year or use the model's training/current date.
+- Do not set appointment_confirmed to true for unrelated business advice, SEO, marketing, construction, or other non-Waves services even if a time was discussed.
 
 IMPORTANT — wants_estimate rules:
 - Set wants_estimate to true only if the caller explicitly asks for a quote, estimate, bid, proposal, or asks Waves to send/give/prepare a price.
@@ -882,16 +978,16 @@ const CallRecordingProcessor = {
     let appointmentResult = null;
     const timeStr = (extracted.preferred_date_time || '').toLowerCase();
     const hasSpecificTime = /\d{1,2}:\d{2}|\d{1,2}\s*(am|pm|a\.m|p\.m)|noon|midday/i.test(timeStr);
-    const hasServiceForAppointment = !!(extracted.matched_service || extracted.requested_service);
+    const serviceResolution = resolveSchedulableCallService(extracted);
     const isOutboundCall = String(call.direction || '').toLowerCase().startsWith('outbound');
-    const canCreateAppointmentFromCall = !isOutboundCall && hasServiceForAppointment;
+    const canCreateAppointmentFromCall = !isOutboundCall && serviceResolution.ok;
     if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && !canCreateAppointmentFromCall) {
       appointmentResult = {
-        service: extracted.matched_service || extracted.requested_service || null,
+        service: serviceResolution.service || extracted.matched_service || extracted.requested_service || null,
         dateTime: extracted.preferred_date_time,
         scheduleCreated: false,
         smsSent: false,
-        skippedReason: isOutboundCall ? 'outbound_call' : 'missing_service',
+        skippedReason: isOutboundCall ? 'outbound_call' : serviceResolution.reason,
       };
       logger.info(
         `[call-proc] Skipping appointment auto-create for ${callSid}: ` +
@@ -900,11 +996,27 @@ const CallRecordingProcessor = {
     }
     if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && canCreateAppointmentFromCall) {
       try {
-        const customer = await db('customers').where({ id: customerId }).first();
-        if (customer?.phone) {
-          const firstName = customer.first_name || extracted.first_name || '';
-          const serviceType = extracted.matched_service || extracted.requested_service || 'service';
-          const needsServiceAddress = !customer.address_line1 && !extracted.address_line1;
+        let customer = await db('customers').where({ id: customerId }).first();
+        if (customer) {
+          customer = await backfillCustomerFromAppointmentContact(customerId, customer, extracted, call.from_phone);
+          const customerValidation = validatePhoneCallAppointmentCustomer(customer, extracted, call.from_phone);
+          if (!customerValidation.ok) {
+            appointmentResult = {
+              service: serviceResolution.service,
+              dateTime: extracted.preferred_date_time,
+              scheduleCreated: false,
+              smsSent: false,
+              skippedReason: 'missing_required_customer_fields',
+              missingFields: customerValidation.missing,
+            };
+            logger.warn(
+              `[call-proc] Skipping appointment auto-create for ${callSid}: missing required customer fields ` +
+              customerValidation.missing.join(', ')
+            );
+          } else {
+            const firstName = customerValidation.details.firstName || '';
+            const serviceType = serviceResolution.service;
+            const smsPhone = customerValidation.details.phone;
 
           // Use SMS template if available, fall back to inline
           let smsBody;
@@ -949,7 +1061,7 @@ const CallRecordingProcessor = {
           let alreadySent = false;
           try {
             const existing = await db('sms_log')
-              .where({ to_phone: customer.phone, message_type: 'confirmation' })
+              .where({ to_phone: smsPhone, message_type: 'confirmation' })
               .where('message_body', smsBody)
               .where('created_at', '>', new Date(Date.now() - 10 * 60 * 1000))
               .first();
@@ -1024,7 +1136,6 @@ const CallRecordingProcessor = {
                 const displayH = hh % 12 || 12;
                 windowDisplay = `${displayH}:${String(mm).padStart(2, '0')} ${ampm}`;
               }
-              const serviceType = extracted.matched_service || extracted.requested_service || 'General Pest Control';
               let reusedExistingSchedule = false;
               const svc = await db.transaction(async (trx) => {
                 await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', callSid]);
@@ -1053,7 +1164,6 @@ const CallRecordingProcessor = {
                   notes: [
                     'Booked via phone call.',
                     `Call SID: ${callSid}.`,
-                    needsServiceAddress ? 'ADDRESS NEEDED - confirm service street address before dispatch.' : null,
                     extracted.call_summary || null,
                   ].filter(Boolean).join(' ').trim(),
                   booking_source: 'phone_call',
@@ -1126,7 +1236,7 @@ const CallRecordingProcessor = {
               };
             } else if (!alreadySent) {
               const sendResult = await sendCustomerMessage({
-                to: customer.phone,
+                to: smsPhone,
                 body: smsBody,
                 channel: 'sms',
                 audience: 'customer',
@@ -1159,6 +1269,7 @@ const CallRecordingProcessor = {
               appointmentResult = { smsSent: false, smsSkippedReason: 'duplicate', scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time };
             }
           }
+        }
         }
       } catch (err) {
         logger.error(`[call-proc] Appointment SMS failed: ${err.message}`);
@@ -1499,6 +1610,12 @@ const CallRecordingProcessor = {
       sourceBreakdown: sourceBreakdown.map(s => ({ number: s.to_phone, count: parseInt(s.call_count) })),
     };
   },
+};
+
+CallRecordingProcessor._test = {
+  canonicalWavesService,
+  resolveSchedulableCallService,
+  validatePhoneCallAppointmentCustomer,
 };
 
 module.exports = CallRecordingProcessor;
