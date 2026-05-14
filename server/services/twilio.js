@@ -1,9 +1,9 @@
-const twilio = require('twilio');
-const config = require('../config');
-const db = require('../models/db');
-const logger = require('./logger');
-const smsTemplatesRouter = require('../routes/admin-sms-templates');
-const { shortenOrPassthrough } = require('./short-url');
+const twilio = require("twilio");
+const config = require("../config");
+const db = require("../models/db");
+const logger = require("./logger");
+const smsTemplatesRouter = require("../routes/admin-sms-templates");
+const { shortenOrPassthrough } = require("./short-url");
 
 // Owner-SMS kill switch.
 //
@@ -18,10 +18,10 @@ const { shortenOrPassthrough } = require('./short-url');
 // Toggleable via env var so the kill switch is reversible without a
 // deploy: set OWNER_SMS_DISABLED=true on Railway → silence; unset
 // or set to anything else → restore.
-const HARDCODED_OWNER_FALLBACKS = ['+19413187612', '+19415993489'];
+const HARDCODED_OWNER_FALLBACKS = ["+19413187612", "+19415993489"];
 
 function normalizePhone(p) {
-  if (!p || typeof p !== 'string') return '';
+  if (!p || typeof p !== "string") return "";
   // Canonicalize to bare digits. SMS recipient strings arrive in mixed
   // formats — env-var literals (`+19413187612`), user input
   // (`(941) 318-7612` / `941-318-7612`), JS string concat
@@ -29,15 +29,15 @@ function normalizePhone(p) {
   // single form. US numbers also vary on whether the country-code `1`
   // is included; strip a leading `1` from 11-digit numbers so the
   // 10-digit and 11-digit forms collide.
-  let d = p.replace(/\D/g, '');
-  if (d.length === 11 && d.startsWith('1')) d = d.slice(1);
+  let d = p.replace(/\D/g, "");
+  if (d.length === 11 && d.startsWith("1")) d = d.slice(1);
   return d;
 }
 
 // Mask a phone for logging: keep only the last 4 digits.
 function maskPhone(p) {
   const d = normalizePhone(p);
-  return d.length >= 4 ? `***${d.slice(-4)}` : '***';
+  return d.length >= 4 ? `***${d.slice(-4)}` : "***";
 }
 
 function getOwnerPhoneSet() {
@@ -53,7 +53,7 @@ function getOwnerPhoneSet() {
 }
 
 function isOwnerSmsSilenced(to) {
-  if (process.env.OWNER_SMS_DISABLED !== 'true') return false;
+  if (process.env.OWNER_SMS_DISABLED !== "true") return false;
   return getOwnerPhoneSet().has(normalizePhone(to));
 }
 
@@ -62,7 +62,9 @@ let _client;
 function getClient() {
   if (_client) return _client;
   if (!config.twilio.accountSid || !config.twilio.authToken) {
-    logger.warn('[twilio] TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN not set — SMS/voice disabled');
+    logger.warn(
+      "[twilio] TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN not set — SMS/voice disabled",
+    );
     return null;
   }
   _client = twilio(config.twilio.accountSid, config.twilio.authToken);
@@ -82,16 +84,18 @@ const TwilioService = {
   async sendVerificationCode(phone) {
     try {
       const c = getClient();
-      if (!c) throw new Error('Twilio not configured');
+      if (!c) throw new Error("Twilio not configured");
       const verification = await c.verify.v2
         .services(config.twilio.verifyServiceSid)
-        .verifications.create({ to: phone, channel: 'sms' });
+        .verifications.create({ to: phone, channel: "sms" });
 
-      logger.info(`Verification sent to ${maskPhone(phone)}: ${verification.status}`);
+      logger.info(
+        `Verification sent to ${maskPhone(phone)}: ${verification.status}`,
+      );
       return { success: true, status: verification.status };
     } catch (err) {
       logger.error(`Twilio verification send failed: ${err.message}`);
-      throw new Error('Failed to send verification code');
+      throw new Error("Failed to send verification code");
     }
   },
 
@@ -101,16 +105,18 @@ const TwilioService = {
   async checkVerificationCode(phone, code) {
     try {
       const c = getClient();
-      if (!c) throw new Error('Twilio not configured');
+      if (!c) throw new Error("Twilio not configured");
       const check = await c.verify.v2
         .services(config.twilio.verifyServiceSid)
         .verificationChecks.create({ to: phone, code });
 
-      logger.info(`Verification check for ${maskPhone(phone)}: ${check.status}`);
-      return { success: check.status === 'approved', status: check.status };
+      logger.info(
+        `Verification check for ${maskPhone(phone)}: ${check.status}`,
+      );
+      return { success: check.status === "approved", status: check.status };
     } catch (err) {
       logger.error(`Twilio verification check failed: ${err.message}`);
-      throw new Error('Verification check failed');
+      throw new Error("Verification check failed");
     }
   },
 
@@ -134,27 +140,35 @@ const TwilioService = {
       // Internal alerts contain customer PII (names, addresses) and the
       // AGENTS.md PII-in-logs rule applies even on the suppression path.
       if (isOwnerSmsSilenced(to)) {
-        logger.info(`[OWNER_SMS_DISABLED] suppressed SMS to ${maskPhone(to)} (messageType=${options.messageType || 'n/a'}, bodyLen=${body?.length || 0})`);
-        return { success: true, sid: 'owner-sms-disabled', suppressed: true };
+        logger.info(
+          `[OWNER_SMS_DISABLED] suppressed SMS to ${maskPhone(to)} (messageType=${options.messageType || "n/a"}, bodyLen=${body?.length || 0})`,
+        );
+        return { success: true, sid: "owner-sms-disabled", suppressed: true };
       }
 
-      const { isEnabled } = require('../config/feature-gates');
-      if (!isEnabled('twilioSms')) {
-        logger.info(`[GATE BLOCKED] SMS to ${maskPhone(to)} (messageType=${options.messageType || 'n/a'}, bodyLen=${body?.length || 0}, gate=twilioSms)`);
-        return { success: true, sid: 'gate-blocked', gateBlocked: true };
+      const { isEnabled } = require("../config/feature-gates");
+      if (!isEnabled("twilioSms")) {
+        logger.info(
+          `[GATE BLOCKED] SMS to ${maskPhone(to)} (messageType=${options.messageType || "n/a"}, bodyLen=${body?.length || 0}, gate=twilioSms)`,
+        );
+        return { success: true, sid: "gate-blocked", gateBlocked: true };
       }
 
       // Pre-send guard — rejects messages that look like a template
       // rendering bug (stale month, unsubstituted variables, "undefined",
       // etc.) before they ship to customers. See services/sms-guard.js.
       try {
-        const { validateOutbound } = require('./sms-guard');
-        const hasMedia = Array.isArray(options.mediaUrls) && options.mediaUrls.length > 0;
-        const guard = hasMedia && !String(body || '').trim()
-          ? { ok: true }
-          : validateOutbound(body, { messageType: options.messageType });
+        const { validateOutbound } = require("./sms-guard");
+        const hasMedia =
+          Array.isArray(options.mediaUrls) && options.mediaUrls.length > 0;
+        const guard =
+          hasMedia && !String(body || "").trim()
+            ? { ok: true }
+            : validateOutbound(body, { messageType: options.messageType });
         if (!guard.ok) {
-          logger.warn(`[SMS-GUARD BLOCKED] to=${maskPhone(to)} reason=${guard.reason} messageType=${options.messageType || 'n/a'} bodyLen=${body?.length || 0}`);
+          logger.warn(
+            `[SMS-GUARD BLOCKED] to=${maskPhone(to)} reason=${guard.reason} messageType=${options.messageType || "n/a"} bodyLen=${body?.length || 0}`,
+          );
           // Best-effort alert to the operator so a blocked send gets human eyes.
           // Non-blocking — if the alert path breaks we still refuse the send.
           // Honors OWNER_SMS_DISABLED (the kill switch above only applied to
@@ -162,41 +176,60 @@ const TwilioService = {
           // c.messages.create against ownerPhone, so it needs its own guard).
           (async () => {
             try {
-              const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
+              const ownerPhone = process.env.OWNER_PHONE || "+19413187612";
               if (to !== ownerPhone && !isOwnerSmsSilenced(ownerPhone)) {
                 const c = getClient();
                 if (c) {
-                  await c.messages.create({
-                    to: ownerPhone,
-                    from: options.fromNumber || ownerPhone,
-                    body: `[SMS-GUARD] Blocked outbound to ${maskPhone(to)}\nReason: ${guard.reason}\nMessage type: ${options.messageType || 'n/a'}\nBody length: ${body?.length || 0}`,
-                  }).catch(() => {});
+                  await c.messages
+                    .create({
+                      to: ownerPhone,
+                      from: options.fromNumber || ownerPhone,
+                      body: `[SMS-GUARD] Blocked outbound to ${maskPhone(to)}\nReason: ${guard.reason}\nMessage type: ${options.messageType || "n/a"}\nBody length: ${body?.length || 0}`,
+                    })
+                    .catch(() => {});
                 }
               }
-            } catch { /* alert is best-effort */ }
+            } catch {
+              /* alert is best-effort */
+            }
           })();
-          return { success: false, sid: null, guardBlocked: true, error: guard.reason };
+          return {
+            success: false,
+            sid: null,
+            guardBlocked: true,
+            error: guard.reason,
+          };
         }
       } catch (gErr) {
         // If the guard itself blows up, fail open — missing a legit send is
         // worse than shipping a message the guard would've rejected.
-        logger.warn(`[sms-guard] validator failed (failing open): ${gErr.message}`);
+        logger.warn(
+          `[sms-guard] validator failed (failing open): ${gErr.message}`,
+        );
       }
 
       // Check if this message type has been disabled via SMS Templates admin
-      if (options.messageType && options.messageType !== 'internal_alert') {
+      if (options.messageType && options.messageType !== "internal_alert") {
         try {
-          const templates = require('../routes/admin-sms-templates');
+          const templates = require("../routes/admin-sms-templates");
           const active = await templates.isTemplateActive(options.messageType);
           if (!active) {
-            logger.info(`[SMS DISABLED] Template "${options.messageType}" is off — skipping SMS to ${maskPhone(to)}`);
-            return { success: true, sid: 'template-disabled', templateDisabled: true };
+            logger.info(
+              `[SMS DISABLED] Template "${options.messageType}" is off — skipping SMS to ${maskPhone(to)}`,
+            );
+            return {
+              success: true,
+              sid: "template-disabled",
+              templateDisabled: true,
+            };
           }
-        } catch { /* template check failed — send anyway */ }
+        } catch {
+          /* template check failed — send anyway */
+        }
       }
 
-      const TWILIO_NUMBERS = require('../config/twilio-numbers');
-      const { resolveLocation } = require('../config/locations');
+      const TWILIO_NUMBERS = require("../config/twilio-numbers");
+      const { resolveLocation } = require("../config/locations");
 
       // Determine FROM number — always the customer's location number
       let fromNumber = options.fromNumber;
@@ -206,7 +239,9 @@ const TwilioService = {
 
         if (!locationId && options.customerId) {
           try {
-            const customer = await db('customers').where({ id: options.customerId }).first();
+            const customer = await db("customers")
+              .where({ id: options.customerId })
+              .first();
             if (customer) {
               const loc = resolveLocation(customer.city);
               locationId = loc.id;
@@ -214,17 +249,24 @@ const TwilioService = {
           } catch {}
         }
 
-        fromNumber = TWILIO_NUMBERS.getOutboundNumber(locationId || 'lakewood-ranch');
+        fromNumber = TWILIO_NUMBERS.getOutboundNumber(
+          locationId || "lakewood-ranch",
+        );
       }
       attemptedFrom = fromNumber;
 
       const c = getClient();
       if (!c) {
-        logger.warn(`[twilio] Cannot send SMS — client not initialized. To: ${maskPhone(to)}`);
-        return { success: false, sid: null, error: 'Twilio not configured' };
+        logger.warn(
+          `[twilio] Cannot send SMS — client not initialized. To: ${maskPhone(to)}`,
+        );
+        return { success: false, sid: null, error: "Twilio not configured" };
       }
 
-      const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
+      const domain =
+        process.env.SERVER_DOMAIN ||
+        process.env.RAILWAY_PUBLIC_DOMAIN ||
+        "portal.wavespestcontrol.com";
       const msgPayload = {
         from: fromNumber,
         to,
@@ -239,7 +281,7 @@ const TwilioService = {
       let explicitMedia = [];
       if (Array.isArray(options.mediaUrls) && options.mediaUrls.length > 0) {
         for (const u of options.mediaUrls.slice(0, 10)) {
-          if (typeof u === 'string' && u) urls.push(u);
+          if (typeof u === "string" && u) urls.push(u);
         }
         explicitMedia = urls.map((url, index) => ({ url, index }));
       } else if (options.mediaUrl) {
@@ -248,58 +290,68 @@ const TwilioService = {
       }
       if (urls.length > 0) msgPayload.mediaUrl = urls;
       const message = await c.messages.create(msgPayload);
-      logger.info(`SMS sent to ${maskPhone(to)} from ${maskPhone(fromNumber)}: ${message.sid}`);
+      logger.info(
+        `SMS sent to ${maskPhone(to)} from ${maskPhone(fromNumber)}: ${message.sid}`,
+      );
 
       // Log to sms_log (legacy) AND dual-write to unified messages.
       // PR 2 cuts the inbox read path over to messages; sms_log stays as
       // long as anything still queries it (scheduled-SMS queue, BI scripts).
       try {
-        await db('sms_log').insert({
+        await db("sms_log").insert({
           customer_id: options.customerId || null,
-          direction: 'outbound',
+          direction: "outbound",
           from_phone: fromNumber,
           to_phone: to,
           message_body: body,
           twilio_sid: message.sid,
-          status: 'sent',
-          message_type: options.messageType || 'manual',
+          status: "sent",
+          message_type: options.messageType || "manual",
           admin_user_id: options.adminUserId || null,
-          metadata: options.media ? JSON.stringify({ media: options.media }) : null,
+          metadata: options.media
+            ? JSON.stringify({ media: options.media })
+            : null,
         });
       } catch (logErr) {
         logger.error(`SMS log failed: ${logErr.message}`);
       }
-      require('./conversations').recordTouchpoint({
-        customerId: options.customerId || null,
-        channel: 'sms',
-        ourEndpointId: fromNumber,
-        contactPhone: options.customerId ? null : to,
-        direction: 'outbound',
-        body,
-        authorType: options.adminUserId ? 'admin' : 'system',
-        adminUserId: options.adminUserId || null,
-        twilioSid: message.sid,
-        media: options.media || explicitMedia,
-        messageType: options.messageType || 'manual',
-        deliveryStatus: 'sent',
-      }).catch(() => {});
+      require("./conversations")
+        .recordTouchpoint({
+          customerId: options.customerId || null,
+          channel: "sms",
+          ourEndpointId: fromNumber,
+          contactPhone: options.customerId ? null : to,
+          direction: "outbound",
+          body,
+          authorType: options.adminUserId ? "admin" : "system",
+          adminUserId: options.adminUserId || null,
+          twilioSid: message.sid,
+          media: options.media || explicitMedia,
+          messageType: options.messageType || "manual",
+          deliveryStatus: "sent",
+        })
+        .catch(() => {});
 
       return { success: true, sid: message.sid, fromNumber };
     } catch (err) {
       logger.error(`SMS send failed to ${maskPhone(to)}: ${err.message}`);
-      void require('./twilio-failure-alerts').alertTwilioFailure({
-        channel: 'sms',
-        direction: 'outbound',
-        phase: 'send_api',
-        status: 'failed',
-        errorMessage: err.message,
-        from: attemptedFrom,
-        to,
-        link: '/admin/communications',
-      }).catch((alertErr) => {
-        logger.error(`[twilio-alerts] async notification failed: ${alertErr.message}`);
-      });
-      throw new Error('Failed to send SMS');
+      void require("./twilio-failure-alerts")
+        .alertTwilioFailure({
+          channel: "sms",
+          direction: "outbound",
+          phase: "send_api",
+          status: "failed",
+          errorMessage: err.message,
+          from: attemptedFrom,
+          to,
+          link: "/admin/communications",
+        })
+        .catch((alertErr) => {
+          logger.error(
+            `[twilio-alerts] async notification failed: ${alertErr.message}`,
+          );
+        });
+      throw new Error("Failed to send SMS");
     }
   },
 
@@ -308,33 +360,43 @@ const TwilioService = {
    * Called by cron job the day before scheduled service
    */
   async sendServiceReminder(customerId, scheduledServiceId) {
-    const customer = await db('customers').where({ id: customerId }).first();
-    const service = await db('scheduled_services')
+    const customer = await db("customers").where({ id: customerId }).first();
+    const service = await db("scheduled_services")
       .where({ id: scheduledServiceId })
-      .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
-      .select('scheduled_services.*', 'technicians.name as tech_name')
+      .leftJoin(
+        "technicians",
+        "scheduled_services.technician_id",
+        "technicians.id",
+      )
+      .select("scheduled_services.*", "technicians.name as tech_name")
       .first();
 
     if (!customer || !service) return;
 
     // Check if customer has this notification enabled
-    const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
+    const prefs = await db("notification_prefs")
+      .where({ customer_id: customerId })
+      .first();
     if (!prefs?.service_reminder_24h || !prefs?.sms_enabled) return;
 
-    const timeWindow = service.window_start && service.window_end
-      ? `between ${formatTime(service.window_start)} - ${formatTime(service.window_end)}`
-      : '(time window TBD)';
+    const timeWindow =
+      service.window_start && service.window_end
+        ? `between ${formatTime(service.window_start)} - ${formatTime(service.window_end)}`
+        : "(time window TBD)";
 
-    const body = typeof smsTemplatesRouter.getTemplate === 'function'
-      ? await smsTemplatesRouter.getTemplate('service_reminder_legacy', {
-          first_name: customer.first_name || '',
-          service_type: service.service_type || 'service',
-          time_window: timeWindow,
-          tech_name: service.tech_name || 'TBD',
-        })
-      : null;
+    const body =
+      typeof smsTemplatesRouter.getTemplate === "function"
+        ? await smsTemplatesRouter.getTemplate("service_reminder_legacy", {
+            first_name: customer.first_name || "",
+            service_type: service.service_type || "service",
+            time_window: timeWindow,
+            tech_name: service.tech_name || "TBD",
+          })
+        : null;
     if (!body) {
-      logger.warn(`[twilio] service_reminder_legacy template missing/disabled — skipping reminder for customer ${customerId}`);
+      logger.warn(
+        `[twilio] service_reminder_legacy template missing/disabled — skipping reminder for customer ${customerId}`,
+      );
       return;
     }
 
@@ -351,63 +413,74 @@ const TwilioService = {
    * legacy callers that pass nothing still get a sensible bodyless message.
    */
   async sendTechEnRoute(customerId, techName, etaMinutes, trackToken = null) {
-    const customer = await db('customers').where({ id: customerId }).first();
-    const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
+    const customer = await db("customers").where({ id: customerId }).first();
+    const prefs = await db("notification_prefs")
+      .where({ customer_id: customerId })
+      .first();
     if (!customer || !prefs?.tech_en_route || !prefs?.sms_enabled) return;
 
-    const etaLine = etaMinutes ? `ETA: ~${etaMinutes} minutes.\n` : '';
-    const { getAppointmentContacts } = require('./customer-contact');
+    const etaLine = etaMinutes ? `ETA: ~${etaMinutes} minutes.\n` : "";
+    const { getAppointmentContacts } = require("./customer-contact");
     const contacts = getAppointmentContacts(customer, prefs);
     if (!contacts.length) return;
 
-    const origin = process.env.PUBLIC_PORTAL_URL
-      || process.env.PORTAL_URL
-      || process.env.CLIENT_URL
-      || 'https://portal.wavespestcontrol.com';
+    const origin =
+      process.env.PUBLIC_PORTAL_URL ||
+      process.env.PORTAL_URL ||
+      process.env.CLIENT_URL ||
+      "https://portal.wavespestcontrol.com";
     const longTrackUrl = trackToken ? `${origin}/track/${trackToken}` : null;
     const trackUrl = longTrackUrl
       ? await shortenOrPassthrough(longTrackUrl, {
-        kind: 'tracking',
-        entityType: 'scheduled_services',
-        customerId,
-        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-      })
+          kind: "tracking",
+          entityType: "scheduled_services",
+          customerId,
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        })
       : null;
 
-    const trackClause = trackUrl ? `Track live: ${trackUrl}\n\n` : '';
+    const trackClause = trackUrl ? `Track live: ${trackUrl}\n\n` : "";
 
     const results = [];
-    const { sendCustomerMessage } = require('./messaging/send-customer-message');
+    const {
+      sendCustomerMessage,
+    } = require("./messaging/send-customer-message");
     for (const contact of contacts) {
-      const firstName = contact.name || customer.first_name || '';
+      const firstName = contact.name || customer.first_name || "";
       let body = null;
-      if (typeof smsTemplatesRouter.getTemplate === 'function') {
-        body = await smsTemplatesRouter.getTemplate('tech_en_route', {
+      if (typeof smsTemplatesRouter.getTemplate === "function") {
+        body = await smsTemplatesRouter.getTemplate("tech_en_route", {
           first_name: firstName,
           tech_name: techName,
           eta_line: etaLine,
           track_clause: trackClause,
+          track_url: trackUrl || "",
         });
       }
       if (!body) {
-        logger.warn(`[twilio] tech_en_route template missing/disabled — skipping en-route SMS for customer ${customerId}`);
+        logger.warn(
+          `[twilio] tech_en_route template missing/disabled — skipping en-route SMS for customer ${customerId}`,
+        );
         continue;
       }
-      results.push(await sendCustomerMessage({
-        to: contact.phone,
-        body,
-        channel: 'sms',
-        audience: 'customer',
-        purpose: 'tech_en_route',
-        customerId,
-        identityTrustLevel: contact.role === 'service_contact'
-          ? 'service_contact_authorized'
-          : 'phone_matches_customer',
-        metadata: { original_message_type: 'tech_en_route' },
-      }));
+      results.push(
+        await sendCustomerMessage({
+          to: contact.phone,
+          body,
+          channel: "sms",
+          audience: "customer",
+          purpose: "tech_en_route",
+          customerId,
+          identityTrustLevel:
+            contact.role === "service_contact"
+              ? "service_contact_authorized"
+              : "phone_matches_customer",
+          metadata: { original_message_type: "tech_en_route" },
+        }),
+      );
     }
 
-    return { success: results.some(r => r?.sent), results };
+    return { success: results.some((r) => r?.sent), results };
   },
 
   /**
@@ -418,47 +491,56 @@ const TwilioService = {
    * appointment-progress class, but the copy must not say "on the way".
    */
   async sendTechArrived(customerId, techName) {
-    const customer = await db('customers').where({ id: customerId }).first();
-    const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
+    const customer = await db("customers").where({ id: customerId }).first();
+    const prefs = await db("notification_prefs")
+      .where({ customer_id: customerId })
+      .first();
     if (!customer || !prefs?.tech_en_route || !prefs?.sms_enabled) return;
 
-    const { getAppointmentContacts } = require('./customer-contact');
+    const { getAppointmentContacts } = require("./customer-contact");
     const contacts = getAppointmentContacts(customer, prefs);
     if (!contacts.length) return;
 
     const results = [];
-    const { sendCustomerMessage } = require('./messaging/send-customer-message');
+    const {
+      sendCustomerMessage,
+    } = require("./messaging/send-customer-message");
     for (const contact of contacts) {
-      const firstName = contact.name || customer.first_name || '';
+      const firstName = contact.name || customer.first_name || "";
       let body = null;
-      if (typeof smsTemplatesRouter.getTemplate === 'function') {
-        body = await smsTemplatesRouter.getTemplate('tech_arrived', {
+      if (typeof smsTemplatesRouter.getTemplate === "function") {
+        body = await smsTemplatesRouter.getTemplate("tech_arrived", {
           first_name: firstName,
-          tech_name: techName || 'Your Waves technician',
+          tech_name: techName || "Your Waves technician",
         });
       }
       if (!body) {
-        logger.warn(`[twilio] tech_arrived template missing/disabled — skipping arrival SMS for customer ${customerId}`);
+        logger.warn(
+          `[twilio] tech_arrived template missing/disabled — skipping arrival SMS for customer ${customerId}`,
+        );
         continue;
       }
-      results.push(await sendCustomerMessage({
-        to: contact.phone,
-        body,
-        channel: 'sms',
-        audience: 'customer',
-        purpose: 'tech_en_route',
-        customerId,
-        identityTrustLevel: contact.role === 'service_contact'
-          ? 'service_contact_authorized'
-          : 'phone_matches_customer',
-        metadata: {
-          original_message_type: 'tech_en_route',
-          appointment_progress_event: 'tech_arrived',
-        },
-      }));
+      results.push(
+        await sendCustomerMessage({
+          to: contact.phone,
+          body,
+          channel: "sms",
+          audience: "customer",
+          purpose: "tech_en_route",
+          customerId,
+          identityTrustLevel:
+            contact.role === "service_contact"
+              ? "service_contact_authorized"
+              : "phone_matches_customer",
+          metadata: {
+            original_message_type: "tech_en_route",
+            appointment_progress_event: "tech_arrived",
+          },
+        }),
+      );
     }
 
-    return { success: results.some(r => r?.sent), results };
+    return { success: results.some((r) => r?.sent), results };
   },
 
   /**
@@ -466,53 +548,70 @@ const TwilioService = {
    * Called after tech completes service and submits notes
    */
   async sendServiceCompletedSummary(customerId, serviceRecordId) {
-    const customer = await db('customers').where({ id: customerId }).first();
-    const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
+    const customer = await db("customers").where({ id: customerId }).first();
+    const prefs = await db("notification_prefs")
+      .where({ customer_id: customerId })
+      .first();
     if (!customer || !prefs?.service_completed || !prefs?.sms_enabled) return;
 
-    const service = await db('service_records')
+    const service = await db("service_records")
       .where({ id: serviceRecordId })
-      .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
-      .select('service_records.*', 'technicians.name as tech_name')
+      .leftJoin(
+        "technicians",
+        "service_records.technician_id",
+        "technicians.id",
+      )
+      .select("service_records.*", "technicians.name as tech_name")
       .first();
 
-    const products = await db('service_products')
+    const products = await db("service_products")
       .where({ service_record_id: serviceRecordId })
-      .select('product_name');
+      .select("product_name");
 
-    const productList = products.map(p => p.product_name).join(', ');
+    const productList = products.map((p) => p.product_name).join(", ");
 
-    const body = typeof smsTemplatesRouter.getTemplate === 'function'
-      ? await smsTemplatesRouter.getTemplate('service_complete', {
-          first_name: customer.first_name || '',
-        })
-      : null;
+    const body =
+      typeof smsTemplatesRouter.getTemplate === "function"
+        ? await smsTemplatesRouter.getTemplate("service_complete", {
+            first_name: customer.first_name || "",
+          })
+        : null;
     if (!body) {
-      logger.warn(`[twilio] service_complete template missing/disabled — skipping summary for customer ${customerId}`);
+      logger.warn(
+        `[twilio] service_complete template missing/disabled — skipping summary for customer ${customerId}`,
+      );
       return;
     }
 
-    return this.sendSMS(customer.phone, body, { customerId: customerId, messageType: 'service_complete' });
+    return this.sendSMS(customer.phone, body, {
+      customerId: customerId,
+      messageType: "service_complete",
+    });
   },
 
   /**
    * Send monthly billing reminder
    */
   async sendBillingReminder(customerId, amount, date) {
-    const customer = await db('customers').where({ id: customerId }).first();
-    const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
+    const customer = await db("customers").where({ id: customerId }).first();
+    const prefs = await db("notification_prefs")
+      .where({ customer_id: customerId })
+      .first();
     if (!customer || !prefs?.billing_reminder || !prefs?.sms_enabled) return;
 
-    const body = typeof smsTemplatesRouter.getTemplate === 'function'
-      ? await smsTemplatesRouter.getTemplate('billing_reminder', {
-          first_name: customer.first_name || '',
-          waveguard_tier: customer.waveguard_tier || '',
-          amount: amount.toFixed(2),
-          charge_date: date,
-        })
-      : null;
+    const body =
+      typeof smsTemplatesRouter.getTemplate === "function"
+        ? await smsTemplatesRouter.getTemplate("billing_reminder", {
+            first_name: customer.first_name || "",
+            waveguard_tier: customer.waveguard_tier || "",
+            amount: amount.toFixed(2),
+            charge_date: date,
+          })
+        : null;
     if (!body) {
-      logger.warn(`[twilio] billing_reminder template missing/disabled — skipping for customer ${customerId}`);
+      logger.warn(
+        `[twilio] billing_reminder template missing/disabled — skipping for customer ${customerId}`,
+      );
       return;
     }
 
@@ -523,18 +622,23 @@ const TwilioService = {
    * Send seasonal tip / pest alert
    */
   async sendSeasonalAlert(customerId, subject, tip) {
-    const customer = await db('customers').where({ id: customerId }).first();
-    const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
+    const customer = await db("customers").where({ id: customerId }).first();
+    const prefs = await db("notification_prefs")
+      .where({ customer_id: customerId })
+      .first();
     if (!customer || !prefs?.seasonal_tips || !prefs?.sms_enabled) return;
 
-    const body = typeof smsTemplatesRouter.getTemplate === 'function'
-      ? await smsTemplatesRouter.getTemplate('seasonal_alert', {
-          first_name: customer.first_name || '',
-          tip,
-        })
-      : null;
+    const body =
+      typeof smsTemplatesRouter.getTemplate === "function"
+        ? await smsTemplatesRouter.getTemplate("seasonal_alert", {
+            first_name: customer.first_name || "",
+            tip,
+          })
+        : null;
     if (!body) {
-      logger.warn(`[twilio] seasonal_alert template missing/disabled — skipping for customer ${customerId}`);
+      logger.warn(
+        `[twilio] seasonal_alert template missing/disabled — skipping for customer ${customerId}`,
+      );
       return;
     }
 
@@ -544,11 +648,11 @@ const TwilioService = {
 
 // Helper
 function formatTime(timeStr) {
-  if (!timeStr) return '';
-  const [h, m] = timeStr.split(':').map(Number);
-  const ampm = h >= 12 ? 'PM' : 'AM';
+  if (!timeStr) return "";
+  const [h, m] = timeStr.split(":").map(Number);
+  const ampm = h >= 12 ? "PM" : "AM";
   const hr = h % 12 || 12;
-  return `${hr}:${String(m).padStart(2, '0')} ${ampm}`;
+  return `${hr}:${String(m).padStart(2, "0")} ${ampm}`;
 }
 
 module.exports = TwilioService;
