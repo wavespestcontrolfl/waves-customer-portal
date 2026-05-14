@@ -5,6 +5,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { performPropertyLookup } = require('./property-lookup-v2');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
+const { normalizeLeadAddress } = require('../utils/address-normalizer');
 
 // Aggressive rate limit — each lookup spends real AI + Google Maps dollars.
 // 5 per IP per hour is enough for a real lead to iterate on
@@ -37,12 +38,29 @@ function publicPropertySummary(record) {
 router.post('/property-lookup', lookupLimiter, async (req, res) => {
   try {
     const { firstName, lastName, email, phone, address, attribution } = req.body || {};
+    const normalizedAddress = normalizeLeadAddress({
+      raw: address,
+      line1: req.body.address_line1 || req.body.addressLine1,
+      city: req.body.city,
+      state: req.body.state,
+      zip: req.body.zip,
+      placeId: req.body.google_place_id || req.body.googlePlaceId,
+      components: req.body.address_components || req.body.addressComponents,
+    });
+    const lookupAddress = normalizedAddress.fullAddress || String(address || '').trim();
+    const streetForValidation = normalizedAddress.line1 || String(address || '').trim();
 
     if (!firstName || !lastName) return res.status(400).json({ error: 'Name required.' });
     if (!/^\S+@\S+\.\S+$/.test(email || '')) return res.status(400).json({ error: 'Valid email required.' });
     const normPhone = normalizePhone(phone);
     if (!normPhone) return res.status(400).json({ error: 'Valid 10-digit phone required.' });
-    if (!address || String(address).trim().length < 5) return res.status(400).json({ error: 'Address required.' });
+    if (
+      !lookupAddress
+      || !streetForValidation
+      || streetForValidation.length < 5
+      || !/\d/.test(streetForValidation)
+      || !/[A-Za-z]/.test(streetForValidation)
+    ) return res.status(400).json({ error: 'Address required.' });
 
     const attr = (attribution && typeof attribution === 'object') ? attribution : null;
     const gclid = attr?.gclid ? String(attr.gclid).slice(0, 255) : null;
@@ -55,7 +73,9 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       last_name: lastName,
       email: String(email).toLowerCase().trim(),
       phone: normPhone,
-      address: String(address).trim(),
+      address: lookupAddress,
+      city: normalizedAddress.city || null,
+      zip: normalizedAddress.zip || null,
       lead_type: 'quote_wizard',
       first_contact_channel: 'website_quote',
       lead_source_id: sourceMeta.leadSourceId,
@@ -66,6 +86,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         utm: attr?.utm || null,
         referrer: attr?.referrer || null,
         landing_url: attr?.landing_url || null,
+        address: normalizedAddress,
       }),
     }).returning(['id']);
 
@@ -74,7 +95,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       return res.status(500).json({ error: 'Property lookup failed. Please call (941) 297-5749 to speak with our team.' });
     }
 
-    const result = await performPropertyLookup(address);
+    const result = await performPropertyLookup(lookupAddress);
     const propertyRecord = publicPropertySummary(result.propertyRecord || result.rentcast);
 
     // Persist the enriched profile on the lead so a stale/abandoned row is
@@ -91,6 +112,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
           utm: attr?.utm || null,
           referrer: attr?.referrer || null,
           landing_url: attr?.landing_url || null,
+          address: normalizedAddress,
         }),
         updated_at: new Date(),
       });

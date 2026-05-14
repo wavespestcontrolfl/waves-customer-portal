@@ -13,6 +13,7 @@ const { etDateString } = require('../utils/datetime-et');
 const { isEnabled } = require('../config/feature-gates');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
+const { normalizeLeadAddress } = require('../utils/address-normalizer');
 
 function notifyTwilioFailure(payload) {
   void alertTwilioFailure(payload).catch((alertErr) => {
@@ -43,7 +44,18 @@ router.post('/', async (req, res) => {
     const rawName = body.first_name || body['First Things First Whats Your Name'] || body.name || body.full_name || findField(body, /name/i) || '';
     const email = body.email || body['Whats Your Best Email'] || findField(body, /email/i) || '';
     const rawPhone = body.phone || body['Got A Number We Can Call Or Text'] || findField(body, /number|phone|call|text/i) || '';
-    const address = body.address || body['And Whats Your Address'] || findField(body, /address/i) || '';
+    const rawAddress = body.address || body['And Whats Your Address'] || findField(body, /address/i) || '';
+    const normalizedAddress = normalizeLeadAddress({
+      raw: rawAddress,
+      line1: body.address_line1 || body.addressLine1,
+      city: body.city,
+      state: body.state,
+      zip: body.zip,
+      placeId: body.google_place_id || body.googlePlaceId,
+      components: body.address_components || body.addressComponents,
+    });
+    const address = normalizedAddress.line1 || rawAddress;
+    const fullAddress = normalizedAddress.fullAddress || rawAddress;
 
     // Attribution can arrive in two shapes:
     //   1. Flat top-level fields (legacy callers, GHL forms, etc.):
@@ -173,6 +185,9 @@ router.post('/', async (req, res) => {
       if (!existing.lead_source_detail) updates.lead_source_detail = leadSource.detail;
       if (!existing.email && email) updates.email = email;
       if (!existing.address_line1 && address) updates.address_line1 = address;
+      if (!existing.city && normalizedAddress.city) updates.city = normalizedAddress.city;
+      if (!existing.state && normalizedAddress.state) updates.state = normalizedAddress.state;
+      if (!existing.zip && normalizedAddress.zip) updates.zip = normalizedAddress.zip;
 
       await db('customers').where({ id: existing.id }).update(updates);
 
@@ -192,7 +207,10 @@ router.post('/', async (req, res) => {
       const [newCust] = await db('customers').insert({
         first_name: firstName, last_name: lastName,
         phone: phoneFormatted, email: email || null,
-        address_line1: address || '', city: leadSource.area || '', state: 'FL', zip: '',
+        address_line1: address || '',
+        city: normalizedAddress.city || leadSource.area || '',
+        state: normalizedAddress.state || 'FL',
+        zip: normalizedAddress.zip || '',
         referral_code: code,
         lead_source: leadSource.source,
         lead_source_detail: leadSource.detail,
@@ -217,8 +235,8 @@ router.post('/', async (req, res) => {
       await db('customer_interactions').insert({
         customer_id: customer.id, interaction_type: 'note',
         subject: `New lead from ${leadSource.detail || leadSource.source}`,
-        body: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}. Address: ${address || 'not provided'}.`,
-        metadata: JSON.stringify({ leadSource, formId }),
+        body: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}. Address: ${fullAddress || 'not provided'}.`,
+        metadata: JSON.stringify({ leadSource, formId, address: normalizedAddress }),
       });
 
       await PipelineManager.onEvent(customer.id, 'lead_created');
@@ -359,14 +377,14 @@ router.post('/', async (req, res) => {
             link: '/admin/leads',
           });
           await TwilioService.sendSMS(ADAM_CELL,
-            `🔔 New lead!\n${firstName} ${lastName}\n📞 ${phoneFormatted}\n📍 ${address || 'No address'}\n🌐 ${leadSource.detail || leadSource.source}\n${utmCampaign ? '📊 Campaign: ' + utmCampaign : ''}`,
+            `🔔 New lead!\n${firstName} ${lastName}\n📞 ${phoneFormatted}\n📍 ${fullAddress || 'No address'}\n🌐 ${leadSource.detail || leadSource.source}\n${utmCampaign ? '📊 Campaign: ' + utmCampaign : ''}`,
             { messageType: 'internal_alert' }
           );
         }
       } else {
         // After hours: SMS alert only
         await TwilioService.sendSMS(ADAM_CELL,
-          `🔔 New lead!\n${firstName} ${lastName}\n📞 ${phoneFormatted}\n📍 ${address || 'No address'}\n🌐 ${leadSource.detail || leadSource.source}\n${utmCampaign ? '📊 Campaign: ' + utmCampaign : ''}`,
+          `🔔 New lead!\n${firstName} ${lastName}\n📞 ${phoneFormatted}\n📍 ${fullAddress || 'No address'}\n🌐 ${leadSource.detail || leadSource.source}\n${utmCampaign ? '📊 Campaign: ' + utmCampaign : ''}`,
           { messageType: 'internal_alert' }
         );
       }
@@ -446,7 +464,7 @@ router.post('/', async (req, res) => {
         customer_name: `${firstName} ${lastName}`,
         customer_phone: phoneFormatted,
         customer_email: email || null,
-        address: address || '',
+        address: fullAddress || '',
         status: 'draft',
         source: 'lead_webhook',
         service_interest: serviceInterest || null,
@@ -466,7 +484,8 @@ router.post('/', async (req, res) => {
       const [newLead] = await db('leads').insert({
         first_name: firstName, last_name: lastName,
         phone: phoneFormatted, email: email || null,
-        address: address || '', city: leadSource.area || '',
+        address: fullAddress || '',
+        city: normalizedAddress.city || leadSource.area || '',
         lead_source_id: leadSourceId,
         lead_type: 'form_submission',
         service_interest: serviceInterestField || null,
@@ -485,7 +504,7 @@ router.post('/', async (req, res) => {
     // Fire-and-forget AI triage
     if (leadRecord) {
       const messageText = body.message || body['Message'] || body.service_interest || body['What Can We Help You With'] || findField(body, /service|help|pest|lawn|message/i) || '';
-      aiTriageLead({ name: `${firstName} ${lastName}`, phone: phoneFormatted, message: messageText, address, pageUrl, formName })
+      aiTriageLead({ name: `${firstName} ${lastName}`, phone: phoneFormatted, message: messageText, address: fullAddress, pageUrl, formName })
         .then(async (triageResult) => {
           if (!triageResult) return;
           try {
@@ -528,8 +547,8 @@ router.post('/', async (req, res) => {
         phone: phoneFormatted,
         name: `${firstName} ${lastName}`,
         message: messageText,
-        address: address || '',
-        city: leadSource.area || '',
+        address: fullAddress || '',
+        city: normalizedAddress.city || leadSource.area || '',
         leadSource: leadSource.source,
         pageUrl: pageUrl || '',
         formName: formName || '',

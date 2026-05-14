@@ -12,6 +12,7 @@ const AutomationRunner = require('../services/automation-runner');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { normalizeLeadAddress } = require('../utils/address-normalizer');
 
 const WAVES_ADMIN_PHONE = '+19413187612';
 const PORTAL_BASE_URL = 'https://portal.wavespestcontrol.com';
@@ -44,8 +45,22 @@ function normalizePhone(raw) {
 router.post('/calculate', quoteLimiter, async (req, res) => {
   try {
     const { leadId, firstName, lastName, email, phone, address, city, zip, homeSqFt, lotSqFt, stories, propertyType, enriched, services, attribution } = req.body || {};
+    const normalizedAddress = normalizeLeadAddress({
+      raw: address,
+      line1: req.body.address_line1 || req.body.addressLine1,
+      city,
+      state: req.body.state,
+      zip,
+      placeId: req.body.google_place_id || req.body.googlePlaceId,
+      components: req.body.address_components || req.body.addressComponents,
+    });
+    const quoteAddress = normalizedAddress.line1 || address;
+    const quoteCity = normalizedAddress.city || city || '';
+    const quoteState = normalizedAddress.state || 'FL';
+    const quoteZip = normalizedAddress.zip || zip || '';
+    const quoteFullAddress = normalizedAddress.fullAddress || [quoteAddress, quoteCity, [quoteState, quoteZip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
 
-    if (!firstName || !lastName || !email || !phone || !address) {
+    if (!firstName || !lastName || !email || !phone || !quoteAddress) {
       return res.status(400).json({ error: 'Missing required contact or address fields.' });
     }
     if (!services || (!services.pest && !services.lawn)) {
@@ -125,6 +140,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       utm: attr?.utm || null,
       referrer: attr?.referrer || null,
       landing_url: attr?.landing_url || null,
+      address: normalizedAddress,
     });
 
     // If the property-lookup step already captured a lead row, update it
@@ -138,9 +154,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         last_name: lastName,
         email: email.toLowerCase().trim(),
         phone: normalizedPhone || phone,
-        address: [address, city, zip].filter(Boolean).join(', '),
-        city: city || null,
-        zip: zip || null,
+        address: quoteFullAddress,
+        city: quoteCity || null,
+        zip: quoteZip || null,
         service_interest: serviceInterest,
         monthly_value: monthly,
         extracted_data: extractedData,
@@ -161,9 +177,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         last_name: lastName,
         email: email.toLowerCase().trim(),
         phone: normalizedPhone || phone,
-        address: [address, city, zip].filter(Boolean).join(', '),
-        city: city || null,
-        zip: zip || null,
+        address: quoteFullAddress,
+        city: quoteCity || null,
+        zip: quoteZip || null,
         service_interest: serviceInterest,
         lead_type: 'quote_wizard',
         first_contact_channel: 'website_quote',
@@ -217,11 +233,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         if (!existingCust.lead_source) updates.lead_source = 'website_quote';
         if (!existingCust.lead_source_detail) updates.lead_source_detail = sourceMeta.leadSourceDetail;
         if (!existingCust.lead_source_channel) updates.lead_source_channel = 'quote_wizard';
-        if (!existingCust.lead_source_area && city) updates.lead_source_area = String(city).slice(0, 50);
+        if (!existingCust.lead_source_area && quoteCity) updates.lead_source_area = String(quoteCity).slice(0, 50);
         if (!existingCust.email && emailLc) updates.email = emailLc;
-        if (!existingCust.address_line1 && address) updates.address_line1 = address;
-        if (!existingCust.city && city) updates.city = city;
-        if (!existingCust.zip && zip) updates.zip = zip;
+        if (!existingCust.address_line1 && quoteAddress) updates.address_line1 = quoteAddress;
+        if (!existingCust.city && quoteCity) updates.city = quoteCity;
+        if (!existingCust.state && quoteState) updates.state = quoteState;
+        if (!existingCust.zip && quoteZip) updates.zip = quoteZip;
         if (existingCust.latitude == null && ep.lat) updates.latitude = ep.lat;
         if (existingCust.longitude == null && ep.lng) updates.longitude = ep.lng;
         if (existingCust.property_sqft == null && sqft) updates.property_sqft = sqft;
@@ -237,10 +254,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           last_name: lastName,
           email: emailLc,
           phone: normalizedPhone || phone,
-          address_line1: address,
-          city: city || '',
-          state: 'FL',
-          zip: zip || '',
+          address_line1: quoteAddress,
+          city: quoteCity || '',
+          state: quoteState || 'FL',
+          zip: quoteZip || '',
           latitude: ep.lat || null,
           longitude: ep.lng || null,
           property_sqft: sqft,
@@ -250,7 +267,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           lead_source: 'website_quote',
           lead_source_detail: sourceMeta.leadSourceDetail,
           lead_source_channel: 'quote_wizard',
-          lead_source_area: city ? String(city).slice(0, 50) : null,
+          lead_source_area: quoteCity ? String(quoteCity).slice(0, 50) : null,
           lead_service_interest: serviceInterestForCustomer,
           landing_page_url: landingForCustomer,
           utm_data: attr?.utm || null,
@@ -277,7 +294,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // lookup resolves; pre-stringifying risks pg storing it as a json string
     // scalar.
     try {
-      const fullAddress = [address, city, zip].filter(Boolean).join(', ');
       const estimateDataObj = {
         lead_id: lead.id,
         services,
@@ -294,7 +310,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         customer_name: `${firstName} ${lastName}`,
         customer_phone: normalizedPhone || phone,
         customer_email: email.toLowerCase().trim(),
-        address: fullAddress,
+        address: quoteFullAddress,
         monthly_total: monthly,
         annual_total: annual,
         service_interest: serviceInterest,
@@ -316,7 +332,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       await NotificationService.notifyAdmin(
         'new_lead',
         `Calculator quote: ${firstName} ${lastName}`,
-        `${serviceInterest} · $${Math.round(monthly)}/mo · ${address}`,
+        `${serviceInterest} · $${Math.round(monthly)}/mo · ${quoteFullAddress}`,
         { icon: '\u{1F4B0}', link: '/admin/leads', metadata: { leadId: lead.id } }
       );
     } catch (e) {
@@ -329,7 +345,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // via /api/leads (lead-webhook.js), where admin follow-up is actually needed.
     try {
       await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
-        `\u{1F514} Quote-wizard lead!\n${firstName} ${lastName}\n\u{1F4DE} ${normalizedPhone || phone}\n\u{1F4CD} ${address || 'No address'}\n\u{1F4B0} ${serviceInterest} · $${Math.round(monthly)}/mo`,
+        `\u{1F514} Quote-wizard lead!\n${firstName} ${lastName}\n\u{1F4DE} ${normalizedPhone || phone}\n\u{1F4CD} ${quoteFullAddress || 'No address'}\n\u{1F4B0} ${serviceInterest} · $${Math.round(monthly)}/mo`,
         { messageType: 'internal_alert' }
       );
     } catch (e) { logger.error(`[public-quote] Admin SMS failed: ${e.message}`); }
