@@ -379,28 +379,29 @@ const TwilioService = {
       .first();
     if (!prefs?.service_reminder_24h || !prefs?.sms_enabled) return;
 
-    const timeWindow =
-      service.window_start && service.window_end
-        ? `between ${formatTime(service.window_start)} - ${formatTime(service.window_end)}`
-        : "(time window TBD)";
+    const time = service.window_start
+      ? formatTime(service.window_start)
+      : "a time to be confirmed";
 
     const body =
       typeof smsTemplatesRouter.getTemplate === "function"
-        ? await smsTemplatesRouter.getTemplate("service_reminder_legacy", {
+        ? await smsTemplatesRouter.getTemplate("reminder_24h", {
             first_name: customer.first_name || "",
             service_type: service.service_type || "service",
-            time_window: timeWindow,
-            tech_name: service.tech_name || "TBD",
+            time,
           })
         : null;
     if (!body) {
       logger.warn(
-        `[twilio] service_reminder_legacy template missing/disabled — skipping reminder for customer ${customerId}`,
+        `[twilio] reminder_24h template missing/disabled — skipping reminder for customer ${customerId}`,
       );
       return;
     }
 
-    return this.sendSMS(customer.phone, body);
+    return this.sendSMS(customer.phone, body, {
+      customerId,
+      messageType: "appointment_reminder",
+    });
   },
 
   /**
