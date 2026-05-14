@@ -22,36 +22,40 @@
 const PROTOCOL_KEY = 'ext_gp_perim';
 const PROTOCOL_VERSION = 'v1';
 
-// Canonical strings the resolver should treat as routine exterior
-// General Pest Control. Three naming conventions coexist in the
-// codebase (booking flow / service library / legacy customer rows),
-// so the alias list covers all three:
+// Canonical strings the resolver should treat as routine RECURRING
+// exterior General Pest Control. Multiple naming conventions coexist
+// in the codebase because of historical renames and a partial
+// normalization pass (migration 20260507000002):
 //
-//   "General Pest Control (cadence)" — admin / service-library form
-//   "cadence Pest Control Service"   — current scheduler/booking labels
-//   bare "cadence Pest Control"       — legacy form on long-tenured customers
+//   "General Pest Control (cadence)"        — pre-normalization admin/service-library
+//   "General Pest Control Service (cadence)" — post-normalization (Bi-Monthly + Semiannual got the generic " Service" infix; the migration didn't change DB rows it never visited)
+//   "cadence Pest Control Service"           — current scheduler/booking labels (Monthly + Quarterly were explicitly renamed to this form)
+//   bare "cadence Pest Control"              — legacy form on long-tenured customer rows
 //
-// Future PRs can extend this list (or seed a new template version
-// with broader/narrower coverage).
-//
-// Intentionally EXCLUDED:
+// Intentionally EXCLUDED — these are NOT recurring exterior general pest:
 //   'General Pest Control + Lawn Care'      — combo service, different protocol
 //   'Quarterly Pest Control — Residential'  — marketing label, not scheduler form
+//   'General Pest Control (Initial)'        — initial/startup visits have different scope (interior treatment, more thorough first visit). Codex round-4 P1 — including this would let initial visits attest to the recurring perimeter protocol incorrectly.
+//   'Pest Control Service'                  — bare "Pest Control Service" (no cadence prefix) is the ONE-TIME pest job in the scheduler fallback (admin-schedule.js:2839). Codex round-4 P1 — recurring template would mis-attest a one-time job.
 const SERVICE_TYPE_ALIASES = [
-  // "General Pest Control (cadence)" form
+  // "General Pest Control (cadence)" pre-normalization form
   'General Pest Control',
-  'General Pest Control (Initial)',
   'General Pest Control (Monthly)',
   'General Pest Control (Bi-Monthly)',
   'General Pest Control (Quarterly)',
   'General Pest Control (Semiannual)',
-  // "cadence Pest Control Service" form (current scheduler)
-  'Pest Control Service',
+  // "General Pest Control Service (cadence)" post-normalization form
+  // (codex round-4 P2 — Bi-Monthly + Semiannual were only re-cast by
+  // the generic regex pass; Monthly + Quarterly got explicit renames
+  // to the "cadence Pest Control Service" form below)
+  'General Pest Control Service (Bi-Monthly)',
+  'General Pest Control Service (Semiannual)',
+  // "cadence Pest Control Service" form (current scheduler / booking)
   'Monthly Pest Control Service',
   'Bi-Monthly Pest Control Service',
   'Quarterly Pest Control Service',
   'Semiannual Pest Control Service',
-  // Bare cadence + Pest Control (legacy)
+  // Bare cadence + Pest Control (legacy customer rows)
   'Monthly Pest Control',
   'Bi-Monthly Pest Control',
   'Quarterly Pest Control',
