@@ -17,6 +17,13 @@ const LOGIN_TOOLS = [
   { icon: 'document', label: 'Documents', text: 'Agreements and reports' },
 ];
 
+const PORTAL_FOOTER_LOCATIONS = [
+  { label: 'Lakewood Ranch', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Lakewood%20Ranch&query_place_id=ChIJVbBOKGYyTCgRVFz8_lu61Mw' },
+  { label: 'Parrish', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Parrish&query_place_id=ChIJM32aQRIlw4gRr7goqhbAVpw' },
+  { label: 'Sarasota', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Sarasota&query_place_id=ChIJeT_63_Y5w4gRGTNLozgSmdw' },
+  { label: 'Venice', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Venice&query_place_id=ChIJ81vmrblZw4gRREDmlDUpq0E' },
+];
+
 function normalizeAuthError(error) {
   if (!error) return '';
   if (error === 'No account found for this phone number') {
@@ -436,6 +443,30 @@ export default function LoginPage() {
           gap: 12px;
           flex-wrap: wrap;
         }
+        .portal-login-footer a {
+          color: inherit;
+          text-decoration: none;
+        }
+        .portal-login-footer a:hover {
+          color: var(--login-blue);
+        }
+        .portal-login-footer-brand {
+          color: var(--login-blue);
+          font-weight: 850;
+        }
+        .portal-login-footer-cities {
+          display: inline-flex;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 6px;
+          flex-wrap: wrap;
+        }
+        .portal-login-footer-city {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          font-weight: 800;
+        }
         @media (max-width: 820px) {
           .portal-login-page {
             align-items: flex-start;
@@ -474,7 +505,7 @@ export default function LoginPage() {
         <section className="portal-login-brand" aria-labelledby="portal-login-heading">
           <a className="portal-login-logo" href="https://wavespestcontrol.com">
             <img src="/waves-logo.png" alt="Waves" />
-            <span>Waves Pest Control</span>
+            <span>Waves Customer Portal</span>
           </a>
           <div className="portal-login-eyebrow">
             <Icon name="lock" size={15} strokeWidth={2.2} />
@@ -628,8 +659,19 @@ export default function LoginPage() {
           </div>
 
           <div className="portal-login-footer">
-            <span>Waves Pest Control</span>
-            <span>Lakewood Ranch, Sarasota, Venice</span>
+            <a className="portal-login-footer-brand" href="https://wavespestcontrol.com/" target="_blank" rel="noopener noreferrer">
+              Waves Customer Portal
+            </a>
+            <span className="portal-login-footer-cities">
+              {PORTAL_FOOTER_LOCATIONS.map((location, index) => (
+                <span className="portal-login-footer-city" key={location.label}>
+                  {index > 0 && <span aria-hidden="true">·</span>}
+                  <a href={location.href} target="_blank" rel="noopener noreferrer">
+                    {location.label}
+                  </a>
+                </span>
+              ))}
+            </span>
           </div>
         </section>
       </div>

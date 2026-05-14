@@ -10336,7 +10336,7 @@ export default function PortalPage() {
         flexWrap: 'wrap',
       }}>
         <a href="https://wavespestcontrol.com/" target="_blank" rel="noopener noreferrer" style={{ color: B.blueDeeper, fontWeight: 850, textDecoration: 'none' }}>
-          Waves Pest Control
+          Waves Customer Portal
         </a>
         <span style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
           {PORTAL_FOOTER_LOCATIONS.map((location, index) => (
