@@ -25,9 +25,12 @@ router.get('/', async (req, res, next) => {
     let query = db('service_records')
       .where({ 'service_records.customer_id': req.customerId })
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
+      .leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id')
       .select(
         'service_records.*',
-        'technicians.name as technician_name'
+        'technicians.name as technician_name',
+        db.raw('COALESCE(scheduled_services.check_in_time, scheduled_services.actual_start_time) as effective_check_in_time'),
+        db.raw('COALESCE(scheduled_services.check_out_time, scheduled_services.actual_end_time) as effective_check_out_time')
       )
       .orderBy('service_records.service_date', 'desc')
       .orderBy('service_records.id', 'desc')
@@ -58,6 +61,8 @@ router.get('/', async (req, res, next) => {
         type: svc.service_type,
         status: svc.status || null,
         technician: svc.technician_name || null,
+        checkInTime: svc.effective_check_in_time || null,
+        checkOutTime: svc.effective_check_out_time || null,
         notes: svc.technician_notes || null,
         soilTemp: svc.soil_temp ? parseFloat(svc.soil_temp) : null,
         thatchMeasurement: svc.thatch_measurement ? parseFloat(svc.thatch_measurement) : null,
@@ -99,7 +104,13 @@ router.get('/:id', async (req, res, next) => {
     const service = await db('service_records')
       .where({ 'service_records.id': req.params.id, 'service_records.customer_id': req.customerId })
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
-      .select('service_records.*', 'technicians.name as technician_name')
+      .leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id')
+      .select(
+        'service_records.*',
+        'technicians.name as technician_name',
+        db.raw('COALESCE(scheduled_services.check_in_time, scheduled_services.actual_start_time) as effective_check_in_time'),
+        db.raw('COALESCE(scheduled_services.check_out_time, scheduled_services.actual_end_time) as effective_check_out_time')
+      )
       .first();
 
     if (!service) {
@@ -127,6 +138,8 @@ router.get('/:id', async (req, res, next) => {
       type: service.service_type,
       status: service.status,
       technician: service.technician_name,
+      checkInTime: service.effective_check_in_time || null,
+      checkOutTime: service.effective_check_out_time || null,
       notes: service.technician_notes,
       measurements: {
         soilTemp: service.soil_temp ? parseFloat(service.soil_temp) : null,
