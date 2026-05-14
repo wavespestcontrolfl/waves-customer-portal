@@ -45,6 +45,19 @@ function cacheRoute(ttlSeconds) {
   };
 }
 
+function clearRouteCacheForRequest(req, matches) {
+  const prefix = `${userKey(req)}::`;
+  const filters = Array.isArray(matches) ? matches.filter(Boolean) : [];
+  let deleted = 0;
+  for (const key of buckets.keys()) {
+    if (!key.startsWith(prefix)) continue;
+    if (filters.length && !filters.some((filter) => key.includes(filter))) continue;
+    buckets.delete(key);
+    deleted++;
+  }
+  return deleted;
+}
+
 // Periodic sweep so a long-running process doesn't accumulate stale
 // entries forever. Runs every 5 minutes.
 setInterval(() => {
@@ -54,4 +67,4 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000).unref();
 
-module.exports = { cacheRoute };
+module.exports = { cacheRoute, clearRouteCacheForRequest };

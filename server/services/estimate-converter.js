@@ -90,13 +90,14 @@ const EstimateConverter = {
   async convertEstimate(estimateId, opts = {}) {
     const billingTerm = opts.billingTerm === 'prepay_annual' ? 'prepay_annual' : 'standard';
     const skipSetupInvoice = opts.skipSetupInvoice === true;
-    const estimate = await db('estimates').where({ id: estimateId }).first();
+    const database = opts.database || db;
+    const estimate = await database('estimates').where({ id: estimateId }).first();
     if (!estimate) throw new Error(`Estimate ${estimateId} not found`);
     if (estimate.status !== 'accepted') throw new Error(`Estimate ${estimateId} is not accepted (status: ${estimate.status})`);
     if (!estimate.customer_id) throw new Error(`Estimate ${estimateId} has no linked customer`);
 
     const customerId = estimate.customer_id;
-    const customer = await db('customers').where({ id: customerId }).first();
+    const customer = await database('customers').where({ id: customerId }).first();
     if (!customer) throw new Error(`Customer ${customerId} not found`);
 
     // Parse estimate data
@@ -117,7 +118,7 @@ const EstimateConverter = {
     const monthlyRate = parseFloat(estimate.monthly_total || 0);
 
     // 1. Update customer to active
-    await db('customers').where({ id: customerId }).update({
+    await database('customers').where({ id: customerId }).update({
       pipeline_stage: 'active_customer',
       pipeline_stage_changed_at: new Date(),
       waveguard_tier: tier,
@@ -139,8 +140,10 @@ const EstimateConverter = {
     //    is already working the zone (falls back safely if we can't resolve).
     let scheduledCount = 0;
     let termStartDate = null;
-    const existingFromReservation = await db('scheduled_services')
+    const existingFromReservation = await database('scheduled_services')
       .where({ source_estimate_id: estimateId })
+      .whereNotNull('customer_id')
+      .whereNull('reservation_expires_at')
       .count('id as count')
       .first();
     const reservationRowsExist = Number(existingFromReservation?.count || 0) > 0;
@@ -150,8 +153,10 @@ const EstimateConverter = {
         `[estimate-converter] Skipping auto-schedule for estimate ${estimateId} — ` +
         `reservation path already created ${existingFromReservation.count} scheduled_services row(s)`
       );
-      const reservedStart = await db('scheduled_services')
+      const reservedStart = await database('scheduled_services')
         .where({ source_estimate_id: estimateId })
+        .whereNotNull('customer_id')
+        .whereNull('reservation_expires_at')
         .orderBy('scheduled_date', 'asc')
         .first('scheduled_date');
       termStartDate = reservedStart?.scheduled_date || null;
@@ -164,7 +169,7 @@ const EstimateConverter = {
         const frequency = svc.frequency || 'monthly';
 
         try {
-          await db('scheduled_services').insert({
+          await database('scheduled_services').insert({
             customer_id: customerId,
             scheduled_date: firstServiceDate,
             service_type: serviceName,
@@ -180,7 +185,7 @@ const EstimateConverter = {
     }
 
     // 3. Log conversion in activity_log
-    await db('activity_log').insert({
+    await database('activity_log').insert({
       customer_id: customerId,
       action: 'estimate_converted',
       description: `Estimate #${estimateId} converted: ${customer.first_name} ${customer.last_name} → WaveGuard ${tier} at $${monthlyRate.toFixed(2)}/mo (${serviceCount} services, ${scheduledCount} scheduled)`,
