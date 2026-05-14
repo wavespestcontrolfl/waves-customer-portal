@@ -957,6 +957,18 @@ async function handleChargeRefunded(charge) {
       refund_status: isFullRefund ? 'full' : 'partial',
     });
 
+  // Notify admin bell + push of refund
+  try {
+    const payment = await db('payments').where({ stripe_charge_id: chargeId }).first();
+    await triggerNotification('payment_refunded', {
+      amount: refundAmountDollars,
+      isFullRefund,
+      invoiceId: payment?.invoice_id || null,
+    });
+  } catch (e) {
+    logger.warn(`[stripe-webhook] refund triggerNotification failed: ${e.message}`);
+  }
+
   // Fire-and-forget health rescore after refund
   try {
     const payment = await db('payments').where({ stripe_charge_id: chargeId }).first();
