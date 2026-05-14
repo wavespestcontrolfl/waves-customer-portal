@@ -217,17 +217,20 @@ const ReviewService = {
     });
     const techName = request.tech_name || 'Our team';
 
-    // Pull editable body from sms_templates.review_request. Fall back to inline.
+    // Body sourced from sms_templates.review_request. If the row is
+    // missing/disabled, skip the send rather than fall back to inline copy.
     let body = null;
     try {
       const tpl = require('../routes/admin-sms-templates');
       body = await tpl.getTemplate('review_request', {
         first_name: contact.name || customer.first_name || '',
         review_url: reviewUrl,
+        tech_name: techName,
       });
-    } catch { /* fall through */ }
+    } catch { /* template lookup failed → null */ }
     if (!body) {
-      body = `Hello ${contact.name || customer.first_name}! How was your service with ${techName}? We'd love your feedback: ${reviewUrl}`;
+      logger.info(`[review] review_request template missing/disabled — skipping requestId=${requestId}`);
+      return;
     }
 
     // Routed through the customer-message middleware so consent /

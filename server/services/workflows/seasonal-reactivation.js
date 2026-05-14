@@ -2,6 +2,7 @@ const db = require('../../models/db');
 const TWILIO_NUMBERS = require('../../config/twilio-numbers');
 const logger = require('../logger');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
+const { renderSmsTemplate } = require('../sms-template-renderer');
 
 const SEASONAL_HOOKS = {
   // month index (0-based) → hooks
@@ -59,10 +60,16 @@ class SeasonalReactivation {
         const locationInfo = TWILIO_NUMBERS.findByNumber(locationPhone);
         const callNumber = locationInfo?.formatted || '(941) 318-7612';
 
-        const body = `Hi ${customer.first_name}! ${hookText}. ` +
-          `We'd love to get you back on the schedule` +
-          `${customer.address ? ` at ${customer.address}` : ''}. ` +
-          `Reply YES or call ${callNumber} to book. - Waves Pest Control`;
+        const body = await renderSmsTemplate('seasonal_reactivation', {
+          first_name: customer.first_name || 'there',
+          hook_text: hookText,
+          address_clause: customer.address ? ` at ${customer.address}` : '',
+          call_number: callNumber,
+        });
+        if (!body) {
+          logger.warn(`[seasonal-reactivation] template missing/disabled — skipping customer ${customer.id}`);
+          continue;
+        }
 
         const smsResult = await sendCustomerMessage({
           to: customer.phone,

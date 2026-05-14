@@ -49,9 +49,12 @@ class RenewalReminder {
                 first_name: customer.first_name || 'there',
                 renewal_label: field.label,
                 urgency,
-              },
-              `Hello ${customer.first_name || 'there'}! Your ${field.label} ${urgency}.\n\nDon't let your coverage lapse - reply RENEW or call us to take care of it. Questions or requests? Reply to this message.`
+              }
             );
+            if (!body) {
+              logger.warn(`[renewal-reminder] template missing/disabled — skipping customer ${customer.id} (${field.column})`);
+              continue;
+            }
 
             const smsResult = await sendCustomerMessage({
               to: customer.phone,

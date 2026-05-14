@@ -874,8 +874,9 @@ const InvoiceService = {
       } catch { formattedDate = ''; }
     }
 
-    // Use DB template if available, fall back to inline
-    let body;
+    // Body comes from the editable invoice_sent template. If the row is
+    // missing/disabled, we skip the SMS rather than falling back to inline copy.
+    let body = null;
     try {
       const templates = require('../routes/admin-sms-templates');
       body = await templates.getTemplate('invoice_sent', {
@@ -888,10 +889,10 @@ const InvoiceService = {
       logger.warn(`[invoice] Template lookup failed: ${err.message}`);
     }
 
-    // Fallback — always use inline if template returned null or still has unreplaced vars
-    if (!body || body.includes('{first_name}') || body.includes('{service_type}')) {
-      body = `Hi ${customer.first_name}! Your invoice for ${serviceType} completed on ${formattedDate || 'today'} is ready: ${payUrl}\n\n` +
-        `Questions or requests? Reply to this message. Thank you for choosing Waves!`;
+    if (!body) {
+      logger.warn(`[invoice] invoice_sent template missing/disabled — skipping SMS for invoice ${invoiceId}`);
+      await restoreSendClaim(invoiceId, previousStatus, claimed);
+      return { sent: false, reason: 'template-missing', code: 'INVOICE_SENT_TEMPLATE_MISSING' };
     }
 
     try {
@@ -1124,20 +1125,22 @@ const InvoiceService = {
     const cardLast4 = invoice.card_last_four;
     const cardLine = cardBrand && cardLast4 ? ` (${cardBrand.charAt(0).toUpperCase() + cardBrand.slice(1)} ending ${cardLast4})` : '';
 
-    const fallback = `Hello ${customer.first_name}! Thank you for your payment. We truly appreciate your business. You can view your receipt here: ${receiptUrl}.\n\nIf you have any questions or need assistance, simply reply to this message. Thanks again for choosing Waves!`;
-    let body = fallback;
+    let body = null;
     try {
       const templates = require('../routes/admin-sms-templates');
-      const rendered = await templates.getTemplate('invoice_receipt', {
+      body = await templates.getTemplate('invoice_receipt', {
         first_name: customer.first_name || '',
         invoice_number: invoice.invoice_number,
         amount: 'your payment',
         card_line: cardLine,
         receipt_url: receiptUrl,
       });
-      if (rendered && !rendered.includes('{first_name}')) body = rendered;
     } catch (err) {
       logger.warn(`[invoice] Receipt template lookup failed: ${err.message}`);
+    }
+    if (!body) {
+      logger.warn(`[invoice] invoice_receipt template missing/disabled — skipping receipt for ${invoice.invoice_number}`);
+      return { sent: false, reason: 'template-missing' };
     }
 
     const { sendCustomerMessage } = require('./messaging/send-customer-message');

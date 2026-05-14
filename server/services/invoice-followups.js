@@ -18,40 +18,23 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { customerOnAutopay } = require('./autopay-eligibility');
 
 /**
- * Try to load the SMS body from the editable sms_templates table first.
- * Falls back to the hardcoded config copy if the template is missing/disabled.
- * Templates use {var} syntax; config uses {{var}} syntax — we render both.
+ * Load the SMS body from the editable sms_templates table. Returns null if the
+ * template row is missing or disabled — caller pauses the sequence in that case.
  */
 async function resolveBody(step, ctx) {
-  if (step.template_key && typeof smsTemplatesRouter.getTemplate === 'function') {
-    const fromTable = await smsTemplatesRouter.getTemplate(step.template_key, {
-      first_name: ctx.name || 'there',
-      invoice_title: ctx.invoiceTitle || 'your service',
-      amount: ctx.amount || '0.00',
-      pay_url: ctx.payUrl || '',
-      receipt_url: ctx.payUrl || '',
-      service_date: ctx.serviceDate || '',
-      service_date_clause: ctx.serviceDate ? ` completed on ${ctx.serviceDate}` : '',
-    });
-    if (fromTable) return fromTable;
-  }
-  return renderBody(step.body, ctx);
+  if (!step.template_key || typeof smsTemplatesRouter.getTemplate !== 'function') return null;
+  return smsTemplatesRouter.getTemplate(step.template_key, {
+    first_name: ctx.name || 'there',
+    invoice_title: ctx.invoiceTitle || 'your service',
+    amount: ctx.amount || '0.00',
+    pay_url: ctx.payUrl || '',
+    receipt_url: ctx.payUrl || '',
+    service_date: ctx.serviceDate || '',
+    service_date_clause: ctx.serviceDate ? ` completed on ${ctx.serviceDate}` : '',
+  });
 }
 
 const DOMAIN = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
-
-/**
- * Merge template variables into the body.
- */
-function renderBody(template, ctx) {
-  return template
-    .replace(/\{\{name\}\}/g, ctx.name || 'there')
-    .replace(/\{\{invoiceTitle\}\}/g, ctx.invoiceTitle || 'your service')
-    .replace(/\{\{amount\}\}/g, ctx.amount || '0.00')
-    .replace(/\{\{payUrl\}\}/g, ctx.payUrl || '')
-    .replace(/\{\{serviceDate\}\}/g, ctx.serviceDate || '')
-    .replace(/\{\{serviceDateClause\}\}/g, ctx.serviceDate ? ` completed on ${ctx.serviceDate}` : '');
-}
 
 /**
  * Compute the timestamp at which step `index` should fire for a given invoice.
@@ -205,6 +188,15 @@ async function fireStep(row) {
     serviceDate,
     payUrl,
   });
+  if (!body) {
+    logger.warn(`[invoice-followups] template ${step.template_key} missing/disabled for sequence ${row.id} — pausing`);
+    await db('invoice_followup_sequences').where({ id: row.id }).update({
+      status: 'paused',
+      paused_reason: 'missing_template',
+      next_touch_at: null,
+    });
+    return;
+  }
 
   const sendResult = await sendCustomerMessage({
     to: customer.phone,
@@ -289,19 +281,23 @@ async function stopOnPayment(invoiceId) {
           name: customer.first_name,
           payUrl,
         });
-        const sendResult = await sendCustomerMessage({
-          to: customer.phone,
-          body,
-          channel: 'sms',
-          audience: 'customer',
-          purpose: 'payment_receipt',
-          customerId: customer.id,
-          invoiceId,
-          entryPoint: 'invoice_followup_thank_you',
-          metadata: { original_message_type: 'invoice_thank_you' },
-        });
-        if (sendResult.blocked || sendResult.sent === false) {
-          logger.warn(`[invoice-followups] thank-you SMS blocked for invoice ${invoiceId}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
+        if (!body) {
+          logger.warn(`[invoice-followups] thank-you template ${config.thankYou.template_key} missing/disabled — skipping for invoice ${invoiceId}`);
+        } else {
+          const sendResult = await sendCustomerMessage({
+            to: customer.phone,
+            body,
+            channel: 'sms',
+            audience: 'customer',
+            purpose: 'payment_receipt',
+            customerId: customer.id,
+            invoiceId,
+            entryPoint: 'invoice_followup_thank_you',
+            metadata: { original_message_type: 'invoice_thank_you' },
+          });
+          if (sendResult.blocked || sendResult.sent === false) {
+            logger.warn(`[invoice-followups] thank-you SMS blocked for invoice ${invoiceId}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
+          }
         }
       }
     } catch (err) {

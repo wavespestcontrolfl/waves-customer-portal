@@ -325,11 +325,18 @@ const TwilioService = {
       ? `between ${formatTime(service.window_start)} - ${formatTime(service.window_end)}`
       : '(time window TBD)';
 
-    const body = `🌊 Waves Pest Control — Service Reminder\n\n` +
-      `Hi ${customer.first_name}! Your ${service.service_type} is scheduled for tomorrow ${timeWindow}.\n\n` +
-      `Technician: ${service.tech_name || 'TBD'}\n\n` +
-      `Please ensure gates are unlocked and pets are secured. ` +
-      `Reply CONFIRM to confirm or call (941) 555-0100 to reschedule.`;
+    const body = typeof smsTemplatesRouter.getTemplate === 'function'
+      ? await smsTemplatesRouter.getTemplate('service_reminder_legacy', {
+          first_name: customer.first_name || '',
+          service_type: service.service_type || 'service',
+          time_window: timeWindow,
+          tech_name: service.tech_name || 'TBD',
+        })
+      : null;
+    if (!body) {
+      logger.warn(`[twilio] service_reminder_legacy template missing/disabled — skipping reminder for customer ${customerId}`);
+      return;
+    }
 
     return this.sendSMS(customer.phone, body);
   },
@@ -367,28 +374,24 @@ const TwilioService = {
       })
       : null;
 
+    const trackClause = trackUrl ? `Track live: ${trackUrl}\n\n` : '';
+
     const results = [];
     const { sendCustomerMessage } = require('./messaging/send-customer-message');
     for (const contact of contacts) {
       const firstName = contact.name || customer.first_name || '';
       let body = null;
-      if (trackUrl && typeof smsTemplatesRouter.getTemplate === 'function') {
+      if (typeof smsTemplatesRouter.getTemplate === 'function') {
         body = await smsTemplatesRouter.getTemplate('tech_en_route', {
           first_name: firstName,
           tech_name: techName,
           eta_line: etaLine,
-          track_url: trackUrl,
+          track_clause: trackClause,
         });
       }
       if (!body) {
-        body = trackUrl
-          ? `Hello ${firstName}! ${techName} is on the way.\n\n${etaLine}` +
-            `Track live: ${trackUrl}\n\n` +
-            `Questions or requests? Reply to this message. Reply STOP to opt out.`
-          : `Waves Pest Control\n\n` +
-          `${techName} is on the way to your property! ` +
-            `${etaLine ? `${etaLine}\n` : ''}` +
-            `Please ensure gates are unlocked and pets are secured.`;
+        logger.warn(`[twilio] tech_en_route template missing/disabled — skipping en-route SMS for customer ${customerId}`);
+        continue;
       }
       results.push(await sendCustomerMessage({
         to: contact.phone,
@@ -427,7 +430,17 @@ const TwilioService = {
     const { sendCustomerMessage } = require('./messaging/send-customer-message');
     for (const contact of contacts) {
       const firstName = contact.name || customer.first_name || '';
-      const body = `Hello ${firstName}! ${techName || 'Your Waves technician'} has arrived and is servicing your property.\n\nQuestions or requests? Reply to this message. Reply STOP to opt out.`;
+      let body = null;
+      if (typeof smsTemplatesRouter.getTemplate === 'function') {
+        body = await smsTemplatesRouter.getTemplate('tech_arrived', {
+          first_name: firstName,
+          tech_name: techName || 'Your Waves technician',
+        });
+      }
+      if (!body) {
+        logger.warn(`[twilio] tech_arrived template missing/disabled — skipping arrival SMS for customer ${customerId}`);
+        continue;
+      }
       results.push(await sendCustomerMessage({
         to: contact.phone,
         body,
@@ -469,8 +482,15 @@ const TwilioService = {
 
     const productList = products.map(p => p.product_name).join(', ');
 
-    const portalUrl = 'https://portal.wavespestcontrol.com';
-    const body = `Hello ${customer.first_name}! Your service report is ready. View it here: ${portalUrl}`;
+    const body = typeof smsTemplatesRouter.getTemplate === 'function'
+      ? await smsTemplatesRouter.getTemplate('service_complete', {
+          first_name: customer.first_name || '',
+        })
+      : null;
+    if (!body) {
+      logger.warn(`[twilio] service_complete template missing/disabled — skipping summary for customer ${customerId}`);
+      return;
+    }
 
     return this.sendSMS(customer.phone, body, { customerId: customerId, messageType: 'service_complete' });
   },
@@ -483,10 +503,18 @@ const TwilioService = {
     const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
     if (!customer || !prefs?.billing_reminder || !prefs?.sms_enabled) return;
 
-    const body = `🌊 Waves Pest Control — Billing Notice\n\n` +
-      `Hi ${customer.first_name}, your ${customer.waveguard_tier} WaveGuard monthly charge of $${amount.toFixed(2)} ` +
-      `will be processed on ${date}.\n\n` +
-      `Manage your payment method in your customer portal or call (941) 555-0100.`;
+    const body = typeof smsTemplatesRouter.getTemplate === 'function'
+      ? await smsTemplatesRouter.getTemplate('billing_reminder', {
+          first_name: customer.first_name || '',
+          waveguard_tier: customer.waveguard_tier || '',
+          amount: amount.toFixed(2),
+          charge_date: date,
+        })
+      : null;
+    if (!body) {
+      logger.warn(`[twilio] billing_reminder template missing/disabled — skipping for customer ${customerId}`);
+      return;
+    }
 
     return this.sendSMS(customer.phone, body);
   },
@@ -499,9 +527,16 @@ const TwilioService = {
     const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
     if (!customer || !prefs?.seasonal_tips || !prefs?.sms_enabled) return;
 
-    const body = `🌊 Waves Pest Control — ${subject}\n\n` +
-      `Hi ${customer.first_name}! ${tip}\n\n` +
-      `Questions? Reply to this text or call (941) 555-0100.`;
+    const body = typeof smsTemplatesRouter.getTemplate === 'function'
+      ? await smsTemplatesRouter.getTemplate('seasonal_alert', {
+          first_name: customer.first_name || '',
+          tip,
+        })
+      : null;
+    if (!body) {
+      logger.warn(`[twilio] seasonal_alert template missing/disabled — skipping for customer ${customerId}`);
+      return;
+    }
 
     return this.sendSMS(customer.phone, body);
   },

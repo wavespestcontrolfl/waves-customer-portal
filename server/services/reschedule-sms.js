@@ -42,25 +42,27 @@ class RescheduleSMS {
     const option2 = `${opt2.displayDate}, ${opt2.suggestedWindow.display}`;
 
     let smsBody;
+    let templateKey;
     if (reasonCode.startsWith('weather')) {
-      smsBody = await renderSmsTemplate(
-        'reschedule_options_weather',
-        { first_name: service.first_name, service_type: serviceType, original_date: originalDate, option_1: option1, option_2: option2 },
-        `Hello ${service.first_name}, due to weather your ${serviceType} on ${originalDate} needs to move.\n\nWe have:\n1. ${option1}\n2. ${option2}\n\nReply 1 or 2, or suggest a day. Questions or requests? Reply to this message.`
-      );
+      templateKey = 'reschedule_options_weather';
+      smsBody = await renderSmsTemplate(templateKey, {
+        first_name: service.first_name, service_type: serviceType, original_date: originalDate, option_1: option1, option_2: option2,
+      });
     } else if (reasonCode === 'customer_noshow' || reasonCode === 'gate_locked') {
       const accessIssue = reasonCode === 'gate_locked' ? 'the gate was locked' : "couldn't access the property";
-      smsBody = await renderSmsTemplate(
-        'reschedule_options_access',
-        { first_name: service.first_name, service_type: serviceType, access_issue: accessIssue, option_1: option1, option_2: option2 },
-        `Hello ${service.first_name}, we stopped by for your ${serviceType} but ${accessIssue}. We can come back:\n\n1. ${option1}\n2. ${option2}\n\nReply 1 or 2. Questions or requests? Reply to this message.`
-      );
+      templateKey = 'reschedule_options_access';
+      smsBody = await renderSmsTemplate(templateKey, {
+        first_name: service.first_name, service_type: serviceType, access_issue: accessIssue, option_1: option1, option_2: option2,
+      });
     } else {
-      smsBody = await renderSmsTemplate(
-        'reschedule_options_general',
-        { first_name: service.first_name, service_type: serviceType, original_date: originalDate, reason_text: reasonText ? ` ${reasonText}` : '', option_1: option1, option_2: option2 },
-        `Hello ${service.first_name}, your ${serviceType} on ${originalDate} needs to be rescheduled.${reasonText ? ' ' + reasonText : ''}\n\n1. ${option1}\n2. ${option2}\n\nReply 1 or 2. Questions or requests? Reply to this message.`
-      );
+      templateKey = 'reschedule_options_general';
+      smsBody = await renderSmsTemplate(templateKey, {
+        first_name: service.first_name, service_type: serviceType, original_date: originalDate, reason_text: reasonText ? ` ${reasonText}` : '', option_1: option1, option_2: option2,
+      });
+    }
+    if (!smsBody) {
+      logger.warn(`[reschedule-sms] template ${templateKey} missing/disabled — service ${serviceId}`);
+      return { success: false, reason: 'missing_template', templateKey };
     }
 
     await sendAppointmentSms({
@@ -134,38 +136,43 @@ class RescheduleSMS {
       const customer = await db('customers').where({ id: customerId }).first();
       const displayDate = new Date(selectedOption.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
 
-      await sendAppointmentSms({
-        to: customer.phone,
-        body: await renderSmsTemplate(
-          'reschedule_confirmed_sms_reply',
-          { date: displayDate, time: selectedOption.window.display },
-          `Confirmed! Your service is rescheduled for ${displayDate}, ${selectedOption.window.display}.\n\nWe'll remind you the day before. Questions or requests? Reply to this message.`
-        ),
-        customerId,
-        messageType: 'confirmation',
-      });
+      const confirmedBody = await renderSmsTemplate(
+        'reschedule_confirmed_sms_reply',
+        { date: displayDate, time: selectedOption.window.display }
+      );
+      if (confirmedBody) {
+        await sendAppointmentSms({
+          to: customer.phone,
+          body: confirmedBody,
+          customerId,
+          messageType: 'confirmation',
+        });
+      } else {
+        logger.warn(`[reschedule-sms] reschedule_confirmed_sms_reply template missing/disabled — appointment moved without confirmation SMS for customer ${customerId}`);
+      }
 
       await db('reschedule_log').where({ id: pending.id }).update({
         new_date: selectedOption.date,
         new_window: `${selectedOption.window.start}-${selectedOption.window.end}`,
       });
 
-      return { handled: true, action: 'rescheduled', newDate: selectedOption.date };
+      return { handled: true, action: 'rescheduled', newDate: selectedOption.date, smsSent: !!confirmedBody };
     }
 
     if (responseType === 'call_requested') {
       const customer = await db('customers').where({ id: customerId }).first();
-      await sendAppointmentSms({
-        to: customer.phone,
-        body: await renderSmsTemplate(
-          'reschedule_call_requested',
-          {},
-          "No problem! We'll give you a call shortly.\n\nQuestions or requests? Reply to this message."
-        ),
-        customerId,
-        messageType: 'manual',
-      });
-      return { handled: true, action: 'call_requested' };
+      const callBody = await renderSmsTemplate('reschedule_call_requested', {});
+      if (callBody) {
+        await sendAppointmentSms({
+          to: customer.phone,
+          body: callBody,
+          customerId,
+          messageType: 'manual',
+        });
+      } else {
+        logger.warn(`[reschedule-sms] reschedule_call_requested template missing/disabled — call request logged without SMS reply for customer ${customerId}`);
+      }
+      return { handled: true, action: 'call_requested', smsSent: !!callBody };
     }
 
     return { handled: false, action: 'needs_review', reply: messageBody };
