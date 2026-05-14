@@ -219,7 +219,14 @@ const DEFAULT_TEXT_UNSUB_PLACEHOLDER = '<%asm_group_unsubscribe_raw_url%>';
  */
 function ensureLegalTextFooter(text, opts = {}) {
   if (!text) return text;
-  if (text.includes('13649 Luxe Ave')) return text;
+  // Idempotency: only skip when BOTH legal lines are already present.
+  // Checking for the address alone would false-positive on any body
+  // that mentions the office address in passing (e.g., "stop by our
+  // shop at 13649 Luxe Ave…"), causing the unsubscribe line to be
+  // silently dropped from the plain-text part. The "Unsubscribe:"
+  // marker — with the colon — is specific enough that an operator
+  // who includes it is intentionally setting their own footer.
+  if (text.includes('13649 Luxe Ave') && text.includes('Unsubscribe:')) return text;
   const unsubscribeUrl = opts.unsubscribeUrl || DEFAULT_TEXT_UNSUB_PLACEHOLDER;
   return `${text}\n\n--\nWaves Pest Control, LLC · 13649 Luxe Ave #110, Bradenton, FL 34211\nUnsubscribe: ${unsubscribeUrl}`;
 }
