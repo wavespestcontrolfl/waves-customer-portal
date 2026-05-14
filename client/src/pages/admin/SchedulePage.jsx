@@ -32,6 +32,7 @@
 // - RescheduleModal's slot-conflict handling — what happens if the
 //   chosen slot is taken between modal open and submit?
 import { useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 
 import { etDateString } from "../../lib/timezone";
 
@@ -4256,6 +4257,22 @@ export function CompletionPanel({
     return () => clearInterval(iv);
   }, [onSiteTime]);
 
+  // Lock body+html scroll while the panel is mounted. The panel is portaled
+  // to document.body so its position:fixed overlay isn't trapped inside the
+  // admin shell's -webkit-overflow-scrolling: touch container (iOS Safari
+  // pins fixed descendants to that scroll container, clipping the top
+  // header and bottom submit bar behind the app's top/tab bars).
+  useEffect(() => {
+    const prevBody = document.body.style.overflow;
+    const prevHtml = document.documentElement.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prevBody;
+      document.documentElement.style.overflow = prevHtml;
+    };
+  }, []);
+
   useEffect(() => {
     if (service.customerId) {
       adminFetch(`/admin/schedule/next-visit?customerId=${service.customerId}`)
@@ -5024,7 +5041,7 @@ export function CompletionPanel({
     const Chip = CPChip;
     const ChipGroup = CPChipGroup;
 
-    return (
+    return createPortal(
       <>
         {" "}
         <div
@@ -6519,14 +6536,15 @@ export function CompletionPanel({
             </button>{" "}
           </div>{" "}
         </div>{" "}
-      </>
+      </>,
+      document.body,
     );
   }
 
   // ────────────────────────────────────────────────────────────────────
   // Desktop render (legacy D dark palette) — unchanged
   // ────────────────────────────────────────────────────────────────────
-  return (
+  return createPortal(
     <>
       {" "}
       <div
@@ -7998,7 +8016,8 @@ export function CompletionPanel({
           </button>{" "}
         </div>{" "}
       </div>{" "}
-    </>
+    </>,
+    document.body,
   );
 }
 
