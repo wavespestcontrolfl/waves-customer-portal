@@ -28,6 +28,7 @@
 //   explicit assignment doesn't get silently swapped if the
 //   availability API responds slowly.
 import { useState, useEffect, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import AddressAutocomplete from '../AddressAutocomplete';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -234,6 +235,23 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [serviceLoading, setServiceLoading] = useState(false);
   const [addingService, setAddingService] = useState(false);
   const selectedService = services[0] || null;
+
+  // Lock body scroll while the modal is open. The modal is portaled to
+  // document.body (so it isn't trapped inside the admin shell's
+  // -webkit-overflow-scrolling: touch scroll container — iOS Safari would
+  // otherwise pin position: fixed descendants to that container and hide
+  // the modal header (×, Save) and footer (Schedule appointment) behind
+  // the app's top/bottom tab bars).
+  useEffect(() => {
+    const prevBody = document.body.style.overflow;
+    const prevHtml = document.documentElement.style.overflow;
+    document.body.style.overflow = 'hidden';
+    document.documentElement.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prevBody;
+      document.documentElement.style.overflow = prevHtml;
+    };
+  }, []);
 
   // Debounced Service Library search (same endpoint + filters as /admin/services catalog).
   useEffect(() => {
@@ -888,7 +906,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     </div>
   );
 
-  return (
+  return createPortal(
     <div style={overlayStyle} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div style={modalStyle}>
         <style>{`
@@ -1615,6 +1633,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
