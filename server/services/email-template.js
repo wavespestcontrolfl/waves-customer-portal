@@ -175,7 +175,7 @@ function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote } = {}) {
             ${unsubLine}<a href="https://wavespestcontrol.com" style="color:${MUTED};text-decoration:underline;">wavespestcontrol.com</a> · <a href="tel:+19412975749" style="color:${MUTED};text-decoration:none;">(941) 297-5749</a>
           </div>
           <div style="margin-top:6px;font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};text-align:center;">
-            Waves Pest Control, LLC · Bradenton, FL · FL License #JB351547
+            Waves Pest Control, LLC · 13649 Luxe Ave #110, Bradenton, FL 34211 · FL License #JB351547
           </div>
           ${footerNote ? `<div style="margin-top:8px;font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};text-align:center;">${footerNote}</div>` : ''}
         </td></tr>
@@ -186,9 +186,65 @@ function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote } = {}) {
 </html>`;
 }
 
+/**
+ * Default unsubscribe placeholder for `ensureLegalTextFooter` — SendGrid's
+ * ASM substitution token. Resolves at send time whenever an asm group is
+ * attached, which is the case for automation sends via `sendgrid.sendOne`.
+ *
+ * Newsletter broadcasts use a different token (`{{unsubscribe_url}}`) that
+ * `sendgrid.sendBatch` substitutes per-recipient into the Waves portal
+ * unsubscribe URL. Call sites that go through sendBatch should override
+ * via the `unsubscribeUrl` option so customers land on the portal flow,
+ * not SendGrid's hosted ASM page.
+ */
+const DEFAULT_TEXT_UNSUB_PLACEHOLDER = '<%asm_group_unsubscribe_raw_url%>';
+
+/**
+ * Append a CAN-SPAM § 7704(a)(5) compliant footer to a plain-text body
+ * (physical postal address + visible unsubscribe link). Use this at
+ * every commercial/promotional text send-site — compliance becomes a
+ * system property instead of relying on each template author to
+ * remember the legal boilerplate.
+ *
+ * Idempotent via the address-string guard. Returns the input unchanged
+ * when `text` is empty/null/undefined — we don't want a "footer-only"
+ * body with no message above it.
+ *
+ * @param {string} text  Plain-text body, already personalized.
+ * @param {{unsubscribeUrl?: string}} [opts]
+ *   `unsubscribeUrl` — substitution token or pre-resolved URL the
+ *   recipient should see for unsubscribe. Defaults to the SendGrid ASM
+ *   token (correct for automation/sendOne); override with
+ *   `'{{unsubscribe_url}}'` for newsletter/sendBatch sends.
+ */
+function ensureLegalTextFooter(text, opts = {}) {
+  if (!text) return text;
+  // Idempotency: only skip when BOTH legal lines are already present.
+  // Checking for the address alone would false-positive on any body
+  // that mentions the office address in passing (e.g., "stop by our
+  // shop at 13649 Luxe Ave…"), causing the unsubscribe line to be
+  // silently dropped from the plain-text part. The "Unsubscribe:"
+  // marker — with the colon — is specific enough that an operator
+  // who includes it is intentionally setting their own footer.
+  if (text.includes('13649 Luxe Ave') && text.includes('Unsubscribe:')) return text;
+  // Resolve the unsubscribe URL. `opts.unsubscribeUrl === null` is a
+  // deliberate "no URL available" signal from the caller (e.g.,
+  // automation-runner when no asm group is configured) — in that case
+  // skip the footer entirely rather than ship a broken/literal token.
+  // Mirrors wrapNewsletter's behavior on the HTML side, which omits the
+  // unsubscribe line when no URL is available. Compliance still requires
+  // the caller to refuse commercial sends in that state.
+  const unsubscribeUrl = opts.unsubscribeUrl !== undefined
+    ? opts.unsubscribeUrl
+    : DEFAULT_TEXT_UNSUB_PLACEHOLDER;
+  if (!unsubscribeUrl) return text;
+  return `${text}\n\n--\nWaves Pest Control, LLC · 13649 Luxe Ave #110, Bradenton, FL 34211\nUnsubscribe: ${unsubscribeUrl}`;
+}
+
 module.exports = {
   wrapEmail,
   wrapNewsletter,
+  ensureLegalTextFooter,
   ctaButton,
   currency,
   formatDate,
