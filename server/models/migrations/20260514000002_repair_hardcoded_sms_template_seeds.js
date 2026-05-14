@@ -281,6 +281,13 @@ const BODY_REWRITES = [
   variables: ['first_name', 'invoice_title', 'service_date_clause', 'pay_url'],
 }));
 
+const EMOJI_BLOCKED_TEMPLATE_KEYS = new Set([
+  'estimate_followup_unviewed',
+  'estimate_followup_viewed',
+  'estimate_followup_final',
+  'estimate_followup_expiring',
+]);
+
 function rewriteLegacyServiceDateBody(body) {
   if (typeof body !== 'string') return body;
   if (!/\{service_date\}/.test(body)) return body;
@@ -312,6 +319,12 @@ function hasVariables(row, variables) {
   return variables.every((name) => current.has(name));
 }
 
+function shouldReplaceLegacyBody(row, template) {
+  return EMOJI_BLOCKED_TEMPLATE_KEYS.has(template.template_key)
+    && typeof row.body === 'string'
+    && row.body.includes('🌊');
+}
+
 exports.up = async function (knex) {
   if (!(await knex.schema.hasTable('sms_templates'))) {
     await knex.schema.createTable('sms_templates', (t) => {
@@ -333,7 +346,20 @@ exports.up = async function (knex) {
     const existing = await knex('sms_templates')
       .where({ template_key: template.template_key })
       .first();
-    if (existing) continue;
+    if (existing) {
+      const replaceBody = shouldReplaceLegacyBody(existing, template);
+      const shouldUpdateVars = !hasVariables(existing, template.variables);
+      if (replaceBody || shouldUpdateVars) {
+        await knex('sms_templates')
+          .where({ template_key: template.template_key })
+          .update({
+            body: replaceBody ? template.body : existing.body,
+            variables: JSON.stringify(template.variables),
+            updated_at: new Date(),
+          });
+      }
+      continue;
+    }
     await knex('sms_templates').insert({
       template_key: template.template_key,
       name: template.name,
