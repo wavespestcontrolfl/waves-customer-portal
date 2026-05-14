@@ -187,34 +187,41 @@ function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote } = {}) {
 }
 
 /**
- * CAN-SPAM § 7704(a)(5) legal footer for plain-text bodies. HTML bodies
- * are wrapped by `wrapNewsletter()` whose chrome footer carries the
- * full address + unsubscribe link; text bodies are sent raw, so they
- * need an inline footer.
+ * Default unsubscribe placeholder for `ensureLegalTextFooter` — SendGrid's
+ * ASM substitution token. Resolves at send time whenever an asm group is
+ * attached, which is the case for automation sends via `sendgrid.sendOne`.
  *
- * The unsubscribe placeholder is SendGrid's ASM substitution token
- * (`<%asm_group_unsubscribe_raw_url%>`) — substituted at send time
- * whenever an asm group is attached. The Mailchimp-style
- * `{{unsubscribe_url}}` token would only work for `sendBatch` and
- * would render as literal text on `sendOne` (automation) sends.
+ * Newsletter broadcasts use a different token (`{{unsubscribe_url}}`) that
+ * `sendgrid.sendBatch` substitutes per-recipient into the Waves portal
+ * unsubscribe URL. Call sites that go through sendBatch should override
+ * via the `unsubscribeUrl` option so customers land on the portal flow,
+ * not SendGrid's hosted ASM page.
  */
-const LEGAL_TEXT_FOOTER = '\n\n--\nWaves Pest Control, LLC · 13649 Luxe Ave #110, Bradenton, FL 34211\nUnsubscribe: <%asm_group_unsubscribe_raw_url%>';
+const DEFAULT_TEXT_UNSUB_PLACEHOLDER = '<%asm_group_unsubscribe_raw_url%>';
 
 /**
- * Append the legal text footer to a plain-text body if it isn't already
- * present. Use this at every commercial/promotional text send-site so
- * compliance doesn't depend on each template author remembering to
- * include the footer. Idempotent — the address string guard prevents
- * double-appending if the body already carries the footer.
+ * Append a CAN-SPAM § 7704(a)(5) compliant footer to a plain-text body
+ * (physical postal address + visible unsubscribe link). Use this at
+ * every commercial/promotional text send-site — compliance becomes a
+ * system property instead of relying on each template author to
+ * remember the legal boilerplate.
  *
- * Returns the input unchanged when text is empty/null/undefined — we
- * don't want to materialize a "footer-only" body that has no actual
- * message above it.
+ * Idempotent via the address-string guard. Returns the input unchanged
+ * when `text` is empty/null/undefined — we don't want a "footer-only"
+ * body with no message above it.
+ *
+ * @param {string} text  Plain-text body, already personalized.
+ * @param {{unsubscribeUrl?: string}} [opts]
+ *   `unsubscribeUrl` — substitution token or pre-resolved URL the
+ *   recipient should see for unsubscribe. Defaults to the SendGrid ASM
+ *   token (correct for automation/sendOne); override with
+ *   `'{{unsubscribe_url}}'` for newsletter/sendBatch sends.
  */
-function ensureLegalTextFooter(text) {
+function ensureLegalTextFooter(text, opts = {}) {
   if (!text) return text;
   if (text.includes('13649 Luxe Ave')) return text;
-  return text + LEGAL_TEXT_FOOTER;
+  const unsubscribeUrl = opts.unsubscribeUrl || DEFAULT_TEXT_UNSUB_PLACEHOLDER;
+  return `${text}\n\n--\nWaves Pest Control, LLC · 13649 Luxe Ave #110, Bradenton, FL 34211\nUnsubscribe: ${unsubscribeUrl}`;
 }
 
 module.exports = {

@@ -12,7 +12,7 @@
 const db = require('../models/db');
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
-const { wrapNewsletter } = require('./email-template');
+const { wrapNewsletter, ensureLegalTextFooter } = require('./email-template');
 const { recordTouchpoint } = require('./conversations');
 
 function stripHtml(html) {
@@ -155,7 +155,7 @@ async function sendCampaign(sendId, opts = {}) {
           fromName: send.from_name,
           subject: subjectForGroup,
           html: htmlWithFooter,
-          text: send.text_body || undefined,
+          text: ensureLegalTextFooter(send.text_body, { unsubscribeUrl: '{{unsubscribe_url}}' }) || undefined,
           replyTo: send.reply_to,
           categories: ['newsletter', `send_${send.id}`, variant ? `variant_${variant}` : 'variant_none'],
         });
