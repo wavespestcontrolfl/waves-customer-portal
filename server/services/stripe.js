@@ -246,27 +246,19 @@ const StripeService = {
   // =========================================================================
 
   /**
-   * Look up a PaymentMethod by Stripe id and return its raw type string
-   * ('card' | 'us_bank_account' | ...). Server-side source of truth for
-   * routes that can't trust a client-supplied method type — e.g. consent
-   * snapshotting on the public /pay endpoint, where a stale or tampered
-   * client could otherwise associate the wrong authorization variant
-   * with a real PM.
+   * Retrieve a PaymentIntent with optional Stripe `expand` keys.
+   * Returns null if Stripe isn't configured. Throws on Stripe errors so
+   * callers can decide whether to fail closed or degrade.
    *
-   * Returns null on missing Stripe key, lookup failure, or missing pm —
-   * callers should treat null as "don't know" and fall back conservatively.
+   * Used by routes that need server-verified PaymentIntent facts (e.g.
+   * consent snapshotting on the public /pay endpoint) where trusting
+   * client-supplied fields would defeat the audit trail.
    */
-  async getPaymentMethodType(stripePaymentMethodId) {
-    if (!stripePaymentMethodId) return null;
+  async retrievePaymentIntent(paymentIntentId, options = {}) {
+    if (!paymentIntentId) return null;
     const stripe = getStripe();
     if (!stripe) return null;
-    try {
-      const pm = await stripe.paymentMethods.retrieve(stripePaymentMethodId);
-      return pm?.type || null;
-    } catch (err) {
-      logger.warn(`[stripe] getPaymentMethodType(${stripePaymentMethodId}) failed: ${err.message}`);
-      return null;
-    }
+    return stripe.paymentIntents.retrieve(paymentIntentId, options);
   },
 
   // =========================================================================
