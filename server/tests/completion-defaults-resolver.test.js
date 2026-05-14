@@ -115,9 +115,11 @@ describe('resolveStandardCompletionDefaults', () => {
     // Attestation text composed from template + product/area names.
     expect(result.snapshot.techAttestationText)
       .toBe('I performed the Exterior General Pest Perimeter protocol on this visit: Demand CS, Alpine WSG, and Advion WDG Granular applied to Perimeter, Garage, and Entry points.');
-    // Hash is computed via the same helper as storeResolvedSnapshot —
-    // the preview→submit handshake will compare these byte-for-byte.
-    expect(result.snapshotHash).toBe(hashResolvedSnapshot(result.snapshot));
+    // Hash is computed via the same helper as storeResolvedSnapshot,
+    // but on the snapshot MINUS resolvedAt — see the dedicated test
+    // below for why volatile timestamps are excluded.
+    const { resolvedAt: _omit, ...hashable } = result.snapshot;
+    expect(result.snapshotHash).toBe(hashResolvedSnapshot(hashable));
   });
 
   test('Venice address → review_gbp_resolved = "venice", routingReason includes service city', async () => {
@@ -304,6 +306,29 @@ describe('resolveStandardCompletionDefaults', () => {
     });
     expect(result.ok).toBe(false);
     expect(result.reason).toBe('protocol_misconfigured');
+  });
+
+  test('snapshot hash excludes resolvedAt — preview-stale check survives wall-clock drift (codex P1)', async () => {
+    // resolvedAt is computed from `now` and differs between every
+    // preview→submit pair. If it leaked into the hash, the planned
+    // expectedSnapshotHash handshake (PR #3) would 409 on every
+    // legitimate submit even when nothing changed.
+    const knex1 = happyPathKnex();
+    const knex2 = happyPathKnex();
+    const r1 = await resolveStandardCompletionDefaults({
+      serviceId: 'svc-1',
+      customerInteractionChoice: 'not_home_full_access',
+      now: new Date('2026-05-14T15:00:00Z'),
+      trx: knex1,
+    });
+    const r2 = await resolveStandardCompletionDefaults({
+      serviceId: 'svc-1',
+      customerInteractionChoice: 'not_home_full_access',
+      now: new Date('2026-05-14T15:00:30Z'),    // 30s later
+      trx: knex2,
+    });
+    expect(r1.snapshot.resolvedAt).not.toBe(r2.snapshot.resolvedAt);  // resolvedAt differs
+    expect(r1.snapshotHash).toBe(r2.snapshotHash);                    // but hash matches
   });
 
   test('snapshot hash is stable across calls with identical inputs', async () => {

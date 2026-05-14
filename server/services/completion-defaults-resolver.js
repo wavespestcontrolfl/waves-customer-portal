@@ -278,10 +278,19 @@ async function resolveStandardCompletionDefaults({
     recapMode: 'templated_sms_async_report',
   };
 
+  // Hash deterministic content only. resolvedAt is a wall-clock
+  // timestamp computed on each call; including it would make two
+  // preview→submit calls produce different hashes even when nothing
+  // about the underlying protocol/customer/review data changed,
+  // causing the planned expectedSnapshotHash check (PR #3) to fire
+  // completion_preview_stale on every legitimate submit. resolvedAt
+  // stays in the snapshot for audit (service_records keeps the
+  // long-term copy) but is excluded from the handshake hash.
+  const { resolvedAt: _resolvedAt, ...hashableSnapshot } = snapshot;
   return {
     ok: true,
     snapshot,
-    snapshotHash: hashResolvedSnapshot(snapshot),
+    snapshotHash: hashResolvedSnapshot(hashableSnapshot),
   };
 }
 
