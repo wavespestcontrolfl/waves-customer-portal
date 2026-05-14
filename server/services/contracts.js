@@ -1,5 +1,5 @@
 const crypto = require('crypto');
-const { CONSENT_TEXT, CONSENT_VERSION } = require('./payment-method-consent-text');
+const { CONSENT_TEXT, CONSENT_VERSION, getConsentText } = require('./payment-method-consent-text');
 
 const BUSINESS_NAME = 'Waves Pest Control, LLC';
 const BUSINESS_EMAIL = 'billing@wavespestcontrol.com';
@@ -61,12 +61,13 @@ function buildAutopayContractSnapshot({
     ].join(' ')
     : `Service renewal: Renewal timing and cancellation deadlines remain controlled by the customer's service agreement and account record.`;
 
+  const methodConsentText = getConsentText(paymentMethod?.method_type || paymentMethod?.methodType);
   return [
     'AutoPay Authorization',
     `Business: ${BUSINESS_NAME}, ${BUSINESS_EMAIL}, ${BUSINESS_PHONE}.`,
     `Recipient: ${recipient}${customer?.email ? `, ${customer.email}` : ''}${customer?.phone ? `, ${customer.phone}` : ''}.`,
     `Payment method: ${paymentMethodLabel(paymentMethod)}.`,
-    `Saved payment authorization: ${CONSENT_TEXT}`,
+    `Saved payment authorization: ${methodConsentText}`,
     renewalBlock,
     `Cancellation and revocation: The customer may revoke future automatic payment authorization by replying to a Waves message, emailing ${BUSINESS_EMAIL}, calling ${BUSINESS_PHONE}, or using the customer portal. Revocation applies to future automatic charges and does not cancel amounts already due for completed services.`,
     'Payment data security: Waves stores processor-safe payment tokens and card or bank labels only. Raw card numbers, CVV codes, and bank account numbers are not stored in this contract record.',
@@ -152,6 +153,7 @@ module.exports = {
   BUSINESS_PHONE,
   CONSENT_TEXT,
   CONSENT_VERSION,
+  getConsentText,
   ESIGN_DISCLOSURE,
   CONTRACT_TOKEN_TTL_DAYS,
   buildAutopayContractSnapshot,

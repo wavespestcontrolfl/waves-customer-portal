@@ -392,7 +392,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
               return;
             }
             if (paymentIntent && (paymentIntent.status === 'succeeded' || paymentIntent.status === 'processing')) {
-              onSuccess?.(paymentIntent);
+              onSuccess?.(paymentIntent, selectedMethodRef.current);
             } else if (paymentIntent && paymentIntent.status === 'requires_action') {
               setElementError('Additional verification required. Please follow the prompts.');
             }
@@ -472,12 +472,12 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       }
 
       if (paymentIntent && (paymentIntent.status === 'succeeded' || paymentIntent.status === 'processing')) {
-        onSuccess?.(paymentIntent);
+        onSuccess?.(paymentIntent, selectedMethodRef.current);
       } else if (paymentIntent && paymentIntent.status === 'requires_action') {
         setElementError('Additional verification required. Please follow the prompts.');
         setProcessing(false);
       } else {
-        onSuccess?.(paymentIntent);
+        onSuccess?.(paymentIntent, selectedMethodRef.current);
       }
     } catch (err) {
       setElementError(err.message || 'Payment failed');
@@ -592,14 +592,14 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       <div ref={expressMountRef} style={{ display: isCardFamily ? 'block' : 'none' }} />
       <div ref={mountRef} style={{ minHeight: 90 }} />
 
-      {/* Save-card opt-in */}
+      {/* Save-payment-method opt-in. methodType drives both the headline
+          and the authorization copy (ACH variant satisfies NACHA/Reg E,
+          card variant covers card-network + TILA disclosures). */}
       <div>
         <SaveCardConsent
           checked={!!saveCard}
           onChange={(v) => onSaveCardChange?.(v)}
-          headline={selectedMethod === 'us_bank_account'
-            ? 'Save this bank account on file with Waves Pest Control'
-            : 'Save this payment method on file with Waves Pest Control'}
+          methodType={selectedMethod}
         />
       </div>
 
@@ -742,7 +742,7 @@ export default function PayPageV2() {
       });
   }, [data, token]);
 
-  const handlePaymentSuccess = async (paymentIntent) => {
+  const handlePaymentSuccess = async (paymentIntent, methodType) => {
     try {
       await fetch(`${API_BASE}/pay/${token}/confirm`, {
         method: 'POST',
@@ -754,15 +754,20 @@ export default function PayPageV2() {
       console.error('Confirm call failed (webhook will reconcile):', err);
     }
 
-    // Record card-on-file consent if the customer opted in. The Stripe
-    // webhook handles persisting the payment_methods row asynchronously
-    // and will back-fill the FK on the consent record.
+    // Record save-payment-method consent if the customer opted in. The
+    // Stripe webhook handles persisting the payment_methods row
+    // asynchronously and will back-fill the FK on the consent record.
+    // methodType lets the server snapshot the correct authorization
+    // variant (card vs ACH — they differ for NACHA/Reg E reasons).
     if (saveCard && paymentIntent.payment_method) {
       try {
         await fetch(`${API_BASE}/pay/${token}/consent`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ stripePaymentMethodId: paymentIntent.payment_method }),
+          body: JSON.stringify({
+            stripePaymentMethodId: paymentIntent.payment_method,
+            methodType: methodType || 'card',
+          }),
         });
       } catch (err) {
         console.error('Consent record failed:', err);

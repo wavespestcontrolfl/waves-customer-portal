@@ -202,6 +202,7 @@ router.post('/:token/save-card', loadSession, async (req, res, next) => {
         paymentMethodId: card.id,
         stripePaymentMethodId: paymentMethodId,
         source: 'onboarding',
+        methodType: card.method_type || 'card',
         ip: req.ip,
         userAgent: req.get('user-agent') || null,
       });

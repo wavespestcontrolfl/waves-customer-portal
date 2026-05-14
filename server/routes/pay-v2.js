@@ -204,7 +204,7 @@ router.post('/:token/confirm', async (req, res, next) => {
 // =========================================================================
 router.post('/:token/consent', async (req, res, next) => {
   try {
-    const { stripePaymentMethodId } = req.body || {};
+    const { stripePaymentMethodId, methodType } = req.body || {};
     if (!stripePaymentMethodId) return res.status(400).json({ error: 'stripePaymentMethodId required' });
 
     const invoice = await db('invoices').where({ token: req.params.token }).first();
@@ -215,6 +215,7 @@ router.post('/:token/consent', async (req, res, next) => {
       customerId: invoice.customer_id,
       stripePaymentMethodId,
       source: 'pay_page',
+      methodType: methodType || 'card',
       ip: req.ip,
       userAgent: req.get('user-agent') || null,
     });

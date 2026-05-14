@@ -1,5 +1,5 @@
-// Reusable card-on-file opt-in. Drop it next to any Stripe Payment
-// Element where we want the customer to consent to saving the card for
+// Reusable save-payment-method opt-in. Drop it next to any Stripe Payment
+// Element where we want the customer to consent to saving the method for
 // future charges.
 //
 // Controlled: parent owns `checked` + `onChange`. Read `checked` to
@@ -9,16 +9,27 @@
 // When `locked` is true the box is checked + disabled — use this in
 // flows where saving is a precondition (onboarding, portal add-card
 // modal). The authorization copy is still shown so consent is on record.
+//
+// `methodType` selects the authorization copy. Card-on-file and ACH have
+// different regulatory floors (NACHA/Reg E adds requirements for ACH),
+// so the text is not interchangeable. Pass 'us_bank_account' or 'ach'
+// for ACH; anything else (or omitted) renders the card variant.
 
-import { CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
+import { getConsentText } from '../../lib/paymentMethodConsentText';
 
 export default function SaveCardConsent({
   checked,
   onChange,
   locked = false,
-  headline = 'Save this payment method on file with Waves Pest Control',
+  methodType = 'card',
+  headline,
   style,
 }) {
+  const isAch = methodType === 'us_bank_account' || methodType === 'ach';
+  const resolvedHeadline = headline ?? (isAch
+    ? 'Save this bank account on file with Waves Pest Control'
+    : 'Save this payment method on file with Waves Pest Control');
+  const consentText = getConsentText(methodType);
   const isChecked = locked ? true : !!checked;
   return (
     <label
@@ -45,10 +56,10 @@ export default function SaveCardConsent({
       />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 14, fontWeight: 850, color: '#1B2C5B', lineHeight: 1.35 }}>
-          {headline}
+          {resolvedHeadline}
         </div>
         <div style={{ fontSize: 14, color: '#64748B', marginTop: 6, lineHeight: 1.5 }}>
-          {CONSENT_TEXT}
+          {consentText}
         </div>
       </div>
     </label>
