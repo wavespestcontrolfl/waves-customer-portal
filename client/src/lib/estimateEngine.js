@@ -248,6 +248,47 @@ export function calculateEstimate(inputs) {
 
   let R = {}, wgServices = [];
   let notes = [];
+  function addLawnCustomQuoteNote() {
+    if (notes.some(n => n.type === 'LAWN_CUSTOM_QUOTE')) return;
+    notes.push({
+      type: 'LAWN_CUSTOM_QUOTE',
+      text: 'Turf area exceeds 20,000 sq ft. Pricing was extrapolated and requires field verification/custom quote.',
+      priority: 'HIGH',
+    });
+  }
+
+  function estimateLegacyTurfArea() {
+    let hardscapeEstimate = 800;
+    if (propertyType === 'TOWNHOME') hardscapeEstimate = 400;
+    else if (propertyType === 'CONDO') hardscapeEstimate = 200;
+    else if (propertyType === 'COMMERCIAL') hardscapeEstimate = lotSqFt * 0.15;
+    else {
+      if (lotSqFt > 7500) hardscapeEstimate += (Math.min(lotSqFt, 15000) - 7500) * 0.03;
+      if (lotSqFt > 15000) hardscapeEstimate += (lotSqFt - 15000) * 0.05;
+    }
+    if (hasPoolCage) hardscapeEstimate += 600;
+    else if (hasPool) hardscapeEstimate += 450;
+    if (hasLargeDriveway) hardscapeEstimate += 300;
+
+    const openArea = Math.max(0, Math.round(lotSqFt - footprint - hardscapeEstimate));
+    let score = 0;
+    if (hasPool) score += 2;
+    if (hasPoolCage) score += 2;
+    if (hasLargeDriveway) score += 2;
+    if (shrubDensity === 'MODERATE') score += 1; else if (shrubDensity === 'HEAVY') score += 2;
+    if (treeDensity === 'MODERATE') score += 1; else if (treeDensity === 'HEAVY') score += 2;
+    if (landscapeComplexity === 'MODERATE') score += 1; else if (landscapeComplexity === 'COMPLEX') score += 2;
+    if (bedArea > 0 && lotSqFt > 0) {
+      const bedRatio = bedArea / lotSqFt;
+      if (bedRatio >= 0.20) score += 3;
+      else if (bedRatio >= 0.10) score += 1;
+    }
+    const turfFactors = [0.78, 0.73, 0.68, 0.63, 0.58, 0.53, 0.48, 0.43, 0.38, 0.33];
+    return {
+      turfSf: Math.round(openArea * turfFactors[Math.min(score, 9)]),
+      openArea,
+    };
+  }
 
   function computeTurfArea() {
     const measured = toPositiveNumber(_measuredTurfSf);
@@ -257,6 +298,21 @@ export function calculateEstimate(inputs) {
     const estimated = toPositiveNumber(_estimatedTurfSf);
     if (estimated > 0) {
       return { turfSf: estimated, turfEstimated: true, turfConfidence: 'MEDIUM', turfBasis: 'estimatedTurfSf', turfFlags: [] };
+    }
+    const hasLotBasedTurfFields =
+      _imperviousSurfacePercent !== undefined ||
+      _imperviosSurfacePercent !== undefined ||
+      _estimatedBedAreaPercent !== undefined;
+    if (!hasLotBasedTurfFields) {
+      const legacy = estimateLegacyTurfArea();
+      return {
+        turfSf: legacy.turfSf,
+        turfEstimated: true,
+        turfConfidence: 'LOW',
+        turfBasis: 'legacyHardscapeEstimate',
+        turfOpenArea: legacy.openArea,
+        turfFlags: ['FIELD_VERIFY_TURF_SQFT'],
+      };
     }
     const rawImperviousPct = _imperviousSurfacePercent ?? _imperviosSurfacePercent ?? 20;
     const imperviousPct = toNonNegativeNumber(rawImperviousPct, 20);
@@ -276,9 +332,12 @@ export function calculateEstimate(inputs) {
   }
 
   const turfArea = computeTurfArea();
-  turfArea.turfFlags.forEach(flag => {
-    if (!fieldVerify.includes(flag)) fieldVerify.push(flag);
-  });
+  const hasTurfPricedService = svcLawn || svcOnetimeLawn || svcTopdress || svcDethatch || svcPlugging;
+  if (hasTurfPricedService) {
+    turfArea.turfFlags.forEach(flag => {
+      if (!fieldVerify.includes(flag)) fieldVerify.push(flag);
+    });
+  }
 
   /* ── pricing modifiers tracking ─────────────────────────── */
   const modifiers = [];
@@ -429,11 +488,7 @@ export function calculateEstimate(inputs) {
     wgServices.push({ name: 'Lawn Care', mo: selectedLawn.mo });
     const customQuoteFlag = lsf > LAWN_TABLE_MAX_SQFT;
     if (customQuoteFlag) {
-      notes.push({
-        type: 'LAWN_CUSTOM_QUOTE',
-        text: 'Turf area exceeds 20,000 sq ft. Pricing was extrapolated and requires field verification/custom quote.',
-        priority: 'HIGH',
-      });
+      addLawnCustomQuoteNote();
     }
     R.lawnMeta = {
       lsf, sc, tf, oa, grassType, grassCode: lp.code, grassName: lp.name, hardscape,
@@ -673,7 +728,9 @@ export function calculateEstimate(inputs) {
     const lp = LAWN_PRICES[grassType] || LAWN_PRICES.st_augustine;
     const selectedFreq = resolveLawnFreq(lawnFreq);
     const selectedFreqIdx = LAWN_FREQS.indexOf(selectedFreq);
-    const baselineMonthly = lawnLookup(lp, turfArea.turfSf, selectedFreqIdx >= 0 ? selectedFreqIdx : 2).monthly;
+    const baselinePrice = lawnLookup(lp, turfArea.turfSf, selectedFreqIdx >= 0 ? selectedFreqIdx : 2);
+    const baselineMonthly = baselinePrice.monthly;
+    if (baselinePrice.pricingBasis === 'EXTRAPOLATED_ABOVE_TABLE_MAX') addLawnCustomQuoteNote();
     const baselinePerApp = Math.round((baselineMonthly * 12) / selectedFreq * 100) / 100;
     let bl = Math.max(115, Math.round(baselinePerApp * 1.50));
     let tm = 1.0, tl = 'Fertilization';
