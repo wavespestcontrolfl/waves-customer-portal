@@ -227,7 +227,17 @@ function ensureLegalTextFooter(text, opts = {}) {
   // marker — with the colon — is specific enough that an operator
   // who includes it is intentionally setting their own footer.
   if (text.includes('13649 Luxe Ave') && text.includes('Unsubscribe:')) return text;
-  const unsubscribeUrl = opts.unsubscribeUrl || DEFAULT_TEXT_UNSUB_PLACEHOLDER;
+  // Resolve the unsubscribe URL. `opts.unsubscribeUrl === null` is a
+  // deliberate "no URL available" signal from the caller (e.g.,
+  // automation-runner when no asm group is configured) — in that case
+  // skip the footer entirely rather than ship a broken/literal token.
+  // Mirrors wrapNewsletter's behavior on the HTML side, which omits the
+  // unsubscribe line when no URL is available. Compliance still requires
+  // the caller to refuse commercial sends in that state.
+  const unsubscribeUrl = opts.unsubscribeUrl !== undefined
+    ? opts.unsubscribeUrl
+    : DEFAULT_TEXT_UNSUB_PLACEHOLDER;
+  if (!unsubscribeUrl) return text;
   return `${text}\n\n--\nWaves Pest Control, LLC · 13649 Luxe Ave #110, Bradenton, FL 34211\nUnsubscribe: ${unsubscribeUrl}`;
 }
 

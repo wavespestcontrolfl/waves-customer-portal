@@ -151,9 +151,11 @@ async function sendStep(enrollmentId, { testRecipient } = {}) {
 
   const subject = substitute(step.subject || `(${template.name})`, personal);
   const rawHtml = substitute(step.html_body || '', personal);
-  const text = ensureLegalTextFooter(substitute(step.text_body || '', personal));
-
   const asmGroupId = automationAsmGroupId(template);
+  const text = ensureLegalTextFooter(substitute(step.text_body || '', personal), {
+    unsubscribeUrl: asmGroupId ? '<%asm_group_unsubscribe_raw_url%>' : null,
+  });
+
   const fromEmail = normalizeAutomationFromEmail(step.from_email);
 
   // Wrap operator-written body in branded chrome (same template the
@@ -298,7 +300,9 @@ async function testSequence({ templateKey, toEmail }) {
         replyTo: step.reply_to,
         subject: `[TEST step ${step.step_order}] ${substitute(step.subject || template.name, fake)}`,
         html: substitute(step.html_body || '', fake) || undefined,
-        text: ensureLegalTextFooter(substitute(step.text_body || '', fake)) || undefined,
+        text: ensureLegalTextFooter(substitute(step.text_body || '', fake), {
+          unsubscribeUrl: asmGroupId ? '<%asm_group_unsubscribe_raw_url%>' : null,
+        }) || undefined,
         categories: ['automation_test', `template_${template.key}`],
         asmGroupId,
       });
