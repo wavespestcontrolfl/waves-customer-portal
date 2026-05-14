@@ -111,9 +111,40 @@ exports.up = async function (knex) {
       )
     )
   `);
+
+  // Legacy/NULL-source rows must not silently carry any of the new
+  // attestation/template/snapshot fields. The existing one_tap_ and
+  // detailed_form CHECKs use IS DISTINCT FROM, and SQL NULL is
+  // distinct from both strings — so a row with completion_source=NULL
+  // bypasses both predicates and can populate protocol_defaults_used
+  // / protocol_template_id / tech_attestation_text /
+  // resolved_completion_snapshot freely. That would defeat the audit
+  // invariant for any row that lacks a source classification.
+  //
+  // Two valid populations under this CHECK:
+  //   - Pre-migration legacy rows: all new columns null/false.
+  //   - Going forward: completion_source must be set whenever any
+  //     attestation/template/snapshot field is populated.
+  await knex.raw(`
+    ALTER TABLE service_records
+    ADD CONSTRAINT service_records_null_source_no_attestation
+    CHECK (
+      completion_source IS NOT NULL
+      OR (
+        protocol_defaults_used = false
+        AND protocol_template_id IS NULL
+        AND protocol_template_version IS NULL
+        AND protocol_name IS NULL
+        AND tech_attestation_text IS NULL
+        AND tech_attestation_version IS NULL
+        AND resolved_completion_snapshot IS NULL
+      )
+    )
+  `);
 };
 
 exports.down = async function (knex) {
+  await knex.raw('ALTER TABLE service_records DROP CONSTRAINT IF EXISTS service_records_null_source_no_attestation');
   await knex.raw('ALTER TABLE service_records DROP CONSTRAINT IF EXISTS service_records_detailed_form_no_attestation');
   await knex.raw('ALTER TABLE service_records DROP CONSTRAINT IF EXISTS service_records_one_tap_has_attestation');
   await knex.raw('ALTER TABLE service_records DROP CONSTRAINT IF EXISTS service_records_customer_interaction_source_check');
