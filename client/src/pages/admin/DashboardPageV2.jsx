@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState } from "react";
 import {
   Badge,
   Card,
@@ -6,7 +6,7 @@ import {
   CardHeader,
   CardTitle,
   cn,
-} from '../../components/ui';
+} from "../../components/ui";
 import {
   AgingBar,
   CallsBySourceList,
@@ -24,33 +24,37 @@ import {
   fmtInt,
   fmtMoney,
   fmtMoneyCompact,
-} from '../../components/dashboard/charts';
-import useIsMobile from '../../hooks/useIsMobile';
-import { adminFetch, isForbiddenError, isRateLimitError } from '../../utils/admin-fetch';
+} from "../../components/dashboard/charts";
+import useIsMobile from "../../hooks/useIsMobile";
+import {
+  adminFetch,
+  isForbiddenError,
+  isRateLimitError,
+} from "../../utils/admin-fetch";
 
 const PERIODS = [
-  { id: 'today', label: 'Today' },
-  { id: 'wtd',   label: 'WTD' },
-  { id: 'mtd',   label: 'MTD' },
-  { id: 'ytd',   label: 'YTD' },
+  { id: "today", label: "Today" },
+  { id: "wtd", label: "WTD" },
+  { id: "mtd", label: "MTD" },
+  { id: "ytd", label: "YTD" },
 ];
 
 const greeting = () => {
   const h = new Date().getHours();
-  if (h < 12) return 'Good morning';
-  if (h < 17) return 'Good afternoon';
-  return 'Good evening';
+  if (h < 12) return "Good morning";
+  if (h < 17) return "Good afternoon";
+  return "Good evening";
 };
 
 function adminFirstName() {
   try {
-    if (typeof localStorage === 'undefined') return 'there';
-    const user = JSON.parse(localStorage.getItem('waves_admin_user') || 'null');
-    const raw = user?.name || user?.first_name || user?.email || '';
-    const first = String(raw).trim().split(/\s+/)[0] || 'there';
-    return first.includes('@') ? first.split('@')[0] : first;
+    if (typeof localStorage === "undefined") return "there";
+    const user = JSON.parse(localStorage.getItem("waves_admin_user") || "null");
+    const raw = user?.name || user?.first_name || user?.email || "";
+    const first = String(raw).trim().split(/\s+/)[0] || "there";
+    return first.includes("@") ? first.split("@")[0] : first;
   } catch {
-    return 'there';
+    return "there";
   }
 }
 
@@ -65,8 +69,8 @@ function sparkSeries(daily) {
 
 export default function DashboardPageV2() {
   const isMobile = useIsMobile();
-  const [data, setData] = useState(null);     // /admin/dashboard
-  const [kpis, setKpis] = useState(null);     // /admin/dashboard/core-kpis
+  const [data, setData] = useState(null); // /admin/dashboard
+  const [kpis, setKpis] = useState(null); // /admin/dashboard/core-kpis
   const [compare, setCompare] = useState(null); // /admin/dashboard/compare
   const [funnel, setFunnel] = useState(null);
   const [aging, setAging] = useState(null);
@@ -83,7 +87,7 @@ export default function DashboardPageV2() {
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
-  const [period, setPeriod] = useState('mtd');
+  const [period, setPeriod] = useState("mtd");
   const [kpisLoading, setKpisLoading] = useState(false);
   const [kpisError, setKpisError] = useState(null);
   const [attributionLoading, setAttributionLoading] = useState(false);
@@ -104,11 +108,19 @@ export default function DashboardPageV2() {
     }
     async function loadAll() {
       const wave1 = await Promise.all([
-        track('/dashboard',         adminFetch('/admin/dashboard')),
-        track('/compare',           adminFetch('/admin/dashboard/compare?period=this_month&against=last_month')),
-        track('/today-completion',  adminFetch('/admin/dashboard/today-completion')),
-        track('/billing-health',    adminFetch('/admin/billing-health')),
-        track('/alerts',            adminFetch('/admin/dashboard/alerts')),
+        track("/dashboard", adminFetch("/admin/dashboard")),
+        track(
+          "/compare",
+          adminFetch(
+            "/admin/dashboard/compare?period=this_month&against=last_month",
+          ),
+        ),
+        track(
+          "/today-completion",
+          adminFetch("/admin/dashboard/today-completion"),
+        ),
+        track("/billing-health", adminFetch("/admin/billing-health")),
+        track("/alerts", adminFetch("/admin/dashboard/alerts")),
       ]);
       const [d, cmp, td, bh, al] = wave1;
       if (cancelled) return;
@@ -120,10 +132,10 @@ export default function DashboardPageV2() {
       setLoading(false);
 
       const wave2 = await Promise.all([
-        track('/funnel',            adminFetch('/admin/dashboard/funnel')),
-        track('/aging',             adminFetch('/admin/dashboard/aging')),
-        track('/mrr-trend',         adminFetch('/admin/dashboard/mrr-trend?months=12')),
-        track('/service-mix',       adminFetch('/admin/dashboard/service-mix')),
+        track("/funnel", adminFetch("/admin/dashboard/funnel")),
+        track("/aging", adminFetch("/admin/dashboard/aging")),
+        track("/mrr-trend", adminFetch("/admin/dashboard/mrr-trend?months=12")),
+        track("/service-mix", adminFetch("/admin/dashboard/service-mix")),
       ]);
       if (cancelled) return;
       const [fnl, ag, mrr, mx] = wave2;
@@ -133,7 +145,9 @@ export default function DashboardPageV2() {
       setMix(mx);
     }
     loadAll();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -141,14 +155,16 @@ export default function DashboardPageV2() {
     setKpis(null);
     setKpisError(null);
     setKpisLoading(true);
-    adminFetch(`/admin/dashboard/core-kpis?period=${period}`, { signal: ctrl.signal })
+    adminFetch(`/admin/dashboard/core-kpis?period=${period}`, {
+      signal: ctrl.signal,
+    })
       .then((d) => {
         setKpis(d);
         setKpisError(null);
       })
       .catch((e) => {
-        if (e?.name === 'AbortError') return;
-        console.error('[dashboard-v2] /core-kpis', e);
+        if (e?.name === "AbortError") return;
+        console.error("[dashboard-v2] /core-kpis", e);
         setKpisError(e);
       })
       .finally(() => {
@@ -166,9 +182,15 @@ export default function DashboardPageV2() {
     setAttributionLoading(true);
 
     Promise.all([
-      adminFetch(`/admin/dashboard/calls-by-source?period=${period}`, { signal: ctrl.signal }),
-      adminFetch(`/admin/dashboard/leads-by-source?period=${period}`, { signal: ctrl.signal }),
-      adminFetch(`/admin/dashboard/channel-mix?period=${period}`, { signal: ctrl.signal }),
+      adminFetch(`/admin/dashboard/calls-by-source?period=${period}`, {
+        signal: ctrl.signal,
+      }),
+      adminFetch(`/admin/dashboard/leads-by-source?period=${period}`, {
+        signal: ctrl.signal,
+      }),
+      adminFetch(`/admin/dashboard/channel-mix?period=${period}`, {
+        signal: ctrl.signal,
+      }),
     ])
       .then(([calls, leads, channels]) => {
         setCallsBySource(calls);
@@ -177,8 +199,8 @@ export default function DashboardPageV2() {
         setAttributionError(null);
       })
       .catch((e) => {
-        if (e?.name === 'AbortError') return;
-        console.error('[dashboard-v2] attribution', e);
+        if (e?.name === "AbortError") return;
+        console.error("[dashboard-v2] attribution", e);
         setAttributionError(e);
       })
       .finally(() => {
@@ -188,7 +210,11 @@ export default function DashboardPageV2() {
   }, [period]);
 
   if (loading) {
-    return <div className="p-16 text-center text-14 sm:text-13 text-ink-secondary">Loading dashboard…</div>;
+    return (
+      <div className="p-16 text-center text-14 sm:text-13 text-ink-secondary">
+        Loading dashboard…
+      </div>
+    );
   }
   if (!data || data.error || !data.kpis) {
     // 429 from the global limiter used to render as "Try logging in again",
@@ -196,8 +222,14 @@ export default function DashboardPageV2() {
     if (isRateLimitError(loadError)) {
       return (
         <div className="p-16 text-center text-14 sm:text-13 text-alert-fg">
-          Too many requests. Wait a few seconds and{' '}
-          <button onClick={() => window.location.reload()} className="underline">retry</button>.
+          Too many requests. Wait a few seconds and{" "}
+          <button
+            onClick={() => window.location.reload()}
+            className="underline"
+          >
+            retry
+          </button>
+          .
         </div>
       );
     }
@@ -210,45 +242,55 @@ export default function DashboardPageV2() {
     }
     return (
       <div className="p-16 text-center text-14 sm:text-13 text-alert-fg">
-        Failed to load dashboard. <button onClick={() => window.location.reload()} className="underline">Retry</button>.
+        Failed to load dashboard.{" "}
+        <button onClick={() => window.location.reload()} className="underline">
+          Retry
+        </button>
+        .
       </div>
     );
   }
 
   const k = data.kpis;
   const dailySpark = sparkSeries(data.revenueChart?.daily);
-  const todayLabel = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+  const todayLabel = new Date().toLocaleDateString("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  });
   const firstName = adminFirstName();
-  const mrrTrendSub = mrrTrend?.avg_growth_pct != null
-    ? `${mrrTrend.avg_growth_pct >= 0 ? '↑' : '↓'} ${Math.abs(mrrTrend.avg_growth_pct)}% avg monthly growth`
-    : 'last 12 months';
+  const mrrTrendSub =
+    mrrTrend?.avg_growth_pct != null
+      ? `${mrrTrend.avg_growth_pct >= 0 ? "↑" : "↓"} ${Math.abs(mrrTrend.avg_growth_pct)}% avg monthly growth`
+      : "last 12 months";
 
   // Hero KPI tiles. Google Rating tile intentionally removed. Review Index
   // uses /rate/:token submissions and is not a standard NPS calculation.
   const HERO = [
     {
-      label: 'Revenue MTD',
+      label: "Revenue MTD",
       value: fmtMoney(k.revenueMTD),
       delta: compare?.deltas?.revenue ?? k.revenueChangePercent,
-      deltaSuffix: '% vs same days last month',
+      deltaSuffix: "% vs same days last month",
       series: dailySpark,
     },
     {
-      label: 'Active Customers',
+      label: "Active Customers",
       value: fmtInt(k.activeCustomers),
       sub: `+${fmtInt(k.newCustomersThisMonth)} new MTD`,
     },
     {
-      label: 'MRR',
+      label: "MRR",
       value: fmtMoney(data.mrr),
       sub: `ARR ${fmtMoneyCompact(data.mrr * 12)}`,
     },
     {
-      label: 'Review Index',
-      value: kpis?.quality?.nps != null ? String(kpis.quality.nps) : '—',
+      label: "Review Index",
+      value: kpis?.quality?.nps != null ? String(kpis.quality.nps) : "—",
       sub: kpis?.quality?.csatResponses
         ? `${kpis.quality.csatResponses} responses · ${kpis.quality.csatAvg}/10 avg`
-        : 'awaiting rate-page submissions',
+        : "awaiting rate-page submissions",
       alert: kpis?.quality?.nps != null && kpis.quality.nps < 30,
     },
   ];
@@ -257,54 +299,77 @@ export default function DashboardPageV2() {
 
   return (
     <div className="dashboard-blackout font-sans bg-surface-page min-h-full p-3 sm:p-6 pb-[calc(6rem+env(safe-area-inset-bottom))] md:pb-6 text-zinc-900">
+      {" "}
       <header className="mb-5 max-md:mb-6">
+        {" "}
         <div className="flex items-start justify-between flex-wrap gap-3">
+          {" "}
           <div>
+            {" "}
             <div className="u-label text-ink-secondary max-md:text-13 max-md:tracking-normal max-md:normal-case max-md:font-medium max-md:text-zinc-500">
               {todayLabel}
-            </div>
+            </div>{" "}
             <h1 className="text-28 font-normal tracking-h1 mt-1 max-md:mt-2">
-              <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>{greeting()}, {firstName}</span>
-              <span className="hidden md:inline">{greeting()}, {firstName}</span>
-            </h1>
-          </div>
-        </div>
+              {" "}
+              <span
+                className="md:hidden"
+                style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}
+              >
+                {greeting()}, {firstName}
+              </span>{" "}
+              <span className="hidden md:inline">
+                {greeting()}, {firstName}
+              </span>{" "}
+            </h1>{" "}
+          </div>{" "}
+        </div>{" "}
       </header>
-
       {alerts.length > 0 && <DashboardAlertsBanner alerts={alerts} />}
-
       {/* Hero KPI row — sparkline + delta */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4 mb-4 md:mb-5">
         {HERO.map((h) => (
           <KpiSparklineTile key={h.label} {...h} />
         ))}
       </div>
-
       {/* Row: Revenue trend (2/3) + Today completion gauge (1/3) */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-5">
+        {" "}
         <div className="md:col-span-2">
+          {" "}
           <ChartCard
-            title={`Revenue — ${new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}`}
+            title={`Revenue — ${new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" })}`}
             sub={
               compare?.deltas?.revenue != null
-                ? `${compare.deltas.revenue >= 0 ? '↑' : '↓'} ${Math.abs(compare.deltas.revenue)}% vs ${compare.against?.label?.toLowerCase() || 'prior period'}`
-                : 'vs same days last month'
+                ? `${compare.deltas.revenue >= 0 ? "↑" : "↓"} ${Math.abs(compare.deltas.revenue)}% vs ${compare.against?.label?.toLowerCase() || "prior period"}`
+                : "vs same days last month"
             }
             action={
               <span className="text-12 text-ink-secondary">
-                MRR <span className="u-nums font-medium text-zinc-900 ml-1">{fmtMoney(data.mrr)}</span>
+                MRR{" "}
+                <span className="u-nums font-medium text-zinc-900 ml-1">
+                  {fmtMoney(data.mrr)}
+                </span>{" "}
               </span>
             }
           >
+            {" "}
             <RevenueTrendArea
-              current={compare?.period?.series || data.revenueChart?.daily || []}
+              current={
+                compare?.period?.series || data.revenueChart?.daily || []
+              }
               prior={compare?.against?.series || []}
-            />
-          </ChartCard>
-        </div>
+            />{" "}
+          </ChartCard>{" "}
+        </div>{" "}
         <ChartCard
           title="Today's Completion"
-          sub={today?.date ? new Date(today.date + 'T12:00').toLocaleDateString('en-US', { weekday: 'long' }) : ''}
+          sub={
+            today?.date
+              ? new Date(today.date + "T12:00").toLocaleDateString("en-US", {
+                  weekday: "long",
+                })
+              : ""
+          }
         >
           {today ? (
             <CompletionGauge
@@ -313,63 +378,83 @@ export default function DashboardPageV2() {
               remaining={today.remaining}
               cancelled={today.cancelled}
             />
-          ) : <EmptyState>Loading…</EmptyState>}
-        </ChartCard>
+          ) : (
+            <EmptyState>Loading…</EmptyState>
+          )}
+        </ChartCard>{" "}
       </div>
-
       {/* Row: Service mix donut + Estimate funnel */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-5">
-        <ChartCard title="Service Mix" sub={`${mix?.total_services || 0} completed services this month`}>
-          <ServiceMixDonut mix={mix?.mix || []} />
-        </ChartCard>
+        {" "}
+        <ChartCard
+          title="Service Mix"
+          sub={`${mix?.total_services || 0} completed services this month`}
+        >
+          {" "}
+          <ServiceMixDonut mix={mix?.mix || []} />{" "}
+        </ChartCard>{" "}
         <ChartCard
           title="Estimate Funnel"
-          sub={funnel?.period ? `${funnel.period.from} → ${funnel.period.to}` : ''}
+          sub={
+            funnel?.period ? `${funnel.period.from} → ${funnel.period.to}` : ""
+          }
         >
+          {" "}
           <EstimateFunnel
             funnel={funnel?.funnel || {}}
             rates={funnel?.rates || {}}
             totalAcceptedValue={funnel?.total_accepted_value}
-          />
-        </ChartCard>
+          />{" "}
+        </ChartCard>{" "}
       </div>
-
       {/* AR aging — full width, the 90+ bucket is the only place alert-fg */}
       <div className="mb-5">
+        {" "}
         <ChartCard
           title="Accounts Receivable Aging"
-          sub={aging?.invoice_count != null ? `${aging.invoice_count} open invoices` : ''}
+          sub={
+            aging?.invoice_count != null
+              ? `${aging.invoice_count} open invoices`
+              : ""
+          }
         >
+          {" "}
           <AgingBar
             aging={aging?.aging || {}}
             totalOutstanding={aging?.total_outstanding}
             totalOverdue={aging?.total_overdue}
-          />
-        </ChartCard>
+          />{" "}
+        </ChartCard>{" "}
       </div>
-
       {/* Core operational KPIs (period switcher) */}
       <Card className="mb-5 max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
+        {" "}
         <CardHeader className="flex items-center justify-between gap-3 flex-wrap">
+          {" "}
           <div>
-            <CardTitle>Core KPIs</CardTitle>
-            <div className="text-12 text-ink-secondary mt-1">{kpis?.periodLabel || 'Month to Date'}</div>
-          </div>
+            {" "}
+            <CardTitle>Core KPIs</CardTitle>{" "}
+            <div className="text-12 text-ink-secondary mt-1">
+              {kpis?.periodLabel || "Month to Date"}
+            </div>{" "}
+          </div>{" "}
           <div className="inline-flex items-center border-hairline border-zinc-200 rounded-sm overflow-hidden">
             {PERIODS.map((p) => (
               <button
                 key={p.id}
                 onClick={() => setPeriod(p.id)}
                 className={cn(
-                  'h-11 sm:h-7 px-4 sm:px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors',
-                  period === p.id ? 'bg-zinc-900 text-white' : 'bg-white text-ink-secondary hover:bg-zinc-50'
+                  "h-11 sm:h-7 px-4 sm:px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors",
+                  period === p.id
+                    ? "bg-zinc-900 text-white"
+                    : "bg-white text-ink-secondary hover:bg-zinc-50",
                 )}
               >
                 {p.label}
               </button>
             ))}
-          </div>
-        </CardHeader>
+          </div>{" "}
+        </CardHeader>{" "}
         <CardBody>
           {kpisLoading ? (
             <EmptyState>Loading KPIs…</EmptyState>
@@ -379,124 +464,188 @@ export default function DashboardPageV2() {
             <EmptyState>No KPI data for this period</EmptyState>
           ) : (
             <>
-              <SectionLabel>Operations</SectionLabel>
+              {" "}
+              <SectionLabel>Operations</SectionLabel>{" "}
               <KpiGrid>
+                {" "}
                 <KpiTile
                   label="Service Completion"
                   value={pct(kpis.service.completionRate)}
                   sub={`${kpis.service.completed}/${kpis.service.scheduled} jobs`}
-                  alert={kpis.service.completionRate != null && kpis.service.completionRate < 85}
-                />
+                  alert={
+                    kpis.service.completionRate != null &&
+                    kpis.service.completionRate < 85
+                  }
+                />{" "}
                 <KpiTile
                   label="Callback Rate"
-                  value={kpis.service.callbackRate != null ? `${kpis.service.callbackRate}%` : '—'}
+                  value={
+                    kpis.service.callbackRate != null
+                      ? `${kpis.service.callbackRate}%`
+                      : "—"
+                  }
                   sub={`${kpis.service.callbacks} callbacks`}
-                  alert={kpis.service.callbackRate != null && kpis.service.callbackRate >= 6}
-                />
+                  alert={
+                    kpis.service.callbackRate != null &&
+                    kpis.service.callbackRate >= 6
+                  }
+                />{" "}
                 <KpiTile
                   label="Tech Utilization"
                   value={pct(kpis.financial.utilization)}
                   sub={
                     kpis.financial.activeTechs != null
                       ? `${kpis.financial.laborHours}h / ${kpis.financial.activeTechs} techs`
-                      : 'tech count unavailable'
+                      : "tech count unavailable"
                   }
-                  alert={kpis.financial.utilization != null && kpis.financial.utilization < 45}
-                />
+                  alert={
+                    kpis.financial.utilization != null &&
+                    kpis.financial.utilization < 45
+                  }
+                />{" "}
                 <KpiTile
                   label="Stops / Hour"
-                  value={kpis.financial.stopsPerHour != null ? kpis.financial.stopsPerHour.toFixed(1) : '—'}
+                  value={
+                    kpis.financial.stopsPerHour != null
+                      ? kpis.financial.stopsPerHour.toFixed(1)
+                      : "—"
+                  }
                   sub="route efficiency"
-                />
-              </KpiGrid>
-
-              <SectionLabel>Financial</SectionLabel>
+                />{" "}
+              </KpiGrid>{" "}
+              <SectionLabel>Financial</SectionLabel>{" "}
               <KpiGrid>
+                {" "}
                 <KpiTile
                   label="Revenue / Job"
-                  value={kpis.financial.revPerJob != null ? fmtMoney(kpis.financial.revPerJob) : '—'}
+                  value={
+                    kpis.financial.revPerJob != null
+                      ? fmtMoney(kpis.financial.revPerJob)
+                      : "—"
+                  }
                   sub={`${kpis.financial.jobsDone} completed`}
-                />
+                />{" "}
                 <KpiTile
                   label="Revenue / Man-Hour"
-                  value={kpis.financial.rpmh != null ? fmtMoney(kpis.financial.rpmh) : '—'}
+                  value={
+                    kpis.financial.rpmh != null
+                      ? fmtMoney(kpis.financial.rpmh)
+                      : "—"
+                  }
                   sub="target $120"
-                  alert={kpis.financial.rpmh != null && kpis.financial.rpmh < 90}
-                />
+                  alert={
+                    kpis.financial.rpmh != null && kpis.financial.rpmh < 90
+                  }
+                />{" "}
                 <KpiTile
                   label="Gross Margin"
                   value={
                     kpis.financial.grossMarginWeighted != null
                       ? `${Math.round(kpis.financial.grossMarginWeighted)}%`
-                      : '—'
+                      : "—"
                   }
                   sub={
                     kpis.financial.grossMarginAvg != null
                       ? `per-job avg ${Math.round(kpis.financial.grossMarginAvg)}%`
-                      : 'revenue-weighted'
+                      : "revenue-weighted"
                   }
-                  alert={kpis.financial.grossMarginWeighted != null && kpis.financial.grossMarginWeighted < 40}
-                />
+                  alert={
+                    kpis.financial.grossMarginWeighted != null &&
+                    kpis.financial.grossMarginWeighted < 40
+                  }
+                />{" "}
                 <KpiTile
                   label="AR Days"
-                  value={kpis.ar.days != null ? `${kpis.ar.days}d` : '—'}
+                  value={kpis.ar.days != null ? `${kpis.ar.days}d` : "—"}
                   sub={`${fmtMoneyCompact(kpis.ar.open)} open · ${kpis.ar.overdueCount} overdue`}
                   alert={kpis.ar.days != null && kpis.ar.days > 30}
-                />
-              </KpiGrid>
-
-              <SectionLabel>Sales &amp; Customer</SectionLabel>
+                />{" "}
+              </KpiGrid>{" "}
+              <SectionLabel>Sales &amp; Customer</SectionLabel>{" "}
               <KpiGrid>
+                {" "}
                 <KpiTile
                   label="Lead → Booked"
-                  value={!salesUnavailable && sales.conversion != null ? `${sales.conversion}%` : '—'}
-                  sub={salesUnavailable ? 'lead metrics unavailable' : `${sales.booked ?? 0}/${sales.leads ?? 0} leads`}
-                  alert={salesUnavailable || (sales.conversion != null && sales.conversion < 20)}
-                />
+                  value={
+                    !salesUnavailable && sales.conversion != null
+                      ? `${sales.conversion}%`
+                      : "—"
+                  }
+                  sub={
+                    salesUnavailable
+                      ? "lead metrics unavailable"
+                      : `${sales.booked ?? 0}/${sales.leads ?? 0} leads`
+                  }
+                  alert={
+                    salesUnavailable ||
+                    (sales.conversion != null && sales.conversion < 20)
+                  }
+                />{" "}
                 <KpiTile
                   label="Response Speed"
-                  value={!salesUnavailable && sales.avgResponseMin != null ? `${sales.avgResponseMin}m` : '—'}
-                  sub={salesUnavailable ? 'lead metrics unavailable' : 'lead → first contact'}
-                  alert={salesUnavailable || (sales.avgResponseMin != null && sales.avgResponseMin > 60)}
-                />
+                  value={
+                    !salesUnavailable && sales.avgResponseMin != null
+                      ? `${sales.avgResponseMin}m`
+                      : "—"
+                  }
+                  sub={
+                    salesUnavailable
+                      ? "lead metrics unavailable"
+                      : "lead → first contact"
+                  }
+                  alert={
+                    salesUnavailable ||
+                    (sales.avgResponseMin != null && sales.avgResponseMin > 60)
+                  }
+                />{" "}
                 <KpiTile
                   label="CSAT"
-                  value={kpis.quality.csatAvg != null ? `${kpis.quality.csatAvg}/10` : '—'}
-                  sub={kpis.quality.csatResponses
-                    ? `${kpis.quality.csatResponses} rate-page responses`
-                    : 'no responses yet'}
-                  alert={kpis.quality.csatAvg != null && parseFloat(kpis.quality.csatAvg) < 8}
-                />
+                  value={
+                    kpis.quality.csatAvg != null
+                      ? `${kpis.quality.csatAvg}/10`
+                      : "—"
+                  }
+                  sub={
+                    kpis.quality.csatResponses
+                      ? `${kpis.quality.csatResponses} rate-page responses`
+                      : "no responses yet"
+                  }
+                  alert={
+                    kpis.quality.csatAvg != null &&
+                    parseFloat(kpis.quality.csatAvg) < 8
+                  }
+                />{" "}
                 <KpiTile
                   label="Retention"
-                  value={kpis.retention.pct != null ? `${kpis.retention.pct}%` : '—'}
+                  value={
+                    kpis.retention.pct != null ? `${kpis.retention.pct}%` : "—"
+                  }
                   sub={`${kpis.retention.churned} churned`}
                   alert={kpis.retention.pct != null && kpis.retention.pct < 85}
-                />
-              </KpiGrid>
+                />{" "}
+              </KpiGrid>{" "}
             </>
           )}
-        </CardBody>
+        </CardBody>{" "}
       </Card>
-
       {/* MRR trend — full width above the attribution row */}
       {isMobile ? (
         <MobileFold title="MRR Trend" sub={mrrTrendSub}>
+          {" "}
           <ChartCard title="MRR Trend" sub={mrrTrendSub}>
-            <MrrTrendChart trend={mrrTrend?.trend || []} />
-          </ChartCard>
+            {" "}
+            <MrrTrendChart trend={mrrTrend?.trend || []} />{" "}
+          </ChartCard>{" "}
         </MobileFold>
       ) : (
-      <div className="mb-5">
-        <ChartCard
-          title="MRR Trend"
-          sub={mrrTrendSub}
-        >
-          <MrrTrendChart trend={mrrTrend?.trend || []} />
-        </ChartCard>
-      </div>
+        <div className="mb-5">
+          {" "}
+          <ChartCard title="MRR Trend" sub={mrrTrendSub}>
+            {" "}
+            <MrrTrendChart trend={mrrTrend?.trend || []} />{" "}
+          </ChartCard>{" "}
+        </div>
       )}
-
       {/* Upstream lead-attribution row.
           Replaces the prior single Lead Source panel (which aggregated the
           downstream customers.lead_source string) with three upstream views
@@ -506,14 +655,20 @@ export default function DashboardPageV2() {
             - Channel Mix:     leads.first_contact_channel breakdown
           Uses the same period selector as Core KPIs. */}
       {isMobile ? (
-        <MobileFold title="Lead Attribution" sub={callsBySource?.period?.label || kpis?.periodLabel || 'Month to Date'}>
+        <MobileFold
+          title="Lead Attribution"
+          sub={
+            callsBySource?.period?.label || kpis?.periodLabel || "Month to Date"
+          }
+        >
+          {" "}
           <AttributionPanels
             callsBySource={callsBySource}
             leadsBySource={leadsBySource}
             channelMix={channelMix}
             loading={attributionLoading}
             error={attributionError}
-          />
+          />{" "}
         </MobileFold>
       ) : (
         <AttributionPanels
@@ -524,63 +679,87 @@ export default function DashboardPageV2() {
           error={attributionError}
         />
       )}
-
       {/* Tech leaderboard — bar variant */}
-      {kpis?.leaderboard?.length > 0 && (
-        isMobile ? (
+      {kpis?.leaderboard?.length > 0 &&
+        (isMobile ? (
           <MobileFold title="Tech Leaderboard" sub={kpis.periodLabel}>
+            {" "}
             <ChartCard title="Tech Leaderboard" sub={kpis.periodLabel}>
-              <TechLeaderboardBars leaderboard={kpis.leaderboard} />
-            </ChartCard>
+              {" "}
+              <TechLeaderboardBars leaderboard={kpis.leaderboard} />{" "}
+            </ChartCard>{" "}
           </MobileFold>
         ) : (
-          <ChartCard title="Tech Leaderboard" sub={kpis.periodLabel} className="mb-5">
-            <TechLeaderboardBars leaderboard={kpis.leaderboard} />
+          <ChartCard
+            title="Tech Leaderboard"
+            sub={kpis.periodLabel}
+            className="mb-5"
+          >
+            {" "}
+            <TechLeaderboardBars leaderboard={kpis.leaderboard} />{" "}
           </ChartCard>
-        )
-      )}
-
+        ))}
       {/* Billing Health — kept as a peer panel per user instruction */}
-      {billing && (
-        isMobile ? (
-          <MobileFold title="Billing Health" sub={`${billing.total_billable} billable`}>
-            <BillingHealthPanel summary={billing} />
+      {billing &&
+        (isMobile ? (
+          <MobileFold
+            title="Billing Health"
+            sub={`${billing.total_billable} billable`}
+          >
+            {" "}
+            <BillingHealthPanel summary={billing} />{" "}
           </MobileFold>
         ) : (
           <BillingHealthPanel summary={billing} />
-        )
-      )}
+        ))}
     </div>
   );
 }
 
 function DashboardAlertsBanner({ alerts }) {
   const visible = alerts.slice(0, 4);
-  const criticalCount = alerts.filter((a) => a.severity === 'critical').length;
+  const criticalCount = alerts.filter((a) => a.severity === "critical").length;
   return (
     <Card className="mb-4 max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
+      {" "}
       <CardBody className="p-4">
+        {" "}
         <div className="flex items-center justify-between gap-3">
+          {" "}
           <div>
-            <div className="u-label text-ink-secondary">Operational Alerts</div>
+            {" "}
+            <div className="u-label text-ink-secondary">
+              Operational Alerts
+            </div>{" "}
             <div className="mt-1 text-13 text-zinc-900">
               {criticalCount > 0
-                ? `${criticalCount} critical alert${criticalCount === 1 ? '' : 's'}`
-                : `${alerts.length} active alert${alerts.length === 1 ? '' : 's'}`}
-            </div>
-          </div>
-          <Badge tone={criticalCount > 0 ? 'alert' : 'neutral'}>{alerts.length}</Badge>
-        </div>
+                ? `${criticalCount} critical alert${criticalCount === 1 ? "" : "s"}`
+                : `${alerts.length} active alert${alerts.length === 1 ? "" : "s"}`}
+            </div>{" "}
+          </div>{" "}
+          <Badge tone={criticalCount > 0 ? "alert" : "neutral"}>
+            {alerts.length}
+          </Badge>{" "}
+        </div>{" "}
         <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2">
           {visible.map((alert) => (
             <a
               key={alert.id}
-              href={alert.href || '#'}
+              href={alert.href || "#"}
               className="flex items-center justify-between gap-3 rounded-sm border-hairline border-zinc-200 bg-surface-sunken px-3 py-2 text-13 text-zinc-900 hover:bg-white"
             >
+              {" "}
               <span className="flex items-center gap-2 min-w-0">
-                <span className={cn('h-2 w-2 rounded-full flex-shrink-0', alert.severity === 'critical' ? 'bg-alert-fg' : 'bg-amber-500')} />
-                <span className="truncate">{alert.label}</span>
+                {" "}
+                <span
+                  className={cn(
+                    "h-2 w-2 rounded-full flex-shrink-0",
+                    alert.severity === "critical"
+                      ? "bg-alert-fg"
+                      : "bg-amber-500",
+                  )}
+                />{" "}
+                <span className="truncate">{alert.label}</span>{" "}
               </span>
               {alert.amount != null && (
                 <span className="u-nums text-12 text-ink-secondary flex-shrink-0">
@@ -589,8 +768,8 @@ function DashboardAlertsBanner({ alerts }) {
               )}
             </a>
           ))}
-        </div>
-      </CardBody>
+        </div>{" "}
+      </CardBody>{" "}
     </Card>
   );
 }
@@ -598,24 +777,37 @@ function DashboardAlertsBanner({ alerts }) {
 function MobileFold({ title, sub, children }) {
   return (
     <details className="md:hidden mb-3 rounded-xl border-hairline border-zinc-200 bg-white shadow-sm overflow-hidden">
+      {" "}
       <summary className="list-none cursor-pointer select-none px-4 py-4 flex items-center justify-between gap-3">
+        {" "}
         <span className="u-label text-zinc-900">{title}</span>
-        {sub && <span className="text-12 text-ink-secondary text-right truncate">{sub}</span>}
-      </summary>
-      <div className="px-3 pb-3">{children}</div>
+        {sub && (
+          <span className="text-12 text-ink-secondary text-right truncate">
+            {sub}
+          </span>
+        )}
+      </summary>{" "}
+      <div className="px-3 pb-3">{children}</div>{" "}
     </details>
   );
 }
 
-function AttributionPanels({ callsBySource, leadsBySource, channelMix, loading, error }) {
+function AttributionPanels({
+  callsBySource,
+  leadsBySource,
+  channelMix,
+  loading,
+  error,
+}) {
   return (
     <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-5">
+      {" "}
       <ChartCard
         title="Calls by Source"
         sub={
           callsBySource?.total_inbound_calls != null
-            ? `${callsBySource.total_inbound_calls} inbound calls · ${callsBySource.period?.label || 'MTD'}`
-            : ''
+            ? `${callsBySource.total_inbound_calls} inbound calls · ${callsBySource.period?.label || "MTD"}`
+            : ""
         }
       >
         {loading ? (
@@ -625,13 +817,13 @@ function AttributionPanels({ callsBySource, leadsBySource, channelMix, loading, 
         ) : (
           <CallsBySourceList sources={callsBySource?.sources || []} />
         )}
-      </ChartCard>
+      </ChartCard>{" "}
       <ChartCard
         title="Leads by Source"
         sub={
           leadsBySource?.total_leads != null
-            ? `${leadsBySource.total_leads} leads · ${leadsBySource.overall_conversion_pct ?? 0}% booked · ${leadsBySource.period?.label || 'MTD'}`
-            : ''
+            ? `${leadsBySource.total_leads} leads · ${leadsBySource.overall_conversion_pct ?? 0}% booked · ${leadsBySource.period?.label || "MTD"}`
+            : ""
         }
       >
         {loading ? (
@@ -641,10 +833,14 @@ function AttributionPanels({ callsBySource, leadsBySource, channelMix, loading, 
         ) : (
           <LeadsBySourceList sources={leadsBySource?.sources || []} />
         )}
-      </ChartCard>
+      </ChartCard>{" "}
       <ChartCard
         title="Channel Mix"
-        sub={channelMix?.total_leads != null ? `${channelMix.total_leads} leads by first-contact channel` : ''}
+        sub={
+          channelMix?.total_leads != null
+            ? `${channelMix.total_leads} leads by first-contact channel`
+            : ""
+        }
       >
         {loading ? (
           <EmptyState>Loading…</EmptyState>
@@ -653,12 +849,14 @@ function AttributionPanels({ callsBySource, leadsBySource, channelMix, loading, 
         ) : (
           <ChannelMixDonut channels={channelMix?.channels || []} />
         )}
-      </ChartCard>
+      </ChartCard>{" "}
     </div>
   );
 }
 
-function pct(n) { return n == null ? '—' : `${n}%`; }
+function pct(n) {
+  return n == null ? "—" : `${n}%`;
+}
 
 function SectionLabel({ children }) {
   return (
@@ -669,14 +867,22 @@ function SectionLabel({ children }) {
 }
 
 function KpiGrid({ children }) {
-  return <div className="grid grid-cols-2 md:grid-cols-4 gap-3">{children}</div>;
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">{children}</div>
+  );
 }
 
 function KpiTile({ label, value, sub, alert }) {
   return (
     <div className="bg-surface-sunken border-hairline border-zinc-200 rounded-sm p-3">
-      <div className="u-label text-ink-secondary">{label}</div>
-      <div className={cn('u-nums text-22 font-medium tracking-tight mt-2 leading-none', alert ? 'text-alert-fg' : 'text-zinc-900')}>
+      {" "}
+      <div className="u-label text-ink-secondary">{label}</div>{" "}
+      <div
+        className={cn(
+          "u-nums text-22 font-medium tracking-tight mt-2 leading-none",
+          alert ? "text-alert-fg" : "text-zinc-900",
+        )}
+      >
         {value}
       </div>
       {sub && <div className="mt-1 text-11 text-ink-secondary">{sub}</div>}
@@ -686,33 +892,61 @@ function KpiTile({ label, value, sub, alert }) {
 
 function BillingHealthPanel({ summary: h }) {
   const metrics = [
-    { label: 'Autopay active',    value: h.autopay_active },
-    { label: 'Paused',            value: h.autopay_paused },
-    { label: 'No method',         value: h.no_payment_method,        alert: h.no_payment_method > 0 },
-    { label: 'Charged this month',value: h.charged_this_month },
-    { label: 'Failed (30d)',      value: h.failed_last_30_days,      alert: h.failed_last_30_days > 0 },
-    { label: 'In retry',          value: h.in_retry_queue,           alert: h.in_retry_queue > 0 },
-    { label: 'Escalated (30d)',   value: h.escalated_last_30_days,   alert: h.escalated_last_30_days > 0 },
-    { label: 'Cards expired/60d', value: h.expiring_cards_60_days,   alert: h.expiring_cards_60_days > 0 },
+    { label: "Autopay active", value: h.autopay_active },
+    { label: "Paused", value: h.autopay_paused },
+    {
+      label: "No method",
+      value: h.no_payment_method,
+      alert: h.no_payment_method > 0,
+    },
+    { label: "Charged this month", value: h.charged_this_month },
+    {
+      label: "Failed (30d)",
+      value: h.failed_last_30_days,
+      alert: h.failed_last_30_days > 0,
+    },
+    { label: "In retry", value: h.in_retry_queue, alert: h.in_retry_queue > 0 },
+    {
+      label: "Escalated (30d)",
+      value: h.escalated_last_30_days,
+      alert: h.escalated_last_30_days > 0,
+    },
+    {
+      label: "Cards expired/60d",
+      value: h.expiring_cards_60_days,
+      alert: h.expiring_cards_60_days > 0,
+    },
   ];
   return (
     <Card className="mb-5 max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
+      {" "}
       <CardHeader className="flex items-center justify-between">
-        <CardTitle>Billing Health</CardTitle>
-        <Badge>{h.total_billable} billable</Badge>
-      </CardHeader>
+        {" "}
+        <CardTitle>Billing Health</CardTitle>{" "}
+        <Badge>{h.total_billable} billable</Badge>{" "}
+      </CardHeader>{" "}
       <CardBody>
+        {" "}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           {metrics.map((m) => (
-            <div key={m.label} className="bg-surface-sunken border-hairline border-zinc-200 rounded-sm p-3">
-              <div className="u-label text-ink-secondary">{m.label}</div>
-              <div className={cn('u-nums text-22 font-medium tracking-tight mt-2 leading-none', m.alert ? 'text-alert-fg' : 'text-zinc-900')}>
+            <div
+              key={m.label}
+              className="bg-surface-sunken border-hairline border-zinc-200 rounded-sm p-3"
+            >
+              {" "}
+              <div className="u-label text-ink-secondary">{m.label}</div>{" "}
+              <div
+                className={cn(
+                  "u-nums text-22 font-medium tracking-tight mt-2 leading-none",
+                  m.alert ? "text-alert-fg" : "text-zinc-900",
+                )}
+              >
                 {m.value}
-              </div>
+              </div>{" "}
             </div>
           ))}
-        </div>
-      </CardBody>
+        </div>{" "}
+      </CardBody>{" "}
     </Card>
   );
 }

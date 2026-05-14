@@ -12,10 +12,10 @@
  * remap the same tokens on a `[data-theme="tech-dark"]` scope without
  * touching this component.
  */
-import { useState, useEffect, useRef } from 'react';
-import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
-import { consumeSnapshotOnMount } from '../lib/tapToPayReturn';
-import { cn } from './ui/cn';
+import { useState, useEffect, useRef } from "react";
+import { Outlet, useNavigate, useLocation, Link } from "react-router-dom";
+import { consumeSnapshotOnMount } from "../lib/tapToPayReturn";
+import { cn } from "./ui/cn";
 import {
   LayoutDashboard,
   Users,
@@ -51,88 +51,113 @@ import {
   Sparkles,
   Send,
   Newspaper,
-} from 'lucide-react';
-import useIsMobile from '../hooks/useIsMobile';
-import { refetchFlags } from '../hooks/useFeatureFlag';
-import NotificationBell from './NotificationBell';
-import GlobalCommandPalette from './admin/GlobalCommandPalette';
+} from "lucide-react";
+import useIsMobile from "../hooks/useIsMobile";
+import { refetchFlags } from "../hooks/useFeatureFlag";
+import NotificationBell from "./NotificationBell";
+import GlobalCommandPalette from "./admin/GlobalCommandPalette";
 
 const MOBILE_TABS = [
-  { path: '/admin/dashboard', icon: Home, label: 'Dashboard' },
-  { path: '/admin/schedule', icon: Calendar, label: 'Schedule' },
-  { path: '/admin/customers', icon: Users, label: 'Customers' },
-  { path: '/admin/communications', icon: MessageSquare, label: 'Messages' },
-  { path: '/admin/more', icon: Menu, label: 'More' },
+  { path: "/admin/dashboard", icon: Home, label: "Dashboard" },
+  { path: "/admin/schedule", icon: Calendar, label: "Schedule" },
+  { path: "/admin/customers", icon: Users, label: "Customers" },
+  { path: "/admin/communications", icon: MessageSquare, label: "Messages" },
+  { path: "/admin/more", icon: Menu, label: "More" },
 ];
 
-function isTabActive(pathname, tabPath, search = '') {
+function isTabActive(pathname, tabPath, search = "") {
   if (pathname === tabPath) return true;
-  if (tabPath === '/admin/dashboard' && pathname === '/admin') return true;
-  if (tabPath === '/admin/schedule' && pathname === '/admin/dispatch') {
-    return new URLSearchParams(search).get('tab') === 'schedule';
+  if (tabPath === "/admin/dashboard" && pathname === "/admin") return true;
+  if (tabPath === "/admin/schedule" && pathname === "/admin/dispatch") {
+    return new URLSearchParams(search).get("tab") === "schedule";
   }
-  if (pathname.startsWith(tabPath + '/')) return true;
+  if (pathname.startsWith(tabPath + "/")) return true;
   return false;
 }
 
 const NAV_SECTIONS = [
-  { section: 'Operations', items: [
-    { path: '/admin/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
-    { path: '/admin/customers', icon: Users, label: 'Customers' },
-    { path: '/admin/estimates', icon: ClipboardList, label: 'Pipeline' },
-    { path: '/admin/schedule', icon: Calendar, label: 'Schedule' },
-    { path: '/admin/timetracking', icon: Clock, label: 'Staff' },
-    { path: '/admin/service-library', icon: BookOpen, label: 'Services' },
-    { path: '/admin/projects', icon: FileText, label: 'Projects' },
-  ]},
-  { section: 'Communications', items: [
-    { path: '/admin/communications', icon: MessageSquare, label: 'Communications' },
-    { path: '/admin/reviews', icon: Star, label: 'Reviews' },
-    { path: '/admin/referrals', icon: Gift, label: 'Referrals' },
-    { path: '/admin/email', icon: Mail, label: 'Email' },
-  ]},
-  { section: 'Marketing', items: [
-    { path: '/admin/ppc', icon: Megaphone, label: 'PPC' },
-    { path: '/admin/seo', icon: Search, label: 'SEO' },
-    { path: '/admin/social-media', icon: Share2, label: 'Social Media' },
-    { path: '/admin/blog', icon: Newspaper, label: 'Blog' },
-    { path: '/admin/newsletter', icon: Send, label: 'Newsletter' },
-  ]},
-  { section: 'Field & Equipment', items: [
-    { path: '/admin/equipment', icon: Wrench, label: 'Equipment' },
-    { path: '/admin/fleet', icon: Truck, label: 'Fleet' },
-    { path: '/admin/inventory', icon: Package, label: 'Inventory' },
-    { path: '/admin/compliance', icon: ShieldCheck, label: 'Compliance' },
-    { path: '/admin/lawn-assessment', icon: Leaf, label: 'Lawn Assessment' },
-  ]},
-  { section: 'Intelligence', items: [
-    { path: '/admin/knowledge', icon: BookMarked, label: 'Knowledge Base' },
-    { path: '/admin/kb', icon: Brain, label: 'Claudeopedia' },
-  ]},
-  { section: 'Finance', items: [
-    { path: '/admin/invoices', icon: FileText, label: 'Invoices' },
-    { path: '/admin/banking', icon: Landmark, label: 'Banking' },
-    { path: '/admin/tax', icon: Receipt, label: 'Taxes' },
-    { path: '/admin/pricing-logic', icon: Calculator, label: 'Pricing' },
-  ]},
-  { section: 'System', items: [
-    { path: '/admin/tool-health', icon: Activity, label: 'Tool Health' },
-    { path: '/admin/geofence-events', icon: Radio, label: 'Geofence' },
-    { path: '/admin/settings', icon: Settings, label: 'Settings' },
-  ]},
+  {
+    section: "Operations",
+    items: [
+      { path: "/admin/dashboard", icon: LayoutDashboard, label: "Dashboard" },
+      { path: "/admin/customers", icon: Users, label: "Customers" },
+      { path: "/admin/estimates", icon: ClipboardList, label: "Pipeline" },
+      { path: "/admin/schedule", icon: Calendar, label: "Schedule" },
+      { path: "/admin/timetracking", icon: Clock, label: "Staff" },
+      { path: "/admin/service-library", icon: BookOpen, label: "Services" },
+      { path: "/admin/projects", icon: FileText, label: "Projects" },
+    ],
+  },
+  {
+    section: "Communications",
+    items: [
+      {
+        path: "/admin/communications",
+        icon: MessageSquare,
+        label: "Communications",
+      },
+      { path: "/admin/reviews", icon: Star, label: "Reviews" },
+      { path: "/admin/referrals", icon: Gift, label: "Referrals" },
+      { path: "/admin/email", icon: Mail, label: "Email" },
+    ],
+  },
+  {
+    section: "Marketing",
+    items: [
+      { path: "/admin/ppc", icon: Megaphone, label: "PPC" },
+      { path: "/admin/seo", icon: Search, label: "SEO" },
+      { path: "/admin/social-media", icon: Share2, label: "Social Media" },
+      { path: "/admin/blog", icon: Newspaper, label: "Blog" },
+      { path: "/admin/newsletter", icon: Send, label: "Newsletter" },
+    ],
+  },
+  {
+    section: "Field & Equipment",
+    items: [
+      { path: "/admin/equipment", icon: Wrench, label: "Equipment" },
+      { path: "/admin/fleet", icon: Truck, label: "Fleet" },
+      { path: "/admin/inventory", icon: Package, label: "Inventory" },
+      { path: "/admin/compliance", icon: ShieldCheck, label: "Compliance" },
+      { path: "/admin/lawn-assessment", icon: Leaf, label: "Lawn Assessment" },
+    ],
+  },
+  {
+    section: "Intelligence",
+    items: [
+      { path: "/admin/knowledge", icon: BookMarked, label: "Knowledge Base" },
+      { path: "/admin/kb", icon: Brain, label: "Claudeopedia" },
+    ],
+  },
+  {
+    section: "Finance",
+    items: [
+      { path: "/admin/invoices", icon: FileText, label: "Invoices" },
+      { path: "/admin/banking", icon: Landmark, label: "Banking" },
+      { path: "/admin/tax", icon: Receipt, label: "Taxes" },
+      { path: "/admin/pricing-logic", icon: Calculator, label: "Pricing" },
+    ],
+  },
+  {
+    section: "System",
+    items: [
+      { path: "/admin/tool-health", icon: Activity, label: "Tool Health" },
+      { path: "/admin/geofence-events", icon: Radio, label: "Geofence" },
+      { path: "/admin/settings", icon: Settings, label: "Settings" },
+    ],
+  },
 ];
 
 function initialsFor(name) {
-  if (!name) return '•';
+  if (!name) return "•";
   const parts = name.trim().split(/\s+/);
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
 function roleLabel(role) {
-  if (!role) return 'Staff';
-  if (role === 'admin') return 'Admin';
-  if (role === 'technician') return 'Technician';
+  if (!role) return "Staff";
+  if (role === "admin") return "Admin";
+  if (role === "technician") return "Technician";
   return role.charAt(0).toUpperCase() + role.slice(1);
 }
 
@@ -146,21 +171,28 @@ export default function AdminLayoutV2() {
   // Restore route if we just returned from WavesPay (iOS often evicts the
   // tab during the hand-off, reloading the app to its default route).
   // See lib/tapToPayReturn.js.
-  useEffect(() => { consumeSnapshotOnMount(navigate); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    consumeSnapshotOnMount(navigate);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const paletteRef = useRef(null);
 
   useEffect(() => {
-    const token = localStorage.getItem('waves_admin_token');
-    if (!token) { navigate('/admin/login', { replace: true }); return; }
-    const u = localStorage.getItem('waves_admin_user');
+    const token = localStorage.getItem("waves_admin_token");
+    if (!token) {
+      navigate("/admin/login", { replace: true });
+      return;
+    }
+    const u = localStorage.getItem("waves_admin_user");
     if (u) setUser(JSON.parse(u));
-    fetch('/api/admin/auth/me', { headers: { Authorization: `Bearer ${token}` } })
+    fetch("/api/admin/auth/me", {
+      headers: { Authorization: `Bearer ${token}` },
+    })
       .then((r) => {
         if (r.status === 401) {
-          localStorage.removeItem('waves_admin_token');
-          localStorage.removeItem('waves_admin_user');
+          localStorage.removeItem("waves_admin_token");
+          localStorage.removeItem("waves_admin_user");
           refetchFlags();
-          navigate('/admin/login', { replace: true });
+          navigate("/admin/login", { replace: true });
         }
       })
       .catch(() => {});
@@ -172,10 +204,10 @@ export default function AdminLayoutV2() {
   }, [location.pathname, isMobile]);
 
   const handleLogout = () => {
-    localStorage.removeItem('waves_admin_token');
-    localStorage.removeItem('waves_admin_user');
+    localStorage.removeItem("waves_admin_token");
+    localStorage.removeItem("waves_admin_user");
     refetchFlags();
-    navigate('/admin/login', { replace: true });
+    navigate("/admin/login", { replace: true });
   };
 
   const openPalette = () => paletteRef.current?.open();
@@ -186,32 +218,32 @@ export default function AdminLayoutV2() {
     <div
       className="admin-shell-v2"
       style={{
-        display: 'flex',
-        height: '100vh',
-        minHeight: '100vh',
-        overflow: 'hidden',
-        boxSizing: 'border-box',
-        background: 'var(--surface-page)',
-        color: 'var(--text-primary)',
+        display: "flex",
+        height: "100vh",
+        minHeight: "100vh",
+        overflow: "hidden",
+        boxSizing: "border-box",
+        background: "var(--surface-page)",
+        color: "var(--text-primary)",
       }}
     >
       {/* Mobile top bar — only visible below breakpoint */}
       {isMobile && (
         <div
           style={{
-            position: 'fixed',
+            position: "fixed",
             top: 0,
             left: 0,
             right: 0,
-            height: 'calc(52px + env(safe-area-inset-top))',
-            background: 'var(--surface-primary)',
-            borderBottom: '1px solid var(--border-default)',
-            display: 'flex',
-            alignItems: 'center',
+            height: "calc(52px + env(safe-area-inset-top))",
+            background: "var(--surface-primary)",
+            borderBottom: "1px solid var(--border-default)",
+            display: "flex",
+            alignItems: "center",
             gap: 10,
-            paddingTop: 'env(safe-area-inset-top)',
-            paddingLeft: 'max(8px, env(safe-area-inset-left))',
-            paddingRight: 'max(8px, env(safe-area-inset-right))',
+            paddingTop: "env(safe-area-inset-top)",
+            paddingLeft: "max(8px, env(safe-area-inset-left))",
+            paddingRight: "max(8px, env(safe-area-inset-right))",
             zIndex: 90,
           }}
         >
@@ -220,16 +252,16 @@ export default function AdminLayoutV2() {
             onClick={() => setSidebarOpen(true)}
             aria-label="Open menu"
             style={{
-              background: 'none',
-              border: 'none',
-              color: 'var(--text-primary)',
+              background: "none",
+              border: "none",
+              color: "var(--text-primary)",
               width: 44,
               height: 44,
               borderRadius: 6,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              cursor: 'pointer',
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
             }}
           >
             <Menu size={22} strokeWidth={1.75} />
@@ -241,16 +273,16 @@ export default function AdminLayoutV2() {
             onClick={openPalette}
             aria-label="Open Intelligence Bar"
             style={{
-              background: 'none',
-              border: 'none',
-              color: 'var(--text-primary)',
+              background: "none",
+              border: "none",
+              color: "var(--text-primary)",
               width: 44,
               height: 44,
               borderRadius: 6,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              cursor: 'pointer',
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
             }}
           >
             <Sparkles size={20} strokeWidth={1.75} />
@@ -264,9 +296,9 @@ export default function AdminLayoutV2() {
         <div
           onClick={() => setSidebarOpen(false)}
           style={{
-            position: 'fixed',
+            position: "fixed",
             inset: 0,
-            background: 'rgba(0,0,0,0.4)',
+            background: "rgba(0,0,0,0.4)",
             zIndex: 99,
           }}
         />
@@ -276,30 +308,31 @@ export default function AdminLayoutV2() {
       <aside
         style={{
           width: 220,
-          background: 'var(--surface-primary)',
-          borderRight: '1px solid var(--border-default)',
-          display: 'flex',
-          flexDirection: 'column',
+          background: "var(--surface-primary)",
+          borderRight: "1px solid var(--border-default)",
+          display: "flex",
+          flexDirection: "column",
           flexShrink: 0,
-          position: 'fixed',
+          position: "fixed",
           left: 0,
           top: 0,
           bottom: 0,
           zIndex: 100,
-          overflowY: 'auto',
-          transform: sidebarVisible ? 'translateX(0)' : 'translateX(-100%)',
-          transition: 'transform 0.2s ease',
-          boxShadow: isMobile && sidebarOpen ? '2px 0 16px rgba(0,0,0,0.12)' : 'none',
+          overflowY: "auto",
+          transform: sidebarVisible ? "translateX(0)" : "translateX(-100%)",
+          transition: "transform 0.2s ease",
+          boxShadow:
+            isMobile && sidebarOpen ? "2px 0 16px rgba(0,0,0,0.12)" : "none",
         }}
       >
         {/* Logo + title + notification bell */}
         <div
           style={{
-            display: 'flex',
-            alignItems: 'center',
+            display: "flex",
+            alignItems: "center",
             gap: 10,
-            padding: '16px 14px 12px',
-            borderBottom: '1px solid var(--border-subtle)',
+            padding: "16px 14px 12px",
+            borderBottom: "1px solid var(--border-subtle)",
             flexShrink: 0,
           }}
         >
@@ -311,16 +344,16 @@ export default function AdminLayoutV2() {
               onClick={() => setSidebarOpen(false)}
               aria-label="Close menu"
               style={{
-                background: 'none',
-                border: 'none',
-                color: 'var(--text-secondary)',
+                background: "none",
+                border: "none",
+                color: "var(--text-secondary)",
                 width: 44,
                 height: 44,
                 borderRadius: 6,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: 'pointer',
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                cursor: "pointer",
               }}
             >
               <X size={20} strokeWidth={1.75} />
@@ -332,16 +365,16 @@ export default function AdminLayoutV2() {
                 onClick={openPalette}
                 aria-label="Open Intelligence Bar"
                 style={{
-                  background: 'none',
-                  border: 'none',
-                  color: 'var(--text-primary)',
+                  background: "none",
+                  border: "none",
+                  color: "var(--text-primary)",
                   width: 36,
                   height: 36,
                   borderRadius: 6,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  cursor: 'pointer',
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  cursor: "pointer",
                 }}
               >
                 <Sparkles size={18} strokeWidth={1.75} />
@@ -356,19 +389,19 @@ export default function AdminLayoutV2() {
           type="button"
           onClick={openPalette}
           style={{
-            display: 'flex',
-            alignItems: 'center',
+            display: "flex",
+            alignItems: "center",
             gap: 8,
-            margin: '10px 12px',
-            padding: isMobile ? '12px 12px' : '8px 10px',
+            margin: "10px 12px",
+            padding: isMobile ? "12px 12px" : "8px 10px",
             minHeight: isMobile ? 44 : undefined,
             borderRadius: 8,
-            border: '1px solid var(--border-default)',
-            background: 'var(--surface-hover)',
-            color: 'var(--text-tertiary)',
+            border: "1px solid var(--border-default)",
+            background: "var(--surface-hover)",
+            color: "var(--text-tertiary)",
             fontSize: isMobile ? 14 : 13,
-            cursor: 'pointer',
-            textAlign: 'left',
+            cursor: "pointer",
+            textAlign: "left",
           }}
           aria-label="Open search"
         >
@@ -376,13 +409,13 @@ export default function AdminLayoutV2() {
           <span style={{ flex: 1 }}>Search…</span>
           <kbd
             style={{
-              fontFamily: "'DM Sans', sans-serif",
+              fontFamily: "'Roboto', Arial, sans-serif",
               fontSize: 11,
-              padding: '2px 6px',
+              padding: "2px 6px",
               borderRadius: 4,
-              background: 'var(--kbd-bg)',
-              border: '1px solid var(--kbd-border)',
-              color: 'var(--kbd-fg)',
+              background: "var(--kbd-bg)",
+              border: "1px solid var(--kbd-border)",
+              color: "var(--kbd-fg)",
             }}
           >
             ⌘K
@@ -390,7 +423,7 @@ export default function AdminLayoutV2() {
         </button>
 
         {/* Nav sections */}
-        <nav style={{ flex: 1, padding: '4px 8px 12px' }}>
+        <nav style={{ flex: 1, padding: "4px 8px 12px" }}>
           {NAV_SECTIONS.map(({ section, items }) => (
             <div key={section} style={{ marginBottom: 10 }}>
               <div
@@ -401,11 +434,11 @@ export default function AdminLayoutV2() {
                   // than utility labels.
                   fontSize: 15,
                   fontWeight: 600,
-                  color: 'var(--text-primary)',
-                  textTransform: 'none',
+                  color: "var(--text-primary)",
+                  textTransform: "none",
                   letterSpacing: 0,
-                  padding: '14px 12px 6px',
-                  userSelect: 'none',
+                  padding: "14px 12px 6px",
+                  userSelect: "none",
                 }}
               >
                 {section}
@@ -413,32 +446,43 @@ export default function AdminLayoutV2() {
               {items.map(({ path, icon: Icon, label }) => {
                 const isActive =
                   location.pathname === path ||
-                  (path === '/admin/schedule' && location.pathname === '/admin/dispatch' && new URLSearchParams(location.search).get('tab') === 'schedule') ||
-                  (path === '/admin/dashboard' && location.pathname === '/admin');
+                  (path === "/admin/schedule" &&
+                    location.pathname === "/admin/dispatch" &&
+                    new URLSearchParams(location.search).get("tab") ===
+                      "schedule") ||
+                  (path === "/admin/dashboard" &&
+                    location.pathname === "/admin");
                 return (
                   <Link
                     key={path}
                     to={path}
                     style={{
-                      display: 'flex',
-                      alignItems: 'center',
+                      display: "flex",
+                      alignItems: "center",
                       gap: 12,
-                      padding: isMobile ? '10px 12px' : '8px 12px',
+                      padding: isMobile ? "10px 12px" : "8px 12px",
                       minHeight: isMobile ? 44 : undefined,
                       borderRadius: 6,
                       marginBottom: 1,
-                      background: isActive ? 'var(--surface-active)' : 'transparent',
-                      color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
+                      background: isActive
+                        ? "var(--surface-active)"
+                        : "transparent",
+                      color: isActive
+                        ? "var(--text-primary)"
+                        : "var(--text-secondary)",
                       fontSize: isMobile ? 14 : 14,
                       fontWeight: isActive ? 600 : 500,
-                      textDecoration: 'none',
-                      transition: 'background 0.1s ease',
+                      textDecoration: "none",
+                      transition: "background 0.1s ease",
                     }}
                     onMouseEnter={(e) => {
-                      if (!isActive) e.currentTarget.style.background = 'var(--surface-hover)';
+                      if (!isActive)
+                        e.currentTarget.style.background =
+                          "var(--surface-hover)";
                     }}
                     onMouseLeave={(e) => {
-                      if (!isActive) e.currentTarget.style.background = 'transparent';
+                      if (!isActive)
+                        e.currentTarget.style.background = "transparent";
                     }}
                   >
                     <Icon size={18} strokeWidth={1.75} />
@@ -453,11 +497,11 @@ export default function AdminLayoutV2() {
         {/* User chip footer */}
         <div
           style={{
-            display: 'flex',
-            alignItems: 'center',
+            display: "flex",
+            alignItems: "center",
             gap: 10,
-            padding: '10px 12px',
-            borderTop: '1px solid var(--border-subtle)',
+            padding: "10px 12px",
+            borderTop: "1px solid var(--border-subtle)",
             flexShrink: 0,
           }}
         >
@@ -465,12 +509,12 @@ export default function AdminLayoutV2() {
             style={{
               width: 30,
               height: 30,
-              borderRadius: '50%',
-              background: 'var(--surface-active)',
-              color: 'var(--text-primary)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
+              borderRadius: "50%",
+              background: "var(--surface-active)",
+              color: "var(--text-primary)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
               fontSize: 12,
               fontWeight: 500,
               flexShrink: 0,
@@ -483,15 +527,15 @@ export default function AdminLayoutV2() {
               style={{
                 fontSize: 12,
                 fontWeight: 500,
-                color: 'var(--text-primary)',
-                whiteSpace: 'nowrap',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
+                color: "var(--text-primary)",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
               }}
             >
-              {user?.name || 'Staff'}
+              {user?.name || "Staff"}
             </div>
-            <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+            <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
               {roleLabel(user?.role)}
             </div>
           </div>
@@ -500,26 +544,26 @@ export default function AdminLayoutV2() {
             onClick={handleLogout}
             aria-label="Sign out"
             style={{
-              background: 'none',
-              border: 'none',
-              color: 'var(--text-tertiary)',
-              cursor: 'pointer',
+              background: "none",
+              border: "none",
+              color: "var(--text-tertiary)",
+              cursor: "pointer",
               padding: isMobile ? 0 : 6,
               width: isMobile ? 44 : undefined,
               height: isMobile ? 44 : undefined,
               minWidth: isMobile ? 44 : undefined,
               borderRadius: isMobile ? 6 : 4,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
             }}
             onMouseEnter={(e) => {
-              e.currentTarget.style.background = 'var(--surface-hover)';
-              e.currentTarget.style.color = 'var(--text-primary)';
+              e.currentTarget.style.background = "var(--surface-hover)";
+              e.currentTarget.style.color = "var(--text-primary)";
             }}
             onMouseLeave={(e) => {
-              e.currentTarget.style.background = 'none';
-              e.currentTarget.style.color = 'var(--text-tertiary)';
+              e.currentTarget.style.background = "none";
+              e.currentTarget.style.color = "var(--text-tertiary)";
             }}
           >
             <LogOut size={15} strokeWidth={1.75} />
@@ -532,18 +576,22 @@ export default function AdminLayoutV2() {
         style={{
           flex: 1,
           minWidth: 0,
-          maxWidth: '100%',
+          maxWidth: "100%",
           marginLeft: isMobile ? 0 : 220,
-          paddingTop: isMobile ? 'calc(52px + env(safe-area-inset-top) + 16px)' : 24,
-          paddingBottom: isMobile ? 'calc(56px + env(safe-area-inset-bottom) + 16px)' : 24,
+          paddingTop: isMobile
+            ? "calc(52px + env(safe-area-inset-top) + 16px)"
+            : 24,
+          paddingBottom: isMobile
+            ? "calc(56px + env(safe-area-inset-bottom) + 16px)"
+            : 24,
           paddingLeft: isMobile ? 16 : 28,
           paddingRight: isMobile ? 16 : 28,
-          height: '100vh',
-          minHeight: '100vh',
-          boxSizing: 'border-box',
-          overflowY: 'auto',
-          WebkitOverflowScrolling: 'touch',
-          background: 'var(--surface-page)',
+          height: "100vh",
+          minHeight: "100vh",
+          boxSizing: "border-box",
+          overflowY: "auto",
+          WebkitOverflowScrolling: "touch",
+          background: "var(--surface-page)",
         }}
         className="admin-main"
       >
@@ -555,29 +603,35 @@ export default function AdminLayoutV2() {
         <nav
           aria-label="Primary"
           style={{
-            position: 'fixed',
+            position: "fixed",
             bottom: 0,
             left: 0,
             right: 0,
-            background: 'var(--surface-primary)',
-            borderTop: '1px solid var(--border-default)',
-            paddingBottom: 'env(safe-area-inset-bottom)',
+            background: "var(--surface-primary)",
+            borderTop: "1px solid var(--border-default)",
+            paddingBottom: "env(safe-area-inset-bottom)",
             zIndex: 95,
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'stretch', height: 56 }}>
+          <div style={{ display: "flex", alignItems: "stretch", height: 56 }}>
             {MOBILE_TABS.map(({ path, icon: Icon, label }) => {
-              const active = isTabActive(location.pathname, path, location.search);
+              const active = isTabActive(
+                location.pathname,
+                path,
+                location.search,
+              );
               return (
                 <Link
                   key={path}
                   to={path}
-                  aria-current={active ? 'page' : undefined}
+                  aria-current={active ? "page" : undefined}
                   className={cn(
-                    'flex-1 flex flex-col items-center justify-center gap-[3px] select-none no-underline',
+                    "flex-1 flex flex-col items-center justify-center gap-[3px] select-none no-underline",
                   )}
                   style={{
-                    color: active ? 'var(--text-primary)' : 'var(--text-tertiary)',
+                    color: active
+                      ? "var(--text-primary)"
+                      : "var(--text-tertiary)",
                     minHeight: 44,
                   }}
                 >
@@ -586,9 +640,9 @@ export default function AdminLayoutV2() {
                     style={{
                       fontSize: 10,
                       lineHeight: 1,
-                      letterSpacing: '0.08em',
+                      letterSpacing: "0.08em",
                       fontWeight: 500,
-                      textTransform: 'uppercase',
+                      textTransform: "uppercase",
                     }}
                   >
                     {label}

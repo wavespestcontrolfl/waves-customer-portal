@@ -6,9 +6,7 @@
 // tab. The Automations tab is wired separately via
 // EmailAutomationsPanelV2 — imported directly by NewsletterPage.
 
-import React, {
-  useState, useEffect, useCallback, useMemo,
-} from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   CalendarClock,
   Download,
@@ -19,36 +17,43 @@ import {
   Send,
   UserPlus,
   Wand2,
-} from 'lucide-react';
-import { Badge, Button, Card, cn } from '../../components/ui';
+} from "lucide-react";
+import { Badge, Button, Card, cn } from "../../components/ui";
 
-const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const INPUT_CLS = 'w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900';
+const API_BASE = import.meta.env.VITE_API_URL || "/api";
+const INPUT_CLS =
+  "w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900";
 const TEXTAREA_CLS = `${INPUT_CLS} font-mono leading-relaxed`;
-const PANEL_CLS = 'bg-white border-hairline border-zinc-200 rounded-sm';
+const PANEL_CLS = "bg-white border-hairline border-zinc-200 rounded-sm";
 const SOURCE_SEGMENTS = [
-  { value: 'footer', label: 'Footer' },
-  { value: 'newsletter_landing', label: 'Landing' },
-  { value: 'newsletter_archive', label: 'Archive' },
-  { value: 'portal_learn', label: 'Portal Learn' },
-  { value: 'quote_wizard', label: 'Quote Wizard' },
-  { value: 'quote_wizard_deferred', label: 'Quote Deferred' },
-  { value: 'public_form', label: 'Public Form' },
-  { value: 'admin_manual', label: 'Manual' },
-  { value: 'beehiiv_import', label: 'Admin Import' },
-  { value: 'beehiiv_migration', label: 'Beehiiv Migration' },
-  { value: 'beehiiv_migration_orphan', label: 'Beehiiv Orphans' },
-  { value: 'website', label: 'Website Legacy' },
+  { value: "footer", label: "Footer" },
+  { value: "newsletter_landing", label: "Landing" },
+  { value: "newsletter_archive", label: "Archive" },
+  { value: "portal_learn", label: "Portal Learn" },
+  { value: "quote_wizard", label: "Quote Wizard" },
+  { value: "quote_wizard_deferred", label: "Quote Deferred" },
+  { value: "public_form", label: "Public Form" },
+  { value: "admin_manual", label: "Manual" },
+  { value: "beehiiv_import", label: "Admin Import" },
+  { value: "beehiiv_migration", label: "Beehiiv Migration" },
+  { value: "beehiiv_migration_orphan", label: "Beehiiv Orphans" },
+  { value: "website", label: "Website Legacy" },
 ];
 
 function FieldLabel({ children }) {
-  return <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">{children}</label>;
+  return (
+    <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+      {children}
+    </label>
+  );
 }
 
 function PanelHeader({ title, hint, action }) {
   return (
     <div className="flex items-start justify-between gap-3 p-4 border-b border-hairline border-zinc-200">
+      {" "}
       <div className="min-w-0">
+        {" "}
         <h3 className="text-14 font-medium text-zinc-900">{title}</h3>
         {hint && <p className="text-12 text-ink-tertiary mt-0.5">{hint}</p>}
       </div>
@@ -60,8 +65,8 @@ function PanelHeader({ title, hint, action }) {
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
-      Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
-      'Content-Type': 'application/json',
+      Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+      "Content-Type": "application/json",
     },
     ...options,
   }).then(async (r) => {
@@ -80,97 +85,71 @@ function adminFetch(path, options = {}) {
 // Deliberately minimal markup — SendGrid footer is appended automatically.
 const TEMPLATES = [
   {
-    key: 'blank',
-    label: 'Blank',
-    html: '',
+    key: "blank",
+    label: "Blank",
+    html: "",
   },
   {
-    key: 'weekend',
-    label: 'Weekend Lineup',
-    html: `<h1>🎉 [Punchy weekend headline — e.g., "Your No-Lame-Plans Weekend Starts Here"]</h1>
+    key: "weekend",
+    label: "Weekend Lineup",
+    html: `<h1>[Punchy weekend headline — e.g., "Your No-Lame-Plans Weekend Starts Here"]</h1>
 <p>What's good, neighbor — here's what's hitting around Southwest Florida this weekend. Pick one (or three) and get out of the house.</p>
-
 <h2>[Event 1 name]</h2>
-<p><strong>[City] · [Day, time]</strong> — [One or two sentences on why it's worth going. Keep it casual, drop a vibe.]</p>
-
+<p><strong>[City] · [Day, time]</strong>— [One or two sentences on why it's worth going. Keep it casual, drop a vibe.]</p>
 <h2>[Event 2 name]</h2>
-<p><strong>[City] · [Day, time]</strong> — [Why-go blurb.]</p>
-
+<p><strong>[City] · [Day, time]</strong>— [Why-go blurb.]</p>
 <h2>[Event 3 name]</h2>
-<p><strong>[City] · [Day, time]</strong> — [Why-go blurb.]</p>
-
+<p><strong>[City] · [Day, time]</strong>— [Why-go blurb.]</p>
 <h2>[Optional event 4 / 5]</h2>
-<p><strong>[City] · [Day, time]</strong> — [Why-go blurb.]</p>
-
+<p><strong>[City] · [Day, time]</strong>— [Why-go blurb.]</p>
 <h2>One more thing</h2>
 <p>[Optional pest/lawn tie-in — e.g., "If your yard's looking rough before guests come over, we've got a same-week slot." Drop this section if you'd rather keep it pure events.]</p>
-
 <p>Have a good one out there.</p>
 <p>— The Waves crew</p>`,
   },
   {
-    key: 'pest_concern',
-    label: 'Pest / Lawn Concern',
-    html: `<h1>🦟 [Concern + region — e.g., "Mosquitoes are back across SWFL"]</h1>
+    key: "pest_concern",
+    label: "Pest / Lawn Concern",
+    html: `<h1>[Concern + region — e.g., "Mosquitoes are back across SWFL"]</h1>
 <p>Heads up — we've been getting [a lot] more calls about [pest / issue] this past week than usual. Here's what's going on and what to do.</p>
-
 <h2>Why now</h2>
 <p>[One or two sentences: weather, life cycle, sandy-soil angle, recent rain — whatever the trigger is.]</p>
-
 <h2>Signs to watch for</h2>
-<ul>
-  <li>[Sign 1 — make it specific and visible]</li>
-  <li>[Sign 2]</li>
-  <li>[Sign 3]</li>
-  <li>[Sign 4 — optional]</li>
+<ul> <li>[Sign 1 — make it specific and visible]</li> <li>[Sign 2]</li> <li>[Sign 3]</li> <li>[Sign 4 — optional]</li>
 </ul>
-
 <h2>What to do this week</h2>
 <p>[2-3 sentences of practical advice a homeowner can do today. Then a soft mention of Waves if they want help — don't oversell.]</p>
-
 <p>Stay ahead of it,</p>
 <p>— The Waves crew</p>`,
   },
   {
-    key: 'local_spotlight',
-    label: 'Local Spotlight',
-    html: `<h1>🍽️ [Food / spot / lifestyle hook — e.g., "Fresh bites we're hitting this month"]</h1>
+    key: "local_spotlight",
+    label: "Local Spotlight",
+    html: `<h1>[Food / spot / lifestyle hook — e.g., "Fresh bites we're hitting this month"]</h1>
 <p>Quick rundown of [restaurants / shops / spots] worth a stop around Southwest Florida — built from what our techs and neighbors are actually talking about.</p>
-
 <h2>[Spot 1 name]</h2>
-<p><strong>[Neighborhood / city]</strong> — [Why it's worth a visit. 1-2 sentences max. Drop a vibe or a specific dish.]</p>
-
+<p><strong>[Neighborhood / city]</strong>— [Why it's worth a visit. 1-2 sentences max. Drop a vibe or a specific dish.]</p>
 <h2>[Spot 2 name]</h2>
-<p><strong>[Neighborhood / city]</strong> — [Why-visit blurb.]</p>
-
+<p><strong>[Neighborhood / city]</strong>— [Why-visit blurb.]</p>
 <h2>[Spot 3 name]</h2>
-<p><strong>[Neighborhood / city]</strong> — [Why-visit blurb.]</p>
-
+<p><strong>[Neighborhood / city]</strong>— [Why-visit blurb.]</p>
 <h2>[Optional spot 4]</h2>
-<p><strong>[Neighborhood / city]</strong> — [Why-visit blurb.]</p>
-
+<p><strong>[Neighborhood / city]</strong>— [Why-visit blurb.]</p>
 <p>Tell 'em Waves sent you.</p>
 <p>— The Waves crew</p>`,
   },
   {
-    key: 'service_promo',
-    label: 'Service Promo',
-    html: `<h1>🎉 [Offer headline — clear and direct, e.g., "$150 off a full-yard treatment, this week only"]</h1>
+    key: "service_promo",
+    label: "Service Promo",
+    html: `<h1>[Offer headline — clear and direct, e.g., "$150 off a full-yard treatment, this week only"]</h1>
 <p>Quick one — we're running a [offer summary] for [audience: existing customers / new SWFL homeowners / etc.] through [expiration date].</p>
-
 <h2>The deal</h2>
 <p>[One or two sentences: exact offer, eligibility, dollar value.]</p>
-
 <h2>What's included</h2>
-<ul>
-  <li>[Inclusion 1]</li>
-  <li>[Inclusion 2]</li>
-  <li>[Inclusion 3]</li>
+<ul> <li>[Inclusion 1]</li> <li>[Inclusion 2]</li> <li>[Inclusion 3]</li>
 </ul>
-
 <h2>How to claim</h2>
 <p>Reply to this email or call us before [expiration date]. We'll lock it in same day.</p>
-
 <p>— The Waves crew</p>`,
   },
 ];
@@ -182,20 +161,26 @@ const TEMPLATES = [
 // extra padding events. Strips obvious HTML from descriptions since
 // some RSS feeds embed markup in the contentSnippet/summary fields.
 function buildEventPrompt(event) {
-  if (!event) return '';
+  if (!event) return "";
   const dateLabel = event.startAt
-    ? new Date(event.startAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-    : 'Ongoing';
-  const cityLabel = event.city ? event.city.replace(/(?:^|\s)\S/g, (s) => s.toUpperCase()) : null;
-  const desc = (event.description || '')
-    .replace(/<[^>]*>/g, ' ') // strip HTML
-    .replace(/\s+/g, ' ')
+    ? new Date(event.startAt).toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      })
+    : "Ongoing";
+  const cityLabel = event.city
+    ? event.city.replace(/(?:^|\s)\S/g, (s) => s.toUpperCase())
+    : null;
+  const desc = (event.description || "")
+    .replace(/<[^>]*>/g, " ") // strip HTML
+    .replace(/\s+/g, " ")
     .trim()
     .slice(0, 280);
   const lines = [
     `Anchor this Weekend Lineup on this event:`,
     `- ${event.title}`,
-    `- ${dateLabel}${cityLabel ? ` · ${cityLabel}` : ''}${event.venueName ? ` · ${event.venueName}` : ''}`,
+    `- ${dateLabel}${cityLabel ? ` · ${cityLabel}` : ""}${event.venueName ? ` · ${event.venueName}` : ""}`,
   ];
   // Include venueAddress when populated by the P3b leg 3 normalizer.
   // Helps Claude write specific where-to-find-it copy ("Bayfront Park,
@@ -205,31 +190,37 @@ function buildEventPrompt(event) {
   if (event.venueAddress) lines.push(`- Address: ${event.venueAddress}`);
   if (desc) lines.push(`- ${desc}`);
   if (event.eventUrl) lines.push(`- ${event.eventUrl}`);
-  lines.push('');
-  lines.push('Pad with 2-3 other typical SWFL weekend activities for the same window.');
-  return lines.join('\n');
+  lines.push("");
+  lines.push(
+    "Pad with 2-3 other typical SWFL weekend activities for the same window.",
+  );
+  return lines.join("\n");
 }
 
-export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComplete } = {}) {
+export function ComposeView({
+  pendingEvent,
+  onPendingEventConsumed,
+  onSendComplete,
+} = {}) {
   const [draftId, setDraftId] = useState(null);
-  const [subject, setSubject] = useState('');
-  const [subjectB, setSubjectB] = useState('');
+  const [subject, setSubject] = useState("");
+  const [subjectB, setSubjectB] = useState("");
   const [abEnabled, setAbEnabled] = useState(false);
-  const [previewText, setPreviewText] = useState('');
-  const [htmlBody, setHtmlBody] = useState('');
-  const [textBody, setTextBody] = useState('');
-  const [fromName, setFromName] = useState('Waves Pest Control');
-  const [fromEmail, setFromEmail] = useState('newsletter@wavespestcontrol.com');
+  const [previewText, setPreviewText] = useState("");
+  const [htmlBody, setHtmlBody] = useState("");
+  const [textBody, setTextBody] = useState("");
+  const [fromName, setFromName] = useState("Waves Pest Control");
+  const [fromEmail, setFromEmail] = useState("newsletter@wavespestcontrol.com");
   // Defaults to the logged-in admin's email (populated below) so test
   // sends don't fire into the shared contact@ inbox by default. Falls
   // back to '' if /me is unreachable — operator types their own.
-  const [testEmail, setTestEmail] = useState('');
-  const [status, setStatus] = useState('');
+  const [testEmail, setTestEmail] = useState("");
+  const [status, setStatus] = useState("");
   const [activeCount, setActiveCount] = useState(null);
   const [segmentCount, setSegmentCount] = useState(null);
 
   // Segment
-  const [segmentMode, setSegmentMode] = useState('all');   // all | customers | leads | custom
+  const [segmentMode, setSegmentMode] = useState("all"); // all | customers | leads | custom
   const [segmentSources, setSegmentSources] = useState([]);
   // Tags filter — additive on top of the audience mode (e.g. "Customers
   // only AND tagged 'platinum-tier'"). Maps to f.tags on the server, which
@@ -237,18 +228,18 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComple
   // ?| operator. Free-form so operators can use whatever taxonomy fits
   // the campaign — the column is JSONB with no enum.
   const [segmentTags, setSegmentTags] = useState([]);
-  const [tagDraft, setTagDraft] = useState('');
+  const [tagDraft, setTagDraft] = useState("");
   // Existing distinct tags pulled from the DB — fed into the tag input's
-  // <datalist> so the operator picks an existing tag instead of typing
+  // <datalist>so the operator picks an existing tag instead of typing
   // a near-miss that matches zero subscribers.
   const [tagSuggestions, setTagSuggestions] = useState([]);
 
   // Schedule
-  const [scheduleAt, setScheduleAt] = useState('');
+  const [scheduleAt, setScheduleAt] = useState("");
 
   // Preview dialog
   const [previewOpen, setPreviewOpen] = useState(false);
-  const [previewHtml, setPreviewHtml] = useState('');
+  const [previewHtml, setPreviewHtml] = useState("");
   const [previewLoading, setPreviewLoading] = useState(false);
 
   // Send confirm dialog
@@ -264,7 +255,7 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComple
   // handed off from DashboardView's "Draft newsletter" click; cleared
   // after the modal opens (so reopening from the regular button isn't
   // re-seeded).
-  const [aiInitialPrompt, setAiInitialPrompt] = useState('');
+  const [aiInitialPrompt, setAiInitialPrompt] = useState("");
 
   // Consume pendingEvent on mount (or whenever a new one arrives via
   // tab switch). Apply the Weekend Lineup template so the body is
@@ -273,9 +264,9 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComple
   // handoff state.
   useEffect(() => {
     if (!pendingEvent) return;
-    const weekend = TEMPLATES.find((t) => t.key === 'weekend');
+    const weekend = TEMPLATES.find((t) => t.key === "weekend");
     if (weekend) setHtmlBody(weekend.html);
-    setSelectedTemplate('weekend');
+    setSelectedTemplate("weekend");
     setAiInitialPrompt(buildEventPrompt(pendingEvent));
     setAiOpen(true);
     if (onPendingEventConsumed) onPendingEventConsumed();
@@ -284,26 +275,31 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComple
 
   const segmentFilter = useMemo(() => {
     const f = {};
-    if (segmentMode === 'customers') f.customersOnly = true;
-    if (segmentMode === 'leads') f.leadsOnly = true;
+    if (segmentMode === "customers") f.customersOnly = true;
+    if (segmentMode === "leads") f.leadsOnly = true;
     // Source chips are only visible in 'custom' mode — scope the filter
     // to that mode so a stale segmentSources selection doesn't leak
     // through after the operator switches back to "All active" /
     // "Customers only" / "Leads only". Tags remain additive across all
     // modes by design.
-    if (segmentMode === 'custom' && segmentSources.length) f.sources = segmentSources;
+    if (segmentMode === "custom" && segmentSources.length)
+      f.sources = segmentSources;
     if (segmentTags.length) f.tags = segmentTags;
     return Object.keys(f).length ? f : null;
   }, [segmentMode, segmentSources, segmentTags]);
 
   useEffect(() => {
-    adminFetch('/admin/newsletter/subscribers?status=active&limit=1')
+    adminFetch("/admin/newsletter/subscribers?status=active&limit=1")
       .then((d) => setActiveCount(d.counts?.active || 0))
       .catch(() => setActiveCount(null));
-    adminFetch('/admin/auth/me')
-      .then((me) => { if (me?.email) setTestEmail(me.email); })
-      .catch(() => { /* leave blank, operator types */ });
-    adminFetch('/admin/newsletter/tags')
+    adminFetch("/admin/auth/me")
+      .then((me) => {
+        if (me?.email) setTestEmail(me.email);
+      })
+      .catch(() => {
+        /* leave blank, operator types */
+      });
+    adminFetch("/admin/newsletter/tags")
       .then((d) => setTagSuggestions(Array.isArray(d?.tags) ? d.tags : []))
       .catch(() => setTagSuggestions([]));
   }, []);
@@ -311,25 +307,35 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComple
   // Recalculate segment match count when the filter changes.
   useEffect(() => {
     let cancelled = false;
-    adminFetch('/admin/newsletter/segment-preview', {
-      method: 'POST',
+    adminFetch("/admin/newsletter/segment-preview", {
+      method: "POST",
       body: JSON.stringify({ segmentFilter }),
     })
-      .then((d) => { if (!cancelled) setSegmentCount(d.count); })
-      .catch(() => { if (!cancelled) setSegmentCount(null); });
-    return () => { cancelled = true; };
+      .then((d) => {
+        if (!cancelled) setSegmentCount(d.count);
+      })
+      .catch(() => {
+        if (!cancelled) setSegmentCount(null);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [segmentFilter]);
 
   const applyTemplate = (key) => {
     const t = TEMPLATES.find((x) => x.key === key);
     if (!t) return;
-    if (htmlBody && !confirm('Replace the current HTML body with this template?')) return;
+    if (
+      htmlBody &&
+      !confirm("Replace the current HTML body with this template?")
+    )
+      return;
     setHtmlBody(t.html);
-    setSelectedTemplate(key === 'blank' ? null : key);
+    setSelectedTemplate(key === "blank" ? null : key);
   };
 
   const saveDraft = async () => {
-    setStatus('Saving...');
+    setStatus("Saving...");
     try {
       const body = {
         subject,
@@ -342,94 +348,145 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComple
         segmentFilter,
       };
       if (draftId) {
-        await adminFetch(`/admin/newsletter/sends/${draftId}`, { method: 'PATCH', body: JSON.stringify(body) });
-        setStatus('Draft saved.');
+        await adminFetch(`/admin/newsletter/sends/${draftId}`, {
+          method: "PATCH",
+          body: JSON.stringify(body),
+        });
+        setStatus("Draft saved.");
       } else {
-        const d = await adminFetch('/admin/newsletter/sends', { method: 'POST', body: JSON.stringify(body) });
+        const d = await adminFetch("/admin/newsletter/sends", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
         setDraftId(d.send.id);
-        setStatus('Draft saved.');
+        setStatus("Draft saved.");
       }
-    } catch (e) { setStatus('Save failed: ' + e.message); }
+    } catch (e) {
+      setStatus("Save failed: " + e.message);
+    }
   };
 
   const openPreview = async () => {
     setPreviewOpen(true);
     setPreviewLoading(true);
-    setPreviewHtml('');
+    setPreviewHtml("");
     try {
-      const res = await adminFetch('/admin/newsletter/preview', {
-        method: 'POST',
+      const res = await adminFetch("/admin/newsletter/preview", {
+        method: "POST",
         body: JSON.stringify({ htmlBody, previewText }),
       });
-      setPreviewHtml(res.html || '');
+      setPreviewHtml(res.html || "");
     } catch (e) {
-      setPreviewHtml(`<p style="font-family:sans-serif;color:#C8312F;padding:20px;">Preview failed: ${e.message}</p>`);
+      setPreviewHtml(
+        `<p style="font-family:sans-serif;color:#C8312F;padding:20px;">Preview failed: ${e.message}</p>`,
+      );
     } finally {
       setPreviewLoading(false);
     }
   };
 
   const sendTest = async () => {
-    if (!draftId) { setStatus('Save a draft first.'); return; }
+    if (!draftId) {
+      setStatus("Save a draft first.");
+      return;
+    }
     setStatus(`Sending test to ${testEmail}...`);
     try {
-      await adminFetch(`/admin/newsletter/sends/${draftId}/test`, { method: 'POST', body: JSON.stringify({ email: testEmail }) });
+      await adminFetch(`/admin/newsletter/sends/${draftId}/test`, {
+        method: "POST",
+        body: JSON.stringify({ email: testEmail }),
+      });
       setStatus(`Test sent to ${testEmail}.`);
-    } catch (e) { setStatus('Test failed: ' + e.message); }
+    } catch (e) {
+      setStatus("Test failed: " + e.message);
+    }
   };
 
   // Open the typed-confirm modal. The actual fetch happens in confirmSend
   // once the operator types SEND and clicks the button.
   const sendNow = () => {
-    if (!draftId) { setStatus('Save a draft first.'); return; }
+    if (!draftId) {
+      setStatus("Save a draft first.");
+      return;
+    }
     setSendConfirmOpen(true);
   };
 
   const confirmSend = async () => {
     setSendConfirmOpen(false);
-    const audience = segmentCount ?? activeCount ?? '?';
+    const audience = segmentCount ?? activeCount ?? "?";
     setStatus(`Queuing send to ${audience} subscribers...`);
     try {
       // Server returns 202 — campaign runs asynchronously now (a long
       // synchronous send was timing out the proxy and prompting double-
       // clicks). Operator polls History for the final delivered/failed
       // counts.
-      await adminFetch(`/admin/newsletter/sends/${draftId}/send`, { method: 'POST' });
+      await adminFetch(`/admin/newsletter/sends/${draftId}/send`, {
+        method: "POST",
+      });
       setStatus(`Send queued. Opening History…`);
       resetForm();
       // Brief delay so the operator sees the status before the tab
       // switches; History view will refresh when the parent flips
       // refreshKey, surfacing the new row at status='sending'.
       if (onSendComplete) setTimeout(onSendComplete, 1200);
-    } catch (e) { setStatus('Send failed: ' + e.message); }
+    } catch (e) {
+      setStatus("Send failed: " + e.message);
+    }
   };
 
   const schedule = async () => {
-    if (!draftId) { setStatus('Save a draft first.'); return; }
-    if (!scheduleAt) { setStatus('Pick a date/time first.'); return; }
+    if (!draftId) {
+      setStatus("Save a draft first.");
+      return;
+    }
+    if (!scheduleAt) {
+      setStatus("Pick a date/time first.");
+      return;
+    }
     const when = new Date(scheduleAt);
-    if (when.getTime() <= Date.now()) { setStatus('Pick a time in the future.'); return; }
-    setStatus('Scheduling...');
+    if (when.getTime() <= Date.now()) {
+      setStatus("Pick a time in the future.");
+      return;
+    }
+    setStatus("Scheduling...");
     try {
-      const res = await adminFetch(`/admin/newsletter/sends/${draftId}/schedule`, {
-        method: 'POST',
-        body: JSON.stringify({ scheduledFor: when.toISOString() }),
-      });
-      setStatus(`Scheduled for ${new Date(res.send.scheduled_for).toLocaleString()}.`);
+      const res = await adminFetch(
+        `/admin/newsletter/sends/${draftId}/schedule`,
+        {
+          method: "POST",
+          body: JSON.stringify({ scheduledFor: when.toISOString() }),
+        },
+      );
+      setStatus(
+        `Scheduled for ${new Date(res.send.scheduled_for).toLocaleString()}.`,
+      );
       resetForm();
-    } catch (e) { setStatus('Schedule failed: ' + e.message); }
+    } catch (e) {
+      setStatus("Schedule failed: " + e.message);
+    }
   };
 
   const resetForm = () => {
     setDraftId(null);
-    setSubject(''); setSubjectB(''); setAbEnabled(false);
-    setPreviewText(''); setHtmlBody(''); setTextBody('');
-    setScheduleAt('');
+    setSubject("");
+    setSubjectB("");
+    setAbEnabled(false);
+    setPreviewText("");
+    setHtmlBody("");
+    setTextBody("");
+    setScheduleAt("");
   };
 
-  const handleAiDraft = async ({ prompt, template, audience, tone, includeCTA }) => {
-    const res = await adminFetch('/admin/newsletter/draft-ai', {
-      method: 'POST',
+  const handleAiDraft = async ({
+    prompt,
+    template,
+    audience,
+    tone,
+    includeCTA,
+  }) => {
+    const res = await adminFetch("/admin/newsletter/draft-ai", {
+      method: "POST",
       body: JSON.stringify({ prompt, template, audience, tone, includeCTA }),
     });
     const d = res.draft || {};
@@ -445,300 +502,409 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComple
     // Clear the event-seeded prompt on success too (mirror of the
     // onClose handler). Otherwise the next "Draft with AI" toolbar
     // click would prefill with the stale event seed.
-    setAiInitialPrompt('');
-    setStatus('AI draft inserted. Review before saving.');
+    setAiInitialPrompt("");
+    setStatus("AI draft inserted. Review before saving.");
   };
 
-  const audienceLabel = segmentCount !== null && segmentFilter
-    ? `${segmentCount} of ${activeCount ?? '?'} subscribers match segment`
-    : activeCount !== null
-      ? `${activeCount} active subscriber${activeCount === 1 ? '' : 's'}`
-      : 'Loading subscribers…';
+  const audienceLabel =
+    segmentCount !== null && segmentFilter
+      ? `${segmentCount} of ${activeCount ?? "?"} subscribers match segment`
+      : activeCount !== null
+        ? `${activeCount} active subscriber${activeCount === 1 ? "" : "s"}`
+        : "Loading subscribers…";
 
   return (
     <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-4">
+      {" "}
       <div className={PANEL_CLS}>
+        {" "}
         <PanelHeader
           title="Campaign Content"
           hint="Write the message body, subject, preview text, and sender details."
-          action={(
+          action={
             <div className="flex items-center gap-2">
               {draftId && <Badge tone="neutral">Draft saved</Badge>}
               <Button onClick={() => setAiOpen(true)} variant="secondary">
-                <Wand2 size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
+                {" "}
+                <Wand2
+                  size={14}
+                  strokeWidth={1.75}
+                  className="mr-2"
+                  aria-hidden
+                />
                 Draft With AI
-              </Button>
+              </Button>{" "}
             </div>
-          )}
-        />
-
+          }
+        />{" "}
         <div className="p-4 space-y-4">
+          {" "}
           <div>
-            <FieldLabel>Template</FieldLabel>
-          <div className="flex flex-wrap gap-1.5">
-            {TEMPLATES.map((t) => (
-              <button
-                key={t.key}
-                type="button"
-                onClick={() => applyTemplate(t.key)}
-                className="h-8 px-3 text-12 font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 u-focus-ring"
-              >{t.label}</button>
-            ))}
-          </div>
-        </div>
-
-        <div>
-          <FieldLabel>
-            Subject {abEnabled && <span className="text-ink-tertiary normal-case">(A)</span>}
-          </FieldLabel>
-          <input
-            type="text"
-            value={subject}
-            onChange={(e) => setSubject(e.target.value)}
-            className={INPUT_CLS}
-            placeholder="e.g. Florida spring pest alert — what to watch for"
-          />
-          <label className="mt-2 inline-flex items-center gap-2 text-12 text-ink-secondary">
-            <input type="checkbox" checked={abEnabled} onChange={(e) => setAbEnabled(e.target.checked)} />
-            A/B test a second subject (random 50/50 split)
-          </label>
-        </div>
-
-        {abEnabled && (
-          <div>
-            <FieldLabel>Subject (B)</FieldLabel>
-            <input
-              type="text"
-              value={subjectB}
-              onChange={(e) => setSubjectB(e.target.value)}
-              className={INPUT_CLS}
-              placeholder="Alternative subject line"
-            />
-          </div>
-        )}
-
-        <div>
-          <FieldLabel>Preview text</FieldLabel>
-          <input
-            type="text"
-            value={previewText}
-            onChange={(e) => setPreviewText(e.target.value)}
-            className={INPUT_CLS}
-            placeholder="One-line preview that renders after the subject in Gmail/Apple Mail."
-          />
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <div>
-            <FieldLabel>From name</FieldLabel>
-            <input
-              type="text"
-              value={fromName}
-              onChange={(e) => setFromName(e.target.value)}
-              className={INPUT_CLS}
-            />
-          </div>
-          <div>
-            <FieldLabel>From email</FieldLabel>
-            <input
-              type="text"
-              value={fromEmail}
-              onChange={(e) => setFromEmail(e.target.value)}
-              className={`${INPUT_CLS} font-mono`}
-            />
-          </div>
-        </div>
-
-        <div>
-          <FieldLabel>HTML body</FieldLabel>
-          <textarea
-            value={htmlBody}
-            onChange={(e) => setHtmlBody(e.target.value)}
-            rows={16}
-            className={TEXTAREA_CLS}
-            placeholder="<h1>Subject line</h1><p>Your newsletter content here. The unsubscribe footer is appended automatically.</p>"
-          />
-          <p className="text-11 text-ink-tertiary mt-1">
-            The unsubscribe footer + List-Unsubscribe header are added automatically — do not include your own.
-          </p>
-        </div>
-
-        <div>
-          <FieldLabel>
-            Plain-text fallback <span className="text-ink-tertiary normal-case">(optional — improves deliverability)</span>
-          </FieldLabel>
-          <textarea
-            value={textBody}
-            onChange={(e) => setTextBody(e.target.value)}
-            rows={5}
-            className={INPUT_CLS}
-            placeholder="Same content in plain text for mail clients that don't render HTML."
-          />
-        </div>
-      </div>
-      </div>
-
-      <aside className="space-y-4">
-        <div className={PANEL_CLS}>
-          <PanelHeader title="Audience" hint={audienceLabel} />
-          <div className="p-4 space-y-3">
+            {" "}
+            <FieldLabel>Template</FieldLabel>{" "}
             <div className="flex flex-wrap gap-1.5">
-            {[
-              { key: 'all', label: 'All active' },
-              { key: 'customers', label: 'Customers only' },
-              { key: 'leads', label: 'Non-customers only' },
-              { key: 'custom', label: 'By source…' },
-            ].map((o) => (
-              <button
-                key={o.key}
-                type="button"
-                onClick={() => setSegmentMode(o.key)}
-                className={cn(
-                  'h-8 px-3 text-12 font-medium rounded-sm border-hairline u-focus-ring',
-                  segmentMode === o.key
-                    ? 'bg-zinc-900 text-white border-zinc-900'
-                    : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50',
-                )}
-              >{o.label}</button>
-            ))}
-          </div>
-          {segmentMode === 'custom' && (
-            <div className="flex flex-wrap gap-1.5">
-              {SOURCE_SEGMENTS.map((src) => {
-                const on = segmentSources.includes(src.value);
-                return (
-                  <button
-                    key={src.value}
-                    type="button"
-                    onClick={() => setSegmentSources((cur) => on ? cur.filter((x) => x !== src.value) : [...cur, src.value])}
-                    className={cn(
-                      'h-7 px-2.5 text-11 rounded-full border-hairline u-focus-ring',
-                      on
-                        ? 'bg-zinc-900 text-white border-zinc-900'
-                        : 'bg-white text-ink-secondary border-zinc-300 hover:border-zinc-900',
-                    )}
-                  >{src.label}</button>
-                );
-              })}
-            </div>
-          )}
-
-          <div className="mt-3">
-            <FieldLabel>
-              Tags <span className="normal-case tracking-normal text-ink-tertiary">(optional, additive)</span>
-            </FieldLabel>
-            <div className="flex flex-wrap items-center gap-1.5">
-              {segmentTags.map((t) => (
+              {TEMPLATES.map((t) => (
                 <button
-                  key={t}
+                  key={t.key}
                   type="button"
-                  onClick={() => setSegmentTags((cur) => cur.filter((x) => x !== t))}
-                  className="h-7 px-2.5 text-11 rounded-full bg-zinc-900 text-white border-hairline border-zinc-900 u-focus-ring"
-                  title="Click to remove"
-                >{t} ×</button>
+                  onClick={() => applyTemplate(t.key)}
+                  className="h-8 px-3 text-12 font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 u-focus-ring"
+                >
+                  {t.label}
+                </button>
               ))}
+            </div>{" "}
+          </div>{" "}
+          <div>
+            {" "}
+            <FieldLabel>
+              Subject{" "}
+              {abEnabled && (
+                <span className="text-ink-tertiary normal-case">(A)</span>
+              )}
+            </FieldLabel>{" "}
+            <input
+              type="text"
+              value={subject}
+              onChange={(e) => setSubject(e.target.value)}
+              className={INPUT_CLS}
+              placeholder="e.g. Florida spring pest alert — what to watch for"
+            />{" "}
+            <label className="mt-2 inline-flex items-center gap-2 text-12 text-ink-secondary">
+              {" "}
+              <input
+                type="checkbox"
+                checked={abEnabled}
+                onChange={(e) => setAbEnabled(e.target.checked)}
+              />
+              A/B test a second subject (random 50/50 split)
+            </label>{" "}
+          </div>
+          {abEnabled && (
+            <div>
+              {" "}
+              <FieldLabel>Subject (B)</FieldLabel>{" "}
               <input
                 type="text"
-                value={tagDraft}
-                onChange={(e) => setTagDraft(e.target.value)}
-                list="newsletter-tag-suggestions"
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ',') {
-                    e.preventDefault();
-                    const v = tagDraft.trim().toLowerCase();
-                    if (v && !segmentTags.includes(v)) setSegmentTags((cur) => [...cur, v]);
-                    setTagDraft('');
-                  } else if (e.key === 'Backspace' && !tagDraft && segmentTags.length) {
-                    setSegmentTags((cur) => cur.slice(0, -1));
-                  }
-                }}
-                placeholder={segmentTags.length ? 'add another…' : 'e.g. platinum-tier, hurricane-prep'}
-                className="h-7 flex-1 min-w-[160px] bg-white border-hairline border-zinc-300 rounded-full px-3 text-11 text-zinc-900 placeholder:text-ink-tertiary focus:outline-none focus:border-zinc-900"
-              />
-              <datalist id="newsletter-tag-suggestions">
-                {tagSuggestions
-                  .filter((t) => !segmentTags.includes(t))
-                  .map((t) => <option key={t} value={t} />)}
-              </datalist>
+                value={subjectB}
+                onChange={(e) => setSubjectB(e.target.value)}
+                className={INPUT_CLS}
+                placeholder="Alternative subject line"
+              />{" "}
             </div>
-            <div className="text-11 text-ink-tertiary mt-1">
-              Press Enter or comma to add. Matches subscribers tagged with ANY of the listed tags.
-            </div>
-          </div>
-        </div>
-        </div>
-
-        <div className={PANEL_CLS}>
-          <PanelHeader title="Review + Send" hint="Save before test sends, live sends, or scheduling." />
-          <div className="p-4 space-y-3">
-          <Button onClick={saveDraft} variant="secondary" disabled={!subject} className="w-full">
-            <Save size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
-            {draftId ? 'Update draft' : 'Save draft'}
-          </Button>
-          <Button onClick={openPreview} variant="secondary" disabled={!htmlBody} className="w-full">
-            <Eye size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
-            Preview
-          </Button>
+          )}
           <div>
-            <FieldLabel>Test recipient</FieldLabel>
+            {" "}
+            <FieldLabel>Preview text</FieldLabel>{" "}
             <input
               type="text"
-              value={testEmail}
-              onChange={(e) => setTestEmail(e.target.value)}
-              className={`${INPUT_CLS} font-mono`}
-              placeholder="test@wavespestcontrol.com"
-            />
-          </div>
-          <Button onClick={sendTest} variant="secondary" disabled={!draftId || !testEmail} className="w-full">
-            <MailCheck size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
-            Send Test
-          </Button>
-          <Button onClick={sendNow} disabled={!draftId || !htmlBody || segmentCount === 0} className="w-full">
-            <Send size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
-            Send To Audience
-          </Button>
-          </div>
-        </div>
-
+              value={previewText}
+              onChange={(e) => setPreviewText(e.target.value)}
+              className={INPUT_CLS}
+              placeholder="One-line preview that renders after the subject in Gmail/Apple Mail."
+            />{" "}
+          </div>{" "}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {" "}
+            <div>
+              {" "}
+              <FieldLabel>From name</FieldLabel>{" "}
+              <input
+                type="text"
+                value={fromName}
+                onChange={(e) => setFromName(e.target.value)}
+                className={INPUT_CLS}
+              />{" "}
+            </div>{" "}
+            <div>
+              {" "}
+              <FieldLabel>From email</FieldLabel>{" "}
+              <input
+                type="text"
+                value={fromEmail}
+                onChange={(e) => setFromEmail(e.target.value)}
+                className={`${INPUT_CLS} font-mono`}
+              />{" "}
+            </div>{" "}
+          </div>{" "}
+          <div>
+            {" "}
+            <FieldLabel>HTML body</FieldLabel>{" "}
+            <textarea
+              value={htmlBody}
+              onChange={(e) => setHtmlBody(e.target.value)}
+              rows={16}
+              className={TEXTAREA_CLS}
+              placeholder="<h1>Subject line</h1><p>Your newsletter content here. The unsubscribe footer is appended automatically.</p>"
+            />{" "}
+            <p className="text-11 text-ink-tertiary mt-1">
+              The unsubscribe footer + List-Unsubscribe header are added
+              automatically — do not include your own.
+            </p>{" "}
+          </div>{" "}
+          <div>
+            {" "}
+            <FieldLabel>
+              Plain-text fallback{" "}
+              <span className="text-ink-tertiary normal-case">
+                (optional — improves deliverability)
+              </span>{" "}
+            </FieldLabel>{" "}
+            <textarea
+              value={textBody}
+              onChange={(e) => setTextBody(e.target.value)}
+              rows={5}
+              className={INPUT_CLS}
+              placeholder="Same content in plain text for mail clients that don't render HTML."
+            />{" "}
+          </div>{" "}
+        </div>{" "}
+      </div>{" "}
+      <aside className="space-y-4">
+        {" "}
         <div className={PANEL_CLS}>
-          <PanelHeader title="Schedule" hint="Queued sends fire within one minute of the target time." />
+          {" "}
+          <PanelHeader title="Audience" hint={audienceLabel} />{" "}
           <div className="p-4 space-y-3">
+            {" "}
+            <div className="flex flex-wrap gap-1.5">
+              {[
+                { key: "all", label: "All active" },
+                { key: "customers", label: "Customers only" },
+                { key: "leads", label: "Non-customers only" },
+                { key: "custom", label: "By source…" },
+              ].map((o) => (
+                <button
+                  key={o.key}
+                  type="button"
+                  onClick={() => setSegmentMode(o.key)}
+                  className={cn(
+                    "h-8 px-3 text-12 font-medium rounded-sm border-hairline u-focus-ring",
+                    segmentMode === o.key
+                      ? "bg-zinc-900 text-white border-zinc-900"
+                      : "bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50",
+                  )}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+            {segmentMode === "custom" && (
+              <div className="flex flex-wrap gap-1.5">
+                {SOURCE_SEGMENTS.map((src) => {
+                  const on = segmentSources.includes(src.value);
+                  return (
+                    <button
+                      key={src.value}
+                      type="button"
+                      onClick={() =>
+                        setSegmentSources((cur) =>
+                          on
+                            ? cur.filter((x) => x !== src.value)
+                            : [...cur, src.value],
+                        )
+                      }
+                      className={cn(
+                        "h-7 px-2.5 text-11 rounded-full border-hairline u-focus-ring",
+                        on
+                          ? "bg-zinc-900 text-white border-zinc-900"
+                          : "bg-white text-ink-secondary border-zinc-300 hover:border-zinc-900",
+                      )}
+                    >
+                      {src.label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            <div className="mt-3">
+              {" "}
+              <FieldLabel>
+                Tags{" "}
+                <span className="normal-case tracking-normal text-ink-tertiary">
+                  (optional, additive)
+                </span>{" "}
+              </FieldLabel>{" "}
+              <div className="flex flex-wrap items-center gap-1.5">
+                {segmentTags.map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() =>
+                      setSegmentTags((cur) => cur.filter((x) => x !== t))
+                    }
+                    className="h-7 px-2.5 text-11 rounded-full bg-zinc-900 text-white border-hairline border-zinc-900 u-focus-ring"
+                    title="Click to remove"
+                  >
+                    {t} ×
+                  </button>
+                ))}
+                <input
+                  type="text"
+                  value={tagDraft}
+                  onChange={(e) => setTagDraft(e.target.value)}
+                  list="newsletter-tag-suggestions"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === ",") {
+                      e.preventDefault();
+                      const v = tagDraft.trim().toLowerCase();
+                      if (v && !segmentTags.includes(v))
+                        setSegmentTags((cur) => [...cur, v]);
+                      setTagDraft("");
+                    } else if (
+                      e.key === "Backspace" &&
+                      !tagDraft &&
+                      segmentTags.length
+                    ) {
+                      setSegmentTags((cur) => cur.slice(0, -1));
+                    }
+                  }}
+                  placeholder={
+                    segmentTags.length
+                      ? "add another…"
+                      : "e.g. platinum-tier, hurricane-prep"
+                  }
+                  className="h-7 flex-1 min-w-[160px] bg-white border-hairline border-zinc-300 rounded-full px-3 text-11 text-zinc-900 placeholder:text-ink-tertiary focus:outline-none focus:border-zinc-900"
+                />{" "}
+                <datalist id="newsletter-tag-suggestions">
+                  {tagSuggestions
+                    .filter((t) => !segmentTags.includes(t))
+                    .map((t) => (
+                      <option key={t} value={t} />
+                    ))}
+                </datalist>{" "}
+              </div>{" "}
+              <div className="text-11 text-ink-tertiary mt-1">
+                Press Enter or comma to add. Matches subscribers tagged with ANY
+                of the listed tags.
+              </div>{" "}
+            </div>{" "}
+          </div>{" "}
+        </div>{" "}
+        <div className={PANEL_CLS}>
+          {" "}
+          <PanelHeader
+            title="Review + Send"
+            hint="Save before test sends, live sends, or scheduling."
+          />{" "}
+          <div className="p-4 space-y-3">
+            {" "}
+            <Button
+              onClick={saveDraft}
+              variant="secondary"
+              disabled={!subject}
+              className="w-full"
+            >
+              {" "}
+              <Save size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
+              {draftId ? "Update draft" : "Save draft"}
+            </Button>{" "}
+            <Button
+              onClick={openPreview}
+              variant="secondary"
+              disabled={!htmlBody}
+              className="w-full"
+            >
+              {" "}
+              <Eye size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
+              Preview
+            </Button>{" "}
+            <div>
+              {" "}
+              <FieldLabel>Test recipient</FieldLabel>{" "}
+              <input
+                type="text"
+                value={testEmail}
+                onChange={(e) => setTestEmail(e.target.value)}
+                className={`${INPUT_CLS} font-mono`}
+                placeholder="test@wavespestcontrol.com"
+              />{" "}
+            </div>{" "}
+            <Button
+              onClick={sendTest}
+              variant="secondary"
+              disabled={!draftId || !testEmail}
+              className="w-full"
+            >
+              {" "}
+              <MailCheck
+                size={14}
+                strokeWidth={1.75}
+                className="mr-2"
+                aria-hidden
+              />
+              Send Test
+            </Button>{" "}
+            <Button
+              onClick={sendNow}
+              disabled={!draftId || !htmlBody || segmentCount === 0}
+              className="w-full"
+            >
+              {" "}
+              <Send size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
+              Send To Audience
+            </Button>{" "}
+          </div>{" "}
+        </div>{" "}
+        <div className={PANEL_CLS}>
+          {" "}
+          <PanelHeader
+            title="Schedule"
+            hint="Queued sends fire within one minute of the target time."
+          />{" "}
+          <div className="p-4 space-y-3">
+            {" "}
             <input
               type="datetime-local"
               value={scheduleAt}
               onChange={(e) => setScheduleAt(e.target.value)}
               className={`${INPUT_CLS} font-mono`}
-            />
-            <Button onClick={schedule} variant="secondary" disabled={!draftId || !scheduleAt || !htmlBody} className="w-full">
-              <CalendarClock size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
+            />{" "}
+            <Button
+              onClick={schedule}
+              variant="secondary"
+              disabled={!draftId || !scheduleAt || !htmlBody}
+              className="w-full"
+            >
+              {" "}
+              <CalendarClock
+                size={14}
+                strokeWidth={1.75}
+                className="mr-2"
+                aria-hidden
+              />
               Schedule Send
-            </Button>
+            </Button>{" "}
             <div className="text-11 text-ink-tertiary">
               {scheduleAt
-                ? `Fires ${new Date(scheduleAt).toLocaleString('en-US', {
-                    timeZone: 'America/New_York',
-                    month: 'short', day: 'numeric',
-                    hour: 'numeric', minute: '2-digit',
+                ? `Fires ${new Date(scheduleAt).toLocaleString("en-US", {
+                    timeZone: "America/New_York",
+                    month: "short",
+                    day: "numeric",
+                    hour: "numeric",
+                    minute: "2-digit",
                   })} ET`
-                : 'America/New_York timezone'}
-            </div>
-          </div>
+                : "America/New_York timezone"}
+            </div>{" "}
+          </div>{" "}
         </div>
-
         {status && (
-          <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-3 text-12 text-ink-secondary">{status}</div>
+          <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-3 text-12 text-ink-secondary">
+            {status}
+          </div>
         )}
       </aside>
-
       {aiOpen && (
         <AiDraftModal
           initialTemplate={selectedTemplate}
           initialPrompt={aiInitialPrompt}
-          onClose={() => { setAiOpen(false); setAiInitialPrompt(''); }}
+          onClose={() => {
+            setAiOpen(false);
+            setAiInitialPrompt("");
+          }}
           onDraft={handleAiDraft}
         />
       )}
-
       {previewOpen && (
         <PreviewDialog
           html={previewHtml}
@@ -746,7 +912,6 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComple
           onClose={() => setPreviewOpen(false)}
         />
       )}
-
       {sendConfirmOpen && (
         <SendConfirmDialog
           subject={subject}
@@ -774,25 +939,33 @@ export function ComposeView({ pendingEvent, onPendingEventConsumed, onSendComple
 // less likely than a stray Enter on the browser modal.
 
 function SendConfirmDialog({
-  subject, subjectB, previewText, fromName, fromEmail,
-  audience, activeCount, segmentFilter, htmlBody,
-  onCancel, onConfirm,
+  subject,
+  subjectB,
+  previewText,
+  fromName,
+  fromEmail,
+  audience,
+  activeCount,
+  segmentFilter,
+  htmlBody,
+  onCancel,
+  onConfirm,
 }) {
-  const [typed, setTyped] = useState('');
-  const ready = typed.trim().toUpperCase() === 'SEND' && audience > 0;
+  const [typed, setTyped] = useState("");
+  const ready = typed.trim().toUpperCase() === "SEND" && audience > 0;
 
   const segmentSummary = useMemo(() => {
-    if (!segmentFilter) return `All active (${activeCount ?? '?'})`;
+    if (!segmentFilter) return `All active (${activeCount ?? "?"})`;
     const parts = [];
-    if (segmentFilter.customersOnly) parts.push('Customers only');
-    else if (segmentFilter.leadsOnly) parts.push('Non-customers only');
+    if (segmentFilter.customersOnly) parts.push("Customers only");
+    else if (segmentFilter.leadsOnly) parts.push("Non-customers only");
     if (Array.isArray(segmentFilter.sources) && segmentFilter.sources.length) {
-      parts.push(`Sources: ${segmentFilter.sources.join(', ')}`);
+      parts.push(`Sources: ${segmentFilter.sources.join(", ")}`);
     }
     if (Array.isArray(segmentFilter.tags) && segmentFilter.tags.length) {
-      parts.push(`Tags: ${segmentFilter.tags.join(', ')}`);
+      parts.push(`Tags: ${segmentFilter.tags.join(", ")}`);
     }
-    return parts.length ? parts.join(' · ') : 'Filtered';
+    return parts.length ? parts.join(" · ") : "Filtered";
   }, [segmentFilter, activeCount]);
 
   // Body-only preview — no chrome wrap. The wrap is server-side and
@@ -802,43 +975,85 @@ function SendConfirmDialog({
   const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><base target="_blank"><style>html,body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:15px;line-height:1.55;color:#0F172A;}body{padding:14px;}h1,h2,h3,h4{line-height:1.25;}img{max-width:100%;height:auto;}*{box-sizing:border-box;}</style></head><body>${htmlBody || '<em style="color:#64748B">(empty body)</em>'}</body></html>`;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onCancel}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      onClick={onCancel}
+    >
+      {" "}
       <div
         className="bg-white border-hairline border-zinc-300 rounded-sm shadow-xl w-full max-w-2xl flex flex-col"
-        style={{ maxHeight: '90vh' }}
+        style={{ maxHeight: "90vh" }}
         onClick={(e) => e.stopPropagation()}
       >
+        {" "}
         <div className="p-5 border-b border-hairline border-zinc-200 flex items-start justify-between flex-shrink-0">
+          {" "}
           <div className="min-w-0">
-            <h3 className="text-16 font-medium text-zinc-900">Send to {audience != null ? audience.toLocaleString() : '?'} subscriber{audience === 1 ? '' : 's'}?</h3>
-            <p className="text-12 text-ink-secondary mt-0.5">This can't be undone. Each recipient is contacted at the SendGrid send below.</p>
-          </div>
-          <button type="button" onClick={onCancel} className="text-ink-tertiary hover:text-zinc-900 text-14 ml-3" aria-label="Close">✕</button>
-        </div>
-
+            {" "}
+            <h3 className="text-16 font-medium text-zinc-900">
+              Send to {audience != null ? audience.toLocaleString() : "?"}{" "}
+              subscriber{audience === 1 ? "" : "s"}?
+            </h3>{" "}
+            <p className="text-12 text-ink-secondary mt-0.5">
+              This can't be undone. Each recipient is contacted at the SendGrid
+              send below.
+            </p>{" "}
+          </div>{" "}
+          <button
+            type="button"
+            onClick={onCancel}
+            className="text-ink-tertiary hover:text-zinc-900 text-14 ml-3"
+            aria-label="Close"
+          >
+            ×
+          </button>{" "}
+        </div>{" "}
         <div className="px-5 py-4 overflow-y-auto flex-1 space-y-3">
-          <ConfirmRow label="Subject" value={subject || <em className="text-ink-tertiary">(missing)</em>} />
-          {subjectB && <ConfirmRow label="Subject (B)" value={subjectB} hint="A/B 50/50 random split" />}
-          {previewText && <ConfirmRow label="Preview text" value={previewText} />}
-          <ConfirmRow label="From" value={`${fromName} <${fromEmail}>`} />
-          <ConfirmRow label="Audience" value={segmentSummary} />
-
+          {" "}
+          <ConfirmRow
+            label="Subject"
+            value={subject || <em className="text-ink-tertiary">(missing)</em>}
+          />
+          {subjectB && (
+            <ConfirmRow
+              label="Subject (B)"
+              value={subjectB}
+              hint="A/B 50/50 random split"
+            />
+          )}
+          {previewText && (
+            <ConfirmRow label="Preview text" value={previewText} />
+          )}
+          <ConfirmRow label="From" value={`${fromName} <${fromEmail}>`} />{" "}
+          <ConfirmRow label="Audience" value={segmentSummary} />{" "}
           <div>
-            <div className="text-11 uppercase tracking-label text-ink-secondary mb-1">Body preview</div>
+            {" "}
+            <div className="text-11 uppercase tracking-label text-ink-secondary mb-1">
+              Body preview
+            </div>{" "}
             <iframe
               title="Body preview"
               srcDoc={srcDoc}
               sandbox=""
-              style={{ width: '100%', height: 320, border: '1px solid #E4E4E7', borderRadius: 4, background: '#fff' }}
-            />
+              style={{
+                width: "100%",
+                height: 320,
+                border: "1px solid #E4E4E7",
+                borderRadius: 4,
+                background: "#fff",
+              }}
+            />{" "}
             <p className="text-11 text-ink-tertiary mt-1">
-              Body only — Waves header + unsubscribe footer are added server-side. Send a test if you want to see the full chrome.
-            </p>
-          </div>
-        </div>
-
+              Body only — Waves header + unsubscribe footer are added
+              server-side. Send a test if you want to see the full chrome.
+            </p>{" "}
+          </div>{" "}
+        </div>{" "}
         <div className="px-5 py-4 border-t border-hairline border-zinc-200 flex items-center gap-3 flex-shrink-0 flex-wrap">
-          <label className="text-12 text-ink-secondary flex-shrink-0">Type SEND to confirm:</label>
+          {" "}
+          <label className="text-12 text-ink-secondary flex-shrink-0">
+            Type SEND to confirm:
+          </label>{" "}
           <input
             type="text"
             value={typed}
@@ -848,13 +1063,18 @@ function SendConfirmDialog({
             autoComplete="off"
             className="bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-13 text-zinc-900 font-mono w-32"
             placeholder="SEND"
-          />
+          />{" "}
           <div className="ml-auto flex items-center gap-2">
-            <Button onClick={onCancel} variant="secondary">Cancel</Button>
-            <Button onClick={onConfirm} disabled={!ready}>Send to all</Button>
-          </div>
-        </div>
-      </div>
+            {" "}
+            <Button onClick={onCancel} variant="secondary">
+              Cancel
+            </Button>{" "}
+            <Button onClick={onConfirm} disabled={!ready}>
+              Send to all
+            </Button>{" "}
+          </div>{" "}
+        </div>{" "}
+      </div>{" "}
     </div>
   );
 }
@@ -868,37 +1088,63 @@ function SendConfirmDialog({
 
 function PreviewDialog({ html, loading, onClose }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      onClick={onClose}
+    >
+      {" "}
       <div
         className="bg-white border-hairline border-zinc-300 rounded-sm shadow-xl w-full max-w-3xl flex flex-col"
-        style={{ maxHeight: '90vh' }}
+        style={{ maxHeight: "90vh" }}
         onClick={(e) => e.stopPropagation()}
       >
+        {" "}
         <div className="p-5 border-b border-hairline border-zinc-200 flex items-center justify-between flex-shrink-0">
+          {" "}
           <div>
-            <h3 className="text-16 font-medium text-zinc-900">Preview</h3>
+            {" "}
+            <h3 className="text-16 font-medium text-zinc-900">Preview</h3>{" "}
             <p className="text-12 text-ink-secondary mt-0.5">
-              How the email looks with header + footer chrome. Unsubscribe link is a demo token; real recipients get their own.
-            </p>
-          </div>
-          <button type="button" onClick={onClose} className="text-ink-tertiary hover:text-zinc-900 text-14 ml-3" aria-label="Close">✕</button>
-        </div>
+              How the email looks with header + footer chrome. Unsubscribe link
+              is a demo token; real recipients get their own.
+            </p>{" "}
+          </div>{" "}
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-ink-tertiary hover:text-zinc-900 text-14 ml-3"
+            aria-label="Close"
+          >
+            ×
+          </button>{" "}
+        </div>{" "}
         <div className="overflow-y-auto flex-1 bg-zinc-50 p-3">
           {loading ? (
-            <div className="text-13 text-ink-secondary p-8 text-center">Rendering…</div>
+            <div className="text-13 text-ink-secondary p-8 text-center">
+              Rendering…
+            </div>
           ) : (
             <iframe
               title="Newsletter preview"
               srcDoc={html}
               sandbox=""
-              style={{ width: '100%', minHeight: '60vh', border: '1px solid #E4E4E7', borderRadius: 4, background: '#fff' }}
+              style={{
+                width: "100%",
+                minHeight: "60vh",
+                border: "1px solid #E4E4E7",
+                borderRadius: 4,
+                background: "#fff",
+              }}
             />
           )}
-        </div>
+        </div>{" "}
         <div className="px-5 py-3 border-t border-hairline border-zinc-200 flex justify-end flex-shrink-0">
-          <Button onClick={onClose} variant="secondary">Close</Button>
-        </div>
-      </div>
+          {" "}
+          <Button onClick={onClose} variant="secondary">
+            Close
+          </Button>{" "}
+        </div>{" "}
+      </div>{" "}
     </div>
   );
 }
@@ -906,11 +1152,15 @@ function PreviewDialog({ html, loading, onClose }) {
 function ConfirmRow({ label, value, hint }) {
   return (
     <div className="flex items-baseline gap-3">
-      <div className="text-11 uppercase tracking-label text-ink-secondary w-28 flex-shrink-0">{label}</div>
+      {" "}
+      <div className="text-11 uppercase tracking-label text-ink-secondary w-28 flex-shrink-0">
+        {label}
+      </div>{" "}
       <div className="flex-1 min-w-0">
+        {" "}
         <div className="text-13 text-zinc-900 break-words">{value}</div>
         {hint && <div className="text-11 text-ink-tertiary mt-0.5">{hint}</div>}
-      </div>
+      </div>{" "}
     </div>
   );
 }
@@ -918,23 +1168,33 @@ function ConfirmRow({ label, value, hint }) {
 // ── AI draft modal ────────────────────────────────────────────────
 
 function AiDraftModal({ initialTemplate, initialPrompt, onClose, onDraft }) {
-  const [prompt, setPrompt] = useState(initialPrompt || '');
-  const [template, setTemplate] = useState(initialTemplate || '');
-  const [audience, setAudience] = useState('Existing Waves customers');
-  const [tone, setTone] = useState('Neighborly, owner-operator');
+  const [prompt, setPrompt] = useState(initialPrompt || "");
+  const [template, setTemplate] = useState(initialTemplate || "");
+  const [audience, setAudience] = useState("Existing Waves customers");
+  const [tone, setTone] = useState("Neighborly, owner-operator");
   const [includeCTA, setIncludeCTA] = useState(true);
   const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState('');
+  const [err, setErr] = useState("");
 
   // Templates eligible for AI drafting — every TEMPLATES entry except
   // 'blank', which has no structure for Claude to follow.
-  const draftableTemplates = TEMPLATES.filter((t) => t.key !== 'blank');
+  const draftableTemplates = TEMPLATES.filter((t) => t.key !== "blank");
 
   const run = async () => {
-    if (prompt.trim().length < 8) { setErr('Describe the newsletter (at least 8 characters)'); return; }
-    setLoading(true); setErr('');
+    if (prompt.trim().length < 8) {
+      setErr("Describe the newsletter (at least 8 characters)");
+      return;
+    }
+    setLoading(true);
+    setErr("");
     try {
-      await onDraft({ prompt, template: template || null, audience, tone, includeCTA });
+      await onDraft({
+        prompt,
+        template: template || null,
+        audience,
+        tone,
+        includeCTA,
+      });
     } catch (e) {
       setErr(e.message);
       setLoading(false);
@@ -942,74 +1202,112 @@ function AiDraftModal({ initialTemplate, initialPrompt, onClose, onDraft }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
-      <div className="bg-white border-hairline border-zinc-300 rounded-sm shadow-xl w-full max-w-lg p-5 space-y-3" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      onClick={onClose}
+    >
+      {" "}
+      <div
+        className="bg-white border-hairline border-zinc-300 rounded-sm shadow-xl w-full max-w-lg p-5 space-y-3"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {" "}
         <div className="flex items-center justify-between">
-          <h3 className="text-16 font-medium text-zinc-900">Draft with AI</h3>
-          <button type="button" onClick={onClose} className="text-ink-tertiary hover:text-zinc-900 text-14">✕</button>
-        </div>
-
+          {" "}
+          <h3 className="text-16 font-medium text-zinc-900">
+            Draft with AI
+          </h3>{" "}
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-ink-tertiary hover:text-zinc-900 text-14"
+          >
+            ×
+          </button>{" "}
+        </div>{" "}
         <div>
-          <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">What's the newsletter about?</label>
+          {" "}
+          <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+            What's the newsletter about?
+          </label>{" "}
           <textarea
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             rows={4}
             className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
             placeholder="e.g. Spring uptick in no-see-ums and what homeowners can do this week. Want to mention our mosquito service as a soft CTA."
-          />
-        </div>
-
+          />{" "}
+        </div>{" "}
         <div>
-          <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">Template (optional)</label>
+          {" "}
+          <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+            Template (optional)
+          </label>{" "}
           <select
             value={template}
             onChange={(e) => setTemplate(e.target.value)}
             className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
           >
+            {" "}
             <option value="">Free-form (no template)</option>
             {draftableTemplates.map((t) => (
-              <option key={t.key} value={t.key}>{t.label}</option>
+              <option key={t.key} value={t.key}>
+                {t.label}
+              </option>
             ))}
-          </select>
+          </select>{" "}
           <p className="text-11 text-ink-tertiary mt-1">
-            Picks a structure + voice for Claude to draft into. Defaults to whatever you last clicked above.
-          </p>
-        </div>
-
+            Picks a structure + voice for Claude to draft into. Defaults to
+            whatever you last clicked above.
+          </p>{" "}
+        </div>{" "}
         <div className="grid grid-cols-2 gap-3">
+          {" "}
           <div>
-            <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">Audience</label>
+            {" "}
+            <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+              Audience
+            </label>{" "}
             <input
               type="text"
               value={audience}
               onChange={(e) => setAudience(e.target.value)}
               className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
-            />
-          </div>
+            />{" "}
+          </div>{" "}
           <div>
-            <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">Tone</label>
+            {" "}
+            <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+              Tone
+            </label>{" "}
             <input
               type="text"
               value={tone}
               onChange={(e) => setTone(e.target.value)}
               className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
-            />
-          </div>
-        </div>
-
+            />{" "}
+          </div>{" "}
+        </div>{" "}
         <label className="inline-flex items-center gap-2 text-12 text-ink-secondary">
-          <input type="checkbox" checked={includeCTA} onChange={(e) => setIncludeCTA(e.target.checked)} />
+          {" "}
+          <input
+            type="checkbox"
+            checked={includeCTA}
+            onChange={(e) => setIncludeCTA(e.target.checked)}
+          />
           Include a call to action at the end
         </label>
-
         {err && <div className="text-12 text-alert-fg">{err}</div>}
-
         <div className="flex items-center justify-end gap-2 pt-2 border-t border-hairline border-zinc-200">
-          <Button onClick={onClose} variant="secondary" disabled={loading}>Cancel</Button>
-          <Button onClick={run} disabled={loading}>{loading ? 'Drafting…' : 'Draft it'}</Button>
-        </div>
-      </div>
+          {" "}
+          <Button onClick={onClose} variant="secondary" disabled={loading}>
+            Cancel
+          </Button>{" "}
+          <Button onClick={run} disabled={loading}>
+            {loading ? "Drafting…" : "Draft it"}
+          </Button>{" "}
+        </div>{" "}
+      </div>{" "}
     </div>
   );
 }
@@ -1026,26 +1324,35 @@ export function HistoryView() {
 
   const load = useCallback(() => {
     setLoading(true);
-    adminFetch('/admin/newsletter/sends')
+    adminFetch("/admin/newsletter/sends")
       .then((d) => setSends(d.sends || []))
       .catch(() => setSends([]))
       .finally(() => setLoading(false));
   }, []);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    load();
+  }, [load]);
 
   const cancelSchedule = async (id) => {
-    if (!confirm('Cancel this scheduled send and return it to draft?')) return;
+    if (!confirm("Cancel this scheduled send and return it to draft?")) return;
     try {
-      await adminFetch(`/admin/newsletter/sends/${id}/cancel-schedule`, { method: 'POST' });
+      await adminFetch(`/admin/newsletter/sends/${id}/cancel-schedule`, {
+        method: "POST",
+      });
       load();
-    } catch (e) { alert('Cancel failed: ' + e.message); }
+    } catch (e) {
+      alert("Cancel failed: " + e.message);
+    }
   };
 
   // Toggle the A/B breakdown panel. First open lazy-loads /sends/:id (the
   // detail endpoint includes variantStats); subsequent toggles read from
   // the cache.
   const toggleVariants = async (id) => {
-    if (expandedId === id) { setExpandedId(null); return; }
+    if (expandedId === id) {
+      setExpandedId(null);
+      return;
+    }
     setExpandedId(id);
     if (variantStats[id]) return;
     try {
@@ -1053,75 +1360,121 @@ export function HistoryView() {
       if (d.variantStats) {
         setVariantStats((prev) => ({ ...prev, [id]: d.variantStats }));
       }
-    } catch { /* surfaces as 'no breakdown available' below */ }
+    } catch {
+      /* surfaces as 'no breakdown available' below */
+    }
   };
 
   return (
     <Card className="p-0 overflow-hidden">
+      {" "}
       <div className="flex items-center justify-between p-4 border-b border-hairline border-zinc-200 flex-wrap gap-2">
+        {" "}
         <div>
-          <h3 className="text-16 font-medium text-zinc-900">Past sends</h3>
-          <p className="text-12 text-ink-tertiary mt-0.5">Delivery health, scheduling, and subject-line results.</p>
-        </div>
-        <span className="text-11 text-ink-tertiary u-nums">{sends.length} campaign{sends.length === 1 ? '' : 's'}</span>
+          {" "}
+          <h3 className="text-16 font-medium text-zinc-900">Past sends</h3>{" "}
+          <p className="text-12 text-ink-tertiary mt-0.5">
+            Delivery health, scheduling, and subject-line results.
+          </p>{" "}
+        </div>{" "}
+        <span className="text-11 text-ink-tertiary u-nums">
+          {sends.length} campaign{sends.length === 1 ? "" : "s"}
+        </span>{" "}
       </div>
-
       {loading ? (
-        <div className="text-13 text-ink-secondary p-6 text-center">Loading…</div>
+        <div className="text-13 text-ink-secondary p-6 text-center">
+          Loading…
+        </div>
       ) : sends.length === 0 ? (
-        <div className="text-13 text-ink-secondary p-8 text-center">No campaigns yet. Compose your first newsletter in the Compose tab.</div>
+        <div className="text-13 text-ink-secondary p-8 text-center">
+          No campaigns yet. Compose your first newsletter in the Compose tab.
+        </div>
       ) : (
         <div className="space-y-0">
           {sends.map((s) => {
-            const pct = s.recipient_count ? Math.round((s.delivered_count / s.recipient_count) * 100) : 0;
+            const pct = s.recipient_count
+              ? Math.round((s.delivered_count / s.recipient_count) * 100)
+              : 0;
             const isAb = !!s.subject_b;
             const isOpen = expandedId === s.id;
             return (
-              <div key={s.id} className="border-b border-hairline border-zinc-200">
+              <div
+                key={s.id}
+                className="border-b border-hairline border-zinc-200"
+              >
+                {" "}
                 <div className="px-4 py-3 flex flex-col lg:flex-row lg:items-start gap-3 lg:gap-4">
+                  {" "}
                   <div className="flex-1 min-w-0">
+                    {" "}
                     <div className="flex items-center gap-2 mb-1 flex-wrap">
-                      <span className="text-14 font-medium text-zinc-900 truncate">{s.subject}</span>
+                      {" "}
+                      <span className="text-14 font-medium text-zinc-900 truncate">
+                        {s.subject}
+                      </span>
                       {isAb && (
                         <button
                           type="button"
                           onClick={() => toggleVariants(s.id)}
                           className="inline-flex items-center gap-1 px-2 py-0.5 rounded-sm bg-zinc-100 text-11 font-medium text-zinc-700 hover:bg-zinc-200 u-focus-ring"
-                          title={isOpen ? 'Hide A/B breakdown' : 'Show A/B breakdown'}
+                          title={
+                            isOpen ? "Hide A/B breakdown" : "Show A/B breakdown"
+                          }
                         >
-                          A/B {isOpen ? '▾' : '▸'}
+                          A/B {isOpen ? "▾" : "▸"}
                         </button>
                       )}
-                      {s.segment_filter && <Badge tone="muted">Segmented</Badge>}
-                      <StatusChip status={s.status} />
-                    </div>
+                      {s.segment_filter && (
+                        <Badge tone="muted">Segmented</Badge>
+                      )}
+                      <StatusChip status={s.status} />{" "}
+                    </div>{" "}
                     <div className="text-11 text-ink-tertiary">
-                      {s.created_by_name || 'Admin'} · {
-                        s.status === 'scheduled' && s.scheduled_for
-                          ? `scheduled for ${new Date(s.scheduled_for).toLocaleString()}`
-                          : s.sent_at ? new Date(s.sent_at).toLocaleString() : 'draft (not sent)'
-                      }
+                      {s.created_by_name || "Admin"} ·{" "}
+                      {s.status === "scheduled" && s.scheduled_for
+                        ? `scheduled for ${new Date(s.scheduled_for).toLocaleString()}`
+                        : s.sent_at
+                          ? new Date(s.sent_at).toLocaleString()
+                          : "draft (not sent)"}
                     </div>
                     {isAb && (
-                      <div className="text-11 text-ink-tertiary mt-0.5 truncate">B: {s.subject_b}</div>
+                      <div className="text-11 text-ink-tertiary mt-0.5 truncate">
+                        B: {s.subject_b}
+                      </div>
                     )}
-                  </div>
+                  </div>{" "}
                   <div className="grid grid-cols-2 sm:grid-cols-4 lg:flex lg:items-center gap-3 lg:gap-5 text-12 flex-shrink-0">
-                    {s.status === 'scheduled' ? (
+                    {s.status === "scheduled" ? (
                       <button
                         type="button"
                         onClick={() => cancelSchedule(s.id)}
                         className="text-11 px-2 py-1 border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-zinc-900 hover:border-zinc-900 u-focus-ring"
-                      >Cancel schedule</button>
+                      >
+                        Cancel schedule
+                      </button>
                     ) : (
                       <>
-                        <Stat label="Sent" value={s.recipient_count || 0} />
-                        <Stat label="Delivered" value={`${s.delivered_count || 0} (${pct}%)`} />
-                        <Stat label="Bounced" value={s.bounced_count || 0} alert={s.bounced_count > 0} />
-                        <Stat label="Unsub" value={s.unsubscribed_count || 0} />
+                        {" "}
+                        <Stat
+                          label="Sent"
+                          value={s.recipient_count || 0}
+                        />{" "}
+                        <Stat
+                          label="Delivered"
+                          value={`${s.delivered_count || 0} (${pct}%)`}
+                        />{" "}
+                        <Stat
+                          label="Bounced"
+                          value={s.bounced_count || 0}
+                          alert={s.bounced_count > 0}
+                        />{" "}
+                        <Stat
+                          label="Unsub"
+                          value={s.unsubscribed_count || 0}
+                        />{" "}
                       </>
                     )}
-                  </div>
+                  </div>{" "}
                 </div>
                 {isAb && isOpen && (
                   <VariantBreakdown
@@ -1160,22 +1513,36 @@ function VariantBreakdown({ stats, subjectA, subjectB }) {
   if (!a && !b) {
     return (
       <div className="px-5 pb-3 -mt-2 text-11 text-ink-tertiary">
-        No A/B delivery rows yet — open rates appear once SendGrid events arrive.
+        No A/B delivery rows yet — open rates appear once SendGrid events
+        arrive.
       </div>
     );
   }
-  const openRate = (v) => v && v.delivered ? v.opened / v.delivered : null;
+  const openRate = (v) => (v && v.delivered ? v.opened / v.delivered : null);
   const aRate = openRate(a);
   const bRate = openRate(b);
   let winner = null;
   if (aRate != null && bRate != null && Math.abs(aRate - bRate) >= 0.005) {
-    winner = aRate > bRate ? 'a' : 'b';
+    winner = aRate > bRate ? "a" : "b";
   }
 
   return (
     <div className="px-5 pb-4 -mt-1 grid grid-cols-1 sm:grid-cols-2 gap-3">
-      <VariantCell letter="A" subject={subjectA} stats={a} rate={aRate} isWinner={winner === 'a'} />
-      <VariantCell letter="B" subject={subjectB} stats={b} rate={bRate} isWinner={winner === 'b'} />
+      {" "}
+      <VariantCell
+        letter="A"
+        subject={subjectA}
+        stats={a}
+        rate={aRate}
+        isWinner={winner === "a"}
+      />{" "}
+      <VariantCell
+        letter="B"
+        subject={subjectB}
+        stats={b}
+        rate={bRate}
+        isWinner={winner === "b"}
+      />{" "}
     </div>
   );
 }
@@ -1184,23 +1551,33 @@ function VariantCell({ letter, subject, stats, rate, isWinner }) {
   return (
     <div
       className={cn(
-        'border-hairline rounded-sm p-3 bg-white',
-        isWinner ? 'border-zinc-900' : 'border-zinc-200',
+        "border-hairline rounded-sm p-3 bg-white",
+        isWinner ? "border-zinc-900" : "border-zinc-200",
       )}
     >
+      {" "}
       <div className="flex items-center gap-2 mb-1 flex-wrap">
-        <span className="text-11 uppercase tracking-label text-ink-secondary">Variant {letter}</span>
+        {" "}
+        <span className="text-11 uppercase tracking-label text-ink-secondary">
+          Variant {letter}
+        </span>
         {isWinner && <Badge tone="strong">Winner</Badge>}
+      </div>{" "}
+      <div className="text-12 text-zinc-900 mb-2 truncate" title={subject}>
+        {subject || <em className="text-ink-tertiary">(missing)</em>}
       </div>
-      <div className="text-12 text-zinc-900 mb-2 truncate" title={subject}>{subject || <em className="text-ink-tertiary">(missing)</em>}</div>
       {!stats ? (
         <div className="text-11 text-ink-tertiary">No deliveries recorded.</div>
       ) : (
         <div className="grid grid-cols-4 gap-2">
-          <Stat label="Sent" value={stats.total} />
-          <Stat label="Delivered" value={stats.delivered} />
-          <Stat label="Opens" value={`${stats.opened}${rate != null ? ` (${(rate * 100).toFixed(0)}%)` : ''}`} />
-          <Stat label="Clicks" value={stats.clicked} />
+          {" "}
+          <Stat label="Sent" value={stats.total} />{" "}
+          <Stat label="Delivered" value={stats.delivered} />{" "}
+          <Stat
+            label="Opens"
+            value={`${stats.opened}${rate != null ? ` (${(rate * 100).toFixed(0)}%)` : ""}`}
+          />{" "}
+          <Stat label="Clicks" value={stats.clicked} />{" "}
         </div>
       )}
     </div>
@@ -1208,18 +1585,26 @@ function VariantCell({ letter, subject, stats, rate, isWinner }) {
 }
 
 function StatusChip({ status }) {
-  if (status === 'sent') return <Badge tone="strong">Sent</Badge>;
-  if (status === 'sending') return <Badge tone="neutral">Sending…</Badge>;
-  if (status === 'scheduled') return <Badge tone="neutral">Scheduled</Badge>;
-  if (status === 'failed') return <Badge tone="alert">Failed</Badge>;
+  if (status === "sent") return <Badge tone="strong">Sent</Badge>;
+  if (status === "sending") return <Badge tone="neutral">Sending…</Badge>;
+  if (status === "scheduled") return <Badge tone="neutral">Scheduled</Badge>;
+  if (status === "failed") return <Badge tone="alert">Failed</Badge>;
   return <Badge tone="muted">Draft</Badge>;
 }
 
 function Stat({ label, value, alert }) {
   return (
     <div className="text-right">
-      <div className={cn('u-nums font-medium', alert ? 'text-alert-fg' : 'text-zinc-900')}>{value}</div>
-      <div className="text-11 text-ink-tertiary">{label}</div>
+      {" "}
+      <div
+        className={cn(
+          "u-nums font-medium",
+          alert ? "text-alert-fg" : "text-zinc-900",
+        )}
+      >
+        {value}
+      </div>{" "}
+      <div className="text-11 text-ink-tertiary">{label}</div>{" "}
     </div>
   );
 }
@@ -1231,23 +1616,23 @@ const SUBSCRIBERS_PAGE_SIZE = 100;
 export function SubscribersView() {
   const [subs, setSubs] = useState([]);
   const [counts, setCounts] = useState({});
-  const [filter, setFilter] = useState('active');
-  const [q, setQ] = useState('');
+  const [filter, setFilter] = useState("active");
+  const [q, setQ] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [offset, setOffset] = useState(0);
-  const [status, setStatus] = useState('');
+  const [status, setStatus] = useState("");
 
   // Initial / filter-changed fetch — resets the list. Re-runs whenever
   // the filter or search query changes (via the useEffect below).
   const load = useCallback(() => {
     setLoading(true);
     const qs = new URLSearchParams();
-    if (filter !== 'all') qs.set('status', filter);
-    if (q) qs.set('q', q);
-    qs.set('limit', String(SUBSCRIBERS_PAGE_SIZE));
-    qs.set('offset', '0');
+    if (filter !== "all") qs.set("status", filter);
+    if (q) qs.set("q", q);
+    qs.set("limit", String(SUBSCRIBERS_PAGE_SIZE));
+    qs.set("offset", "0");
     adminFetch(`/admin/newsletter/subscribers?${qs}`)
       .then((d) => {
         const next = d.subscribers || [];
@@ -1256,18 +1641,23 @@ export function SubscribersView() {
         setOffset(next.length);
         setHasMore(next.length === SUBSCRIBERS_PAGE_SIZE);
       })
-      .catch(() => { setSubs([]); setHasMore(false); })
+      .catch(() => {
+        setSubs([]);
+        setHasMore(false);
+      })
       .finally(() => setLoading(false));
   }, [filter, q]);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    load();
+  }, [load]);
 
   const loadMore = async () => {
     setLoadingMore(true);
     const qs = new URLSearchParams();
-    if (filter !== 'all') qs.set('status', filter);
-    if (q) qs.set('q', q);
-    qs.set('limit', String(SUBSCRIBERS_PAGE_SIZE));
-    qs.set('offset', String(offset));
+    if (filter !== "all") qs.set("status", filter);
+    if (q) qs.set("q", q);
+    qs.set("limit", String(SUBSCRIBERS_PAGE_SIZE));
+    qs.set("offset", String(offset));
     try {
       const d = await adminFetch(`/admin/newsletter/subscribers?${qs}`);
       const next = d.subscribers || [];
@@ -1275,158 +1665,236 @@ export function SubscribersView() {
       setOffset((cur) => cur + next.length);
       setHasMore(next.length === SUBSCRIBERS_PAGE_SIZE);
     } catch (e) {
-      setStatus('Load more failed: ' + e.message);
+      setStatus("Load more failed: " + e.message);
     } finally {
       setLoadingMore(false);
     }
   };
 
   const exportCsv = async () => {
-    setStatus('Building CSV…');
+    setStatus("Building CSV…");
     try {
       const qs = new URLSearchParams();
-      if (filter !== 'all') qs.set('status', filter);
-      if (q) qs.set('q', q);
+      if (filter !== "all") qs.set("status", filter);
+      if (q) qs.set("q", q);
       // Bypass adminFetch's JSON parsing — this returns text/csv.
-      const res = await fetch(`${API_BASE}/admin/newsletter/subscribers.csv?${qs}`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` },
-      });
+      const res = await fetch(
+        `${API_BASE}/admin/newsletter/subscribers.csv?${qs}`,
+        {
+          headers: {
+            Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+          },
+        },
+      );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const text = await res.text();
-      const url = URL.createObjectURL(new Blob([text], { type: 'text/csv' }));
-      const a = document.createElement('a');
+      const url = URL.createObjectURL(new Blob([text], { type: "text/csv" }));
+      const a = document.createElement("a");
       a.href = url;
       a.download = `newsletter-subscribers-${new Date().toISOString().slice(0, 10)}.csv`;
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      setStatus('CSV downloaded.');
+      setStatus("CSV downloaded.");
     } catch (e) {
-      setStatus('Export failed: ' + e.message);
+      setStatus("Export failed: " + e.message);
     }
   };
 
   const addSubscriber = async () => {
-    const email = prompt('Email address to add:');
+    const email = prompt("Email address to add:");
     if (!email) return;
-    setStatus('Adding...');
+    setStatus("Adding...");
     try {
-      await adminFetch('/admin/newsletter/subscribers', {
-        method: 'POST',
+      await adminFetch("/admin/newsletter/subscribers", {
+        method: "POST",
         body: JSON.stringify({ email }),
       });
       setStatus(`Added ${email}.`);
       load();
-    } catch (e) { setStatus('Failed: ' + e.message); }
+    } catch (e) {
+      setStatus("Failed: " + e.message);
+    }
   };
 
   const removeSubscriber = async (id, email) => {
     if (!confirm(`Unsubscribe ${email}?`)) return;
     try {
-      await adminFetch(`/admin/newsletter/subscribers/${id}`, { method: 'DELETE' });
+      await adminFetch(`/admin/newsletter/subscribers/${id}`, {
+        method: "DELETE",
+      });
       load();
-    } catch (e) { alert('Failed: ' + e.message); }
+    } catch (e) {
+      alert("Failed: " + e.message);
+    }
   };
 
   return (
     <Card className="p-0 overflow-hidden">
+      {" "}
       <div className="flex items-start justify-between p-4 border-b border-hairline border-zinc-200 flex-wrap gap-3">
+        {" "}
         <div>
-          <h3 className="text-16 font-medium text-zinc-900">Subscribers</h3>
-          <p className="text-12 text-ink-tertiary mt-0.5">Search the list, export filtered contacts, and manage opt-outs.</p>
-        </div>
+          {" "}
+          <h3 className="text-16 font-medium text-zinc-900">
+            Subscribers
+          </h3>{" "}
+          <p className="text-12 text-ink-tertiary mt-0.5">
+            Search the list, export filtered contacts, and manage opt-outs.
+          </p>{" "}
+        </div>{" "}
         <div className="flex items-center gap-2 flex-wrap">
+          {" "}
           <Button onClick={exportCsv} variant="secondary">
-            <Download size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
+            {" "}
+            <Download
+              size={14}
+              strokeWidth={1.75}
+              className="mr-2"
+              aria-hidden
+            />
             Export CSV
-          </Button>
+          </Button>{" "}
           <Button onClick={addSubscriber} variant="secondary">
-            <UserPlus size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
+            {" "}
+            <UserPlus
+              size={14}
+              strokeWidth={1.75}
+              className="mr-2"
+              aria-hidden
+            />
             Add Subscriber
-          </Button>
-        </div>
-      </div>
-
+          </Button>{" "}
+        </div>{" "}
+      </div>{" "}
       <div className="p-4 border-b border-hairline border-zinc-100 flex items-center gap-2 flex-wrap">
-        {['active', 'unsubscribed', 'bounced', 'all'].map((f) => {
+        {["active", "unsubscribed", "bounced", "all"].map((f) => {
           const active = filter === f;
-          const count = f === 'all'
-            ? counts.all ?? Object.entries(counts)
-              .filter(([key]) => !['all', 'bounced'].includes(key))
-              .reduce((sum, [, value]) => sum + Number(value || 0), 0)
-            : counts[f] || 0;
+          const count =
+            f === "all"
+              ? (counts.all ??
+                Object.entries(counts)
+                  .filter(([key]) => !["all", "bounced"].includes(key))
+                  .reduce((sum, [, value]) => sum + Number(value || 0), 0))
+              : counts[f] || 0;
           return (
             <button
               key={f}
               type="button"
               onClick={() => setFilter(f)}
               className={cn(
-                'inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-12 font-medium border-hairline u-focus-ring',
+                "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-12 font-medium border-hairline u-focus-ring",
                 active
-                  ? 'bg-zinc-900 text-white border-zinc-900'
-                  : 'bg-white text-ink-secondary border-zinc-300 hover:border-zinc-900',
+                  ? "bg-zinc-900 text-white border-zinc-900"
+                  : "bg-white text-ink-secondary border-zinc-300 hover:border-zinc-900",
               )}
             >
               {f.charAt(0).toUpperCase() + f.slice(1)}
-              <span className={cn('u-nums text-11', active ? 'text-zinc-300' : 'text-ink-tertiary')}>{count}</span>
+              <span
+                className={cn(
+                  "u-nums text-11",
+                  active ? "text-zinc-300" : "text-ink-tertiary",
+                )}
+              >
+                {count}
+              </span>{" "}
             </button>
           );
         })}
         <div className="relative w-full sm:w-72 sm:ml-auto">
-          <Search size={14} strokeWidth={1.75} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-tertiary" aria-hidden />
+          {" "}
+          <Search
+            size={14}
+            strokeWidth={1.75}
+            className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-tertiary"
+            aria-hidden
+          />{" "}
           <input
             type="text"
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="Search email…"
             className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 pl-8 pr-2 text-12 text-zinc-900"
-          />
-        </div>
+          />{" "}
+        </div>{" "}
       </div>
-
-      {status && <div className="mx-4 mt-3 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-3 text-12 text-ink-secondary">{status}</div>}
-
+      {status && (
+        <div className="mx-4 mt-3 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-3 text-12 text-ink-secondary">
+          {status}
+        </div>
+      )}
       {loading ? (
-        <div className="text-13 text-ink-secondary p-6 text-center">Loading…</div>
+        <div className="text-13 text-ink-secondary p-6 text-center">
+          Loading…
+        </div>
       ) : subs.length === 0 ? (
-        <div className="text-13 text-ink-secondary p-8 text-center">No subscribers in this filter.</div>
+        <div className="text-13 text-ink-secondary p-8 text-center">
+          No subscribers in this filter.
+        </div>
       ) : (
         <div>
           {subs.map((s) => (
-            <div key={s.id} className="px-4 py-3 border-b border-hairline border-zinc-200 flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4">
+            <div
+              key={s.id}
+              className="px-4 py-3 border-b border-hairline border-zinc-200 flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4"
+            >
+              {" "}
               <div className="flex-1 min-w-0">
+                {" "}
                 <div className="flex items-center gap-2">
-                  <span className="text-13 text-zinc-900 font-mono truncate">{s.email}</span>
-                  {s.status === 'unsubscribed' && <Badge tone="muted">Unsubscribed</Badge>}
-                  {s.status === 'bounced' && <Badge tone="alert">Bounced</Badge>}
+                  {" "}
+                  <span className="text-13 text-zinc-900 font-mono truncate">
+                    {s.email}
+                  </span>
+                  {s.status === "unsubscribed" && (
+                    <Badge tone="muted">Unsubscribed</Badge>
+                  )}
+                  {s.status === "bounced" && (
+                    <Badge tone="alert">Bounced</Badge>
+                  )}
                   {s.customer_id && <Badge tone="muted">Customer</Badge>}
-                </div>
+                </div>{" "}
                 <div className="text-11 text-ink-tertiary">
-                  {s.first_name || s.last_name ? `${s.first_name || ''} ${s.last_name || ''}`.trim() + ' · ' : ''}
-                  Source: {s.source || 'unknown'} · Joined {new Date(s.subscribed_at).toLocaleDateString()}
-                  {s.bounce_count > 0 && ` · ${s.bounce_count} bounce${s.bounce_count === 1 ? '' : 's'}`}
-                </div>
+                  {s.first_name || s.last_name
+                    ? `${s.first_name || ""} ${s.last_name || ""}`.trim() +
+                      " · "
+                    : ""}
+                  Source: {s.source || "unknown"} · Joined{" "}
+                  {new Date(s.subscribed_at).toLocaleDateString()}
+                  {s.bounce_count > 0 &&
+                    ` · ${s.bounce_count} bounce${s.bounce_count === 1 ? "" : "s"}`}
+                </div>{" "}
               </div>
-              {s.status === 'active' && (
+              {s.status === "active" && (
                 <button
                   type="button"
                   onClick={() => removeSubscriber(s.id, s.email)}
                   className="text-11 px-2 py-1 border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-zinc-900 hover:border-zinc-900 u-focus-ring self-start sm:self-center"
-                >Unsubscribe</button>
+                >
+                  Unsubscribe
+                </button>
               )}
             </div>
           ))}
           {hasMore && (
             <div className="px-5 py-4 text-center">
-              <Button onClick={loadMore} variant="secondary" disabled={loadingMore}>
-                {loadingMore ? 'Loading…' : `Load ${SUBSCRIBERS_PAGE_SIZE} more`}
-              </Button>
+              {" "}
+              <Button
+                onClick={loadMore}
+                variant="secondary"
+                disabled={loadingMore}
+              >
+                {loadingMore
+                  ? "Loading…"
+                  : `Load ${SUBSCRIBERS_PAGE_SIZE} more`}
+              </Button>{" "}
             </div>
           )}
           {!hasMore && subs.length > SUBSCRIBERS_PAGE_SIZE && (
             <div className="px-5 py-4 text-center text-11 text-ink-tertiary">
-              Showing all {subs.length} subscriber{subs.length === 1 ? '' : 's'} in this filter.
+              Showing all {subs.length} subscriber{subs.length === 1 ? "" : "s"}{" "}
+              in this filter.
             </div>
           )}
         </div>

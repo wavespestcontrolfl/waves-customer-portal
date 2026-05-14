@@ -1,9 +1,9 @@
-@import '@fontsource/inter/400.css';
-@import '@fontsource/inter/500.css';
-@import './styles/design-tokens.css';
-@import './styles/buttons.css';
-@import './styles/tokens.css';
-@import './styles/theme-square.css';
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "./styles/design-tokens.css";
+@import "./styles/buttons.css";
+@import "./styles/tokens.css";
+@import "./styles/theme-square.css";
 
 @tailwind base;
 @tailwind components;
@@ -11,11 +11,18 @@
 
 /* preflight is disabled, so border-width utilities have no effect without
    an explicit border-style. Force solid on hairline so it actually renders. */
-.border-hairline { border-style: solid; }
+.border-hairline {
+  border-style: solid;
+}
 
 /* Hide scrollbar on HorizontalScroll component */
-.horizontal-scroll::-webkit-scrollbar { display: none; }
-.horizontal-scroll > * { flex-shrink: 0; white-space: nowrap; }
+.horizontal-scroll::-webkit-scrollbar {
+  display: none;
+}
+.horizontal-scroll > * {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
 
 /* Mobile horizontally-scrollable tab pill — applied to admin-page tab bars
    that otherwise wrap to multiple rows when there are 5+ tabs. Mirrors the
@@ -27,7 +34,9 @@
     justify-content: flex-start !important;
     scrollbar-width: none;
   }
-  .tab-pill-scroll::-webkit-scrollbar { display: none; }
+  .tab-pill-scroll::-webkit-scrollbar {
+    display: none;
+  }
   .tab-pill-scroll-inner {
     flex-wrap: nowrap !important;
   }
@@ -48,38 +57,39 @@
    <button>, .btn, and anything with role=button so action chrome keeps its
    tonal hierarchy. Scoped to .dashboard-blackout (root of DashboardPageV2);
    other admin pages keep the default zinc ramp. */
-.dashboard-blackout :where(
-  .text-ink-secondary,
-  .text-ink-tertiary,
-  .text-ink-disabled,
-  .text-zinc-400,
-  .text-zinc-500,
-  .text-zinc-600,
-  .text-zinc-700,
-  .text-stone-400,
-  .text-stone-500,
-  .text-stone-600,
-  .text-stone-700,
-  .text-slate-400,
-  .text-slate-500,
-  .text-slate-600,
-  .text-slate-700
-):not(button):not(.btn):not([role="button"]):not(button *):not(.btn *):not([role="button"] *) {
+.dashboard-blackout
+  :where(
+    .text-ink-secondary,
+    .text-ink-tertiary,
+    .text-ink-disabled,
+    .text-zinc-400,
+    .text-zinc-500,
+    .text-zinc-600,
+    .text-zinc-700,
+    .text-stone-400,
+    .text-stone-500,
+    .text-stone-600,
+    .text-stone-700,
+    .text-slate-400,
+    .text-slate-500,
+    .text-slate-600,
+    .text-slate-700
+  ):not(button):not(.btn):not([role="button"]):not(button *):not(.btn *):not(
+    [role="button"] *
+  ) {
   color: #000 !important;
 }
 
-/* /admin/* — Roboto everywhere except <h1>. Scoped to .admin-shell-v2 (the
+/* /admin/* — Roboto everywhere. Scoped to .admin-shell-v2 (the
    AdminLayoutV2 root) so the customer portal and tech portal keep their
    existing brand fonts (Luckiest Guy / Baloo 2 / Inter / Montserrat).
-   <h1> is excluded so the dashboard greeting keeps its Anton / Luckiest
-   Guy display font. The mono override below handles the JetBrains-Mono
-   number/code path (Tailwind .font-mono, <code>, <pre>) so numeric
-   columns don't lose their tabular monospace styling.
+   The mono override below keeps numbers/code on the
+   same Roboto family while preserving tabular numeric spacing.
    !important is required because every nav link and many inline-styled
    elements set their own font-family via the style attribute, which
    beats class-based rules in the cascade. */
-.admin-shell-v2 *:not(h1):not(h1 *) {
-  font-family: 'Roboto', system-ui, sans-serif !important;
+.admin-shell-v2 * {
+  font-family: "Roboto", system-ui, sans-serif !important;
 }
 .admin-shell-v2 [class*="font-mono"],
 .admin-shell-v2 [class*="font-mono"] *,
@@ -87,7 +97,7 @@
 .admin-shell-v2 code *,
 .admin-shell-v2 pre,
 .admin-shell-v2 pre * {
-  font-family: 'JetBrains Mono', ui-monospace, monospace !important;
+  font-family: "Roboto", system-ui, sans-serif !important;
 }
 
 /* Global focus-visible ring for interactive elements. The .btn system in
@@ -96,7 +106,7 @@
    see where they are. Intentionally light — a branded 2px ring with a
    2px offset so it stands clear without reflowing layout. */
 :where(button, a, [role="button"]):focus-visible {
-  outline: 2px solid #009CDE;
+  outline: 2px solid #009cde;
   outline-offset: 2px;
   border-radius: 4px;
 }

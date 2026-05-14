@@ -1,6 +1,8 @@
-import { useEffect, useState, useCallback } from 'react';
-import { adminFetch } from '../../lib/adminFetch';
-import CreateProjectModal from '../../components/tech/CreateProjectModal';
+import { useEffect, useState, useCallback } from "react";
+import { ClipboardList, Plus } from "lucide-react";
+import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import { adminFetch } from "../../lib/adminFetch";
+import CreateProjectModal from "../../components/tech/CreateProjectModal";
 
 /**
  * Projects — post-service inspection / documentation reports.
@@ -11,96 +13,115 @@ import CreateProjectModal from '../../components/tech/CreateProjectModal';
  */
 
 const D = {
-  bg: '#F4F4F5', card: '#FFFFFF', border: '#E4E4E7',
-  heading: '#09090B', text: '#27272A', muted: '#71717A',
-  accent: '#18181B', accentHover: '#27272A',
-  success: '#15803D', amber: '#A16207', red: '#991B1B',
-  inputBorder: '#D4D4D8', pill: '#F4F4F5',
+  bg: "#F4F4F5",
+  card: "#FFFFFF",
+  border: "#E4E4E7",
+  heading: "#09090B",
+  text: "#27272A",
+  muted: "#71717A",
+  accent: "#18181B",
+  accentHover: "#27272A",
+  success: "#15803D",
+  amber: "#A16207",
+  red: "#991B1B",
+  inputBorder: "#D4D4D8",
+  pill: "#F4F4F5",
 };
 
 const MONO = "'JetBrains Mono', monospace";
 
 const STATUS_STYLES = {
-  draft: { bg: '#FEF3C7', fg: '#92400E', label: 'Draft' },
-  sent: { bg: '#DCFCE7', fg: '#166534', label: 'Sent' },
-  closed: { bg: '#E4E4E7', fg: '#52525B', label: 'Closed' },
+  draft: { bg: "#FEF3C7", fg: "#92400E", label: "Draft" },
+  sent: { bg: "#DCFCE7", fg: "#166534", label: "Sent" },
+  closed: { bg: "#E4E4E7", fg: "#52525B", label: "Closed" },
 };
 
 const TYPE_LABELS = {
-  wdo_inspection: 'WDO',
-  termite_inspection: 'Termite',
-  pest_inspection: 'Pest',
-  flea: 'Flea',
-  rodent_exclusion: 'Rodent',
-  bed_bug: 'Bed Bug',
+  wdo_inspection: "WDO",
+  termite_inspection: "Termite",
+  pest_inspection: "Pest",
+  flea: "Flea",
+  rodent_exclusion: "Rodent",
+  bed_bug: "Bed Bug",
 };
-const WDO_TYPE = 'wdo_inspection';
+const WDO_TYPE = "wdo_inspection";
 const GENERAL_TYPE_LABELS = Object.fromEntries(
-  Object.entries(TYPE_LABELS).filter(([key]) => key !== WDO_TYPE)
+  Object.entries(TYPE_LABELS).filter(([key]) => key !== WDO_TYPE),
 );
 const GENERAL_PROJECT_TYPES = Object.keys(GENERAL_TYPE_LABELS);
 const TECHNICAL_SNIPPETS = [
   {
-    label: 'Moisture risk',
-    text: 'Moisture should be corrected because elevated moisture can support wood decay and create conditions that are more favorable for wood-destroying organisms.',
+    label: "Moisture risk",
+    text: "Moisture should be corrected because elevated moisture can support wood decay and create conditions that are more favorable for wood-destroying organisms.",
   },
   {
-    label: 'Wood rot',
-    text: 'Visible wood rot should be repaired after the moisture source is corrected so damaged material does not continue to deteriorate.',
+    label: "Wood rot",
+    text: "Visible wood rot should be repaired after the moisture source is corrected so damaged material does not continue to deteriorate.",
   },
   {
-    label: 'Termite treatment',
-    text: 'A targeted termite treatment is recommended in the affected areas to address documented activity or conducive conditions while limiting unnecessary application elsewhere.',
+    label: "Termite treatment",
+    text: "A targeted termite treatment is recommended in the affected areas to address documented activity or conducive conditions while limiting unnecessary application elsewhere.",
   },
   {
-    label: 'Rodent entry',
-    text: 'Entry points should be sealed with durable materials after active trapping pressure is reduced, so rodents are not locked inside and future access is limited.',
+    label: "Rodent entry",
+    text: "Entry points should be sealed with durable materials after active trapping pressure is reduced, so rodents are not locked inside and future access is limited.",
   },
   {
-    label: 'Sanitation',
-    text: 'Reducing food, water, and harborage sources will improve treatment performance and help prevent pest pressure from rebuilding between services.',
+    label: "Sanitation",
+    text: "Reducing food, water, and harborage sources will improve treatment performance and help prevent pest pressure from rebuilding between services.",
   },
 ];
 
 function getAdminRole() {
-  try { return JSON.parse(localStorage.getItem('waves_admin_user') || '{}')?.role || null; }
-  catch { return null; }
+  try {
+    return (
+      JSON.parse(localStorage.getItem("waves_admin_user") || "{}")?.role || null
+    );
+  } catch {
+    return null;
+  }
 }
 
 function mergeProjectsUnique(...lists) {
   const byId = new Map();
-  lists.flat().forEach(p => {
+  lists.flat().forEach((p) => {
     if (p?.id && !byId.has(p.id)) byId.set(p.id, p);
   });
   return Array.from(byId.values());
 }
 
 function fmtDate(d) {
-  if (!d) return '—';
+  if (!d) return "—";
   const raw = String(d);
   const dateOnly = dateOnlyValue(raw);
   const date = dateOnly ? new Date(`${dateOnly}T12:00:00`) : new Date(raw);
-  if (Number.isNaN(date.getTime())) return '—';
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "America/New_York",
+  });
 }
 
 function dateInputValue(d) {
-  if (!d) return '';
+  if (!d) return "";
   const raw = String(d);
   const dateOnly = dateOnlyValue(raw);
   if (dateOnly) return dateOnly;
   const date = new Date(raw);
-  return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 10);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10);
 }
 
 function dateOnlyValue(raw) {
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
-  if (/^\d{4}-\d{2}-\d{2}T00:00:00(?:\.000)?Z$/.test(raw)) return raw.slice(0, 10);
-  return '';
+  if (/^\d{4}-\d{2}-\d{2}T00:00:00(?:\.000)?Z$/.test(raw))
+    return raw.slice(0, 10);
+  return "";
 }
 
 function hasMeaningfulValue(value) {
-  return value !== null && value !== undefined && String(value).trim() !== '';
+  return value !== null && value !== undefined && String(value).trim() !== "";
 }
 
 async function readJsonResponse(response, fallbackMessage) {
@@ -111,57 +132,109 @@ async function readJsonResponse(response, fallbackMessage) {
     payload = {};
   }
   if (!response.ok) {
-    throw new Error(payload?.error || fallbackMessage || `Request failed (${response.status})`);
+    throw new Error(
+      payload?.error ||
+        fallbackMessage ||
+        `Request failed (${response.status})`,
+    );
   }
   return payload;
 }
 
 function deliverySummary(channels = {}) {
   const entries = Object.entries(channels);
-  if (!entries.length) return '';
+  if (!entries.length) return "";
   return entries
-    .map(([name, result]) => `${name.toUpperCase()}: ${result?.ok ? 'sent' : result?.error || 'failed'}`)
-    .join(' · ');
+    .map(
+      ([name, result]) =>
+        `${name.toUpperCase()}: ${result?.ok ? "sent" : result?.error || "failed"}`,
+    )
+    .join(" · ");
 }
 
-function evaluateProjectReadiness({ project, typeCfg, findings, recommendations, projectDate, photos }) {
+function evaluateProjectReadiness({
+  project,
+  typeCfg,
+  findings,
+  recommendations,
+  projectDate,
+  photos,
+}) {
   const required = [
-    { label: 'Inspection date', ok: hasMeaningfulValue(projectDate) },
-    { label: 'Customer', ok: hasMeaningfulValue(project?.customer_name) },
-    { label: 'Report title or type', ok: hasMeaningfulValue(project?.title) || hasMeaningfulValue(typeCfg?.label) },
-    { label: 'Findings captured', ok: Object.values(findings || {}).some(hasMeaningfulValue) },
-    { label: 'Recommendation / notes', ok: hasMeaningfulValue(recommendations) },
-    { label: 'Photos attached', ok: (photos || []).length > 0 },
+    { label: "Inspection date", ok: hasMeaningfulValue(projectDate) },
+    { label: "Customer", ok: hasMeaningfulValue(project?.customer_name) },
+    {
+      label: "Report title or type",
+      ok:
+        hasMeaningfulValue(project?.title) ||
+        hasMeaningfulValue(typeCfg?.label),
+    },
+    {
+      label: "Findings captured",
+      ok: Object.values(findings || {}).some(hasMeaningfulValue),
+    },
+    {
+      label: "Recommendation / notes",
+      ok: hasMeaningfulValue(recommendations),
+    },
+    { label: "Photos attached", ok: (photos || []).length > 0 },
   ];
   if (project?.project_type === WDO_TYPE) {
     required.push(
-      { label: 'Property inspected', ok: hasMeaningfulValue(findings?.property_address) },
-      { label: 'FDACS finding selected', ok: hasMeaningfulValue(findings?.wdo_finding) },
-      { label: 'Visible/access scope', ok: hasMeaningfulValue(findings?.inspection_scope) },
+      {
+        label: "Property inspected",
+        ok: hasMeaningfulValue(findings?.property_address),
+      },
+      {
+        label: "FDACS finding selected",
+        ok: hasMeaningfulValue(findings?.wdo_finding),
+      },
+      {
+        label: "Visible/access scope",
+        ok: hasMeaningfulValue(findings?.inspection_scope),
+      },
     );
   }
 
-  const text = [
-    recommendations,
-    ...Object.values(findings || {}),
-  ].filter(Boolean).join(' ').toLowerCase();
+  const text = [recommendations, ...Object.values(findings || {})]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
   const quality = [];
   if (recommendations && recommendations.length < 80) {
-    quality.push('Recommendation is short; add what was found, why it matters, and the next step.');
+    quality.push(
+      "Recommendation is short; add what was found, why it matters, and the next step.",
+    );
   }
-  if (/\b(termite|roach|ant|rodent|mouse|rat|bed bug|wdo)\b/.test(text) && !/\b(kitchen|bath|attic|garage|eave|exterior|interior|bedroom|crawlspace|foundation|wall|ceiling|floor|window|door)\b/.test(text)) {
-    quality.push('Pest or WDO activity is mentioned without a clear location.');
+  if (
+    /\b(termite|roach|ant|rodent|mouse|rat|bed bug|wdo)\b/.test(text) &&
+    !/\b(kitchen|bath|attic|garage|eave|exterior|interior|bedroom|crawlspace|foundation|wall|ceiling|floor|window|door)\b/.test(
+      text,
+    )
+  ) {
+    quality.push("Pest or WDO activity is mentioned without a clear location.");
   }
-  if (/\b(treat|treatment|apply|application|boracare|bora care|bait|exclusion|follow[-\s]?up)\b/.test(text) && !recommendations) {
-    quality.push('Treatment language appears in findings but the recommendation field is empty.');
+  if (
+    /\b(treat|treatment|apply|application|boracare|bora care|bait|exclusion|follow[-\s]?up)\b/.test(
+      text,
+    ) &&
+    !recommendations
+  ) {
+    quality.push(
+      "Treatment language appears in findings but the recommendation field is empty.",
+    );
   }
-  if (/\b(eliminate|eradicate|guarantee|100%|pest-free|impenetrable)\b/.test(text)) {
-    quality.push('Avoid overpromising language such as guarantee, eradicate, eliminate, or pest-free.');
+  if (
+    /\b(eliminate|eradicate|guarantee|100%|pest-free|impenetrable)\b/.test(text)
+  ) {
+    quality.push(
+      "Avoid overpromising language such as guarantee, eradicate, eliminate, or pest-free.",
+    );
   }
 
   return {
     required,
-    missing: required.filter(item => !item.ok),
+    missing: required.filter((item) => !item.ok),
     quality,
   };
 }
@@ -169,119 +242,155 @@ function evaluateProjectReadiness({ project, typeCfg, findings, recommendations,
 export default function ProjectsPage() {
   const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [filterStatus, setFilterStatus] = useState('');
-  const [filterType, setFilterType] = useState('');
+  const [filterStatus, setFilterStatus] = useState("");
+  const [filterType, setFilterType] = useState("");
   const [selectedId, setSelectedId] = useState(null);
   const [typesRegistry, setTypesRegistry] = useState(null);
   const [createMode, setCreateMode] = useState(null);
-  const [error, setError] = useState('');
-  const isAdmin = getAdminRole() === 'admin';
+  const [error, setError] = useState("");
+  const isAdmin = getAdminRole() === "admin";
 
   const loadProjects = useCallback(async () => {
     setLoading(true);
-    setError('');
+    setError("");
     const qs = new URLSearchParams();
-    qs.set('limit', '500');
-    if (filterStatus) qs.set('status', filterStatus);
-    if (filterType) qs.set('project_type', filterType);
+    qs.set("limit", "500");
+    if (filterStatus) qs.set("status", filterStatus);
+    if (filterType) qs.set("project_type", filterType);
     try {
       const requests = [adminFetch(`/admin/projects?${qs.toString()}`)];
       if (!filterType) {
         const wdoQs = new URLSearchParams(qs);
-        wdoQs.set('project_type', WDO_TYPE);
+        wdoQs.set("project_type", WDO_TYPE);
         requests.push(adminFetch(`/admin/projects?${wdoQs.toString()}`));
       }
       const responses = await Promise.all(requests);
-      const payloads = await Promise.all(responses.map(res => readJsonResponse(res, 'Could not load projects')));
-      setProjects(mergeProjectsUnique(payloads.flatMap(data => data.projects || [])));
+      const payloads = await Promise.all(
+        responses.map((res) =>
+          readJsonResponse(res, "Could not load projects"),
+        ),
+      );
+      setProjects(
+        mergeProjectsUnique(payloads.flatMap((data) => data.projects || [])),
+      );
     } catch (e) {
-      setError(e.message || 'Could not load projects');
+      setError(e.message || "Could not load projects");
       setProjects([]);
+    } finally {
+      setLoading(false);
     }
-    finally { setLoading(false); }
   }, [filterStatus, filterType]);
 
-  useEffect(() => { loadProjects(); }, [loadProjects]);
+  useEffect(() => {
+    loadProjects();
+  }, [loadProjects]);
 
   useEffect(() => {
-    adminFetch('/admin/projects/types')
-      .then(r => readJsonResponse(r, 'Could not load project types'))
-      .then(d => setTypesRegistry(d.types))
-      .catch(e => setError(e.message || 'Could not load project types'));
+    adminFetch("/admin/projects/types")
+      .then((r) => readJsonResponse(r, "Could not load project types"))
+      .then((d) => setTypesRegistry(d.types))
+      .catch((e) => setError(e.message || "Could not load project types"));
   }, []);
 
-  const regularProjects = projects.filter(p => p.project_type !== WDO_TYPE && (!filterType || p.project_type === filterType));
-  const wdoProjects = projects.filter(p => p.project_type === WDO_TYPE);
+  const regularProjects = projects.filter(
+    (p) =>
+      p.project_type !== WDO_TYPE &&
+      (!filterType || p.project_type === filterType),
+  );
+  const wdoProjects = projects.filter((p) => p.project_type === WDO_TYPE);
   const showRegularProjects = filterType !== WDO_TYPE;
   const showWdoProjects = !filterType || filterType === WDO_TYPE;
-  const selected = projects.find(p => p.id === selectedId);
+  const selected = projects.find((p) => p.id === selectedId);
 
   return (
-    <div style={{ padding: '16px 4px', color: D.text, fontFamily: "'DM Sans', sans-serif" }}>
-      <header style={{
-        marginBottom: 16,
-        display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12,
-      }}>
-        <div>
-          <h1 style={{ fontSize: 28, fontWeight: 400, letterSpacing: '-0.015em', color: D.heading, margin: 0 }}>
-            <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Projects</span>
-            <span className="hidden md:inline">Projects</span>
-          </h1>
-        </div>
-        <button
-          type="button"
-          onClick={() => setCreateMode('general')}
-          style={{
-            padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
-            background: D.accent, color: '#fff', border: 'none', cursor: 'pointer',
-            whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
-            fontFamily: "'DM Sans', sans-serif",
-          }}
-        >+ New Project</button>
-      </header>
-
+    <div
+      style={{
+        maxWidth: 1300,
+        margin: "0 auto",
+        color: D.text,
+        fontFamily: "'Roboto', Arial, sans-serif",
+      }}
+    >
+      {" "}
+      <AdminCommandHeader
+        title="Projects"
+        icon={ClipboardList}
+        action={{
+          label: "New Project",
+          icon: Plus,
+          onClick: () => setCreateMode("general"),
+        }}
+      />
       {/* Filters */}
-      <div style={{
-        display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 12,
-        background: D.card, padding: '10px 12px', borderRadius: 10, border: `1px solid ${D.border}`,
-      }}>
-        <FilterPill label="All statuses" active={!filterStatus} onClick={() => setFilterStatus('')} />
-        {['draft', 'sent', 'closed'].map(s => (
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: 8,
+          marginBottom: 12,
+          background: D.card,
+          padding: "10px 12px",
+          borderRadius: 10,
+          border: `1px solid ${D.border}`,
+        }}
+      >
+        {" "}
+        <FilterPill
+          label="All statuses"
+          active={!filterStatus}
+          onClick={() => setFilterStatus("")}
+        />
+        {["draft", "sent", "closed"].map((s) => (
           <FilterPill
             key={s}
             label={STATUS_STYLES[s].label}
             active={filterStatus === s}
-            onClick={() => setFilterStatus(filterStatus === s ? '' : s)}
+            onClick={() => setFilterStatus(filterStatus === s ? "" : s)}
           />
         ))}
-        <div style={{ width: 12 }} />
-        <FilterPill label="All types" active={!filterType} onClick={() => setFilterType('')} />
+        <div style={{ width: 12 }} />{" "}
+        <FilterPill
+          label="All types"
+          active={!filterType}
+          onClick={() => setFilterType("")}
+        />
         {Object.entries(TYPE_LABELS).map(([key, label]) => (
           <FilterPill
             key={key}
             label={label}
             active={filterType === key}
-            onClick={() => setFilterType(filterType === key ? '' : key)}
+            onClick={() => setFilterType(filterType === key ? "" : key)}
           />
         ))}
       </div>
       {error && <Alert tone="error">{error}</Alert>}
-
-      <div style={{ display: 'grid', gridTemplateColumns: selected ? '1fr 1.4fr' : '1fr', gap: 16 }}>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: selected ? "1fr 1.4fr" : "1fr",
+          gap: 16,
+        }}
+      >
         {/* List */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {showRegularProjects && (
-            loading ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {showRegularProjects &&
+            (loading ? (
               <div style={{ padding: 24, color: D.muted }}>Loading…</div>
             ) : regularProjects.length === 0 ? (
-              <div style={{
-                padding: 24, background: D.card, borderRadius: 10,
-                border: `1px dashed ${D.border}`, color: D.muted, textAlign: 'center',
-              }}>
+              <div
+                style={{
+                  padding: 24,
+                  background: D.card,
+                  borderRadius: 10,
+                  border: `1px dashed ${D.border}`,
+                  color: D.muted,
+                  textAlign: "center",
+                }}
+              >
                 No projects match these filters.
               </div>
             ) : (
-              regularProjects.map(p => (
+              regularProjects.map((p) => (
                 <ProjectRow
                   key={p.id}
                   project={p}
@@ -289,19 +398,17 @@ export default function ProjectsPage() {
                   onSelect={() => setSelectedId(p.id)}
                 />
               ))
-            )
-          )}
+            ))}
 
           {showWdoProjects && (
             <WdoReportsSection
               projects={wdoProjects}
               selectedId={selectedId}
               onSelect={setSelectedId}
-              onCreate={() => setCreateMode('wdo')}
+              onCreate={() => setCreateMode("wdo")}
             />
           )}
         </div>
-
         {/* Detail */}
         {selected && (
           <ProjectDetail
@@ -313,13 +420,14 @@ export default function ProjectsPage() {
           />
         )}
       </div>
-
       {createMode && (
         <CreateProjectModal
           theme="light"
           allowAiDraft
-          defaultProjectType={createMode === 'wdo' ? WDO_TYPE : ''}
-          allowedProjectTypes={createMode === 'wdo' ? [WDO_TYPE] : GENERAL_PROJECT_TYPES}
+          defaultProjectType={createMode === "wdo" ? WDO_TYPE : ""}
+          allowedProjectTypes={
+            createMode === "wdo" ? [WDO_TYPE] : GENERAL_PROJECT_TYPES
+          }
           onClose={() => setCreateMode(null)}
           onCreated={(p) => {
             setCreateMode(null);
@@ -333,66 +441,95 @@ export default function ProjectsPage() {
 }
 
 function WdoReportsSection({ projects, selectedId, onSelect, onCreate }) {
-  const urgentCount = projects.filter(p => {
-    if (p.status === 'sent' || p.status === 'closed') return false;
+  const urgentCount = projects.filter((p) => {
+    if (p.status === "sent" || p.status === "closed") return false;
     const created = p.created_at ? new Date(p.created_at).getTime() : 0;
     return created && Date.now() - created > 24 * 60 * 60 * 1000;
   }).length;
 
   return (
-    <section style={{
-      marginTop: 18,
-      paddingTop: 16,
-      borderTop: `1px solid ${D.border}`,
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 8,
-    }}>
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
+    <section
+      style={{
+        marginTop: 18,
+        paddingTop: 16,
+        borderTop: `1px solid ${D.border}`,
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+      }}
+    >
+      {" "}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          justifyContent: "space-between",
+          gap: 10,
+        }}
+      >
+        {" "}
         <div>
-          <div style={{ fontSize: 11, fontWeight: 800, color: D.muted, textTransform: 'uppercase', letterSpacing: 1 }}>
+          {" "}
+          <div
+            style={{
+              fontSize: 11,
+              fontWeight: 800,
+              color: D.muted,
+              textTransform: "uppercase",
+              letterSpacing: 1,
+            }}
+          >
             WDO Inspection Reports
-          </div>
+          </div>{" "}
           <div style={{ fontSize: 13, color: D.text, marginTop: 3 }}>
-            Real-estate reports, realtor sharing, and closing-sensitive documentation.
+            Real-estate reports, realtor sharing, and closing-sensitive
+            documentation.
           </div>
           {urgentCount > 0 && (
-            <div style={{ fontSize: 11, color: D.amber, marginTop: 4, fontWeight: 700 }}>
-              {urgentCount} draft{urgentCount === 1 ? '' : 's'} older than 24h
+            <div
+              style={{
+                fontSize: 11,
+                color: D.amber,
+                marginTop: 4,
+                fontWeight: 700,
+              }}
+            >
+              {urgentCount} draft{urgentCount === 1 ? "" : "s"} older than 24h
             </div>
           )}
-        </div>
+        </div>{" "}
         <button
           type="button"
           onClick={onCreate}
           style={{
             ...btnSecondary,
-            padding: '7px 10px',
+            padding: "7px 10px",
             fontSize: 11,
             fontWeight: 800,
-            whiteSpace: 'nowrap',
-            textTransform: 'uppercase',
-            letterSpacing: '0.04em',
+            whiteSpace: "nowrap",
+            textTransform: "uppercase",
+            letterSpacing: "0.04em",
           }}
         >
           + New WDO
-        </button>
+        </button>{" "}
       </div>
-
       {projects.length === 0 ? (
-        <div style={{
-          padding: 18,
-          background: D.card,
-          borderRadius: 10,
-          border: `1px dashed ${D.border}`,
-          color: D.muted,
-          fontSize: 12,
-          textAlign: 'center',
-        }}>
+        <div
+          style={{
+            padding: 18,
+            background: D.card,
+            borderRadius: 10,
+            border: `1px dashed ${D.border}`,
+            color: D.muted,
+            fontSize: 12,
+            textAlign: "center",
+          }}
+        >
           No WDO reports match these filters.
         </div>
       ) : (
-        projects.map(p => (
+        projects.map((p) => (
           <ProjectRow
             key={p.id}
             project={p}
@@ -412,13 +549,18 @@ function FilterPill({ label, active, onClick }) {
       type="button"
       onClick={onClick}
       style={{
-        padding: '5px 12px', borderRadius: 999, fontSize: 12, fontWeight: 600,
+        padding: "5px 12px",
+        borderRadius: 999,
+        fontSize: 12,
+        fontWeight: 600,
         background: active ? D.accent : D.pill,
-        color: active ? '#fff' : D.text,
+        color: active ? "#fff" : D.text,
         border: `1px solid ${active ? D.accent : D.inputBorder}`,
-        cursor: 'pointer',
+        cursor: "pointer",
       }}
-    >{label}</button>
+    >
+      {label}
+    </button>
   );
 }
 
@@ -429,119 +571,205 @@ function ProjectRow({ project, active, onSelect, compactType }) {
       type="button"
       onClick={onSelect}
       style={{
-        textAlign: 'left', width: '100%', cursor: 'pointer',
-        background: D.card, border: `1px solid ${active ? D.accent : D.border}`,
-        borderRadius: 10, padding: '12px 14px',
-        display: 'flex', gap: 12, alignItems: 'flex-start',
+        textAlign: "left",
+        width: "100%",
+        cursor: "pointer",
+        background: D.card,
+        border: `1px solid ${active ? D.accent : D.border}`,
+        borderRadius: 10,
+        padding: "12px 14px",
+        display: "flex",
+        gap: 12,
+        alignItems: "flex-start",
       }}
     >
-      <div style={{
-        flexShrink: 0, width: 48, height: 48, borderRadius: 8,
-        background: D.pill, display: 'flex', alignItems: 'center', justifyContent: 'center',
-        fontFamily: MONO, fontSize: 11, fontWeight: 700, color: D.heading,
-      }}>
-        {compactType || TYPE_LABELS[project.project_type] || 'Proj'}
-      </div>
+      {" "}
+      <div
+        style={{
+          flexShrink: 0,
+          width: 48,
+          height: 48,
+          borderRadius: 8,
+          background: D.pill,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontFamily: MONO,
+          fontSize: 11,
+          fontWeight: 700,
+          color: D.heading,
+        }}
+      >
+        {compactType || TYPE_LABELS[project.project_type] || "Proj"}
+      </div>{" "}
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            {project.customer_name || 'Customer'}
-          </div>
-          <span style={{
-            fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999,
-            background: status.bg, color: status.fg, textTransform: 'uppercase', letterSpacing: 0.5,
-            whiteSpace: 'nowrap',
-          }}>{status.label}</span>
-        </div>
+        {" "}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 8,
+          }}
+        >
+          {" "}
+          <div
+            style={{
+              fontSize: 14,
+              fontWeight: 700,
+              color: D.heading,
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {project.customer_name || "Customer"}
+          </div>{" "}
+          <span
+            style={{
+              fontSize: 10,
+              fontWeight: 700,
+              padding: "2px 8px",
+              borderRadius: 999,
+              background: status.bg,
+              color: status.fg,
+              textTransform: "uppercase",
+              letterSpacing: 0.5,
+              whiteSpace: "nowrap",
+            }}
+          >
+            {status.label}
+          </span>{" "}
+        </div>{" "}
         <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
-          {project.title || TYPE_LABELS[project.project_type] || project.project_type}
-        </div>
-        <div style={{ display: 'flex', gap: 10, marginTop: 6, fontSize: 11, color: D.muted }}>
-          <span>{fmtDate(project.project_date || project.created_at)}</span>
-          <span>·</span>
-          <span>{project.tech_name || 'Tech'}</span>
-          {project.photo_count > 0 && (<><span>·</span><span>{project.photo_count} 📸</span></>)}
-        </div>
-      </div>
+          {project.title ||
+            TYPE_LABELS[project.project_type] ||
+            project.project_type}
+        </div>{" "}
+        <div
+          style={{
+            display: "flex",
+            gap: 10,
+            marginTop: 6,
+            fontSize: 11,
+            color: D.muted,
+          }}
+        >
+          {" "}
+          <span>
+            {fmtDate(project.project_date || project.created_at)}
+          </span>{" "}
+          <span>·</span> <span>{project.tech_name || "Tech"}</span>
+          {project.photo_count > 0 && (
+            <>
+              <span>·</span>
+              <span>{project.photo_count} </span>
+            </>
+          )}
+        </div>{" "}
+      </div>{" "}
     </button>
   );
 }
 
-function ProjectDetail({ projectId, typesRegistry, onClose, onChanged, canAdminActions = false }) {
+function ProjectDetail({
+  projectId,
+  typesRegistry,
+  onClose,
+  onChanged,
+  canAdminActions = false,
+}) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [editFindings, setEditFindings] = useState({});
-  const [editRecs, setEditRecs] = useState('');
-  const [editTitle, setEditTitle] = useState('');
-  const [editProjectDate, setEditProjectDate] = useState('');
+  const [editRecs, setEditRecs] = useState("");
+  const [editTitle, setEditTitle] = useState("");
+  const [editProjectDate, setEditProjectDate] = useState("");
   const [dirty, setDirty] = useState(false);
-  const [sentLink, setSentLink] = useState('');
+  const [sentLink, setSentLink] = useState("");
   const [aiWriting, setAiWriting] = useState(false);
-  const [notice, setNotice] = useState('');
-  const [error, setError] = useState('');
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
   const [delivery, setDelivery] = useState(null);
   const [aiUseComms, setAiUseComms] = useState(true);
   const [aiUsePhotos, setAiUsePhotos] = useState(true);
 
   async function load() {
     setLoading(true);
-    setError('');
+    setError("");
     try {
       const [projectRes, activityRes] = await Promise.all([
         adminFetch(`/admin/projects/${projectId}`),
         adminFetch(`/admin/projects/${projectId}/activity`),
       ]);
-      const d = await readJsonResponse(projectRes, 'Could not load project');
-      const activityData = await readJsonResponse(activityRes, 'Could not load project history');
+      const d = await readJsonResponse(projectRes, "Could not load project");
+      const activityData = await readJsonResponse(
+        activityRes,
+        "Could not load project history",
+      );
       d.activity = activityData.activity || [];
       setData(d);
       setEditFindings(d.project.findings || {});
-      setEditRecs(d.project.recommendations || '');
-      setEditTitle(d.project.title || '');
-      setEditProjectDate(dateInputValue(d.project.project_date || d.project.created_at));
+      setEditRecs(d.project.recommendations || "");
+      setEditTitle(d.project.title || "");
+      setEditProjectDate(
+        dateInputValue(d.project.project_date || d.project.created_at),
+      );
       setDirty(false);
       if (d.project.report_token) {
-        setSentLink(`${window.location.origin}${d.project.report_url || `/report/project/${d.project.report_token}`}`);
+        setSentLink(
+          `${window.location.origin}${d.project.report_url || `/report/project/${d.project.report_token}`}`,
+        );
       } else {
-        setSentLink('');
+        setSentLink("");
       }
       setDelivery(d.project.delivery_channels || null);
     } catch (e) {
-      setError(e.message || 'Could not load project');
+      setError(e.message || "Could not load project");
       setData(null);
+    } finally {
+      setLoading(false);
     }
-    finally { setLoading(false); }
   }
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [projectId]);
+  useEffect(() => {
+    load(); /* eslint-disable-next-line */
+  }, [projectId]);
 
   const project = data?.project;
-  const typeCfg = project && typesRegistry ? typesRegistry[project.project_type] : null;
+  const typeCfg =
+    project && typesRegistry ? typesRegistry[project.project_type] : null;
 
   async function saveEdits() {
     setSaving(true);
-    setError('');
-    setNotice('');
+    setError("");
+    setNotice("");
     try {
       const r = await adminFetch(`/admin/projects/${projectId}`, {
-        method: 'PUT',
-        body: { title: editTitle || null, project_date: editProjectDate || null, findings: editFindings, recommendations: editRecs || null },
+        method: "PUT",
+        body: {
+          title: editTitle || null,
+          project_date: editProjectDate || null,
+          findings: editFindings,
+          recommendations: editRecs || null,
+        },
       });
-      await readJsonResponse(r, 'Could not save project changes');
+      await readJsonResponse(r, "Could not save project changes");
       setDirty(false);
       await load();
       onChanged?.();
-      setNotice('Changes saved.');
+      setNotice("Changes saved.");
     } catch (e) {
-      setError(e.message || 'Could not save project changes');
+      setError(e.message || "Could not save project changes");
+    } finally {
+      setSaving(false);
     }
-    finally { setSaving(false); }
   }
 
   async function handleSend() {
     if (!canAdminActions) {
-      setError('Admin access required to send project reports.');
+      setError("Admin access required to send project reports.");
       return;
     }
     const readiness = evaluateProjectReadiness({
@@ -554,68 +782,99 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged, canAdminA
     });
     if (readiness.missing.length || readiness.quality.length) {
       const lines = [
-        ...readiness.missing.map(item => `Missing: ${item.label}`),
-        ...readiness.quality.map(item => `Review: ${item}`),
+        ...readiness.missing.map((item) => `Missing: ${item.label}`),
+        ...readiness.quality.map((item) => `Review: ${item}`),
       ];
-      if (!confirm(`This report has items to review before sending:\n\n${lines.join('\n')}\n\nSend anyway?`)) return;
+      if (
+        !confirm(
+          `This report has items to review before sending:\n\n${lines.join("\n")}\n\nSend anyway?`,
+        )
+      )
+        return;
     }
-    let overrideReason = '';
+    let overrideReason = "";
     if (readiness.missing.length) {
-      overrideReason = window.prompt('Enter the admin override reason for sending this incomplete report:')?.trim() || '';
+      overrideReason =
+        window
+          .prompt(
+            "Enter the admin override reason for sending this incomplete report:",
+          )
+          ?.trim() || "";
       if (!overrideReason) return;
     }
-    const actionLabel = project.status === 'sent' ? 'Resend report to customer?' : 'Send report to customer? This generates a public link and marks the project as Sent.';
+    const actionLabel =
+      project.status === "sent"
+        ? "Resend report to customer?"
+        : "Send report to customer? This generates a public link and marks the project as Sent.";
     if (!confirm(actionLabel)) return;
     setSaving(true);
-    setError('');
-    setNotice('');
+    setError("");
+    setNotice("");
     try {
       // Persist any dirty edits (including an AI-drafted Recommendations block)
       // before delivery runs — otherwise the customer sees the pre-edit version
       // at the public link.
       if (dirty) {
         const saveRes = await adminFetch(`/admin/projects/${projectId}`, {
-          method: 'PUT',
-          body: { title: editTitle || null, project_date: editProjectDate || null, findings: editFindings, recommendations: editRecs || null },
+          method: "PUT",
+          body: {
+            title: editTitle || null,
+            project_date: editProjectDate || null,
+            findings: editFindings,
+            recommendations: editRecs || null,
+          },
         });
-        await readJsonResponse(saveRes, 'Could not save project before sending');
+        await readJsonResponse(
+          saveRes,
+          "Could not save project before sending",
+        );
         setDirty(false);
       }
       const r = await adminFetch(`/admin/projects/${projectId}/send`, {
-        method: 'POST',
+        method: "POST",
         body: overrideReason ? { override_reason: overrideReason } : {},
       });
-      const d = await readJsonResponse(r, 'Could not send report');
+      const d = await readJsonResponse(r, "Could not send report");
       if (d.report_url) setSentLink(`${window.location.origin}${d.report_url}`);
       setDelivery(d.channels || null);
-      if (d.sent === false || d.delivery_status === 'failed') {
-        setError(`Delivery failed; project remains in review. ${deliverySummary(d.channels)}`.trim());
+      if (d.sent === false || d.delivery_status === "failed") {
+        setError(
+          `Delivery failed; project remains in review. ${deliverySummary(d.channels)}`.trim(),
+        );
       } else {
         setNotice(`Report delivered. ${deliverySummary(d.channels)}`.trim());
       }
       await load();
       onChanged?.();
     } catch (e) {
-      setError(e.message || 'Could not send report');
+      setError(e.message || "Could not send report");
+    } finally {
+      setSaving(false);
     }
-    finally { setSaving(false); }
   }
 
   async function handleAiWrite() {
     if (!canAdminActions) {
-      setError('Admin access required to draft project reports with AI.');
+      setError("Admin access required to draft project reports with AI.");
       return;
     }
     // Drafts into the Recommendations field. Replaces existing content so the
     // admin can tell what came from AI vs. what they kept by-hand; if the
     // admin liked prior text, Cmd-Z restores it before save.
-    if (editRecs && editRecs.trim() && !confirm('Replace the current Recommendations text with an AI-drafted version?\n\nThe tech\'s original notes will still be used as context for the AI.')) return;
+    if (
+      editRecs &&
+      editRecs.trim() &&
+      !confirm(
+        "Replace the current Recommendations text with an AI-drafted version?\n\nThe tech's original notes will still be used as context for the AI.",
+      )
+    )
+      return;
     setAiWriting(true);
-    setError('');
-    setNotice('');
+    setError("");
+    setNotice("");
     try {
       const r = await adminFetch(`/admin/projects/${projectId}/ai-write`, {
-        method: 'POST',
+        method: "POST",
         body: {
           findings: editFindings,
           recommendations: editRecs,
@@ -624,7 +883,7 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged, canAdminA
           include_photos: aiUsePhotos,
         },
       });
-      const d = await readJsonResponse(r, 'AI draft failed');
+      const d = await readJsonResponse(r, "AI draft failed");
       if (d.report) {
         const aiText = d.report.trim();
         setEditRecs(aiText);
@@ -633,17 +892,25 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged, canAdminA
         // are included in the same PUT.
         try {
           const saveRes = await adminFetch(`/admin/projects/${projectId}`, {
-            method: 'PUT',
-            body: { title: editTitle || null, project_date: editProjectDate || null, findings: editFindings, recommendations: aiText },
+            method: "PUT",
+            body: {
+              title: editTitle || null,
+              project_date: editProjectDate || null,
+              findings: editFindings,
+              recommendations: aiText,
+            },
           });
-          await readJsonResponse(saveRes, 'AI draft created but autosave failed');
+          await readJsonResponse(
+            saveRes,
+            "AI draft created but autosave failed",
+          );
           setDirty(false);
           await load();
-          setNotice('AI draft saved.');
+          setNotice("AI draft saved.");
         } catch {
           // Autosave failed — leave it marked dirty so manual Save still works.
           setDirty(true);
-          setNotice('AI draft created. Save changes to keep it.');
+          setNotice("AI draft created. Save changes to keep it.");
         }
       }
     } catch (e) {
@@ -655,75 +922,102 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged, canAdminA
 
   async function handleClose() {
     if (!canAdminActions) {
-      setError('Admin access required to close projects.');
+      setError("Admin access required to close projects.");
       return;
     }
-    if (!confirm('Close this project? It stays accessible but is filtered out of Sent view.')) return;
+    if (
+      !confirm(
+        "Close this project? It stays accessible but is filtered out of Sent view.",
+      )
+    )
+      return;
     setSaving(true);
-    setError('');
-    setNotice('');
+    setError("");
+    setNotice("");
     try {
-      const r = await adminFetch(`/admin/projects/${projectId}/close`, { method: 'POST' });
-      await readJsonResponse(r, 'Could not close project');
+      const r = await adminFetch(`/admin/projects/${projectId}/close`, {
+        method: "POST",
+      });
+      await readJsonResponse(r, "Could not close project");
       await load();
       onChanged?.();
-      setNotice('Project closed.');
+      setNotice("Project closed.");
     } catch (e) {
-      setError(e.message || 'Could not close project');
+      setError(e.message || "Could not close project");
+    } finally {
+      setSaving(false);
     }
-    finally { setSaving(false); }
   }
 
   async function handlePhotoDelete(photoId) {
-    if (!confirm('Remove this photo?')) return;
-    setError('');
-    setNotice('');
+    if (!confirm("Remove this photo?")) return;
+    setError("");
+    setNotice("");
     try {
-      const r = await adminFetch(`/admin/projects/${projectId}/photos/${photoId}`, { method: 'DELETE' });
-      await readJsonResponse(r, 'Could not remove photo');
+      const r = await adminFetch(
+        `/admin/projects/${projectId}/photos/${photoId}`,
+        { method: "DELETE" },
+      );
+      await readJsonResponse(r, "Could not remove photo");
       await load();
-      setNotice('Photo removed.');
+      setNotice("Photo removed.");
     } catch (e) {
-      setError(e.message || 'Could not remove photo');
+      setError(e.message || "Could not remove photo");
     }
   }
 
   async function handlePhotoUpload(e) {
     const files = Array.from(e.target.files || []);
-    e.target.value = '';
+    e.target.value = "";
     if (!files.length) return;
     setSaving(true);
-    setError('');
-    setNotice('');
+    setError("");
+    setNotice("");
     const failed = [];
     for (const f of files) {
       const fd = new FormData();
-      fd.append('photo', f);
+      fd.append("photo", f);
       try {
-        const r = await adminFetch(`/admin/projects/${projectId}/photos`, { method: 'POST', body: fd, headers: {} });
+        const r = await adminFetch(`/admin/projects/${projectId}/photos`, {
+          method: "POST",
+          body: fd,
+          headers: {},
+        });
         await readJsonResponse(r, `Could not upload ${f.name}`);
       } catch (e) {
-        failed.push(`${f.name}: ${e.message || 'upload failed'}`);
+        failed.push(`${f.name}: ${e.message || "upload failed"}`);
       }
     }
     await load();
     if (failed.length) {
-      setError(`Some photos did not upload: ${failed.join('; ')}`);
+      setError(`Some photos did not upload: ${failed.join("; ")}`);
     } else {
-      setNotice(`${files.length} photo${files.length === 1 ? '' : 's'} uploaded.`);
+      setNotice(
+        `${files.length} photo${files.length === 1 ? "" : "s"} uploaded.`,
+      );
     }
     setSaving(false);
   }
 
   function appendTechnicalSnippet(text) {
-    setEditRecs(prev => prev.trim() ? `${prev.trimEnd()}\n\n${text}` : text);
+    setEditRecs((prev) =>
+      prev.trim() ? `${prev.trimEnd()}\n\n${text}` : text,
+    );
     setDirty(true);
   }
 
   if (loading || !project) {
     return (
-      <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, padding: 24, color: D.muted }}>
-        {loading ? 'Loading project…' : (error || 'Project unavailable.')}
+      <div
+        style={{
+          background: D.card,
+          border: `1px solid ${D.border}`,
+          borderRadius: 10,
+          padding: 24,
+          color: D.muted,
+        }}
+      >
+        {loading ? "Loading project…" : error || "Project unavailable."}
       </div>
     );
   }
@@ -741,164 +1035,300 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged, canAdminA
   });
 
   return (
-    <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 10, display: 'flex', flexDirection: 'column' }}>
+    <div
+      style={{
+        background: D.card,
+        border: `1px solid ${D.border}`,
+        borderRadius: 10,
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
       {/* Header */}
-      <div style={{
-        display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
-        padding: '14px 16px', borderBottom: `1px solid ${D.border}`,
-      }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          justifyContent: "space-between",
+          padding: "14px 16px",
+          borderBottom: `1px solid ${D.border}`,
+        }}
+      >
+        {" "}
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 12, color: D.muted, textTransform: 'uppercase', letterSpacing: 1, fontWeight: 700 }}>
+          {" "}
+          <div
+            style={{
+              fontSize: 12,
+              color: D.muted,
+              textTransform: "uppercase",
+              letterSpacing: 1,
+              fontWeight: 700,
+            }}
+          >
             {typeCfg?.label || project.project_type} · {project.customer_name}
-          </div>
-          <div style={{ fontSize: 18, fontWeight: 800, color: D.heading, marginTop: 4 }}>
-            {project.title || typeCfg?.label || 'Project'}
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
-            <span style={{
-              fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999,
-              background: status.bg, color: status.fg, textTransform: 'uppercase', letterSpacing: 0.5,
-            }}>{status.label}</span>
-            <span style={{ fontSize: 11, color: D.muted }}>Inspection {fmtDate(project.project_date || project.created_at)} by {project.tech_name || '—'}</span>
+          </div>{" "}
+          <div
+            style={{
+              fontSize: 18,
+              fontWeight: 800,
+              color: D.heading,
+              marginTop: 4,
+            }}
+          >
+            {project.title || typeCfg?.label || "Project"}
+          </div>{" "}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              marginTop: 6,
+              flexWrap: "wrap",
+            }}
+          >
+            {" "}
+            <span
+              style={{
+                fontSize: 10,
+                fontWeight: 700,
+                padding: "2px 8px",
+                borderRadius: 999,
+                background: status.bg,
+                color: status.fg,
+                textTransform: "uppercase",
+                letterSpacing: 0.5,
+              }}
+            >
+              {status.label}
+            </span>{" "}
+            <span style={{ fontSize: 11, color: D.muted }}>
+              Inspection {fmtDate(project.project_date || project.created_at)}{" "}
+              by {project.tech_name || "—"}
+            </span>
             {project.sent_at && (
-              <span style={{ fontSize: 11, color: D.muted }}>· Sent {fmtDate(project.sent_at)}</span>
+              <span style={{ fontSize: 11, color: D.muted }}>
+                · Sent {fmtDate(project.sent_at)}
+              </span>
             )}
-          </div>
-        </div>
+          </div>{" "}
+        </div>{" "}
         <button
           type="button"
           onClick={onClose}
           style={{
-            background: 'transparent', border: 'none', color: D.muted,
-            fontSize: 22, cursor: 'pointer', padding: '0 8px',
+            background: "transparent",
+            border: "none",
+            color: D.muted,
+            fontSize: 22,
+            cursor: "pointer",
+            padding: "0 8px",
           }}
           aria-label="Close"
-        >×</button>
+        >
+          ×
+        </button>{" "}
       </div>
-
       {/* Body */}
-      <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 18 }}>
+      <div
+        style={{
+          padding: 16,
+          display: "flex",
+          flexDirection: "column",
+          gap: 18,
+        }}
+      >
         {error && <Alert tone="error">{error}</Alert>}
         {notice && <Alert tone="success">{notice}</Alert>}
-        {delivery && <DeliveryPanel channels={delivery} status={project.delivery_status} />}
-
+        {delivery && (
+          <DeliveryPanel channels={delivery} status={project.delivery_status} />
+        )}
         {sentLink && (
-          <div style={{
-            padding: '10px 12px', background: '#ECFDF5', border: `1px solid #A7F3D0`,
-            borderRadius: 8, fontSize: 12, color: D.heading,
-          }}>
-            <div style={{ fontWeight: 700, marginBottom: 4 }}>Customer-facing report</div>
-            <div style={{ fontFamily: MONO, fontSize: 11, wordBreak: 'break-all' }}>
-              <a href={sentLink} target="_blank" rel="noreferrer" style={{ color: '#065F46' }}>{sentLink}</a>
-            </div>
+          <div
+            style={{
+              padding: "10px 12px",
+              background: "#ECFDF5",
+              border: `1px solid #A7F3D0`,
+              borderRadius: 8,
+              fontSize: 12,
+              color: D.heading,
+            }}
+          >
+            {" "}
+            <div style={{ fontWeight: 700, marginBottom: 4 }}>
+              Customer-facing report
+            </div>{" "}
+            <div
+              style={{ fontFamily: MONO, fontSize: 11, wordBreak: "break-all" }}
+            >
+              {" "}
+              <a
+                href={sentLink}
+                target="_blank"
+                rel="noreferrer"
+                style={{ color: "#065F46" }}
+              >
+                {sentLink}
+              </a>{" "}
+            </div>{" "}
           </div>
         )}
-
         {project.project_type === WDO_TYPE && (
-          <div style={{
-            padding: '10px 12px',
-            background: D.pill,
-            border: `1px solid ${D.border}`,
-            borderRadius: 8,
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            gap: 12,
-          }}>
+          <div
+            style={{
+              padding: "10px 12px",
+              background: D.pill,
+              border: `1px solid ${D.border}`,
+              borderRadius: 8,
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: 12,
+            }}
+          >
+            {" "}
             <div>
-              <div style={{ fontSize: 12, fontWeight: 800, color: D.heading }}>FDACS-13645 WDO form</div>
-              <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>Use this as the official inspection template and review copy.</div>
-            </div>
+              {" "}
+              <div style={{ fontSize: 12, fontWeight: 800, color: D.heading }}>
+                FDACS-13645 WDO form
+              </div>{" "}
+              <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+                Use this as the official inspection template and review copy.
+              </div>{" "}
+            </div>{" "}
             <a
               href="/forms/fdacs-13645-wdo-inspection-report.pdf"
               target="_blank"
               rel="noreferrer"
               style={{
                 flexShrink: 0,
-                padding: '7px 10px',
+                padding: "7px 10px",
                 borderRadius: 6,
                 fontSize: 11,
                 fontWeight: 800,
                 color: D.heading,
-                textDecoration: 'none',
+                textDecoration: "none",
                 background: D.card,
                 border: `1px solid ${D.inputBorder}`,
               }}
             >
               Open PDF
-            </a>
+            </a>{" "}
           </div>
         )}
-
         <ReadinessPanel readiness={readiness} />
-
         {/* Title */}
         <div>
-          <Label htmlFor={`${idPrefix}-title`}>Report title</Label>
+          {" "}
+          <Label htmlFor={`${idPrefix}-title`}>Report title</Label>{" "}
           <input
             id={`${idPrefix}-title`}
             name="title"
             type="text"
             value={editTitle}
-            onChange={(e) => { setEditTitle(e.target.value); setDirty(true); }}
-            placeholder={typeCfg?.label || 'Project'}
+            onChange={(e) => {
+              setEditTitle(e.target.value);
+              setDirty(true);
+            }}
+            placeholder={typeCfg?.label || "Project"}
             style={inputStyle}
-          />
-        </div>
-
+          />{" "}
+        </div>{" "}
         <div>
-          <Label htmlFor={`${idPrefix}-project-date`}>Inspection / project date</Label>
+          {" "}
+          <Label htmlFor={`${idPrefix}-project-date`}>
+            Inspection / project date
+          </Label>{" "}
           <input
             id={`${idPrefix}-project-date`}
             name="project_date"
             type="date"
             value={editProjectDate}
-            onChange={(e) => { setEditProjectDate(e.target.value); setDirty(true); }}
+            onChange={(e) => {
+              setEditProjectDate(e.target.value);
+              setDirty(true);
+            }}
             style={inputStyle}
-          />
+          />{" "}
         </div>
-
         {/* Type-specific findings */}
-        {typeCfg?.findingsFields?.map(field => (
+        {typeCfg?.findingsFields?.map((field) => (
           <div key={field.key}>
+            {" "}
             <Label htmlFor={fieldInputId(field.key)}>{field.label}</Label>
-            {field.type === 'select' ? (
+            {field.type === "select" ? (
               <select
                 id={fieldInputId(field.key)}
                 name={`findings.${field.key}`}
-                value={editFindings[field.key] || ''}
-                onChange={(e) => { setEditFindings(f => ({ ...f, [field.key]: e.target.value })); setDirty(true); }}
+                value={editFindings[field.key] || ""}
+                onChange={(e) => {
+                  setEditFindings((f) => ({
+                    ...f,
+                    [field.key]: e.target.value,
+                  }));
+                  setDirty(true);
+                }}
                 style={inputStyle}
               >
+                {" "}
                 <option value="">Select…</option>
-                {field.options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                {field.options.map((opt) => (
+                  <option key={opt} value={opt}>
+                    {opt}
+                  </option>
+                ))}
               </select>
-            ) : field.type === 'textarea' ? (
+            ) : field.type === "textarea" ? (
               <textarea
                 id={fieldInputId(field.key)}
                 name={`findings.${field.key}`}
-                value={editFindings[field.key] || ''}
-                onChange={(e) => { setEditFindings(f => ({ ...f, [field.key]: e.target.value })); setDirty(true); }}
+                value={editFindings[field.key] || ""}
+                onChange={(e) => {
+                  setEditFindings((f) => ({
+                    ...f,
+                    [field.key]: e.target.value,
+                  }));
+                  setDirty(true);
+                }}
                 rows={3}
-                style={{ ...inputStyle, resize: 'vertical', minHeight: 72 }}
+                style={{ ...inputStyle, resize: "vertical", minHeight: 72 }}
               />
             ) : (
               <input
                 id={fieldInputId(field.key)}
                 name={`findings.${field.key}`}
                 type="text"
-                value={editFindings[field.key] || ''}
-                onChange={(e) => { setEditFindings(f => ({ ...f, [field.key]: e.target.value })); setDirty(true); }}
+                value={editFindings[field.key] || ""}
+                onChange={(e) => {
+                  setEditFindings((f) => ({
+                    ...f,
+                    [field.key]: e.target.value,
+                  }));
+                  setDirty(true);
+                }}
                 style={inputStyle}
               />
             )}
           </div>
         ))}
-
         {/* Recommendations */}
         <div>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-            <Label htmlFor={`${idPrefix}-recommendations`} style={{ margin: 0 }}>Recommendations / notes</Label>
+          {" "}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: 6,
+            }}
+          >
+            {" "}
+            <Label
+              htmlFor={`${idPrefix}-recommendations`}
+              style={{ margin: 0 }}
+            >
+              Recommendations / notes
+            </Label>
             {canAdminActions && (
               <button
                 type="button"
@@ -906,21 +1336,41 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged, canAdminA
                 disabled={aiWriting || saving}
                 title="Claude drafts Customer Concern, What We Inspected, What We Found, What We Did, and What We Recommend from selected context."
                 style={{
-                  padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700,
-                  background: aiWriting ? D.muted : D.card, color: D.heading,
+                  padding: "4px 10px",
+                  borderRadius: 6,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  background: aiWriting ? D.muted : D.card,
+                  color: D.heading,
                   border: `1px solid ${D.inputBorder}`,
-                  cursor: (aiWriting || saving) ? 'default' : 'pointer',
-                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                  cursor: aiWriting || saving ? "default" : "pointer",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
                 }}
               >
-                <span aria-hidden="true">✨</span>
-                {aiWriting ? 'Drafting…' : 'Write with AI'}
+                {" "}
+                <span aria-hidden="true"></span>
+                {aiWriting ? "Drafting…" : "Write with AI"}
               </button>
             )}
           </div>
           {canAdminActions && (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, margin: '0 0 8px', fontSize: 11, color: D.muted }}>
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 10,
+                margin: "0 0 8px",
+                fontSize: 11,
+                color: D.muted,
+              }}
+            >
+              {" "}
+              <label
+                style={{ display: "inline-flex", alignItems: "center", gap: 5 }}
+              >
+                {" "}
                 <input
                   id={`${idPrefix}-ai-comms`}
                   name="ai_include_communications"
@@ -929,8 +1379,11 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged, canAdminA
                   onChange={(e) => setAiUseComms(e.target.checked)}
                 />
                 Include recent calls/texts/emails
-              </label>
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+              </label>{" "}
+              <label
+                style={{ display: "inline-flex", alignItems: "center", gap: 5 }}
+              >
+                {" "}
                 <input
                   id={`${idPrefix}-ai-photos`}
                   name="ai_include_photos"
@@ -939,50 +1392,79 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged, canAdminA
                   onChange={(e) => setAiUsePhotos(e.target.checked)}
                 />
                 Include photos
-              </label>
+              </label>{" "}
             </div>
           )}
           <textarea
             id={`${idPrefix}-recommendations`}
             name="recommendations"
             value={editRecs}
-            onChange={(e) => { setEditRecs(e.target.value); setDirty(true); }}
+            onChange={(e) => {
+              setEditRecs(e.target.value);
+              setDirty(true);
+            }}
             rows={8}
             placeholder={`Write freely, or tap "Write with AI" to draft the customer-facing report sections from findings, communication context, tech notes, and photos.`}
-            style={{ ...inputStyle, resize: 'vertical', minHeight: 160, fontFamily: "'DM Sans', sans-serif" }}
-          />
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
-            {TECHNICAL_SNIPPETS.map(snippet => (
+            style={{
+              ...inputStyle,
+              resize: "vertical",
+              minHeight: 160,
+              fontFamily: "'Roboto', Arial, sans-serif",
+            }}
+          />{" "}
+          <div
+            style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}
+          >
+            {TECHNICAL_SNIPPETS.map((snippet) => (
               <button
                 key={snippet.label}
                 type="button"
                 onClick={() => appendTechnicalSnippet(snippet.text)}
                 style={{
-                  padding: '5px 8px',
+                  padding: "5px 8px",
                   borderRadius: 6,
                   border: `1px solid ${D.inputBorder}`,
                   background: D.card,
                   color: D.heading,
                   fontSize: 11,
                   fontWeight: 700,
-                  cursor: 'pointer',
+                  cursor: "pointer",
                 }}
               >
                 {snippet.label}
               </button>
             ))}
-          </div>
+          </div>{" "}
         </div>
-
         {/* Photos */}
         <div>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-            <Label style={{ margin: 0 }}>Photos ({data.photos?.length || 0})</Label>
-            <label style={{
-              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 700,
-              background: D.accent, color: '#fff', cursor: 'pointer',
-            }}>
+          {" "}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: 8,
+            }}
+          >
+            {" "}
+            <Label style={{ margin: 0 }}>
+              Photos ({data.photos?.length || 0})
+            </Label>{" "}
+            <label
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: "6px 12px",
+                borderRadius: 6,
+                fontSize: 12,
+                fontWeight: 700,
+                background: D.accent,
+                color: "#fff",
+                cursor: "pointer",
+              }}
+            >
               + Upload
               <input
                 id={`${idPrefix}-photos`}
@@ -991,127 +1473,198 @@ function ProjectDetail({ projectId, typesRegistry, onClose, onChanged, canAdminA
                 accept="image/*"
                 multiple
                 onChange={handlePhotoUpload}
-                style={{ display: 'none' }}
-              />
-            </label>
+                style={{ display: "none" }}
+              />{" "}
+            </label>{" "}
           </div>
           {data.photos?.length > 0 ? (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: 8 }}>
-              {data.photos.map(ph => <PhotoThumb key={ph.id} photo={ph} projectId={projectId} onDelete={() => handlePhotoDelete(ph.id)} />)}
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))",
+                gap: 8,
+              }}
+            >
+              {data.photos.map((ph) => (
+                <PhotoThumb
+                  key={ph.id}
+                  photo={ph}
+                  projectId={projectId}
+                  onDelete={() => handlePhotoDelete(ph.id)}
+                />
+              ))}
             </div>
           ) : (
-            <div style={{ padding: '20px 0', fontSize: 12, color: D.muted, textAlign: 'center' }}>
+            <div
+              style={{
+                padding: "20px 0",
+                fontSize: 12,
+                color: D.muted,
+                textAlign: "center",
+              }}
+            >
               No photos yet.
             </div>
           )}
-        </div>
-
-        <ProjectHistoryPanel activity={data.activity || []} />
+        </div>{" "}
+        <ProjectHistoryPanel activity={data.activity || []} />{" "}
       </div>
-
       {/* Footer actions */}
-      <div style={{
-        padding: '12px 16px', borderTop: `1px solid ${D.border}`,
-        display: 'flex', gap: 10, justifyContent: 'flex-end', alignItems: 'center',
-      }}>
-        {canAdminActions && project.status !== 'closed' && (
+      <div
+        style={{
+          padding: "12px 16px",
+          borderTop: `1px solid ${D.border}`,
+          display: "flex",
+          gap: 10,
+          justifyContent: "flex-end",
+          alignItems: "center",
+        }}
+      >
+        {canAdminActions && project.status !== "closed" && (
           <button
             type="button"
             onClick={handleClose}
             disabled={saving}
             style={{ ...btnSecondary, opacity: saving ? 0.5 : 1 }}
-          >Close project</button>
+          >
+            Close project
+          </button>
         )}
         <button
           type="button"
           onClick={saveEdits}
           disabled={saving || !dirty}
-          style={{ ...btnSecondary, opacity: (saving || !dirty) ? 0.4 : 1 }}
-        >{saving ? 'Saving…' : 'Save changes'}</button>
-        {canAdminActions && project.status === 'sent' && project.status !== 'closed' && (
-          <button
-            type="button"
-            onClick={handleSend}
-            disabled={saving}
-            style={{ ...btnPrimary, opacity: saving ? 0.5 : 1 }}
-          >Resend report</button>
-        )}
-        {canAdminActions && project.status !== 'sent' && project.status !== 'closed' && (
-          <button
-            type="button"
-            onClick={handleSend}
-            disabled={saving}
-            style={{ ...btnPrimary, opacity: saving ? 0.5 : 1 }}
-          >Send report</button>
-        )}
-      </div>
+          style={{ ...btnSecondary, opacity: saving || !dirty ? 0.4 : 1 }}
+        >
+          {saving ? "Saving…" : "Save changes"}
+        </button>
+        {canAdminActions &&
+          project.status === "sent" &&
+          project.status !== "closed" && (
+            <button
+              type="button"
+              onClick={handleSend}
+              disabled={saving}
+              style={{ ...btnPrimary, opacity: saving ? 0.5 : 1 }}
+            >
+              Resend report
+            </button>
+          )}
+        {canAdminActions &&
+          project.status !== "sent" &&
+          project.status !== "closed" && (
+            <button
+              type="button"
+              onClick={handleSend}
+              disabled={saving}
+              style={{ ...btnPrimary, opacity: saving ? 0.5 : 1 }}
+            >
+              Send report
+            </button>
+          )}
+      </div>{" "}
     </div>
   );
 }
 
 const PROJECT_ACTIVITY_LABELS = {
-  project_created: 'Created',
-  project_updated: 'Updated',
-  project_report_sent: 'Sent',
-  project_report_resent: 'Resent',
-  project_closed: 'Closed',
-  project_followup_recorded: 'Follow-up',
-  project_photo_uploaded: 'Photo uploaded',
-  project_photo_deleted: 'Photo deleted',
-  project_report_viewed: 'Viewed',
+  project_created: "Created",
+  project_updated: "Updated",
+  project_report_sent: "Sent",
+  project_report_resent: "Resent",
+  project_closed: "Closed",
+  project_followup_recorded: "Follow-up",
+  project_photo_uploaded: "Photo uploaded",
+  project_photo_deleted: "Photo deleted",
+  project_report_viewed: "Viewed",
 };
 
 function fmtDateTime(value) {
-  if (!value) return '—';
+  if (!value) return "—";
   const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return '—';
+  if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleString([], {
-    timeZone: 'America/New_York',
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
+    timeZone: "America/New_York",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
   });
 }
 
 function ProjectHistoryPanel({ activity }) {
   return (
     <div>
-      <div style={{ fontSize: 14, fontWeight: 800, color: D.heading, marginBottom: 8 }}>History</div>
+      {" "}
+      <div
+        style={{
+          fontSize: 14,
+          fontWeight: 800,
+          color: D.heading,
+          marginBottom: 8,
+        }}
+      >
+        History
+      </div>
       {activity.length > 0 ? (
-        <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, overflow: 'hidden' }}>
+        <div
+          style={{
+            border: `1px solid ${D.border}`,
+            borderRadius: 8,
+            overflow: "hidden",
+          }}
+        >
           {activity.map((item, idx) => (
             <div
               key={item.id || `${item.action}-${item.created_at}-${idx}`}
               style={{
-                padding: '10px 12px',
-                borderTop: idx === 0 ? 'none' : `1px solid ${D.border}`,
+                padding: "10px 12px",
+                borderTop: idx === 0 ? "none" : `1px solid ${D.border}`,
                 background: D.card,
               }}
             >
-              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
+              {" "}
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 12,
+                  alignItems: "flex-start",
+                }}
+              >
+                {" "}
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 14, fontWeight: 800, color: D.heading }}>
+                  {" "}
+                  <div
+                    style={{ fontSize: 14, fontWeight: 800, color: D.heading }}
+                  >
                     {PROJECT_ACTIVITY_LABELS[item.action] || item.action}
-                  </div>
+                  </div>{" "}
                   <div style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>
-                    {item.description || 'Project activity recorded.'}
+                    {item.description || "Project activity recorded."}
                   </div>
                   {item.actor_name && (
                     <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
                       By {item.actor_name}
                     </div>
                   )}
-                </div>
-                <div style={{ flexShrink: 0, fontSize: 14, color: D.muted, textAlign: 'right' }}>
+                </div>{" "}
+                <div
+                  style={{
+                    flexShrink: 0,
+                    fontSize: 14,
+                    color: D.muted,
+                    textAlign: "right",
+                  }}
+                >
                   {fmtDateTime(item.created_at)}
-                </div>
-              </div>
+                </div>{" "}
+              </div>{" "}
             </div>
           ))}
         </div>
       ) : (
-        <div style={{ padding: '12px 0', fontSize: 14, color: D.muted }}>
+        <div style={{ padding: "12px 0", fontSize: 14, color: D.muted }}>
           No activity recorded yet.
         </div>
       )}
@@ -1127,46 +1680,107 @@ function PhotoThumb({ photo, projectId, onDelete }) {
     setUrl(null);
     setLoadFailed(false);
     adminFetch(`/admin/projects/${projectId}/photos/${photo.id}/url`)
-      .then(r => readJsonResponse(r, 'Could not load photo'))
-      .then(d => {
+      .then((r) => readJsonResponse(r, "Could not load photo"))
+      .then((d) => {
         if (!cancelled) {
           if (d.url) setUrl(d.url);
           else setLoadFailed(true);
         }
       })
-      .catch(() => { if (!cancelled) setLoadFailed(true); });
-    return () => { cancelled = true; };
+      .catch(() => {
+        if (!cancelled) setLoadFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [projectId, photo.id]);
 
   return (
-    <div style={{
-      position: 'relative', background: D.pill, borderRadius: 8,
-      border: `1px solid ${D.border}`, overflow: 'hidden', aspectRatio: '1/1',
-    }}>
+    <div
+      style={{
+        position: "relative",
+        background: D.pill,
+        borderRadius: 8,
+        border: `1px solid ${D.border}`,
+        overflow: "hidden",
+        aspectRatio: "1/1",
+      }}
+    >
       {url ? (
-        <a href={url} target="_blank" rel="noreferrer" style={{ display: 'block', width: '100%', height: '100%' }}>
-          <img src={url} alt={photo.caption || photo.category || 'Photo'} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+        <a
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+          style={{ display: "block", width: "100%", height: "100%" }}
+        >
+          {" "}
+          <img
+            src={url}
+            alt={photo.caption || photo.category || "Photo"}
+            style={{ width: "100%", height: "100%", objectFit: "cover" }}
+          />{" "}
         </a>
       ) : (
-        <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, color: D.muted }}>
-          {loadFailed ? 'Photo unavailable' : 'Loading…'}
+        <div
+          style={{
+            width: "100%",
+            height: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 11,
+            color: D.muted,
+          }}
+        >
+          {loadFailed ? "Photo unavailable" : "Loading…"}
         </div>
       )}
-      <div style={{
-        position: 'absolute', left: 0, right: 0, bottom: 0, padding: '4px 6px',
-        background: 'rgba(0,0,0,0.55)', color: '#fff', fontSize: 10, fontWeight: 600,
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-      }}>
-        <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          {(photo.category || '').replace(/_/g, ' ')}
-        </span>
+      <div
+        style={{
+          position: "absolute",
+          left: 0,
+          right: 0,
+          bottom: 0,
+          padding: "4px 6px",
+          background: "rgba(0,0,0,0.55)",
+          color: "#fff",
+          fontSize: 10,
+          fontWeight: 600,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+        }}
+      >
+        {" "}
+        <span
+          style={{
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {(photo.category || "").replace(/_/g, " ")}
+        </span>{" "}
         <button
           type="button"
-          onClick={(e) => { e.preventDefault(); onDelete(); }}
-          style={{ background: 'transparent', border: 'none', color: '#fff', cursor: 'pointer', fontSize: 13, padding: 0, lineHeight: 1 }}
+          onClick={(e) => {
+            e.preventDefault();
+            onDelete();
+          }}
+          style={{
+            background: "transparent",
+            border: "none",
+            color: "#fff",
+            cursor: "pointer",
+            fontSize: 13,
+            padding: 0,
+            lineHeight: 1,
+          }}
           aria-label="Remove photo"
-        >×</button>
-      </div>
+        >
+          ×
+        </button>{" "}
+      </div>{" "}
     </div>
   );
 }
@@ -1175,51 +1789,86 @@ function ReadinessPanel({ readiness }) {
   const complete = readiness.missing.length === 0;
   const hasQualityNotes = readiness.quality.length > 0;
   return (
-    <div style={{
-      padding: '10px 12px',
-      background: complete && !hasQualityNotes ? '#ECFDF5' : '#FFFBEB',
-      border: `1px solid ${complete && !hasQualityNotes ? '#A7F3D0' : '#FDE68A'}`,
-      borderRadius: 8,
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+    <div
+      style={{
+        padding: "10px 12px",
+        background: complete && !hasQualityNotes ? "#ECFDF5" : "#FFFBEB",
+        border: `1px solid ${complete && !hasQualityNotes ? "#A7F3D0" : "#FDE68A"}`,
+        borderRadius: 8,
+      }}
+    >
+      {" "}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 10,
+        }}
+      >
+        {" "}
         <div>
-          <div style={{ fontSize: 12, fontWeight: 800, color: D.heading }}>Pre-send review</div>
+          {" "}
+          <div style={{ fontSize: 12, fontWeight: 800, color: D.heading }}>
+            Pre-send review
+          </div>{" "}
           <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-            {complete ? 'Required report details are present.' : `${readiness.missing.length} required item${readiness.missing.length === 1 ? '' : 's'} still need attention.`}
-          </div>
-        </div>
-        <span style={{
-          flexShrink: 0,
-          fontSize: 10,
-          fontWeight: 800,
-          color: complete && !hasQualityNotes ? '#065F46' : '#92400E',
-          textTransform: 'uppercase',
-          letterSpacing: 0.5,
-        }}>
-          {complete && !hasQualityNotes ? 'Ready' : 'Review'}
-        </span>
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 6, marginTop: 10 }}>
-        {readiness.required.map(item => (
+            {complete
+              ? "Required report details are present."
+              : `${readiness.missing.length} required item${readiness.missing.length === 1 ? "" : "s"} still need attention.`}
+          </div>{" "}
+        </div>{" "}
+        <span
+          style={{
+            flexShrink: 0,
+            fontSize: 10,
+            fontWeight: 800,
+            color: complete && !hasQualityNotes ? "#065F46" : "#92400E",
+            textTransform: "uppercase",
+            letterSpacing: 0.5,
+          }}
+        >
+          {complete && !hasQualityNotes ? "Ready" : "Review"}
+        </span>{" "}
+      </div>{" "}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+          gap: 6,
+          marginTop: 10,
+        }}
+      >
+        {readiness.required.map((item) => (
           <div
             key={item.label}
             style={{
               fontSize: 11,
-              color: item.ok ? '#166534' : '#92400E',
-              background: item.ok ? '#F0FDF4' : '#FEF3C7',
-              border: `1px solid ${item.ok ? '#BBF7D0' : '#FDE68A'}`,
+              color: item.ok ? "#166534" : "#92400E",
+              background: item.ok ? "#F0FDF4" : "#FEF3C7",
+              border: `1px solid ${item.ok ? "#BBF7D0" : "#FDE68A"}`,
               borderRadius: 6,
-              padding: '5px 7px',
+              padding: "5px 7px",
             }}
           >
-            {item.ok ? 'Done' : 'Missing'}: {item.label}
+            {item.ok ? "Done" : "Missing"}: {item.label}
           </div>
         ))}
       </div>
       {hasQualityNotes && (
-        <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 5 }}>
-          {readiness.quality.map(note => (
-            <div key={note} style={{ fontSize: 11, color: '#92400E', lineHeight: 1.4 }}>
+        <div
+          style={{
+            marginTop: 10,
+            display: "flex",
+            flexDirection: "column",
+            gap: 5,
+          }}
+        >
+          {readiness.quality.map((note) => (
+            <div
+              key={note}
+              style={{ fontSize: 11, color: "#92400E", lineHeight: 1.4 }}
+            >
               Review: {note}
             </div>
           ))}
@@ -1229,18 +1878,20 @@ function ReadinessPanel({ readiness }) {
   );
 }
 
-function Alert({ tone = 'success', children }) {
-  const isError = tone === 'error';
+function Alert({ tone = "success", children }) {
+  const isError = tone === "error";
   return (
-    <div style={{
-      padding: '9px 12px',
-      background: isError ? '#FEF2F2' : '#ECFDF5',
-      border: `1px solid ${isError ? '#FECACA' : '#A7F3D0'}`,
-      borderRadius: 8,
-      color: isError ? D.red : '#065F46',
-      fontSize: 12,
-      lineHeight: 1.45,
-    }}>
+    <div
+      style={{
+        padding: "9px 12px",
+        background: isError ? "#FEF2F2" : "#ECFDF5",
+        border: `1px solid ${isError ? "#FECACA" : "#A7F3D0"}`,
+        borderRadius: 8,
+        color: isError ? D.red : "#065F46",
+        fontSize: 12,
+        lineHeight: 1.45,
+      }}
+    >
       {children}
     </div>
   );
@@ -1250,54 +1901,110 @@ function DeliveryPanel({ channels, status }) {
   const entries = Object.entries(channels || {});
   if (!entries.length) return null;
   return (
-    <div style={{
-      padding: '10px 12px',
-      background: D.pill,
-      border: `1px solid ${D.border}`,
-      borderRadius: 8,
-    }}>
-      <div style={{ fontSize: 12, fontWeight: 800, color: D.heading, marginBottom: 8 }}>
-        Delivery status{status ? `: ${String(status).replace(/_/g, ' ')}` : ''}
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+    <div
+      style={{
+        padding: "10px 12px",
+        background: D.pill,
+        border: `1px solid ${D.border}`,
+        borderRadius: 8,
+      }}
+    >
+      {" "}
+      <div
+        style={{
+          fontSize: 12,
+          fontWeight: 800,
+          color: D.heading,
+          marginBottom: 8,
+        }}
+      >
+        Delivery status{status ? `: ${String(status).replace(/_/g, " ")}` : ""}
+      </div>{" "}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         {entries.map(([channel, result]) => (
-          <div key={channel} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 12 }}>
-            <span style={{ color: D.text, fontWeight: 700, textTransform: 'uppercase' }}>{channel}</span>
-            <span style={{ color: result?.ok ? D.success : D.red, textAlign: 'right' }}>
-              {result?.ok ? 'Sent' : result?.error || 'Failed'}
-            </span>
+          <div
+            key={channel}
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              gap: 10,
+              fontSize: 12,
+            }}
+          >
+            {" "}
+            <span
+              style={{
+                color: D.text,
+                fontWeight: 700,
+                textTransform: "uppercase",
+              }}
+            >
+              {channel}
+            </span>{" "}
+            <span
+              style={{
+                color: result?.ok ? D.success : D.red,
+                textAlign: "right",
+              }}
+            >
+              {result?.ok ? "Sent" : result?.error || "Failed"}
+            </span>{" "}
           </div>
         ))}
-      </div>
+      </div>{" "}
     </div>
   );
 }
 
 function Label({ children, style, htmlFor }) {
   return (
-    <label htmlFor={htmlFor} style={{
-      fontSize: 11, fontWeight: 700, color: D.muted,
-      textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6,
-      display: 'block',
-      ...(style || {}),
-    }}>{children}</label>
+    <label
+      htmlFor={htmlFor}
+      style={{
+        fontSize: 11,
+        fontWeight: 700,
+        color: D.muted,
+        textTransform: "uppercase",
+        letterSpacing: 1,
+        marginBottom: 6,
+        display: "block",
+        ...(style || {}),
+      }}
+    >
+      {children}
+    </label>
   );
 }
 
 const inputStyle = {
-  width: '100%',
-  background: D.card, color: D.text,
+  width: "100%",
+  background: D.card,
+  color: D.text,
   border: `1px solid ${D.inputBorder}`,
-  borderRadius: 8, padding: '9px 12px',
-  fontSize: 13, boxSizing: 'border-box',
-  fontFamily: "'DM Sans', sans-serif",
+  borderRadius: 8,
+  padding: "9px 12px",
+  fontSize: 13,
+  boxSizing: "border-box",
+  fontFamily: "'Roboto', Arial, sans-serif",
 };
 
 const btnPrimary = {
-  padding: '9px 16px', borderRadius: 8, fontSize: 13, fontWeight: 700,
-  background: D.accent, color: '#fff', border: 'none', cursor: 'pointer',
+  padding: "9px 16px",
+  borderRadius: 8,
+  fontSize: 13,
+  fontWeight: 700,
+  background: D.accent,
+  color: "#fff",
+  border: "none",
+  cursor: "pointer",
 };
 const btnSecondary = {
-  padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 600,
-  background: D.card, color: D.text, border: `1px solid ${D.inputBorder}`, cursor: 'pointer',
+  padding: "9px 14px",
+  borderRadius: 8,
+  fontSize: 13,
+  fontWeight: 600,
+  background: D.card,
+  color: D.text,
+  border: `1px solid ${D.inputBorder}`,
+  cursor: "pointer",
 };
