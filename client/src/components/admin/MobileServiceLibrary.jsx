@@ -6,44 +6,61 @@
 //
 // Desktop ServiceLibraryPage (tabs + filters + grouped catalog) is unchanged.
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
-import { SERVICE_CATEGORY_LABELS as CATEGORY_LABELS } from '../../constants/serviceCategories';
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { SERVICE_CATEGORY_LABELS as CATEGORY_LABELS } from "../../constants/serviceCategories";
 
-const API = import.meta.env.VITE_API_URL || '/api';
+const API = import.meta.env.VITE_API_URL || "/api";
 
 function aFetch(path, opts = {}) {
   return fetch(`${API}${path}`, {
     headers: {
-      Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
-      'Content-Type': 'application/json',
+      Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+      "Content-Type": "application/json",
     },
     ...opts,
-  }).then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
+  }).then((r) => {
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
+  });
 }
 
 // Shared row + card styling so the three views look identical.
-const rowChrome = 'flex items-center gap-3 bg-white border-hairline border-zinc-200 rounded-sm px-3 no-underline';
+const rowChrome =
+  "flex items-center gap-3 bg-white border-hairline border-zinc-200 rounded-sm px-3 no-underline";
 
 // Shared form primitives for the inline edit panels.
 function Field({ label, children }) {
   return (
     <label className="flex flex-col gap-1">
-      <span className="text-ink-tertiary uppercase tracking-label" style={{ fontSize: 11 }}>{label}</span>
+      {" "}
+      <span
+        className="text-ink-tertiary uppercase tracking-label"
+        style={{ fontSize: 11 }}
+      >
+        {label}
+      </span>
       {children}
     </label>
   );
 }
 
-const inputChrome = 'block w-full bg-white text-14 text-ink-primary border-hairline border-zinc-300 rounded-sm h-10 px-3 focus:outline-none focus:border-zinc-900';
+const inputChrome =
+  "block w-full bg-white text-14 text-ink-primary border-hairline border-zinc-300 rounded-sm h-10 px-3 focus:outline-none focus:border-zinc-900";
 const selectChrome = inputChrome;
-const editPanelChrome = 'bg-zinc-50 border-hairline border-zinc-200 rounded-sm px-3 py-3 flex flex-col gap-3';
+const editPanelChrome =
+  "bg-zinc-50 border-hairline border-zinc-200 rounded-sm px-3 py-3 flex flex-col gap-3";
 
 function SearchBar({ value, onChange, placeholder }) {
   return (
     <div className="relative mb-3">
-      <span aria-hidden className="absolute left-4 top-1/2 -translate-y-1/2 text-ink-tertiary" style={{ fontSize: 14 }}>
+      {" "}
+      <span
+        aria-hidden
+        className="absolute left-4 top-1/2 -translate-y-1/2 text-ink-tertiary"
+        style={{ fontSize: 14 }}
+      >
         ⌕
-      </span>
+      </span>{" "}
       <input
         type="search"
         inputMode="search"
@@ -51,14 +68,18 @@ function SearchBar({ value, onChange, placeholder }) {
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         className="block w-full bg-white text-14 text-ink-primary border-hairline border-zinc-300 rounded-full h-12 pl-10 pr-4 focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
-      />
+      />{" "}
     </div>
   );
 }
 
 function Header({ title, onBack, onAdd, centerTitle = false }) {
   return (
-    <div className="flex items-center justify-between mb-3" style={{ minHeight: 44 }}>
+    <div
+      className="flex items-center justify-between mb-3"
+      style={{ minHeight: 44 }}
+    >
+      {" "}
       <button
         type="button"
         onClick={onBack}
@@ -69,7 +90,10 @@ function Header({ title, onBack, onAdd, centerTitle = false }) {
         ←
       </button>
       {centerTitle && (
-        <div className="flex-1 text-center font-semibold text-zinc-900" style={{ fontSize: 17 }}>
+        <div
+          className="flex-1 text-center font-semibold text-zinc-900"
+          style={{ fontSize: 17 }}
+        >
           {title}
         </div>
       )}
@@ -92,7 +116,10 @@ function Header({ title, onBack, onAdd, centerTitle = false }) {
 
 function LargeTitle({ children }) {
   return (
-    <h1 className="text-zinc-900 tracking-tight mb-4" style={{ fontSize: 32, fontWeight: 800 }}>
+    <h1
+      className="m-0 text-22 font-medium text-zinc-900 tracking-normal mb-4"
+      style={{ fontFamily: "'Roboto', Arial, sans-serif" }}
+    >
       {children}
     </h1>
   );
@@ -101,15 +128,36 @@ function LargeTitle({ children }) {
 // ── Menu (top of stack) ─────────────────────────────────────────────────
 function MenuView({ onNav }) {
   const items = [
-    { key: 'categories', label: 'Categories', hint: 'Group services by type' },
-    { key: 'discounts', label: 'Discounts', hint: 'Percentage & dollar discounts' },
-    { key: 'services', label: 'All Services', hint: 'Every service in the library' },
+    { key: "categories", label: "Categories", hint: "Group services by type" },
+    {
+      key: "discounts",
+      label: "Discounts",
+      hint: "Percentage & dollar discounts",
+    },
+    {
+      key: "services",
+      label: "All Services",
+      hint: "Every service in the library",
+    },
   ];
   return (
-    <div className="px-4 pt-4 pb-10 mx-auto" style={{ maxWidth: 640 }}>
-      <h1 className="text-zinc-900 tracking-tight mb-4" style={{ fontSize: 32, fontWeight: 800 }}>
-        Services
-      </h1>
+    <div className="pt-0 pb-10 mx-auto" style={{ maxWidth: 640 }}>
+      {" "}
+      <div
+        className="md:sticky md:top-0 z-20 mb-5 bg-surface-page/95 pb-3"
+        style={{ fontFamily: "'Roboto', Arial, sans-serif" }}
+      >
+        <div className="overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
+          <div className="flex items-center px-4 py-3">
+            <h1
+              className="m-0 text-22 font-medium text-zinc-900 tracking-normal"
+              style={{ fontFamily: "'Roboto', Arial, sans-serif" }}
+            >
+              Services
+            </h1>
+          </div>
+        </div>
+      </div>
       <div className="flex flex-col gap-2">
         {items.map((it) => (
           <button
@@ -119,27 +167,47 @@ function MenuView({ onNav }) {
             className={`${rowChrome} justify-between cursor-pointer hover:bg-zinc-50 text-left`}
             style={{ height: 64 }}
           >
+            {" "}
             <div className="flex-1 min-w-0">
-              <div className="font-medium text-ink-primary" style={{ fontSize: 15 }}>{it.label}</div>
-              <div className="text-ink-tertiary truncate" style={{ fontSize: 12, marginTop: 2 }}>{it.hint}</div>
-            </div>
-            <span aria-hidden className="text-ink-secondary" style={{ fontSize: 20 }}>›</span>
+              {" "}
+              <div
+                className="font-medium text-ink-primary"
+                style={{ fontSize: 15 }}
+              >
+                {it.label}
+              </div>{" "}
+              <div
+                className="text-ink-tertiary truncate"
+                style={{ fontSize: 12, marginTop: 2 }}
+              >
+                {it.hint}
+              </div>{" "}
+            </div>{" "}
+            <span
+              aria-hidden
+              className="text-ink-secondary"
+              style={{ fontSize: 20 }}
+            >
+              ›
+            </span>{" "}
           </button>
         ))}
-      </div>
+      </div>{" "}
     </div>
   );
 }
 
 // ── Thumbnail (small square with Waves logo or category accent) ─────────
-function Thumb({ color = '#E4E4E7', icon }) {
+function Thumb({ color = "#E4E4E7", icon }) {
   return (
     <div
       className="flex items-center justify-center rounded-sm shrink-0"
-      style={{ width: 44, height: 44, background: color, color: '#18181B' }}
+      style={{ width: 44, height: 44, background: color, color: "#18181B" }}
       aria-hidden
     >
-      {icon || <img src="/waves-logo.png" alt="" className="w-8 h-8 object-contain" />}
+      {icon || (
+        <img src="/waves-logo.png" alt="" className="w-8 h-8 object-contain" />
+      )}
     </div>
   );
 }
@@ -148,12 +216,15 @@ function Thumb({ color = '#E4E4E7', icon }) {
 function CategoriesView({ onBack }) {
   const [services, setServices] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState("");
   const [expandedKey, setExpandedKey] = useState(null);
 
   useEffect(() => {
-    aFetch('/admin/services?is_active=true&limit=500')
-      .then((d) => { setServices(d.services || []); setLoading(false); })
+    aFetch("/admin/services?is_active=true&limit=500")
+      .then((d) => {
+        setServices(d.services || []);
+        setLoading(false);
+      })
       .catch(() => setLoading(false));
   }, []);
 
@@ -162,7 +233,7 @@ function CategoriesView({ onBack }) {
     // and keep the underlying service rows for the expanded panel.
     const map = new Map();
     for (const s of services) {
-      const key = s.category || 'other';
+      const key = s.category || "other";
       if (!map.has(key)) map.set(key, { key, services: [], subs: new Set() });
       const g = map.get(key);
       g.services.push(s);
@@ -184,19 +255,39 @@ function CategoriesView({ onBack }) {
 
   return (
     <div className="px-4 pt-4 pb-10 mx-auto" style={{ maxWidth: 640 }}>
-      <Header title="Categories" onBack={onBack} onAdd={() => alert('Create category — coming soon')} />
-      <LargeTitle>Categories</LargeTitle>
-      <SearchBar value={query} onChange={setQuery} placeholder="Search Categories" />
+      {" "}
+      <Header
+        title="Categories"
+        onBack={onBack}
+        onAdd={() => alert("Create category — coming soon")}
+      />{" "}
+      <LargeTitle>Categories</LargeTitle>{" "}
+      <SearchBar
+        value={query}
+        onChange={setQuery}
+        placeholder="Search Categories"
+      />
       {loading ? (
-        <div className="p-10 text-center text-ink-secondary" style={{ fontSize: 13 }}>Loading…</div>
+        <div
+          className="p-10 text-center text-ink-secondary"
+          style={{ fontSize: 13 }}
+        >
+          Loading…
+        </div>
       ) : groups.length === 0 ? (
-        <div className="p-10 text-center text-ink-secondary" style={{ fontSize: 13 }}>No categories</div>
+        <div
+          className="p-10 text-center text-ink-secondary"
+          style={{ fontSize: 13 }}
+        >
+          No categories
+        </div>
       ) : (
         <div className="flex flex-col gap-2">
           {groups.map((g) => {
             const isOpen = expandedKey === g.key;
             return (
               <div key={g.key} className="flex flex-col gap-2">
+                {" "}
                 <button
                   type="button"
                   onClick={() => setExpandedKey(isOpen ? null : g.key)}
@@ -204,17 +295,43 @@ function CategoriesView({ onBack }) {
                   className={`${rowChrome} justify-between text-left u-focus-ring`}
                   style={{ height: 64 }}
                 >
-                  <Thumb />
+                  {" "}
+                  <Thumb />{" "}
                   <div className="flex-1 min-w-0">
-                    <div className="font-semibold text-ink-primary truncate" style={{ fontSize: 15 }}>{g.label}</div>
-                    <div className="text-ink-tertiary truncate" style={{ fontSize: 12, marginTop: 2 }}>
-                      {g.subCount} subcategor{g.subCount === 1 ? 'y' : 'ies'}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1 text-ink-secondary" style={{ fontSize: 14 }}>
-                    <span className="u-nums">{g.itemCount} item{g.itemCount === 1 ? '' : 's'}</span>
-                    <span aria-hidden style={{ fontSize: 18, lineHeight: 1, transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 120ms' }}>›</span>
-                  </div>
+                    {" "}
+                    <div
+                      className="font-semibold text-ink-primary truncate"
+                      style={{ fontSize: 15 }}
+                    >
+                      {g.label}
+                    </div>{" "}
+                    <div
+                      className="text-ink-tertiary truncate"
+                      style={{ fontSize: 12, marginTop: 2 }}
+                    >
+                      {g.subCount} subcategor{g.subCount === 1 ? "y" : "ies"}
+                    </div>{" "}
+                  </div>{" "}
+                  <div
+                    className="flex items-center gap-1 text-ink-secondary"
+                    style={{ fontSize: 14 }}
+                  >
+                    {" "}
+                    <span className="u-nums">
+                      {g.itemCount} item{g.itemCount === 1 ? "" : "s"}
+                    </span>{" "}
+                    <span
+                      aria-hidden
+                      style={{
+                        fontSize: 18,
+                        lineHeight: 1,
+                        transform: isOpen ? "rotate(90deg)" : "none",
+                        transition: "transform 120ms",
+                      }}
+                    >
+                      ›
+                    </span>{" "}
+                  </div>{" "}
                 </button>
                 {isOpen && <CategoryDetail group={g} />}
               </div>
@@ -232,32 +349,53 @@ function CategoryDetail({ group }) {
   const bySub = useMemo(() => {
     const map = new Map();
     for (const s of group.services) {
-      const k = s.subcategory || '';
+      const k = s.subcategory || "";
       if (!map.has(k)) map.set(k, []);
       map.get(k).push(s);
     }
     for (const arr of map.values()) {
-      arr.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+      arr.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
     }
     return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]));
   }, [group]);
 
   return (
     <div className={editPanelChrome}>
+      {" "}
       <div className="text-ink-tertiary" style={{ fontSize: 12 }}>
-        Categories are set per service. Edit a service from <strong>All Services</strong> to move it.
+        Categories are set per service. Edit a service from{" "}
+        <strong>All Services</strong>to move it.
       </div>
       {bySub.map(([sub, svcs]) => (
-        <div key={sub || '__none__'} className="flex flex-col gap-1">
-          <div className="text-ink-secondary uppercase tracking-label" style={{ fontSize: 11 }}>
-            {sub || 'Uncategorized'}
+        <div key={sub || "__none__"} className="flex flex-col gap-1">
+          {" "}
+          <div
+            className="text-ink-secondary uppercase tracking-label"
+            style={{ fontSize: 11 }}
+          >
+            {sub || "Uncategorized"}
           </div>
           {svcs.map((s) => (
-            <div key={s.id} className="flex items-center justify-between bg-white border-hairline border-zinc-200 rounded-sm px-3" style={{ height: 40 }}>
-              <span className="text-ink-primary truncate" style={{ fontSize: 13 }}>{s.name}</span>
-              <span className="text-ink-tertiary u-nums" style={{ fontSize: 12 }}>
-                {s.pricing_type === 'fixed' && s.base_price ? `$${Number(s.base_price).toFixed(0)}` : '—'}
-              </span>
+            <div
+              key={s.id}
+              className="flex items-center justify-between bg-white border-hairline border-zinc-200 rounded-sm px-3"
+              style={{ height: 40 }}
+            >
+              {" "}
+              <span
+                className="text-ink-primary truncate"
+                style={{ fontSize: 13 }}
+              >
+                {s.name}
+              </span>{" "}
+              <span
+                className="text-ink-tertiary u-nums"
+                style={{ fontSize: 12 }}
+              >
+                {s.pricing_type === "fixed" && s.base_price
+                  ? `$${Number(s.base_price).toFixed(0)}`
+                  : "—"}
+              </span>{" "}
             </div>
           ))}
         </div>
@@ -270,66 +408,98 @@ function CategoryDetail({ group }) {
 function DiscountsView({ onBack }) {
   const [discounts, setDiscounts] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState("");
   const [expandedId, setExpandedId] = useState(null);
   const [creating, setCreating] = useState(false);
 
   const load = useCallback(() => {
-    return aFetch('/admin/discounts')
+    return aFetch("/admin/discounts")
       .then((d) => {
         // Endpoint returns a raw array.
-        setDiscounts(Array.isArray(d) ? d : (d.discounts || []));
+        setDiscounts(Array.isArray(d) ? d : d.discounts || []);
         setLoading(false);
       })
       .catch(() => setLoading(false));
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    load();
+  }, [load]);
 
   const formatAmount = (d) => {
     const amt = Number(d.amount || 0);
-    if (d.discount_type === 'percentage' || d.discount_type === 'variable_percentage') {
+    if (
+      d.discount_type === "percentage" ||
+      d.discount_type === "variable_percentage"
+    ) {
       return `${amt.toFixed(0)}%`;
     }
-    if (d.discount_type === 'fixed_amount' || d.discount_type === 'variable_amount') {
+    if (
+      d.discount_type === "fixed_amount" ||
+      d.discount_type === "variable_amount"
+    ) {
       return `−$${amt.toFixed(2)}`;
     }
-    if (d.discount_type === 'free_service') return 'Free';
-    return amt ? String(amt) : '—';
+    if (d.discount_type === "free_service") return "Free";
+    return amt ? String(amt) : "—";
   };
 
   const q = query.trim().toLowerCase();
-  const list = discounts.filter((d) => d.is_active !== false)
-    .filter((d) => !q || (d.name || '').toLowerCase().includes(q));
+  const list = discounts
+    .filter((d) => d.is_active !== false)
+    .filter((d) => !q || (d.name || "").toLowerCase().includes(q));
 
   return (
     <div className="px-4 pt-4 pb-10 mx-auto" style={{ maxWidth: 640 }}>
+      {" "}
       <Header
         title="Discounts"
         centerTitle
         onBack={onBack}
-        onAdd={() => { setCreating(true); setExpandedId(null); }}
+        onAdd={() => {
+          setCreating(true);
+          setExpandedId(null);
+        }}
+      />{" "}
+      <SearchBar
+        value={query}
+        onChange={setQuery}
+        placeholder="Search discounts"
       />
-      <SearchBar value={query} onChange={setQuery} placeholder="Search discounts" />
       {creating && (
         <div className="mb-3">
+          {" "}
           <DiscountEditPanel
             discount={null}
             onCancel={() => setCreating(false)}
-            onSaved={async () => { await load(); setCreating(false); }}
-          />
+            onSaved={async () => {
+              await load();
+              setCreating(false);
+            }}
+          />{" "}
         </div>
       )}
       {loading ? (
-        <div className="p-10 text-center text-ink-secondary" style={{ fontSize: 13 }}>Loading…</div>
+        <div
+          className="p-10 text-center text-ink-secondary"
+          style={{ fontSize: 13 }}
+        >
+          Loading…
+        </div>
       ) : list.length === 0 ? (
-        <div className="p-10 text-center text-ink-secondary" style={{ fontSize: 13 }}>No discounts</div>
+        <div
+          className="p-10 text-center text-ink-secondary"
+          style={{ fontSize: 13 }}
+        >
+          No discounts
+        </div>
       ) : (
         <div className="flex flex-col gap-2">
           {list.map((d) => {
             const isOpen = expandedId === d.id;
             return (
               <div key={d.id} className="flex flex-col gap-2">
+                {" "}
                 <button
                   type="button"
                   onClick={() => setExpandedId(isOpen ? null : d.id)}
@@ -337,20 +507,50 @@ function DiscountsView({ onBack }) {
                   className={`${rowChrome} justify-between text-left u-focus-ring`}
                   style={{ height: 64 }}
                 >
-                  <Thumb color="#F4F4F5" icon={<span style={{ fontSize: 18 }} aria-hidden>🏷</span>} />
+                  {" "}
+                  <Thumb
+                    color="#F4F4F5"
+                    icon={<span style={{ fontSize: 18 }} aria-hidden></span>}
+                  />{" "}
                   <div className="flex-1 min-w-0">
-                    <div className="font-semibold text-ink-primary truncate" style={{ fontSize: 15 }}>{d.name}</div>
-                  </div>
-                  <div className="flex items-center gap-1 text-ink-primary" style={{ fontSize: 14 }}>
-                    <span className="u-nums font-medium">{formatAmount(d)}</span>
-                    <span aria-hidden className="text-ink-secondary" style={{ fontSize: 18, lineHeight: 1, transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 120ms' }}>›</span>
-                  </div>
+                    {" "}
+                    <div
+                      className="font-semibold text-ink-primary truncate"
+                      style={{ fontSize: 15 }}
+                    >
+                      {d.name}
+                    </div>{" "}
+                  </div>{" "}
+                  <div
+                    className="flex items-center gap-1 text-ink-primary"
+                    style={{ fontSize: 14 }}
+                  >
+                    {" "}
+                    <span className="u-nums font-medium">
+                      {formatAmount(d)}
+                    </span>{" "}
+                    <span
+                      aria-hidden
+                      className="text-ink-secondary"
+                      style={{
+                        fontSize: 18,
+                        lineHeight: 1,
+                        transform: isOpen ? "rotate(90deg)" : "none",
+                        transition: "transform 120ms",
+                      }}
+                    >
+                      ›
+                    </span>{" "}
+                  </div>{" "}
                 </button>
                 {isOpen && (
                   <DiscountEditPanel
                     discount={d}
                     onCancel={() => setExpandedId(null)}
-                    onSaved={async () => { await load(); setExpandedId(null); }}
+                    onSaved={async () => {
+                      await load();
+                      setExpandedId(null);
+                    }}
                   />
                 )}
               </div>
@@ -363,18 +563,22 @@ function DiscountsView({ onBack }) {
 }
 
 const DISCOUNT_TYPES = [
-  { value: 'percentage', label: 'Percentage (%)' },
-  { value: 'fixed_amount', label: 'Fixed amount ($)' },
-  { value: 'variable_percentage', label: 'Variable percentage' },
-  { value: 'variable_amount', label: 'Variable amount' },
-  { value: 'free_service', label: 'Free service' },
+  { value: "percentage", label: "Percentage (%)" },
+  { value: "fixed_amount", label: "Fixed amount ($)" },
+  { value: "variable_percentage", label: "Variable percentage" },
+  { value: "variable_amount", label: "Variable amount" },
+  { value: "free_service", label: "Free service" },
 ];
 
 function DiscountEditPanel({ discount, onCancel, onSaved }) {
   const isNew = !discount?.id;
-  const [name, setName] = useState(discount?.name || '');
-  const [discountType, setDiscountType] = useState(discount?.discount_type || 'percentage');
-  const [amount, setAmount] = useState(discount?.amount != null ? String(discount.amount) : '0');
+  const [name, setName] = useState(discount?.name || "");
+  const [discountType, setDiscountType] = useState(
+    discount?.discount_type || "percentage",
+  );
+  const [amount, setAmount] = useState(
+    discount?.amount != null ? String(discount.amount) : "0",
+  );
   const [isActive, setIsActive] = useState(discount?.is_active !== false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -384,18 +588,21 @@ function DiscountEditPanel({ discount, onCancel, onSaved }) {
     setSaving(true);
     setError(null);
     try {
-      await aFetch(isNew ? '/admin/discounts' : `/admin/discounts/${discount.id}`, {
-        method: isNew ? 'POST' : 'PUT',
-        body: JSON.stringify({
-          name: name.trim(),
-          discount_type: discountType,
-          amount: amount === '' ? 0 : Number(amount),
-          is_active: isActive,
-        }),
-      });
+      await aFetch(
+        isNew ? "/admin/discounts" : `/admin/discounts/${discount.id}`,
+        {
+          method: isNew ? "POST" : "PUT",
+          body: JSON.stringify({
+            name: name.trim(),
+            discount_type: discountType,
+            amount: amount === "" ? 0 : Number(amount),
+            is_active: isActive,
+          }),
+        },
+      );
       await onSaved();
     } catch (err) {
-      setError(err.message || 'Save failed');
+      setError(err.message || "Save failed");
       setSaving(false);
     }
   };
@@ -403,28 +610,61 @@ function DiscountEditPanel({ discount, onCancel, onSaved }) {
   return (
     <form onSubmit={submit} className={editPanelChrome}>
       {isNew && (
-        <div className="text-ink-primary font-semibold" style={{ fontSize: 15 }}>
+        <div
+          className="text-ink-primary font-semibold"
+          style={{ fontSize: 15 }}
+        >
           New Discount
         </div>
       )}
       {!isNew && (
         <div className="bg-white border-hairline border-zinc-200 rounded-sm px-3 py-2">
-          <div className="text-ink-tertiary uppercase tracking-label" style={{ fontSize: 10 }}>Quick Edit</div>
+          {" "}
+          <div
+            className="text-ink-tertiary uppercase tracking-label"
+            style={{ fontSize: 10 }}
+          >
+            Quick Edit
+          </div>{" "}
           <div className="text-ink-secondary mt-1" style={{ fontSize: 12 }}>
-            {[discount?.discount_key, discount?.service_key_filter && `Service: ${discount.service_key_filter}`, discount?.promo_code && `Promo: ${discount.promo_code}`].filter(Boolean).join(' · ') || 'General discount'}
-          </div>
+            {[
+              discount?.discount_key,
+              discount?.service_key_filter &&
+                `Service: ${discount.service_key_filter}`,
+              discount?.promo_code && `Promo: ${discount.promo_code}`,
+            ]
+              .filter(Boolean)
+              .join(" · ") || "General discount"}
+          </div>{" "}
         </div>
       )}
       <Field label="Name">
-        <input className={inputChrome} value={name} onChange={(e) => setName(e.target.value)} required />
-      </Field>
+        {" "}
+        <input
+          className={inputChrome}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          required
+        />{" "}
+      </Field>{" "}
       <div className="grid grid-cols-2 gap-3">
+        {" "}
         <Field label="Type">
-          <select className={selectChrome} value={discountType} onChange={(e) => setDiscountType(e.target.value)}>
-            {DISCOUNT_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-          </select>
-        </Field>
+          {" "}
+          <select
+            className={selectChrome}
+            value={discountType}
+            onChange={(e) => setDiscountType(e.target.value)}
+          >
+            {DISCOUNT_TYPES.map((t) => (
+              <option key={t.value} value={t.value}>
+                {t.label}
+              </option>
+            ))}
+          </select>{" "}
+        </Field>{" "}
         <Field label="Amount">
+          {" "}
           <input
             className={inputChrome}
             type="number"
@@ -433,23 +673,44 @@ function DiscountEditPanel({ discount, onCancel, onSaved }) {
             min="0"
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
-            disabled={discountType === 'free_service'}
-          />
-        </Field>
-      </div>
+            disabled={discountType === "free_service"}
+          />{" "}
+        </Field>{" "}
+      </div>{" "}
       <label className="flex items-center gap-2" style={{ fontSize: 13 }}>
-        <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} />
-        <span className="text-ink-primary">Active</span>
+        {" "}
+        <input
+          type="checkbox"
+          checked={isActive}
+          onChange={(e) => setIsActive(e.target.checked)}
+        />{" "}
+        <span className="text-ink-primary">Active</span>{" "}
       </label>
-      {error && <div className="text-alert-fg" style={{ fontSize: 12 }}>{error}</div>}
+      {error && (
+        <div className="text-alert-fg" style={{ fontSize: 12 }}>
+          {error}
+        </div>
+      )}
       <div className="flex gap-2 justify-end pt-1">
-        <button type="button" onClick={onCancel} disabled={saving} className="bg-white border-hairline border-zinc-300 text-ink-primary rounded-sm u-focus-ring" style={{ padding: '8px 14px', fontSize: 13 }}>
+        {" "}
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={saving}
+          className="bg-white border-hairline border-zinc-300 text-ink-primary rounded-sm u-focus-ring"
+          style={{ padding: "8px 14px", fontSize: 13 }}
+        >
           Cancel
-        </button>
-        <button type="submit" disabled={saving} className="bg-zinc-900 text-white rounded-sm u-focus-ring" style={{ padding: '8px 14px', fontSize: 13, fontWeight: 500 }}>
-          {saving ? 'Saving…' : isNew ? 'Create' : 'Save'}
-        </button>
-      </div>
+        </button>{" "}
+        <button
+          type="submit"
+          disabled={saving}
+          className="bg-zinc-900 text-white rounded-sm u-focus-ring"
+          style={{ padding: "8px 14px", fontSize: 13, fontWeight: 500 }}
+        >
+          {saving ? "Saving…" : isNew ? "Create" : "Save"}
+        </button>{" "}
+      </div>{" "}
     </form>
   );
 }
@@ -458,83 +719,105 @@ function DiscountEditPanel({ discount, onCancel, onSaved }) {
 function AllServicesView({ onBack }) {
   const [services, setServices] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState("");
   const [expandedId, setExpandedId] = useState(null);
-  const [status, setStatus] = useState('active');
+  const [status, setStatus] = useState("active");
   const [creating, setCreating] = useState(false);
 
   const load = useCallback(() => {
     setLoading(true);
-    const params = new URLSearchParams({ limit: '500' });
-    if (status === 'active') params.set('is_active', 'true');
-    if (status === 'inactive') params.set('is_active', 'false');
-    if (status === 'archived') params.set('is_archived', 'true');
+    const params = new URLSearchParams({ limit: "500" });
+    if (status === "active") params.set("is_active", "true");
+    if (status === "inactive") params.set("is_active", "false");
+    if (status === "archived") params.set("is_archived", "true");
     return aFetch(`/admin/services?${params}`)
-      .then((d) => { setServices(d.services || []); setLoading(false); })
+      .then((d) => {
+        setServices(d.services || []);
+        setLoading(false);
+      })
       .catch(() => setLoading(false));
   }, [status]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    load();
+  }, [load]);
 
   const formatDuration = (m) => {
     const n = Number(m || 0);
-    if (!n) return '';
-    if (n === 60) return '1 hr';
+    if (!n) return "";
+    if (n === 60) return "1 hr";
     if (n % 60 === 0) return `${n / 60} hr`;
     if (n < 60) return `${n} min`;
     return `${Math.floor(n / 60)} hr ${n % 60} min`;
   };
 
   const formatPrice = (s) => {
-    if (s.pricing_type === 'variable' || s.pricing_type === 'quoted') return 'Variable';
+    if (s.pricing_type === "variable" || s.pricing_type === "quoted")
+      return "Variable";
     const p = Number(s.base_price || 0);
-    return p ? `$${p.toFixed(0)}` : 'Variable';
+    return p ? `$${p.toFixed(0)}` : "Variable";
   };
 
   const q = query.trim().toLowerCase();
   const list = services
-    .filter((s) => !q || (s.name || '').toLowerCase().includes(q))
-    .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    .filter((s) => !q || (s.name || "").toLowerCase().includes(q))
+    .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
 
   return (
     <div className="px-4 pt-4 pb-10 mx-auto" style={{ maxWidth: 640 }}>
-      <Header title="All Services" centerTitle onBack={onBack} />
+      {" "}
+      <Header title="All Services" centerTitle onBack={onBack} />{" "}
       <button
         type="button"
-        onClick={() => { setCreating(true); setExpandedId(null); }}
+        onClick={() => {
+          setCreating(true);
+          setExpandedId(null);
+        }}
         className="w-full bg-zinc-100 text-zinc-900 font-semibold rounded-sm u-focus-ring mt-2"
-        style={{ padding: '18px 20px', fontSize: 16 }}
+        style={{ padding: "18px 20px", fontSize: 16 }}
       >
         Create Service
       </button>
       {creating && (
         <div className="mt-3">
+          {" "}
           <ServiceEditPanel
             service={null}
             onCancel={() => setCreating(false)}
             onSaved={async () => {
               setCreating(false);
-              if (status === 'active') await load();
-              else setStatus('active');
+              if (status === "active") await load();
+              else setStatus("active");
             }}
-          />
+          />{" "}
         </div>
       )}
       <div className="mt-3">
-        <SearchBar value={query} onChange={setQuery} placeholder="Search All Services" />
-      </div>
-      <div className="grid gap-2 mb-3" style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}>
+        {" "}
+        <SearchBar
+          value={query}
+          onChange={setQuery}
+          placeholder="Search All Services"
+        />{" "}
+      </div>{" "}
+      <div
+        className="grid gap-2 mb-3"
+        style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}
+      >
         {[
-          ['active', 'Active'],
-          ['inactive', 'Inactive'],
-          ['all', 'All'],
-          ['archived', 'Archived'],
+          ["active", "Active"],
+          ["inactive", "Inactive"],
+          ["all", "All"],
+          ["archived", "Archived"],
         ].map(([key, label]) => (
           <button
             key={key}
             type="button"
-            onClick={() => { setStatus(key); setExpandedId(null); }}
-            className={`${status === key ? 'bg-zinc-900 text-white' : 'bg-white text-ink-secondary border-hairline border-zinc-200'} rounded-sm u-focus-ring`}
+            onClick={() => {
+              setStatus(key);
+              setExpandedId(null);
+            }}
+            className={`${status === key ? "bg-zinc-900 text-white" : "bg-white text-ink-secondary border-hairline border-zinc-200"} rounded-sm u-focus-ring`}
             style={{ height: 36, fontSize: 13, fontWeight: 600 }}
           >
             {label}
@@ -542,9 +825,19 @@ function AllServicesView({ onBack }) {
         ))}
       </div>
       {loading ? (
-        <div className="p-10 text-center text-ink-secondary" style={{ fontSize: 13 }}>Loading…</div>
+        <div
+          className="p-10 text-center text-ink-secondary"
+          style={{ fontSize: 13 }}
+        >
+          Loading…
+        </div>
       ) : list.length === 0 ? (
-        <div className="p-10 text-center text-ink-secondary" style={{ fontSize: 13 }}>No services</div>
+        <div
+          className="p-10 text-center text-ink-secondary"
+          style={{ fontSize: 13 }}
+        >
+          No services
+        </div>
       ) : (
         <div className="flex flex-col gap-2">
           {list.map((s) => {
@@ -553,6 +846,7 @@ function AllServicesView({ onBack }) {
             const isOpen = expandedId === s.id;
             return (
               <div key={s.id} className="flex flex-col gap-2">
+                {" "}
                 <button
                   type="button"
                   onClick={() => setExpandedId(isOpen ? null : s.id)}
@@ -560,25 +854,57 @@ function AllServicesView({ onBack }) {
                   className={`${rowChrome} justify-between text-left u-focus-ring`}
                   style={{ height: 68 }}
                 >
-                  <Thumb color={s.color || '#E4E4E7'} />
+                  {" "}
+                  <Thumb color={s.color || "#E4E4E7"} />{" "}
                   <div className="flex-1 min-w-0">
-                    <div className="font-semibold text-ink-primary truncate" style={{ fontSize: 15 }}>{s.name}</div>
+                    {" "}
+                    <div
+                      className="font-semibold text-ink-primary truncate"
+                      style={{ fontSize: 15 }}
+                    >
+                      {s.name}
+                    </div>
                     {(duration || s.is_archived) && (
-                      <div className="text-ink-tertiary truncate" style={{ fontSize: 12, marginTop: 2 }}>
-                        {[duration, s.is_archived && 'Archived'].filter(Boolean).join(' · ')}
+                      <div
+                        className="text-ink-tertiary truncate"
+                        style={{ fontSize: 12, marginTop: 2 }}
+                      >
+                        {[duration, s.is_archived && "Archived"]
+                          .filter(Boolean)
+                          .join(" · ")}
                       </div>
                     )}
-                  </div>
+                  </div>{" "}
                   <div className="flex items-center gap-2">
-                    <span className="u-nums font-medium text-ink-primary" style={{ fontSize: 14 }}>{price}</span>
-                    <span aria-hidden className="text-ink-secondary" style={{ fontSize: 18, lineHeight: 1, transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 120ms' }}>›</span>
-                  </div>
+                    {" "}
+                    <span
+                      className="u-nums font-medium text-ink-primary"
+                      style={{ fontSize: 14 }}
+                    >
+                      {price}
+                    </span>{" "}
+                    <span
+                      aria-hidden
+                      className="text-ink-secondary"
+                      style={{
+                        fontSize: 18,
+                        lineHeight: 1,
+                        transform: isOpen ? "rotate(90deg)" : "none",
+                        transition: "transform 120ms",
+                      }}
+                    >
+                      ›
+                    </span>{" "}
+                  </div>{" "}
                 </button>
                 {isOpen && (
                   <ServiceEditPanel
                     service={s}
                     onCancel={() => setExpandedId(null)}
-                    onSaved={async () => { await load(); setExpandedId(null); }}
+                    onSaved={async () => {
+                      await load();
+                      setExpandedId(null);
+                    }}
                   />
                 )}
               </div>
@@ -591,18 +917,26 @@ function AllServicesView({ onBack }) {
 }
 
 const PRICING_TYPES = [
-  { value: 'fixed', label: 'Fixed price' },
-  { value: 'variable', label: 'Variable' },
-  { value: 'quoted', label: 'Quoted' },
+  { value: "fixed", label: "Fixed price" },
+  { value: "variable", label: "Variable" },
+  { value: "quoted", label: "Quoted" },
 ];
 
 function ServiceEditPanel({ service, onCancel, onSaved }) {
   const isNew = !service?.id;
   const isArchived = !!service?.is_archived;
-  const [name, setName] = useState(service?.name || '');
-  const [duration, setDuration] = useState(service?.default_duration_minutes != null ? String(service.default_duration_minutes) : '60');
-  const [pricingType, setPricingType] = useState(service?.pricing_type || 'variable');
-  const [basePrice, setBasePrice] = useState(service?.base_price != null ? String(service.base_price) : '');
+  const [name, setName] = useState(service?.name || "");
+  const [duration, setDuration] = useState(
+    service?.default_duration_minutes != null
+      ? String(service.default_duration_minutes)
+      : "60",
+  );
+  const [pricingType, setPricingType] = useState(
+    service?.pricing_type || "variable",
+  );
+  const [basePrice, setBasePrice] = useState(
+    service?.base_price != null ? String(service.base_price) : "",
+  );
   const [isActive, setIsActive] = useState(service?.is_active !== false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -612,21 +946,27 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
     setSaving(true);
     setError(null);
     try {
-      await aFetch(isNew ? '/admin/services' : `/admin/services/${service.id}`, {
-        method: isNew ? 'POST' : 'PUT',
-        body: JSON.stringify({
-          name: name.trim(),
-          category: isNew ? 'other' : undefined,
-          billing_type: isNew ? 'one_time' : undefined,
-          default_duration_minutes: duration === '' ? null : Number(duration),
-          pricing_type: pricingType,
-          base_price: pricingType === 'fixed' && basePrice !== '' ? Number(basePrice) : null,
-          is_active: isActive,
-        }),
-      });
+      await aFetch(
+        isNew ? "/admin/services" : `/admin/services/${service.id}`,
+        {
+          method: isNew ? "POST" : "PUT",
+          body: JSON.stringify({
+            name: name.trim(),
+            category: isNew ? "other" : undefined,
+            billing_type: isNew ? "one_time" : undefined,
+            default_duration_minutes: duration === "" ? null : Number(duration),
+            pricing_type: pricingType,
+            base_price:
+              pricingType === "fixed" && basePrice !== ""
+                ? Number(basePrice)
+                : null,
+            is_active: isActive,
+          }),
+        },
+      );
       await onSaved();
     } catch (err) {
-      setError(err.message || 'Save failed');
+      setError(err.message || "Save failed");
       setSaving(false);
     }
   };
@@ -636,12 +976,12 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
     setError(null);
     try {
       await aFetch(`/admin/services/${service.id}`, {
-        method: 'PUT',
+        method: "PUT",
         body: JSON.stringify({ is_archived: false, is_active: true }),
       });
       await onSaved();
     } catch (err) {
-      setError(err.message || 'Restore failed');
+      setError(err.message || "Restore failed");
       setSaving(false);
     }
   };
@@ -649,23 +989,47 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
   return (
     <form onSubmit={submit} className={editPanelChrome}>
       {isNew && (
-        <div className="text-ink-primary font-semibold" style={{ fontSize: 15 }}>
+        <div
+          className="text-ink-primary font-semibold"
+          style={{ fontSize: 15 }}
+        >
           New Service
         </div>
       )}
       {!isNew && (
         <div className="bg-white border-hairline border-zinc-200 rounded-sm px-3 py-2">
-          <div className="text-ink-tertiary uppercase tracking-label" style={{ fontSize: 10 }}>Quick Edit</div>
+          {" "}
+          <div
+            className="text-ink-tertiary uppercase tracking-label"
+            style={{ fontSize: 10 }}
+          >
+            Quick Edit
+          </div>{" "}
           <div className="text-ink-secondary mt-1" style={{ fontSize: 12 }}>
-            {[service?.service_key, CATEGORY_LABELS[service?.category] || service?.category, service?.billing_type, isArchived && 'Archived'].filter(Boolean).join(' · ')}
-          </div>
+            {[
+              service?.service_key,
+              CATEGORY_LABELS[service?.category] || service?.category,
+              service?.billing_type,
+              isArchived && "Archived",
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </div>{" "}
         </div>
       )}
       <Field label="Name">
-        <input className={inputChrome} value={name} onChange={(e) => setName(e.target.value)} required />
-      </Field>
+        {" "}
+        <input
+          className={inputChrome}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          required
+        />{" "}
+      </Field>{" "}
       <div className="grid grid-cols-2 gap-3">
+        {" "}
         <Field label="Duration (min)">
+          {" "}
           <input
             className={inputChrome}
             type="number"
@@ -674,16 +1038,26 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
             min="0"
             value={duration}
             onChange={(e) => setDuration(e.target.value)}
-          />
-        </Field>
+          />{" "}
+        </Field>{" "}
         <Field label="Pricing">
-          <select className={selectChrome} value={pricingType} onChange={(e) => setPricingType(e.target.value)}>
-            {PRICING_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-          </select>
-        </Field>
+          {" "}
+          <select
+            className={selectChrome}
+            value={pricingType}
+            onChange={(e) => setPricingType(e.target.value)}
+          >
+            {PRICING_TYPES.map((t) => (
+              <option key={t.value} value={t.value}>
+                {t.label}
+              </option>
+            ))}
+          </select>{" "}
+        </Field>{" "}
       </div>
-      {pricingType === 'fixed' && (
+      {pricingType === "fixed" && (
         <Field label="Base price ($)">
+          {" "}
           <input
             className={inputChrome}
             type="number"
@@ -692,42 +1066,68 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
             min="0"
             value={basePrice}
             onChange={(e) => setBasePrice(e.target.value)}
-          />
+          />{" "}
         </Field>
       )}
       <label className="flex items-center gap-2" style={{ fontSize: 13 }}>
-        <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} />
-        <span className="text-ink-primary">Active</span>
+        {" "}
+        <input
+          type="checkbox"
+          checked={isActive}
+          onChange={(e) => setIsActive(e.target.checked)}
+        />{" "}
+        <span className="text-ink-primary">Active</span>{" "}
       </label>
-      {error && <div className="text-alert-fg" style={{ fontSize: 12 }}>{error}</div>}
+      {error && (
+        <div className="text-alert-fg" style={{ fontSize: 12 }}>
+          {error}
+        </div>
+      )}
       <div className="flex gap-2 justify-end pt-1">
         {isArchived && (
-          <button type="button" onClick={restore} disabled={saving} className="bg-white border-hairline border-zinc-300 text-ink-primary rounded-sm u-focus-ring" style={{ padding: '8px 14px', fontSize: 13 }}>
+          <button
+            type="button"
+            onClick={restore}
+            disabled={saving}
+            className="bg-white border-hairline border-zinc-300 text-ink-primary rounded-sm u-focus-ring"
+            style={{ padding: "8px 14px", fontSize: 13 }}
+          >
             Restore
           </button>
         )}
-        <button type="button" onClick={onCancel} disabled={saving} className="bg-white border-hairline border-zinc-300 text-ink-primary rounded-sm u-focus-ring" style={{ padding: '8px 14px', fontSize: 13 }}>
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={saving}
+          className="bg-white border-hairline border-zinc-300 text-ink-primary rounded-sm u-focus-ring"
+          style={{ padding: "8px 14px", fontSize: 13 }}
+        >
           Cancel
-        </button>
-        <button type="submit" disabled={saving} className="bg-zinc-900 text-white rounded-sm u-focus-ring" style={{ padding: '8px 14px', fontSize: 13, fontWeight: 500 }}>
-          {saving ? 'Saving…' : isNew ? 'Create' : 'Save'}
-        </button>
-      </div>
+        </button>{" "}
+        <button
+          type="submit"
+          disabled={saving}
+          className="bg-zinc-900 text-white rounded-sm u-focus-ring"
+          style={{ padding: "8px 14px", fontSize: 13, fontWeight: 500 }}
+        >
+          {saving ? "Saving…" : isNew ? "Create" : "Save"}
+        </button>{" "}
+      </div>{" "}
     </form>
   );
 }
 
 // ── Root mobile component ───────────────────────────────────────────────
-export default function MobileServiceLibrary({ initialView = 'menu' }) {
+export default function MobileServiceLibrary({ initialView = "menu" }) {
   const [view, setView] = useState(initialView); // 'menu' | 'categories' | 'discounts' | 'services'
-  const onBack = () => setView('menu');
+  const onBack = () => setView("menu");
 
   useEffect(() => {
-    setView(initialView || 'menu');
+    setView(initialView || "menu");
   }, [initialView]);
 
-  if (view === 'categories') return <CategoriesView onBack={onBack} />;
-  if (view === 'discounts') return <DiscountsView onBack={onBack} />;
-  if (view === 'services') return <AllServicesView onBack={onBack} />;
+  if (view === "categories") return <CategoriesView onBack={onBack} />;
+  if (view === "discounts") return <DiscountsView onBack={onBack} />;
+  if (view === "services") return <AllServicesView onBack={onBack} />;
   return <MenuView onNav={setView} />;
 }

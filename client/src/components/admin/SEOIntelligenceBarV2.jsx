@@ -7,56 +7,111 @@
  * decides what onRefresh does).
  */
 
-import { useCallback } from 'react';
-import IntelligenceBarShell from './IntelligenceBarShell';
+import { useCallback } from "react";
+import IntelligenceBarShell from "./IntelligenceBarShell";
 
 const FALLBACK_ACTIONS = {
   seo: [
-    { id: 'health', label: 'Fleet Health', prompt: 'Check all 15 sites for issues' },
-    { id: 'traffic', label: 'Top Sites', prompt: 'Rank sites by traffic' },
-    { id: 'drops', label: 'Drops', prompt: 'Any ranking drops this week?' },
-    { id: 'queries', label: 'Top Queries', prompt: 'Top 20 non-branded keywords' },
+    {
+      id: "health",
+      label: "Fleet Health",
+      prompt: "Check all 15 sites for issues",
+    },
+    { id: "traffic", label: "Top Sites", prompt: "Rank sites by traffic" },
+    { id: "drops", label: "Drops", prompt: "Any ranking drops this week?" },
+    {
+      id: "queries",
+      label: "Top Queries",
+      prompt: "Top 20 non-branded keywords",
+    },
   ],
   blog: [
-    { id: 'pipeline', label: 'Pipeline', prompt: "What's in the content pipeline?" },
-    { id: 'perf', label: 'Top Posts', prompt: 'Which blog posts perform best?' },
+    {
+      id: "pipeline",
+      label: "Pipeline",
+      prompt: "What's in the content pipeline?",
+    },
+    {
+      id: "perf",
+      label: "Top Posts",
+      prompt: "Which blog posts perform best?",
+    },
   ],
   reviews: [
-    { id: 'stats', label: 'Review Stats', prompt: 'How are our Google reviews?' },
-    { id: 'unresponded', label: 'Needs Reply', prompt: 'Any reviews needing a reply?' },
-    { id: 'trends', label: 'Trends', prompt: 'Review trend over 6 months' },
+    {
+      id: "stats",
+      label: "Review Stats",
+      prompt: "How are our Google reviews?",
+    },
+    {
+      id: "unresponded",
+      label: "Needs Reply",
+      prompt: "Any reviews needing a reply?",
+    },
+    { id: "trends", label: "Trends", prompt: "Review trend over 6 months" },
   ],
   comms: [
-    { id: 'unanswered', label: 'Unanswered', prompt: 'Any unanswered messages?' },
-    { id: 'today', label: "Today's Activity", prompt: 'What happened today?' },
-    { id: 'calls', label: 'Calls', prompt: 'Recent calls today' },
+    {
+      id: "unanswered",
+      label: "Unanswered",
+      prompt: "Any unanswered messages?",
+    },
+    { id: "today", label: "Today's Activity", prompt: "What happened today?" },
+    { id: "calls", label: "Calls", prompt: "Recent calls today" },
   ],
   tax: [
-    { id: 'overview', label: 'Tax Overview', prompt: 'Give me the full tax picture' },
-    { id: 'quarterly', label: 'Quarterly Est.', prompt: 'Estimated quarterly tax payment' },
-    { id: 'expenses', label: 'Expenses', prompt: 'Expenses by category this year' },
+    {
+      id: "overview",
+      label: "Tax Overview",
+      prompt: "Give me the full tax picture",
+    },
+    {
+      id: "quarterly",
+      label: "Quarterly Est.",
+      prompt: "Estimated quarterly tax payment",
+    },
+    {
+      id: "expenses",
+      label: "Expenses",
+      prompt: "Expenses by category this year",
+    },
   ],
   leads: [
-    { id: 'overview', label: 'Pipeline', prompt: 'How does the pipeline look?' },
-    { id: 'stale', label: 'Stale Leads', prompt: 'Leads not contacted in 48 hours' },
-    { id: 'funnel', label: 'Funnel', prompt: 'Show me the funnel' },
+    {
+      id: "overview",
+      label: "Pipeline",
+      prompt: "How does the pipeline look?",
+    },
+    {
+      id: "stale",
+      label: "Stale Leads",
+      prompt: "Leads not contacted in 48 hours",
+    },
+    { id: "funnel", label: "Funnel", prompt: "Show me the funnel" },
   ],
   banking: [
-    { id: 'balance', label: 'Balance', prompt: "What's my Stripe balance?" },
-    { id: 'payouts', label: 'Payouts', prompt: 'Recent payouts to the bank' },
-    { id: 'cash_flow', label: 'Cash Flow', prompt: 'Cash flow this month' },
+    { id: "balance", label: "Balance", prompt: "What's my Stripe balance?" },
+    { id: "payouts", label: "Payouts", prompt: "Recent payouts to the bank" },
+    { id: "cash_flow", label: "Cash Flow", prompt: "Cash flow this month" },
   ],
   email: [
-    { id: 'summary', label: 'Inbox', prompt: 'Inbox summary' },
-    { id: 'unread', label: 'Unread', prompt: 'Unread emails' },
+    { id: "summary", label: "Inbox", prompt: "Inbox summary" },
+    { id: "unread", label: "Unread", prompt: "Unread emails" },
   ],
 };
 
-export default function SEOIntelligenceBarV2({ context = 'seo', activeDomain, onRefresh }) {
-  const buildPageData = useCallback(() => ({
-    page: context,
-    active_domain: activeDomain || null,
-  }), [context, activeDomain]);
+export default function SEOIntelligenceBarV2({
+  context = "seo",
+  activeDomain,
+  onRefresh,
+}) {
+  const buildPageData = useCallback(
+    () => ({
+      page: context,
+      active_domain: activeDomain || null,
+    }),
+    [context, activeDomain],
+  );
 
   const handleAfterSubmit = useCallback(() => {
     if (onRefresh) onRefresh();

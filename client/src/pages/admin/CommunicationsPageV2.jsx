@@ -53,36 +53,50 @@
 //   missing signature verification or path that creates customers
 //   from arbitrary inbound numbers without rate-limiting.
 import React, {
-  useState, useEffect, useCallback, useMemo, useRef,
-} from 'react';
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  useRef,
+} from "react";
 import {
-  ALL_NUMBERS,
-  NUMBER_LABEL_MAP,
-} from './CommunicationsPage';
-import CallLogTabV2 from './CallLogTabV2';
-import { SmsTemplatesTabV2, CSRCoachTabV2 } from './CommunicationsTabsV2';
-import PushSettingsV2 from '../../components/admin/PushSettingsV2';
-import CallBridgeLink from '../../components/admin/CallBridgeLink';
-import Customer360ProfileV2 from '../../components/admin/Customer360ProfileV2';
-import { Badge, Button, Card, cn } from '../../components/ui';
+  Bell,
+  FileText,
+  Headphones,
+  MessageSquare,
+  PhoneCall,
+} from "lucide-react";
+import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
+import CallLogTabV2 from "./CallLogTabV2";
+import { SmsTemplatesTabV2, CSRCoachTabV2 } from "./CommunicationsTabsV2";
+import PushSettingsV2 from "../../components/admin/PushSettingsV2";
+import CallBridgeLink from "../../components/admin/CallBridgeLink";
+import Customer360ProfileV2 from "../../components/admin/Customer360ProfileV2";
+import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import { Badge, Button, Card, cn } from "../../components/ui";
 
-const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
-      Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
-      'Content-Type': 'application/json',
+      Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+      "Content-Type": "application/json",
     },
     ...options,
   }).then(async (r) => {
     if (!r.ok) {
-      let serverMsg = '';
+      let serverMsg = "";
       try {
         const body = await r.clone().json();
-        serverMsg = body?.error || body?.reason || body?.message || body?.code || '';
+        serverMsg =
+          body?.error || body?.reason || body?.message || body?.code || "";
       } catch {
-        try { serverMsg = (await r.text()).trim(); } catch { /* ignore */ }
+        try {
+          serverMsg = (await r.text()).trim();
+        } catch {
+          /* ignore */
+        }
       }
       const err = new Error(serverMsg || `HTTP ${r.status}`);
       err.status = r.status;
@@ -94,87 +108,119 @@ function adminFetch(path, options = {}) {
 }
 
 function timeAgo(dateStr) {
-  if (!dateStr) return '';
+  if (!dateStr) return "";
   const d = new Date(dateStr);
   const mins = Math.floor((Date.now() - d) / 60000);
-  if (mins < 1) return 'just now';
+  if (mins < 1) return "just now";
   if (mins < 60) return `${mins}m ago`;
   const hrs = Math.floor(mins / 60);
   if (hrs < 24) return `${hrs}h ago`;
   const days = Math.floor(hrs / 24);
-  if (days === 1) return 'yesterday';
+  if (days === 1) return "yesterday";
   if (days < 30) return `${days}d ago`;
   return d.toLocaleDateString();
 }
 
 function formatTimestamp(dateStr) {
-  if (!dateStr) return '';
+  if (!dateStr) return "";
   const d = new Date(dateStr);
   const now = new Date();
   const isToday = d.toDateString() === now.toDateString();
-  const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
   const isYesterday = d.toDateString() === yesterday.toDateString();
-  if (isToday) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  if (isYesterday) return 'Yesterday ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (isToday)
+    return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (isYesterday)
+    return (
+      "Yesterday " +
+      d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+    );
+  return (
+    d.toLocaleDateString([], { month: "short", day: "numeric" }) +
+    " " +
+    d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+  );
 }
 
 function getInitials(nameOrPhone) {
-  if (!nameOrPhone) return '?';
+  if (!nameOrPhone) return "?";
   const trimmed = String(nameOrPhone).trim();
-  if (!trimmed) return '?';
+  if (!trimmed) return "?";
   const hasLetters = /\p{L}/u.test(trimmed);
   if (!hasLetters) {
-    const digits = trimmed.replace(/\D/g, '');
-    return digits.slice(-2) || '#';
+    const digits = trimmed.replace(/\D/g, "");
+    return digits.slice(-2) || "#";
   }
   const parts = trimmed.split(/\s+/).filter(Boolean);
-  const first = parts[0]?.[0] || '';
-  const last = parts.length > 1 ? parts[parts.length - 1][0] : '';
+  const first = parts[0]?.[0] || "";
+  const last = parts.length > 1 ? parts[parts.length - 1][0] : "";
   return (first + last).toUpperCase() || trimmed[0].toUpperCase();
 }
 
 function getCustomerOptionName(customer) {
-  if (!customer) return 'Customer';
-  const first = customer.firstName || customer.first_name || '';
-  const last = customer.lastName || customer.last_name || '';
-  return [first, last].filter(Boolean).join(' ') || customer.name || customer.phone || 'Customer';
+  if (!customer) return "Customer";
+  const first = customer.firstName || customer.first_name || "";
+  const last = customer.lastName || customer.last_name || "";
+  return (
+    [first, last].filter(Boolean).join(" ") ||
+    customer.name ||
+    customer.phone ||
+    "Customer"
+  );
 }
 
 const TABS = [
-  { key: 'sms', label: 'SMS' },
-  { key: 'calls', label: 'Calls' },
-  { key: 'templates', label: 'Templates', desktopOnly: true },
-  { key: 'csr', label: 'CSR Coach', desktopOnly: true },
-  { key: 'notifications', label: 'Notifications', desktopOnly: true },
+  { key: "sms", label: "SMS", Icon: MessageSquare },
+  { key: "calls", label: "Calls", Icon: PhoneCall },
+  {
+    key: "templates",
+    label: "Templates",
+    Icon: FileText,
+    className: "hidden md:inline-flex",
+  },
+  {
+    key: "csr",
+    label: "CSR Coach",
+    Icon: Headphones,
+    className: "hidden md:inline-flex",
+  },
+  {
+    key: "notifications",
+    label: "Notifications",
+    Icon: Bell,
+    className: "hidden md:inline-flex",
+  },
 ];
 
 // ── V2 helpers ────────────────────────────────────────────────
 
 function StatCardV2({ label, value, sub, active, alert, onClick }) {
-  const clickable = typeof onClick === 'function';
+  const clickable = typeof onClick === "function";
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={!clickable}
       className={cn(
-        'flex-1 min-w-[140px] bg-white border-hairline rounded-md p-3.5 text-left',
-        'transition-colors',
-        clickable && 'hover:bg-zinc-50 cursor-pointer',
-        active ? 'border-zinc-900' : 'border-zinc-200',
-        !clickable && 'cursor-default',
+        "flex-1 min-w-[140px] bg-white border-hairline rounded-md p-3.5 text-left",
+        "transition-colors",
+        clickable && "hover:bg-zinc-50 cursor-pointer",
+        active ? "border-zinc-900" : "border-zinc-200",
+        !clickable && "cursor-default",
       )}
     >
+      {" "}
       <div className="flex items-center gap-1.5 mb-1">
+        {" "}
         <span className="text-11 uppercase tracking-label text-ink-tertiary">
           {label}
-        </span>
-      </div>
+        </span>{" "}
+      </div>{" "}
       <div
         className={cn(
-          'text-22 font-medium u-nums',
-          alert ? 'text-alert-fg' : 'text-zinc-900',
+          "text-22 font-medium u-nums",
+          alert ? "text-alert-fg" : "text-zinc-900",
         )}
       >
         {value}
@@ -186,32 +232,32 @@ function StatCardV2({ label, value, sub, active, alert, onClick }) {
 
 function StatusBadgeV2({ status }) {
   if (!status) return null;
-  const strong = status === 'delivered' || status === 'received';
-  const alert = status === 'failed';
+  const strong = status === "delivered" || status === "received";
+  const alert = status === "failed";
   return (
-    <Badge tone={alert ? 'alert' : strong ? 'strong' : 'neutral'}>
+    <Badge tone={alert ? "alert" : strong ? "strong" : "neutral"}>
       {status}
     </Badge>
   );
 }
 
 function SmsDeliveryReceiptV2({ status, readAt }) {
-  const normalized = String(status || '').toLowerCase();
+  const normalized = String(status || "").toLowerCase();
   if (readAt) {
     return `Read internally ${formatTimestamp(readAt)}`;
   }
   if (!normalized) return null;
-  if (normalized === 'delivered') return 'Delivered';
-  if (normalized === 'sent') return 'Sent to carrier';
-  if (normalized === 'queued' || normalized === 'accepted') return 'Queued';
-  if (normalized === 'undelivered') return 'Undelivered';
-  if (normalized === 'failed') return 'Failed';
-  return normalized.replace(/_/g, ' ');
+  if (normalized === "delivered") return "Delivered";
+  if (normalized === "sent") return "Sent to carrier";
+  if (normalized === "queued" || normalized === "accepted") return "Queued";
+  if (normalized === "undelivered") return "Undelivered";
+  if (normalized === "failed") return "Failed";
+  return normalized.replace(/_/g, " ");
 }
 
 function TypeBadgeV2({ type }) {
   if (!type) return null;
-  return <Badge tone="neutral">{type.replace(/_/g, ' ')}</Badge>;
+  return <Badge tone="neutral">{type.replace(/_/g, " ")}</Badge>;
 }
 
 function MessageMediaV2({ media = [], inverted = false }) {
@@ -227,16 +273,19 @@ function MessageMediaV2({ media = [], inverted = false }) {
           rel="noreferrer"
           onClick={(e) => e.stopPropagation()}
           className={cn(
-            'block overflow-hidden rounded-sm border-hairline u-focus-ring',
-            inverted ? 'border-white/30 bg-white/10' : 'border-zinc-300 bg-white',
+            "block overflow-hidden rounded-sm border-hairline u-focus-ring",
+            inverted
+              ? "border-white/30 bg-white/10"
+              : "border-zinc-300 bg-white",
           )}
         >
+          {" "}
           <img
             src={item.url}
             alt={item.fileName || `SMS attachment ${idx + 1}`}
             className="h-28 w-full object-cover"
             loading="lazy"
-          />
+          />{" "}
         </a>
       ))}
     </div>
@@ -252,63 +301,83 @@ function SmsLogItemV2({ msg: m, onReply }) {
       className="py-2.5 border-b border-hairline border-zinc-200 cursor-pointer"
       onClick={() => setExpanded(!expanded)}
     >
+      {" "}
       <div className="flex items-start gap-2.5">
+        {" "}
         <span
           className={cn(
-            'text-14 leading-5 flex-shrink-0 w-5 text-center',
-            m.direction === 'outbound' ? 'text-zinc-900' : 'text-ink-secondary',
+            "text-14 leading-5 flex-shrink-0 w-5 text-center",
+            m.direction === "outbound" ? "text-zinc-900" : "text-ink-secondary",
           )}
           aria-hidden
         >
-          {m.direction === 'outbound' ? '↑' : '↓'}
-        </span>
+          {m.direction === "outbound" ? "↑" : "↓"}
+        </span>{" "}
         <div className="flex-1 min-w-0">
+          {" "}
           <div className="flex items-center gap-2 flex-wrap mb-0.5">
+            {" "}
             <span className="font-mono text-12 text-ink-secondary u-nums">
               {m.from} → {m.to}
             </span>
             {m.customerName && (
               <span className="text-11 text-zinc-900">({m.customerName})</span>
             )}
-          </div>
+          </div>{" "}
           <div
             className={cn(
-              'text-13 leading-normal break-words',
-              expanded ? 'whitespace-pre-wrap text-zinc-900' : 'text-ink-secondary',
+              "text-13 leading-normal break-words",
+              expanded
+                ? "whitespace-pre-wrap text-zinc-900"
+                : "text-ink-secondary",
             )}
           >
             {m.body
-              ? expanded ? m.body : isLong ? m.body.slice(0, 80) + '…' : m.body
-              : hasMedia ? `${m.media.length} photo${m.media.length === 1 ? '' : 's'}` : ''}
+              ? expanded
+                ? m.body
+                : isLong
+                  ? m.body.slice(0, 80) + "…"
+                  : m.body
+              : hasMedia
+                ? `${m.media.length} photo${m.media.length === 1 ? "" : "s"}`
+                : ""}
           </div>
           {expanded && <MessageMediaV2 media={m.media} />}
-        </div>
+        </div>{" "}
         <div className="flex flex-col items-end gap-1 flex-shrink-0">
+          {" "}
           <div className="flex gap-1">
-            <StatusBadgeV2 status={m.status} />
-            <TypeBadgeV2 type={m.messageType} />
-          </div>
+            {" "}
+            <StatusBadgeV2 status={m.status} />{" "}
+            <TypeBadgeV2 type={m.messageType} />{" "}
+          </div>{" "}
           <span className="font-mono text-11 text-ink-tertiary">
             {timeAgo(m.createdAt)}
-          </span>
-        </div>
+          </span>{" "}
+        </div>{" "}
       </div>
       {expanded && (
         <div className="mt-2 ml-7 flex gap-2">
-          {m.direction === 'inbound' && (
+          {m.direction === "inbound" && (
             <Button
               size="sm"
               variant="primary"
-              onClick={(e) => { e.stopPropagation(); onReply(m.from, m.to, m.customerId); }}
+              onClick={(e) => {
+                e.stopPropagation();
+                onReply(m.from, m.to, m.customerId);
+              }}
             >
               Reply
             </Button>
           )}
-          {m.direction === 'outbound' && (
+          {m.direction === "outbound" && (
             <Button
               size="sm"
               variant="primary"
-              onClick={(e) => { e.stopPropagation(); onReply(m.to, m.from, m.customerId); }}
+              onClick={(e) => {
+                e.stopPropagation();
+                onReply(m.to, m.from, m.customerId);
+              }}
             >
               Send Again
             </Button>
@@ -318,25 +387,35 @@ function SmsLogItemV2({ msg: m, onReply }) {
             variant="secondary"
             onClick={(e) => {
               e.stopPropagation();
-              navigator.clipboard.writeText(m.body || '');
+              navigator.clipboard.writeText(m.body || "");
             }}
           >
             Copy
-          </Button>
+          </Button>{" "}
         </div>
       )}
     </div>
   );
 }
 
-function ConversationViewV2({ thread, messages, onReply, onBack, onOpenProfile }) {
+function ConversationViewV2({
+  thread,
+  messages,
+  onReply,
+  onBack,
+  onOpenProfile,
+}) {
   const contactPhone = thread.contactPhone;
   const contactName = thread.customerName || contactPhone;
   const canOpenProfile = !!(thread.customerName && thread.customerId);
   return (
     <div className="flex flex-col h-full">
+      {" "}
       <div className="flex items-center gap-3 mb-4 pb-3 border-b border-hairline border-zinc-200">
-        <Button size="sm" variant="secondary" onClick={onBack}>Back</Button>
+        {" "}
+        <Button size="sm" variant="secondary" onClick={onBack}>
+          Back
+        </Button>{" "}
         <div className="flex-1 min-w-0">
           {canOpenProfile ? (
             <button
@@ -348,55 +427,63 @@ function ConversationViewV2({ thread, messages, onReply, onBack, onOpenProfile }
               {contactName}
             </button>
           ) : (
-            <div className="text-14 font-medium text-zinc-900 truncate">{contactName}</div>
+            <div className="text-14 font-medium text-zinc-900 truncate">
+              {contactName}
+            </div>
           )}
           <CallBridgeLink
             phone={contactPhone}
-            customerName={thread.customerName || ''}
+            customerName={thread.customerName || ""}
             className="font-mono text-12 text-ink-secondary underline"
-          />
-        </div>
+          />{" "}
+        </div>{" "}
         <Button
           size="sm"
           variant="primary"
-          onClick={() => onReply(contactPhone, thread.ourNumber, thread.customerId)}
+          onClick={() =>
+            onReply(contactPhone, thread.ourNumber, thread.customerId)
+          }
         >
           Reply
-        </Button>
-      </div>
+        </Button>{" "}
+      </div>{" "}
       <div className="flex-1 md:max-h-[500px] md:overflow-y-auto flex flex-col gap-2">
         {messages.map((m) => {
-          const isOut = m.direction === 'outbound';
+          const isOut = m.direction === "outbound";
           const receipt = isOut
             ? SmsDeliveryReceiptV2({ status: m.status })
             : SmsDeliveryReceiptV2({ readAt: m.readAt });
           return (
             <div
               key={m.id}
-              className={cn('flex', isOut ? 'justify-end' : 'justify-start')}
+              className={cn("flex", isOut ? "justify-end" : "justify-start")}
             >
+              {" "}
               <div
                 className={cn(
-                  'max-w-[75%] px-3.5 py-2.5 rounded-md border-hairline',
+                  "max-w-[75%] px-3.5 py-2.5 rounded-md border-hairline",
                   isOut
-                    ? 'bg-zinc-900 text-white border-zinc-900 rounded-br-xs'
-                    : 'bg-zinc-50 text-zinc-900 border-zinc-200 rounded-bl-xs',
+                    ? "bg-zinc-900 text-white border-zinc-900 rounded-br-xs"
+                    : "bg-zinc-50 text-zinc-900 border-zinc-200 rounded-bl-xs",
                 )}
               >
+                {" "}
                 <div className="text-13 leading-normal whitespace-pre-wrap break-words">
-                  {m.body || (Array.isArray(m.media) && m.media.length ? 'Photo' : '')}
-                </div>
-                <MessageMediaV2 media={m.media} inverted={isOut} />
+                  {m.body ||
+                    (Array.isArray(m.media) && m.media.length ? "Photo" : "")}
+                </div>{" "}
+                <MessageMediaV2 media={m.media} inverted={isOut} />{" "}
                 <div
                   className={cn(
-                    'flex items-center gap-1.5 mt-1',
-                    isOut ? 'justify-end' : 'justify-start',
+                    "flex items-center gap-1.5 mt-1",
+                    isOut ? "justify-end" : "justify-start",
                   )}
                 >
+                  {" "}
                   <span
                     className={cn(
-                      'text-11',
-                      isOut ? 'text-white/70' : 'text-ink-tertiary',
+                      "text-11",
+                      isOut ? "text-white/70" : "text-ink-tertiary",
                     )}
                   >
                     {formatTimestamp(m.createdAt)}
@@ -404,33 +491,33 @@ function ConversationViewV2({ thread, messages, onReply, onBack, onOpenProfile }
                   {m.messageType && (
                     <span
                       className={cn(
-                        'text-11 uppercase tracking-label',
-                        isOut ? 'text-white/70' : 'text-ink-tertiary',
+                        "text-11 uppercase tracking-label",
+                        isOut ? "text-white/70" : "text-ink-tertiary",
                       )}
                     >
-                      {m.messageType.replace(/_/g, ' ')}
+                      {m.messageType.replace(/_/g, " ")}
                     </span>
                   )}
                   {receipt && (
                     <span
                       className={cn(
-                        'text-11',
+                        "text-11",
                         isOut
-                          ? m.status === 'failed' || m.status === 'undelivered'
-                            ? 'text-red-200'
-                            : 'text-white/70'
-                          : 'text-ink-tertiary',
+                          ? m.status === "failed" || m.status === "undelivered"
+                            ? "text-red-200"
+                            : "text-white/70"
+                          : "text-ink-tertiary",
                       )}
                     >
                       {receipt}
                     </span>
                   )}
-                </div>
-              </div>
+                </div>{" "}
+              </div>{" "}
             </div>
           );
         })}
-      </div>
+      </div>{" "}
     </div>
   );
 }
@@ -441,18 +528,18 @@ function SmsTab() {
   const [messages, setMessages] = useState([]);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [smsFilter, setSmsFilter] = useState('all');
+  const [smsFilter, setSmsFilter] = useState("all");
 
   const [aiAutoReply, setAiAutoReply] = useState(false);
   const [togglingAi, setTogglingAi] = useState(false);
 
   // Compose
-  const [toNumber, setToNumber] = useState('');
-  const [toSearch, setToSearch] = useState('');
+  const [toNumber, setToNumber] = useState("");
+  const [toSearch, setToSearch] = useState("");
   const [toResults, setToResults] = useState([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState(null);
-  const [fromNumber, setFromNumber] = useState('+19413187612');
-  const [msgBody, setMsgBody] = useState('');
+  const [fromNumber, setFromNumber] = useState("+19413187612");
+  const [msgBody, setMsgBody] = useState("");
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState(null);
   const [aiDrafting, setAiDrafting] = useState(false);
@@ -467,25 +554,25 @@ function SmsTab() {
   const [showAttachSheet, setShowAttachSheet] = useState(false);
 
   // Filters
-  const [dirFilter, setDirFilter] = useState('all');
-  const [typeFilter, setTypeFilter] = useState('all');
+  const [dirFilter, setDirFilter] = useState("all");
+  const [typeFilter, setTypeFilter] = useState("all");
 
   // Threading
-  const [smsView, setSmsView] = useState('threads');
+  const [smsView, setSmsView] = useState("threads");
   const [activeThread, setActiveThread] = useState(null);
-  const [smsSearch, setSmsSearch] = useState('');
+  const [smsSearch, setSmsSearch] = useState("");
   // PR 4 — status filter chips, reply-from lock.
-  const [statusFilter, setStatusFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState("all");
   const [threadLock, setThreadLock] = useState(null);
   const [selected360Id, setSelected360Id] = useState(null);
 
-  const loadData = useCallback((search = '') => {
+  const loadData = useCallback((search = "") => {
     const logUrl = search
       ? `/admin/communications/log?search=${encodeURIComponent(search)}&limit=1000`
-      : '/admin/communications/log';
+      : "/admin/communications/log";
     Promise.all([
       adminFetch(logUrl).catch(() => ({ messages: [] })),
-      adminFetch('/admin/communications/stats').catch(() => null),
+      adminFetch("/admin/communications/stats").catch(() => null),
     ]).then(([logData, statsData]) => {
       setMessages(logData.messages || []);
       setStats(statsData);
@@ -493,57 +580,76 @@ function SmsTab() {
     });
   }, []);
 
-  useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
   useEffect(() => {
-    const t = setTimeout(() => { loadData(smsSearch.trim()); }, 300);
+    const t = setTimeout(() => {
+      loadData(smsSearch.trim());
+    }, 300);
     return () => clearTimeout(t);
   }, [smsSearch, loadData]);
 
-  const markMessagesRead = useCallback(async (thread) => {
-    const threadMessages = Array.isArray(thread?.messages)
-      ? thread.messages
-      : Array.isArray(thread?.messagesList)
-        ? thread.messagesList
-        : [];
-    const unreadIds = threadMessages
-      .filter((m) => m.direction === 'inbound' && !m.isRead)
-      .map((m) => m.id)
-      .filter(Boolean);
-    const conversationIds = [...new Set(threadMessages
-      .map((m) => m.conversationId)
-      .filter(Boolean))];
-    const readBefore = thread?.lastTimestamp || threadMessages.reduce((latest, m) => (
-      !latest || new Date(m.createdAt) > new Date(latest) ? m.createdAt : latest
-    ), null);
-    if (!unreadIds.length && !conversationIds.length) return;
+  const markMessagesRead = useCallback(
+    async (thread) => {
+      const threadMessages = Array.isArray(thread?.messages)
+        ? thread.messages
+        : Array.isArray(thread?.messagesList)
+          ? thread.messagesList
+          : [];
+      const unreadIds = threadMessages
+        .filter((m) => m.direction === "inbound" && !m.isRead)
+        .map((m) => m.id)
+        .filter(Boolean);
+      const conversationIds = [
+        ...new Set(threadMessages.map((m) => m.conversationId).filter(Boolean)),
+      ];
+      const readBefore =
+        thread?.lastTimestamp ||
+        threadMessages.reduce(
+          (latest, m) =>
+            !latest || new Date(m.createdAt) > new Date(latest)
+              ? m.createdAt
+              : latest,
+          null,
+        );
+      if (!unreadIds.length && !conversationIds.length) return;
 
-    const readAt = new Date().toISOString();
-    setMessages((prev) => prev.map((m) => (
-      unreadIds.includes(m.id) ? { ...m, isRead: true, readAt } : m
-    )));
-    setActiveThread((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        messages: prev.messages.map((m) => (
-          unreadIds.includes(m.id) ? { ...m, isRead: true, readAt } : m
-        )),
-      };
-    });
-
-    try {
-      await adminFetch('/admin/communications/messages/read', {
-        method: 'POST',
-        body: JSON.stringify({ messageIds: unreadIds, conversationIds, readBefore }),
+      const readAt = new Date().toISOString();
+      setMessages((prev) =>
+        prev.map((m) =>
+          unreadIds.includes(m.id) ? { ...m, isRead: true, readAt } : m,
+        ),
+      );
+      setActiveThread((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          messages: prev.messages.map((m) =>
+            unreadIds.includes(m.id) ? { ...m, isRead: true, readAt } : m,
+          ),
+        };
       });
-    } catch {
-      loadData(smsSearch.trim());
-    }
-  }, [loadData, smsSearch]);
+
+      try {
+        await adminFetch("/admin/communications/messages/read", {
+          method: "POST",
+          body: JSON.stringify({
+            messageIds: unreadIds,
+            conversationIds,
+            readBefore,
+          }),
+        });
+      } catch {
+        loadData(smsSearch.trim());
+      }
+    },
+    [loadData, smsSearch],
+  );
 
   useEffect(() => {
-    adminFetch('/admin/communications/ai-auto-reply-status')
+    adminFetch("/admin/communications/ai-auto-reply-status")
       .then((d) => setAiAutoReply(d.enabled))
       .catch(() => {});
   }, []);
@@ -551,10 +657,10 @@ function SmsTab() {
   // Prefill compose "To" from ?phone= deep-link (Estimates/Customers SMS button)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const phone = params.get('phone');
+    const phone = params.get("phone");
     if (phone) {
       setToNumber(phone);
-      setToSearch('');
+      setToSearch("");
       setSelectedCustomerId(null);
     }
   }, []);
@@ -562,37 +668,44 @@ function SmsTab() {
   const toggleAiAutoReply = async () => {
     setTogglingAi(true);
     try {
-      const r = await adminFetch('/admin/communications/ai-auto-reply', {
-        method: 'POST',
+      const r = await adminFetch("/admin/communications/ai-auto-reply", {
+        method: "POST",
         body: JSON.stringify({ enabled: !aiAutoReply }),
       });
       setAiAutoReply(r.enabled);
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     setTogglingAi(false);
   };
 
   const handleSend = async () => {
-    if (!toNumber.trim() || (!msgBody.trim() && attachments.length === 0)) return;
+    if (!toNumber.trim() || (!msgBody.trim() && attachments.length === 0))
+      return;
     setSending(true);
     setSendResult(null);
     try {
-      await adminFetch('/admin/communications/sms', {
-        method: 'POST',
+      await adminFetch("/admin/communications/sms", {
+        method: "POST",
         body: JSON.stringify({
           to: toNumber.trim(),
           body: msgBody.trim(),
           customerId: selectedCustomerId || undefined,
-          messageType: 'manual',
+          messageType: "manual",
           fromNumber,
-          mediaUrls: attachments.length > 0 ? attachments.map((a) => a.url) : undefined,
-          mediaAttachments: attachments.length > 0 ? attachments.map(({ previewUrl, ...a }) => a) : undefined,
+          mediaUrls:
+            attachments.length > 0 ? attachments.map((a) => a.url) : undefined,
+          mediaAttachments:
+            attachments.length > 0
+              ? attachments.map(({ previewUrl, ...a }) => a)
+              : undefined,
         }),
       });
-      setSendResult({ ok: true, text: 'Message sent.' });
-      setToNumber('');
-      setToSearch('');
+      setSendResult({ ok: true, text: "Message sent." });
+      setToNumber("");
+      setToSearch("");
       setSelectedCustomerId(null);
-      setMsgBody('');
+      setMsgBody("");
       // Release blob preview URLs before clearing so we don't leak them.
       for (const a of attachments) {
         if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
@@ -607,23 +720,25 @@ function SmsTab() {
   };
 
   // Upload one-or-more image files → S3 → mediaUrls. Called from the hidden
-  // <input type="file"> triggered by the + button.
+  // <input type="file">triggered by the + button.
   const handleUpload = async (fileList) => {
     const files = Array.from(fileList || []);
     if (files.length === 0) return;
     const remaining = 5 - attachments.length;
     if (remaining <= 0) {
-      alert('Max 5 attachments per message');
+      alert("Max 5 attachments per message");
       return;
     }
     const queue = files.slice(0, remaining);
     setUploading(true);
     try {
       const fd = new FormData();
-      for (const f of queue) fd.append('attachments', f);
-      const token = localStorage.getItem('waves_admin_token');
+      for (const f of queue) fd.append("attachments", f);
+      const token = localStorage.getItem("waves_admin_token");
       const r = await fetch(`${API_BASE}/admin/communications/attach`, {
-        method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd,
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: fd,
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
@@ -655,11 +770,14 @@ function SmsTab() {
   // the message field. Falls back to an alert on browsers without support
   // (Firefox). iOS Safari ships `webkitSpeechRecognition`.
   const toggleDictation = () => {
-    const SR = typeof window !== 'undefined'
-      ? window.SpeechRecognition || window.webkitSpeechRecognition
-      : null;
+    const SR =
+      typeof window !== "undefined"
+        ? window.SpeechRecognition || window.webkitSpeechRecognition
+        : null;
     if (!SR) {
-      alert('Voice dictation isn\'t supported in this browser. Use the keyboard mic on your phone, or try Chrome/Safari.');
+      alert(
+        "Voice dictation isn't supported in this browser. Use the keyboard mic on your phone, or try Chrome/Safari.",
+      );
       return;
     }
     if (listening && recognitionRef.current) {
@@ -669,16 +787,17 @@ function SmsTab() {
     const rec = new SR();
     rec.continuous = true;
     rec.interimResults = false;
-    rec.lang = 'en-US';
+    rec.lang = "en-US";
     rec.onresult = (ev) => {
-      let append = '';
+      let append = "";
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
         if (ev.results[i].isFinal) append += ev.results[i][0].transcript;
       }
-      if (append) setMsgBody((b) => (b ? `${b} ${append.trim()}` : append.trim()));
+      if (append)
+        setMsgBody((b) => (b ? `${b} ${append.trim()}` : append.trim()));
     };
     rec.onerror = (e) => {
-      if (e.error !== 'aborted' && e.error !== 'no-speech') {
+      if (e.error !== "aborted" && e.error !== "no-speech") {
         alert(`Dictation error: ${e.error}`);
       }
       setListening(false);
@@ -693,27 +812,28 @@ function SmsTab() {
   };
 
   const handleAiDraft = async () => {
-    if (!toNumber.trim()) { alert('Enter a To number first'); return; }
+    if (!toNumber.trim()) {
+      alert("Enter a To number first");
+      return;
+    }
     setAiDrafting(true);
     try {
       const lastMsg = messages.find(
         (m) =>
-          m.direction === 'inbound' &&
+          m.direction === "inbound" &&
           (m.from === toNumber.trim() ||
-            m.from?.includes(
-              toNumber.trim().replace(/\D/g, '').slice(-10),
-            )),
+            m.from?.includes(toNumber.trim().replace(/\D/g, "").slice(-10))),
       );
-      const d = await adminFetch('/admin/communications/ai-draft', {
-        method: 'POST',
+      const d = await adminFetch("/admin/communications/ai-draft", {
+        method: "POST",
         body: JSON.stringify({
           customerPhone: toNumber.trim(),
-          lastMessage: lastMsg?.body || '',
+          lastMessage: lastMsg?.body || "",
         }),
       });
       if (d.draft) setMsgBody(d.draft.slice(0, 160));
     } catch (e) {
-      alert('AI draft failed: ' + e.message);
+      alert("AI draft failed: " + e.message);
     } finally {
       setAiDrafting(false);
     }
@@ -728,12 +848,14 @@ function SmsTab() {
     ALL_NUMBERS.forEach((g) => g.numbers.forEach((n) => allNums.add(n.number)));
     sorted.forEach((m) => {
       let contactPhone, ourNumber;
-      if (m.direction === 'inbound') {
-        contactPhone = m.from; ourNumber = m.to;
+      if (m.direction === "inbound") {
+        contactPhone = m.from;
+        ourNumber = m.to;
       } else {
-        contactPhone = m.to; ourNumber = m.from;
+        contactPhone = m.to;
+        ourNumber = m.from;
       }
-      const key = contactPhone?.replace(/\D/g, '').slice(-10) || 'unknown';
+      const key = contactPhone?.replace(/\D/g, "").slice(-10) || "unknown";
       if (!threadMap[key]) {
         threadMap[key] = {
           contactPhone,
@@ -752,48 +874,60 @@ function SmsTab() {
       if (m.customerName) thread.customerName = m.customerName;
       if (m.customerId) thread.customerId = m.customerId;
       if (ourNumber && allNums.has(ourNumber)) thread.ourNumber = ourNumber;
-      thread.lastMessage = m.body || (Array.isArray(m.media) && m.media.length
-        ? `${m.media.length} photo${m.media.length === 1 ? '' : 's'}`
-        : '');
+      thread.lastMessage =
+        m.body ||
+        (Array.isArray(m.media) && m.media.length
+          ? `${m.media.length} photo${m.media.length === 1 ? "" : "s"}`
+          : "");
       thread.lastTimestamp = m.createdAt;
       thread.lastDirection = m.direction;
     });
     const threadList = Object.values(threadMap).map((t) => {
       t.messages.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-      t.unanswered = t.lastDirection === 'inbound';
-      t.unread = t.messages.some((m) => m.direction === 'inbound' && !m.isRead);
+      t.unanswered = t.lastDirection === "inbound";
+      t.unread = t.messages.some((m) => m.direction === "inbound" && !m.isRead);
       return t;
     });
-    threadList.sort((a, b) => new Date(b.lastTimestamp) - new Date(a.lastTimestamp));
+    threadList.sort(
+      (a, b) => new Date(b.lastTimestamp) - new Date(a.lastTimestamp),
+    );
     return threadList;
   }, [messages]);
 
   const filteredThreads = threads.filter((t) => {
     // PR 4 — status filter chips (stacked on top of message-type smsFilter).
-    if (statusFilter !== 'all') {
+    if (statusFilter !== "all") {
       const hasUnseen = t.unread;
-      if (statusFilter === 'unread' && !hasUnseen) return false;
-      if (statusFilter === 'unanswered' && !t.unanswered) return false;
-      if (statusFilter === 'unknown' && t.customerName) return false;
+      if (statusFilter === "unread" && !hasUnseen) return false;
+      if (statusFilter === "unanswered" && !t.unanswered) return false;
+      if (statusFilter === "unknown" && t.customerName) return false;
     }
-    if (smsFilter === 'all') return true;
-    if (smsFilter === 'sent') return t.messages.some((m) => m.direction === 'outbound');
-    if (smsFilter === 'received') return t.messages.some((m) => m.direction === 'inbound');
-    if (smsFilter === 'auto_reply')
-      return t.messages.some((m) => m.messageType === 'auto_reply' || m.messageType === 'ai_draft');
-    if (smsFilter === 'reminder')
-      return t.messages.some((m) =>
-        ['reminder', 'confirmation', 'appointment_confirmation'].includes(m.messageType),
+    if (smsFilter === "all") return true;
+    if (smsFilter === "sent")
+      return t.messages.some((m) => m.direction === "outbound");
+    if (smsFilter === "received")
+      return t.messages.some((m) => m.direction === "inbound");
+    if (smsFilter === "auto_reply")
+      return t.messages.some(
+        (m) => m.messageType === "auto_reply" || m.messageType === "ai_draft",
       );
-    if (smsFilter === 'review_request')
-      return t.messages.some((m) => m.messageType === 'review_request');
-    if (smsFilter === 'estimate')
-      return t.messages.some((m) => m.messageType === 'estimate');
+    if (smsFilter === "reminder")
+      return t.messages.some((m) =>
+        ["reminder", "confirmation", "appointment_confirmation"].includes(
+          m.messageType,
+        ),
+      );
+    if (smsFilter === "review_request")
+      return t.messages.some((m) => m.messageType === "review_request");
+    if (smsFilter === "estimate")
+      return t.messages.some((m) => m.messageType === "estimate");
     return true;
   });
 
   const chipCounts = useMemo(() => {
-    let unread = 0, unanswered = 0, unknown = 0;
+    let unread = 0,
+      unanswered = 0,
+      unknown = 0;
     threads.forEach((t) => {
       if (t.unread) unread++;
       if (t.unanswered) unanswered++;
@@ -804,33 +938,41 @@ function SmsTab() {
 
   const handleThreadReply = (contactPhone, ourNumber, customerId = null) => {
     setToNumber(contactPhone);
-    setToSearch('');
+    setToSearch("");
     setSelectedCustomerId(customerId || null);
     if (ourNumber) {
       setFromNumber(ourNumber);
-      setThreadLock({ contactPhone, ourNumber, label: NUMBER_LABEL_MAP[ourNumber] || ourNumber });
+      setThreadLock({
+        contactPhone,
+        ourNumber,
+        label: NUMBER_LABEL_MAP[ourNumber] || ourNumber,
+      });
     }
-    setSmsView('threads');
+    setSmsView("threads");
     setActiveThread(null);
     setTimeout(() => {
-      const el = document.getElementById('sms-compose-v2');
-      if (el) el.scrollIntoView({ behavior: 'smooth' });
+      const el = document.getElementById("sms-compose-v2");
+      if (el) el.scrollIntoView({ behavior: "smooth" });
     }, 100);
   };
 
-  const totalSent = stats?.totalSent
-    || stats?.channelStats?.reduce((s, c) => s + (c.sent || 0), 0)
-    || 0;
-  const totalReceived = stats?.totalReceived
-    || stats?.locationStats?.reduce((s, l) => s + (l.received || 0), 0)
-    || 0;
+  const totalSent =
+    stats?.totalSent ||
+    stats?.channelStats?.reduce((s, c) => s + (c.sent || 0), 0) ||
+    0;
+  const totalReceived =
+    stats?.totalReceived ||
+    stats?.locationStats?.reduce((s, l) => s + (l.received || 0), 0) ||
+    0;
   const channelStats = stats?.channelStats || [];
-  const messageTypes = [...new Set(messages.map((m) => m.messageType).filter(Boolean))];
+  const messageTypes = [
+    ...new Set(messages.map((m) => m.messageType).filter(Boolean)),
+  ];
 
   const filtered = messages.filter((m) => {
-    if (dirFilter === 'inbound' && m.direction !== 'inbound') return false;
-    if (dirFilter === 'outbound' && m.direction !== 'outbound') return false;
-    if (typeFilter !== 'all' && m.messageType !== typeFilter) return false;
+    if (dirFilter === "inbound" && m.direction !== "inbound") return false;
+    if (dirFilter === "outbound" && m.direction !== "outbound") return false;
+    if (typeFilter !== "all" && m.messageType !== typeFilter) return false;
     return true;
   });
 
@@ -846,55 +988,73 @@ function SmsTab() {
     <div>
       {/* Stats + auto-reply */}
       <div className="hidden md:flex items-center gap-2 mb-4 flex-wrap">
+        {" "}
         <StatCardV2
           label="Sent This Month"
           value={totalSent}
-          active={smsFilter === 'sent'}
-          onClick={() => setSmsFilter((f) => (f === 'sent' ? 'all' : 'sent'))}
-        />
+          active={smsFilter === "sent"}
+          onClick={() => setSmsFilter((f) => (f === "sent" ? "all" : "sent"))}
+        />{" "}
         <StatCardV2
           label="Received This Month"
           value={totalReceived}
-          active={smsFilter === 'received'}
-          onClick={() => setSmsFilter((f) => (f === 'received' ? 'all' : 'received'))}
-        />
+          active={smsFilter === "received"}
+          onClick={() =>
+            setSmsFilter((f) => (f === "received" ? "all" : "received"))
+          }
+        />{" "}
         <StatCardV2
           label="Auto-Replies"
-          value={channelStats.find((c) => c.type === 'auto_reply')?.sent || 0}
-          active={smsFilter === 'auto_reply'}
-          alert={(channelStats.find((c) => c.type === 'auto_reply')?.sent || 0) === 0}
-          onClick={() => setSmsFilter((f) => (f === 'auto_reply' ? 'all' : 'auto_reply'))}
-        />
+          value={channelStats.find((c) => c.type === "auto_reply")?.sent || 0}
+          active={smsFilter === "auto_reply"}
+          alert={
+            (channelStats.find((c) => c.type === "auto_reply")?.sent || 0) === 0
+          }
+          onClick={() =>
+            setSmsFilter((f) => (f === "auto_reply" ? "all" : "auto_reply"))
+          }
+        />{" "}
         <StatCardV2
           label="Reminders"
           value={
-            channelStats.find((c) => c.type === 'reminder')?.sent
-            || channelStats.find((c) => c.type === 'confirmation')?.sent
-            || 0
+            channelStats.find((c) => c.type === "reminder")?.sent ||
+            channelStats.find((c) => c.type === "confirmation")?.sent ||
+            0
           }
-          active={smsFilter === 'reminder'}
-          onClick={() => setSmsFilter((f) => (f === 'reminder' ? 'all' : 'reminder'))}
-        />
+          active={smsFilter === "reminder"}
+          onClick={() =>
+            setSmsFilter((f) => (f === "reminder" ? "all" : "reminder"))
+          }
+        />{" "}
         <StatCardV2
           label="Review Requests"
-          value={channelStats.find((c) => c.type === 'review_request')?.sent || 0}
-          active={smsFilter === 'review_request'}
-          onClick={() => setSmsFilter((f) => (f === 'review_request' ? 'all' : 'review_request'))}
-        />
+          value={
+            channelStats.find((c) => c.type === "review_request")?.sent || 0
+          }
+          active={smsFilter === "review_request"}
+          onClick={() =>
+            setSmsFilter((f) =>
+              f === "review_request" ? "all" : "review_request",
+            )
+          }
+        />{" "}
         <StatCardV2
           label="Estimates"
-          value={channelStats.find((c) => c.type === 'estimate')?.sent || 0}
-          active={smsFilter === 'estimate'}
-          onClick={() => setSmsFilter((f) => (f === 'estimate' ? 'all' : 'estimate'))}
-        />
+          value={channelStats.find((c) => c.type === "estimate")?.sent || 0}
+          active={smsFilter === "estimate"}
+          onClick={() =>
+            setSmsFilter((f) => (f === "estimate" ? "all" : "estimate"))
+          }
+        />{" "}
       </div>
-
       {/* Compose */}
       <Card id="sms-compose-v2" className="p-5 mb-5">
+        {" "}
         <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+          {" "}
           <div className="text-14 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary">
             Send SMS
-          </div>
+          </div>{" "}
           <button
             type="button"
             onClick={toggleAiAutoReply}
@@ -902,49 +1062,59 @@ function SmsTab() {
             aria-pressed={aiAutoReply}
             className="flex items-center gap-2 min-h-[44px] md:min-h-0 px-1 md:px-0 u-focus-ring"
           >
-            <span className="text-13 md:text-11 text-ink-secondary">AI Auto-Reply</span>
+            {" "}
+            <span className="text-13 md:text-11 text-ink-secondary">
+              AI Auto-Reply
+            </span>{" "}
             <span
               className={cn(
-                'h-6 w-10 rounded-full border-hairline transition-colors relative',
-                aiAutoReply ? 'bg-zinc-900 border-zinc-900' : 'bg-white border-zinc-300',
+                "h-6 w-10 rounded-full border-hairline transition-colors relative",
+                aiAutoReply
+                  ? "bg-zinc-900 border-zinc-900"
+                  : "bg-white border-zinc-300",
               )}
             >
+              {" "}
               <span
                 className={cn(
-                  'absolute top-0.5 h-4 w-4 rounded-full transition-all',
-                  aiAutoReply ? 'left-5 bg-white' : 'left-0.5 bg-zinc-400',
+                  "absolute top-0.5 h-4 w-4 rounded-full transition-all",
+                  aiAutoReply ? "left-5 bg-white" : "left-0.5 bg-zinc-400",
                 )}
-              />
-            </span>
-          </button>
+              />{" "}
+            </span>{" "}
+          </button>{" "}
         </div>
-
         {/* PR 4 — thread-reply lock banner */}
         {threadLock && (
           <div className="flex items-center gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-900 rounded-sm mb-3">
-            <Badge tone="strong">Locked</Badge>
+            {" "}
+            <Badge tone="strong">Locked</Badge>{" "}
             <span className="text-12 text-zinc-900 flex-1">
-              Replying from <strong>{threadLock.label}</strong> to continue thread with {threadLock.contactPhone}
-            </span>
+              Replying from <strong>{threadLock.label}</strong>to continue
+              thread with {threadLock.contactPhone}
+            </span>{" "}
             <button
               type="button"
               onClick={() => setThreadLock(null)}
               className="text-13 md:text-11 min-h-[44px] md:min-h-0 inline-flex items-center px-2 text-ink-secondary underline hover:text-zinc-900 u-focus-ring"
-            >Override</button>
+            >
+              Override
+            </button>{" "}
           </div>
         )}
-
         <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">
-          From{threadLock && ' (locked to thread)'}
-        </label>
+          From{threadLock && " (locked to thread)"}
+        </label>{" "}
         <select
           value={fromNumber}
           onChange={(e) => setFromNumber(e.target.value)}
           disabled={!!threadLock}
           className={cn(
-            'w-full bg-white border-hairline rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 mb-3 min-h-[44px] md:min-h-0',
-            'focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900',
-            threadLock ? 'border-zinc-900 opacity-60 cursor-not-allowed' : 'border-zinc-300',
+            "w-full bg-white border-hairline rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 mb-3 min-h-[44px] md:min-h-0",
+            "focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900",
+            threadLock
+              ? "border-zinc-900 opacity-60 cursor-not-allowed"
+              : "border-zinc-300",
           )}
         >
           {ALL_NUMBERS.map((group) => (
@@ -956,9 +1126,10 @@ function SmsTab() {
               ))}
             </optgroup>
           ))}
-        </select>
-
-        <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">To</label>
+        </select>{" "}
+        <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">
+          To
+        </label>{" "}
         <input
           type="text"
           placeholder="Search by name or enter phone number…"
@@ -968,32 +1139,38 @@ function SmsTab() {
             if (/^[\d\s()\-+]+$/.test(val)) {
               setToNumber(val);
               setSelectedCustomerId(null);
-              setToSearch('');
+              setToSearch("");
               setToResults([]);
             } else {
               setToSearch(val);
-              setToNumber('');
+              setToNumber("");
               setSelectedCustomerId(null);
               if (val.length >= 2) {
                 try {
                   const r = await fetch(
                     `${API_BASE}/admin/customers?search=${encodeURIComponent(val)}&limit=8`,
-                    { headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` } },
+                    {
+                      headers: {
+                        Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+                      },
+                    },
                   );
                   if (r.ok) {
                     const d = await r.json();
                     setToResults(d.customers || []);
                   }
-                } catch { /* ignore */ }
+                } catch {
+                  /* ignore */
+                }
               } else {
                 setToResults([]);
               }
             }
           }}
           className={cn(
-            'w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 min-h-[44px] md:min-h-0',
-            'focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900',
-            toResults.length ? 'mb-0' : 'mb-3',
+            "w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 min-h-[44px] md:min-h-0",
+            "focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900",
+            toResults.length ? "mb-0" : "mb-3",
           )}
         />
         {toResults.length > 0 && (
@@ -1003,44 +1180,52 @@ function SmsTab() {
                 key={c.id}
                 onClick={() => {
                   const name = getCustomerOptionName(c);
-                  setToNumber(c.phone || '');
+                  setToNumber(c.phone || "");
                   setSelectedCustomerId(c.id || null);
-                  setToSearch(`${name} — ${c.phone || ''}`);
+                  setToSearch(`${name} — ${c.phone || ""}`);
                   setToResults([]);
                 }}
                 className="px-3 py-2 cursor-pointer border-b border-hairline border-zinc-200 text-13 text-zinc-900 hover:bg-zinc-50"
               >
-                <span className="font-medium">{getCustomerOptionName(c)}</span>
+                {" "}
+                <span className="font-medium">
+                  {getCustomerOptionName(c)}
+                </span>{" "}
                 <span className="text-ink-secondary ml-2 font-mono">
-                  {c.phone || 'no phone'}
-                </span>
+                  {c.phone || "no phone"}
+                </span>{" "}
               </div>
             ))}
           </div>
         )}
-
-        {activeThread && (() => {
-          const lastInbound = activeThread.messages.find((m) => m.direction === 'inbound');
-          if (!lastInbound) return null;
-          return (
-            <div className="mb-3 px-3 py-2.5 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
-              <div className="text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-tertiary mb-1">
-                Last message from customer
+        {activeThread &&
+          (() => {
+            const lastInbound = activeThread.messages.find(
+              (m) => m.direction === "inbound",
+            );
+            if (!lastInbound) return null;
+            return (
+              <div className="mb-3 px-3 py-2.5 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
+                {" "}
+                <div className="text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-tertiary mb-1">
+                  Last message from customer
+                </div>{" "}
+                <div className="text-15 md:text-13 text-zinc-900 leading-normal whitespace-pre-wrap">
+                  {lastInbound.body}
+                </div>{" "}
+                <div className="text-12 md:text-11 text-ink-tertiary mt-1">
+                  {formatTimestamp(lastInbound.createdAt)}
+                </div>{" "}
               </div>
-              <div className="text-15 md:text-13 text-zinc-900 leading-normal whitespace-pre-wrap">
-                {lastInbound.body}
-              </div>
-              <div className="text-12 md:text-11 text-ink-tertiary mt-1">
-                {formatTimestamp(lastInbound.createdAt)}
-              </div>
-            </div>
-          );
-        })()}
-
-        <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">Message</label>
+            );
+          })()}
+        <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">
+          Message
+        </label>{" "}
         <div className="relative">
+          {" "}
           <textarea
-            placeholder={listening ? 'Listening…' : 'Type your message…'}
+            placeholder={listening ? "Listening…" : "Type your message…"}
             value={msgBody}
             onChange={(e) => setMsgBody(e.target.value)}
             rows={3}
@@ -1050,23 +1235,34 @@ function SmsTab() {
           <button
             type="button"
             onClick={toggleDictation}
-            aria-label={listening ? 'Stop dictation' : 'Start voice dictation'}
-            title={listening ? 'Stop dictation' : 'Start voice dictation'}
+            aria-label={listening ? "Stop dictation" : "Start voice dictation"}
+            title={listening ? "Stop dictation" : "Start voice dictation"}
             className={cn(
-              'absolute top-2 right-2 flex items-center justify-center h-8 w-8 rounded-full u-focus-ring',
-              listening ? 'bg-alert-fg text-white animate-pulse' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200',
+              "absolute top-2 right-2 flex items-center justify-center h-8 w-8 rounded-full u-focus-ring",
+              listening
+                ? "bg-alert-fg text-white animate-pulse"
+                : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200",
             )}
           >
             {/* Mic glyph */}
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-              <line x1="12" y1="19" x2="12" y2="23" />
-              <line x1="8" y1="23" x2="16" y2="23" />
-            </svg>
-          </button>
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              {" "}
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />{" "}
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />{" "}
+              <line x1="12" y1="19" x2="12" y2="23" />{" "}
+              <line x1="8" y1="23" x2="16" y2="23" />{" "}
+            </svg>{" "}
+          </button>{" "}
         </div>
-
         {/* Attachment tray */}
         {attachments.length > 0 && (
           <div className="flex gap-2 flex-wrap mt-2">
@@ -1076,12 +1272,13 @@ function SmsTab() {
                 className="relative"
                 style={{ width: 56, height: 56 }}
               >
+                {" "}
                 <img
                   src={a.previewUrl || a.url}
                   alt={a.fileName}
                   className="object-cover rounded-sm border-hairline border-zinc-300"
                   style={{ width: 56, height: 56 }}
-                />
+                />{" "}
                 <button
                   type="button"
                   onClick={() => removeAttachment(i)}
@@ -1090,17 +1287,18 @@ function SmsTab() {
                   style={{ width: 18, height: 18, fontSize: 11, lineHeight: 1 }}
                 >
                   ×
-                </button>
+                </button>{" "}
               </div>
             ))}
           </div>
         )}
-
         <div className="flex items-center justify-between text-13 md:text-11 font-mono text-ink-tertiary u-nums mt-1 mb-3">
-          <span>{attachments.length > 0 ? `${attachments.length} attached` : ''}</span>
-          <span>{msgBody.length} chars</span>
+          {" "}
+          <span>
+            {attachments.length > 0 ? `${attachments.length} attached` : ""}
+          </span>{" "}
+          <span>{msgBody.length} chars</span>{" "}
         </div>
-
         {/* Hidden file inputs, triggered by the + menu buttons. */}
         <input
           ref={fileInputRef}
@@ -1108,20 +1306,26 @@ function SmsTab() {
           accept="image/*"
           multiple
           className="hidden"
-          onChange={(e) => { handleUpload(e.target.files); e.target.value = ''; }}
-        />
+          onChange={(e) => {
+            handleUpload(e.target.files);
+            e.target.value = "";
+          }}
+        />{" "}
         <input
           ref={cameraInputRef}
           type="file"
           accept="image/*"
           capture="environment"
           className="hidden"
-          onChange={(e) => { handleUpload(e.target.files); e.target.value = ''; }}
-        />
-
+          onChange={(e) => {
+            handleUpload(e.target.files);
+            e.target.value = "";
+          }}
+        />{" "}
         <div className="flex gap-2 items-center">
           {/* Plus — attachment menu */}
           <div className="relative">
+            {" "}
             <button
               type="button"
               onClick={() => setShowAttachSheet((v) => !v)}
@@ -1130,128 +1334,169 @@ function SmsTab() {
               title="Add image"
               className="flex items-center justify-center h-10 w-10 rounded-full bg-zinc-100 text-zinc-900 hover:bg-zinc-200 u-focus-ring disabled:opacity-50"
             >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="12" y1="5" x2="12" y2="19" />
-                <line x1="5" y1="12" x2="19" y2="12" />
-              </svg>
+              {" "}
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.25"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                {" "}
+                <line x1="12" y1="5" x2="12" y2="19" />{" "}
+                <line x1="5" y1="12" x2="19" y2="12" />{" "}
+              </svg>{" "}
             </button>
             {showAttachSheet && (
-              <div className="absolute bottom-full left-0 mb-2 z-10 bg-white border-hairline border-zinc-300 rounded-sm shadow-lg overflow-hidden" style={{ width: 180 }}>
+              <div
+                className="absolute bottom-full left-0 mb-2 z-10 bg-white border-hairline border-zinc-300 rounded-sm shadow-lg overflow-hidden"
+                style={{ width: 180 }}
+              >
+                {" "}
                 <button
                   type="button"
-                  onClick={() => { setShowAttachSheet(false); cameraInputRef.current?.click(); }}
+                  onClick={() => {
+                    setShowAttachSheet(false);
+                    cameraInputRef.current?.click();
+                  }}
                   className="block w-full text-left px-3 py-2.5 text-13 text-zinc-900 hover:bg-zinc-100 u-focus-ring"
                 >
-                  📷 Take photo
-                </button>
+                  Take photo
+                </button>{" "}
                 <button
                   type="button"
-                  onClick={() => { setShowAttachSheet(false); fileInputRef.current?.click(); }}
+                  onClick={() => {
+                    setShowAttachSheet(false);
+                    fileInputRef.current?.click();
+                  }}
                   className="block w-full text-left px-3 py-2.5 text-13 text-zinc-900 hover:bg-zinc-100 border-t border-hairline border-zinc-200 u-focus-ring"
                 >
-                  🖼 Photo library
-                </button>
+                  Photo library
+                </button>{" "}
               </div>
             )}
-          </div>
-
+          </div>{" "}
           <Button
             variant="primary"
             className="flex-1"
             onClick={handleSend}
-            disabled={sending || uploading || !toNumber.trim() || (!msgBody.trim() && attachments.length === 0)}
+            disabled={
+              sending ||
+              uploading ||
+              !toNumber.trim() ||
+              (!msgBody.trim() && attachments.length === 0)
+            }
           >
-            {sending ? 'Sending…' : uploading ? 'Uploading…' : 'Send'}
-          </Button>
+            {sending ? "Sending…" : uploading ? "Uploading…" : "Send"}
+          </Button>{" "}
           <Button
             variant="secondary"
             onClick={handleAiDraft}
             disabled={aiDrafting || !toNumber.trim()}
           >
-            {aiDrafting ? 'Drafting…' : 'AI Draft'}
-          </Button>
+            {aiDrafting ? "Drafting…" : "AI Draft"}
+          </Button>{" "}
         </div>
-
         {sendResult && (
           <div
             className={cn(
-              'mt-2.5 text-12',
-              sendResult.ok ? 'text-zinc-900' : 'text-alert-fg',
+              "mt-2.5 text-12",
+              sendResult.ok ? "text-zinc-900" : "text-alert-fg",
             )}
           >
             {sendResult.text}
           </div>
         )}
       </Card>
-
       {/* View toggle — desktop power-user feature; mobile just shows Conversations */}
       <div className="hidden md:flex items-center gap-3 mb-3 flex-wrap">
+        {" "}
         <div className="flex border-hairline border-zinc-300 rounded-sm p-0.5 bg-white">
+          {" "}
           <button
             type="button"
-            onClick={() => { setSmsView('threads'); setActiveThread(null); }}
+            onClick={() => {
+              setSmsView("threads");
+              setActiveThread(null);
+            }}
             className={cn(
-              'px-3.5 py-2.5 md:py-1 min-h-[44px] md:min-h-0 text-14 md:text-12 normal-case md:uppercase tracking-normal md:tracking-label rounded-xs u-focus-ring transition-colors',
-              (smsView === 'threads' || smsView === 'conversation')
-                ? 'bg-zinc-900 text-white'
-                : 'text-ink-secondary hover:bg-zinc-50',
+              "px-3.5 py-2.5 md:py-1 min-h-[44px] md:min-h-0 text-14 md:text-12 normal-case md:uppercase tracking-normal md:tracking-label rounded-xs u-focus-ring transition-colors",
+              smsView === "threads" || smsView === "conversation"
+                ? "bg-zinc-900 text-white"
+                : "text-ink-secondary hover:bg-zinc-50",
             )}
           >
             Conversations
-          </button>
+          </button>{" "}
           <button
             type="button"
-            onClick={() => { setSmsView('log'); setActiveThread(null); }}
+            onClick={() => {
+              setSmsView("log");
+              setActiveThread(null);
+            }}
             className={cn(
-              'px-3.5 py-2.5 md:py-1 min-h-[44px] md:min-h-0 text-14 md:text-12 normal-case md:uppercase tracking-normal md:tracking-label rounded-xs u-focus-ring transition-colors',
-              smsView === 'log'
-                ? 'bg-zinc-900 text-white'
-                : 'text-ink-secondary hover:bg-zinc-50',
+              "px-3.5 py-2.5 md:py-1 min-h-[44px] md:min-h-0 text-14 md:text-12 normal-case md:uppercase tracking-normal md:tracking-label rounded-xs u-focus-ring transition-colors",
+              smsView === "log"
+                ? "bg-zinc-900 text-white"
+                : "text-ink-secondary hover:bg-zinc-50",
             )}
           >
             Log View
-          </button>
-        </div>
+          </button>{" "}
+        </div>{" "}
       </div>
-
       {/* Search */}
       <div className="mb-3">
+        {" "}
         <input
           type="text"
           placeholder="Search all SMS by name, phone, or message text…"
           value={smsSearch}
           onChange={(e) => setSmsSearch(e.target.value)}
           className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 min-h-[44px] md:min-h-0 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
-        />
+        />{" "}
       </div>
-
       {/* Thread list / conversation / log */}
-      {smsView === 'conversation' && activeThread ? (
+      {smsView === "conversation" && activeThread ? (
         <Card className="p-5">
+          {" "}
           <ConversationViewV2
             thread={activeThread}
             messages={activeThread.messages.slice().reverse()}
             onReply={handleThreadReply}
-            onBack={() => { setSmsView('threads'); setActiveThread(null); }}
+            onBack={() => {
+              setSmsView("threads");
+              setActiveThread(null);
+            }}
             onOpenProfile={(id) => setSelected360Id(id)}
-          />
+          />{" "}
         </Card>
-      ) : smsView === 'threads' ? (
+      ) : smsView === "threads" ? (
         <Card className="p-5">
+          {" "}
           <div className="flex items-center justify-between mb-3">
+            {" "}
             <div className="text-14 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary">
               Conversations
-              <span className="ml-2 u-nums">({filteredThreads.length})</span>
-            </div>
+              <span className="ml-2 u-nums">
+                ({filteredThreads.length})
+              </span>{" "}
+            </div>{" "}
           </div>
-
           {/* PR 4 — filter chip row */}
           <div className="flex gap-1.5 mb-3 flex-wrap">
             {[
-              { key: 'all', label: 'All', count: chipCounts.all },
-              { key: 'unread', label: 'Unread', count: chipCounts.unread },
-              { key: 'unanswered', label: 'Unanswered', count: chipCounts.unanswered },
-              { key: 'unknown', label: 'Unknown', count: chipCounts.unknown },
+              { key: "all", label: "All", count: chipCounts.all },
+              { key: "unread", label: "Unread", count: chipCounts.unread },
+              {
+                key: "unanswered",
+                label: "Unanswered",
+                count: chipCounts.unanswered,
+              },
+              { key: "unknown", label: "Unknown", count: chipCounts.unknown },
             ].map((chip) => {
               const active = statusFilter === chip.key;
               return (
@@ -1260,21 +1505,25 @@ function SmsTab() {
                   type="button"
                   onClick={() => setStatusFilter(chip.key)}
                   className={cn(
-                    'inline-flex items-center gap-1.5 px-3 py-2.5 md:py-1 min-h-[44px] md:min-h-0 rounded-full text-14 md:text-12 font-medium border-hairline u-focus-ring',
+                    "inline-flex items-center gap-1.5 px-3 py-2.5 md:py-1 min-h-[44px] md:min-h-0 rounded-full text-14 md:text-12 font-medium border-hairline u-focus-ring",
                     active
-                      ? 'bg-zinc-900 text-white border-zinc-900'
-                      : 'bg-white text-ink-secondary border-zinc-300 hover:border-zinc-900 hover:text-zinc-900',
+                      ? "bg-zinc-900 text-white border-zinc-900"
+                      : "bg-white text-ink-secondary border-zinc-300 hover:border-zinc-900 hover:text-zinc-900",
                   )}
                 >
                   {chip.label}
-                  <span className={cn('u-nums text-11', active ? 'text-zinc-300' : 'text-ink-tertiary')}>
+                  <span
+                    className={cn(
+                      "u-nums text-11",
+                      active ? "text-zinc-300" : "text-ink-tertiary",
+                    )}
+                  >
                     {chip.count}
-                  </span>
+                  </span>{" "}
                 </button>
               );
             })}
-          </div>
-
+          </div>{" "}
           <div className="md:max-h-[600px] md:overflow-y-auto">
             {filteredThreads.length === 0 ? (
               <div className="p-5 text-center text-13 text-ink-secondary">
@@ -1284,9 +1533,9 @@ function SmsTab() {
               filteredThreads.map((t, i) => {
                 const preview = t.lastMessage
                   ? t.lastMessage.length > 60
-                    ? t.lastMessage.slice(0, 60) + '…'
+                    ? t.lastMessage.slice(0, 60) + "…"
                     : t.lastMessage
-                  : '';
+                  : "";
                 const hasUnseen = t.unread;
                 const displayName = t.customerName || t.contactPhone;
                 const initials = getInitials(t.customerName || t.contactPhone);
@@ -1296,38 +1545,48 @@ function SmsTab() {
                     onClick={() => {
                       const openedThread = { ...t };
                       setActiveThread(openedThread);
-                      setSmsView('conversation');
+                      setSmsView("conversation");
                       setToNumber(t.contactPhone);
-                      setToSearch('');
+                      setToSearch("");
                       setSelectedCustomerId(t.customerId || null);
                       if (t.ourNumber) {
                         setFromNumber(t.ourNumber);
-                        setThreadLock({ contactPhone: t.contactPhone, ourNumber: t.ourNumber, label: NUMBER_LABEL_MAP[t.ourNumber] || t.ourNumber });
+                        setThreadLock({
+                          contactPhone: t.contactPhone,
+                          ourNumber: t.ourNumber,
+                          label: NUMBER_LABEL_MAP[t.ourNumber] || t.ourNumber,
+                        });
                       }
                       markMessagesRead(openedThread);
                     }}
                     className={cn(
-                      'w-full text-left px-3.5 py-3.5 md:py-3 border-b border-hairline border-zinc-200 flex items-center gap-3 cursor-pointer',
-                      'hover:bg-zinc-50 transition-colors',
-                      hasUnseen && 'bg-zinc-50',
+                      "w-full text-left px-3.5 py-3.5 md:py-3 border-b border-hairline border-zinc-200 flex items-center gap-3 cursor-pointer",
+                      "hover:bg-zinc-50 transition-colors",
+                      hasUnseen && "bg-zinc-50",
                     )}
                   >
+                    {" "}
                     <div
                       className="flex-shrink-0 flex items-center justify-center h-10 w-10 rounded-full bg-zinc-100 text-zinc-700 text-13 font-medium tracking-tight u-nums"
                       aria-hidden
                     >
                       {initials}
-                    </div>
+                    </div>{" "}
                     <div className="flex-1 min-w-0">
+                      {" "}
                       <div className="flex items-center justify-between gap-2 mb-0.5">
+                        {" "}
                         <div className="flex items-center gap-1.5 min-w-0">
                           {t.customerName && t.customerId ? (
                             <button
                               type="button"
-                              onClick={(e) => { e.stopPropagation(); setSelected360Id(t.customerId); }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelected360Id(t.customerId);
+                              }}
                               className={cn(
-                                'text-16 md:text-14 truncate hover:underline text-left text-zinc-900',
-                                hasUnseen ? 'font-medium' : 'font-normal',
+                                "text-16 md:text-14 truncate hover:underline text-left text-zinc-900",
+                                hasUnseen ? "font-medium" : "font-normal",
                               )}
                               title="Open customer profile"
                             >
@@ -1336,29 +1595,31 @@ function SmsTab() {
                           ) : (
                             <span
                               className={cn(
-                                'text-16 md:text-14 truncate text-zinc-900',
-                                hasUnseen ? 'font-medium' : 'font-normal',
+                                "text-16 md:text-14 truncate text-zinc-900",
+                                hasUnseen ? "font-medium" : "font-normal",
                               )}
                             >
                               {displayName}
                             </span>
                           )}
-                        </div>
+                        </div>{" "}
                         <span className="font-mono text-12 md:text-11 text-ink-tertiary flex-shrink-0">
                           {timeAgo(t.lastTimestamp)}
-                        </span>
-                      </div>
+                        </span>{" "}
+                      </div>{" "}
                       <div
                         className={cn(
-                          'text-15 md:text-12 truncate leading-snug',
-                          hasUnseen ? 'text-zinc-900' : 'text-ink-secondary',
+                          "text-15 md:text-12 truncate leading-snug",
+                          hasUnseen ? "text-zinc-900" : "text-ink-secondary",
                         )}
                       >
                         {preview || (
-                          <span className="text-ink-tertiary italic">No messages</span>
+                          <span className="text-ink-tertiary italic">
+                            No messages
+                          </span>
                         )}
-                      </div>
-                    </div>
+                      </div>{" "}
+                    </div>{" "}
                     <div className="w-2 flex-shrink-0 flex justify-center">
                       {hasUnseen && (
                         <span
@@ -1366,41 +1627,48 @@ function SmsTab() {
                           aria-label="Unread"
                         />
                       )}
-                    </div>
+                    </div>{" "}
                   </div>
                 );
               })
             )}
-          </div>
+          </div>{" "}
         </Card>
       ) : (
         <Card className="p-5">
+          {" "}
           <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+            {" "}
             <div className="text-14 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary">
               SMS Log
-            </div>
+            </div>{" "}
             <div className="flex gap-2">
+              {" "}
               <select
                 value={dirFilter}
                 onChange={(e) => setDirFilter(e.target.value)}
                 className="bg-white border-hairline border-zinc-300 rounded-xs py-2 md:py-1 px-2 text-16 md:text-12 text-zinc-900 min-h-[44px] md:min-h-0 focus:outline-none focus:ring-2 focus:ring-zinc-900"
               >
-                <option value="all">All directions</option>
-                <option value="inbound">Inbound</option>
-                <option value="outbound">Outbound</option>
-              </select>
+                {" "}
+                <option value="all">All directions</option>{" "}
+                <option value="inbound">Inbound</option>{" "}
+                <option value="outbound">Outbound</option>{" "}
+              </select>{" "}
               <select
                 value={typeFilter}
                 onChange={(e) => setTypeFilter(e.target.value)}
                 className="bg-white border-hairline border-zinc-300 rounded-xs py-2 md:py-1 px-2 text-16 md:text-12 text-zinc-900 min-h-[44px] md:min-h-0 focus:outline-none focus:ring-2 focus:ring-zinc-900"
               >
+                {" "}
                 <option value="all">All types</option>
                 {messageTypes.map((t) => (
-                  <option key={t} value={t}>{t}</option>
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
                 ))}
-              </select>
-            </div>
-          </div>
+              </select>{" "}
+            </div>{" "}
+          </div>{" "}
           <div className="md:max-h-[600px] md:overflow-y-auto">
             {filtered.length === 0 ? (
               <div className="p-5 text-center text-13 text-ink-secondary">
@@ -1413,15 +1681,15 @@ function SmsTab() {
                   msg={m}
                   onReply={(phone, from, customerId) => {
                     setToNumber(phone);
-                    setToSearch('');
+                    setToSearch("");
                     setSelectedCustomerId(customerId || null);
                     setFromNumber(from);
-                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                    window.scrollTo({ top: 0, behavior: "smooth" });
                   }}
                 />
               ))
             )}
-          </div>
+          </div>{" "}
         </Card>
       )}
 
@@ -1438,47 +1706,26 @@ function SmsTab() {
 // ── Page ──────────────────────────────────────────────────────
 
 export default function CommunicationsPageV2() {
-  const [tab, setTab] = useState('sms');
+  const [tab, setTab] = useState("sms");
   const tabs = TABS;
 
   return (
-    <div className="bg-surface-page min-h-full p-4 md:p-6 font-sans text-zinc-900 max-w-[1200px]">
-      <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
-        <div>
-          <h1 className="text-28 font-normal tracking-h1 text-zinc-900">
-            <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Communications</span>
-            <span className="hidden md:inline">Communications</span>
-          </h1>
-        </div>
-      </div>
-
-      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
-        <div style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, background: '#F4F4F5', borderRadius: 10, padding: 4, border: '1px solid #E4E4E7' }}>
-          {tabs.map((t) => (
-            <button
-              key={t.key}
-              type="button"
-              onClick={() => setTab(t.key)}
-              className={t.desktopOnly ? 'hidden md:inline-block' : ''}
-              style={{
-                padding: '10px 24px', borderRadius: 8, border: 'none', cursor: 'pointer',
-                background: tab === t.key ? '#18181B' : 'transparent',
-                color: tab === t.key ? '#FFFFFF' : '#A1A1AA',
-                fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
-                fontFamily: "'DM Sans', sans-serif",
-              }}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {tab === 'sms' && <SmsTab />}
-      {tab === 'calls' && <CallLogTabV2 />}
-      {tab === 'templates' && <SmsTemplatesTabV2 />}
-      {tab === 'csr' && <CSRCoachTabV2 />}
-      {tab === 'notifications' && <PushSettingsV2 />}
+    <div className="bg-surface-page min-h-full font-sans text-zinc-900 max-w-[1300px] mx-auto">
+      {" "}
+      <AdminCommandHeader
+        title="Communications"
+        icon={MessageSquare}
+        sections={tabs}
+        activeKey={tab}
+        onSectionChange={setTab}
+        ariaLabel="Communications section"
+        navGridClassName="grid-cols-2 md:grid-cols-5"
+      />
+      {tab === "sms" && <SmsTab />}
+      {tab === "calls" && <CallLogTabV2 />}
+      {tab === "templates" && <SmsTemplatesTabV2 />}
+      {tab === "csr" && <CSRCoachTabV2 />}
+      {tab === "notifications" && <PushSettingsV2 />}
     </div>
   );
 }

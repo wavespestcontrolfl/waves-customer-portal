@@ -11,52 +11,71 @@
 //   PR #5c → FollowUpModalV2 + DeclineModalV2 replace V1 modals (Dialog
 //            primitive, danger variant on Mark-as-Lost)
 // Leads / Pricing Logic tabs still render V1 panels.
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { createPortal } from 'react-dom';
-import { useSearchParams, useNavigate } from 'react-router-dom';
+import React, { useState, useEffect, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
+import { useSearchParams, useNavigate } from "react-router-dom";
 import {
   STATUS_CONFIG,
   PIPELINE_FILTERS,
   classifyEstimate,
   getUrgencyIndicator,
   detectCompetitor,
-} from './EstimatePage';
-import { LeadsSection } from './LeadsTabs';
-import PricingLogicPanel from '../../components/admin/PricingLogicPanel';
-import { MarginCalculator } from './PricingLogicPage';
-import EstimateToolViewV2 from './EstimateToolViewV2';
-import CustomerEstimatesPanel from './CustomerEstimatesPanel';
+} from "./EstimatePage";
+import { LeadsSection } from "./LeadsTabs";
+import PricingLogicPanel from "../../components/admin/PricingLogicPanel";
+import { MarginCalculator } from "./PricingLogicPage";
+import EstimateToolViewV2 from "./EstimateToolViewV2";
+import CustomerEstimatesPanel from "./CustomerEstimatesPanel";
 import {
   FollowUpModalV2,
   DeclineModalV2,
-} from '../../components/admin/EstimateModalsV2';
-import useIsMobile from '../../hooks/useIsMobile';
-import { useFeatureFlag } from '../../hooks/useFeatureFlag';
-import { Badge, Button, Card, CardBody, cn } from '../../components/ui';
+} from "../../components/admin/EstimateModalsV2";
+import useIsMobile from "../../hooks/useIsMobile";
+import { useFeatureFlag } from "../../hooks/useFeatureFlag";
+import { Badge, Button, Card, CardBody, cn } from "../../components/ui";
 import {
-  Flag, Globe, Users, Bot, Phone, MessageSquare, Send, FilePlus2, SlidersHorizontal,
-  Check, X, ArrowLeft, Plus, Trash2, CalendarCheck, ExternalLink,
-} from 'lucide-react';
+  Flag,
+  Globe,
+  Users,
+  Bot,
+  Phone,
+  MessageSquare,
+  Send,
+  FilePlus2,
+  SlidersHorizontal,
+  Check,
+  X,
+  ArrowLeft,
+  Plus,
+  Trash2,
+  CalendarCheck,
+  ExternalLink,
+  ClipboardList,
+} from "lucide-react";
 
-const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
 const ESTIMATE_PIPELINE_LIMIT = 500;
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
-      Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
-      'Content-Type': 'application/json',
+      Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+      "Content-Type": "application/json",
     },
     ...options,
   }).then(async (r) => {
     if (!r.ok) {
-      let serverMsg = '';
+      let serverMsg = "";
       try {
         const body = await r.clone().json();
-        serverMsg = body?.error || '';
+        serverMsg = body?.error || "";
       } catch {
-        try { serverMsg = await r.text(); } catch { /* ignore */ }
+        try {
+          serverMsg = await r.text();
+        } catch {
+          /* ignore */
+        }
       }
       throw new Error(serverMsg || `HTTP ${r.status}`);
     }
@@ -67,21 +86,29 @@ function adminFetch(path, options = {}) {
 function summarizeEstimateSend(data) {
   const parts = [];
   if (data?.channels?.sms) {
-    parts.push(data.channels.sms.ok ? 'SMS sent' : `SMS failed: ${data.channels.sms.error || 'unknown error'}`);
+    parts.push(
+      data.channels.sms.ok
+        ? "SMS sent"
+        : `SMS failed: ${data.channels.sms.error || "unknown error"}`,
+    );
   }
   if (data?.channels?.email) {
-    parts.push(data.channels.email.ok ? 'Email sent' : `Email failed: ${data.channels.email.error || 'unknown error'}`);
+    parts.push(
+      data.channels.email.ok
+        ? "Email sent"
+        : `Email failed: ${data.channels.email.error || "unknown error"}`,
+    );
   }
-  if (parts.length === 0) return data?.error || 'Estimate send failed';
-  return parts.join(' / ');
+  if (parts.length === 0) return data?.error || "Estimate send failed";
+  return parts.join(" / ");
 }
 
-async function sendEstimateFromPipeline(id, sendMethod = 'both') {
+async function sendEstimateFromPipeline(id, sendMethod = "both") {
   const r = await fetch(`${API_BASE}/admin/estimates/${id}/send`, {
-    method: 'POST',
+    method: "POST",
     headers: {
-      Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
-      'Content-Type': 'application/json',
+      Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+      "Content-Type": "application/json",
     },
     body: JSON.stringify({ sendMethod }),
   });
@@ -95,10 +122,10 @@ async function sendEstimateFromPipeline(id, sendMethod = 'both') {
 // Status badge. V2 collapses to neutral; alert tone only for declined/expired.
 function StatusBadgeV2({ status }) {
   const cfg = STATUS_CONFIG[status] || STATUS_CONFIG.draft;
-  const isAlert = status === 'declined' || status === 'expired';
-  const isStrong = status === 'accepted';
+  const isAlert = status === "declined" || status === "expired";
+  const isStrong = status === "accepted";
   return (
-    <Badge tone={isAlert ? 'alert' : isStrong ? 'strong' : 'neutral'}>
+    <Badge tone={isAlert ? "alert" : isStrong ? "strong" : "neutral"}>
       {cfg.label}
     </Badge>
   );
@@ -110,44 +137,48 @@ function StatusBadgeV2({ status }) {
 function StatusPillV3({ status }) {
   const label = (STATUS_CONFIG[status] || STATUS_CONFIG.draft).label;
   // Common base for the filled-pill variants.
-  const filled = 'inline-flex items-center gap-1 h-5 px-2 rounded-full text-11 font-medium whitespace-nowrap';
+  const filled =
+    "inline-flex items-center gap-1 h-5 px-2 rounded-full text-11 font-medium whitespace-nowrap";
   switch (status) {
-    case 'expired':
+    case "expired":
       return (
-        <span className={cn(filled, 'bg-alert-fg text-white')}>{label}</span>
+        <span className={cn(filled, "bg-alert-fg text-white")}>{label}</span>
       );
-    case 'viewed':
+    case "viewed":
       return (
-        <span className={cn(filled, 'bg-zinc-200 text-zinc-900')}>
+        <span className={cn(filled, "bg-zinc-200 text-zinc-900")}>
+          {" "}
           <span aria-hidden className="w-1.5 h-1.5 rounded-full bg-zinc-900" />
           {label}
         </span>
       );
-    case 'accepted':
+    case "accepted":
       return (
-        <span className={cn(filled, 'bg-zinc-200 text-zinc-900')}>
+        <span className={cn(filled, "bg-zinc-200 text-zinc-900")}>
+          {" "}
           <Check size={10} strokeWidth={2.5} aria-hidden />
           {label}
         </span>
       );
-    case 'sent':
+    case "sent":
       return (
-        <span className={cn(filled, 'bg-zinc-200 text-zinc-900')}>{label}</span>
+        <span className={cn(filled, "bg-zinc-200 text-zinc-900")}>{label}</span>
       );
-    case 'scheduled':
+    case "scheduled":
       return (
-        <span className={cn(filled, 'bg-zinc-200 text-zinc-900')}>
+        <span className={cn(filled, "bg-zinc-200 text-zinc-900")}>
+          {" "}
           <CalendarCheck size={10} strokeWidth={2.5} aria-hidden />
           {label}
         </span>
       );
-    case 'declined':
+    case "declined":
       return (
         <span className="inline-flex items-center h-5 px-2 rounded-full text-11 font-normal whitespace-nowrap border-hairline border-zinc-300 text-ink-tertiary bg-white">
           {label}
         </span>
       );
-    case 'draft':
+    case "draft":
     default:
       return (
         <span className="inline-flex items-center h-5 px-2 rounded-full text-11 font-normal whitespace-nowrap border-hairline border-zinc-300 text-ink-tertiary bg-white">
@@ -179,31 +210,36 @@ function v3SortFn(a, b) {
 }
 
 // Estimates v2 filter chips (spec §7). Action Required = expired plus viewed
-// sitting idle (viewed > 48h). Open = sent+viewed. Closed = accepted+declined.
+// sitting idle (viewed >48h). Open = sent+viewed. Closed = accepted+declined.
 const V3_CHIPS = [
-  { key: 'all', label: 'All' },
-  { key: 'action', label: 'Action Required' },
-  { key: 'pricing_risk', label: 'Pricing Risk' },
-  { key: 'missing_cogs', label: 'Missing COGS' },
-  { key: 'low_margin', label: 'Low Margin' },
-  { key: 'open', label: 'Open' },
-  { key: 'closed', label: 'Closed' },
-  { key: 'drafts', label: 'Drafts' },
-  { key: 'archived', label: 'Archived' },
+  { key: "all", label: "All" },
+  { key: "action", label: "Action Required" },
+  { key: "pricing_risk", label: "Pricing Risk" },
+  { key: "missing_cogs", label: "Missing COGS" },
+  { key: "low_margin", label: "Low Margin" },
+  { key: "open", label: "Open" },
+  { key: "closed", label: "Closed" },
+  { key: "drafts", label: "Drafts" },
+  { key: "archived", label: "Archived" },
 ];
 
 function v3ChipMatches(e, chip) {
-  if (chip === 'all') return true;
-  if (chip === 'pricing_risk') return !!e.pricingRisk?.hasRisk;
-  if (chip === 'missing_cogs') return (e.pricingRisk?.missingCogsCount || 0) > 0;
-  if (chip === 'low_margin') return (e.pricingRisk?.lowMarginCount || 0) > 0;
-  if (chip === 'archived') return !!e.archivedAt;
-  if (chip === 'drafts') return e.status === 'draft';
-  if (chip === 'open') return e.status === 'scheduled' || e.status === 'sent' || e.status === 'viewed';
-  if (chip === 'closed') return e.status === 'accepted' || e.status === 'declined';
-  if (chip === 'action') {
-    if (e.status === 'expired') return true;
-    if (e.status === 'viewed' && e.viewedAt) {
+  if (chip === "all") return true;
+  if (chip === "pricing_risk") return !!e.pricingRisk?.hasRisk;
+  if (chip === "missing_cogs")
+    return (e.pricingRisk?.missingCogsCount || 0) > 0;
+  if (chip === "low_margin") return (e.pricingRisk?.lowMarginCount || 0) > 0;
+  if (chip === "archived") return !!e.archivedAt;
+  if (chip === "drafts") return e.status === "draft";
+  if (chip === "open")
+    return (
+      e.status === "scheduled" || e.status === "sent" || e.status === "viewed"
+    );
+  if (chip === "closed")
+    return e.status === "accepted" || e.status === "declined";
+  if (chip === "action") {
+    if (e.status === "expired") return true;
+    if (e.status === "viewed" && e.viewedAt) {
       const hrs = (Date.now() - new Date(e.viewedAt).getTime()) / 3.6e6;
       return hrs >= 48;
     }
@@ -213,29 +249,41 @@ function v3ChipMatches(e, chip) {
 }
 
 const PRICING_RISK_FILTERS = [
-  { key: 'pricing_risk', label: 'Pricing Risk' },
-  { key: 'missing_cogs', label: 'Missing COGS' },
-  { key: 'low_margin', label: 'Low Margin' },
+  { key: "pricing_risk", label: "Pricing Risk" },
+  { key: "missing_cogs", label: "Missing COGS" },
+  { key: "low_margin", label: "Low Margin" },
 ];
 
-const PIPELINE_AND_RISK_FILTERS = [...PIPELINE_FILTERS, ...PRICING_RISK_FILTERS];
+const PIPELINE_AND_RISK_FILTERS = [
+  ...PIPELINE_FILTERS,
+  ...PRICING_RISK_FILTERS,
+];
 
 function estimateMatchesFilter(e, filter) {
-  if (filter === 'all') return true;
-  if (filter === 'pricing_risk') return !!e.pricingRisk?.hasRisk;
-  if (filter === 'missing_cogs') return (e.pricingRisk?.missingCogsCount || 0) > 0;
-  if (filter === 'low_margin') return (e.pricingRisk?.lowMarginCount || 0) > 0;
+  if (filter === "all") return true;
+  if (filter === "pricing_risk") return !!e.pricingRisk?.hasRisk;
+  if (filter === "missing_cogs")
+    return (e.pricingRisk?.missingCogsCount || 0) > 0;
+  if (filter === "low_margin") return (e.pricingRisk?.lowMarginCount || 0) > 0;
   return e._class === filter;
 }
 
 function serviceLineFromAuditLine(line) {
-  const value = String(line?.protocol?.serviceType || line?.serviceKey || line?.label || '').toLowerCase();
-  if (value.includes('termite') || value.includes('bora-care') || value.includes('bora care') || value.includes('termidor')) return 'termite';
-  if (value.includes('mosquito')) return 'mosquito';
-  if (value.includes('rodent')) return 'rodent';
-  if (value.includes('lawn')) return 'lawn';
-  if (value.includes('tree') || value.includes('shrub')) return 'tree_shrub';
-  return 'pest';
+  const value = String(
+    line?.protocol?.serviceType || line?.serviceKey || line?.label || "",
+  ).toLowerCase();
+  if (
+    value.includes("termite") ||
+    value.includes("bora-care") ||
+    value.includes("bora care") ||
+    value.includes("termidor")
+  )
+    return "termite";
+  if (value.includes("mosquito")) return "mosquito";
+  if (value.includes("rodent")) return "rodent";
+  if (value.includes("lawn")) return "lawn";
+  if (value.includes("tree") || value.includes("shrub")) return "tree_shrub";
+  return "pest";
 }
 
 function PricingRiskBadges({ risk, onMissingCogs, onLowMargin }) {
@@ -245,26 +293,35 @@ function PricingRiskBadges({ risk, onMissingCogs, onLowMargin }) {
       {(risk.missingCogsCount || 0) > 0 && (
         <button
           type="button"
-          onClick={(e) => { e.stopPropagation(); onMissingCogs?.(); }}
+          onClick={(e) => {
+            e.stopPropagation();
+            onMissingCogs?.();
+          }}
           className="inline-flex u-focus-ring rounded-full"
           title="Open pricing audit focused on missing inventory COGS"
         >
-          <Badge tone="alert">Missing COGS</Badge>
+          {" "}
+          <Badge tone="alert">Missing COGS</Badge>{" "}
         </button>
       )}
       {(risk.lowMarginCount || 0) > 0 && (
         <button
           type="button"
-          onClick={(e) => { e.stopPropagation(); onLowMargin?.(); }}
+          onClick={(e) => {
+            e.stopPropagation();
+            onLowMargin?.();
+          }}
           className="inline-flex u-focus-ring rounded-full"
           title="Open pricing audit focused on low-margin lines"
         >
-          <Badge tone="alert">Low Margin</Badge>
+          {" "}
+          <Badge tone="alert">Low Margin</Badge>{" "}
         </button>
       )}
-      {risk.status === 'warning' && !(risk.missingCogsCount || risk.lowMarginCount) && (
-        <Badge tone="alert">Pricing Warning</Badge>
-      )}
+      {risk.status === "warning" &&
+        !(risk.missingCogsCount || risk.lowMarginCount) && (
+          <Badge tone="alert">Pricing Warning</Badge>
+        )}
     </>
   );
 }
@@ -283,10 +340,8 @@ function v3ChipCounts(estimates) {
 function UrgencyBadge({ urgency }) {
   if (!urgency) return null;
   const isCritical =
-    urgency.label === 'Going cold' || urgency.label === 'Final follow-up';
-  return (
-    <Badge tone={isCritical ? 'alert' : 'neutral'}>{urgency.label}</Badge>
-  );
+    urgency.label === "Going cold" || urgency.label === "Final follow-up";
+  return <Badge tone={isCritical ? "alert" : "neutral"}>{urgency.label}</Badge>;
 }
 
 // Filter — 7 pipeline filters exceed the 4-item pill cap. Per UI SoR §6.1
@@ -300,19 +355,20 @@ function FilterSheetV2({ value, onChange, options, counts }) {
   useEffect(() => {
     if (!open) return undefined;
     const onKey = (e) => {
-      if (e.key === 'Escape') setOpen(false);
+      if (e.key === "Escape") setOpen(false);
     };
-    document.addEventListener('keydown', onKey);
+    document.addEventListener("keydown", onKey);
     const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
+    document.body.style.overflow = "hidden";
     return () => {
-      document.removeEventListener('keydown', onKey);
+      document.removeEventListener("keydown", onKey);
       document.body.style.overflow = prevOverflow;
     };
   }, [open]);
 
   return (
     <>
+      {" "}
       <button
         type="button"
         onClick={() => setOpen(true)}
@@ -320,97 +376,111 @@ function FilterSheetV2({ value, onChange, options, counts }) {
         aria-expanded={open}
         aria-label={`Filter estimates. Current filter: ${active.label} (${counts[active.key] ?? 0})`}
         className={cn(
-          'inline-flex items-center gap-2 h-11 sm:h-9 pl-4 pr-5 rounded-full',
-          'text-12 font-medium uppercase tracking-label',
-          'bg-zinc-900 text-white border-hairline border-zinc-900',
-          'u-focus-ring hover:bg-zinc-800 transition-colors',
+          "inline-flex items-center gap-2 h-11 sm:h-9 pl-4 pr-5 rounded-full",
+          "text-12 font-medium uppercase tracking-label",
+          "bg-zinc-900 text-white border-hairline border-zinc-900",
+          "u-focus-ring hover:bg-zinc-800 transition-colors",
         )}
       >
-        <SlidersHorizontal size={16} strokeWidth={1.75} aria-hidden />
-        <span>Filter: {active.label} ({counts[active.key] ?? 0})</span>
+        {" "}
+        <SlidersHorizontal size={16} strokeWidth={1.75} aria-hidden />{" "}
+        <span>
+          Filter: {active.label} ({counts[active.key] ?? 0})
+        </span>{" "}
       </button>
-
-      {open && createPortal(
-        <div
-          className="fixed inset-0 z-50 flex items-end justify-center sm:items-center sm:p-4"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Filter estimates"
-        >
+      {open &&
+        createPortal(
           <div
-            className="absolute inset-0 bg-zinc-900/40"
-            onClick={() => setOpen(false)}
-          />
-          <div
-            className={cn(
-              'relative w-full bg-white outline-none',
-              'rounded-t-md sm:rounded-md sm:max-w-md',
-              'border-hairline border-zinc-200',
-              'flex flex-col max-h-[85vh]',
-            )}
-            style={{ paddingBottom: 'env(safe-area-inset-bottom, 0)' }}
+            className="fixed inset-0 z-50 flex items-end justify-center sm:items-center sm:p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Filter estimates"
           >
-            {/* Drag handle (mobile only) */}
-            <div className="pt-2 pb-1 sm:hidden">
-              <div className="mx-auto w-10 h-1 rounded-full bg-zinc-300" />
-            </div>
-
-            <div className="px-5 py-3 flex items-center justify-between border-b border-hairline border-zinc-200">
-              <div className="text-11 uppercase tracking-label font-medium text-ink-tertiary">
-                Filter estimates
-              </div>
-              <button
-                type="button"
-                onClick={() => setOpen(false)}
-                aria-label="Close"
-                className="h-9 w-9 flex items-center justify-center rounded-full bg-zinc-100 text-zinc-900 hover:bg-zinc-200 u-focus-ring"
-              >
-                <X size={16} strokeWidth={1.75} aria-hidden />
-              </button>
-            </div>
-
-            <div className="flex-1 overflow-y-auto">
-              {options.map((o) => {
-                const isActive = o.key === value;
-                return (
-                  <button
-                    key={o.key}
-                    type="button"
-                    onClick={() => {
-                      onChange(o.key);
-                      setOpen(false);
-                    }}
-                    className={cn(
-                      'w-full flex items-center justify-between gap-3',
-                      'px-5 py-4 text-left u-focus-ring',
-                      'border-b border-hairline border-zinc-100 last:border-b-0',
-                      isActive ? 'bg-zinc-50' : 'bg-white hover:bg-zinc-50',
-                    )}
-                  >
-                    <span
+            {" "}
+            <div
+              className="absolute inset-0 bg-zinc-900/40"
+              onClick={() => setOpen(false)}
+            />{" "}
+            <div
+              className={cn(
+                "relative w-full bg-white outline-none",
+                "rounded-t-md sm:rounded-md sm:max-w-md",
+                "border-hairline border-zinc-200",
+                "flex flex-col max-h-[85vh]",
+              )}
+              style={{ paddingBottom: "env(safe-area-inset-bottom, 0)" }}
+            >
+              {/* Drag handle (mobile only) */}
+              <div className="pt-2 pb-1 sm:hidden">
+                {" "}
+                <div className="mx-auto w-10 h-1 rounded-full bg-zinc-300" />{" "}
+              </div>{" "}
+              <div className="px-5 py-3 flex items-center justify-between border-b border-hairline border-zinc-200">
+                {" "}
+                <div className="text-11 uppercase tracking-label font-medium text-ink-tertiary">
+                  Filter estimates
+                </div>{" "}
+                <button
+                  type="button"
+                  onClick={() => setOpen(false)}
+                  aria-label="Close"
+                  className="h-9 w-9 flex items-center justify-center rounded-full bg-zinc-100 text-zinc-900 hover:bg-zinc-200 u-focus-ring"
+                >
+                  {" "}
+                  <X size={16} strokeWidth={1.75} aria-hidden />{" "}
+                </button>{" "}
+              </div>{" "}
+              <div className="flex-1 overflow-y-auto">
+                {options.map((o) => {
+                  const isActive = o.key === value;
+                  return (
+                    <button
+                      key={o.key}
+                      type="button"
+                      onClick={() => {
+                        onChange(o.key);
+                        setOpen(false);
+                      }}
                       className={cn(
-                        'text-14 tracking-tight',
-                        isActive ? 'font-medium text-zinc-900' : 'text-zinc-700',
+                        "w-full flex items-center justify-between gap-3",
+                        "px-5 py-4 text-left u-focus-ring",
+                        "border-b border-hairline border-zinc-100 last:border-b-0",
+                        isActive ? "bg-zinc-50" : "bg-white hover:bg-zinc-50",
                       )}
                     >
-                      {o.label}
-                    </span>
-                    <span className="flex items-center gap-3">
-                      <span className="text-12 u-nums text-ink-tertiary">
-                        {counts[o.key] ?? 0}
-                      </span>
-                      {isActive && (
-                        <Check size={16} strokeWidth={2} className="text-zinc-900" aria-hidden />
-                      )}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </div>,
-        document.body,
-      )}
+                      {" "}
+                      <span
+                        className={cn(
+                          "text-14 tracking-tight",
+                          isActive
+                            ? "font-medium text-zinc-900"
+                            : "text-zinc-700",
+                        )}
+                      >
+                        {o.label}
+                      </span>{" "}
+                      <span className="flex items-center gap-3">
+                        {" "}
+                        <span className="text-12 u-nums text-ink-tertiary">
+                          {counts[o.key] ?? 0}
+                        </span>
+                        {isActive && (
+                          <Check
+                            size={16}
+                            strokeWidth={2}
+                            className="text-zinc-900"
+                            aria-hidden
+                          />
+                        )}
+                      </span>{" "}
+                    </button>
+                  );
+                })}
+              </div>{" "}
+            </div>{" "}
+          </div>,
+          document.body,
+        )}
     </>
   );
 }
@@ -421,102 +491,283 @@ function fmtMoney(value) {
 }
 
 function fmtPct(value) {
-  if (value == null || Number.isNaN(Number(value))) return '—';
+  if (value == null || Number.isNaN(Number(value))) return "—";
   return `${Math.round(Number(value) * 100)}%`;
 }
 
 function fmtDateTime(value) {
-  if (!value) return '—';
+  if (!value) return "—";
   try {
-    return new Date(value).toLocaleString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit',
-      timeZone: 'America/New_York',
-      timeZoneName: 'short',
+    return new Date(value).toLocaleString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZone: "America/New_York",
+      timeZoneName: "short",
     });
   } catch {
-    return '—';
+    return "—";
   }
 }
 
 // Stat card — label, big value, sub. Single alert accent reserved for
-// Follow-Up Overdue when > 0. Conversion% no longer color-codes; the
+// Follow-Up Overdue when >0. Conversion% no longer color-codes; the
 // number alone tells the story. Centered both axes per spec.
 function StatCard({ label, value, sub, alert }) {
   return (
     <Card className="flex-1 min-w-[140px] p-4 min-h-[104px] flex flex-col items-center justify-center text-center">
+      {" "}
       <div className="text-11 uppercase tracking-label text-ink-tertiary mb-1">
         {label}
-      </div>
+      </div>{" "}
       <div
         className={cn(
-          'text-22 font-medium u-nums',
-          alert ? 'text-alert-fg' : 'text-zinc-900',
+          "text-22 font-medium u-nums",
+          alert ? "text-alert-fg" : "text-zinc-900",
         )}
       >
         {value}
       </div>
-      {sub && (
-        <div className="text-11 text-ink-tertiary mt-1">{sub}</div>
-      )}
+      {sub && <div className="text-11 text-ink-tertiary mt-1">{sub}</div>}
     </Card>
   );
 }
 
-function EstimatePricingAuditModal({ estimate, initialFocus = 'all', onClose }) {
+const WORK_QUEUE_GROUPS = [
+  {
+    label: "Work Queue",
+    keys: [
+      "needs_estimate",
+      "ready_to_send",
+      "scheduled",
+      "awaiting",
+      "follow_up",
+    ],
+  },
+  {
+    label: "Risk Review",
+    keys: ["pricing_risk", "missing_cogs", "low_margin"],
+  },
+  {
+    label: "Outcomes",
+    keys: ["won", "lost", "archived"],
+  },
+];
+
+function WorkQueueRail({ value, onChange, counts }) {
+  const optionsByKey = useMemo(() => {
+    const entries = PIPELINE_AND_RISK_FILTERS.map((item) => [item.key, item]);
+    return Object.fromEntries(entries);
+  }, []);
+
+  return (
+    <Card className="hidden xl:block sticky top-[132px] p-3">
+      {" "}
+      <button
+        type="button"
+        onClick={() => onChange("all")}
+        className={cn(
+          "w-full h-10 px-3 rounded-sm border-hairline text-left",
+          "flex items-center justify-between gap-2 u-focus-ring",
+          value === "all"
+            ? "bg-zinc-900 text-white border-zinc-900"
+            : "bg-white text-zinc-900 border-zinc-200 hover:bg-zinc-50",
+        )}
+      >
+        {" "}
+        <span className="text-12 font-medium uppercase tracking-label">
+          All Work
+        </span>{" "}
+        <span className="text-11 u-nums">{counts.all ?? 0}</span>{" "}
+      </button>
+      {WORK_QUEUE_GROUPS.map((group) => (
+        <div key={group.label} className="mt-4">
+          {" "}
+          <div className="px-1 mb-1.5 text-10 uppercase tracking-label font-medium text-ink-tertiary">
+            {group.label}
+          </div>{" "}
+          <div className="space-y-1">
+            {group.keys.map((key) => {
+              const item = optionsByKey[key];
+              if (!item) return null;
+              const active = value === key;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => onChange(key)}
+                  className={cn(
+                    "w-full min-h-9 px-3 rounded-sm text-left",
+                    "flex items-center justify-between gap-2 u-focus-ring",
+                    active
+                      ? "bg-zinc-900 text-white"
+                      : "bg-transparent text-zinc-700 hover:bg-zinc-50 hover:text-zinc-900",
+                  )}
+                >
+                  {" "}
+                  <span className="text-12">{item.label}</span>{" "}
+                  <span className="text-11 u-nums opacity-80">
+                    {counts[key] ?? 0}
+                  </span>{" "}
+                </button>
+              );
+            })}
+          </div>{" "}
+        </div>
+      ))}
+    </Card>
+  );
+}
+
+function PipelineCommandHeader({ activeTab, onTabChange }) {
+  const activeConfig = TABS.find((t) => t.key === activeTab) || TABS[0];
+  const ActionIcon = activeTab === "new" ? ClipboardList : FilePlus2;
+  const actionLabel =
+    activeTab === "new" ? "View Estimates" : "Create Estimate";
+  const actionTarget = activeTab === "new" ? "estimates" : "new";
+
+  return (
+    <div
+      className="md:sticky md:top-0 z-20 mb-5 bg-surface-page/95 pb-3"
+      style={{ fontFamily: ROBOTO }}
+    >
+      {" "}
+      <div className="overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
+        {" "}
+        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
+          {" "}
+          <div className="flex items-center gap-3 min-w-0">
+            {" "}
+            <div className="h-9 w-9 rounded-sm bg-zinc-900 text-white flex items-center justify-center flex-shrink-0">
+              {" "}
+              <activeConfig.Icon size={17} strokeWidth={1.9} aria-hidden />{" "}
+            </div>{" "}
+            <h1
+              className="m-0 text-22 font-medium text-zinc-900 tracking-normal"
+              style={{ fontFamily: ROBOTO }}
+            >
+              Pipeline
+            </h1>{" "}
+          </div>{" "}
+          <Button
+            size="md"
+            variant={activeTab === "new" ? "secondary" : "primary"}
+            className="gap-2 text-12 font-medium uppercase tracking-label"
+            onClick={() => onTabChange(actionTarget)}
+          >
+            {" "}
+            <ActionIcon size={15} strokeWidth={1.9} aria-hidden />
+            {actionLabel}
+          </Button>{" "}
+        </div>{" "}
+        <nav
+          aria-label="Pipeline section"
+          className="grid grid-cols-2 lg:grid-cols-4 gap-1 p-2"
+        >
+          {TABS.map(({ key, label, Icon }) => {
+            const active = activeTab === key;
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => onTabChange(key)}
+                aria-current={active ? "page" : undefined}
+                className={cn(
+                  "h-11 px-3 rounded-sm border-hairline text-12 font-medium uppercase tracking-label",
+                  "inline-flex items-center justify-center gap-2 u-focus-ring transition-colors",
+                  active
+                    ? "bg-zinc-900 text-white border-zinc-900"
+                    : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50 hover:text-zinc-900",
+                )}
+              >
+                {" "}
+                <Icon size={15} strokeWidth={1.8} aria-hidden />
+                {label}
+              </button>
+            );
+          })}
+        </nav>{" "}
+      </div>{" "}
+    </div>
+  );
+}
+
+function EstimatePricingAuditModal({
+  estimate,
+  initialFocus = "all",
+  onClose,
+}) {
   const navigate = useNavigate();
   const [audit, setAudit] = useState(null);
-  const [error, setError] = useState('');
-  const [focus, setFocus] = useState(initialFocus || 'all');
+  const [error, setError] = useState("");
+  const [focus, setFocus] = useState(initialFocus || "all");
 
   useEffect(() => {
     let alive = true;
     setAudit(null);
-    setError('');
-    setFocus(initialFocus || 'all');
+    setError("");
+    setFocus(initialFocus || "all");
     adminFetch(`/admin/estimates/${estimate.id}/pricing-audit`)
-      .then((data) => { if (alive) setAudit(data); })
-      .catch((err) => { if (alive) setError(err.message); });
-    return () => { alive = false; };
+      .then((data) => {
+        if (alive) setAudit(data);
+      })
+      .catch((err) => {
+        if (alive) setError(err.message);
+      });
+    return () => {
+      alive = false;
+    };
   }, [estimate.id, initialFocus]);
 
   useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
-    document.addEventListener('keydown', onKey);
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
     const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
+    document.body.style.overflow = "hidden";
     return () => {
-      document.removeEventListener('keydown', onKey);
+      document.removeEventListener("keydown", onKey);
       document.body.style.overflow = prevOverflow;
     };
   }, [onClose]);
 
   const lineMatchesFocus = (line) => {
-    if (focus === 'missing_cogs') return ['missing_cogs', 'unmapped'].includes(line.cogs?.status);
-    if (focus === 'low_margin') return line.margin != null && line.margin < 0.35;
+    if (focus === "missing_cogs")
+      return ["missing_cogs", "unmapped"].includes(line.cogs?.status);
+    if (focus === "low_margin")
+      return line.margin != null && line.margin < 0.35;
     return true;
   };
   const visibleLines = audit?.lines?.filter(lineMatchesFocus) || [];
-  const focusLabel = focus === 'missing_cogs' ? 'Missing COGS'
-    : focus === 'low_margin' ? 'Low Margin'
-      : 'All Lines';
+  const focusLabel =
+    focus === "missing_cogs"
+      ? "Missing COGS"
+      : focus === "low_margin"
+        ? "Low Margin"
+        : "All Lines";
 
   const goFixSource = (line) => {
     const serviceLine = serviceLineFromAuditLine(line);
-    if (['missing_cogs', 'unmapped'].includes(line.cogs?.status)) {
-      navigate(`/admin/inventory?tab=protocols&serviceLine=${encodeURIComponent(serviceLine)}&add=1`);
+    if (["missing_cogs", "unmapped"].includes(line.cogs?.status)) {
+      navigate(
+        `/admin/inventory?tab=protocols&serviceLine=${encodeURIComponent(serviceLine)}&add=1`,
+      );
       onClose();
       return;
     }
-    if (line.cogs?.status === 'warning') {
-      navigate(`/admin/inventory?tab=protocols&serviceLine=${encodeURIComponent(serviceLine)}&highlight=costs`);
+    if (line.cogs?.status === "warning") {
+      navigate(
+        `/admin/inventory?tab=protocols&serviceLine=${encodeURIComponent(serviceLine)}&highlight=costs`,
+      );
       onClose();
       return;
     }
-    navigate(`/admin/pricing-logic?service=${encodeURIComponent(line.serviceKey || serviceLine)}&focus=margin`);
+    navigate(
+      `/admin/pricing-logic?service=${encodeURIComponent(line.serviceKey || serviceLine)}&focus=margin`,
+    );
     onClose();
   };
 
@@ -528,27 +779,34 @@ function EstimatePricingAuditModal({ estimate, initialFocus = 'all', onClose }) 
       aria-label="Estimate pricing audit"
       onClick={onClose}
     >
+      {" "}
       <div
         className="bg-white border-hairline border-zinc-200 rounded-lg shadow-xl w-full max-w-5xl max-h-[88vh] overflow-hidden flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
+        {" "}
         <div className="p-5 border-b border-zinc-200 flex items-start justify-between gap-4">
+          {" "}
           <div>
-            <div className="text-16 font-semibold text-zinc-900">Estimate Pricing Audit</div>
+            {" "}
+            <div className="text-16 font-semibold text-zinc-900">
+              Estimate Pricing Audit
+            </div>{" "}
             <div className="text-12 text-ink-secondary mt-1">
-              {estimate.customerName || 'Unknown'} · {estimate.address || 'No address'}
-            </div>
-          </div>
+              {estimate.customerName || "Unknown"} ·{" "}
+              {estimate.address || "No address"}
+            </div>{" "}
+          </div>{" "}
           <button
             type="button"
             onClick={onClose}
             className="h-9 w-9 inline-flex items-center justify-center rounded-xs border-hairline border-zinc-300 text-zinc-700 hover:bg-zinc-50"
             aria-label="Close pricing audit"
           >
-            <X size={16} strokeWidth={1.75} />
-          </button>
-        </div>
-
+            {" "}
+            <X size={16} strokeWidth={1.75} />{" "}
+          </button>{" "}
+        </div>{" "}
         <div className="p-5 overflow-auto">
           {error && (
             <div className="border-hairline border-alert-fg bg-alert-bg text-alert-fg rounded-xs p-3 text-13">
@@ -556,174 +814,286 @@ function EstimatePricingAuditModal({ estimate, initialFocus = 'all', onClose }) 
             </div>
           )}
           {!audit && !error && (
-            <div className="p-8 text-center text-13 text-ink-secondary">Loading audit…</div>
+            <div className="p-8 text-center text-13 text-ink-secondary">
+              Loading audit…
+            </div>
           )}
           {audit && (
             <div className="space-y-4">
+              {" "}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                <StatCard label="Annual + 1x Revenue" value={fmtMoney(audit.totals.revenue)} sub="stored estimate" />
-                <StatCard label="Inventory COGS" value={fmtMoney(audit.totals.estimatedCost)} sub="current products" />
-                <StatCard label="Gross Profit" value={fmtMoney(audit.totals.grossProfit)} sub={fmtPct(audit.totals.margin)} alert={audit.totals.margin != null && audit.totals.margin < 0.35} />
-                <StatCard label="WaveGuard" value={audit.estimate.waveguardTier || '—'} sub={audit.estimate.pricingVersion || 'saved result'} />
+                {" "}
+                <StatCard
+                  label="Annual + 1x Revenue"
+                  value={fmtMoney(audit.totals.revenue)}
+                  sub="stored estimate"
+                />{" "}
+                <StatCard
+                  label="Inventory COGS"
+                  value={fmtMoney(audit.totals.estimatedCost)}
+                  sub="current products"
+                />{" "}
+                <StatCard
+                  label="Gross Profit"
+                  value={fmtMoney(audit.totals.grossProfit)}
+                  sub={fmtPct(audit.totals.margin)}
+                  alert={
+                    audit.totals.margin != null && audit.totals.margin < 0.35
+                  }
+                />{" "}
+                <StatCard
+                  label="WaveGuard"
+                  value={audit.estimate.waveguardTier || "—"}
+                  sub={audit.estimate.pricingVersion || "saved result"}
+                />{" "}
               </div>
-
               {audit.snapshot && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  {" "}
                   <Card className="p-4">
-                    <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">Sent Snapshot</div>
+                    {" "}
+                    <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">
+                      Sent Snapshot
+                    </div>{" "}
                     <div className="grid grid-cols-3 gap-3">
+                      {" "}
                       <div>
-                        <div className="text-11 text-ink-tertiary">COGS</div>
-                        <div className="text-16 font-medium u-nums text-zinc-900">{fmtMoney(audit.snapshot.totals?.estimatedCost)}</div>
-                      </div>
-                      <div>
-                        <div className="text-11 text-ink-tertiary">Margin</div>
-                        <div className="text-16 font-medium u-nums text-zinc-900">{fmtPct(audit.snapshot.totals?.margin)}</div>
-                      </div>
-                      <div>
-                        <div className="text-11 text-ink-tertiary">Captured</div>
-                        <div className="text-12 text-zinc-900">{fmtDateTime(audit.snapshot.snapshotAt)}</div>
-                      </div>
-                    </div>
-                  </Card>
-                  <Card className="p-4">
-                    <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">Current Audit</div>
-                    <div className="grid grid-cols-3 gap-3">
-                      <div>
-                        <div className="text-11 text-ink-tertiary">COGS</div>
-                        <div className="text-16 font-medium u-nums text-zinc-900">{fmtMoney(audit.totals.estimatedCost)}</div>
-                      </div>
-                      <div>
-                        <div className="text-11 text-ink-tertiary">Margin</div>
-                        <div className="text-16 font-medium u-nums text-zinc-900">{fmtPct(audit.totals.margin)}</div>
-                      </div>
-                      <div>
-                        <div className="text-11 text-ink-tertiary">Delta</div>
+                        {" "}
+                        <div className="text-11 text-ink-tertiary">
+                          COGS
+                        </div>{" "}
                         <div className="text-16 font-medium u-nums text-zinc-900">
-                          {audit.snapshot.totals?.margin == null || audit.totals.margin == null
-                            ? '—'
+                          {fmtMoney(audit.snapshot.totals?.estimatedCost)}
+                        </div>{" "}
+                      </div>{" "}
+                      <div>
+                        {" "}
+                        <div className="text-11 text-ink-tertiary">
+                          Margin
+                        </div>{" "}
+                        <div className="text-16 font-medium u-nums text-zinc-900">
+                          {fmtPct(audit.snapshot.totals?.margin)}
+                        </div>{" "}
+                      </div>{" "}
+                      <div>
+                        {" "}
+                        <div className="text-11 text-ink-tertiary">
+                          Captured
+                        </div>{" "}
+                        <div className="text-12 text-zinc-900">
+                          {fmtDateTime(audit.snapshot.snapshotAt)}
+                        </div>{" "}
+                      </div>{" "}
+                    </div>{" "}
+                  </Card>{" "}
+                  <Card className="p-4">
+                    {" "}
+                    <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">
+                      Current Audit
+                    </div>{" "}
+                    <div className="grid grid-cols-3 gap-3">
+                      {" "}
+                      <div>
+                        {" "}
+                        <div className="text-11 text-ink-tertiary">
+                          COGS
+                        </div>{" "}
+                        <div className="text-16 font-medium u-nums text-zinc-900">
+                          {fmtMoney(audit.totals.estimatedCost)}
+                        </div>{" "}
+                      </div>{" "}
+                      <div>
+                        {" "}
+                        <div className="text-11 text-ink-tertiary">
+                          Margin
+                        </div>{" "}
+                        <div className="text-16 font-medium u-nums text-zinc-900">
+                          {fmtPct(audit.totals.margin)}
+                        </div>{" "}
+                      </div>{" "}
+                      <div>
+                        {" "}
+                        <div className="text-11 text-ink-tertiary">
+                          Delta
+                        </div>{" "}
+                        <div className="text-16 font-medium u-nums text-zinc-900">
+                          {audit.snapshot.totals?.margin == null ||
+                          audit.totals.margin == null
+                            ? "—"
                             : `${Math.round((audit.totals.margin - audit.snapshot.totals.margin) * 100)} pts`}
-                        </div>
-                      </div>
-                    </div>
-                  </Card>
+                        </div>{" "}
+                      </div>{" "}
+                    </div>{" "}
+                  </Card>{" "}
                 </div>
               )}
-
               <div className="flex flex-wrap items-center justify-between gap-2 border-hairline border-zinc-200 rounded-md px-3 py-2">
+                {" "}
                 <div className="text-12 text-ink-secondary">
-                  Showing <span className="font-medium text-zinc-900">{focusLabel}</span>
-                  {focus !== 'all' ? ` (${visibleLines.length} of ${audit.lines.length})` : ''}
-                </div>
+                  Showing{" "}
+                  <span className="font-medium text-zinc-900">
+                    {focusLabel}
+                  </span>
+                  {focus !== "all"
+                    ? ` (${visibleLines.length} of ${audit.lines.length})`
+                    : ""}
+                </div>{" "}
                 <div className="flex flex-wrap gap-1.5">
                   {[
-                    { key: 'all', label: 'All' },
-                    { key: 'missing_cogs', label: 'Missing COGS' },
-                    { key: 'low_margin', label: 'Low Margin' },
+                    { key: "all", label: "All" },
+                    { key: "missing_cogs", label: "Missing COGS" },
+                    { key: "low_margin", label: "Low Margin" },
                   ].map((item) => (
                     <button
                       key={item.key}
                       type="button"
                       onClick={() => setFocus(item.key)}
                       className={cn(
-                        'h-8 px-3 rounded-full text-11 font-medium border-hairline u-focus-ring',
+                        "h-8 px-3 rounded-full text-11 font-medium border-hairline u-focus-ring",
                         focus === item.key
-                          ? 'bg-zinc-900 text-white border-zinc-900'
-                          : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50',
+                          ? "bg-zinc-900 text-white border-zinc-900"
+                          : "bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50",
                       )}
                     >
                       {item.label}
                     </button>
                   ))}
-                </div>
-              </div>
-
+                </div>{" "}
+              </div>{" "}
               <div className="border-hairline border-zinc-200 rounded-lg overflow-hidden">
+                {" "}
                 <div className="hidden md:grid grid-cols-[1.1fr_0.85fr_0.75fr_0.65fr_0.75fr_1fr_0.65fr] gap-3 px-3 py-2 bg-zinc-50 text-10 uppercase tracking-label text-ink-tertiary font-medium">
-                  <div>Line</div>
-                  <div>Price Source</div>
-                  <div>Protocol</div>
-                  <div>Revenue</div>
-                  <div>COGS</div>
-                  <div>Margin / Warnings</div>
-                  <div>Fix</div>
+                  {" "}
+                  <div>Line</div> <div>Price Source</div> <div>Protocol</div>{" "}
+                  <div>Revenue</div> <div>COGS</div>{" "}
+                  <div>Margin / Warnings</div> <div>Fix</div>{" "}
                 </div>
                 {visibleLines.length === 0 ? (
                   <div className="p-4 text-13 text-ink-secondary">
-                    {audit.lines.length === 0 ? 'No saved estimate lines found.' : `No ${focusLabel.toLowerCase()} lines found.`}
+                    {audit.lines.length === 0
+                      ? "No saved estimate lines found."
+                      : `No ${focusLabel.toLowerCase()} lines found.`}
                   </div>
-                ) : visibleLines.map((line, idx) => (
-                  <div
-                    key={`${line.serviceKey}-${idx}`}
-                    className="grid grid-cols-1 md:grid-cols-[1.1fr_0.85fr_0.75fr_0.65fr_0.75fr_1fr_0.65fr] gap-3 px-3 py-3 border-t border-zinc-100 text-12"
-                  >
-                    <div>
-                      <div className="font-medium text-zinc-900">{line.label}</div>
-                      <div className="text-ink-secondary">{line.cadence === 'recurring' ? `${line.monthly ? fmtMoney(line.monthly) : '—'}/mo` : 'one-time'} · {line.cogs?.visitsPerYear || 0} visit{line.cogs?.visitsPerYear === 1 ? '' : 's'}</div>
-                    </div>
-                    <div className="text-ink-secondary break-words">{line.priceSource}</div>
-                    <div>
-                      <div className="text-zinc-900">{line.protocol?.programKey || '—'}</div>
-                      <div className="text-ink-secondary">{line.protocol?.matched ? line.protocol.visitName || 'matched' : line.protocol?.reason || 'not matched'}</div>
-                    </div>
-                    <div className="u-nums font-medium text-zinc-900">{fmtMoney(line.price)}</div>
-                    <div>
-                      <div className="u-nums font-medium text-zinc-900">{fmtMoney(line.cogs?.estimatedCost)}</div>
-                      <div className="text-ink-secondary">{fmtMoney(line.cogs?.totalPerVisit)}/visit · {line.cogs?.status}</div>
-                      {line.cogs?.lines?.length > 0 && (
-                        <div className="mt-1 text-11 text-ink-tertiary">
-                          {line.cogs.lines.slice(0, 2).map((p) => p.productName).join(', ')}
-                          {line.cogs.lines.length > 2 ? ` +${line.cogs.lines.length - 2}` : ''}
+                ) : (
+                  visibleLines.map((line, idx) => (
+                    <div
+                      key={`${line.serviceKey}-${idx}`}
+                      className="grid grid-cols-1 md:grid-cols-[1.1fr_0.85fr_0.75fr_0.65fr_0.75fr_1fr_0.65fr] gap-3 px-3 py-3 border-t border-zinc-100 text-12"
+                    >
+                      {" "}
+                      <div>
+                        {" "}
+                        <div className="font-medium text-zinc-900">
+                          {line.label}
+                        </div>{" "}
+                        <div className="text-ink-secondary">
+                          {line.cadence === "recurring"
+                            ? `${line.monthly ? fmtMoney(line.monthly) : "—"}/mo`
+                            : "one-time"}{" "}
+                          · {line.cogs?.visitsPerYear || 0} visit
+                          {line.cogs?.visitsPerYear === 1 ? "" : "s"}
+                        </div>{" "}
+                      </div>{" "}
+                      <div className="text-ink-secondary break-words">
+                        {line.priceSource}
+                      </div>{" "}
+                      <div>
+                        {" "}
+                        <div className="text-zinc-900">
+                          {line.protocol?.programKey || "—"}
+                        </div>{" "}
+                        <div className="text-ink-secondary">
+                          {line.protocol?.matched
+                            ? line.protocol.visitName || "matched"
+                            : line.protocol?.reason || "not matched"}
+                        </div>{" "}
+                      </div>{" "}
+                      <div className="u-nums font-medium text-zinc-900">
+                        {fmtMoney(line.price)}
+                      </div>{" "}
+                      <div>
+                        {" "}
+                        <div className="u-nums font-medium text-zinc-900">
+                          {fmtMoney(line.cogs?.estimatedCost)}
+                        </div>{" "}
+                        <div className="text-ink-secondary">
+                          {fmtMoney(line.cogs?.totalPerVisit)}/visit ·{" "}
+                          {line.cogs?.status}
                         </div>
-                      )}
-                    </div>
-                    <div>
-                      <Badge tone={line.status === 'ok' ? 'neutral' : 'alert'}>{fmtPct(line.margin)}</Badge>
-                      {line.warnings?.length > 0 && (
-                        <div className="mt-1 space-y-1">
-                          {line.warnings.slice(0, 3).map((w, i) => (
-                            <div key={i} className="text-11 text-alert-fg">{w}</div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    <div>
-                      {line.status === 'ok' ? (
-                        <span className="text-ink-tertiary">—</span>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => goFixSource(line)}
-                          className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-full border-hairline border-zinc-300 text-11 font-medium text-zinc-800 hover:bg-zinc-50 u-focus-ring"
-                          title="Open the source setup for this pricing issue"
+                        {line.cogs?.lines?.length > 0 && (
+                          <div className="mt-1 text-11 text-ink-tertiary">
+                            {line.cogs.lines
+                              .slice(0, 2)
+                              .map((p) => p.productName)
+                              .join(", ")}
+                            {line.cogs.lines.length > 2
+                              ? ` +${line.cogs.lines.length - 2}`
+                              : ""}
+                          </div>
+                        )}
+                      </div>{" "}
+                      <div>
+                        {" "}
+                        <Badge
+                          tone={line.status === "ok" ? "neutral" : "alert"}
                         >
-                          <ExternalLink size={13} strokeWidth={1.75} aria-hidden />
-                          Fix source
-                        </button>
-                      )}
+                          {fmtPct(line.margin)}
+                        </Badge>
+                        {line.warnings?.length > 0 && (
+                          <div className="mt-1 space-y-1">
+                            {line.warnings.slice(0, 3).map((w, i) => (
+                              <div key={i} className="text-11 text-alert-fg">
+                                {w}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>{" "}
+                      <div>
+                        {line.status === "ok" ? (
+                          <span className="text-ink-tertiary">—</span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => goFixSource(line)}
+                            className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-full border-hairline border-zinc-300 text-11 font-medium text-zinc-800 hover:bg-zinc-50 u-focus-ring"
+                            title="Open the source setup for this pricing issue"
+                          >
+                            {" "}
+                            <ExternalLink
+                              size={13}
+                              strokeWidth={1.75}
+                              aria-hidden
+                            />
+                            Fix source
+                          </button>
+                        )}
+                      </div>{" "}
                     </div>
-                  </div>
-                ))}
-              </div>
-
+                  ))
+                )}
+              </div>{" "}
               <div className="text-11 text-ink-tertiary">
-                Pricing is read from the saved estimate result. Current COGS is recalculated from today's inventory product costs and service protocol mappings; sent snapshots preserve the audit values captured when the estimate was delivered.
-              </div>
+                Pricing is read from the saved estimate result. Current COGS is
+                recalculated from today's inventory product costs and service
+                protocol mappings; sent snapshots preserve the audit values
+                captured when the estimate was delivered.
+              </div>{" "}
             </div>
           )}
-        </div>
-      </div>
+        </div>{" "}
+      </div>{" "}
     </div>,
     document.body,
   );
 }
 
 function fmtDate(d) {
-  if (!d) return '—';
-  return new Date(d).toLocaleDateString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
+  if (!d) return "—";
+  return new Date(d).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
   });
 }
 
@@ -731,17 +1101,24 @@ function fmtDate(d) {
 // "Tue 5/12 · 9:00 AM". scheduledDate is YYYY-MM-DD in ET, so we render it
 // in ET to keep day-of-week consistent regardless of viewer locale.
 function formatApptShort(appt) {
-  if (!appt?.scheduledDate) return '';
+  if (!appt?.scheduledDate) return "";
   // Pin the date to noon ET so day-of-week never flips on a locale shift.
   const dt = new Date(`${appt.scheduledDate}T12:00:00-05:00`);
-  const dow = dt.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' });
-  const md = dt.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', timeZone: 'America/New_York' });
-  const t = appt.windowDisplay ? ` · ${appt.windowDisplay}` : '';
+  const dow = dt.toLocaleDateString("en-US", {
+    weekday: "short",
+    timeZone: "America/New_York",
+  });
+  const md = dt.toLocaleDateString("en-US", {
+    month: "numeric",
+    day: "numeric",
+    timeZone: "America/New_York",
+  });
+  const t = appt.windowDisplay ? ` · ${appt.windowDisplay}` : "";
   return `${dow} ${md}${t}`;
 }
 
 function timeAgo(d) {
-  if (!d) return '';
+  if (!d) return "";
   const mins = Math.floor((Date.now() - new Date(d)) / 60000);
   if (mins < 60) return `${mins}m ago`;
   const hrs = Math.floor(mins / 60);
@@ -751,20 +1128,20 @@ function timeAgo(d) {
 }
 
 const SOURCE_ICON = {
-  lead_webhook: { Icon: Globe, title: 'Website lead' },
-  referral: { Icon: Users, title: 'Referral' },
-  ai_agent: { Icon: Bot, title: 'AI agent draft — review before sending' },
-  call_recording: { Icon: Phone, title: 'Phone call recording draft' },
+  lead_webhook: { Icon: Globe, title: "Website lead" },
+  referral: { Icon: Users, title: "Referral" },
+  ai_agent: { Icon: Bot, title: "AI agent draft — review before sending" },
+  call_recording: { Icon: Phone, title: "Phone call recording draft" },
 };
 
 function EstimatePipelineViewV2() {
-  const v3Flag = useFeatureFlag('estimates_v2_status_pills');
+  const v3Flag = useFeatureFlag("estimates_v2_status_pills");
   const navigate = useNavigate();
   const [estimates, setEstimates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [customerPanelId, setCustomerPanelId] = useState(null);
-  const [filter, setFilter] = useState('all');
+  const [filter, setFilter] = useState("all");
   const [followUpTarget, setFollowUpTarget] = useState(null);
   const [declineTarget, setDeclineTarget] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
@@ -774,9 +1151,10 @@ function EstimatePipelineViewV2() {
     // When the "Archived" filter is picked, ask the API for archived-only;
     // otherwise the default hides archived rows so closed/old work stops
     // cluttering the pipeline.
-    const qs = filter === 'archived'
-      ? `?archived=only&limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`
-      : `?limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`;
+    const qs =
+      filter === "archived"
+        ? `?archived=only&limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`
+        : `?limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`;
     setLoading(true);
     setError(null);
     adminFetch(`/admin/estimates${qs}`)
@@ -794,80 +1172,114 @@ function EstimatePipelineViewV2() {
     refreshEstimates();
   }, [refreshEstimates]);
 
-  const archiveEstimate = useCallback(async (e) => {
-    if (!confirm(`Archive this ${e.status} estimate? It stays accessible under the Archived filter.`)) return;
-    try {
-      await adminFetch(`/admin/estimates/${e.id}/archive`, { method: 'POST' });
-      refreshEstimates();
-    } catch (err) {
-      alert('Archive failed: ' + err.message);
-    }
-  }, [refreshEstimates]);
+  const archiveEstimate = useCallback(
+    async (e) => {
+      if (
+        !confirm(
+          `Archive this ${e.status} estimate? It stays accessible under the Archived filter.`,
+        )
+      )
+        return;
+      try {
+        await adminFetch(`/admin/estimates/${e.id}/archive`, {
+          method: "POST",
+        });
+        refreshEstimates();
+      } catch (err) {
+        alert("Archive failed: " + err.message);
+      }
+    },
+    [refreshEstimates],
+  );
 
-  const unarchiveEstimate = useCallback(async (e) => {
-    try {
-      await adminFetch(`/admin/estimates/${e.id}/unarchive`, { method: 'POST' });
-      refreshEstimates();
-    } catch (err) {
-      alert('Unarchive failed: ' + err.message);
-    }
-  }, [refreshEstimates]);
+  const unarchiveEstimate = useCallback(
+    async (e) => {
+      try {
+        await adminFetch(`/admin/estimates/${e.id}/unarchive`, {
+          method: "POST",
+        });
+        refreshEstimates();
+      } catch (err) {
+        alert("Unarchive failed: " + err.message);
+      }
+    },
+    [refreshEstimates],
+  );
 
-  const patchEstimateToggle = useCallback(async (estimate, field, value) => {
-    const key = `${estimate.id}:${field}`;
-    if (pendingToggleKeys.has(key)) return false;
-    setPendingToggleKeys((prev) => new Set(prev).add(key));
-    try {
-      await adminFetch(`/admin/estimates/${estimate.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ [field]: value }),
-      });
-      setEstimates((prev) =>
-        prev.map((est) => (est.id === estimate.id ? { ...est, [field]: value } : est)),
-      );
-      return true;
-    } finally {
-      setPendingToggleKeys((prev) => {
-        const next = new Set(prev);
-        next.delete(key);
-        return next;
-      });
-    }
-  }, [pendingToggleKeys]);
+  const patchEstimateToggle = useCallback(
+    async (estimate, field, value) => {
+      const key = `${estimate.id}:${field}`;
+      if (pendingToggleKeys.has(key)) return false;
+      setPendingToggleKeys((prev) => new Set(prev).add(key));
+      try {
+        await adminFetch(`/admin/estimates/${estimate.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ [field]: value }),
+        });
+        setEstimates((prev) =>
+          prev.map((est) =>
+            est.id === estimate.id ? { ...est, [field]: value } : est,
+          ),
+        );
+        return true;
+      } finally {
+        setPendingToggleKeys((prev) => {
+          const next = new Set(prev);
+          next.delete(key);
+          return next;
+        });
+      }
+    },
+    [pendingToggleKeys],
+  );
 
-  const isEstimateTogglePending = useCallback((estimateId, field) => (
-    pendingToggleKeys.has(`${estimateId}:${field}`)
-  ), [pendingToggleKeys]);
+  const isEstimateTogglePending = useCallback(
+    (estimateId, field) => pendingToggleKeys.has(`${estimateId}:${field}`),
+    [pendingToggleKeys],
+  );
 
-  const togglePriority = useCallback(async (e) => {
-    const newVal = !e.isPriority;
-    try {
-      await patchEstimateToggle(e, 'isPriority', newVal);
-    } catch (err) {
-      alert(`Failed to update priority: ${err.message}`);
-    }
-  }, [patchEstimateToggle]);
+  const togglePriority = useCallback(
+    async (e) => {
+      const newVal = !e.isPriority;
+      try {
+        await patchEstimateToggle(e, "isPriority", newVal);
+      } catch (err) {
+        alert(`Failed to update priority: ${err.message}`);
+      }
+    },
+    [patchEstimateToggle],
+  );
 
-  const toggleOneTimeOption = useCallback(async (e) => {
-    const newVal = !e.showOneTimeOption;
-    try {
-      await patchEstimateToggle(e, 'showOneTimeOption', newVal);
-    } catch (err) {
-      alert(`Failed to update one-time option: ${err.message}`);
-    }
-  }, [patchEstimateToggle]);
+  const toggleOneTimeOption = useCallback(
+    async (e) => {
+      const newVal = !e.showOneTimeOption;
+      try {
+        await patchEstimateToggle(e, "showOneTimeOption", newVal);
+      } catch (err) {
+        alert(`Failed to update one-time option: ${err.message}`);
+      }
+    },
+    [patchEstimateToggle],
+  );
 
-  const toggleBillByInvoice = useCallback(async (e) => {
-    const newVal = !e.billByInvoice;
-    if (newVal && !window.confirm(
-      'Invoice mode: when the customer accepts, an invoice due immediately will be created and pay-link delivery will be attempted — no onboarding or payment method up front.\n\nContinue?',
-    )) return;
-    try {
-      await patchEstimateToggle(e, 'billByInvoice', newVal);
-    } catch (err) {
-      alert(`Failed to update invoice mode: ${err.message}`);
-    }
-  }, [patchEstimateToggle]);
+  const toggleBillByInvoice = useCallback(
+    async (e) => {
+      const newVal = !e.billByInvoice;
+      if (
+        newVal &&
+        !window.confirm(
+          "Invoice mode: when the customer accepts, an invoice due immediately will be created and pay-link delivery will be attempted — no onboarding or payment method up front.\n\nContinue?",
+        )
+      )
+        return;
+      try {
+        await patchEstimateToggle(e, "billByInvoice", newVal);
+      } catch (err) {
+        alert(`Failed to update invoice mode: ${err.message}`);
+      }
+    },
+    [patchEstimateToggle],
+  );
 
   if (loading) {
     return (
@@ -880,29 +1292,43 @@ function EstimatePipelineViewV2() {
   if (error && estimates.length === 0) {
     return (
       <div className="p-10 text-center">
-        <div className="text-14 text-alert-fg mb-3">Failed to load estimates</div>
-        <div className="text-13 text-ink-tertiary mb-4">{error.message || String(error)}</div>
-        <Button variant="primary" onClick={() => refreshEstimates()}>Retry</Button>
+        {" "}
+        <div className="text-14 text-alert-fg mb-3">
+          Failed to load estimates
+        </div>{" "}
+        <div className="text-13 text-ink-tertiary mb-4">
+          {error.message || String(error)}
+        </div>{" "}
+        <Button variant="primary" onClick={() => refreshEstimates()}>
+          Retry
+        </Button>{" "}
       </div>
     );
   }
 
   // Classify + sort newest-first so the most recent estimates stay at the top.
-  const classified = estimates.map((e) => ({ ...e, _class: classifyEstimate(e) }));
-  const sorted = [...classified].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  const classified = estimates.map((e) => ({
+    ...e,
+    _class: classifyEstimate(e),
+  }));
+  const sorted = [...classified].sort(
+    (a, b) => new Date(b.createdAt) - new Date(a.createdAt),
+  );
 
   // Stats — preserved 1:1 from V1
   const total = estimates.length;
-  const accepted = estimates.filter((e) => e.status === 'accepted').length;
-  const sent = estimates.filter((e) => ['sent', 'viewed'].includes(e.status)).length;
+  const accepted = estimates.filter((e) => e.status === "accepted").length;
+  const sent = estimates.filter((e) =>
+    ["sent", "viewed"].includes(e.status),
+  ).length;
   const declined = estimates.filter(
-    (e) => e.status === 'declined' || e.status === 'expired',
+    (e) => e.status === "declined" || e.status === "expired",
   ).length;
   const totalMRRWon = estimates
-    .filter((e) => e.status === 'accepted')
+    .filter((e) => e.status === "accepted")
     .reduce((s, e) => s + (e.monthlyTotal || 0), 0);
   const pipelineValue = estimates
-    .filter((e) => !['accepted', 'declined', 'expired'].includes(e.status))
+    .filter((e) => !["accepted", "declined", "expired"].includes(e.status))
     .reduce((s, e) => s + (e.monthlyTotal || 0), 0);
   const conversionRate =
     sent + accepted + declined > 0
@@ -919,29 +1345,37 @@ function EstimatePipelineViewV2() {
   const now = Date.now();
   const followUpOverdue = estimates.filter((e) => {
     if (
-      e.status === 'sent' &&
+      e.status === "sent" &&
       !e.viewedAt &&
       e.sentAt &&
       now - new Date(e.sentAt).getTime() > 72 * HOUR
     )
       return true;
     if (
-      e.status === 'viewed' &&
+      e.status === "viewed" &&
       e.viewedAt &&
       now - new Date(e.viewedAt).getTime() > 48 * HOUR
     )
       return true;
     return false;
   }).length;
-  const pricingRiskCount = estimates.filter((e) => e.pricingRisk?.hasRisk).length;
-  const missingCogsCount = estimates.filter((e) => (e.pricingRisk?.missingCogsCount || 0) > 0).length;
-  const lowMarginCount = estimates.filter((e) => (e.pricingRisk?.lowMarginCount || 0) > 0).length;
+  const pricingRiskCount = estimates.filter(
+    (e) => e.pricingRisk?.hasRisk,
+  ).length;
+  const missingCogsCount = estimates.filter(
+    (e) => (e.pricingRisk?.missingCogsCount || 0) > 0,
+  ).length;
+  const lowMarginCount = estimates.filter(
+    (e) => (e.pricingRisk?.lowMarginCount || 0) > 0,
+  ).length;
 
   // Filter counts
   const filterCounts = {};
   for (const f of PIPELINE_AND_RISK_FILTERS) {
     filterCounts[f.key] =
-      f.key === 'all' ? total : classified.filter((e) => estimateMatchesFilter(e, f.key)).length;
+      f.key === "all"
+        ? total
+        : classified.filter((e) => estimateMatchesFilter(e, f.key)).length;
   }
 
   const filtered = sorted.filter((e) => estimateMatchesFilter(e, filter));
@@ -971,7 +1405,7 @@ function EstimatePipelineViewV2() {
       {auditTarget && (
         <EstimatePricingAuditModal
           estimate={auditTarget.estimate || auditTarget}
-          initialFocus={auditTarget.focus || 'all'}
+          initialFocus={auditTarget.focus || "all"}
           onClose={() => setAuditTarget(null)}
         />
       )}
@@ -982,447 +1416,549 @@ function EstimatePipelineViewV2() {
         </div>
       )}
 
-      {/* Stats bar */}
-      <div className="flex gap-2 mb-5 flex-wrap">
-        <StatCard
-          label="Pipeline Value"
-          value={`$${Math.round(pipelineValue)}`}
-          sub="/mo potential"
-        />
-        <StatCard
-          label="MRR Won"
-          value={`$${Math.round(totalMRRWon)}`}
-          sub="/mo closed"
-        />
-        <StatCard
-          label="Conversion"
-          value={`${conversionRate}%`}
-          sub={`${accepted} of ${sent + accepted + declined}`}
-        />
-        <StatCard
-          label="Avg Estimate"
-          value={`$${avgEstimateValue}`}
-          sub="/mo"
-        />
-        <StatCard
-          label="Follow-Up Overdue"
-          value={followUpOverdue}
-          sub={followUpOverdue > 0 ? 'need attention' : 'all clear'}
-          alert={followUpOverdue > 0}
-        />
-        <StatCard
-          label="Pricing Risk"
-          value={pricingRiskCount}
-          sub={`${missingCogsCount} COGS · ${lowMarginCount} margin`}
-          alert={pricingRiskCount > 0}
-        />
-        <StatCard
-          label="Total"
-          value={total}
-          sub={`${accepted} won · ${declined} lost`}
-        />
-      </div>
-
-      {/* Filter — 7 options exceeds the 4-item pill cap, so FILTER button
-          opens a bottom sheet on mobile / centered modal on desktop */}
-      <div className="mb-4 flex justify-center sm:justify-start">
-        <FilterSheetV2
+      <div className="grid grid-cols-1 xl:grid-cols-[220px_minmax(0,1fr)] gap-4 items-start">
+        {" "}
+        <WorkQueueRail
           value={filter}
           onChange={setFilter}
-          options={PIPELINE_AND_RISK_FILTERS}
           counts={filterCounts}
-        />
-      </div>
+        />{" "}
+        <div className="min-w-0">
+          {/* Stats bar */}
+          <div className="flex gap-2 mb-5 flex-wrap">
+            {" "}
+            <StatCard
+              label="Pipeline Value"
+              value={`$${Math.round(pipelineValue)}`}
+              sub="/mo potential"
+            />{" "}
+            <StatCard
+              label="MRR Won"
+              value={`$${Math.round(totalMRRWon)}`}
+              sub="/mo closed"
+            />{" "}
+            <StatCard
+              label="Conversion"
+              value={`${conversionRate}%`}
+              sub={`${accepted} of ${sent + accepted + declined}`}
+            />{" "}
+            <StatCard
+              label="Avg Estimate"
+              value={`$${avgEstimateValue}`}
+              sub="/mo"
+            />{" "}
+            <StatCard
+              label="Follow-Up Overdue"
+              value={followUpOverdue}
+              sub={followUpOverdue > 0 ? "need attention" : "all clear"}
+              alert={followUpOverdue > 0}
+            />{" "}
+            <StatCard
+              label="Pricing Risk"
+              value={pricingRiskCount}
+              sub={`${missingCogsCount} COGS · ${lowMarginCount} margin`}
+              alert={pricingRiskCount > 0}
+            />{" "}
+            <StatCard
+              label="Total"
+              value={total}
+              sub={`${accepted} won · ${declined} lost`}
+            />{" "}
+          </div>{" "}
+          <div className="mb-4 flex justify-center sm:justify-start xl:hidden">
+            {" "}
+            <FilterSheetV2
+              value={filter}
+              onChange={setFilter}
+              options={PIPELINE_AND_RISK_FILTERS}
+              counts={filterCounts}
+            />{" "}
+          </div>
+          {/* Estimates list */}
+          {filtered.length === 0 ? (
+            <div className="p-10 text-center text-13 text-ink-secondary">
+              No estimates{" "}
+              {filter !== "all"
+                ? `in "${PIPELINE_AND_RISK_FILTERS.find((f) => f.key === filter)?.label}"`
+                : "yet"}
+              . Create one using the Create Estimate tab.
+            </div>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {filtered.map((e) => {
+                const urgency = getUrgencyIndicator(e);
+                const competitor = detectCompetitor(e.notes || e.description);
+                const source = SOURCE_ICON[e.source];
 
-      {/* Estimates list */}
-      {filtered.length === 0 ? (
-        <div className="p-10 text-center text-13 text-ink-secondary">
-          No estimates{' '}
-          {filter !== 'all'
-            ? `in "${PIPELINE_AND_RISK_FILTERS.find((f) => f.key === filter)?.label}"`
-            : 'yet'}
-          . Create one using the Create Estimate tab.
-        </div>
-      ) : (
-        <div className="flex flex-col gap-2">
-          {filtered.map((e) => {
-            const urgency = getUrgencyIndicator(e);
-            const competitor = detectCompetitor(e.notes || e.description);
-            const source = SOURCE_ICON[e.source];
-
-            return (
-              <Card
-                key={e.id}
-                className={cn(
-                  'p-4 flex flex-wrap items-center gap-3 relative',
-                  e.isPriority && 'border-alert-fg',
-                )}
-              >
-                {e.isPriority && (
-                  <div className="absolute -top-px right-4 bg-alert-fg text-white text-11 uppercase tracking-label font-medium px-2 py-0.5 rounded-b-xs">
-                    Urgent
-                  </div>
-                )}
-
-                {v3Flag
-                  ? <StatusPillV3 status={e.status} />
-                  : <StatusBadgeV2 status={e.status} />}
-
-                {/* Customer info */}
-                <div className="flex-1 min-w-[150px]">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    {e.customerId ? (
-                      <button
-                        type="button"
-                        onClick={(evt) => { evt.stopPropagation(); setCustomerPanelId(e.customerId); }}
-                        className="text-14 sm:text-14 font-medium text-zinc-900 bg-transparent border-0 p-0 cursor-pointer hover:underline"
-                        title="Open customer + estimate history"
-                      >
-                        {e.customerName || 'Unknown'}
-                      </button>
+                return (
+                  <Card
+                    key={e.id}
+                    className={cn(
+                      "p-4 flex flex-wrap items-center gap-3 relative",
+                      e.isPriority && "border-alert-fg",
+                    )}
+                  >
+                    {e.isPriority && (
+                      <div className="absolute -top-px right-4 bg-alert-fg text-white text-11 uppercase tracking-label font-medium px-2 py-0.5 rounded-b-xs">
+                        Urgent
+                      </div>
+                    )}
+                    {v3Flag ? (
+                      <StatusPillV3 status={e.status} />
                     ) : (
-                      <span className="text-14 sm:text-14 font-medium text-zinc-900">
-                        {e.customerName || 'Unknown'}
-                      </span>
+                      <StatusBadgeV2 status={e.status} />
                     )}
-                    {source && (
-                      <span title={source.title} className="inline-flex text-ink-tertiary">
-                        <source.Icon size={14} strokeWidth={1.75} aria-hidden />
-                      </span>
-                    )}
-                    <UrgencyBadge urgency={urgency} />
-                    {competitor && (
-                      <Badge tone="neutral" title={`Switching from ${competitor}`}>
-                        Switching from: {competitor}
-                      </Badge>
-                    )}
-                    {e.declineReason && (
-                      <Badge tone="alert">{e.declineReason}</Badge>
-                    )}
-                    <PricingRiskBadges
-                      risk={e.pricingRisk}
-                      onMissingCogs={() => setAuditTarget({ estimate: e, focus: 'missing_cogs' })}
-                      onLowMargin={() => setAuditTarget({ estimate: e, focus: 'low_margin' })}
-                    />
-                    {e.confirmedAppointment && (
-                      <Badge
-                        tone="neutral"
-                        title={
-                          e.confirmedAppointment.linked
-                            ? `This call also booked an appointment on ${formatApptShort(e.confirmedAppointment)} — review the schedule before sending a fresh quote.`
-                            : `Customer already has a confirmed appointment on ${formatApptShort(e.confirmedAppointment)}.`
-                        }
-                      >
-                        <CalendarCheck size={11} strokeWidth={1.75} aria-hidden />
-                        {e.confirmedAppointment.linked ? 'Already scheduled' : 'Has appointment'} · {formatApptShort(e.confirmedAppointment)}
-                      </Badge>
-                    )}
-                  </div>
-                  <div className="text-13 sm:text-12 text-ink-secondary mt-0.5 truncate">
-                    {e.address || '—'}
-                    {e.serviceInterest ? ` · ${e.serviceInterest}` : ''}
-                  </div>
-                </div>
-
-                {/* Call + text + send-estimate trailing buttons — matches the
+                    {/* Customer info */}
+                    <div className="flex-1 min-w-[150px]">
+                      {" "}
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {e.customerId ? (
+                          <button
+                            type="button"
+                            onClick={(evt) => {
+                              evt.stopPropagation();
+                              setCustomerPanelId(e.customerId);
+                            }}
+                            className="text-14 sm:text-14 font-medium text-zinc-900 bg-transparent border-0 p-0 cursor-pointer hover:underline"
+                            title="Open customer + estimate history"
+                          >
+                            {e.customerName || "Unknown"}
+                          </button>
+                        ) : (
+                          <span className="text-14 sm:text-14 font-medium text-zinc-900">
+                            {e.customerName || "Unknown"}
+                          </span>
+                        )}
+                        {source && (
+                          <span
+                            title={source.title}
+                            className="inline-flex text-ink-tertiary"
+                          >
+                            {" "}
+                            <source.Icon
+                              size={14}
+                              strokeWidth={1.75}
+                              aria-hidden
+                            />{" "}
+                          </span>
+                        )}
+                        <UrgencyBadge urgency={urgency} />
+                        {competitor && (
+                          <Badge
+                            tone="neutral"
+                            title={`Switching from ${competitor}`}
+                          >
+                            Switching from: {competitor}
+                          </Badge>
+                        )}
+                        {e.declineReason && (
+                          <Badge tone="alert">{e.declineReason}</Badge>
+                        )}
+                        <PricingRiskBadges
+                          risk={e.pricingRisk}
+                          onMissingCogs={() =>
+                            setAuditTarget({
+                              estimate: e,
+                              focus: "missing_cogs",
+                            })
+                          }
+                          onLowMargin={() =>
+                            setAuditTarget({ estimate: e, focus: "low_margin" })
+                          }
+                        />
+                        {e.confirmedAppointment && (
+                          <Badge
+                            tone="neutral"
+                            title={
+                              e.confirmedAppointment.linked
+                                ? `This call also booked an appointment on ${formatApptShort(e.confirmedAppointment)} — review the schedule before sending a fresh quote.`
+                                : `Customer already has a confirmed appointment on ${formatApptShort(e.confirmedAppointment)}.`
+                            }
+                          >
+                            {" "}
+                            <CalendarCheck
+                              size={11}
+                              strokeWidth={1.75}
+                              aria-hidden
+                            />
+                            {e.confirmedAppointment.linked
+                              ? "Already scheduled"
+                              : "Has appointment"}{" "}
+                            · {formatApptShort(e.confirmedAppointment)}
+                          </Badge>
+                        )}
+                      </div>{" "}
+                      <div className="text-13 sm:text-12 text-ink-secondary mt-0.5 truncate">
+                        {e.address || "—"}
+                        {e.serviceInterest ? ` · ${e.serviceInterest}` : ""}
+                      </div>{" "}
+                    </div>
+                    {/* Call + text + send-estimate trailing buttons — matches the
                     CustomersPageV2 list row's icon trio. Send is shown for
                     states where it's a real action (draft / sent / viewed);
                     accepted/declined/expired hide it. */}
-                {(e.customerPhone || ['draft', 'sent', 'viewed'].includes(e.status)) && (
-                  <div className="flex gap-1.5">
-                    {e.customerPhone && (
-                      <button
-                        type="button"
-                        onClick={async (evt) => {
-                          evt.stopPropagation();
-                          if (!window.confirm(`Call ${e.customerName || 'customer'} at ${e.customerPhone}?\n\nWaves will call your phone first — press 1 to connect.`)) return;
-                          try {
-                            const r = await adminFetch('/admin/communications/call', {
-                              method: 'POST',
-                              body: JSON.stringify({ to: e.customerPhone, fromNumber: '+19412975749' }),
-                            });
-                            if (!r?.success) alert('Call failed: ' + (r?.error || 'unknown error'));
-                          } catch (err) { alert('Call failed: ' + err.message); }
-                        }}
-                        aria-label={`Call ${e.customerName || 'customer'} via Waves`}
-                        title="Call via Waves — rings your phone first, press 1 to connect"
-                        className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
-                      >
-                        <Phone size={16} strokeWidth={1.75} />
-                      </button>
-                    )}
-                    {e.customerPhone && (
-                      <a
-                        href={`/admin/communications?phone=${encodeURIComponent(e.customerPhone)}`}
-                        onClick={(evt) => evt.stopPropagation()}
-                        aria-label={`Message ${e.customerName || 'customer'}`}
-                        title={`Message ${e.customerPhone}`}
-                        className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
-                      >
-                        <MessageSquare size={16} strokeWidth={1.75} />
-                      </a>
-                    )}
-                    {/* Create-estimate icon — carries customer fields into the
+                    {(e.customerPhone ||
+                      ["draft", "sent", "viewed"].includes(e.status)) && (
+                      <div className="flex gap-1.5">
+                        {e.customerPhone && (
+                          <button
+                            type="button"
+                            onClick={async (evt) => {
+                              evt.stopPropagation();
+                              if (
+                                !window.confirm(
+                                  `Call ${e.customerName || "customer"} at ${e.customerPhone}?\n\nWaves will call your phone first — press 1 to connect.`,
+                                )
+                              )
+                                return;
+                              try {
+                                const r = await adminFetch(
+                                  "/admin/communications/call",
+                                  {
+                                    method: "POST",
+                                    body: JSON.stringify({
+                                      to: e.customerPhone,
+                                      fromNumber: "+19412975749",
+                                    }),
+                                  },
+                                );
+                                if (!r?.success)
+                                  alert(
+                                    "Call failed: " +
+                                      (r?.error || "unknown error"),
+                                  );
+                              } catch (err) {
+                                alert("Call failed: " + err.message);
+                              }
+                            }}
+                            aria-label={`Call ${e.customerName || "customer"} via Waves`}
+                            title="Call via Waves — rings your phone first, press 1 to connect"
+                            className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+                          >
+                            {" "}
+                            <Phone size={16} strokeWidth={1.75} />{" "}
+                          </button>
+                        )}
+                        {e.customerPhone && (
+                          <a
+                            href={`/admin/communications?phone=${encodeURIComponent(e.customerPhone)}`}
+                            onClick={(evt) => evt.stopPropagation()}
+                            aria-label={`Message ${e.customerName || "customer"}`}
+                            title={`Message ${e.customerPhone}`}
+                            className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+                          >
+                            {" "}
+                            <MessageSquare size={16} strokeWidth={1.75} />{" "}
+                          </a>
+                        )}
+                        {/* Create-estimate icon — carries customer fields into the
                         new-estimate form via query string. Always shown when
                         we have a customerId so the operator can start a
                         follow-up quote without leaving the list. */}
-                    {e.customerId && (
-                      <button
-                        type="button"
-                        onClick={(evt) => {
-                          evt.stopPropagation();
-                          const params = new URLSearchParams();
-                          params.set('customerId', e.customerId);
-                          if (e.address) params.set('address', e.address);
-                          if (e.customerName) params.set('customerName', e.customerName);
-                          if (e.customerPhone) params.set('customerPhone', e.customerPhone);
-                          if (e.customerEmail) params.set('customerEmail', e.customerEmail);
-                          navigate(`/admin/estimates?${params.toString()}`);
-                        }}
-                        aria-label={`Create new estimate for ${e.customerName || 'customer'}`}
-                        title="Create a new estimate for this customer"
-                        className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+                        {e.customerId && (
+                          <button
+                            type="button"
+                            onClick={(evt) => {
+                              evt.stopPropagation();
+                              const params = new URLSearchParams();
+                              params.set("customerId", e.customerId);
+                              if (e.address) params.set("address", e.address);
+                              if (e.customerName)
+                                params.set("customerName", e.customerName);
+                              if (e.customerPhone)
+                                params.set("customerPhone", e.customerPhone);
+                              if (e.customerEmail)
+                                params.set("customerEmail", e.customerEmail);
+                              navigate(`/admin/estimates?${params.toString()}`);
+                            }}
+                            aria-label={`Create new estimate for ${e.customerName || "customer"}`}
+                            title="Create a new estimate for this customer"
+                            className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+                          >
+                            {" "}
+                            <FilePlus2 size={16} strokeWidth={1.75} />{" "}
+                          </button>
+                        )}
+                        {["draft", "sent", "viewed"].includes(e.status) && (
+                          <button
+                            type="button"
+                            onClick={async (evt) => {
+                              evt.stopPropagation();
+                              const action =
+                                e.status === "draft" ? "Send" : "Resend";
+                              if (
+                                !window.confirm(
+                                  `${action} estimate to ${e.customerName || "customer"} via SMS + email?`,
+                                )
+                              )
+                                return;
+                              try {
+                                await sendEstimateFromPipeline(e.id, "both");
+                                refreshEstimates();
+                              } catch (err) {
+                                window.alert("Send failed: " + err.message);
+                              }
+                            }}
+                            aria-label={`${e.status === "draft" ? "Send" : "Resend"} estimate to ${e.customerName || "customer"}`}
+                            title={
+                              e.status === "draft"
+                                ? "Send estimate via SMS + email"
+                                : "Resend estimate via SMS + email"
+                            }
+                            className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+                          >
+                            {" "}
+                            <Send size={16} strokeWidth={1.75} />{" "}
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    {e.tier && <Badge tone="neutral">{e.tier}</Badge>}
+                    {/* Monthly total */}
+                    <div className="text-right min-w-[80px]">
+                      {" "}
+                      <div
+                        className={cn(
+                          "text-18 font-medium u-nums",
+                          e.monthlyTotal > 0
+                            ? "text-zinc-900"
+                            : "text-ink-tertiary",
+                        )}
                       >
-                        <FilePlus2 size={16} strokeWidth={1.75} />
-                      </button>
-                    )}
-                    {['draft', 'sent', 'viewed'].includes(e.status) && (
-                      <button
-                        type="button"
-                        onClick={async (evt) => {
-                          evt.stopPropagation();
-                          const action = e.status === 'draft' ? 'Send' : 'Resend';
-                          if (!window.confirm(`${action} estimate to ${e.customerName || 'customer'} via SMS + email?`)) return;
-                          try {
-                            await sendEstimateFromPipeline(e.id, 'both');
-                            refreshEstimates();
-                          } catch (err) {
-                            window.alert('Send failed: ' + err.message);
-                          }
-                        }}
-                        aria-label={`${e.status === 'draft' ? 'Send' : 'Resend'} estimate to ${e.customerName || 'customer'}`}
-                        title={e.status === 'draft' ? 'Send estimate via SMS + email' : 'Resend estimate via SMS + email'}
-                        className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
-                      >
-                        <Send size={16} strokeWidth={1.75} />
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                {e.tier && <Badge tone="neutral">{e.tier}</Badge>}
-
-                {/* Monthly total */}
-                <div className="text-right min-w-[80px]">
-                  <div
-                    className={cn(
-                      'text-18 font-medium u-nums',
-                      e.monthlyTotal > 0 ? 'text-zinc-900' : 'text-ink-tertiary',
-                    )}
-                  >
-                    ${e.monthlyTotal?.toFixed(0) || '0'}
-                    <span className="text-11 font-normal text-ink-tertiary">
-                      /mo
-                    </span>
-                  </div>
-                </div>
-
-                {/* Timeline */}
-                <div className="text-right min-w-[110px] text-11 text-ink-secondary space-y-0.5">
-                  <div>Created {fmtDate(e.createdAt)}</div>
-                  {e.scheduledAt && <div>Scheduled {fmtDate(e.scheduledAt)}</div>}
-                  {e.sentAt && <div>Sent {timeAgo(e.sentAt)}</div>}
-                  {e.viewedAt && (
-                    <div>
-                      Viewed {timeAgo(e.viewedAt)}
-                      {e.viewCount > 1 && ` · ${e.viewCount}×`}
+                        ${e.monthlyTotal?.toFixed(0) || "0"}
+                        <span className="text-11 font-normal text-ink-tertiary">
+                          /mo
+                        </span>{" "}
+                      </div>{" "}
                     </div>
-                  )}
-                  {e.lastViewedAt && e.viewCount > 1 && (
-                    <div>Last viewed {timeAgo(e.lastViewedAt)}</div>
-                  )}
-                  {e.clickCount > 0 && (
-                    <div>
-                      Clicked {timeAgo(e.lastClickedAt)}
-                      {e.clickCount > 1 && ` · ${e.clickCount}×`}
+                    {/* Timeline */}
+                    <div className="text-right min-w-[110px] text-11 text-ink-secondary space-y-0.5">
+                      {" "}
+                      <div>Created {fmtDate(e.createdAt)}</div>
+                      {e.scheduledAt && (
+                        <div>Scheduled {fmtDate(e.scheduledAt)}</div>
+                      )}
+                      {e.sentAt && <div>Sent {timeAgo(e.sentAt)}</div>}
+                      {e.viewedAt && (
+                        <div>
+                          Viewed {timeAgo(e.viewedAt)}
+                          {e.viewCount > 1 && ` · ${e.viewCount}×`}
+                        </div>
+                      )}
+                      {e.lastViewedAt && e.viewCount > 1 && (
+                        <div>Last viewed {timeAgo(e.lastViewedAt)}</div>
+                      )}
+                      {e.clickCount > 0 && (
+                        <div>
+                          Clicked {timeAgo(e.lastClickedAt)}
+                          {e.clickCount > 1 && ` · ${e.clickCount}×`}
+                        </div>
+                      )}
+                      {e.acceptedAt && (
+                        <div>Accepted {timeAgo(e.acceptedAt)}</div>
+                      )}
+                      {e.declinedAt && (
+                        <div>Declined {timeAgo(e.declinedAt)}</div>
+                      )}
+                      {e.followUpCount > 0 && (
+                        <div>Follow-ups: {e.followUpCount}</div>
+                      )}
                     </div>
-                  )}
-                  {e.acceptedAt && <div>Accepted {timeAgo(e.acceptedAt)}</div>}
-                  {e.declinedAt && <div>Declined {timeAgo(e.declinedAt)}</div>}
-                  {e.followUpCount > 0 && (
-                    <div>Follow-ups: {e.followUpCount}</div>
-                  )}
-                </div>
-
-                {/* Actions — flag is its own icon button; primary actions
+                    {/* Actions — flag is its own icon button; primary actions
                     render as an equal-width pill group (flex-1) to remove
                     dead space between pills. */}
-                <div className="flex items-center gap-1.5 w-full sm:w-auto">
-                  <button
-                    type="button"
-                    onClick={() => togglePriority(e)}
-                    disabled={isEstimateTogglePending(e.id, 'isPriority')}
-                    title={e.isPriority ? 'Remove priority' : 'Flag as urgent'}
-                    aria-label={e.isPriority ? 'Remove priority' : 'Flag as urgent'}
-                    className={cn(
-                      'h-11 w-11 sm:h-7 sm:w-7 flex-shrink-0 flex items-center justify-center rounded-full sm:rounded-xs border-hairline u-focus-ring transition-colors',
-                      isEstimateTogglePending(e.id, 'isPriority') && 'opacity-60 cursor-wait',
-                      e.isPriority
-                        ? 'bg-alert-bg text-alert-fg border-alert-fg'
-                        : 'bg-white text-ink-secondary border-zinc-300 hover:bg-zinc-50',
-                    )}
-                  >
-                    <Flag size={16} strokeWidth={1.75} aria-hidden />
-                  </button>
-
-                  <div className="grid grid-cols-2 sm:flex sm:flex-none gap-1.5 flex-1">
-                    {['draft', 'sent', 'viewed'].includes(e.status) && (
-                      <Button
-                        size="sm"
-                        variant={e.showOneTimeOption ? 'secondary' : 'ghost'}
-                        className="w-full sm:w-auto rounded-full whitespace-nowrap"
-                        onClick={() => toggleOneTimeOption(e)}
-                        disabled={isEstimateTogglePending(e.id, 'showOneTimeOption')}
+                    <div className="flex items-center gap-1.5 w-full sm:w-auto">
+                      {" "}
+                      <button
+                        type="button"
+                        onClick={() => togglePriority(e)}
+                        disabled={isEstimateTogglePending(e.id, "isPriority")}
                         title={
-                          e.showOneTimeOption
-                            ? 'One-time option is visible to the customer. Click to hide.'
-                            : 'Let the customer choose one-time instead of recurring.'
+                          e.isPriority ? "Remove priority" : "Flag as urgent"
                         }
-                      >
-                        {e.showOneTimeOption ? '1x Option: On' : '1x Option: Off'}
-                      </Button>
-                    )}
-
-                    {['draft', 'sent', 'viewed'].includes(e.status) && (
-                      <Button
-                        size="sm"
-                        variant={e.billByInvoice ? 'secondary' : 'ghost'}
-                        className="w-full sm:w-auto rounded-full whitespace-nowrap"
-                        onClick={() => toggleBillByInvoice(e)}
-                        disabled={isEstimateTogglePending(e.id, 'billByInvoice')}
-                        title={
-                          e.billByInvoice
-                            ? 'Invoice mode is ON — customer acceptance creates an invoice due immediately and attempts pay-link delivery. Click to switch back to the normal onboarding flow.'
-                            : 'Switch to invoice mode — skip onboarding / payment up front and create an invoice when the customer accepts.'
+                        aria-label={
+                          e.isPriority ? "Remove priority" : "Flag as urgent"
                         }
+                        className={cn(
+                          "h-11 w-11 sm:h-7 sm:w-7 flex-shrink-0 flex items-center justify-center rounded-full sm:rounded-xs border-hairline u-focus-ring transition-colors",
+                          isEstimateTogglePending(e.id, "isPriority") &&
+                            "opacity-60 cursor-wait",
+                          e.isPriority
+                            ? "bg-alert-bg text-alert-fg border-alert-fg"
+                            : "bg-white text-ink-secondary border-zinc-300 hover:bg-zinc-50",
+                        )}
                       >
-                        {e.billByInvoice ? 'Invoice: On' : 'Invoice: Off'}
-                      </Button>
-                    )}
+                        {" "}
+                        <Flag size={16} strokeWidth={1.75} aria-hidden />{" "}
+                      </button>{" "}
+                      <div className="grid grid-cols-2 sm:flex sm:flex-none gap-1.5 flex-1">
+                        {["draft", "sent", "viewed"].includes(e.status) && (
+                          <Button
+                            size="sm"
+                            variant={
+                              e.showOneTimeOption ? "secondary" : "ghost"
+                            }
+                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                            onClick={() => toggleOneTimeOption(e)}
+                            disabled={isEstimateTogglePending(
+                              e.id,
+                              "showOneTimeOption",
+                            )}
+                            title={
+                              e.showOneTimeOption
+                                ? "One-time option is visible to the customer. Click to hide."
+                                : "Let the customer choose one-time instead of recurring."
+                            }
+                          >
+                            {e.showOneTimeOption
+                              ? "1x Option: On"
+                              : "1x Option: Off"}
+                          </Button>
+                        )}
 
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="w-full sm:w-auto rounded-full whitespace-nowrap"
-                      onClick={() => setAuditTarget({ estimate: e, focus: 'all' })}
-                    >
-                      Audit
-                    </Button>
+                        {["draft", "sent", "viewed"].includes(e.status) && (
+                          <Button
+                            size="sm"
+                            variant={e.billByInvoice ? "secondary" : "ghost"}
+                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                            onClick={() => toggleBillByInvoice(e)}
+                            disabled={isEstimateTogglePending(
+                              e.id,
+                              "billByInvoice",
+                            )}
+                            title={
+                              e.billByInvoice
+                                ? "Invoice mode is ON — customer acceptance creates an invoice due immediately and attempts pay-link delivery. Click to switch back to the normal onboarding flow."
+                                : "Switch to invoice mode — skip onboarding / payment up front and create an invoice when the customer accepts."
+                            }
+                          >
+                            {e.billByInvoice ? "Invoice: On" : "Invoice: Off"}
+                          </Button>
+                        )}
 
-                    {e.status === 'draft' && e.monthlyTotal > 0 && (
-                      <Button
-                        size="sm"
-                        variant="primary"
-                        className="w-full sm:w-auto rounded-full whitespace-nowrap"
-                        onClick={async () => {
-                          try {
-                            await sendEstimateFromPipeline(e.id, 'both');
-                            refreshEstimates();
-                          } catch (err) {
-                            window.alert('Send failed: ' + err.message);
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                          onClick={() =>
+                            setAuditTarget({ estimate: e, focus: "all" })
                           }
-                        }}
-                      >
-                        Send
-                      </Button>
-                    )}
+                        >
+                          Audit
+                        </Button>
+                        {e.status === "draft" && e.monthlyTotal > 0 && (
+                          <Button
+                            size="sm"
+                            variant="primary"
+                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                            onClick={async () => {
+                              try {
+                                await sendEstimateFromPipeline(e.id, "both");
+                                refreshEstimates();
+                              } catch (err) {
+                                window.alert("Send failed: " + err.message);
+                              }
+                            }}
+                          >
+                            Send
+                          </Button>
+                        )}
 
-                    {(e.status === 'sent' || e.status === 'viewed') && (
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        className="w-full sm:w-auto rounded-full whitespace-nowrap"
-                        onClick={() => setFollowUpTarget(e)}
-                      >
-                        Follow Up
-                      </Button>
-                    )}
+                        {(e.status === "sent" || e.status === "viewed") && (
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                            onClick={() => setFollowUpTarget(e)}
+                          >
+                            Follow Up
+                          </Button>
+                        )}
 
-                    {(e.status === 'sent' || e.status === 'viewed') && (
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        className="w-full sm:w-auto rounded-full whitespace-nowrap"
-                        onClick={async () => {
-                          if (!confirm(`Resend estimate to ${e.customerName || 'customer'} via SMS + email?`)) return;
-                          try {
-                            await sendEstimateFromPipeline(e.id, 'both');
-                            refreshEstimates();
-                          } catch (err) {
-                            window.alert('Send failed: ' + err.message);
-                          }
-                        }}
-                      >
-                        Resend
-                      </Button>
-                    )}
+                        {(e.status === "sent" || e.status === "viewed") && (
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                            onClick={async () => {
+                              if (
+                                !confirm(
+                                  `Resend estimate to ${e.customerName || "customer"} via SMS + email?`,
+                                )
+                              )
+                                return;
+                              try {
+                                await sendEstimateFromPipeline(e.id, "both");
+                                refreshEstimates();
+                              } catch (err) {
+                                window.alert("Send failed: " + err.message);
+                              }
+                            }}
+                          >
+                            Resend
+                          </Button>
+                        )}
 
-                    {(e.status === 'sent' || e.status === 'viewed') && (
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        className="w-full sm:w-auto rounded-full whitespace-nowrap"
-                        onClick={() => setDeclineTarget(e)}
-                      >
-                        Mark Lost
-                      </Button>
-                    )}
+                        {(e.status === "sent" || e.status === "viewed") && (
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                            onClick={() => setDeclineTarget(e)}
+                          >
+                            Mark Lost
+                          </Button>
+                        )}
 
-                    {(e.status === 'sent' || e.status === 'viewed') && (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="w-full sm:w-auto rounded-full whitespace-nowrap"
-                        onClick={() => {
-                          const link = `${window.location.origin}/estimate/${e.token || e.id}`;
-                          navigator.clipboard?.writeText(link);
-                        }}
-                      >
-                        Copy Link
-                      </Button>
-                    )}
+                        {(e.status === "sent" || e.status === "viewed") && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                            onClick={() => {
+                              const link = `${window.location.origin}/estimate/${e.token || e.id}`;
+                              navigator.clipboard?.writeText(link);
+                            }}
+                          >
+                            Copy Link
+                          </Button>
+                        )}
 
-                    {/* Archive / Unarchive — archive only shows on closed
+                        {/* Archive / Unarchive — archive only shows on closed
                         rows (declined / expired / accepted). Unarchive shows
                         whenever archivedAt is set, regardless of status. */}
-                    {!e.archivedAt && ['declined', 'expired', 'accepted'].includes(e.status) && (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="w-full sm:w-auto rounded-full whitespace-nowrap"
-                        onClick={() => archiveEstimate(e)}
-                      >
-                        Archive
-                      </Button>
-                    )}
-                    {e.archivedAt && (
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        className="w-full sm:w-auto rounded-full whitespace-nowrap"
-                        onClick={() => unarchiveEstimate(e)}
-                      >
-                        Unarchive
-                      </Button>
-                    )}
-                  </div>
-                </div>
-              </Card>
-            );
-          })}
-        </div>
-      )}
-
+                        {!e.archivedAt &&
+                          ["declined", "expired", "accepted"].includes(
+                            e.status,
+                          ) && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                              onClick={() => archiveEstimate(e)}
+                            >
+                              Archive
+                            </Button>
+                          )}
+                        {e.archivedAt && (
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                            onClick={() => unarchiveEstimate(e)}
+                          >
+                            Unarchive
+                          </Button>
+                        )}
+                      </div>{" "}
+                    </div>{" "}
+                  </Card>
+                );
+              })}
+            </div>
+          )}
+        </div>{" "}
+      </div>
       {customerPanelId && (
         <CustomerEstimatesPanel
           customerId={customerPanelId}
@@ -1434,58 +1970,81 @@ function EstimatePipelineViewV2() {
 }
 
 const TABS = [
-  { key: 'leads', label: 'Leads' },
-  { key: 'estimates', label: 'Estimates' },
-  { key: 'new', label: 'Create Estimate' },
-  { key: 'pricing', label: 'Pricing Logic' },
+  { key: "leads", label: "Leads", Icon: Users },
+  { key: "estimates", label: "Estimates", Icon: ClipboardList },
+  { key: "new", label: "Create Estimate", Icon: FilePlus2 },
+  { key: "pricing", label: "Pricing Logic", Icon: SlidersHorizontal },
+];
+
+const PREFILL_PARAM_KEYS = [
+  "leadId",
+  "customerId",
+  "address",
+  "customerName",
+  "customerPhone",
+  "customerEmail",
+  "serviceInterest",
+  "first_name",
+  "last_name",
+  "phone",
+  "email",
+  "service_interest",
 ];
 
 // Mobile-only filter dimensions. FILTER reuses PIPELINE_FILTERS. DATE filters on
 // createdAt relative to now. SORT controls row order; grouping is always by day.
 const MOBILE_DATE_FILTERS = [
-  { key: 'all', label: 'All' },
-  { key: 'today', label: 'Today' },
-  { key: 'week', label: 'This week' },
-  { key: 'month', label: 'This month' },
-  { key: 'last30', label: 'Last 30 days' },
+  { key: "all", label: "All" },
+  { key: "today", label: "Today" },
+  { key: "week", label: "This week" },
+  { key: "month", label: "This month" },
+  { key: "last30", label: "Last 30 days" },
 ];
 
 const MOBILE_SORT_OPTIONS = [
-  { key: 'newest', label: 'Newest' },
-  { key: 'oldest', label: 'Oldest' },
-  { key: 'amount-desc', label: 'Amount: high → low' },
-  { key: 'amount-asc', label: 'Amount: low → high' },
+  { key: "newest", label: "Newest" },
+  { key: "oldest", label: "Oldest" },
+  { key: "amount-desc", label: "Amount: high → low" },
+  { key: "amount-asc", label: "Amount: low → high" },
 ];
 
 function mobileMatchesDate(createdAt, dateKey, nowTs) {
-  if (dateKey === 'all') return true;
+  if (dateKey === "all") return true;
   if (!createdAt) return false;
   const ts = new Date(createdAt).getTime();
   if (Number.isNaN(ts)) return false;
-  if (dateKey === 'today') {
+  if (dateKey === "today") {
     return new Date(ts).toDateString() === new Date(nowTs).toDateString();
   }
   const MS_DAY = 86400000;
-  if (dateKey === 'week') return nowTs - ts <= 7 * MS_DAY;
-  if (dateKey === 'month' || dateKey === 'last30') return nowTs - ts <= 30 * MS_DAY;
+  if (dateKey === "week") return nowTs - ts <= 7 * MS_DAY;
+  if (dateKey === "month" || dateKey === "last30")
+    return nowTs - ts <= 30 * MS_DAY;
   return true;
 }
 
 function mobileSortFn(sortKey) {
   switch (sortKey) {
-    case 'oldest': return (a, b) => new Date(a.createdAt) - new Date(b.createdAt);
-    case 'amount-desc': return (a, b) => (b.monthlyTotal || 0) - (a.monthlyTotal || 0);
-    case 'amount-asc': return (a, b) => (a.monthlyTotal || 0) - (b.monthlyTotal || 0);
-    case 'newest':
-    default: return (a, b) => new Date(b.createdAt) - new Date(a.createdAt);
+    case "oldest":
+      return (a, b) => new Date(a.createdAt) - new Date(b.createdAt);
+    case "amount-desc":
+      return (a, b) => (b.monthlyTotal || 0) - (a.monthlyTotal || 0);
+    case "amount-asc":
+      return (a, b) => (a.monthlyTotal || 0) - (b.monthlyTotal || 0);
+    case "newest":
+    default:
+      return (a, b) => new Date(b.createdAt) - new Date(a.createdAt);
   }
 }
 
 // Short 6-char ref derived from UUID. estimates.id is a UUID (no human-readable
 // sequence column exists yet); last-6 uppercased is a pragmatic display token.
 function shortEstimateRef(id) {
-  if (!id) return '—';
-  return String(id).replace(/[^a-zA-Z0-9]/g, '').slice(-6).toUpperCase();
+  if (!id) return "—";
+  return String(id)
+    .replace(/[^a-zA-Z0-9]/g, "")
+    .slice(-6)
+    .toUpperCase();
 }
 
 // Bottom-sheet single-select chip. Matches FilterSheetV2 pattern but chip
@@ -1496,18 +2055,21 @@ function MobileChipSheet({ label, value, options, onChange, title }) {
 
   useEffect(() => {
     if (!open) return undefined;
-    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
-    document.addEventListener('keydown', onKey);
+    const onKey = (e) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
     const prev = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
+    document.body.style.overflow = "hidden";
     return () => {
-      document.removeEventListener('keydown', onKey);
+      document.removeEventListener("keydown", onKey);
       document.body.style.overflow = prev;
     };
   }, [open]);
 
   return (
     <>
+      {" "}
       <button
         type="button"
         onClick={() => setOpen(true)}
@@ -1515,83 +2077,103 @@ function MobileChipSheet({ label, value, options, onChange, title }) {
         aria-expanded={open}
         aria-label={`${label}: ${active.label}`}
         className={cn(
-          'inline-flex items-center gap-1.5 h-9 px-4 rounded-lg',
-          'bg-zinc-100 border-hairline border-zinc-100',
-          'text-13 text-zinc-600 u-focus-ring',
-          'hover:bg-zinc-200 active:bg-zinc-200 whitespace-nowrap',
+          "inline-flex items-center gap-1.5 h-9 px-4 rounded-lg",
+          "bg-zinc-100 border-hairline border-zinc-100",
+          "text-13 text-zinc-600 u-focus-ring",
+          "hover:bg-zinc-200 active:bg-zinc-200 whitespace-nowrap",
         )}
       >
-        <span>{label}</span>
-        <span className="font-medium text-zinc-900">{active.label}</span>
+        {" "}
+        <span>{label}</span>{" "}
+        <span className="font-medium text-zinc-900">{active.label}</span>{" "}
       </button>
-
-      {open && createPortal(
-        <div
-          className="fixed inset-0 z-50 flex items-end justify-center sm:items-center sm:p-4"
-          role="dialog"
-          aria-modal="true"
-          aria-label={title}
-        >
-          <div className="absolute inset-0 bg-zinc-900/40" onClick={() => setOpen(false)} />
+      {open &&
+        createPortal(
           <div
-            className={cn(
-              'relative w-full bg-white outline-none',
-              'rounded-t-md sm:rounded-md sm:max-w-md',
-              'border-hairline border-zinc-200',
-              'flex flex-col max-h-[85vh]',
-            )}
-            style={{ paddingBottom: 'env(safe-area-inset-bottom, 0)' }}
+            className="fixed inset-0 z-50 flex items-end justify-center sm:items-center sm:p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label={title}
           >
-            <div className="pt-2 pb-1 sm:hidden">
-              <div className="mx-auto w-10 h-1 rounded-full bg-zinc-300" />
-            </div>
-            <div className="px-5 py-3 flex items-center justify-between border-b border-hairline border-zinc-200">
-              <div className="text-11 uppercase tracking-label font-medium text-ink-tertiary">
-                {title}
-              </div>
-              <button
-                type="button"
-                onClick={() => setOpen(false)}
-                aria-label="Close"
-                className="h-9 w-9 flex items-center justify-center rounded-full bg-zinc-100 text-zinc-900 hover:bg-zinc-200 u-focus-ring"
-              >
-                <X size={16} strokeWidth={1.75} aria-hidden />
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto">
-              {options.map((o) => {
-                const isActive = o.key === value;
-                return (
-                  <button
-                    key={o.key}
-                    type="button"
-                    onClick={() => { onChange(o.key); setOpen(false); }}
-                    className={cn(
-                      'w-full flex items-center justify-between gap-3',
-                      'px-5 py-4 text-left u-focus-ring',
-                      'border-b border-hairline border-zinc-100 last:border-b-0',
-                      isActive ? 'bg-zinc-50' : 'bg-white hover:bg-zinc-50',
-                    )}
-                  >
-                    <span
+            {" "}
+            <div
+              className="absolute inset-0 bg-zinc-900/40"
+              onClick={() => setOpen(false)}
+            />{" "}
+            <div
+              className={cn(
+                "relative w-full bg-white outline-none",
+                "rounded-t-md sm:rounded-md sm:max-w-md",
+                "border-hairline border-zinc-200",
+                "flex flex-col max-h-[85vh]",
+              )}
+              style={{ paddingBottom: "env(safe-area-inset-bottom, 0)" }}
+            >
+              {" "}
+              <div className="pt-2 pb-1 sm:hidden">
+                {" "}
+                <div className="mx-auto w-10 h-1 rounded-full bg-zinc-300" />{" "}
+              </div>{" "}
+              <div className="px-5 py-3 flex items-center justify-between border-b border-hairline border-zinc-200">
+                {" "}
+                <div className="text-11 uppercase tracking-label font-medium text-ink-tertiary">
+                  {title}
+                </div>{" "}
+                <button
+                  type="button"
+                  onClick={() => setOpen(false)}
+                  aria-label="Close"
+                  className="h-9 w-9 flex items-center justify-center rounded-full bg-zinc-100 text-zinc-900 hover:bg-zinc-200 u-focus-ring"
+                >
+                  {" "}
+                  <X size={16} strokeWidth={1.75} aria-hidden />{" "}
+                </button>{" "}
+              </div>{" "}
+              <div className="flex-1 overflow-y-auto">
+                {options.map((o) => {
+                  const isActive = o.key === value;
+                  return (
+                    <button
+                      key={o.key}
+                      type="button"
+                      onClick={() => {
+                        onChange(o.key);
+                        setOpen(false);
+                      }}
                       className={cn(
-                        'text-14 tracking-tight',
-                        isActive ? 'font-medium text-zinc-900' : 'text-zinc-700',
+                        "w-full flex items-center justify-between gap-3",
+                        "px-5 py-4 text-left u-focus-ring",
+                        "border-b border-hairline border-zinc-100 last:border-b-0",
+                        isActive ? "bg-zinc-50" : "bg-white hover:bg-zinc-50",
                       )}
                     >
-                      {o.label}
-                    </span>
-                    {isActive && (
-                      <Check size={16} strokeWidth={2} className="text-zinc-900" aria-hidden />
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </div>,
-        document.body,
-      )}
+                      {" "}
+                      <span
+                        className={cn(
+                          "text-14 tracking-tight",
+                          isActive
+                            ? "font-medium text-zinc-900"
+                            : "text-zinc-700",
+                        )}
+                      >
+                        {o.label}
+                      </span>
+                      {isActive && (
+                        <Check
+                          size={16}
+                          strokeWidth={2}
+                          className="text-zinc-900"
+                          aria-hidden
+                        />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>{" "}
+            </div>{" "}
+          </div>,
+          document.body,
+        )}
     </>
   );
 }
@@ -1599,10 +2181,16 @@ function MobileChipSheet({ label, value, options, onChange, title }) {
 // Status label color on mobile row. Draft = waves blue, alert = red,
 // accepted = zinc-900, others fall back to ink-tertiary for low emphasis.
 function mobileStatusClass(status) {
-  if (status === 'declined' || status === 'expired') return 'text-alert-fg';
-  if (status === 'accepted') return 'text-zinc-900';
-  if (status === 'draft' || status === 'scheduled' || status === 'sent' || status === 'viewed') return 'text-waves-blue';
-  return 'text-ink-tertiary';
+  if (status === "declined" || status === "expired") return "text-alert-fg";
+  if (status === "accepted") return "text-zinc-900";
+  if (
+    status === "draft" ||
+    status === "scheduled" ||
+    status === "sent" ||
+    status === "viewed"
+  )
+    return "text-waves-blue";
+  return "text-ink-tertiary";
 }
 
 // Row in the mobile list. Mirrors CustomersPageV2 directory row: 64px white
@@ -1610,14 +2198,24 @@ function mobileStatusClass(status) {
 // present. Row tap is currently a no-op — action sheet will land in a
 // follow-up PR so this PR stays scoped to the list-view redesign per
 // CLAUDE.md Rule 1/2.
-function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel, onSend, onDeleted, onAudit, v3Flag = false }) {
+function MobileEstimateRow({
+  estimate,
+  onCreateFromAddress,
+  onOpenCustomerPanel,
+  onSend,
+  onDeleted,
+  onAudit,
+  v3Flag = false,
+}) {
   const navigate = useNavigate();
   const cfg = STATUS_CONFIG[estimate.status] || STATUS_CONFIG.draft;
   const amount = `$${(estimate.monthlyTotal || 0).toFixed(0)}/mo`;
-  const customerName = estimate.customerName || 'Unknown';
-  const isDraftMuted = v3Flag && estimate.status === 'draft';
+  const customerName = estimate.customerName || "Unknown";
+  const isDraftMuted = v3Flag && estimate.status === "draft";
   const hasCustomer = !!estimate.customerId;
-  const openPanel = () => { if (hasCustomer) onOpenCustomerPanel?.(estimate.customerId); };
+  const openPanel = () => {
+    if (hasCustomer) onOpenCustomerPanel?.(estimate.customerId);
+  };
   return (
     <div
       // Row-level click only activates when the estimate is linked to a
@@ -1626,21 +2224,33 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
       // does nothing on tap — that's been the root of the "customers
       // aren't clickable on mobile" complaint for unlinked rows.
       onClick={hasCustomer ? openPanel : undefined}
-      role={hasCustomer ? 'button' : undefined}
+      role={hasCustomer ? "button" : undefined}
       tabIndex={hasCustomer ? 0 : undefined}
-      onKeyDown={hasCustomer ? (e) => { if (e.key === 'Enter' || e.key === ' ') openPanel(); } : undefined}
+      onKeyDown={
+        hasCustomer
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") openPanel();
+            }
+          : undefined
+      }
       className={cn(
-        'bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-1.5',
-        hasCustomer ? 'cursor-pointer hover:bg-zinc-50 active:bg-zinc-100' : 'cursor-default',
-        isDraftMuted && 'opacity-60',
+        "bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-1.5",
+        hasCustomer
+          ? "cursor-pointer hover:bg-zinc-50 active:bg-zinc-100"
+          : "cursor-default",
+        isDraftMuted && "opacity-60",
       )}
       style={{ height: 64 }}
     >
+      {" "}
       <div className="flex-1 min-w-0 flex flex-col gap-0.5">
         {hasCustomer ? (
           <button
             type="button"
-            onClick={(e) => { e.stopPropagation(); openPanel(); }}
+            onClick={(e) => {
+              e.stopPropagation();
+              openPanel();
+            }}
             // Underline-always (not hover:underline) so touch users see
             // the affordance — hover doesn't fire on mobile.
             className="text-14 font-medium text-blue-700 underline decoration-dotted underline-offset-2 truncate text-left bg-transparent border-0 p-0 cursor-pointer"
@@ -1657,20 +2267,27 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
         )}
         {v3Flag ? (
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="u-nums text-11 text-ink-tertiary">{amount}</span>
+            {" "}
+            <span className="u-nums text-11 text-ink-tertiary">
+              {amount}
+            </span>{" "}
             <StatusPillV3 status={estimate.status} />
             {estimate.viewCount > 1 && (
               <span
                 className="u-nums text-11 text-ink-tertiary"
-                title={estimate.lastViewedAt ? `Last viewed ${timeAgo(estimate.lastViewedAt)}` : undefined}
+                title={
+                  estimate.lastViewedAt
+                    ? `Last viewed ${timeAgo(estimate.lastViewedAt)}`
+                    : undefined
+                }
               >
                 {estimate.viewCount}× viewed
               </span>
             )}
             <PricingRiskBadges
               risk={estimate.pricingRisk}
-              onMissingCogs={() => onAudit?.(estimate, 'missing_cogs')}
-              onLowMargin={() => onAudit?.(estimate, 'low_margin')}
+              onMissingCogs={() => onAudit?.(estimate, "missing_cogs")}
+              onLowMargin={() => onAudit?.(estimate, "low_margin")}
             />
             {estimate.confirmedAppointment && (
               <span
@@ -1681,28 +2298,51 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
                     : `Customer has a confirmed appointment ${formatApptShort(estimate.confirmedAppointment)}.`
                 }
               >
-                <CalendarCheck size={11} strokeWidth={1.75} className="inline-block align-text-top" aria-hidden /> {formatApptShort(estimate.confirmedAppointment)}
+                {" "}
+                <CalendarCheck
+                  size={11}
+                  strokeWidth={1.75}
+                  className="inline-block align-text-top"
+                  aria-hidden
+                />
+                {formatApptShort(estimate.confirmedAppointment)}
               </span>
             )}
-            <span className="u-nums text-11 text-ink-tertiary">#{shortEstimateRef(estimate.id)}</span>
+            <span className="u-nums text-11 text-ink-tertiary">
+              #{shortEstimateRef(estimate.id)}
+            </span>{" "}
           </div>
         ) : (
           <div className="text-11 text-ink-tertiary truncate">
-            <span className="u-nums">{amount}</span>
-            <span className={cn('ml-2 font-medium', mobileStatusClass(estimate.status))}>
+            {" "}
+            <span className="u-nums">{amount}</span>{" "}
+            <span
+              className={cn(
+                "ml-2 font-medium",
+                mobileStatusClass(estimate.status),
+              )}
+            >
               {cfg.label}
             </span>
             {estimate.viewCount > 1 && (
               <span
                 className="ml-2 u-nums"
-                title={estimate.lastViewedAt ? `Last viewed ${timeAgo(estimate.lastViewedAt)}` : undefined}
+                title={
+                  estimate.lastViewedAt
+                    ? `Last viewed ${timeAgo(estimate.lastViewedAt)}`
+                    : undefined
+                }
               >
                 {estimate.viewCount}×
               </span>
             )}
             {estimate.pricingRisk?.hasRisk && (
               <span className="ml-2 text-alert-fg">
-                {estimate.pricingRisk.missingCogsCount ? 'Missing COGS' : estimate.pricingRisk.lowMarginCount ? 'Low Margin' : 'Pricing Risk'}
+                {estimate.pricingRisk.missingCogsCount
+                  ? "Missing COGS"
+                  : estimate.pricingRisk.lowMarginCount
+                    ? "Low Margin"
+                    : "Pricing Risk"}
               </span>
             )}
             {estimate.confirmedAppointment && (
@@ -1714,10 +2354,19 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
                     : `Customer has a confirmed appointment ${formatApptShort(estimate.confirmedAppointment)}.`
                 }
               >
-                <CalendarCheck size={11} strokeWidth={1.75} className="inline-block align-text-top" aria-hidden /> {formatApptShort(estimate.confirmedAppointment)}
+                {" "}
+                <CalendarCheck
+                  size={11}
+                  strokeWidth={1.75}
+                  className="inline-block align-text-top"
+                  aria-hidden
+                />
+                {formatApptShort(estimate.confirmedAppointment)}
               </span>
             )}
-            <span className="ml-2 u-nums">#{shortEstimateRef(estimate.id)}</span>
+            <span className="ml-2 u-nums">
+              #{shortEstimateRef(estimate.id)}
+            </span>{" "}
           </div>
         )}
       </div>
@@ -1726,20 +2375,32 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
           type="button"
           onClick={async (e) => {
             e.stopPropagation();
-            if (!window.confirm(`Call ${estimate.customerName || 'customer'} at ${estimate.customerPhone}?\n\nWaves will call your phone first — press 1 to connect.`)) return;
+            if (
+              !window.confirm(
+                `Call ${estimate.customerName || "customer"} at ${estimate.customerPhone}?\n\nWaves will call your phone first — press 1 to connect.`,
+              )
+            )
+              return;
             try {
-              const r = await adminFetch('/admin/communications/call', {
-                method: 'POST',
-                body: JSON.stringify({ to: estimate.customerPhone, fromNumber: '+19412975749' }),
+              const r = await adminFetch("/admin/communications/call", {
+                method: "POST",
+                body: JSON.stringify({
+                  to: estimate.customerPhone,
+                  fromNumber: "+19412975749",
+                }),
               });
-              if (!r?.success) alert('Call failed: ' + (r?.error || 'unknown error'));
-            } catch (err) { alert('Call failed: ' + err.message); }
+              if (!r?.success)
+                alert("Call failed: " + (r?.error || "unknown error"));
+            } catch (err) {
+              alert("Call failed: " + err.message);
+            }
           }}
           aria-label="Call via Waves"
           title="Call via Waves — rings your phone first, press 1 to connect"
           className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
         >
-          <Phone size={16} strokeWidth={1.75} />
+          {" "}
+          <Phone size={16} strokeWidth={1.75} />{" "}
         </button>
       )}
       {estimate.customerPhone && (
@@ -1749,7 +2410,8 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
           aria-label="SMS"
           className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
         >
-          <MessageSquare size={16} strokeWidth={1.75} />
+          {" "}
+          <MessageSquare size={16} strokeWidth={1.75} />{" "}
         </a>
       )}
       {estimate.customerId && (
@@ -1758,112 +2420,141 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
           onClick={(e) => {
             e.stopPropagation();
             const params = new URLSearchParams();
-            params.set('customerId', estimate.customerId);
-            if (estimate.address) params.set('address', estimate.address);
-            if (estimate.customerName) params.set('customerName', estimate.customerName);
-            if (estimate.customerPhone) params.set('customerPhone', estimate.customerPhone);
-            if (estimate.customerEmail) params.set('customerEmail', estimate.customerEmail);
+            params.set("customerId", estimate.customerId);
+            if (estimate.address) params.set("address", estimate.address);
+            if (estimate.customerName)
+              params.set("customerName", estimate.customerName);
+            if (estimate.customerPhone)
+              params.set("customerPhone", estimate.customerPhone);
+            if (estimate.customerEmail)
+              params.set("customerEmail", estimate.customerEmail);
             navigate(`/admin/estimates?${params.toString()}`);
           }}
           aria-label={`Create new estimate for ${customerName}`}
           title="Create a new estimate for this customer"
           className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
         >
-          <FilePlus2 size={16} strokeWidth={1.75} />
+          {" "}
+          <FilePlus2 size={16} strokeWidth={1.75} />{" "}
         </button>
       )}
       <button
         type="button"
         onClick={(e) => {
           e.stopPropagation();
-          onAudit?.(estimate, 'all');
+          onAudit?.(estimate, "all");
         }}
         aria-label={`Audit pricing for ${customerName}`}
         title="Audit pricing, protocol, COGS, and margin"
         className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
       >
-        <SlidersHorizontal size={16} strokeWidth={1.75} />
+        {" "}
+        <SlidersHorizontal size={16} strokeWidth={1.75} />{" "}
       </button>
-      {['draft', 'sent', 'viewed'].includes(estimate.status) && (
+      {["draft", "sent", "viewed"].includes(estimate.status) && (
         <button
           type="button"
           onClick={async (e) => {
             e.stopPropagation();
-            const action = estimate.status === 'draft' ? 'Send' : 'Resend';
-            if (!window.confirm(`${action} estimate to ${customerName} via SMS + email?`)) return;
+            const action = estimate.status === "draft" ? "Send" : "Resend";
+            if (
+              !window.confirm(
+                `${action} estimate to ${customerName} via SMS + email?`,
+              )
+            )
+              return;
             try {
-              await sendEstimateFromPipeline(estimate.id, 'both');
+              await sendEstimateFromPipeline(estimate.id, "both");
               onSend?.();
             } catch (err) {
-              window.alert('Send failed: ' + err.message);
+              window.alert("Send failed: " + err.message);
             }
           }}
-          aria-label={`${estimate.status === 'draft' ? 'Send' : 'Resend'} estimate`}
-          title={estimate.status === 'draft' ? 'Send estimate via SMS + email' : 'Resend estimate via SMS + email'}
+          aria-label={`${estimate.status === "draft" ? "Send" : "Resend"} estimate`}
+          title={
+            estimate.status === "draft"
+              ? "Send estimate via SMS + email"
+              : "Resend estimate via SMS + email"
+          }
           className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
         >
-          <Send size={16} strokeWidth={1.75} />
+          {" "}
+          <Send size={16} strokeWidth={1.75} />{" "}
         </button>
       )}
-      {estimate.status === 'draft' && (
+      {estimate.status === "draft" && (
         <button
           type="button"
           onClick={async (e) => {
             e.stopPropagation();
-            const ok = window.confirm(`Delete draft estimate for ${customerName}?\n\nThis is permanent.`);
+            const ok = window.confirm(
+              `Delete draft estimate for ${customerName}?\n\nThis is permanent.`,
+            );
             if (!ok) return;
             try {
-              await adminFetch(`/admin/estimates/${estimate.id}`, { method: 'DELETE' });
+              await adminFetch(`/admin/estimates/${estimate.id}`, {
+                method: "DELETE",
+              });
               onDeleted?.(estimate.id);
             } catch (err) {
-              alert('Delete failed: ' + err.message);
+              alert("Delete failed: " + err.message);
             }
           }}
           aria-label={`Delete draft estimate for ${customerName}`}
           title="Delete this draft estimate"
           className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-alert-fg/60 rounded-xs text-alert-fg bg-white hover:bg-alert-bg"
         >
-          <Trash2 size={16} strokeWidth={1.75} />
+          {" "}
+          <Trash2 size={16} strokeWidth={1.75} />{" "}
         </button>
       )}
-      {!estimate.archivedAt && ['declined', 'expired', 'accepted'].includes(estimate.status) && (
-        <button
-          type="button"
-          onClick={async (e) => {
-            e.stopPropagation();
-            const ok = window.confirm(`Archive this ${estimate.status} estimate for ${customerName}?`);
-            if (!ok) return;
-            try {
-              await adminFetch(`/admin/estimates/${estimate.id}/archive`, { method: 'POST' });
-              onDeleted?.(estimate.id);
-            } catch (err) {
-              alert('Archive failed: ' + err.message);
-            }
-          }}
-          aria-label={`Archive estimate for ${customerName}`}
-          title="Archive this estimate"
-          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-300 rounded-xs text-zinc-700 bg-white hover:bg-zinc-50"
-        >
-          <Trash2 size={16} strokeWidth={1.75} />
-        </button>
-      )}
+      {!estimate.archivedAt &&
+        ["declined", "expired", "accepted"].includes(estimate.status) && (
+          <button
+            type="button"
+            onClick={async (e) => {
+              e.stopPropagation();
+              const ok = window.confirm(
+                `Archive this ${estimate.status} estimate for ${customerName}?`,
+              );
+              if (!ok) return;
+              try {
+                await adminFetch(`/admin/estimates/${estimate.id}/archive`, {
+                  method: "POST",
+                });
+                onDeleted?.(estimate.id);
+              } catch (err) {
+                alert("Archive failed: " + err.message);
+              }
+            }}
+            aria-label={`Archive estimate for ${customerName}`}
+            title="Archive this estimate"
+            className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-300 rounded-xs text-zinc-700 bg-white hover:bg-zinc-50"
+          >
+            {" "}
+            <Trash2 size={16} strokeWidth={1.75} />{" "}
+          </button>
+        )}
       {estimate.archivedAt && (
         <button
           type="button"
           onClick={async (e) => {
             e.stopPropagation();
             try {
-              await adminFetch(`/admin/estimates/${estimate.id}/unarchive`, { method: 'POST' });
+              await adminFetch(`/admin/estimates/${estimate.id}/unarchive`, {
+                method: "POST",
+              });
               onDeleted?.(estimate.id);
             } catch (err) {
-              alert('Unarchive failed: ' + err.message);
+              alert("Unarchive failed: " + err.message);
             }
           }}
           aria-label={`Unarchive estimate for ${customerName}`}
           title="Restore this estimate"
           className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
         >
-          <ArrowLeft size={16} strokeWidth={1.75} />
+          {" "}
+          <ArrowLeft size={16} strokeWidth={1.75} />{" "}
         </button>
       )}
     </div>
@@ -1874,21 +2565,22 @@ function MobileEstimateRow({ estimate, onCreateFromAddress, onOpenCustomerPanel,
 // (GET /admin/estimates) with EstimatePipelineViewV2. KPI bar, Leads tab,
 // and Pricing Logic tab are desktop-only by design.
 function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
-  const v3Flag = useFeatureFlag('estimates_v2_status_pills');
+  const v3Flag = useFeatureFlag("estimates_v2_status_pills");
   const [estimates, setEstimates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState('all');
-  const [dateFilter, setDateFilter] = useState('all');
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("all");
+  const [dateFilter, setDateFilter] = useState("all");
   const [customerPanelId, setCustomerPanelId] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
-  const [sort, setSort] = useState('newest');
+  const [sort, setSort] = useState("newest");
 
   const refreshEstimates = useCallback(() => {
-    const qs = filter === 'archived'
-      ? `?archived=only&limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`
-      : `?limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`;
+    const qs =
+      filter === "archived"
+        ? `?archived=only&limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`
+        : `?limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`;
     setError(null);
     adminFetch(`/admin/estimates${qs}`)
       .then((d) => setEstimates(d.estimates || []))
@@ -1904,25 +2596,32 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
   const groups = useMemo(() => {
     const now = Date.now();
     const q = search.trim().toLowerCase();
-    const classified = estimates.map((e) => ({ ...e, _class: classifyEstimate(e) }));
+    const classified = estimates.map((e) => ({
+      ...e,
+      _class: classifyEstimate(e),
+    }));
     let list = classified;
     if (v3Flag) {
       list = list.filter((e) => v3ChipMatches(e, filter));
-    } else if (filter !== 'all') {
+    } else if (filter !== "all") {
       list = list.filter((e) => estimateMatchesFilter(e, filter));
     }
-    if (dateFilter !== 'all') {
-      list = list.filter((e) => mobileMatchesDate(e.createdAt, dateFilter, now));
+    if (dateFilter !== "all") {
+      list = list.filter((e) =>
+        mobileMatchesDate(e.createdAt, dateFilter, now),
+      );
     }
     if (q) {
       list = list.filter((e) => {
-        const name = (e.customerName || '').toLowerCase();
+        const name = (e.customerName || "").toLowerCase();
         const ref = shortEstimateRef(e.id).toLowerCase();
         return name.includes(q) || ref.includes(q);
       });
     }
-    const useV3Sort = v3Flag && sort === 'v3';
-    list = useV3Sort ? [...list].sort(v3SortFn) : [...list].sort(mobileSortFn(sort));
+    const useV3Sort = v3Flag && sort === "v3";
+    list = useV3Sort
+      ? [...list].sort(v3SortFn)
+      : [...list].sort(mobileSortFn(sort));
 
     // v3 sort breaks day-grouping (status rank wins, not date), so collapse
     // to a single group preserving the sorted order.
@@ -1932,14 +2631,15 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
     const byDay = new Map();
     for (const e of list) {
       const d = e.createdAt ? new Date(e.createdAt) : null;
-      const key = d && !Number.isNaN(d.getTime())
-        ? new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
-        : 0;
+      const key =
+        d && !Number.isNaN(d.getTime())
+          ? new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+          : 0;
       if (!byDay.has(key)) byDay.set(key, []);
       byDay.get(key).push(e);
     }
     const sortedGroups = Array.from(byDay.entries()).sort((a, b) =>
-      sort === 'oldest' ? a[0] - b[0] : b[0] - a[0],
+      sort === "oldest" ? a[0] - b[0] : b[0] - a[0],
     );
     return sortedGroups;
   }, [estimates, search, filter, dateFilter, sort, v3Flag]);
@@ -1948,7 +2648,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
     if (v3Flag) return v3ChipCounts(estimates);
     const counts = { all: estimates.length };
     for (const f of PIPELINE_AND_RISK_FILTERS) {
-      if (f.key === 'all') continue;
+      if (f.key === "all") continue;
       counts[f.key] = estimates
         .map((e) => ({ ...e, _class: classifyEstimate(e) }))
         .filter((e) => estimateMatchesFilter(e, f.key)).length;
@@ -1958,7 +2658,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
 
   // Reset filter when the v3 flag flips; keep chronological ordering stable.
   useEffect(() => {
-    setFilter('all');
+    setFilter("all");
   }, [v3Flag]);
 
   // Flat list across all days — mirrors CustomersPageV2 directory layout.
@@ -1968,25 +2668,34 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
     // Mirrors CustomersPageV2: page padding comes from AdminLayout, no
     // edge-to-edge overrides, list rows are cards (not hairlined rows).
     <div style={{ fontFamily: ROBOTO }}>
-      {/* Title row — matches Customers header: h1 + round FAB when v3 flag on. */}
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
-        <h1 className="text-28 font-normal tracking-h1 text-ink-primary">
-          <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Estimates</span>
-          <span className="hidden md:inline">Estimates</span>
-        </h1>
-        <button
-          type="button"
-          onClick={onNew}
-          aria-label="Add estimate"
-          className="flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring hover:bg-zinc-800"
-          style={{ width: 36, height: 36 }}
-        >
-          <Plus size={20} strokeWidth={2} />
-        </button>
+      {/* Title row — matches the shared command header scale on mobile. */}
+      <div
+        className="md:sticky md:top-0 z-20 mb-5 bg-surface-page/95 pb-3"
+        style={{ fontFamily: ROBOTO }}
+      >
+        <div className="overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
+          <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+            <h1
+              className="m-0 text-22 font-medium text-zinc-900 tracking-normal"
+              style={{ fontFamily: ROBOTO }}
+            >
+              Pipeline
+            </h1>
+            <button
+              type="button"
+              onClick={onNew}
+              aria-label="Add estimate"
+              className="flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring hover:bg-zinc-800"
+              style={{ width: 36, height: 36 }}
+            >
+              <Plus size={20} strokeWidth={2} />
+            </button>
+          </div>
+        </div>
       </div>
-
       {/* Search + Add/filter row — mirrors Customers mobile block. */}
       <div className="mb-3">
+        {" "}
         <input
           type="search"
           inputMode="search"
@@ -1995,53 +2704,67 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
           placeholder="Search by customer name or reference"
           aria-label="Search estimates"
           className="block w-full bg-white text-14 text-ink-primary border-hairline border-zinc-300 rounded-sm h-12 px-4 focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
-        />
+        />{" "}
         <div className="mt-3 flex items-center gap-2 flex-wrap">
+          {" "}
           <MobileChipSheet
             label="Filter"
             value={filter}
             onChange={setFilter}
-            options={(v3Flag ? V3_CHIPS : PIPELINE_AND_RISK_FILTERS).map((f) => ({
-              ...f,
-              label: f.key === 'all'
-                ? `All (${filterCounts.all || 0})`
-                : `${f.label} (${filterCounts[f.key] || 0})`,
-            }))}
+            options={(v3Flag ? V3_CHIPS : PIPELINE_AND_RISK_FILTERS).map(
+              (f) => ({
+                ...f,
+                label:
+                  f.key === "all"
+                    ? `All (${filterCounts.all || 0})`
+                    : `${f.label} (${filterCounts[f.key] || 0})`,
+              }),
+            )}
             title="Filter estimates"
-          />
+          />{" "}
           <MobileChipSheet
             label="Date"
             value={dateFilter}
             onChange={setDateFilter}
             options={MOBILE_DATE_FILTERS}
             title="Filter by date"
-          />
+          />{" "}
           <MobileChipSheet
             label="Sort"
             value={sort}
             onChange={setSort}
-            options={v3Flag
-              ? [{ key: 'v3', label: 'Action Priority' }, ...MOBILE_SORT_OPTIONS]
-              : MOBILE_SORT_OPTIONS}
+            options={
+              v3Flag
+                ? [
+                    { key: "v3", label: "Action Priority" },
+                    ...MOBILE_SORT_OPTIONS,
+                  ]
+                : MOBILE_SORT_OPTIONS
+            }
             title="Sort estimates"
-          />
-        </div>
+          />{" "}
+        </div>{" "}
       </div>
-
       {error && (
         <div className="mb-3 border-hairline border-alert-fg bg-alert-bg text-alert-fg rounded-xs p-3 text-13">
           Failed to load estimates: {error.message || String(error)}
-          <button type="button" onClick={() => { setLoading(true); refreshEstimates(); }} className="ml-2 underline">
+          <button
+            type="button"
+            onClick={() => {
+              setLoading(true);
+              refreshEstimates();
+            }}
+            className="ml-2 underline"
+          >
             Retry
-          </button>
+          </button>{" "}
         </div>
       )}
 
       {/* Result count — mirrors Customers */}
       <div className="u-nums text-11 text-ink-tertiary text-right mb-3 mt-3">
-        {flat.length} result{flat.length !== 1 ? 's' : ''}
+        {flat.length} result{flat.length !== 1 ? "s" : ""}
       </div>
-
       {/* List */}
       {loading ? (
         <div className="p-10 text-center text-13 text-ink-secondary">
@@ -2049,16 +2772,20 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
         </div>
       ) : flat.length === 0 ? (
         <Card>
+          {" "}
           <CardBody className="p-12 text-center">
+            {" "}
             <div className="text-14 text-ink-primary mb-1">
-              {estimates.length === 0 ? 'No estimates yet' : 'No estimates found'}
-            </div>
+              {estimates.length === 0
+                ? "No estimates yet"
+                : "No estimates found"}
+            </div>{" "}
             <div className="text-13 text-ink-tertiary">
               {estimates.length === 0
-                ? 'Tap Add Estimate to create one'
-                : 'Try adjusting your filters'}
-            </div>
-          </CardBody>
+                ? "Tap Add Estimate to create one"
+                : "Try adjusting your filters"}
+            </div>{" "}
+          </CardBody>{" "}
         </Card>
       ) : (
         <div className="flex flex-col gap-2">
@@ -2070,7 +2797,9 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
               onOpenCustomerPanel={setCustomerPanelId}
               onSend={refreshEstimates}
               onDeleted={refreshEstimates}
-              onAudit={(estimate, focus = 'all') => setAuditTarget({ estimate, focus })}
+              onAudit={(estimate, focus = "all") =>
+                setAuditTarget({ estimate, focus })
+              }
               v3Flag={v3Flag}
             />
           ))}
@@ -2086,7 +2815,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
       {auditTarget && (
         <EstimatePricingAuditModal
           estimate={auditTarget.estimate || auditTarget}
-          initialFocus={auditTarget.focus || 'all'}
+          initialFocus={auditTarget.focus || "all"}
           onClose={() => setAuditTarget(null)}
         />
       )}
@@ -2098,15 +2827,19 @@ export default function EstimatesPageV2() {
   const isMobile = useIsMobile(768);
   const [searchParams, setSearchParams] = useSearchParams();
   const readLeadPrefill = useCallback((params) => {
-    const legacyName = [params.get('first_name'), params.get('last_name')].filter(Boolean).join(' ').trim();
+    const legacyName = [params.get("first_name"), params.get("last_name")]
+      .filter(Boolean)
+      .join(" ")
+      .trim();
     return {
-      leadId: params.get('leadId') || '',
-      customerId: params.get('customerId') || '',
-      address: params.get('address') || '',
-      customerName: params.get('customerName') || legacyName,
-      customerPhone: params.get('customerPhone') || params.get('phone') || '',
-      customerEmail: params.get('customerEmail') || params.get('email') || '',
-      serviceInterest: params.get('serviceInterest') || params.get('service_interest') || '',
+      leadId: params.get("leadId") || "",
+      customerId: params.get("customerId") || "",
+      address: params.get("address") || "",
+      customerName: params.get("customerName") || legacyName,
+      customerPhone: params.get("customerPhone") || params.get("phone") || "",
+      customerEmail: params.get("customerEmail") || params.get("email") || "",
+      serviceInterest:
+        params.get("serviceInterest") || params.get("service_interest") || "",
     };
   }, []);
 
@@ -2114,11 +2847,25 @@ export default function EstimatesPageV2() {
   // row's "+ Estimate" quick action. Stays in state so consuming the params
   // (clearing the URL) doesn't blow away the wizard the user just landed on.
   const [prefill, setPrefill] = useState(() => readLeadPrefill(searchParams));
-  const hasPrefill = !!(prefill.leadId || prefill.customerId || prefill.address || prefill.customerName || prefill.customerPhone || prefill.customerEmail || prefill.serviceInterest);
-  const initialTab = TABS.some((t) => t.key === searchParams.get('tab')) ? searchParams.get('tab') : null;
+  const hasPrefill = !!(
+    prefill.leadId ||
+    prefill.customerId ||
+    prefill.address ||
+    prefill.customerName ||
+    prefill.customerPhone ||
+    prefill.customerEmail ||
+    prefill.serviceInterest
+  );
+  const initialTab = TABS.some((t) => t.key === searchParams.get("tab"))
+    ? searchParams.get("tab")
+    : null;
 
-  const [activeTab, setActiveTab] = useState(initialTab || (hasPrefill ? 'new' : 'leads'));
-  const [mobileView, setMobileView] = useState(initialTab === 'new' || hasPrefill ? 'new' : 'list'); // 'list' | 'new'
+  const [activeTab, setActiveTab] = useState(
+    initialTab || (hasPrefill ? "new" : "leads"),
+  );
+  const [mobileView, setMobileView] = useState(
+    initialTab === "new" || hasPrefill ? "new" : "list",
+  ); // 'list' | 'new'
 
   // Watch URL params for incoming prefill. Two cases this needs to handle:
   //   1. First mount with prefill in URL (e.g. arriving from a Customer panel
@@ -2130,42 +2877,78 @@ export default function EstimatesPageV2() {
   //      pull the values into prefill state, and switch into the create flow.
   useEffect(() => {
     const incoming = readLeadPrefill(searchParams);
-    const hasIncoming = !!(incoming.leadId || incoming.customerId || incoming.address || incoming.customerName || incoming.customerPhone || incoming.customerEmail || incoming.serviceInterest);
-    const tabParam = searchParams.get('tab');
+    const hasIncoming = !!(
+      incoming.leadId ||
+      incoming.customerId ||
+      incoming.address ||
+      incoming.customerName ||
+      incoming.customerPhone ||
+      incoming.customerEmail ||
+      incoming.serviceInterest
+    );
+    const tabParam = searchParams.get("tab");
     const hasTabParam = TABS.some((t) => t.key === tabParam);
     if (!hasIncoming && !hasTabParam) return;
     if (hasIncoming) {
       setPrefill(incoming);
-      setActiveTab('new');
-      setMobileView('new');
+      setActiveTab("new");
+      setMobileView("new");
     } else if (hasTabParam) {
       setActiveTab(tabParam);
-      if (tabParam === 'new') setMobileView('new');
+      setMobileView(tabParam === "new" ? "new" : "list");
     }
-    const stripped = new URLSearchParams(searchParams);
-    ['leadId', 'customerId', 'address', 'customerName', 'customerPhone', 'customerEmail', 'serviceInterest', 'first_name', 'last_name', 'phone', 'email', 'service_interest', 'tab'].forEach((k) => stripped.delete(k));
-    setSearchParams(stripped, { replace: true });
+    if (hasIncoming) {
+      const stripped = new URLSearchParams(searchParams);
+      PREFILL_PARAM_KEYS.forEach((k) => stripped.delete(k));
+      stripped.delete("tab");
+      setSearchParams(stripped, { replace: true });
+    }
   }, [searchParams, setSearchParams, readLeadPrefill]);
 
   function clearPrefill() {
-    setPrefill({ leadId: '', customerId: '', address: '', customerName: '', customerPhone: '', customerEmail: '', serviceInterest: '' });
+    setPrefill({
+      leadId: "",
+      customerId: "",
+      address: "",
+      customerName: "",
+      customerPhone: "",
+      customerEmail: "",
+      serviceInterest: "",
+    });
   }
+
+  const selectTab = useCallback(
+    (key) => {
+      setActiveTab(key);
+      const next = new URLSearchParams(searchParams);
+      PREFILL_PARAM_KEYS.forEach((k) => next.delete(k));
+      if (key === "leads") next.delete("tab");
+      else next.set("tab", key);
+      setSearchParams(next, { replace: false });
+    },
+    [searchParams, setSearchParams],
+  );
 
   // Mobile: list (default) + create-estimate flow. Leads + Pricing Logic are
   // desktop-only per CLAUDE.md Rule 1 (mobile IA scope confirmed with owner).
   if (isMobile) {
-    if (mobileView === 'new') {
+    if (mobileView === "new") {
       return (
         <div style={{ fontFamily: ROBOTO }}>
+          {" "}
           <button
             type="button"
-            onClick={() => { setMobileView('list'); clearPrefill(); }}
+            onClick={() => {
+              setMobileView("list");
+              clearPrefill();
+            }}
             aria-label="Back to estimates"
             className="inline-flex items-center gap-1 mb-3 h-9 px-2 -ml-2 rounded-md text-14 text-zinc-700 hover:bg-zinc-100 u-focus-ring"
           >
+            {" "}
             <ArrowLeft size={18} strokeWidth={1.75} aria-hidden />
             Back
-          </button>
+          </button>{" "}
           <EstimateToolViewV2
             initialLeadId={prefill.leadId}
             initialCustomerId={prefill.customerId}
@@ -2174,16 +2957,27 @@ export default function EstimatesPageV2() {
             initialCustomerPhone={prefill.customerPhone}
             initialCustomerEmail={prefill.customerEmail}
             initialServiceInterest={prefill.serviceInterest}
-          />
+          />{" "}
         </div>
       );
     }
     return (
       <EstimatesMobileListView
-        onNew={() => { clearPrefill(); setMobileView('new'); }}
+        onNew={() => {
+          clearPrefill();
+          setMobileView("new");
+        }}
         onCreateFromAddress={(addr) => {
-          setPrefill({ leadId: '', customerId: '', address: addr || '', customerName: '', customerPhone: '', customerEmail: '', serviceInterest: '' });
-          setMobileView('new');
+          setPrefill({
+            leadId: "",
+            customerId: "",
+            address: addr || "",
+            customerName: "",
+            customerPhone: "",
+            customerEmail: "",
+            serviceInterest: "",
+          });
+          setMobileView("new");
         }}
       />
     );
@@ -2191,66 +2985,11 @@ export default function EstimatesPageV2() {
 
   return (
     <div style={{ fontFamily: ROBOTO }}>
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
-        <h1 className="text-28 font-normal text-zinc-900 tracking-display">
-          Pipeline
-        </h1>
-        <button
-          type="button"
-          onClick={() => setActiveTab('new')}
-          style={{
-            padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
-            background: '#18181B', color: '#fff', border: 'none', cursor: 'pointer',
-            whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
-            fontFamily: ROBOTO,
-          }}
-        >
-          + Create Estimate
-        </button>
-      </div>
-      {/* Centered tab strip — wrapper centers the inline-flex pill bar
-          so it shrinks to its content and floats in the middle of the
-          page, matching the Customers view toggle. */}
-      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
-        <div
-          style={{
-            display: 'inline-flex',
-            flexWrap: 'wrap',
-            alignItems: 'center',
-            gap: 4,
-            background: '#F4F4F5',
-            borderRadius: 10,
-            padding: 4,
-            border: '1px solid #E4E4E7',
-          }}
-        >
-          {TABS.map((t) => (
-            <button
-              key={t.key}
-              type="button"
-              onClick={() => setActiveTab(t.key)}
-              style={{
-                padding: '10px 24px',
-                borderRadius: 8,
-                border: 'none',
-                cursor: 'pointer',
-                background: activeTab === t.key ? '#18181B' : 'transparent',
-                color: activeTab === t.key ? '#FFFFFF' : '#A1A1AA',
-                fontSize: 14,
-                fontWeight: 700,
-                transition: 'all 0.2s',
-                fontFamily: ROBOTO,
-              }}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {activeTab === 'leads' && <LeadsSection />}
-      {activeTab === 'estimates' && <EstimatePipelineViewV2 />}
-      {activeTab === 'new' && (
+      {" "}
+      <PipelineCommandHeader activeTab={activeTab} onTabChange={selectTab} />
+      {activeTab === "leads" && <LeadsSection />}
+      {activeTab === "estimates" && <EstimatePipelineViewV2 />}
+      {activeTab === "new" && (
         <EstimateToolViewV2
           initialLeadId={prefill.leadId}
           initialCustomerId={prefill.customerId}
@@ -2261,10 +3000,10 @@ export default function EstimatesPageV2() {
           initialServiceInterest={prefill.serviceInterest}
         />
       )}
-      {activeTab === 'pricing' && (
+      {activeTab === "pricing" && (
         <>
-          <MarginCalculator />
-          <PricingLogicPanel />
+          {" "}
+          <MarginCalculator /> <PricingLogicPanel />{" "}
         </>
       )}
     </div>

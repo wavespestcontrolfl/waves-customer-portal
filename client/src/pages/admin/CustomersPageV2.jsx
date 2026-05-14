@@ -34,20 +34,30 @@
 // - V1/V2 panel reuse: CustomerHealthSection (V1 export) renders
 //   inside V2. Watch for V1 styling leaking through — should be
 //   reskinned eventually but for now stylistic drift is the risk.
-import { useState, useEffect, useRef } from 'react';
-import { useSearchParams, useNavigate } from 'react-router-dom';
-import { Filter, Phone, MessageSquare, Plus, Trash2 } from 'lucide-react';
-import Customer360Profile from '../../components/admin/Customer360ProfileV2';
-import MobileNewCustomerSheet from '../../components/admin/MobileNewCustomerSheet';
-import AddressAutocomplete from '../../components/AddressAutocomplete';
-import useIsMobile from '../../hooks/useIsMobile';
+import { useState, useEffect, useRef } from "react";
+import { useSearchParams, useNavigate } from "react-router-dom";
+import {
+  Filter,
+  HeartPulse,
+  MapPinned,
+  MessageSquare,
+  Phone,
+  Sparkles,
+  Trash2,
+  UserPlus,
+  Users,
+} from "lucide-react";
+import Customer360Profile from "../../components/admin/Customer360ProfileV2";
+import MobileNewCustomerSheet from "../../components/admin/MobileNewCustomerSheet";
+import AddressAutocomplete from "../../components/AddressAutocomplete";
+import useIsMobile from "../../hooks/useIsMobile";
 import {
   CUSTOMER_TAG_OPTIONS,
   LEAD_SOURCE_OPTIONS,
   PROPERTY_LABEL_OPTIONS,
   normalizeCustomerTag,
-} from '../../lib/customerFormOptions';
-import { CustomerHealthSection } from './CustomerHealthTabs';
+} from "../../lib/customerFormOptions";
+import { CustomerHealthSection } from "./CustomerHealthTabs";
 import {
   Button,
   Badge,
@@ -59,28 +69,39 @@ import {
   DialogBody,
   DialogFooter,
   cn,
-} from '../../components/ui';
-import { adminFetch, isRateLimitError } from '../../utils/admin-fetch';
+} from "../../components/ui";
+import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 
-const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const STAGES = [
-  { key: 'new_lead', label: 'New Lead' },
-  { key: 'contacted', label: 'Contacted' },
-  { key: 'estimate_sent', label: 'Est. Sent' },
-  { key: 'estimate_viewed', label: 'Est. Viewed' },
-  { key: 'follow_up', label: 'Follow Up' },
-  { key: 'won', label: 'Won' },
-  { key: 'active_customer', label: 'Active' },
-  { key: 'at_risk', label: 'At Risk' },
-  { key: 'churned', label: 'Churned' },
-  { key: 'lost', label: 'Lost' },
+  { key: "new_lead", label: "New Lead" },
+  { key: "contacted", label: "Contacted" },
+  { key: "estimate_sent", label: "Est. Sent" },
+  { key: "estimate_viewed", label: "Est. Viewed" },
+  { key: "follow_up", label: "Follow Up" },
+  { key: "won", label: "Won" },
+  { key: "active_customer", label: "Active" },
+  { key: "at_risk", label: "At Risk" },
+  { key: "churned", label: "Churned" },
+  { key: "lost", label: "Lost" },
 ];
 
 const STAGE_MAP = {};
-STAGES.forEach((stage) => { STAGE_MAP[stage.key] = stage; });
+STAGES.forEach((stage) => {
+  STAGE_MAP[stage.key] = stage;
+});
 
-const KANBAN_STAGES = ['new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up', 'won', 'active_customer', 'at_risk'];
+const KANBAN_STAGES = [
+  "new_lead",
+  "contacted",
+  "estimate_sent",
+  "estimate_viewed",
+  "follow_up",
+  "won",
+  "active_customer",
+  "at_risk",
+];
 const LEAD_SOURCES = LEAD_SOURCE_OPTIONS;
 
 function LegacyCustomersPanel({ exportName, props = {} }) {
@@ -89,18 +110,24 @@ function LegacyCustomersPanel({ exportName, props = {} }) {
 
   useEffect(() => {
     let cancelled = false;
-    import('./CustomersPage')
+    import("./CustomersPage")
       .then((mod) => {
         if (!cancelled) setComponent(() => mod[exportName] || null);
       })
       .catch((err) => {
         if (!cancelled) setLoadError(err);
       });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [exportName]);
 
   if (loadError) {
-    return <div className="p-6 text-13 text-alert-fg">Could not load this panel: {loadError.message}</div>;
+    return (
+      <div className="p-6 text-13 text-alert-fg">
+        Could not load this panel: {loadError.message}
+      </div>
+    );
   }
   if (!Component) {
     return <div className="p-6 text-13 text-ink-tertiary">Loading...</div>;
@@ -119,20 +146,21 @@ function TierBadgeV2({ tier }) {
 function StageBadgeV2({ stage }) {
   const s = STAGE_MAP[stage];
   if (!s) return null;
-  const isAlert = stage === 'at_risk' || stage === 'churned';
-  return (
-    <Badge tone={isAlert ? 'alert' : 'neutral'}>{s.label}</Badge>
-  );
+  const isAlert = stage === "at_risk" || stage === "churned";
+  return <Badge tone={isAlert ? "alert" : "neutral"}>{s.label}</Badge>;
 }
 
 function formatCustomerAddress(address) {
-  if (!address) return '';
-  if (typeof address === 'string') return address.replace(/^,\s*|\s*,\s*$/g, '').trim();
-  if (typeof address === 'object') {
-    const cityStateZip = [address.city, address.state, address.zip].filter(Boolean).join(' ');
-    return [address.line1, cityStateZip].filter(Boolean).join(', ').trim();
+  if (!address) return "";
+  if (typeof address === "string")
+    return address.replace(/^,\s*|\s*,\s*$/g, "").trim();
+  if (typeof address === "object") {
+    const cityStateZip = [address.city, address.state, address.zip]
+      .filter(Boolean)
+      .join(" ");
+    return [address.line1, cityStateZip].filter(Boolean).join(", ").trim();
   }
-  return '';
+  return "";
 }
 
 // Health-score dot. Single color for valid score, alert red only for
@@ -142,25 +170,69 @@ function formatCustomerAddress(address) {
 // down for row density. Color tier: ≥70 green, 40–69 amber, <40 red.
 function HealthDot({ score }) {
   if (score == null) {
-    return <span className="inline-block w-6 h-6 rounded-full border-hairline border-zinc-200" title="No score" />;
+    return (
+      <span
+        className="inline-block w-6 h-6 rounded-full border-hairline border-zinc-200"
+        title="No score"
+      />
+    );
   }
-  const stroke = score >= 70 ? '#10B981' : score >= 40 ? '#F59E0B' : '#C8312F';
-  const r = 10, circ = 2 * Math.PI * r, offset = circ - (score / 100) * circ;
+  const stroke = score >= 70 ? "#10B981" : score >= 40 ? "#F59E0B" : "#C8312F";
+  const r = 10,
+    circ = 2 * Math.PI * r,
+    offset = circ - (score / 100) * circ;
   return (
-    <svg width={26} height={26} viewBox="0 0 26 26" className="flex-shrink-0" aria-label={`Health: ${score}`}>
-      <circle cx={13} cy={13} r={r} fill="none" stroke="#E4E4E7" strokeWidth={2} />
-      <circle cx={13} cy={13} r={r} fill="none" stroke={stroke} strokeWidth={2}
-        strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round"
-        transform="rotate(-90 13 13)" />
-      <text x={13} y={16} textAnchor="middle" fill={stroke} fontSize={9} fontWeight={500}
-        fontFamily="ui-monospace, monospace">{score}</text>
+    <svg
+      width={26}
+      height={26}
+      viewBox="0 0 26 26"
+      className="flex-shrink-0"
+      aria-label={`Health: ${score}`}
+    >
+      {" "}
+      <circle
+        cx={13}
+        cy={13}
+        r={r}
+        fill="none"
+        stroke="#E4E4E7"
+        strokeWidth={2}
+      />{" "}
+      <circle
+        cx={13}
+        cy={13}
+        r={r}
+        fill="none"
+        stroke={stroke}
+        strokeWidth={2}
+        strokeDasharray={circ}
+        strokeDashoffset={offset}
+        strokeLinecap="round"
+        transform="rotate(-90 13 13)"
+      />{" "}
+      <text
+        x={13}
+        y={16}
+        textAnchor="middle"
+        fill={stroke}
+        fontSize={9}
+        fontWeight={500}
+        fontFamily="ui-monospace, monospace"
+      >
+        {score}
+      </text>{" "}
     </svg>
   );
 }
 
 function getAdminRole() {
-  try { return JSON.parse(localStorage.getItem('waves_admin_user') || '{}')?.role || null; }
-  catch { return null; }
+  try {
+    return (
+      JSON.parse(localStorage.getItem("waves_admin_user") || "{}")?.role || null
+    );
+  } catch {
+    return null;
+  }
 }
 
 // --- Pipeline card (V2) ---
@@ -172,12 +244,16 @@ function PipelineCardV2({ customer, onDelete, canDelete = false }) {
   const daysInStage = customer.stageEnteredAt
     ? Math.floor((Date.now() - new Date(customer.stageEnteredAt)) / 86400000)
     : null;
-  const addressLine = formatCustomerAddress(customer.address).split(',')[0] || '';
-  const tier = customer.tier && customer.tier !== 'Bronze' ? customer.tier : null;
+  const addressLine =
+    formatCustomerAddress(customer.address).split(",")[0] || "";
+  const tier =
+    customer.tier && customer.tier !== "Bronze" ? customer.tier : null;
 
   return (
     <div className="bg-white border border-hairline border-zinc-200 rounded-md p-3 mb-2 last:mb-0">
+      {" "}
       <div className="flex justify-between items-start mb-1">
+        {" "}
         <div className="text-13 font-medium text-ink-primary tracking-tight">
           {customer.firstName} {customer.lastName}
         </div>
@@ -194,46 +270,57 @@ function PipelineCardV2({ customer, onDelete, canDelete = false }) {
           </button>
         )}
       </div>
-
       {confirming && (
         <div className="bg-alert-bg border border-hairline border-alert-fg/30 rounded p-2 mb-2">
+          {" "}
           <div className="text-12 text-alert-fg mb-2">
             Delete {customer.firstName} {customer.lastName}?
-          </div>
+          </div>{" "}
           <div className="flex gap-1.5">
+            {" "}
             <Button
               variant="danger"
               size="sm"
               onClick={async () => {
                 try {
-                  const r = await fetch(`${API_BASE}/admin/customers/${customer.id}`, {
-                    method: 'DELETE',
-                    headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` },
-                  });
+                  const r = await fetch(
+                    `${API_BASE}/admin/customers/${customer.id}`,
+                    {
+                      method: "DELETE",
+                      headers: {
+                        Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+                      },
+                    },
+                  );
                   if (!r.ok) {
                     const err = await r.json().catch(() => ({}));
                     throw new Error(err.error || `HTTP ${r.status}`);
                   }
                   onDelete?.(customer.id);
                 } catch (e) {
-                  alert('Delete failed: ' + e.message);
+                  alert("Delete failed: " + e.message);
                 }
               }}
             >
               Delete
-            </Button>
-            <Button variant="secondary" size="sm" onClick={() => setConfirming(false)}>
+            </Button>{" "}
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setConfirming(false)}
+            >
               Cancel
-            </Button>
-          </div>
+            </Button>{" "}
+          </div>{" "}
         </div>
       )}
-
       {addressLine && (
-        <div className="text-12 text-ink-tertiary mb-2 truncate">{addressLine}</div>
+        <div className="text-12 text-ink-tertiary mb-2 truncate">
+          {addressLine}
+        </div>
       )}
-
       <div className="flex items-center gap-2 flex-wrap">
+        {" "}
         <HealthDot score={customer.leadScore} />
         {tier && <TierBadgeV2 tier={tier} />}
         {customer.monthlyRate > 0 && (
@@ -242,10 +329,9 @@ function PipelineCardV2({ customer, onDelete, canDelete = false }) {
           </span>
         )}
       </div>
-
       {daysInStage != null && (
         <div className="text-11 text-ink-tertiary u-label mt-1.5">
-          {daysInStage === 0 ? 'Today' : `${daysInStage}d in stage`}
+          {daysInStage === 0 ? "Today" : `${daysInStage}d in stage`}
         </div>
       )}
     </div>
@@ -253,53 +339,88 @@ function PipelineCardV2({ customer, onDelete, canDelete = false }) {
 }
 
 // --- Pipeline column (V2) ---
-function PipelineColumnV2({ stage, customers, onDeleteCustomer, fullWidth = false, canDelete = false }) {
-  const monthlyTotal = customers.reduce((sum, c) => sum + (c.monthlyRate || 0), 0);
-  const isAlertStage = stage.key === 'at_risk' || stage.key === 'churned';
+function PipelineColumnV2({
+  stage,
+  customers,
+  onDeleteCustomer,
+  fullWidth = false,
+  canDelete = false,
+}) {
+  const monthlyTotal = customers.reduce(
+    (sum, c) => sum + (c.monthlyRate || 0),
+    0,
+  );
+  const isAlertStage = stage.key === "at_risk" || stage.key === "churned";
   return (
     <div
       className={cn(
-        'bg-white border border-hairline border-zinc-200 rounded-md flex flex-col',
-        fullWidth ? 'w-full' : 'flex-shrink-0 w-[260px]'
+        "bg-white border border-hairline border-zinc-200 rounded-md flex flex-col",
+        fullWidth ? "w-full" : "flex-shrink-0 w-[260px]",
       )}
-      style={{ maxHeight: 'calc(100vh - 220px)' }}
+      style={{ maxHeight: "calc(100vh - 220px)" }}
     >
+      {" "}
       <div className="px-3.5 py-3 border-b border-hairline border-zinc-200 flex justify-between items-center">
+        {" "}
         <div>
+          {" "}
           <div className="flex items-center gap-2">
-            <span className="text-13 font-medium text-ink-primary">{stage.label}</span>
-            {isAlertStage && <span className="inline-block w-1.5 h-1.5 rounded-full bg-alert-fg" />}
-          </div>
+            {" "}
+            <span className="text-13 font-medium text-ink-primary">
+              {stage.label}
+            </span>
+            {isAlertStage && (
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-alert-fg" />
+            )}
+          </div>{" "}
           <div className="text-11 font-mono u-nums text-ink-tertiary mt-0.5">
-            {customers.length} {customers.length === 1 ? 'customer' : 'customers'}
-          </div>
+            {customers.length}{" "}
+            {customers.length === 1 ? "customer" : "customers"}
+          </div>{" "}
         </div>
         {monthlyTotal > 0 && (
           <span className="font-mono u-nums text-12 text-ink-primary font-medium">
             ${monthlyTotal.toLocaleString()}/mo
           </span>
         )}
-      </div>
+      </div>{" "}
       <div className="p-2 overflow-y-auto flex-1">
         {customers.length === 0 ? (
-          <div className="text-ink-tertiary text-12 text-center py-5">No customers</div>
+          <div className="text-ink-tertiary text-12 text-center py-5">
+            No customers
+          </div>
         ) : (
           customers.map((c) => (
-            <PipelineCardV2 key={c.id} customer={c} onDelete={onDeleteCustomer} canDelete={canDelete} />
+            <PipelineCardV2
+              key={c.id}
+              customer={c}
+              onDelete={onDeleteCustomer}
+              canDelete={canDelete}
+            />
           ))
         )}
-      </div>
+      </div>{" "}
     </div>
   );
 }
 
 // --- Quick Add Modal (V2) ---
 const EMPTY_QUICK_ADD_FORM = {
-  firstName: '', lastName: '', phone: '', email: '', address: '',
-  city: '', state: 'FL', zip: '',
-  profileLabel: 'Primary',
-  customProfileLabel: '',
-  leadSource: 'manual_entry', pipelineStage: 'new_lead', tags: [], customTag: '', notes: '',
+  firstName: "",
+  lastName: "",
+  phone: "",
+  email: "",
+  address: "",
+  city: "",
+  state: "FL",
+  zip: "",
+  profileLabel: "Primary",
+  customProfileLabel: "",
+  leadSource: "manual_entry",
+  pipelineStage: "new_lead",
+  tags: [],
+  customTag: "",
+  notes: "",
 };
 
 function normalizeQuickAddInitialValues(initialValues = {}) {
@@ -309,13 +430,21 @@ function normalizeQuickAddInitialValues(initialValues = {}) {
     ...values,
     state: values.state || EMPTY_QUICK_ADD_FORM.state,
     tags: Array.isArray(values.tags) ? values.tags : EMPTY_QUICK_ADD_FORM.tags,
-    customTag: '',
-    customProfileLabel: values.customProfileLabel || '',
+    customTag: "",
+    customProfileLabel: values.customProfileLabel || "",
   };
 }
 
-function QuickAddModalV2({ open, onClose, onCreated, initialValues = null, title = 'Add Customer' }) {
-  const [form, setForm] = useState(() => normalizeQuickAddInitialValues(initialValues));
+function QuickAddModalV2({
+  open,
+  onClose,
+  onCreated,
+  initialValues = null,
+  title = "Add Customer",
+}) {
+  const [form, setForm] = useState(() =>
+    normalizeQuickAddInitialValues(initialValues),
+  );
   useEffect(() => {
     if (open) setForm(normalizeQuickAddInitialValues(initialValues));
   }, [open, initialValues]);
@@ -323,28 +452,36 @@ function QuickAddModalV2({ open, onClose, onCreated, initialValues = null, title
 
   const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
   const selectedTags = Array.isArray(form.tags) ? form.tags : [];
-  const resolvedProfileLabel = form.profileLabel === '__custom__'
-    ? form.customProfileLabel.trim()
-    : form.profileLabel;
+  const resolvedProfileLabel =
+    form.profileLabel === "__custom__"
+      ? form.customProfileLabel.trim()
+      : form.profileLabel;
 
   const addTag = (value) => {
     const normalized = normalizeCustomerTag(value);
     if (!normalized) return;
     setForm((p) => {
       const tags = Array.isArray(p.tags) ? p.tags : [];
-      return tags.includes(normalized) ? p : { ...p, tags: [...tags, normalized] };
+      return tags.includes(normalized)
+        ? p
+        : { ...p, tags: [...tags, normalized] };
     });
   };
 
   const removeTag = (value) => {
-    setForm((p) => ({ ...p, tags: (Array.isArray(p.tags) ? p.tags : []).filter((tag) => tag !== value) }));
+    setForm((p) => ({
+      ...p,
+      tags: (Array.isArray(p.tags) ? p.tags : []).filter(
+        (tag) => tag !== value,
+      ),
+    }));
   };
 
   const addCustomTag = () => {
     const tag = normalizeCustomerTag(form.customTag);
     if (!tag) return;
     addTag(tag);
-    set('customTag', '');
+    set("customTag", "");
   };
 
   const handleSubmit = async (e) => {
@@ -361,10 +498,10 @@ function QuickAddModalV2({ open, onClose, onCreated, initialValues = null, title
       delete body.customProfileLabel;
       delete body.customTag;
       const r = await fetch(`${API_BASE}/admin/customers`, {
-        method: 'POST',
+        method: "POST",
         headers: {
-          Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
-          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+          "Content-Type": "application/json",
         },
         body: JSON.stringify(body),
       });
@@ -373,131 +510,214 @@ function QuickAddModalV2({ open, onClose, onCreated, initialValues = null, title
       onCreated(data);
       onClose();
     } catch (err) {
-      window.alert('Failed to create customer: ' + err.message);
+      window.alert("Failed to create customer: " + err.message);
     } finally {
       setSubmitting(false);
     }
   };
 
   const INPUT_CLS =
-    'block w-full bg-white text-13 text-zinc-900 border-hairline border-zinc-300 rounded-sm h-9 px-3 ' +
-    'focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900';
-  const LABEL_CLS = 'block u-label text-zinc-900 mb-1';
-  const FORM_FONT = { fontFamily: 'Roboto, Arial, sans-serif' };
+    "block w-full bg-white text-13 text-zinc-900 border-hairline border-zinc-300 rounded-sm h-9 px-3 " +
+    "focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900";
+  const LABEL_CLS = "block u-label text-zinc-900 mb-1";
+  const FORM_FONT = { fontFamily: "Roboto, Arial, sans-serif" };
 
   return (
     <Dialog open={open} onClose={onClose} size="md">
+      {" "}
       <DialogHeader>
-        <DialogTitle>{title}</DialogTitle>
-      </DialogHeader>
+        {" "}
+        <DialogTitle>{title}</DialogTitle>{" "}
+      </DialogHeader>{" "}
       <form onSubmit={handleSubmit} style={FORM_FONT}>
+        {" "}
         <DialogBody className="flex flex-col gap-3">
+          {" "}
           <div className="grid grid-cols-2 gap-3">
+            {" "}
             <div>
-              <label className={LABEL_CLS}>First name *</label>
-              <input value={form.firstName} onChange={(e) => set('firstName', e.target.value)} className={INPUT_CLS} required />
-            </div>
+              {" "}
+              <label className={LABEL_CLS}>First name *</label>{" "}
+              <input
+                value={form.firstName}
+                onChange={(e) => set("firstName", e.target.value)}
+                className={INPUT_CLS}
+                required
+              />{" "}
+            </div>{" "}
             <div>
-              <label className={LABEL_CLS}>Last name</label>
-              <input value={form.lastName} onChange={(e) => set('lastName', e.target.value)} className={INPUT_CLS} />
-            </div>
-          </div>
+              {" "}
+              <label className={LABEL_CLS}>Last name</label>{" "}
+              <input
+                value={form.lastName}
+                onChange={(e) => set("lastName", e.target.value)}
+                className={INPUT_CLS}
+              />{" "}
+            </div>{" "}
+          </div>{" "}
           <div className="grid grid-cols-2 gap-3">
+            {" "}
             <div>
-              <label className={LABEL_CLS}>Phone *</label>
-              <input value={form.phone} onChange={(e) => set('phone', e.target.value)} className={INPUT_CLS} placeholder="+1…" required />
-            </div>
+              {" "}
+              <label className={LABEL_CLS}>Phone *</label>{" "}
+              <input
+                value={form.phone}
+                onChange={(e) => set("phone", e.target.value)}
+                className={INPUT_CLS}
+                placeholder="+1…"
+                required
+              />{" "}
+            </div>{" "}
             <div>
-              <label className={LABEL_CLS}>Email</label>
-              <input type="email" value={form.email} onChange={(e) => set('email', e.target.value)} className={INPUT_CLS} />
-            </div>
-          </div>
+              {" "}
+              <label className={LABEL_CLS}>Email</label>{" "}
+              <input
+                type="email"
+                value={form.email}
+                onChange={(e) => set("email", e.target.value)}
+                className={INPUT_CLS}
+              />{" "}
+            </div>{" "}
+          </div>{" "}
           <div>
-            <label className={LABEL_CLS}>Address</label>
+            {" "}
+            <label className={LABEL_CLS}>Address</label>{" "}
             <AddressAutocomplete
               value={form.address}
-              onChange={(value) => set('address', value)}
-              onSelect={(parts) => setForm((p) => ({
-                ...p,
-                address: parts.line1 || parts.formatted || p.address,
-                city: parts.city || p.city,
-                state: parts.state || p.state || 'FL',
-                zip: parts.zip || p.zip,
-              }))}
+              onChange={(value) => set("address", value)}
+              onSelect={(parts) =>
+                setForm((p) => ({
+                  ...p,
+                  address: parts.line1 || parts.formatted || p.address,
+                  city: parts.city || p.city,
+                  state: parts.state || p.state || "FL",
+                  zip: parts.zip || p.zip,
+                }))
+              }
               className={INPUT_CLS}
               style={{ height: 36 }}
-            />
-          </div>
+            />{" "}
+          </div>{" "}
           <div className="grid grid-cols-[1fr_80px_120px] gap-3">
+            {" "}
             <div>
-              <label className={LABEL_CLS}>City</label>
-              <input value={form.city} onChange={(e) => set('city', e.target.value)} className={INPUT_CLS} />
-            </div>
+              {" "}
+              <label className={LABEL_CLS}>City</label>{" "}
+              <input
+                value={form.city}
+                onChange={(e) => set("city", e.target.value)}
+                className={INPUT_CLS}
+              />{" "}
+            </div>{" "}
             <div>
-              <label className={LABEL_CLS}>State</label>
-              <input value={form.state} onChange={(e) => set('state', e.target.value.toUpperCase().slice(0, 2))} className={INPUT_CLS} />
-            </div>
+              {" "}
+              <label className={LABEL_CLS}>State</label>{" "}
+              <input
+                value={form.state}
+                onChange={(e) =>
+                  set("state", e.target.value.toUpperCase().slice(0, 2))
+                }
+                className={INPUT_CLS}
+              />{" "}
+            </div>{" "}
             <div>
-              <label className={LABEL_CLS}>ZIP</label>
-              <input value={form.zip} onChange={(e) => set('zip', e.target.value)} className={INPUT_CLS} inputMode="numeric" />
-            </div>
-          </div>
+              {" "}
+              <label className={LABEL_CLS}>ZIP</label>{" "}
+              <input
+                value={form.zip}
+                onChange={(e) => set("zip", e.target.value)}
+                className={INPUT_CLS}
+                inputMode="numeric"
+              />{" "}
+            </div>{" "}
+          </div>{" "}
           <div>
-            <label className={LABEL_CLS}>Property label</label>
-            <select value={form.profileLabel} onChange={(e) => set('profileLabel', e.target.value)} className={cn(INPUT_CLS, 'cursor-pointer')}>
+            {" "}
+            <label className={LABEL_CLS}>Property label</label>{" "}
+            <select
+              value={form.profileLabel}
+              onChange={(e) => set("profileLabel", e.target.value)}
+              className={cn(INPUT_CLS, "cursor-pointer")}
+            >
               {PROPERTY_LABEL_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>{option.label}</option>
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
               ))}
             </select>
-            {form.profileLabel === '__custom__' && (
+            {form.profileLabel === "__custom__" && (
               <input
                 value={form.customProfileLabel}
-                onChange={(e) => set('customProfileLabel', e.target.value)}
-                className={cn(INPUT_CLS, 'mt-2')}
+                onChange={(e) => set("customProfileLabel", e.target.value)}
+                className={cn(INPUT_CLS, "mt-2")}
                 placeholder="Rental - Cape Coral"
               />
             )}
-          </div>
+          </div>{" "}
           <div className="grid grid-cols-2 gap-3">
+            {" "}
             <div>
-              <label className={LABEL_CLS}>Lead source</label>
-              <select value={form.leadSource} onChange={(e) => set('leadSource', e.target.value)} className={cn(INPUT_CLS, 'cursor-pointer')}>
+              {" "}
+              <label className={LABEL_CLS}>Lead source</label>{" "}
+              <select
+                value={form.leadSource}
+                onChange={(e) => set("leadSource", e.target.value)}
+                className={cn(INPUT_CLS, "cursor-pointer")}
+              >
                 {LEAD_SOURCES.map((s) => (
-                  <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>
+                  <option key={s} value={s}>
+                    {s.replace(/_/g, " ")}
+                  </option>
                 ))}
-              </select>
-            </div>
+              </select>{" "}
+            </div>{" "}
             <div>
-              <label className={LABEL_CLS}>Pipeline stage</label>
-              <select value={form.pipelineStage} onChange={(e) => set('pipelineStage', e.target.value)} className={cn(INPUT_CLS, 'cursor-pointer')}>
+              {" "}
+              <label className={LABEL_CLS}>Pipeline stage</label>{" "}
+              <select
+                value={form.pipelineStage}
+                onChange={(e) => set("pipelineStage", e.target.value)}
+                className={cn(INPUT_CLS, "cursor-pointer")}
+              >
                 {STAGES.map((s) => (
-                  <option key={s.key} value={s.key}>{s.label}</option>
+                  <option key={s.key} value={s.key}>
+                    {s.label}
+                  </option>
                 ))}
-              </select>
-            </div>
-          </div>
+              </select>{" "}
+            </div>{" "}
+          </div>{" "}
           <div>
-            <label className={LABEL_CLS}>Tags</label>
+            {" "}
+            <label className={LABEL_CLS}>Tags</label>{" "}
             <div className="flex gap-2">
-              <select value="" onChange={(e) => addTag(e.target.value)} className={cn(INPUT_CLS, 'cursor-pointer flex-1')}>
+              {" "}
+              <select
+                value=""
+                onChange={(e) => addTag(e.target.value)}
+                className={cn(INPUT_CLS, "cursor-pointer flex-1")}
+              >
+                {" "}
                 <option value="">Add a tag...</option>
                 {CUSTOMER_TAG_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
                 ))}
-              </select>
+              </select>{" "}
               <input
                 value={form.customTag}
-                onChange={(e) => set('customTag', e.target.value)}
+                onChange={(e) => set("customTag", e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ',') {
+                  if (e.key === "Enter" || e.key === ",") {
                     e.preventDefault();
                     addCustomTag();
                   }
                 }}
                 onBlur={addCustomTag}
-                className={cn(INPUT_CLS, 'flex-1')}
+                className={cn(INPUT_CLS, "flex-1")}
                 placeholder="Custom tag"
-              />
+              />{" "}
             </div>
             {selectedTags.length > 0 && (
               <div className="flex flex-wrap gap-1.5 mt-2">
@@ -509,30 +729,51 @@ function QuickAddModalV2({ open, onClose, onCreated, initialValues = null, title
                     className="inline-flex items-center h-6 px-2 rounded-xs border-hairline border-zinc-200 bg-zinc-50 text-11 text-ink-secondary hover:bg-zinc-100"
                     title="Remove tag"
                   >
-                    {tag.replace(/_/g, ' ')} ×
+                    {tag.replace(/_/g, " ")} ×
                   </button>
                 ))}
               </div>
             )}
-          </div>
+          </div>{" "}
           <div>
-            <label className={LABEL_CLS}>Notes</label>
-            <textarea rows={3} value={form.notes} onChange={(e) => set('notes', e.target.value)} className={cn(INPUT_CLS, 'h-auto py-2 resize-y')} />
-          </div>
-        </DialogBody>
+            {" "}
+            <label className={LABEL_CLS}>Notes</label>{" "}
+            <textarea
+              rows={3}
+              value={form.notes}
+              onChange={(e) => set("notes", e.target.value)}
+              className={cn(INPUT_CLS, "h-auto py-2 resize-y")}
+            />{" "}
+          </div>{" "}
+        </DialogBody>{" "}
         <DialogFooter>
-          <Button variant="ghost" onClick={onClose} type="button">Cancel</Button>
-          <Button variant="primary" type="submit" disabled={submitting} className="font-bold">
-            {submitting ? 'Submitting…' : 'Submit'}
-          </Button>
-        </DialogFooter>
-      </form>
+          {" "}
+          <Button variant="ghost" onClick={onClose} type="button">
+            Cancel
+          </Button>{" "}
+          <Button
+            variant="primary"
+            type="submit"
+            disabled={submitting}
+            className="font-bold"
+          >
+            {submitting ? "Submitting…" : "Submit"}
+          </Button>{" "}
+        </DialogFooter>{" "}
+      </form>{" "}
     </Dialog>
   );
 }
 
 // Sortable header cell
-function SortHeaderV2({ label, sortKey, currentSort, currentDir, onSort, className }) {
+function SortHeaderV2({
+  label,
+  sortKey,
+  currentSort,
+  currentDir,
+  onSort,
+  className,
+}) {
   const active = currentSort === sortKey;
   return (
     <button
@@ -540,77 +781,98 @@ function SortHeaderV2({ label, sortKey, currentSort, currentDir, onSort, classNa
       onClick={() => onSort(sortKey)}
       style={{ fontWeight: 700 }}
       className={cn(
-        'inline-flex items-center gap-1 text-11 uppercase tracking-label text-zinc-900 bg-transparent border-0 p-0 focus:outline-none',
-        className
+        "inline-flex items-center gap-1 text-11 uppercase tracking-label text-zinc-900 bg-transparent border-0 p-0 focus:outline-none",
+        className,
       )}
     >
       {label}
-      {active && <span className="text-11">{currentDir === 'asc' ? '↑' : '↓'}</span>}
+      {active && (
+        <span className="text-11">{currentDir === "asc" ? "↑" : "↓"}</span>
+      )}
     </button>
   );
 }
 
-// --- View toggle (flat pill row, no emoji) ---
-// Mobile lands on Directory with no visible toggle (it's the only
-// mobile view). Desktop also defaults to Directory (list-first),
-// with Map / Health / AI Advisor as secondary tabs in the pill
-// strip. Pipeline lives on its own page (`/admin/estimates`) — the
-// nav link is the canonical surface, no need for a duplicate tab here.
+const ROBOTO = "'Roboto', Arial, sans-serif";
+
+// --- Command header ---
+// Mirrors the Pipeline page header chrome while keeping Customers'
+// section set: Directory / Map / Health / AI Advisor.
 const VIEWS = [
-  { key: 'directory', label: 'Directory', desktopOnly: true },
-  { key: 'map', label: 'Map', desktopOnly: true },
-  { key: 'health', label: 'Health', desktopOnly: true },
-  { key: 'intelligence', label: 'AI Advisor', desktopOnly: true },
+  { key: "directory", label: "Directory", Icon: Users },
+  { key: "map", label: "Map", Icon: MapPinned },
+  { key: "health", label: "Health", Icon: HeartPulse },
+  { key: "intelligence", label: "AI Advisor", Icon: Sparkles },
 ];
 
-function ViewToggleV2({ view, onChange }) {
+function CustomersCommandHeader({ view, onViewChange, onAddCustomer, canAdd }) {
+  const activeConfig = VIEWS.find((v) => v.key === view) || VIEWS[0];
+  const ActiveIcon = activeConfig.Icon;
+
   return (
-    // Hidden on mobile entirely — Directory is the only mobile view, no
-    // toggle needed. Desktop renders the Pipeline-page tab strip
-    // (Leads / Estimates / Create Estimate / Pricing Logic) shape:
-    // a zinc-100 framed segmented bar with title-case labels that flip
-    // to a solid black pill when active. Centered on the page.
-    <div className="hidden md:flex justify-center">
-      <div
-        className="inline-flex flex-wrap items-center"
-        style={{
-          gap: 4,
-          padding: 4,
-          background: '#F4F4F5',
-          borderRadius: 10,
-          border: '1px solid #E4E4E7',
-        }}
-      >
-        {VIEWS.map((v) => {
-          const active = v.key === view;
-          return (
-            <button
-              key={v.key}
-              type="button"
-              onClick={() => onChange(v.key)}
-              className={cn(
-                v.desktopOnly && 'hidden md:inline-flex items-center justify-center',
-                v.mobileOnly && 'hidden',
-                'u-focus-ring',
-              )}
-              style={{
-                padding: '10px 24px',
-                borderRadius: 8,
-                border: 'none',
-                cursor: 'pointer',
-                background: active ? '#18181B' : 'transparent',
-                color: active ? '#FFFFFF' : '#A1A1AA',
-                fontSize: 14,
-                fontWeight: 700,
-                transition: 'all 0.2s',
-                fontFamily: "'DM Sans', sans-serif",
-              }}
+    <div
+      className="md:sticky md:top-0 z-20 mb-5 bg-surface-page/95 pb-3"
+      style={{ fontFamily: ROBOTO }}
+    >
+      {" "}
+      <div className="overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
+        {" "}
+        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
+          {" "}
+          <div className="flex items-center gap-3 min-w-0">
+            {" "}
+            <div className="h-9 w-9 rounded-sm bg-zinc-900 text-white flex items-center justify-center flex-shrink-0">
+              {" "}
+              <ActiveIcon size={17} strokeWidth={1.9} aria-hidden />{" "}
+            </div>{" "}
+            <h1
+              className="m-0 text-22 font-medium text-zinc-900 tracking-normal"
+              style={{ fontFamily: ROBOTO }}
             >
-              {v.label}
-            </button>
-          );
-        })}
-      </div>
+              Customers
+            </h1>{" "}
+          </div>
+          {canAdd && (
+            <Button
+              size="md"
+              variant="primary"
+              className="gap-2 text-12 font-medium uppercase tracking-label"
+              onClick={onAddCustomer}
+            >
+              {" "}
+              <UserPlus size={15} strokeWidth={1.9} aria-hidden />
+              Add Customer
+            </Button>
+          )}
+        </div>{" "}
+        <nav
+          aria-label="Customers section"
+          className="grid grid-cols-2 lg:grid-cols-4 gap-1 p-2"
+        >
+          {VIEWS.map(({ key, label, Icon }) => {
+            const active = key === view;
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => onViewChange(key)}
+                aria-current={active ? "page" : undefined}
+                className={cn(
+                  "h-11 px-3 rounded-sm border-hairline text-12 font-medium uppercase tracking-label",
+                  "inline-flex items-center justify-center gap-2 u-focus-ring transition-colors",
+                  active
+                    ? "bg-zinc-900 text-white border-zinc-900"
+                    : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50 hover:text-zinc-900",
+                )}
+              >
+                {" "}
+                <Icon size={15} strokeWidth={1.8} aria-hidden />
+                {label}
+              </button>
+            );
+          })}
+        </nav>{" "}
+      </div>{" "}
     </div>
   );
 }
@@ -622,12 +884,12 @@ function FilterPill({ active, onClick, alert = false, children }) {
       type="button"
       onClick={onClick}
       className={cn(
-        'u-label px-3 h-7 rounded-full border-hairline whitespace-nowrap transition-colors',
+        "u-label px-3 h-7 rounded-full border-hairline whitespace-nowrap transition-colors",
         active
-          ? (alert
-              ? 'bg-alert-bg text-alert-fg border-alert-fg'
-              : 'bg-zinc-900 text-white border-zinc-900')
-          : 'bg-white text-ink-secondary border-zinc-200 hover:bg-zinc-50'
+          ? alert
+            ? "bg-alert-bg text-alert-fg border-alert-fg"
+            : "bg-zinc-900 text-white border-zinc-900"
+          : "bg-white text-ink-secondary border-zinc-200 hover:bg-zinc-50",
       )}
     >
       {children}
@@ -637,44 +899,55 @@ function FilterPill({ active, onClick, alert = false, children }) {
 
 // Service-type initials (tone-collapsed to neutral zinc)
 function serviceInitials(c) {
-  const t = (c.serviceTypes || c.service_types || '').toLowerCase();
+  const t = (c.serviceTypes || c.service_types || "").toLowerCase();
   const out = [];
-  if (t.includes('pest')) out.push('P');
-  if (t.includes('lawn')) out.push('L');
-  if (t.includes('mosquito')) out.push('M');
-  if (t.includes('termite')) out.push('T');
+  if (t.includes("pest")) out.push("P");
+  if (t.includes("lawn")) out.push("L");
+  if (t.includes("mosquito")) out.push("M");
+  if (t.includes("termite")) out.push("T");
   return out;
 }
 
 function detectTier(c) {
-  if (c.tier && c.tier !== 'Bronze') return c.tier;
-  if (c.monthlyRate > 200) return 'Platinum';
-  if (c.monthlyRate > 100) return 'Gold';
-  if (c.monthlyRate > 50) return 'Silver';
-  return c.tier || 'Bronze';
+  if (c.tier && c.tier !== "Bronze") return c.tier;
+  if (c.monthlyRate > 200) return "Platinum";
+  if (c.monthlyRate > 100) return "Gold";
+  if (c.monthlyRate > 50) return "Silver";
+  return c.tier || "Bronze";
 }
 
 function pipelineCustomersFrom(data) {
   if (Array.isArray(data?.customers)) return data.customers;
   if (!data?.pipeline) return [];
-  return Object.entries(data.pipeline).flatMap(([stage, group]) => (
+  return Object.entries(data.pipeline).flatMap(([stage, group]) =>
     (group?.customers || []).map((customer) => {
-      const nameParts = (customer.name || '').trim().split(/\s+/).filter(Boolean);
+      const nameParts = (customer.name || "")
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean);
       return {
         ...customer,
-        firstName: customer.firstName || customer.first_name || nameParts[0] || '',
-        lastName: customer.lastName || customer.last_name || nameParts.slice(1).join(' '),
-        pipelineStage: customer.pipelineStage || customer.pipeline_stage || stage,
-        stageEnteredAt: customer.stageEnteredAt || customer.pipelineStageChangedAt || customer.pipeline_stage_changed_at,
+        firstName:
+          customer.firstName || customer.first_name || nameParts[0] || "",
+        lastName:
+          customer.lastName ||
+          customer.last_name ||
+          nameParts.slice(1).join(" "),
+        pipelineStage:
+          customer.pipelineStage || customer.pipeline_stage || stage,
+        stageEnteredAt:
+          customer.stageEnteredAt ||
+          customer.pipelineStageChangedAt ||
+          customer.pipeline_stage_changed_at,
       };
-    })
-  ));
+    }),
+  );
 }
 
 export default function CustomersPageV2() {
   const isMobile = useIsMobile();
   const navigate = useNavigate();
-  const isAdmin = getAdminRole() === 'admin';
+  const isAdmin = getAdminRole() === "admin";
   const [customers, setCustomers] = useState([]);
   const [pipelineData, setPipelineData] = useState(null);
   const [pipelineLoading, setPipelineLoading] = useState(false);
@@ -685,24 +958,24 @@ export default function CustomersPageV2() {
   // Default is Directory on both mobile and desktop (list-first).
   // Explicit ?view=… URLs win — deep-links still work.
   const [view, setView] = useState(() => {
-    const raw = searchParams.get('view');
+    const raw = searchParams.get("view");
     if (raw) return raw;
-    return 'directory';
+    return "directory";
   });
-  const [search, setSearch] = useState('');
-  const [filterStage, setFilterStage] = useState('all');
-  const [filterTier, setFilterTier] = useState('all');
-  const [sortBy, setSortBy] = useState('lastName');
-  const [sortDir, setSortDir] = useState('asc');
+  const [search, setSearch] = useState("");
+  const [filterStage, setFilterStage] = useState("all");
+  const [filterTier, setFilterTier] = useState("all");
+  const [sortBy, setSortBy] = useState("lastName");
+  const [sortDir, setSortDir] = useState("asc");
   const [showAddModal, setShowAddModal] = useState(false);
   const [quickAddPreset, setQuickAddPreset] = useState(null);
   const [filterHasBalance, setFilterHasBalance] = useState(false);
-  const [filterLastVisited, setFilterLastVisited] = useState('all'); // all | 30 | 90 | 180 | never
-  const [filterCards, setFilterCards] = useState('all'); // all | has | none
-  const [pipelineStageMobile, setPipelineStageMobile] = useState('new_lead');
+  const [filterLastVisited, setFilterLastVisited] = useState("all"); // all | 30 | 90 | 180 | never
+  const [filterCards, setFilterCards] = useState("all"); // all | has | none
+  const [pipelineStageMobile, setPipelineStageMobile] = useState("new_lead");
   const [showFilters, setShowFilters] = useState(false);
   const [selected360Id, setSelected360Id] = useState(() => {
-    const id = searchParams.get('customerId');
+    const id = searchParams.get("customerId");
     return id || null;
   });
   const [page, setPage] = useState(1);
@@ -727,12 +1000,17 @@ export default function CustomersPageV2() {
   const startEdit = (c) => {
     setEditingId(c.id);
     setEditForm({
-      firstName: c.firstName, lastName: c.lastName, email: c.email || '',
-      phone: c.phone || '', city: c.city || '', tier: c.tier || 'Bronze',
-      monthlyRate: c.monthlyRate || '', pipelineStage: c.pipelineStage || 'new_lead',
-      serviceContactName: c.serviceContactName || '',
-      serviceContactPhone: c.serviceContactPhone || '',
-      serviceContactEmail: c.serviceContactEmail || '',
+      firstName: c.firstName,
+      lastName: c.lastName,
+      email: c.email || "",
+      phone: c.phone || "",
+      city: c.city || "",
+      tier: c.tier || "Bronze",
+      monthlyRate: c.monthlyRate || "",
+      pipelineStage: c.pipelineStage || "new_lead",
+      serviceContactName: c.serviceContactName || "",
+      serviceContactPhone: c.serviceContactPhone || "",
+      serviceContactEmail: c.serviceContactEmail || "",
     });
   };
 
@@ -740,11 +1018,14 @@ export default function CustomersPageV2() {
     setSavingEdit(true);
     try {
       await adminFetch(`/admin/customers/${editingId}`, {
-        method: 'PUT', body: JSON.stringify(editForm),
+        method: "PUT",
+        body: JSON.stringify(editForm),
       });
       setEditingId(null);
       loadCustomers();
-    } catch (e) { window.alert('Save failed: ' + e.message); }
+    } catch (e) {
+      window.alert("Save failed: " + e.message);
+    }
     setSavingEdit(false);
   };
 
@@ -758,20 +1039,21 @@ export default function CustomersPageV2() {
     setLoading(true);
     setError(null);
     const params = new URLSearchParams();
-    if (search.trim()) params.set('search', search.trim());
-    if (filterStage !== 'all') params.set('stage', filterStage);
-    if (filterTier !== 'all') params.set('tier', filterTier);
-    if (filterCards !== 'all') params.set('cards', filterCards);
-    if (filterHasBalance) params.set('hasBalance', 'true');
-    if (filterLastVisited !== 'all') params.set('lastVisited', filterLastVisited);
-    params.set('sort', sortBy);
-    params.set('order', sortDir);
-    params.set('page', String(pg));
+    if (search.trim()) params.set("search", search.trim());
+    if (filterStage !== "all") params.set("stage", filterStage);
+    if (filterTier !== "all") params.set("tier", filterTier);
+    if (filterCards !== "all") params.set("cards", filterCards);
+    if (filterHasBalance) params.set("hasBalance", "true");
+    if (filterLastVisited !== "all")
+      params.set("lastVisited", filterLastVisited);
+    params.set("sort", sortBy);
+    params.set("order", sortDir);
+    params.set("page", String(pg));
     // Load up to the server's max so the full customer list lands in a
     // single alphabetical scroll rather than A-H on page 1, I-Q on
     // page 2, etc. Server caps at 500; any customer base above that
     // will still paginate (Prev/Next controls stay wired below).
-    params.set('limit', '500');
+    params.set("limit", "500");
     adminFetch(`/admin/customers?${params.toString()}`, { signal: ctrl.signal })
       .then((data) => {
         if (seq !== loadSeqRef.current) return;
@@ -781,7 +1063,7 @@ export default function CustomersPageV2() {
         setLoading(false);
       })
       .catch((e) => {
-        if (e.name === 'AbortError' || seq !== loadSeqRef.current) return;
+        if (e.name === "AbortError" || seq !== loadSeqRef.current) return;
         setError(e);
         setLoading(false);
       });
@@ -790,7 +1072,7 @@ export default function CustomersPageV2() {
   function loadPipeline() {
     setPipelineLoading(true);
     setPipelineError(null);
-    adminFetch('/admin/customers/pipeline/view')
+    adminFetch("/admin/customers/pipeline/view")
       .then((data) => {
         setPipelineData(data);
         setPipelineLoading(false);
@@ -801,39 +1083,66 @@ export default function CustomersPageV2() {
       });
   }
 
-  useEffect(() => () => {
-    if (loadAbortRef.current) loadAbortRef.current.abort();
-  }, []);
+  useEffect(
+    () => () => {
+      if (loadAbortRef.current) loadAbortRef.current.abort();
+    },
+    [],
+  );
 
   // Single debounced effect — one fetch per filter/search/view change.
   // StrictMode's mount→cleanup→mount double-fire is absorbed by the
   // setTimeout cleanup, so dev-mode mount no longer stacks duplicate
   // `/admin/customers` requests.
   useEffect(() => {
-    if (view === 'pipeline') {
+    if (view === "pipeline") {
       loadPipeline();
       return undefined;
     }
-    const t = setTimeout(() => { setPage(1); loadCustomers(1); }, 300);
+    const t = setTimeout(() => {
+      setPage(1);
+      loadCustomers(1);
+    }, 300);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, filterStage, filterTier, filterCards, filterHasBalance, filterLastVisited, sortBy, sortDir, view]);
+  }, [
+    search,
+    filterStage,
+    filterTier,
+    filterCards,
+    filterHasBalance,
+    filterLastVisited,
+    sortBy,
+    sortDir,
+    view,
+  ]);
 
   const handleSort = (key) => {
-    if (sortBy === key) setSortDir((d) => d === 'asc' ? 'desc' : 'asc');
-    else { setSortBy(key); setSortDir('asc'); }
+    if (sortBy === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else {
+      setSortBy(key);
+      setSortDir("asc");
+    }
   };
 
   const handleDeleteCustomer = async (customerId, customerName) => {
-    if (!window.confirm(`Delete ${customerName}? This cannot be undone.`)) return;
+    if (!window.confirm(`Delete ${customerName}? This cannot be undone.`))
+      return;
     try {
       const r = await fetch(`${API_BASE}/admin/customers/${customerId}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` },
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+        },
       });
-      if (!r.ok) { const err = await r.json().catch(() => ({})); throw new Error(err.error || `HTTP ${r.status}`); }
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${r.status}`);
+      }
       loadCustomers();
-    } catch (e) { window.alert('Delete failed: ' + e.message); }
+    } catch (e) {
+      window.alert("Delete failed: " + e.message);
+    }
   };
 
   // First name only, no fallback — operator preference. Blank first
@@ -841,26 +1150,41 @@ export default function CustomersPageV2() {
   // don't leak to the top of an ascending sort (matches server's
   // ORDER BY lower(first_name) NULLS LAST).
   const firstNameKey = (c) => {
-    const k = (c.firstName || '').toString().toLowerCase().trim();
-    return k || '￿';
+    const k = (c.firstName || "").toString().toLowerCase().trim();
+    return k || "￿";
   };
 
   const sorted = [...customers].sort((a, b) => {
     let aVal, bVal;
     switch (sortBy) {
-      case 'name':
-      case 'lastName':
-      case 'firstName':
-        aVal = firstNameKey(a); bVal = firstNameKey(b);
+      case "name":
+      case "lastName":
+      case "firstName":
+        aVal = firstNameKey(a);
+        bVal = firstNameKey(b);
         break;
-      case 'leadScore': aVal = a.leadScore || 0; bVal = b.leadScore || 0; break;
-      case 'monthlyRate': aVal = a.monthlyRate || 0; bVal = b.monthlyRate || 0; break;
-      case 'lastContactDate': aVal = a.lastContactDate || ''; bVal = b.lastContactDate || ''; break;
-      case 'lifetimeRevenue': aVal = a.lifetimeRevenue || 0; bVal = b.lifetimeRevenue || 0; break;
-      default: aVal = (a[sortBy] || '').toString().toLowerCase(); bVal = (b[sortBy] || '').toString().toLowerCase();
+      case "leadScore":
+        aVal = a.leadScore || 0;
+        bVal = b.leadScore || 0;
+        break;
+      case "monthlyRate":
+        aVal = a.monthlyRate || 0;
+        bVal = b.monthlyRate || 0;
+        break;
+      case "lastContactDate":
+        aVal = a.lastContactDate || "";
+        bVal = b.lastContactDate || "";
+        break;
+      case "lifetimeRevenue":
+        aVal = a.lifetimeRevenue || 0;
+        bVal = b.lifetimeRevenue || 0;
+        break;
+      default:
+        aVal = (a[sortBy] || "").toString().toLowerCase();
+        bVal = (b[sortBy] || "").toString().toLowerCase();
     }
-    if (aVal < bVal) return sortDir === 'asc' ? -1 : 1;
-    if (aVal > bVal) return sortDir === 'asc' ? 1 : -1;
+    if (aVal < bVal) return sortDir === "asc" ? -1 : 1;
+    if (aVal > bVal) return sortDir === "asc" ? 1 : -1;
     return 0;
   });
 
@@ -872,12 +1196,13 @@ export default function CustomersPageV2() {
   };
   const filteredSorted = sorted.filter((c) => {
     if (filterHasBalance && !((c.balanceOwed || 0) > 0)) return false;
-    if (filterCards === 'has' && !((c.cardsOnFile || 0) > 0)) return false;
-    if (filterCards === 'none' && (c.cardsOnFile || 0) > 0) return false;
-    if (filterLastVisited !== 'all') {
+    if (filterCards === "has" && !((c.cardsOnFile || 0) > 0)) return false;
+    if (filterCards === "none" && (c.cardsOnFile || 0) > 0) return false;
+    if (filterLastVisited !== "all") {
       const d = daysSince(c.lastServiceDate);
-      if (filterLastVisited === 'never') { if (d !== null) return false; }
-      else {
+      if (filterLastVisited === "never") {
+        if (d !== null) return false;
+      } else {
         const max = parseInt(filterLastVisited, 10);
         if (d === null || d > max) return false;
       }
@@ -887,16 +1212,18 @@ export default function CustomersPageV2() {
 
   // Pipeline groups (for rendering V1 PipelineColumn)
   const pipelineGroups = {};
-  KANBAN_STAGES.forEach((k) => { pipelineGroups[k] = []; });
-  if (view === 'pipeline') {
+  KANBAN_STAGES.forEach((k) => {
+    pipelineGroups[k] = [];
+  });
+  if (view === "pipeline") {
     const pipelineCustomers = pipelineCustomersFrom(pipelineData);
     (pipelineData ? pipelineCustomers : customers).forEach((c) => {
-      const key = c.pipelineStage || 'new_lead';
+      const key = c.pipelineStage || "new_lead";
       if (pipelineGroups[key]) pipelineGroups[key].push(c);
     });
   }
 
-  if (view !== 'pipeline' && loading && customers.length === 0) {
+  if (view !== "pipeline" && loading && customers.length === 0) {
     return (
       <div className="p-16 text-center text-13 text-ink-secondary">
         Loading customers…
@@ -904,118 +1231,91 @@ export default function CustomersPageV2() {
     );
   }
 
-  if (view !== 'pipeline' && error && customers.length === 0) {
+  if (view !== "pipeline" && error && customers.length === 0) {
     const rateLimited = isRateLimitError(error);
     return (
       <div className="p-16 text-center">
+        {" "}
         <div className="text-14 text-alert-fg mb-3">
-          {rateLimited ? 'Too many requests' : 'Failed to load customers'}
-        </div>
+          {rateLimited ? "Too many requests" : "Failed to load customers"}
+        </div>{" "}
         <div className="text-13 text-ink-tertiary mb-4">
           {rateLimited
-            ? 'Wait a few seconds and try again.'
-            : (error?.message || String(error))}
-        </div>
-        <Button variant="primary" onClick={() => loadCustomers()}>Retry</Button>
+            ? "Wait a few seconds and try again."
+            : error?.message || String(error)}
+        </div>{" "}
+        <Button variant="primary" onClick={() => loadCustomers()}>
+          Retry
+        </Button>{" "}
       </div>
     );
   }
 
-  const TABLE_COLS = '1.6fr 2fr 0.3fr 0.6fr 0.9fr';
+  const TABLE_COLS = "1.6fr 2fr 0.3fr 0.6fr 0.9fr";
 
   const activeFilterCount =
-    (filterTier !== 'all' ? 1 : 0) +
-    (filterStage !== 'all' ? 1 : 0) +
-    (filterLastVisited !== 'all' ? 1 : 0) +
-    (filterCards !== 'all' ? 1 : 0) +
+    (filterTier !== "all" ? 1 : 0) +
+    (filterStage !== "all" ? 1 : 0) +
+    (filterLastVisited !== "all" ? 1 : 0) +
+    (filterCards !== "all" ? 1 : 0) +
     (filterHasBalance ? 1 : 0);
 
   return (
     <div>
       {/* ======================= HEADER ======================= */}
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
-        <div className="flex items-center justify-between gap-3 w-full sm:w-auto">
-          <h1 className="text-28 font-normal tracking-h1 text-ink-primary">
-            <span className="md:hidden" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>Customers</span>
-            <span className="hidden md:inline">Customers</span>
-          </h1>
-          {view === 'directory' && isAdmin && (
-            <button
-              type="button"
-              onClick={() => openAddCustomer()}
-              aria-label="Add customer"
-              className="sm:hidden flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring"
-              style={{ width: 36, height: 36 }}
-            >
-              <Plus size={20} strokeWidth={2} />
-            </button>
-          )}
+      <CustomersCommandHeader
+        view={view}
+        onViewChange={setView}
+        onAddCustomer={() => openAddCustomer()}
+        canAdd={isAdmin}
+      />
+      {view === "directory" && (
+        <div className="hidden sm:flex items-center justify-between gap-3 mb-4">
+          {" "}
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search customers..."
+            className="bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-3 w-full max-w-md focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
+          />{" "}
+          <button
+            type="button"
+            onClick={() => setShowFilters(true)}
+            className="inline-flex items-center gap-1.5 h-9 px-3 u-label border-hairline border-zinc-300 rounded-sm text-ink-secondary bg-white hover:bg-zinc-50"
+          >
+            {" "}
+            <Filter size={14} strokeWidth={1.75} />
+            Filter
+            {activeFilterCount > 0 && (
+              <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-zinc-900 text-white u-nums text-11">
+                {activeFilterCount}
+              </span>
+            )}
+          </button>{" "}
         </div>
-        <div className="flex items-center gap-3 flex-wrap w-full sm:w-auto">
-          {view === 'directory' && (
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search customers…"
-              className="hidden sm:block bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-3 w-56 focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
-            />
-          )}
-          {view === 'directory' && isAdmin && (
-            <button
-              type="button"
-              onClick={() => openAddCustomer()}
-              className="hidden sm:inline-flex"
-              style={{
-                padding: '9px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700,
-                background: '#18181B', color: '#fff', border: 'none', cursor: 'pointer',
-                whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em',
-                fontFamily: "'DM Sans', sans-serif",
-              }}
-            >
-              + Add Customer
-            </button>
-          )}
-          {view === 'directory' && (
-            <button
-              type="button"
-              onClick={() => setShowFilters(true)}
-              className="hidden sm:inline-flex items-center gap-1.5 h-9 px-3 u-label border-hairline border-zinc-300 rounded-sm text-ink-secondary bg-white hover:bg-zinc-50"
-            >
-              <Filter size={14} strokeWidth={1.75} />
-              Filter
-              {activeFilterCount > 0 && (
-                <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-zinc-900 text-white u-nums text-11">
-                  {activeFilterCount}
-                </span>
-              )}
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* View toggle — own row, below Waves AI */}
-      <div className="mb-4">
-        <ViewToggleV2 view={view} onChange={setView} />
-      </div>
+      )}
 
       {/* Context-specific mobile stack (search/filter/stage picker) */}
       <div className="sm:hidden mb-3">
-        {view === 'directory' && (
+        {view === "directory" && (
           <>
+            {" "}
             <input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search customer by name, phone number"
               className="block w-full bg-white text-14 text-ink-primary border-hairline border-zinc-300 rounded-sm h-12 px-4 focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
-            />
+            />{" "}
             <div className="mt-3 flex items-center gap-2">
+              {" "}
               <button
                 type="button"
                 onClick={() => setShowFilters(true)}
                 className="inline-flex items-center justify-center gap-1.5 u-label px-3 h-11 bg-white text-ink-secondary border-hairline border-zinc-300 rounded-sm transition-colors u-focus-ring"
               >
+                {" "}
                 <Filter size={14} strokeWidth={1.75} />
                 Filter
                 {activeFilterCount > 0 && (
@@ -1023,13 +1323,16 @@ export default function CustomersPageV2() {
                     {activeFilterCount}
                   </span>
                 )}
-              </button>
-            </div>
+              </button>{" "}
+            </div>{" "}
           </>
         )}
-        {view === 'pipeline' && (
+        {view === "pipeline" && (
           <>
-            <h2 className="text-12 font-medium text-ink-primary mb-1.5">Stage</h2>
+            {" "}
+            <h2 className="text-12 font-medium text-ink-primary mb-1.5">
+              Stage
+            </h2>{" "}
             <div className="grid grid-cols-2 gap-1.5">
               {KANBAN_STAGES.map((key) => {
                 const stage = STAGE_MAP[key];
@@ -1041,225 +1344,307 @@ export default function CustomersPageV2() {
                     type="button"
                     onClick={() => setPipelineStageMobile(key)}
                     className={cn(
-                      'inline-flex items-center justify-between gap-2 u-label px-3 h-11 rounded-sm border-hairline transition-colors u-focus-ring',
+                      "inline-flex items-center justify-between gap-2 u-label px-3 h-11 rounded-sm border-hairline transition-colors u-focus-ring",
                       active
-                        ? 'bg-zinc-900 text-white border-zinc-900'
-                        : 'bg-white text-ink-secondary border-zinc-300'
+                        ? "bg-zinc-900 text-white border-zinc-900"
+                        : "bg-white text-ink-secondary border-zinc-300",
                     )}
                   >
-                    <span className="truncate">{stage.label}</span>
-                    <span className={cn('u-nums text-11 flex-shrink-0', active ? 'text-white/80' : 'text-ink-tertiary')}>{count}</span>
+                    {" "}
+                    <span className="truncate">{stage.label}</span>{" "}
+                    <span
+                      className={cn(
+                        "u-nums text-11 flex-shrink-0",
+                        active ? "text-white/80" : "text-ink-tertiary",
+                      )}
+                    >
+                      {count}
+                    </span>{" "}
                   </button>
                 );
               })}
-            </div>
+            </div>{" "}
           </>
         )}
       </div>
-
       {/* ======================= DIRECTORY ======================= */}
-      {view === 'directory' && (
+      {view === "directory" && (
         <>
+          {" "}
           <div className="u-nums text-11 text-ink-tertiary text-right mb-3 mt-3">
-            {totalCustomers} result{totalCustomers !== 1 ? 's' : ''}
+            {totalCustomers} result{totalCustomers !== 1 ? "s" : ""}
           </div>
-
           {/* Filters dialog */}
           <Dialog open={showFilters} onClose={() => setShowFilters(false)}>
+            {" "}
             <DialogHeader onClose={() => setShowFilters(false)}>
-              <DialogTitle>Filter customers</DialogTitle>
-            </DialogHeader>
+              {" "}
+              <DialogTitle>Filter customers</DialogTitle>{" "}
+            </DialogHeader>{" "}
             <DialogBody>
+              {" "}
               <div className="mb-4">
-                <div className="u-label text-ink-tertiary mb-1.5">Last visited</div>
+                {" "}
+                <div className="u-label text-ink-tertiary mb-1.5">
+                  Last visited
+                </div>{" "}
                 <div className="flex items-center gap-1.5 flex-wrap">
                   {[
-                    { v: 'all', l: 'Any' },
-                    { v: '30', l: '≤ 30 days' },
-                    { v: '90', l: '≤ 90 days' },
-                    { v: '180', l: '≤ 180 days' },
-                    { v: 'never', l: 'Never' },
+                    { v: "all", l: "Any" },
+                    { v: "30", l: "≤ 30 days" },
+                    { v: "90", l: "≤ 90 days" },
+                    { v: "180", l: "≤ 180 days" },
+                    { v: "never", l: "Never" },
                   ].map((o) => (
-                    <FilterPill key={o.v} active={filterLastVisited === o.v} onClick={() => setFilterLastVisited(o.v)}>
+                    <FilterPill
+                      key={o.v}
+                      active={filterLastVisited === o.v}
+                      onClick={() => setFilterLastVisited(o.v)}
+                    >
                       {o.l}
                     </FilterPill>
                   ))}
-                </div>
-              </div>
+                </div>{" "}
+              </div>{" "}
               <div className="mb-4">
-                <div className="u-label text-ink-tertiary mb-1.5">Cards on file</div>
+                {" "}
+                <div className="u-label text-ink-tertiary mb-1.5">
+                  Cards on file
+                </div>{" "}
                 <div className="flex items-center gap-1.5 flex-wrap">
                   {[
-                    { v: 'all', l: 'Any' },
-                    { v: 'has', l: 'Has card' },
-                    { v: 'none', l: 'No card' },
+                    { v: "all", l: "Any" },
+                    { v: "has", l: "Has card" },
+                    { v: "none", l: "No card" },
                   ].map((o) => (
-                    <FilterPill key={o.v} active={filterCards === o.v} onClick={() => setFilterCards(o.v)}>
+                    <FilterPill
+                      key={o.v}
+                      active={filterCards === o.v}
+                      onClick={() => setFilterCards(o.v)}
+                    >
                       {o.l}
                     </FilterPill>
                   ))}
-                </div>
-              </div>
+                </div>{" "}
+              </div>{" "}
               <div className="mb-4">
-                <div className="u-label text-ink-tertiary mb-1.5">Status</div>
+                {" "}
+                <div className="u-label text-ink-tertiary mb-1.5">
+                  Status
+                </div>{" "}
                 <div className="flex items-center gap-1.5 flex-wrap">
                   {[
-                    { v: 'all', l: 'All' },
-                    { v: 'active_customer', l: 'Active' },
-                    { v: 'new_lead', l: 'New Lead' },
-                    { v: 'at_risk', l: 'At Risk', alert: true },
+                    { v: "all", l: "All" },
+                    { v: "active_customer", l: "Active" },
+                    { v: "new_lead", l: "New Lead" },
+                    { v: "at_risk", l: "At Risk", alert: true },
                   ].map((s) => (
-                    <FilterPill key={s.v} active={filterStage === s.v} alert={s.alert} onClick={() => setFilterStage(s.v)}>
+                    <FilterPill
+                      key={s.v}
+                      active={filterStage === s.v}
+                      alert={s.alert}
+                      onClick={() => setFilterStage(s.v)}
+                    >
                       {s.l}
                     </FilterPill>
                   ))}
-                  <FilterPill active={filterHasBalance} alert onClick={() => setFilterHasBalance(!filterHasBalance)}>
+                  <FilterPill
+                    active={filterHasBalance}
+                    alert
+                    onClick={() => setFilterHasBalance(!filterHasBalance)}
+                  >
                     Has Balance
-                  </FilterPill>
-                </div>
-              </div>
+                  </FilterPill>{" "}
+                </div>{" "}
+              </div>{" "}
               <div>
-                <div className="u-label text-ink-tertiary mb-1.5">Tier</div>
+                {" "}
+                <div className="u-label text-ink-tertiary mb-1.5">
+                  Tier
+                </div>{" "}
                 <div className="flex items-center gap-1.5 flex-wrap">
                   {[
-                    { v: 'all', l: 'All Tiers' },
-                    { v: 'Platinum', l: 'Platinum' },
-                    { v: 'Gold', l: 'Gold' },
-                    { v: 'Silver', l: 'Silver' },
-                    { v: 'Bronze', l: 'Bronze' },
-                    { v: 'One-Time', l: 'One-Time' },
-                    { v: 'none', l: 'No Plan' },
+                    { v: "all", l: "All Tiers" },
+                    { v: "Platinum", l: "Platinum" },
+                    { v: "Gold", l: "Gold" },
+                    { v: "Silver", l: "Silver" },
+                    { v: "Bronze", l: "Bronze" },
+                    { v: "One-Time", l: "One-Time" },
+                    { v: "none", l: "No Plan" },
                   ].map((t) => (
-                    <FilterPill key={t.v} active={filterTier === t.v} onClick={() => setFilterTier(t.v)}>
+                    <FilterPill
+                      key={t.v}
+                      active={filterTier === t.v}
+                      onClick={() => setFilterTier(t.v)}
+                    >
                       {t.l}
                     </FilterPill>
                   ))}
-                </div>
-              </div>
-            </DialogBody>
+                </div>{" "}
+              </div>{" "}
+            </DialogBody>{" "}
             <DialogFooter>
+              {" "}
               <Button
                 variant="secondary"
                 onClick={() => {
-                  setFilterTier('all');
-                  setFilterStage('all');
-                  setFilterLastVisited('all');
-                  setFilterCards('all');
+                  setFilterTier("all");
+                  setFilterStage("all");
+                  setFilterLastVisited("all");
+                  setFilterCards("all");
                   setFilterHasBalance(false);
                 }}
               >
                 Clear all
-              </Button>
+              </Button>{" "}
               <Button variant="primary" onClick={() => setShowFilters(false)}>
                 Done
-              </Button>
-            </DialogFooter>
+              </Button>{" "}
+            </DialogFooter>{" "}
           </Dialog>
-
           {/* Desktop table header */}
           {!isMobile && (
             <div
               className="grid gap-1.5 px-4 py-2.5 mb-1 text-11 uppercase tracking-label text-zinc-900"
               style={{ gridTemplateColumns: TABLE_COLS, fontWeight: 700 }}
             >
+              {" "}
               <div className="flex justify-center">
-                <SortHeaderV2 label="Name" sortKey="lastName" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} />
-              </div>
-              <div className="text-center">Address</div>
-              <div className="text-center">HP</div>
-              <div className="text-center">Next Svc</div>
-              <div />
+                {" "}
+                <SortHeaderV2
+                  label="Name"
+                  sortKey="lastName"
+                  currentSort={sortBy}
+                  currentDir={sortDir}
+                  onSort={handleSort}
+                />{" "}
+              </div>{" "}
+              <div className="text-center">Address</div>{" "}
+              <div className="text-center">HP</div>{" "}
+              <div className="text-center">Next Svc</div> <div />{" "}
             </div>
           )}
-
           {/* Rows */}
           {filteredSorted.length === 0 ? (
             <Card>
+              {" "}
               <CardBody className="p-12 text-center">
-                <div className="text-14 text-ink-primary mb-1">No customers found</div>
-                <div className="text-13 text-ink-tertiary">Try adjusting your filters or add a new customer</div>
-              </CardBody>
+                {" "}
+                <div className="text-14 text-ink-primary mb-1">
+                  No customers found
+                </div>{" "}
+                <div className="text-13 text-ink-tertiary">
+                  Try adjusting your filters or add a new customer
+                </div>{" "}
+              </CardBody>{" "}
             </Card>
           ) : (
             filteredSorted.map((c) => {
               return (
                 <div key={c.id} className="mb-2">
-                  {isMobile ? (() => {
-                    const addr = formatCustomerAddress(c.address);
-                    return (
-                      <div
-                        onClick={() => setSelected360Id(c.id)}
-                        className="bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-3 cursor-pointer hover:bg-zinc-50"
-                        style={{ height: 64 }}
-                      >
-                        <HealthDot score={c.healthScore} />
-                        <div className="flex-1 min-w-0 flex flex-col gap-0.5">
-                          <div className="text-14 font-medium text-ink-primary truncate">
-                            {c.firstName} {c.lastName}
+                  {isMobile ? (
+                    (() => {
+                      const addr = formatCustomerAddress(c.address);
+                      return (
+                        <div
+                          onClick={() => setSelected360Id(c.id)}
+                          className="bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-3 cursor-pointer hover:bg-zinc-50"
+                          style={{ height: 64 }}
+                        >
+                          {" "}
+                          <HealthDot score={c.healthScore} />{" "}
+                          <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+                            {" "}
+                            <div className="text-14 font-medium text-ink-primary truncate">
+                              {c.firstName} {c.lastName}
+                            </div>
+                            {addr ? (
+                              <a
+                                href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                className="text-11 text-ink-tertiary truncate no-underline hover:text-ink-primary"
+                              >
+                                {addr}
+                              </a>
+                            ) : (
+                              <div className="text-11 text-ink-tertiary">—</div>
+                            )}
                           </div>
-                          {addr ? (
-                            <a
-                              href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              onClick={(e) => e.stopPropagation()}
-                              className="text-11 text-ink-tertiary truncate no-underline hover:text-ink-primary"
+                          {c.phone && (
+                            <button
+                              type="button"
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                if (
+                                  !window.confirm(
+                                    `Call ${c.firstName || ""} ${c.lastName || ""} at ${c.phone}?\n\nWaves will call your phone first — press 1 to connect.`,
+                                  )
+                                )
+                                  return;
+                                try {
+                                  const r = await adminFetch(
+                                    "/admin/communications/call",
+                                    {
+                                      method: "POST",
+                                      body: JSON.stringify({ to: c.phone }),
+                                    },
+                                  );
+                                  if (!r?.success)
+                                    alert(
+                                      "Call failed: " +
+                                        (r?.error || "unknown error"),
+                                    );
+                                } catch (err) {
+                                  alert("Call failed: " + err.message);
+                                }
+                              }}
+                              aria-label="Call via Waves"
+                              title="Call via Waves — rings your phone first, press 1 to connect"
+                              className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
                             >
-                              {addr}
+                              {" "}
+                              <Phone size={16} strokeWidth={1.75} />{" "}
+                            </button>
+                          )}
+                          {c.phone && (
+                            <a
+                              href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
+                              onClick={(e) => e.stopPropagation()}
+                              aria-label="SMS"
+                              className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+                            >
+                              {" "}
+                              <MessageSquare
+                                size={16}
+                                strokeWidth={1.75}
+                              />{" "}
                             </a>
-                          ) : (
-                            <div className="text-11 text-ink-tertiary">—</div>
                           )}
                         </div>
-                        {c.phone && (
-                          <button
-                            type="button"
-                            onClick={async (e) => {
-                              e.stopPropagation();
-                              if (!window.confirm(`Call ${c.firstName || ''} ${c.lastName || ''} at ${c.phone}?\n\nWaves will call your phone first — press 1 to connect.`)) return;
-                              try {
-                                const r = await adminFetch('/admin/communications/call', {
-                                  method: 'POST',
-                                  body: JSON.stringify({ to: c.phone }),
-                                });
-                                if (!r?.success) alert('Call failed: ' + (r?.error || 'unknown error'));
-                              } catch (err) { alert('Call failed: ' + err.message); }
-                            }}
-                            aria-label="Call via Waves"
-                            title="Call via Waves — rings your phone first, press 1 to connect"
-                            className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
-                          >
-                            <Phone size={16} strokeWidth={1.75} />
-                          </button>
-                        )}
-                        {c.phone && (
-                          <a
-                            href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
-                            onClick={(e) => e.stopPropagation()}
-                            aria-label="SMS"
-                            className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
-                          >
-                            <MessageSquare size={16} strokeWidth={1.75} />
-                          </a>
-                        )}
-                      </div>
-                    );
-                  })() : (
+                      );
+                    })()
+                  ) : (
                     <div
                       onClick={() => setSelected360Id(c.id)}
                       className="grid gap-1.5 px-4 py-3 items-center bg-white border-hairline border-zinc-200 rounded-sm cursor-pointer hover:bg-zinc-50 transition-colors"
                       style={{ gridTemplateColumns: TABLE_COLS }}
                     >
+                      {" "}
                       <div className="text-13 font-medium text-ink-primary text-center">
                         {c.firstName} {c.lastName}
-                        {c.profileLabel && c.profileLabel !== 'Primary' && (
-                          <span className="ml-1 text-11 font-normal text-ink-tertiary">· {c.profileLabel}</span>
+                        {c.profileLabel && c.profileLabel !== "Primary" && (
+                          <span className="ml-1 text-11 font-normal text-ink-tertiary">
+                            · {c.profileLabel}
+                          </span>
                         )}
-                      </div>
+                      </div>{" "}
                       <div className="text-12 text-ink-secondary truncate text-center">
                         {(() => {
                           const full = formatCustomerAddress(c.address);
-                          if (!full) return <span className="text-ink-tertiary">—</span>;
+                          if (!full)
+                            return <span className="text-ink-tertiary">—</span>;
                           return (
                             <a
                               href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(full)}`}
@@ -1272,35 +1657,56 @@ export default function CustomersPageV2() {
                             </a>
                           );
                         })()}
-                      </div>
+                      </div>{" "}
                       <div className="flex items-center justify-center">
-                        <HealthDot score={c.healthScore} />
-                      </div>
+                        {" "}
+                        <HealthDot score={c.healthScore} />{" "}
+                      </div>{" "}
                       <div className="u-nums text-11 text-ink-secondary text-center">
-                        {c.nextServiceDate
-                          ? new Date(c.nextServiceDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-                          : <span className="text-ink-tertiary">—</span>}
-                      </div>
+                        {c.nextServiceDate ? (
+                          new Date(c.nextServiceDate).toLocaleDateString(
+                            "en-US",
+                            { month: "short", day: "numeric" },
+                          )
+                        ) : (
+                          <span className="text-ink-tertiary">—</span>
+                        )}
+                      </div>{" "}
                       <div className="flex gap-1 justify-end">
                         {c.phone && (
                           <button
                             type="button"
                             onClick={async (e) => {
                               e.stopPropagation();
-                              if (!window.confirm(`Call ${c.firstName || ''} ${c.lastName || ''} at ${c.phone}?\n\nWaves will call your phone first — press 1 to connect.`)) return;
+                              if (
+                                !window.confirm(
+                                  `Call ${c.firstName || ""} ${c.lastName || ""} at ${c.phone}?\n\nWaves will call your phone first — press 1 to connect.`,
+                                )
+                              )
+                                return;
                               try {
-                                const r = await adminFetch('/admin/communications/call', {
-                                  method: 'POST',
-                                  body: JSON.stringify({ to: c.phone }),
-                                });
-                                if (!r?.success) alert('Call failed: ' + (r?.error || 'unknown error'));
-                              } catch (err) { alert('Call failed: ' + err.message); }
+                                const r = await adminFetch(
+                                  "/admin/communications/call",
+                                  {
+                                    method: "POST",
+                                    body: JSON.stringify({ to: c.phone }),
+                                  },
+                                );
+                                if (!r?.success)
+                                  alert(
+                                    "Call failed: " +
+                                      (r?.error || "unknown error"),
+                                  );
+                              } catch (err) {
+                                alert("Call failed: " + err.message);
+                              }
                             }}
                             aria-label="Call via Waves"
                             title="Call via Waves — rings your phone first, press 1 to connect"
                             className="inline-flex items-center justify-center h-6 w-6 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
                           >
-                            <Phone size={12} strokeWidth={1.75} />
+                            {" "}
+                            <Phone size={12} strokeWidth={1.75} />{" "}
                           </button>
                         )}
                         {c.phone && (
@@ -1311,13 +1717,17 @@ export default function CustomersPageV2() {
                             title={`SMS ${c.phone}`}
                             className="inline-flex items-center justify-center h-6 w-6 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
                           >
-                            <MessageSquare size={12} strokeWidth={1.75} />
+                            {" "}
+                            <MessageSquare size={12} strokeWidth={1.75} />{" "}
                           </a>
                         )}
                         {isAdmin && (
                           <button
                             type="button"
-                            onClick={(e) => { e.stopPropagation(); startEdit(c); }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              startEdit(c);
+                            }}
                             className="h-6 px-2 u-label border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
                           >
                             Edit
@@ -1326,147 +1736,222 @@ export default function CustomersPageV2() {
                         {isAdmin && (
                           <button
                             type="button"
-                            onClick={(e) => { e.stopPropagation(); handleDeleteCustomer(c.id, `${c.firstName} ${c.lastName}`); }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteCustomer(
+                                c.id,
+                                `${c.firstName} ${c.lastName}`,
+                              );
+                            }}
                             aria-label="Delete customer"
                             className="inline-flex items-center justify-center h-6 w-6 border-hairline border-alert-fg/30 rounded-xs text-alert-fg bg-white hover:bg-alert-bg"
                           >
-                            <Trash2 size={12} strokeWidth={1.75} />
+                            {" "}
+                            <Trash2 size={12} strokeWidth={1.75} />{" "}
                           </button>
                         )}
-                      </div>
+                      </div>{" "}
                     </div>
                   )}
 
                   {/* Inline edit form */}
                   {editingId === c.id && (
                     <div className="bg-white border-hairline border-zinc-900 rounded-sm p-5 mt-1">
-                      <div className="text-13 font-medium text-ink-primary mb-3">Edit Customer</div>
+                      {" "}
+                      <div className="text-13 font-medium text-ink-primary mb-3">
+                        Edit Customer
+                      </div>{" "}
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
                         {[
-                          { key: 'firstName', label: 'First name' },
-                          { key: 'lastName', label: 'Last name' },
-                          { key: 'email', label: 'Email', type: 'email' },
-                          { key: 'phone', label: 'Phone', type: 'tel' },
-                          { key: 'city', label: 'City' },
-                          { key: 'monthlyRate', label: '$/Mo', type: 'number' },
+                          { key: "firstName", label: "First name" },
+                          { key: "lastName", label: "Last name" },
+                          { key: "email", label: "Email", type: "email" },
+                          { key: "phone", label: "Phone", type: "tel" },
+                          { key: "city", label: "City" },
+                          { key: "monthlyRate", label: "$/Mo", type: "number" },
                         ].map((f) => (
                           <div key={f.key}>
-                            <label className="u-label text-ink-tertiary block mb-1">{f.label}</label>
+                            {" "}
+                            <label className="u-label text-ink-tertiary block mb-1">
+                              {f.label}
+                            </label>{" "}
                             <input
-                              value={editForm[f.key] || ''}
-                              onChange={(e) => setEditForm((p) => ({ ...p, [f.key]: e.target.value }))}
-                              type={f.type || 'text'}
+                              value={editForm[f.key] || ""}
+                              onChange={(e) =>
+                                setEditForm((p) => ({
+                                  ...p,
+                                  [f.key]: e.target.value,
+                                }))
+                              }
+                              type={f.type || "text"}
                               className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-8 px-2 focus:outline-none focus:border-zinc-900"
-                            />
+                            />{" "}
                           </div>
                         ))}
                         <div>
-                          <label className="u-label text-ink-tertiary block mb-1">Tier</label>
+                          {" "}
+                          <label className="u-label text-ink-tertiary block mb-1">
+                            Tier
+                          </label>{" "}
                           <select
-                            value={editForm.tier || ''}
-                            onChange={(e) => setEditForm((p) => ({ ...p, tier: e.target.value || null }))}
+                            value={editForm.tier || ""}
+                            onChange={(e) =>
+                              setEditForm((p) => ({
+                                ...p,
+                                tier: e.target.value || null,
+                              }))
+                            }
                             className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-8 px-2 cursor-pointer focus:outline-none focus:border-zinc-900"
                           >
-                            <option value="">No Plan</option>
-                            <option value="Platinum">Platinum (20%)</option>
-                            <option value="Gold">Gold (15%)</option>
-                            <option value="Silver">Silver (10%)</option>
-                            <option value="Bronze">Bronze (0%)</option>
-                            <option value="One-Time">One-Time</option>
-                          </select>
-                        </div>
+                            {" "}
+                            <option value="">No Plan</option>{" "}
+                            <option value="Platinum">Platinum (20%)</option>{" "}
+                            <option value="Gold">Gold (15%)</option>{" "}
+                            <option value="Silver">Silver (10%)</option>{" "}
+                            <option value="Bronze">Bronze (0%)</option>{" "}
+                            <option value="One-Time">One-Time</option>{" "}
+                          </select>{" "}
+                        </div>{" "}
                         <div>
-                          <label className="u-label text-ink-tertiary block mb-1">Stage</label>
+                          {" "}
+                          <label className="u-label text-ink-tertiary block mb-1">
+                            Stage
+                          </label>{" "}
                           <select
-                            value={editForm.pipelineStage || ''}
-                            onChange={(e) => setEditForm((p) => ({ ...p, pipelineStage: e.target.value }))}
+                            value={editForm.pipelineStage || ""}
+                            onChange={(e) =>
+                              setEditForm((p) => ({
+                                ...p,
+                                pipelineStage: e.target.value,
+                              }))
+                            }
                             className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-8 px-2 cursor-pointer focus:outline-none focus:border-zinc-900"
                           >
                             {STAGES.map((s) => (
-                              <option key={s.key} value={s.key}>{s.label}</option>
+                              <option key={s.key} value={s.key}>
+                                {s.label}
+                              </option>
                             ))}
-                          </select>
-                        </div>
+                          </select>{" "}
+                        </div>{" "}
                       </div>
-
                       {/* Service contact — routes appointment reminders, post-service
                           SMS, and review requests to a different person than the
                           bill-payer (e.g. mother pays, son lives at the property). */}
                       <div className="border-t border-hairline border-zinc-200 pt-3 mb-3">
+                        {" "}
                         <div className="u-label text-ink-tertiary mb-2">
-                          Service Contact <span className="normal-case text-11 text-ink-tertiary">(optional — overrides primary for reminders, review requests)</span>
-                        </div>
+                          Service Contact{" "}
+                          <span className="normal-case text-11 text-ink-tertiary">
+                            (optional — overrides primary for reminders, review
+                            requests)
+                          </span>{" "}
+                        </div>{" "}
                         <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                           {[
-                            { key: 'serviceContactName', label: 'Name' },
-                            { key: 'serviceContactPhone', label: 'Phone', type: 'tel' },
-                            { key: 'serviceContactEmail', label: 'Email', type: 'email' },
+                            { key: "serviceContactName", label: "Name" },
+                            {
+                              key: "serviceContactPhone",
+                              label: "Phone",
+                              type: "tel",
+                            },
+                            {
+                              key: "serviceContactEmail",
+                              label: "Email",
+                              type: "email",
+                            },
                           ].map((f) => (
                             <div key={f.key}>
-                              <label className="u-label text-ink-tertiary block mb-1">{f.label}</label>
+                              {" "}
+                              <label className="u-label text-ink-tertiary block mb-1">
+                                {f.label}
+                              </label>{" "}
                               <input
-                                value={editForm[f.key] || ''}
-                                onChange={(e) => setEditForm((p) => ({ ...p, [f.key]: e.target.value }))}
-                                type={f.type || 'text'}
+                                value={editForm[f.key] || ""}
+                                onChange={(e) =>
+                                  setEditForm((p) => ({
+                                    ...p,
+                                    [f.key]: e.target.value,
+                                  }))
+                                }
+                                type={f.type || "text"}
                                 className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-8 px-2 focus:outline-none focus:border-zinc-900"
-                              />
+                              />{" "}
                             </div>
                           ))}
-                        </div>
-                      </div>
-
+                        </div>{" "}
+                      </div>{" "}
                       <div className="flex gap-2">
-                        <Button variant="primary" onClick={saveEdit} disabled={savingEdit}>
-                          {savingEdit ? 'Saving…' : 'Save'}
-                        </Button>
-                        <Button variant="ghost" onClick={() => setEditingId(null)}>Cancel</Button>
-                      </div>
+                        {" "}
+                        <Button
+                          variant="primary"
+                          onClick={saveEdit}
+                          disabled={savingEdit}
+                        >
+                          {savingEdit ? "Saving…" : "Save"}
+                        </Button>{" "}
+                        <Button
+                          variant="ghost"
+                          onClick={() => setEditingId(null)}
+                        >
+                          Cancel
+                        </Button>{" "}
+                      </div>{" "}
                     </div>
                   )}
                 </div>
               );
             })
           )}
-
           {/* Pagination */}
           {totalPages > 1 && (
             <div className="flex items-center justify-center gap-3 mt-5 py-3">
+              {" "}
               <Button
                 variant="secondary"
                 size="sm"
                 disabled={page <= 1}
-                onClick={() => { const p = Math.max(1, page - 1); setPage(p); loadCustomers(p); }}
+                onClick={() => {
+                  const p = Math.max(1, page - 1);
+                  setPage(p);
+                  loadCustomers(p);
+                }}
               >
                 ← Previous
-              </Button>
+              </Button>{" "}
               <span className="u-nums text-13 text-ink-secondary">
                 Page {page} of {totalPages} ({totalCustomers} total)
-              </span>
+              </span>{" "}
               <Button
                 variant="secondary"
                 size="sm"
                 disabled={page >= totalPages}
-                onClick={() => { const p = Math.min(totalPages, page + 1); setPage(p); loadCustomers(p); }}
+                onClick={() => {
+                  const p = Math.min(totalPages, page + 1);
+                  setPage(p);
+                  loadCustomers(p);
+                }}
               >
                 Next →
-              </Button>
+              </Button>{" "}
             </div>
           )}
         </>
       )}
 
       {/* ======================= MAP ======================= */}
-      {view === 'map' && (
+      {view === "map" && (
         <div className="mt-4">
+          {" "}
           <LegacyCustomersPanel
             exportName="CustomerMap"
             props={{ customers, onSelect: (c) => setSelected360Id(c.id) }}
-          />
+          />{" "}
         </div>
       )}
 
       {/* ======================= PIPELINE (V2 monochrome) ======================= */}
-      {view === 'pipeline' && (
+      {view === "pipeline" && (
         <>
           {pipelineLoading && (
             <div className="p-6 text-center text-13 text-ink-secondary">
@@ -1475,50 +1960,72 @@ export default function CustomersPageV2() {
           )}
           {pipelineError && !pipelineLoading && (
             <div className="p-6 text-center">
-              <div className="text-14 text-alert-fg mb-3">Failed to load pipeline</div>
-              <div className="text-13 text-ink-tertiary mb-4">{pipelineError.message || String(pipelineError)}</div>
-              <Button variant="primary" onClick={() => loadPipeline()}>Retry</Button>
+              {" "}
+              <div className="text-14 text-alert-fg mb-3">
+                Failed to load pipeline
+              </div>{" "}
+              <div className="text-13 text-ink-tertiary mb-4">
+                {pipelineError.message || String(pipelineError)}
+              </div>{" "}
+              <Button variant="primary" onClick={() => loadPipeline()}>
+                Retry
+              </Button>{" "}
             </div>
           )}
           {/* Mobile: single selected stage, full-width */}
           {!pipelineError && (
-          <div className="sm:hidden mt-4">
-            <PipelineColumnV2
-              stage={STAGE_MAP[pipelineStageMobile]}
-              customers={pipelineGroups[pipelineStageMobile] || []}
-              onDeleteCustomer={() => { loadPipeline(); loadCustomers(); }}
-              canDelete={isAdmin}
-              fullWidth
-            />
-          </div>
+            <div className="sm:hidden mt-4">
+              {" "}
+              <PipelineColumnV2
+                stage={STAGE_MAP[pipelineStageMobile]}
+                customers={pipelineGroups[pipelineStageMobile] || []}
+                onDeleteCustomer={() => {
+                  loadPipeline();
+                  loadCustomers();
+                }}
+                canDelete={isAdmin}
+                fullWidth
+              />{" "}
+            </div>
           )}
           {/* Desktop: horizontal scrolling board */}
           {!pipelineError && (
-          <div className="hidden sm:flex gap-3 overflow-x-auto pb-3 mt-4" style={{ WebkitOverflowScrolling: 'touch' }}>
-            {KANBAN_STAGES.map((key) => {
-              const stage = STAGE_MAP[key];
-              return (
-                <PipelineColumnV2
-                  key={key}
-                  stage={stage}
-                  customers={pipelineGroups[key] || []}
-                  onDeleteCustomer={() => { loadPipeline(); loadCustomers(); }}
-                  canDelete={isAdmin}
-                />
-              );
-            })}
-          </div>
+            <div
+              className="hidden sm:flex gap-3 overflow-x-auto pb-3 mt-4"
+              style={{ WebkitOverflowScrolling: "touch" }}
+            >
+              {KANBAN_STAGES.map((key) => {
+                const stage = STAGE_MAP[key];
+                return (
+                  <PipelineColumnV2
+                    key={key}
+                    stage={stage}
+                    customers={pipelineGroups[key] || []}
+                    onDeleteCustomer={() => {
+                      loadPipeline();
+                      loadCustomers();
+                    }}
+                    canDelete={isAdmin}
+                  />
+                );
+              })}
+            </div>
           )}
         </>
       )}
 
       {/* ======================= HEALTH ======================= */}
-      {view === 'health' && <div className="mt-4"><CustomerHealthSection /></div>}
+      {view === "health" && (
+        <div className="mt-4">
+          <CustomerHealthSection />
+        </div>
+      )}
 
       {/* ======================= AI ADVISOR ======================= */}
-      {view === 'intelligence' && (
+      {view === "intelligence" && (
         <div className="mt-4">
-          <LegacyCustomersPanel exportName="CustomerIntelligenceTab" />
+          {" "}
+          <LegacyCustomersPanel exportName="CustomerIntelligenceTab" />{" "}
         </div>
       )}
 
@@ -1528,10 +2035,10 @@ export default function CustomersPageV2() {
           open={showAddModal}
           onClose={closeAddCustomer}
           initialValues={quickAddPreset}
-          title={quickAddPreset ? 'Add Property' : 'Add Customer'}
+          title={quickAddPreset ? "Add Property" : "Add Customer"}
           onCreated={(customer) => {
             loadCustomers();
-            if (view === 'pipeline') loadPipeline();
+            if (view === "pipeline") loadPipeline();
             if (customer?.id) setSelected360Id(customer.id);
           }}
         />
@@ -1543,7 +2050,7 @@ export default function CustomersPageV2() {
           initialValues={quickAddPreset}
           onCreated={(customer) => {
             loadCustomers();
-            if (view === 'pipeline') loadPipeline();
+            if (view === "pipeline") loadPipeline();
             // Deep-link into the newly created profile (parity with desktop QuickAdd).
             if (customer?.id) setSelected360Id(customer.id);
           }}
@@ -1558,19 +2065,24 @@ export default function CustomersPageV2() {
           onAddProperty={(customer) => {
             setSelected360Id(null);
             openAddCustomer({
-              firstName: customer.firstName || '',
-              lastName: customer.lastName || '',
-              phone: customer.phone || '',
-              email: customer.email || '',
-              address: '',
-              city: '',
-              state: 'FL',
-              zip: '',
-              profileLabel: 'Other property',
-              leadSource: 'existing_customer',
-              pipelineStage: customer.pipelineStage === 'active_customer' ? 'active_customer' : 'won',
-              tags: ['multi_property', 'existing_customer_addon'],
-              notes: customer.profileLabel ? `Additional property for ${customer.profileLabel}.` : '',
+              firstName: customer.firstName || "",
+              lastName: customer.lastName || "",
+              phone: customer.phone || "",
+              email: customer.email || "",
+              address: "",
+              city: "",
+              state: "FL",
+              zip: "",
+              profileLabel: "Other property",
+              leadSource: "existing_customer",
+              pipelineStage:
+                customer.pipelineStage === "active_customer"
+                  ? "active_customer"
+                  : "won",
+              tags: ["multi_property", "existing_customer_addon"],
+              notes: customer.profileLabel
+                ? `Additional property for ${customer.profileLabel}.`
+                : "",
             });
           }}
           onClose={() => setSelected360Id(null)}

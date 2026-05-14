@@ -1,0 +1,112 @@
+import React from "react";
+import { Button, cn } from "../ui";
+
+const ROBOTO = "'Roboto', Arial, sans-serif";
+
+export default function AdminCommandHeader({
+  title,
+  icon: Icon,
+  action,
+  actions,
+  sections = [],
+  activeKey,
+  onSectionChange,
+  ariaLabel,
+  navGridClassName = "grid-cols-2 lg:grid-cols-4",
+  className,
+}) {
+  const resolvedActions = actions?.length ? actions : action ? [action] : [];
+  return (
+    <div
+      className={cn(
+        "md:sticky md:top-0 z-20 mb-5 bg-surface-page/95 pb-3",
+        className,
+      )}
+      style={{ fontFamily: ROBOTO }}
+    >
+      {" "}
+      <div className="overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
+        {" "}
+        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
+          {" "}
+          <div className="flex items-center gap-3 min-w-0">
+            {" "}
+            <div className="h-9 w-9 rounded-sm bg-zinc-900 text-white flex items-center justify-center flex-shrink-0">
+              {Icon && <Icon size={17} strokeWidth={1.9} aria-hidden />}
+            </div>{" "}
+            <h1
+              className="m-0 text-22 font-medium text-zinc-900 tracking-normal"
+              style={{ fontFamily: ROBOTO }}
+            >
+              {title}
+            </h1>{" "}
+          </div>
+          {resolvedActions.length > 0 && (
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {resolvedActions.map((item) => {
+                const ActionIcon = item.icon;
+                return (
+                  <Button
+                    key={item.key || item.label}
+                    size={item.size || "md"}
+                    variant={item.variant || "primary"}
+                    className={cn(
+                      "gap-2 text-12 font-medium uppercase tracking-label",
+                      item.className,
+                    )}
+                    onClick={item.onClick}
+                    disabled={item.disabled}
+                    aria-disabled={item.disabled || undefined}
+                  >
+                    {ActionIcon && (
+                      <ActionIcon size={15} strokeWidth={1.9} aria-hidden />
+                    )}
+                    {item.label}
+                  </Button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        {sections.length > 0 && (
+          <nav
+            aria-label={ariaLabel || `${title} section`}
+            className={cn("grid gap-1 p-2", navGridClassName)}
+          >
+            {sections.map(
+              ({
+                key,
+                label,
+                Icon: SectionIcon,
+                className: sectionClassName,
+              }) => {
+                const active = activeKey === key;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => onSectionChange?.(key)}
+                    aria-current={active ? "page" : undefined}
+                    className={cn(
+                      "h-11 px-3 rounded-sm border-hairline text-12 font-medium uppercase tracking-label",
+                      "inline-flex items-center justify-center gap-2 u-focus-ring transition-colors",
+                      active
+                        ? "bg-zinc-900 text-white border-zinc-900"
+                        : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50 hover:text-zinc-900",
+                      sectionClassName,
+                    )}
+                  >
+                    {SectionIcon && (
+                      <SectionIcon size={15} strokeWidth={1.8} aria-hidden />
+                    )}
+                    {label}
+                  </button>
+                );
+              },
+            )}
+          </nav>
+        )}
+      </div>{" "}
+    </div>
+  );
+}

@@ -1,7 +1,7 @@
 // client/src/pages/admin/EstimateToolViewV2.jsx
 // Monochrome V2 of EstimateToolView. Strict 1:1 on state, refs, effects,
 // callbacks, and API calls — all copied verbatim from V1. Only the render
-// chrome is reskinned (panels -> Card, tier rows -> zinc, color accents
+// chrome is reskinned (panels ->Card, tier rows ->zinc, color accents
 // collapsed to zinc ramp + alert-fg reserved for real alerts).
 //
 // Endpoints preserved:
@@ -17,7 +17,7 @@
 // - All panels = Card
 // - All primary buttons = Button variant="primary" (zinc-900)
 // - Supporting buttons = secondary (white + hairline) or ghost
-// - Status lines: "ok" => zinc, "err" => alert-fg, "loading" => zinc
+// - Status lines: "ok" =>zinc, "err" =>alert-fg, "loading" =>zinc
 // - Field-verify banners and critical confidence flags use alert-fg
 // - Tier rows: selected = zinc-900 ring, recommended = zinc-900 dot,
 //   dimmed = opacity-50 (no green/teal tint)
@@ -26,21 +26,28 @@
 // - Roboto enforced across the full Create Estimate experience
 // - Existing customer banner = neutral Card with dot indicator
 import React, {
-  useState, useEffect, useRef, useCallback, useMemo, createContext, useContext, Component,
-} from 'react';
-import { fmt, fmtInt } from '../../lib/estimateEngine';
-import { Button, Badge, Card, cn } from '../../components/ui';
-import PestProductionDiagnosticsPanel from '../../components/admin/PestProductionDiagnosticsPanel';
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  useMemo,
+  createContext,
+  useContext,
+  Component,
+} from "react";
+import { fmt, fmtInt } from "../../lib/estimateEngine";
+import { Button, Badge, Card, cn } from "../../components/ui";
+import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
 
-const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     ...options,
     headers: {
-      Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
-      'Content-Type': 'application/json',
+      Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+      "Content-Type": "application/json",
       ...(options.headers || {}),
     },
   });
@@ -49,13 +56,21 @@ function adminFetch(path, options = {}) {
 function summarizeEstimateSend(data) {
   const parts = [];
   if (data?.channels?.sms) {
-    parts.push(data.channels.sms.ok ? 'SMS sent' : `SMS failed: ${data.channels.sms.error || 'unknown error'}`);
+    parts.push(
+      data.channels.sms.ok
+        ? "SMS sent"
+        : `SMS failed: ${data.channels.sms.error || "unknown error"}`,
+    );
   }
   if (data?.channels?.email) {
-    parts.push(data.channels.email.ok ? 'Email sent' : `Email failed: ${data.channels.email.error || 'unknown error'}`);
+    parts.push(
+      data.channels.email.ok
+        ? "Email sent"
+        : `Email failed: ${data.channels.email.error || "unknown error"}`,
+    );
   }
-  if (parts.length === 0) return data?.error || 'Estimate send failed';
-  return parts.join(' / ');
+  if (parts.length === 0) return data?.error || "Estimate send failed";
+  return parts.join(" / ");
 }
 
 async function summarizeEstimateResponseFailure(response, fallbackLabel) {
@@ -67,25 +82,41 @@ async function summarizeEstimateResponseFailure(response, fallbackLabel) {
     try {
       const text = await response.text();
       if (text) return text;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
   return `${fallbackLabel}: ${response.status}`;
 }
 
 // ── Error Boundary ──────────────────────────────────────────────
 class EstimateErrorBoundary extends Component {
-  constructor(props) { super(props); this.state = { error: null }; }
-  static getDerivedStateFromError(error) { return { error }; }
-  componentDidCatch(error, info) { console.error('[EstimateToolViewV2 crash]', error, info.componentStack); }
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, info) {
+    console.error("[EstimateToolViewV2 crash]", error, info.componentStack);
+  }
   render() {
     if (this.state.error) {
       return (
         <Card className="p-10 text-center border-alert-fg">
-          <div className="text-18 font-medium text-alert-fg mb-3">Estimate Render Error</div>
+          {" "}
+          <div className="text-18 font-medium text-alert-fg mb-3">
+            Estimate Render Error
+          </div>{" "}
           <pre className="text-12 text-ink-secondary mb-4 whitespace-pre-wrap text-left max-h-48 overflow-auto">
-            {this.state.error.message}{'\n'}{this.state.error.stack}
-          </pre>
-          <Button onClick={() => this.setState({ error: null })}>Try Again</Button>
+            {this.state.error.message}
+            {"\n"}
+            {this.state.error.stack}
+          </pre>{" "}
+          <Button onClick={() => this.setState({ error: null })}>
+            Try Again
+          </Button>{" "}
         </Card>
       );
     }
@@ -98,7 +129,8 @@ const FormCtx = createContext({});
 
 function FieldV2({ label, children, className }) {
   return (
-    <div className={cn('mb-4', className)}>
+    <div className={cn("mb-4", className)}>
+      {" "}
       <label className="block text-13 font-bold text-zinc-900 tracking-normal mb-2 md:text-11 md:font-medium md:text-ink-secondary md:uppercase md:tracking-label md:mb-1.5">
         {label}
       </label>
@@ -108,62 +140,79 @@ function FieldV2({ label, children, className }) {
 }
 
 const INPUT_CLS =
-  'w-full h-10 px-3 text-14 text-zinc-900 bg-white border-hairline border-zinc-300 ' +
-  'rounded-sm u-focus-ring placeholder:text-ink-disabled';
+  "w-full h-10 px-3 text-14 text-zinc-900 bg-white border-hairline border-zinc-300 " +
+  "rounded-sm u-focus-ring placeholder:text-ink-disabled";
 
-const CONTACT_FIELDS = new Set(['leadId', 'customerId', 'customerName', 'customerPhone', 'customerEmail']);
-const SEND_FIELDS = new Set(['scheduleSend', 'scheduledAt']);
-const DELIVERY_OPTION_FIELDS = new Set(['showOneTimeOption', 'billByInvoice']);
+const CONTACT_FIELDS = new Set([
+  "leadId",
+  "customerId",
+  "customerName",
+  "customerPhone",
+  "customerEmail",
+]);
+const SEND_FIELDS = new Set(["scheduleSend", "scheduledAt"]);
+const DELIVERY_OPTION_FIELDS = new Set(["showOneTimeOption", "billByInvoice"]);
 
 const MOSQUITO_PROTOCOL_STEPS = [
-  'Inspect shaded foliage, fence lines, lanai perimeter, pool cage edges, drains, planters, and any standing-water source before treatment.',
-  'Use a gas-powered backpack sprayer for a directed barrier application to mosquito resting zones. Keep applications off blooms and avoid pollinator activity windows.',
-  'Essential Barrier uses bifenthrin adulticide with pyriproxyfen + novaluron IGR support where breeding pressure exists.',
-  'Precision Barrier uses gamma-cyhalothrin adulticide with the same IGR support for heavier foliage, water adjacency, pool cages, and higher residual expectations.',
-  'Recommend stations or Bti dunk tablets when breeding sources cannot be fully dumped, drained, or eliminated during the visit.',
-  'Document inaccessible water, wind/rain constraints, customer source-reduction notes, and any reinspection trigger on the service record.',
+  "Inspect shaded foliage, fence lines, lanai perimeter, pool cage edges, drains, planters, and any standing-water source before treatment.",
+  "Use a gas-powered backpack sprayer for a directed barrier application to mosquito resting zones. Keep applications off blooms and avoid pollinator activity windows.",
+  "Essential Barrier uses bifenthrin adulticide with pyriproxyfen + novaluron IGR support where breeding pressure exists.",
+  "Precision Barrier uses gamma-cyhalothrin adulticide with the same IGR support for heavier foliage, water adjacency, pool cages, and higher residual expectations.",
+  "Recommend stations or Bti dunk tablets when breeding sources cannot be fully dumped, drained, or eliminated during the visit.",
+  "Document inaccessible water, wind/rain constraints, customer source-reduction notes, and any reinspection trigger on the service record.",
 ];
 
 function buildMosquitoRecommendations(form) {
   const isMosquitoSelected = !!form.svcMosquito || !!form.svcOnetimeMosquito;
   if (!isMosquitoSelected) return [];
 
-  const heavyVegetation = form.treeDensity === 'HEAVY' || form.shrubDensity === 'HEAVY' || form.landscapeComplexity === 'COMPLEX';
-  const waterPressure = form.nearWater === 'YES';
-  const poolPressure = form.hasPool === 'YES' || form.hasPoolCage === 'YES';
+  const heavyVegetation =
+    form.treeDensity === "HEAVY" ||
+    form.shrubDensity === "HEAVY" ||
+    form.landscapeComplexity === "COMPLEX";
+  const waterPressure = form.nearWater === "YES";
+  const poolPressure = form.hasPool === "YES" || form.hasPoolCage === "YES";
   const lotPressure = Number(form.lotSqFt || 0) >= 12000;
   const recommendations = [];
 
-  if (form.svcMosquito && form.mosquitoProgram !== 'residual_monthly' && (heavyVegetation || waterPressure || poolPressure || lotPressure)) {
+  if (
+    form.svcMosquito &&
+    form.mosquitoProgram !== "residual_monthly" &&
+    (heavyVegetation || waterPressure || poolPressure || lotPressure)
+  ) {
     const reasons = [
-      heavyVegetation ? 'heavy landscape pressure' : null,
-      waterPressure ? 'water adjacency' : null,
-      poolPressure ? 'pool or cage edges' : null,
-      lotPressure ? 'larger treatable area' : null,
+      heavyVegetation ? "heavy landscape pressure" : null,
+      waterPressure ? "water adjacency" : null,
+      poolPressure ? "pool or cage edges" : null,
+      lotPressure ? "larger treatable area" : null,
     ].filter(Boolean);
     recommendations.push({
-      key: 'precision',
-      label: 'Use Monthly Precision Barrier',
-      detail: `Recommended for ${reasons.join(', ')}.`,
-      apply: { mosquitoProgram: 'residual_monthly' },
+      key: "precision",
+      label: "Use Monthly Precision Barrier",
+      detail: `Recommended for ${reasons.join(", ")}.`,
+      apply: { mosquitoProgram: "residual_monthly" },
     });
   }
 
-  if ((waterPressure || poolPressure) && Number(form.mosquitoStationCount || 0) < 2) {
+  if (
+    (waterPressure || poolPressure) &&
+    Number(form.mosquitoStationCount || 0) < 2
+  ) {
     recommendations.push({
-      key: 'stations',
-      label: 'Add 2 mosquito stations',
-      detail: 'Use when breeding sources cannot be fully removed or accessed.',
-      apply: { mosquitoStationCount: '2' },
+      key: "stations",
+      label: "Add 2 mosquito stations",
+      detail: "Use when breeding sources cannot be fully removed or accessed.",
+      apply: { mosquitoStationCount: "2" },
     });
   }
 
   if (waterPressure && Number(form.mosquitoDunkCount || 0) < 4) {
     recommendations.push({
-      key: 'dunks',
-      label: 'Add 4 Bti dunk tablets',
-      detail: 'Use for drains, planters, or non-potable standing water where labeled.',
-      apply: { mosquitoDunkCount: '4' },
+      key: "dunks",
+      label: "Add 4 Bti dunk tablets",
+      detail:
+        "Use for drains, planters, or non-potable standing water where labeled.",
+      apply: { mosquitoDunkCount: "4" },
     });
   }
 
@@ -178,29 +227,29 @@ function validateDeliveryOptions(form, estimate) {
     Number(estimate?.recurring?.annualAfterDiscount || 0),
   );
   if (form.showOneTimeOption && oneTimeAmount <= 0) {
-    return 'Offer one-time option requires a one-time total on the generated estimate.';
+    return "Offer one-time option requires a one-time total on the generated estimate.";
   }
   if (form.billByInvoice && oneTimeAmount <= 0 && recurringAmount <= 0) {
-    return 'Bill by invoice requires a billable recurring or one-time total.';
+    return "Bill by invoice requires a billable recurring or one-time total.";
   }
   return null;
 }
 
 function formatDatetimeLocal(date) {
-  const pad = (value) => String(value).padStart(2, '0');
-  return [
-    date.getFullYear(),
-    pad(date.getMonth() + 1),
-    pad(date.getDate()),
-  ].join('-') + `T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const pad = (value) => String(value).padStart(2, "0");
+  return (
+    [date.getFullYear(), pad(date.getMonth() + 1), pad(date.getDate())].join(
+      "-",
+    ) + `T${pad(date.getHours())}:${pad(date.getMinutes())}`
+  );
 }
 
-function InputV2({ k, type = 'text', placeholder, min, max, className }) {
+function InputV2({ k, type = "text", placeholder, min, max, className }) {
   const { form, set } = useContext(FormCtx);
   return (
     <input
       type={type}
-      value={form[k] ?? ''}
+      value={form[k] ?? ""}
       onChange={(e) => set(k, e.target.value)}
       placeholder={placeholder}
       min={min}
@@ -214,13 +263,21 @@ function SelectV2({ k, options }) {
   const { form, set } = useContext(FormCtx);
   return (
     <select
-      value={form[k] ?? ''}
+      value={form[k] ?? ""}
       onChange={(e) => set(k, e.target.value)}
-      className={cn(INPUT_CLS, 'cursor-pointer appearance-none pr-8 bg-no-repeat bg-[right_0.75rem_center]')}
-      style={{ backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' fill='%2371717A' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E\")" }}
+      className={cn(
+        INPUT_CLS,
+        "cursor-pointer appearance-none pr-8 bg-no-repeat bg-[right_0.75rem_center]",
+      )}
+      style={{
+        backgroundImage:
+          "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' fill='%2371717A' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E\")",
+      }}
     >
       {options.map((o) => (
-        <option key={o.value} value={o.value}>{o.label}</option>
+        <option key={o.value} value={o.value}>
+          {o.label}
+        </option>
       ))}
     </select>
   );
@@ -231,18 +288,26 @@ function CheckboxV2({ k, label }) {
   const checked = !!form[k];
   return (
     <label className="flex items-center gap-2.5 mb-2.5 cursor-pointer text-14 text-zinc-900 select-none">
+      {" "}
       <span
         className={cn(
-          'flex-shrink-0 w-4 h-4 border-hairline rounded-xs flex items-center justify-center transition-colors',
-          checked ? 'bg-zinc-900 border-zinc-900' : 'bg-white border-zinc-300',
+          "flex-shrink-0 w-4 h-4 border-hairline rounded-xs flex items-center justify-center transition-colors",
+          checked ? "bg-zinc-900 border-zinc-900" : "bg-white border-zinc-300",
         )}
       >
         {checked && (
           <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-            <path d="M1.5 5L4 7.5L8.5 2.5" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            {" "}
+            <path
+              d="M1.5 5L4 7.5L8.5 2.5"
+              stroke="white"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />{" "}
           </svg>
         )}
-      </span>
+      </span>{" "}
       <input
         type="checkbox"
         checked={checked}
@@ -259,7 +324,11 @@ function CheckboxV2({ k, label }) {
 function PanelTitle({ children, description }) {
   return (
     <>
-      <h3 className="text-zinc-900 mt-0 mb-3" style={{ fontSize: 15, fontWeight: 600 }}>
+      {" "}
+      <h3
+        className="text-zinc-900 mt-0 mb-3"
+        style={{ fontSize: 15, fontWeight: 600 }}
+      >
         {children}
       </h3>
       {description && (
@@ -274,7 +343,10 @@ function PanelTitle({ children, description }) {
 // Create Estimate form reads as one visual family.
 function SubGroupLabel({ children, className }) {
   return (
-    <h4 className={cn('text-zinc-900 mt-4 mb-2', className)} style={{ fontSize: 15, fontWeight: 600 }}>
+    <h4
+      className={cn("text-zinc-900 mt-4 mb-2", className)}
+      style={{ fontSize: 15, fontWeight: 600 }}
+    >
       {children}
     </h4>
   );
@@ -282,12 +354,14 @@ function SubGroupLabel({ children, className }) {
 
 function StatusLine({ status }) {
   if (!status?.type) return null;
-  const isErr = status.type === 'err';
+  const isErr = status.type === "err";
   return (
     <div
       className={cn(
-        ' text-12 px-3 py-2 rounded-xs mb-3 whitespace-pre-line border-hairline',
-        isErr ? 'bg-alert-bg text-alert-fg border-alert-fg' : 'bg-zinc-50 text-ink-secondary border-zinc-200',
+        " text-12 px-3 py-2 rounded-xs mb-3 whitespace-pre-line border-hairline",
+        isErr
+          ? "bg-alert-bg text-alert-fg border-alert-fg"
+          : "bg-zinc-50 text-ink-secondary border-zinc-200",
       )}
     >
       {status.msg}
@@ -300,27 +374,45 @@ function TierGridV2({ children }) {
   return <div className="grid gap-2">{children}</div>;
 }
 
-function TierRowV2({ name, detail, price, recommended, dimmed, onSelect, selected }) {
+function TierRowV2({
+  name,
+  detail,
+  price,
+  recommended,
+  dimmed,
+  onSelect,
+  selected,
+}) {
   const clickable = !!onSelect;
   return (
     <div
       onClick={onSelect}
-      title={clickable ? 'Click to select this frequency' : undefined}
+      title={clickable ? "Click to select this frequency" : undefined}
       className={cn(
-        'grid items-center rounded-sm transition-colors px-4 py-3 border-hairline',
-        'grid-cols-[120px_1fr_110px] gap-3',
-        selected ? 'bg-zinc-50 border-zinc-900 ring-2 ring-zinc-900' : 'bg-white border-zinc-200',
-        clickable ? 'cursor-pointer hover:bg-zinc-50' : 'cursor-default',
-        dimmed && !selected ? 'opacity-50' : '',
+        "grid items-center rounded-sm transition-colors px-4 py-3 border-hairline",
+        "grid-cols-[120px_1fr_110px] gap-3",
+        selected
+          ? "bg-zinc-50 border-zinc-900 ring-2 ring-zinc-900"
+          : "bg-white border-zinc-200",
+        clickable ? "cursor-pointer hover:bg-zinc-50" : "cursor-default",
+        dimmed && !selected ? "opacity-50" : "",
       )}
     >
+      {" "}
       <div className="text-14 font-medium text-zinc-900 flex items-center gap-1.5">
         {name}
-        {selected && <span className="text-11 u-nums">✓</span>}
-        {!selected && recommended && <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900" title="Recommended" />}
-      </div>
-      <div className="text-12 text-ink-secondary break-words">{detail}</div>
-      <div className="text-14 font-medium text-zinc-900 text-right u-nums">{price}</div>
+        {selected && <span className="text-11 u-nums"></span>}
+        {!selected && recommended && (
+          <span
+            className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900"
+            title="Recommended"
+          />
+        )}
+      </div>{" "}
+      <div className="text-12 text-ink-secondary break-words">{detail}</div>{" "}
+      <div className="text-14 font-medium text-zinc-900 text-right u-nums">
+        {price}
+      </div>{" "}
     </div>
   );
 }
@@ -359,7 +451,12 @@ function GroupHeader({ children }) {
 
 function SectionTitle({ children, className }) {
   return (
-    <div className={cn('text-14 font-medium uppercase tracking-label text-zinc-900 mb-3', className)}>
+    <div
+      className={cn(
+        "text-14 font-medium uppercase tracking-label text-zinc-900 mb-3",
+        className,
+      )}
+    >
       {children}
     </div>
   );
@@ -370,25 +467,27 @@ function SectionTitle({ children, className }) {
 // State, refs, effects, callbacks all copied verbatim from V1.
 // ═══════════════════════════════════════════════════════════════
 export default function EstimateToolViewV2({
-  initialLeadId = '',
-  initialCustomerId = '',
-  initialAddress = '',
-  initialCustomerName = '',
-  initialCustomerPhone = '',
-  initialCustomerEmail = '',
-  initialServiceInterest = '',
+  initialLeadId = "",
+  initialCustomerId = "",
+  initialAddress = "",
+  initialCustomerName = "",
+  initialCustomerPhone = "",
+  initialCustomerEmail = "",
+  initialServiceInterest = "",
 } = {}) {
   // ── Google Maps script (verbatim from V1) ─────────────────────
   const addressRef = useRef(null);
   const autocompleteRef = useRef(null);
 
   useEffect(() => {
-    const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || 'AIzaSyCvzQ84QWUKMby5YcbM8MhDBlEZ2oF7Bsk';
+    const apiKey =
+      import.meta.env.VITE_GOOGLE_MAPS_API_KEY ||
+      "AIzaSyCvzQ84QWUKMby5YcbM8MhDBlEZ2oF7Bsk";
     if (!apiKey) return;
 
-    if (!document.getElementById('pac-dark-style')) {
-      const style = document.createElement('style');
-      style.id = 'pac-dark-style';
+    if (!document.getElementById("pac-dark-style")) {
+      const style = document.createElement("style");
+      style.id = "pac-dark-style";
       style.textContent = `
         .pac-container { background: #FFFFFF !important; border: 1px solid #E4E4E7 !important; border-radius: 4px !important; margin-top: 4px !important; z-index: 99999 !important; font-family: 'Roboto', Arial, sans-serif !important; box-shadow: 0 8px 24px rgba(0,0,0,0.1) !important; }
         .pac-item { padding: 8px 12px !important; border-top: 1px solid #E4E4E7 !important; color: #3F3F46 !important; cursor: pointer !important; font-size: 14px !important; }
@@ -405,7 +504,12 @@ export default function EstimateToolViewV2({
     }
 
     function tryInit() {
-      if (window.google && window.google.maps && window.google.maps.places && addressRef.current) {
+      if (
+        window.google &&
+        window.google.maps &&
+        window.google.maps.places &&
+        addressRef.current
+      ) {
         initAutocomplete();
         return true;
       }
@@ -413,17 +517,23 @@ export default function EstimateToolViewV2({
     }
     if (tryInit()) return;
 
-    if (document.querySelector('script[src*="maps.googleapis.com/maps/api/js"]')) {
-      const interval = setInterval(() => { if (tryInit()) clearInterval(interval); }, 300);
+    if (
+      document.querySelector('script[src*="maps.googleapis.com/maps/api/js"]')
+    ) {
+      const interval = setInterval(() => {
+        if (tryInit()) clearInterval(interval);
+      }, 300);
       return () => clearInterval(interval);
     }
 
-    const script = document.createElement('script');
+    const script = document.createElement("script");
     script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places&loading=async`;
     script.async = true;
     script.defer = true;
     script.onload = () => {
-      const interval = setInterval(() => { if (tryInit()) clearInterval(interval); }, 200);
+      const interval = setInterval(() => {
+        if (tryInit()) clearInterval(interval);
+      }, 200);
       setTimeout(() => clearInterval(interval), 5000);
     };
     document.head.appendChild(script);
@@ -434,11 +544,11 @@ export default function EstimateToolViewV2({
     if (!addressRef.current || !window.google?.maps?.places) return;
     if (autocompleteRef.current) return;
     const ac = new window.google.maps.places.Autocomplete(addressRef.current, {
-      types: ['address'],
-      componentRestrictions: { country: 'us' },
-      fields: ['formatted_address', 'address_components', 'geometry'],
+      types: ["address"],
+      componentRestrictions: { country: "us" },
+      fields: ["formatted_address", "address_components", "geometry"],
     });
-    ac.addListener('place_changed', () => {
+    ac.addListener("place_changed", () => {
       const p = ac.getPlace();
       if (p && p.formatted_address) {
         setForm((f) => ({ ...f, address: p.formatted_address }));
@@ -449,35 +559,87 @@ export default function EstimateToolViewV2({
 
   // ── form state (verbatim from V1) ─────────────────────────────
   const [form, setForm] = useState({
-    leadId: initialLeadId || '',
-    customerId: initialCustomerId || '',
-    address: initialAddress || '',
-    customerName: initialCustomerName || '',
-    customerPhone: initialCustomerPhone || '',
-    customerEmail: initialCustomerEmail || '',
-    leadServiceInterest: initialServiceInterest || '',
-    homeSqFt: '', stories: '1', lotSqFt: '', propertyType: 'Single Family',
-    hasPool: 'NO', hasPoolCage: 'NO', poolCageSize: 'MEDIUM', hasLargeDriveway: 'NO',
-    shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE',
-    nearWater: 'NO', urgency: 'ROUTINE', isAfterHours: 'NO', isRecurringCustomer: 'NO',
-    bedArea: '', palmCount: '', treeCount: '',
-    roachModifier: 'NONE', lawnFreq: '9', pestFreq: '4', plugArea: '', plugSpacing: '12',
-    manualDiscountPreset: '', manualDiscountType: 'NONE', manualDiscountValue: '', manualDiscountLabel: '',
-    grassType: 'st_augustine',
-    mosquitoProgram: 'monthly', mosquitoStationCount: '0', mosquitoDunkCount: '0',
-    otLawnType: 'FERT',
-    exclSimple: '0', exclModerate: '0', exclAdvanced: '0', exclWaive: 'NO',
-    sanitationTier: 'standard', sanitationArea: '', sanitationDebris: '0', sanitationAccess: 'normal',
-    bedbugRooms: '1', bedbugMethod: 'BOTH',
-    boracareSqft: '', preslabSqft: '', preslabWarranty: 'BASIC', preslabVolume: 'NONE',
-    foamPoints: '5', roachType: 'REGULAR',
-    svcLawn: true, svcPest: true, svcTs: false, svcInjection: false, svcMosquito: false,
-    svcTermiteBait: false, svcRodentBait: false,
-    svcOnetimePest: false, svcOnetimeLawn: false, svcOnetimeMosquito: false,
-    svcPlugging: false, svcTopdress: false, svcDethatch: false, svcTrenching: false,
-    svcBoracare: false, svcPreslab: false, svcFoam: false, svcRodentTrap: false, svcRodentSanitation: false,
-    svcFlea: false, svcWasp: false, svcRoach: false, svcBedbug: false, svcExclusion: false,
-    showOneTimeOption: false, billByInvoice: false,
+    leadId: initialLeadId || "",
+    customerId: initialCustomerId || "",
+    address: initialAddress || "",
+    customerName: initialCustomerName || "",
+    customerPhone: initialCustomerPhone || "",
+    customerEmail: initialCustomerEmail || "",
+    leadServiceInterest: initialServiceInterest || "",
+    homeSqFt: "",
+    stories: "1",
+    lotSqFt: "",
+    propertyType: "Single Family",
+    hasPool: "NO",
+    hasPoolCage: "NO",
+    poolCageSize: "MEDIUM",
+    hasLargeDriveway: "NO",
+    shrubDensity: "MODERATE",
+    treeDensity: "MODERATE",
+    landscapeComplexity: "MODERATE",
+    nearWater: "NO",
+    urgency: "ROUTINE",
+    isAfterHours: "NO",
+    isRecurringCustomer: "NO",
+    bedArea: "",
+    palmCount: "",
+    treeCount: "",
+    roachModifier: "NONE",
+    lawnFreq: "9",
+    pestFreq: "4",
+    plugArea: "",
+    plugSpacing: "12",
+    manualDiscountPreset: "",
+    manualDiscountType: "NONE",
+    manualDiscountValue: "",
+    manualDiscountLabel: "",
+    grassType: "st_augustine",
+    mosquitoProgram: "monthly",
+    mosquitoStationCount: "0",
+    mosquitoDunkCount: "0",
+    otLawnType: "FERT",
+    exclSimple: "0",
+    exclModerate: "0",
+    exclAdvanced: "0",
+    exclWaive: "NO",
+    sanitationTier: "standard",
+    sanitationArea: "",
+    sanitationDebris: "0",
+    sanitationAccess: "normal",
+    bedbugRooms: "1",
+    bedbugMethod: "BOTH",
+    boracareSqft: "",
+    preslabSqft: "",
+    preslabWarranty: "BASIC",
+    preslabVolume: "NONE",
+    foamPoints: "5",
+    roachType: "REGULAR",
+    svcLawn: true,
+    svcPest: true,
+    svcTs: false,
+    svcInjection: false,
+    svcMosquito: false,
+    svcTermiteBait: false,
+    svcRodentBait: false,
+    svcOnetimePest: false,
+    svcOnetimeLawn: false,
+    svcOnetimeMosquito: false,
+    svcPlugging: false,
+    svcTopdress: false,
+    svcDethatch: false,
+    svcTrenching: false,
+    svcBoracare: false,
+    svcPreslab: false,
+    svcFoam: false,
+    svcRodentTrap: false,
+    svcRodentSanitation: false,
+    svcFlea: false,
+    svcWasp: false,
+    svcRoach: false,
+    svcBedbug: false,
+    svcExclusion: false,
+    showOneTimeOption: false,
+    billByInvoice: false,
   });
 
   useEffect(() => {
@@ -498,76 +660,145 @@ export default function EstimateToolViewV2({
       }
       return next;
     });
-  }, [initialAddress, initialCustomerEmail, initialCustomerId, initialCustomerName, initialCustomerPhone, initialLeadId, initialServiceInterest]);
+  }, [
+    initialAddress,
+    initialCustomerEmail,
+    initialCustomerId,
+    initialCustomerName,
+    initialCustomerPhone,
+    initialLeadId,
+    initialServiceInterest,
+  ]);
 
   // ── live preview (verbatim from V1) ───────────────────────────
   const livePreview = useMemo(() => {
-    const recurringKeys = ['svcLawn', 'svcPest', 'svcTs', 'svcInjection', 'svcMosquito', 'svcTermiteBait', 'svcRodentBait'];
+    const recurringKeys = [
+      "svcLawn",
+      "svcPest",
+      "svcTs",
+      "svcInjection",
+      "svcMosquito",
+      "svcTermiteBait",
+      "svcRodentBait",
+    ];
     const recurringCount = recurringKeys.filter((k) => form[k]).length;
 
     const tierMap = {
-      0: { name: 'No recurring bundle', discount: 0 },
-      1: { name: '1-service bundle', discount: 0 },
-      2: { name: '2-service bundle', discount: 0.10 },
-      3: { name: '3-service bundle', discount: 0.15 },
+      0: { name: "No recurring bundle", discount: 0 },
+      1: { name: "1-service bundle", discount: 0 },
+      2: { name: "2-service bundle", discount: 0.1 },
+      3: { name: "3-service bundle", discount: 0.15 },
     };
-    const tier = recurringCount >= 4 ? { name: '4-service bundle', discount: 0.20 } : (tierMap[recurringCount] || tierMap[0]);
+    const tier =
+      recurringCount >= 4
+        ? { name: "4-service bundle", discount: 0.2 }
+        : tierMap[recurringCount] || tierMap[0];
 
     const sqft = Number(form.homeSqFt) || 2000;
     const lotSqft = Number(form.lotSqFt) || 8000;
     const approx = {};
     if (form.svcLawn) approx.lawn = Math.max(55, Math.round(sqft * 0.028 + 10));
     if (form.svcPest) {
-      const freqMult = { '4': 1, '6': 1.3, '12': 2.2 };
-      approx.pest = Math.max(35, Math.round((sqft * 0.022 + 20) * (freqMult[form.pestFreq] || 1)));
+      const freqMult = { 4: 1, 6: 1.3, 12: 2.2 };
+      approx.pest = Math.max(
+        35,
+        Math.round((sqft * 0.022 + 20) * (freqMult[form.pestFreq] || 1)),
+      );
     }
-    if (form.svcTs) approx.ts = Math.max(45, Math.round((Number(form.bedArea) || lotSqft * 0.15) * 0.012 + 30));
-    if (form.svcInjection) approx.injection = Math.round((Number(form.palmCount) || 3) * 35 * 3 / 12);
+    if (form.svcTs)
+      approx.ts = Math.max(
+        45,
+        Math.round((Number(form.bedArea) || lotSqft * 0.15) * 0.012 + 30),
+      );
+    if (form.svcInjection)
+      approx.injection = Math.round(
+        ((Number(form.palmCount) || 3) * 35 * 3) / 12,
+      );
     if (form.svcMosquito) {
-      const programBase = form.mosquitoProgram === 'residual_monthly'
-        ? 120
-        : form.mosquitoProgram === 'residual_seasonal'
-          ? 95
-          : form.mosquitoProgram === 'seasonal'
-            ? 79
-            : 90;
-      approx.mosquito = Math.max(programBase, Math.round(lotSqft * 0.005 + programBase));
+      const programBase =
+        form.mosquitoProgram === "residual_monthly"
+          ? 120
+          : form.mosquitoProgram === "residual_seasonal"
+            ? 95
+            : form.mosquitoProgram === "seasonal"
+              ? 79
+              : 90;
+      approx.mosquito = Math.max(
+        programBase,
+        Math.round(lotSqft * 0.005 + programBase),
+      );
     }
     if (form.svcTermiteBait) approx.termiteBait = 50;
     if (form.svcRodentBait) approx.rodentBait = sqft > 2500 ? 55 : 45;
 
-    const recurringMonthlyBefore = Object.values(approx).reduce((s, v) => s + v, 0);
-    const recurringMonthly = Math.round(recurringMonthlyBefore * (1 - tier.discount));
+    const recurringMonthlyBefore = Object.values(approx).reduce(
+      (s, v) => s + v,
+      0,
+    );
+    const recurringMonthly = Math.round(
+      recurringMonthlyBefore * (1 - tier.discount),
+    );
     const annualRecurring = recurringMonthly * 12;
-    const annualSavings = Math.round(recurringMonthlyBefore * tier.discount * 12);
+    const annualSavings = Math.round(
+      recurringMonthlyBefore * tier.discount * 12,
+    );
 
-    const onetimeKeys = ['svcOnetimePest', 'svcOnetimeLawn', 'svcOnetimeMosquito', 'svcPlugging', 'svcTopdress', 'svcDethatch', 'svcTrenching', 'svcBoracare', 'svcPreslab', 'svcFoam', 'svcRodentTrap', 'svcRodentSanitation', 'svcFlea', 'svcWasp', 'svcRoach', 'svcBedbug', 'svcExclusion'];
+    const onetimeKeys = [
+      "svcOnetimePest",
+      "svcOnetimeLawn",
+      "svcOnetimeMosquito",
+      "svcPlugging",
+      "svcTopdress",
+      "svcDethatch",
+      "svcTrenching",
+      "svcBoracare",
+      "svcPreslab",
+      "svcFoam",
+      "svcRodentTrap",
+      "svcRodentSanitation",
+      "svcFlea",
+      "svcWasp",
+      "svcRoach",
+      "svcBedbug",
+      "svcExclusion",
+    ];
     const onetimeCount = onetimeKeys.filter((k) => form[k]).length;
     const anySelected = recurringCount > 0 || onetimeCount > 0;
 
-    return { recurringCount, onetimeCount, tier, recurringMonthly, annualRecurring, annualSavings, anySelected };
+    return {
+      recurringCount,
+      onetimeCount,
+      tier,
+      recurringMonthly,
+      annualRecurring,
+      annualSavings,
+      anySelected,
+    };
   }, [form]);
 
   const [estimate, setEstimate] = useState(null);
   const [savedId, setSavedId] = useState(null);
-  const [lookupStatus, setLookupStatus] = useState({ type: '', msg: '' });
-  const [customerSearch, setCustomerSearch] = useState('');
+  const [lookupStatus, setLookupStatus] = useState({ type: "", msg: "" });
+  const [customerSearch, setCustomerSearch] = useState("");
   const [customers, setCustomers] = useState([]);
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [sending, setSending] = useState(false);
   const [showSendForm, setShowSendForm] = useState(false);
-  const [sendSearch, setSendSearch] = useState('');
+  const [sendSearch, setSendSearch] = useState("");
   const [sendCustomerResults, setSendCustomerResults] = useState([]);
-  const token = localStorage.getItem('waves_admin_token');
-  const authHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+  const token = localStorage.getItem("waves_admin_token");
+  const authHeaders = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${token}`,
+  };
 
   const set = useCallback((key, val) => {
     setForm((f) => ({
       ...f,
       [key]: val,
-      ...(key === 'poolCageSize' ? { _poolCageSizeEdited: true } : {}),
-      ...(key === 'stories' ? { _storiesEdited: true } : {}),
+      ...(key === "poolCageSize" ? { _poolCageSizeEdited: true } : {}),
+      ...(key === "stories" ? { _storiesEdited: true } : {}),
     }));
     if (SEND_FIELDS.has(key)) return;
     if (CONTACT_FIELDS.has(key) || DELIVERY_OPTION_FIELDS.has(key)) {
@@ -579,14 +810,17 @@ export default function EstimateToolViewV2({
   }, []);
   const toggle = useCallback((key) => {
     setForm((f) => ({ ...f, [key]: !f[key] }));
-    if (key.startsWith('svc')) { setEstimate(null); setSavedId(null); }
+    if (key.startsWith("svc")) {
+      setEstimate(null);
+      setSavedId(null);
+    }
   }, []);
   const applyMosquitoCustomerChoice = useCallback((choice) => {
     setForm((f) => {
       const next = { ...f, showOneTimeOption: true };
-      if (choice === 'one_time') next.svcOnetimeMosquito = true;
-      if (choice === 'recurring') next.svcMosquito = true;
-      if (choice === 'both') {
+      if (choice === "one_time") next.svcOnetimeMosquito = true;
+      if (choice === "recurring") next.svcMosquito = true;
+      if (choice === "both") {
         next.svcMosquito = true;
         next.svcOnetimeMosquito = true;
       }
@@ -599,7 +833,8 @@ export default function EstimateToolViewV2({
     setForm((f) => {
       const next = { ...f, showOneTimeOption: enabled };
       if (enabled) {
-        if (f.svcMosquito && !f.svcOnetimeMosquito) next.svcOnetimeMosquito = true;
+        if (f.svcMosquito && !f.svcOnetimeMosquito)
+          next.svcOnetimeMosquito = true;
         if (f.svcOnetimeMosquito && !f.svcMosquito) next.svcMosquito = true;
       }
       return next;
@@ -608,7 +843,10 @@ export default function EstimateToolViewV2({
     setEstimate(null);
   }, []);
 
-  const mosquitoRecommendations = useMemo(() => buildMosquitoRecommendations(form), [form]);
+  const mosquitoRecommendations = useMemo(
+    () => buildMosquitoRecommendations(form),
+    [form],
+  );
   const applyMosquitoRecommendation = useCallback((recommendation) => {
     setForm((f) => ({ ...f, ...(recommendation?.apply || {}) }));
     setEstimate(null);
@@ -616,11 +854,22 @@ export default function EstimateToolViewV2({
   }, []);
 
   const searchSendCustomers = useCallback(async (q) => {
-    if (!q || q.length < 2) { setSendCustomerResults([]); return; }
+    if (!q || q.length < 2) {
+      setSendCustomerResults([]);
+      return;
+    }
     try {
-      const r = await fetch(`/api/admin/customers?search=${encodeURIComponent(q)}&limit=5`, { headers: authHeaders });
-      if (r.ok) { const d = await r.json(); setSendCustomerResults(d.customers || d || []); }
-    } catch { /* ignore */ }
+      const r = await fetch(
+        `/api/admin/customers?search=${encodeURIComponent(q)}&limit=5`,
+        { headers: authHeaders },
+      );
+      if (r.ok) {
+        const d = await r.json();
+        setSendCustomerResults(d.customers || d || []);
+      }
+    } catch {
+      /* ignore */
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -629,11 +878,12 @@ export default function EstimateToolViewV2({
     const sqft = Number(form.homeSqFt) || 0;
     const st = Math.max(1, Number(form.stories) || 1);
     if (sqft > 0) {
-      const attic = Math.round(sqft / st * 0.85);
+      const attic = Math.round((sqft / st) * 0.85);
       const fp = Math.round(sqft / st);
       setForm((f) => {
         const upd = {};
-        if (!f.boracareSqft || f._boracareAuto) upd.boracareSqft = String(attic);
+        if (!f.boracareSqft || f._boracareAuto)
+          upd.boracareSqft = String(attic);
         if (!f.preslabSqft || f._preslabAuto) upd.preslabSqft = String(fp);
         if (Object.keys(upd).length === 0) return f;
         return { ...f, ...upd, _boracareAuto: true, _preslabAuto: true };
@@ -642,11 +892,22 @@ export default function EstimateToolViewV2({
   }, [form.homeSqFt, form.stories]);
 
   const searchCustomers = useCallback(async (q) => {
-    if (!q || q.length < 2) { setCustomers([]); return; }
+    if (!q || q.length < 2) {
+      setCustomers([]);
+      return;
+    }
     try {
-      const r = await fetch(`/api/admin/customers?search=${encodeURIComponent(q)}`, { headers: authHeaders });
-      if (r.ok) { const d = await r.json(); setCustomers(d.customers || d || []); }
-    } catch { /* ignore */ }
+      const r = await fetch(
+        `/api/admin/customers?search=${encodeURIComponent(q)}`,
+        { headers: authHeaders },
+      );
+      if (r.ok) {
+        const d = await r.json();
+        setCustomers(d.customers || d || []);
+      }
+    } catch {
+      /* ignore */
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -658,14 +919,14 @@ export default function EstimateToolViewV2({
 
   const [enrichedProfile, setEnrichedProfile] = useState(null);
   const [existingCustomerMatch, setExistingCustomerMatch] = useState(null);
-  const [satelliteStatus, setSatelliteStatus] = useState({ type: '', msg: '' });
+  const [satelliteStatus, setSatelliteStatus] = useState({ type: "", msg: "" });
   const [satelliteData, setSatelliteData] = useState(null);
 
   const [discountPresets, setDiscountPresets] = useState([]);
   useEffect(() => {
     (async () => {
       try {
-        const r = await adminFetch('/admin/discounts');
+        const r = await adminFetch("/admin/discounts");
         if (!r.ok) return;
         const rows = await r.json();
         // Exclude WaveGuard tier discounts — those are auto-assigned by
@@ -674,15 +935,17 @@ export default function EstimateToolViewV2({
           .filter((d) => d.is_active && !d.is_waveguard_tier_discount)
           .sort((a, b) => (a.sort_order ?? 999) - (b.sort_order ?? 999));
         setDiscountPresets(manual);
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     })();
   }, []);
 
   function applyDiscountPreset(key) {
     setEstimate(null);
     setSavedId(null);
-    if (key === '__custom__' || !key) {
-      setForm((f) => ({ ...f, manualDiscountPreset: key || '' }));
+    if (key === "__custom__" || !key) {
+      setForm((f) => ({ ...f, manualDiscountPreset: key || "" }));
       return;
     }
     const d = discountPresets.find((x) => x.discount_key === key);
@@ -690,7 +953,8 @@ export default function EstimateToolViewV2({
     setForm((f) => ({
       ...f,
       manualDiscountPreset: key,
-      manualDiscountType: d.discount_type === 'percentage' ? 'PERCENT' : 'FIXED',
+      manualDiscountType:
+        d.discount_type === "percentage" ? "PERCENT" : "FIXED",
       manualDiscountValue: String(d.amount || 0),
       manualDiscountLabel: d.name,
     }));
@@ -698,19 +962,33 @@ export default function EstimateToolViewV2({
 
   async function doLookup() {
     const address = form.address.trim();
-    if (!address) { setLookupStatus({ type: 'err', msg: 'Enter an address' }); return; }
-    setLookupStatus({ type: 'loading', msg: 'Looking up property... (AI property search + AI satellite analysis)' });
-    setSatelliteStatus({ type: 'loading', msg: 'Running AI satellite analysis...' });
+    if (!address) {
+      setLookupStatus({ type: "err", msg: "Enter an address" });
+      return;
+    }
+    setLookupStatus({
+      type: "loading",
+      msg: "Looking up property... (AI property search + AI satellite analysis)",
+    });
+    setSatelliteStatus({
+      type: "loading",
+      msg: "Running AI satellite analysis...",
+    });
     try {
-      const r = await fetch('/api/admin/estimator/property-lookup', {
-        method: 'POST', headers: authHeaders, body: JSON.stringify({ address }),
+      const r = await fetch("/api/admin/estimator/property-lookup", {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({ address }),
       });
-      if (!r.ok) throw new Error('API ' + r.status);
+      if (!r.ok) throw new Error("API " + r.status);
       const data = await r.json();
 
       if (data.errors?.length > 0 && !data.enriched) {
-        setLookupStatus({ type: 'err', msg: data.errors.map((e) => e.message).join(', ') });
-        setSatelliteStatus({ type: '', msg: '' });
+        setLookupStatus({
+          type: "err",
+          msg: data.errors.map((e) => e.message).join(", "),
+        });
+        setSatelliteStatus({ type: "", msg: "" });
         return;
       }
 
@@ -723,20 +1001,22 @@ export default function EstimateToolViewV2({
       if (ep.stories) upd.stories = String(ep.stories);
       if (ep.propertyType) {
         const pt = ep.propertyType.toLowerCase();
-        if (pt.includes('single')) upd.propertyType = 'Single Family';
-        else if (pt.includes('town')) upd.propertyType = 'Townhome';
-        else if (pt.includes('condo')) upd.propertyType = 'Condo';
-        else if (pt.includes('duplex')) upd.propertyType = 'Duplex';
-        else if (pt.includes('commercial')) upd.propertyType = 'Commercial';
+        if (pt.includes("single")) upd.propertyType = "Single Family";
+        else if (pt.includes("town")) upd.propertyType = "Townhome";
+        else if (pt.includes("condo")) upd.propertyType = "Condo";
+        else if (pt.includes("duplex")) upd.propertyType = "Duplex";
+        else if (pt.includes("commercial")) upd.propertyType = "Commercial";
       }
-      if (ep.pool === 'YES' || ep.pool === 'POSSIBLE') upd.hasPool = 'YES';
-      if (ep.poolCage === 'YES') upd.hasPoolCage = 'YES';
-      if (ep.poolCageSize && ep.poolCageSize !== 'NONE') upd.poolCageSize = ep.poolCageSize;
-      if (ep.largeDriveway) upd.hasLargeDriveway = 'YES';
+      if (ep.pool === "YES" || ep.pool === "POSSIBLE") upd.hasPool = "YES";
+      if (ep.poolCage === "YES") upd.hasPoolCage = "YES";
+      if (ep.poolCageSize && ep.poolCageSize !== "NONE")
+        upd.poolCageSize = ep.poolCageSize;
+      if (ep.largeDriveway) upd.hasLargeDriveway = "YES";
       if (ep.shrubDensity) upd.shrubDensity = ep.shrubDensity;
       if (ep.treeDensity) upd.treeDensity = ep.treeDensity;
-      if (ep.landscapeComplexity) upd.landscapeComplexity = ep.landscapeComplexity;
-      if (ep.nearWater && ep.nearWater !== 'NONE') upd.nearWater = 'YES';
+      if (ep.landscapeComplexity)
+        upd.landscapeComplexity = ep.landscapeComplexity;
+      if (ep.nearWater && ep.nearWater !== "NONE") upd.nearWater = "YES";
       if (ep.estimatedBedAreaSf) upd.bedArea = String(ep.estimatedBedAreaSf);
       if (ep.estimatedPalmCount) upd.palmCount = String(ep.estimatedPalmCount);
       if (ep.estimatedTreeCount) upd.treeCount = String(ep.estimatedTreeCount);
@@ -751,28 +1031,41 @@ export default function EstimateToolViewV2({
       }));
 
       try {
-        const addrSearch = address.split(',')[0].trim();
-        const custR = await fetch(`/api/admin/customers?search=${encodeURIComponent(addrSearch)}&limit=3`, { headers: authHeaders });
+        const addrSearch = address.split(",")[0].trim();
+        const custR = await fetch(
+          `/api/admin/customers?search=${encodeURIComponent(addrSearch)}&limit=3`,
+          { headers: authHeaders },
+        );
         if (custR.ok) {
           const custData = await custR.json();
           const custs = custData.customers || custData || [];
-          const match = custs.find((c) => c.address && address.toLowerCase().includes(c.address.split(',')[0].trim().toLowerCase()));
+          const match = custs.find(
+            (c) =>
+              c.address &&
+              address
+                .toLowerCase()
+                .includes(c.address.split(",")[0].trim().toLowerCase()),
+          );
           if (match) {
             setExistingCustomerMatch(match);
-            const hasActivePlan = match.tier && match.tier !== 'null' && match.monthlyRate > 0;
+            const hasActivePlan =
+              match.tier && match.tier !== "null" && match.monthlyRate > 0;
             setForm((f) => ({
               ...f,
-              customerId: match.id || f.customerId || '',
-              isRecurringCustomer: hasActivePlan ? 'YES' : 'NO',
-              customerName: `${match.firstName || ''} ${match.lastName || ''}`.trim(),
-              customerPhone: match.phone || f.customerPhone || '',
-              customerEmail: match.email || f.customerEmail || '',
+              customerId: match.id || f.customerId || "",
+              isRecurringCustomer: hasActivePlan ? "YES" : "NO",
+              customerName:
+                `${match.firstName || ""} ${match.lastName || ""}`.trim(),
+              customerPhone: match.phone || f.customerPhone || "",
+              customerEmail: match.email || f.customerEmail || "",
             }));
           } else {
             setExistingCustomerMatch(null);
           }
         }
-      } catch { /* ignore customer lookup errors */ }
+      } catch {
+        /* ignore customer lookup errors */
+      }
 
       if (data.satellite) {
         setSatelliteData({
@@ -790,71 +1083,107 @@ export default function EstimateToolViewV2({
       const rc = data.propertyRecord || data.rentcast;
       const ai = data.aiAnalysis;
       const lines = [];
-      if (rc) lines.push(`${rc.formattedAddress} — ${rc.squareFootage || '?'} sf / ${rc.lotSize || '?'} sf lot / ${rc.stories || 1} story`);
-      if (ep.yearBuilt) lines.push(`Built ${ep.yearBuilt} · ${ep.constructionMaterial} · ${ep.foundationType} foundation · ${ep.roofType} roof`);
+      if (rc)
+        lines.push(
+          `${rc.formattedAddress} — ${rc.squareFootage || "?"} sf / ${rc.lotSize || "?"} sf lot / ${rc.stories || 1} story`,
+        );
+      if (ep.yearBuilt)
+        lines.push(
+          `Built ${ep.yearBuilt} · ${ep.constructionMaterial} · ${ep.foundationType} foundation · ${ep.roofType} roof`,
+        );
       if (ep.serviceZone) lines.push(`Service Zone ${ep.serviceZone}`);
-      if (ep.propertyDataQuality) lines.push(`Property data quality: ${String(ep.propertyDataQuality.level || 'unknown').toUpperCase()} (${ep.propertyDataQuality.score || 0}/100)`);
-      setLookupStatus({ type: 'ok', msg: lines.join('\n') });
+      if (ep.propertyDataQuality)
+        lines.push(
+          `Property data quality: ${String(ep.propertyDataQuality.level || "unknown").toUpperCase()} (${ep.propertyDataQuality.score || 0}/100)`,
+        );
+      setLookupStatus({ type: "ok", msg: lines.join("\n") });
 
       if (ai) {
-        const conf = ep.aiConfidence >= 70 ? 'HIGH' : ep.aiConfidence >= 40 ? 'MEDIUM' : 'LOW';
+        const conf =
+          ep.aiConfidence >= 70
+            ? "HIGH"
+            : ep.aiConfidence >= 40
+              ? "MEDIUM"
+              : "LOW";
         const flags = ep.fieldVerifyFlags?.length || 0;
         setSatelliteStatus({
-          type: 'ok',
-          msg: `AI Analysis complete — Confidence: ${conf} (${ep.aiConfidence}%)${flags > 0 ? ` · ${flags} field(s) flagged` : ''}\nPest pressure: ${ep.overallPestPressure} · Water: ${ep.nearWater} · Turf: ${ep.estimatedTurfSf} sf`,
+          type: "ok",
+          msg: `AI Analysis complete — Confidence: ${conf} (${ep.aiConfidence}%)${flags > 0 ? ` · ${flags} field(s) flagged` : ""}\nPest pressure: ${ep.overallPestPressure} · Water: ${ep.nearWater} · Turf: ${ep.estimatedTurfSf} sf`,
         });
       } else {
-        setSatelliteStatus({ type: 'err', msg: 'AI satellite analysis unavailable' });
+        setSatelliteStatus({
+          type: "err",
+          msg: "AI satellite analysis unavailable",
+        });
       }
 
       if (data.errors?.length > 0) {
-        console.warn('[estimate] Partial errors:', data.errors);
+        console.warn("[estimate] Partial errors:", data.errors);
       }
     } catch (e) {
-      setLookupStatus({ type: 'err', msg: e.message });
-      setSatelliteStatus({ type: '', msg: '' });
+      setLookupStatus({ type: "err", msg: e.message });
+      setSatelliteStatus({ type: "", msg: "" });
     }
   }
 
   async function doSatelliteAnalysis() {
     const address = form.address.trim();
-    if (!address) { setSatelliteStatus({ type: 'err', msg: 'Enter an address first' }); return; }
-    setSatelliteStatus({ type: 'loading', msg: 'Analyzing satellite imagery with AI...' });
+    if (!address) {
+      setSatelliteStatus({ type: "err", msg: "Enter an address first" });
+      return;
+    }
+    setSatelliteStatus({
+      type: "loading",
+      msg: "Analyzing satellite imagery with AI...",
+    });
     setSatelliteData(null);
     try {
-      const r = await fetch('/api/admin/lookup/satellite-ai', {
-        method: 'POST', headers: authHeaders, body: JSON.stringify({ address }),
+      const r = await fetch("/api/admin/lookup/satellite-ai", {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({ address }),
       });
       const data = await r.json();
-      if (data.error) { setSatelliteStatus({ type: 'err', msg: data.error }); return; }
+      if (data.error) {
+        setSatelliteStatus({ type: "err", msg: data.error });
+        return;
+      }
 
       setSatelliteData(data);
 
       const upd = {};
       if (data.lot_sqft) upd.lotSqFt = String(Math.round(data.lot_sqft));
-      if (data.bed_area_sqft) upd.bedArea = String(Math.round(data.bed_area_sqft));
+      if (data.bed_area_sqft)
+        upd.bedArea = String(Math.round(data.bed_area_sqft));
       if (data.palm_count) upd.palmCount = String(data.palm_count);
       if (data.tree_count) upd.treeCount = String(data.tree_count);
       if (data.shrub_density) upd.shrubDensity = data.shrub_density;
       if (data.tree_density) upd.treeDensity = data.tree_density;
-      if (data.landscape_complexity) upd.landscapeComplexity = data.landscape_complexity;
-      if (data.has_pool) upd.hasPool = 'YES';
-      if (data.has_pool_cage) upd.hasPoolCage = 'YES';
-      if (data.has_large_driveway) upd.hasLargeDriveway = 'YES';
-      if (data.near_water) upd.nearWater = 'YES';
+      if (data.landscape_complexity)
+        upd.landscapeComplexity = data.landscape_complexity;
+      if (data.has_pool) upd.hasPool = "YES";
+      if (data.has_pool_cage) upd.hasPoolCage = "YES";
+      if (data.has_large_driveway) upd.hasLargeDriveway = "YES";
+      if (data.near_water) upd.nearWater = "YES";
       if (data.property_type) upd.propertyType = data.property_type;
-      if (data.perimeter_linear_ft) upd.boracareSqft = String(Math.round(data.perimeter_linear_ft));
+      if (data.perimeter_linear_ft)
+        upd.boracareSqft = String(Math.round(data.perimeter_linear_ft));
 
       setForm((f) => ({ ...f, ...upd }));
 
       const verify = (data.fieldVerify || []).length;
-      const conf = data.confidence === 'high' ? 'HIGH' : data.confidence === 'medium' ? 'MEDIUM' : 'LOW';
+      const conf =
+        data.confidence === "high"
+          ? "HIGH"
+          : data.confidence === "medium"
+            ? "MEDIUM"
+            : "LOW";
       setSatelliteStatus({
-        type: 'ok',
-        msg: `AI Analysis complete — Confidence: ${conf} (${data.agreementPct || '?'}% model agreement)${verify > 0 ? ` · ${verify} field(s) flagged for field verification` : ''}`,
+        type: "ok",
+        msg: `AI Analysis complete — Confidence: ${conf} (${data.agreementPct || "?"}% model agreement)${verify > 0 ? ` · ${verify} field(s) flagged for field verification` : ""}`,
       });
     } catch (e) {
-      setSatelliteStatus({ type: 'err', msg: e.message });
+      setSatelliteStatus({ type: "err", msg: e.message });
     }
   }
 
@@ -863,68 +1192,77 @@ export default function EstimateToolViewV2({
     setGenerating(true);
     try {
       const selectedServices = [];
-      if (form.svcLawn) selectedServices.push('LAWN');
-      if (form.svcPest) selectedServices.push('PEST');
-      if (form.svcTs) selectedServices.push('TREE_SHRUB');
-      if (form.svcInjection) selectedServices.push('PALM_INJECTION');
-      if (form.svcMosquito) selectedServices.push('MOSQUITO');
-      if (form.svcTermiteBait) selectedServices.push('TERMITE_BAIT');
-      if (form.svcRodentBait) selectedServices.push('RODENT_BAIT');
-      if (form.svcOnetimePest) selectedServices.push('OT_PEST');
-      if (form.svcOnetimeLawn) selectedServices.push('OT_LAWN');
-      if (form.svcOnetimeMosquito) selectedServices.push('OT_MOSQUITO');
-      if (form.svcPlugging) selectedServices.push('PLUGGING');
-      if (form.svcTopdress) selectedServices.push('TOPDRESS');
-      if (form.svcDethatch) selectedServices.push('DETHATCH');
-      if (form.svcTrenching) selectedServices.push('TRENCHING');
-      if (form.svcBoracare) selectedServices.push('BORACARE');
-      if (form.svcPreslab) selectedServices.push('PRESLAB');
-      if (form.svcFoam) selectedServices.push('FOAM');
-      if (form.svcRodentTrap) selectedServices.push('RODENT_TRAP');
-      if (form.svcRodentSanitation) selectedServices.push('RODENT_SANITATION');
-      if (form.svcFlea) selectedServices.push('FLEA');
-      if (form.svcWasp) selectedServices.push('STING');
-      if (form.svcRoach) selectedServices.push('ROACH');
-      if (form.svcBedbug) selectedServices.push('BEDBUG');
-      if (form.svcExclusion) selectedServices.push('EXCLUSION');
+      if (form.svcLawn) selectedServices.push("LAWN");
+      if (form.svcPest) selectedServices.push("PEST");
+      if (form.svcTs) selectedServices.push("TREE_SHRUB");
+      if (form.svcInjection) selectedServices.push("PALM_INJECTION");
+      if (form.svcMosquito) selectedServices.push("MOSQUITO");
+      if (form.svcTermiteBait) selectedServices.push("TERMITE_BAIT");
+      if (form.svcRodentBait) selectedServices.push("RODENT_BAIT");
+      if (form.svcOnetimePest) selectedServices.push("OT_PEST");
+      if (form.svcOnetimeLawn) selectedServices.push("OT_LAWN");
+      if (form.svcOnetimeMosquito) selectedServices.push("OT_MOSQUITO");
+      if (form.svcPlugging) selectedServices.push("PLUGGING");
+      if (form.svcTopdress) selectedServices.push("TOPDRESS");
+      if (form.svcDethatch) selectedServices.push("DETHATCH");
+      if (form.svcTrenching) selectedServices.push("TRENCHING");
+      if (form.svcBoracare) selectedServices.push("BORACARE");
+      if (form.svcPreslab) selectedServices.push("PRESLAB");
+      if (form.svcFoam) selectedServices.push("FOAM");
+      if (form.svcRodentTrap) selectedServices.push("RODENT_TRAP");
+      if (form.svcRodentSanitation) selectedServices.push("RODENT_SANITATION");
+      if (form.svcFlea) selectedServices.push("FLEA");
+      if (form.svcWasp) selectedServices.push("STING");
+      if (form.svcRoach) selectedServices.push("ROACH");
+      if (form.svcBedbug) selectedServices.push("BEDBUG");
+      if (form.svcExclusion) selectedServices.push("EXCLUSION");
 
-      const manualDiscountType = overrides.manualDiscountType ?? form.manualDiscountType;
-      const manualDiscountValue = Number(overrides.manualDiscountValue ?? form.manualDiscountValue) || 0;
-      const manualDiscount = (manualDiscountType && manualDiscountType !== 'NONE' && manualDiscountValue > 0)
-        ? { type: manualDiscountType, value: manualDiscountValue, label: form.manualDiscountLabel || '' }
-        : null;
+      const manualDiscountType =
+        overrides.manualDiscountType ?? form.manualDiscountType;
+      const manualDiscountValue =
+        Number(overrides.manualDiscountValue ?? form.manualDiscountValue) || 0;
+      const manualDiscount =
+        manualDiscountType &&
+        manualDiscountType !== "NONE" &&
+        manualDiscountValue > 0
+          ? {
+              type: manualDiscountType,
+              value: manualDiscountValue,
+              label: form.manualDiscountLabel || "",
+            }
+          : null;
 
       const options = {
-        grassType: form.grassType || 'st_augustine',
+        grassType: form.grassType || "st_augustine",
         lawnFreq: parseInt(overrides.lawnFreq ?? form.lawnFreq, 10) || 9,
         pestFreq: parseInt(overrides.pestFreq ?? form.pestFreq, 10) || 4,
         manualDiscount,
-        roachModifier: form.roachModifier || 'NONE',
-        mosquitoProgram: form.mosquitoProgram || 'monthly',
+        roachModifier: form.roachModifier || "NONE",
+        mosquitoProgram: form.mosquitoProgram || "monthly",
         mosquitoStationCount: parseInt(form.mosquitoStationCount, 10) || 0,
         mosquitoDunkCount: parseInt(form.mosquitoDunkCount, 10) || 0,
-        urgency: form.urgency || 'ROUTINE',
-        afterHours: form.isAfterHours === 'YES',
-        recurringCustomer: form.isRecurringCustomer === 'YES',
+        urgency: form.urgency || "ROUTINE",
+        afterHours: form.isAfterHours === "YES",
+        recurringCustomer: form.isRecurringCustomer === "YES",
         plugArea: parseInt(form.plugArea, 10) || 0,
         plugSpacing: parseInt(form.plugSpacing, 10) || 12,
         boracareSqft: parseInt(form.boracareSqft, 10) || 0,
         preslabSqft: parseInt(form.preslabSqft, 10) || 0,
-        preslabWarranty: form.preslabWarranty || 'BASIC',
-        preslabVolume: form.preslabVolume || 'NONE',
+        preslabWarranty: form.preslabWarranty || "BASIC",
+        preslabVolume: form.preslabVolume || "NONE",
         foamPoints: parseInt(form.foamPoints, 10) || 5,
         bedbugRooms: parseInt(form.bedbugRooms, 10) || 1,
-        bedbugMethod: form.bedbugMethod || 'BOTH',
+        bedbugMethod: form.bedbugMethod || "BOTH",
         exclSimple: parseInt(form.exclSimple, 10) || 0,
         exclModerate: parseInt(form.exclModerate, 10) || 0,
         exclAdvanced: parseInt(form.exclAdvanced, 10) || 0,
-        exclWaiveInspection: form.exclWaive === 'YES',
-        sanitationTier: form.sanitationTier || 'standard',
+        exclWaiveInspection: form.exclWaive === "YES",
+        sanitationTier: form.sanitationTier || "standard",
         sanitationArea: parseInt(form.sanitationArea, 10) || 0,
         sanitationDebris: parseInt(form.sanitationDebris, 10) || 0,
-        sanitationAccess: form.sanitationAccess || 'normal',
-        roachType: form.roachType || 'REGULAR',
-        onetimeLawnType: form.otLawnType || 'FERT',
+        sanitationAccess: form.sanitationAccess || "normal",
+        roachType: form.roachType || "REGULAR",
+        onetimeLawnType: form.otLawnType || "FERT",
       };
 
       const manualNumber = (value, fallback = 0) => {
@@ -932,53 +1270,92 @@ export default function EstimateToolViewV2({
         return Number.isFinite(n) ? n : fallback;
       };
       const baseProfile = enrichedProfile || {};
-      const treeCount = manualNumber(form.treeCount, Number(baseProfile.treeCount || baseProfile.estimatedTreeCount) || 0);
+      const treeCount = manualNumber(
+        form.treeCount,
+        Number(baseProfile.treeCount || baseProfile.estimatedTreeCount) || 0,
+      );
       const profile = {
         ...baseProfile,
-        homeSqFt: manualNumber(form.homeSqFt, Number(baseProfile.homeSqFt || baseProfile.squareFootage) || 0),
+        homeSqFt: manualNumber(
+          form.homeSqFt,
+          Number(baseProfile.homeSqFt || baseProfile.squareFootage) || 0,
+        ),
         lotSqFt: manualNumber(form.lotSqFt, Number(baseProfile.lotSqFt) || 0),
         stories: manualNumber(form.stories, Number(baseProfile.stories) || 1),
-        estimatedBedAreaSf: manualNumber(form.bedArea, Number(baseProfile.estimatedBedAreaSf) || 0),
-        estimatedPalmCount: manualNumber(form.palmCount, Number(baseProfile.estimatedPalmCount || baseProfile.palmCount) || 0),
+        estimatedBedAreaSf: manualNumber(
+          form.bedArea,
+          Number(baseProfile.estimatedBedAreaSf) || 0,
+        ),
+        estimatedPalmCount: manualNumber(
+          form.palmCount,
+          Number(baseProfile.estimatedPalmCount || baseProfile.palmCount) || 0,
+        ),
         estimatedTreeCount: treeCount,
         treeCount,
       };
-      if (profile.homeSqFt) profile.footprint = Math.round(profile.homeSqFt / (profile.stories || 1));
-      profile.pool = form.hasPool === 'YES' ? 'YES' : 'NO';
-      profile.poolCage = form.hasPoolCage === 'YES' ? 'YES' : 'NO';
-      profile.poolCageSize = form.hasPoolCage === 'YES' ? (form.poolCageSize || 'MEDIUM') : 'NONE';
-      profile.poolCageSizeInferred = !!baseProfile.poolCageSizeInferred && !form._poolCageSizeEdited && profile.poolCage === 'YES' && profile.poolCageSize === 'MEDIUM';
-      profile.storiesSource = form._storiesEdited ? 'manual' : baseProfile.storiesSource;
-      profile.hasLargeDriveway = form.hasLargeDriveway === 'YES';
+      if (profile.homeSqFt)
+        profile.footprint = Math.round(
+          profile.homeSqFt / (profile.stories || 1),
+        );
+      profile.pool = form.hasPool === "YES" ? "YES" : "NO";
+      profile.poolCage = form.hasPoolCage === "YES" ? "YES" : "NO";
+      profile.poolCageSize =
+        form.hasPoolCage === "YES" ? form.poolCageSize || "MEDIUM" : "NONE";
+      profile.poolCageSizeInferred =
+        !!baseProfile.poolCageSizeInferred &&
+        !form._poolCageSizeEdited &&
+        profile.poolCage === "YES" &&
+        profile.poolCageSize === "MEDIUM";
+      profile.storiesSource = form._storiesEdited
+        ? "manual"
+        : baseProfile.storiesSource;
+      profile.hasLargeDriveway = form.hasLargeDriveway === "YES";
       profile.shrubDensity = form.shrubDensity || profile.shrubDensity;
       profile.treeDensity = form.treeDensity || profile.treeDensity;
-      profile.landscapeComplexity = form.landscapeComplexity || profile.landscapeComplexity;
-      profile.nearWater = form.nearWater === 'YES' ? 'YES' : 'NO';
+      profile.landscapeComplexity =
+        form.landscapeComplexity || profile.landscapeComplexity;
+      profile.nearWater = form.nearWater === "YES" ? "YES" : "NO";
       profile.propertyType = form.propertyType || profile.propertyType;
 
       if (!profile.homeSqFt) profile.homeSqFt = 0;
       if (!profile.lotSqFt) profile.lotSqFt = 0;
       if (profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
-        alert('Enter home sq ft or lot size.');
+        alert("Enter home sq ft or lot size.");
         return null;
       }
-      if ((form.svcLawn || form.svcOnetimeLawn) && profile.lotSqFt <= 0 && !profile.estimatedTurfSf) {
-        alert('Enter lot size or run Property Lookup for lawn pricing.');
+      if (
+        (form.svcLawn || form.svcOnetimeLawn) &&
+        profile.lotSqFt <= 0 &&
+        !profile.estimatedTurfSf
+      ) {
+        alert("Enter lot size or run Property Lookup for lawn pricing.");
         return null;
       }
 
-      const r = await fetch('/api/admin/estimator/calculate-estimate', {
-        method: 'POST', headers: authHeaders,
+      const r = await fetch("/api/admin/estimator/calculate-estimate", {
+        method: "POST",
+        headers: authHeaders,
         body: JSON.stringify({ profile, selectedServices, options }),
       });
-      if (!r.ok) throw new Error(await summarizeEstimateResponseFailure(r, 'Estimate calculation failed'));
+      if (!r.ok)
+        throw new Error(
+          await summarizeEstimateResponseFailure(
+            r,
+            "Estimate calculation failed",
+          ),
+        );
       const result = await r.json();
-      if (result.error) { alert(result.error); setLookupStatus((s) => ({ ...s, type: 'err', msg: result.error })); return null; }
+      if (result.error) {
+        alert(result.error);
+        setLookupStatus((s) => ({ ...s, type: "err", msg: result.error }));
+        return null;
+      }
 
       if (!result.modifiers) {
         const p = result.property || profile || {};
         const mods = [];
-        const add = (svc, label, impact, type) => mods.push({ service: svc, label, impact, type });
+        const add = (svc, label, impact, type) =>
+          mods.push({ service: svc, label, impact, type });
         const interp = (v, b) => {
           if (v <= b[0].at) return b[0].adj;
           if (v >= b[b.length - 1].at) return b[b.length - 1].adj;
@@ -995,44 +1372,83 @@ export default function EstimateToolViewV2({
         const homeSf = p.homeSqFt || p.squareFootage || 0;
         const stories = p.stories || 1;
         const fp = p.footprint || Math.round(homeSf / stories);
-        const fpAdj = interp(fp, [{ at: 800, adj: -15 }, { at: 1200, adj: -10 }, { at: 1500, adj: -5 }, { at: 2000, adj: 0 }, { at: 2500, adj: 3 }, { at: 3000, adj: 6 }, { at: 4000, adj: 10 }, { at: 5500, adj: 16 }]);
-        add('property', `Home: ${homeSf.toLocaleString()} sq ft · ${stories} story`, 0, 'info');
-        add('pest', `Footprint: ${fp.toLocaleString()} sq ft → ${fpAdj >= 0 ? '+' : ''}$${fpAdj}/visit`, fpAdj, fpAdj > 0 ? 'up' : fpAdj < 0 ? 'down' : 'info');
-        if (p.poolCage === 'YES') {
-          const cageSize = String(p.poolCageSize || 'MEDIUM').toUpperCase();
-          const cageAdj = { SMALL: 5, MEDIUM: 8, LARGE: 12, OVERSIZED: 18 }[cageSize] || 8;
-          add('pest', `Pool cage (${cageSize.toLowerCase()}): +$${cageAdj}/visit`, cageAdj, 'up');
-        }
-        else if (p.pool === 'YES') add('pest', 'Pool (no cage): $0/visit', 0, 'info');
-        else add('pest', 'No pool: $0/visit', 0, 'info');
+        const fpAdj = interp(fp, [
+          { at: 800, adj: -15 },
+          { at: 1200, adj: -10 },
+          { at: 1500, adj: -5 },
+          { at: 2000, adj: 0 },
+          { at: 2500, adj: 3 },
+          { at: 3000, adj: 6 },
+          { at: 4000, adj: 10 },
+          { at: 5500, adj: 16 },
+        ]);
+        add(
+          "property",
+          `Home: ${homeSf.toLocaleString()} sq ft · ${stories} story`,
+          0,
+          "info",
+        );
+        add(
+          "pest",
+          `Footprint: ${fp.toLocaleString()} sq ft → ${fpAdj >= 0 ? "+" : ""}$${fpAdj}/visit`,
+          fpAdj,
+          fpAdj > 0 ? "up" : fpAdj < 0 ? "down" : "info",
+        );
+        if (p.poolCage === "YES") {
+          const cageSize = String(p.poolCageSize || "MEDIUM").toUpperCase();
+          const cageAdj =
+            { SMALL: 5, MEDIUM: 8, LARGE: 12, OVERSIZED: 18 }[cageSize] || 8;
+          add(
+            "pest",
+            `Pool cage (${cageSize.toLowerCase()}): +$${cageAdj}/visit`,
+            cageAdj,
+            "up",
+          );
+        } else if (p.pool === "YES")
+          add("pest", "Pool (no cage): $0/visit", 0, "info");
+        else add("pest", "No pool: $0/visit", 0, "info");
         const sd = p.shrubDensity || p.shrubs;
-        if (sd === 'HEAVY') add('pest', 'Heavy shrubs: +$6/visit', 6, 'up');
-        else if (sd === 'MODERATE') add('pest', 'Moderate shrubs: $0/visit', 0, 'info');
-        else if (sd === 'LIGHT') add('pest', 'Light shrubs: -$5/visit', -5, 'down');
-        else add('pest', 'Shrubs: not specified', 0, 'info');
+        if (sd === "HEAVY") add("pest", "Heavy shrubs: +$6/visit", 6, "up");
+        else if (sd === "MODERATE")
+          add("pest", "Moderate shrubs: $0/visit", 0, "info");
+        else if (sd === "LIGHT")
+          add("pest", "Light shrubs: -$5/visit", -5, "down");
+        else add("pest", "Shrubs: not specified", 0, "info");
         const td = p.treeDensity || p.trees;
-        if (td === 'HEAVY') add('pest', 'Heavy trees: +$6/visit', 6, 'up');
-        else if (td === 'MODERATE') add('pest', 'Moderate trees: $0/visit', 0, 'info');
-        else if (td === 'LIGHT') add('pest', 'Light trees: -$5/visit', -5, 'down');
-        else add('pest', 'Trees: not specified', 0, 'info');
+        if (td === "HEAVY") add("pest", "Heavy trees: +$6/visit", 6, "up");
+        else if (td === "MODERATE")
+          add("pest", "Moderate trees: $0/visit", 0, "info");
+        else if (td === "LIGHT")
+          add("pest", "Light trees: -$5/visit", -5, "down");
+        else add("pest", "Trees: not specified", 0, "info");
         const lc = p.landscapeComplexity || p.complexity;
-        if (lc === 'COMPLEX') add('pest', 'Complex landscape: +$3/visit', 3, 'up');
-        else if (lc === 'SIMPLE') add('pest', 'Simple landscape: -$5/visit', -5, 'down');
-        else add('pest', `${lc || 'Simple'} landscape: $0/visit`, 0, 'info');
+        if (lc === "COMPLEX")
+          add("pest", "Complex landscape: +$3/visit", 3, "up");
+        else if (lc === "SIMPLE")
+          add("pest", "Simple landscape: -$5/visit", -5, "down");
+        else add("pest", `${lc || "Simple"} landscape: $0/visit`, 0, "info");
         const nw = p.nearWater || p.waterProximity;
-        if (nw && nw !== 'NONE' && nw !== 'NO' && nw !== false) add('pest', 'Near water: +$3/visit', 3, 'up');
-        else add('pest', 'No water nearby: $0/visit', 0, 'info');
-        if (p.hasLargeDriveway) add('pest', 'Large driveway: +$3/visit', 3, 'up');
-        if (p.yearBuilt) add('property', `Built: ${p.yearBuilt} · ${p.constructionMaterial || 'CBS'} · ${p.foundationType || 'Slab'} · ${p.roofType || 'Shingle'}`, 0, 'info');
+        if (nw && nw !== "NONE" && nw !== "NO" && nw !== false)
+          add("pest", "Near water: +$3/visit", 3, "up");
+        else add("pest", "No water nearby: $0/visit", 0, "info");
+        if (p.hasLargeDriveway)
+          add("pest", "Large driveway: +$3/visit", 3, "up");
+        if (p.yearBuilt)
+          add(
+            "property",
+            `Built: ${p.yearBuilt} · ${p.constructionMaterial || "CBS"} · ${p.foundationType || "Slab"} · ${p.roofType || "Shingle"}`,
+            0,
+            "info",
+          );
         result.modifiers = mods;
       }
 
       setEstimate(result);
       setSavedId(null);
-      setLookupStatus((s) => ({ ...s, type: 'ok' }));
+      setLookupStatus((s) => ({ ...s, type: "ok" }));
       return result;
     } catch (e) {
-      alert('Estimate calculation failed: ' + e.message);
+      alert("Estimate calculation failed: " + e.message);
       return null;
     } finally {
       setGenerating(false);
@@ -1042,49 +1458,72 @@ export default function EstimateToolViewV2({
   async function doSave() {
     if (!estimate) return null;
     const deliveryError = validateDeliveryOptions(form, estimate);
-    if (deliveryError) { alert(deliveryError); return null; }
+    if (deliveryError) {
+      alert(deliveryError);
+      return null;
+    }
     setSaving(true);
     try {
       const E = estimate;
-      const r = await fetch('/api/admin/estimates', {
-        method: 'POST', headers: authHeaders,
+      const r = await fetch("/api/admin/estimates", {
+        method: "POST",
+        headers: authHeaders,
         body: JSON.stringify({
           address: form.address,
-          customerName: form.customerName || '',
-          customerPhone: form.customerPhone || '',
-          customerEmail: form.customerEmail || '',
+          customerName: form.customerName || "",
+          customerPhone: form.customerPhone || "",
+          customerEmail: form.customerEmail || "",
           leadId: form.leadId || null,
           customerId: form.customerId || existingCustomerMatch?.id || null,
           estimateData: { inputs: form, result: E },
           monthlyTotal: E.recurring?.grandTotal || 0,
           annualTotal: (E.recurring?.grandTotal || 0) * 12,
           onetimeTotal: E.oneTime?.total || 0,
-          waveguardTier: E.recurring?.tier || 'Bronze',
-          notes: form.notes || '',
+          waveguardTier: E.recurring?.tier || "Bronze",
+          notes: form.notes || "",
           satelliteUrl: satelliteData?.imageUrl || null,
           showOneTimeOption: !!form.showOneTimeOption,
           billByInvoice: !!form.billByInvoice,
         }),
       });
-      if (!r.ok) throw new Error(await summarizeEstimateResponseFailure(r, 'Save failed'));
+      if (!r.ok)
+        throw new Error(
+          await summarizeEstimateResponseFailure(r, "Save failed"),
+        );
       const d = await r.json();
       const id = d.id || d.estimateId;
       setSavedId(id);
       return id;
-    } catch (e) { alert(e.message); return null; }
-    finally { setSaving(false); }
+    } catch (e) {
+      alert(e.message);
+      return null;
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function doSend(id, method) {
     const useId = id || savedId;
-    if (!useId) { alert('Save the estimate first.'); return; }
-    const sendMethod = method || 'both';
+    if (!useId) {
+      alert("Save the estimate first.");
+      return;
+    }
+    const sendMethod = method || "both";
     let scheduled = null;
     if (form.scheduleSend) {
-      if (!form.scheduledAt) { alert('Pick a send time.'); return; }
+      if (!form.scheduledAt) {
+        alert("Pick a send time.");
+        return;
+      }
       const when = new Date(form.scheduledAt);
-      if (isNaN(when.getTime())) { alert('Invalid send time.'); return; }
-      if (when <= new Date()) { alert('Send time must be in the future.'); return; }
+      if (isNaN(when.getTime())) {
+        alert("Invalid send time.");
+        return;
+      }
+      if (when <= new Date()) {
+        alert("Send time must be in the future.");
+        return;
+      }
       // datetime-local has no timezone; serialize the instant the user picked
       // (browser-local) to an unambiguous ISO string so the server doesn't
       // re-parse "2026-04-26T03:48" as UTC and reject it as already past.
@@ -1093,67 +1532,112 @@ export default function EstimateToolViewV2({
     setSending(true);
     try {
       const r = await fetch(`/api/admin/estimates/${useId}/send`, {
-        method: 'POST', headers: authHeaders,
+        method: "POST",
+        headers: authHeaders,
         body: JSON.stringify({ sendMethod, scheduledAt: scheduled }),
       });
       const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(summarizeEstimateSend(d) || `HTTP ${r.status}`);
-      const label = sendMethod === 'sms' ? 'SMS' : sendMethod === 'email' ? 'email' : 'SMS & email';
+      if (!r.ok)
+        throw new Error(summarizeEstimateSend(d) || `HTTP ${r.status}`);
+      const label =
+        sendMethod === "sms"
+          ? "SMS"
+          : sendMethod === "email"
+            ? "email"
+            : "SMS & email";
       if (d.scheduled) {
         const when = new Date(d.scheduledAt).toLocaleString();
         alert(`Estimate scheduled via ${label} for ${when}`);
       } else if (d.channels) {
         const parts = [];
-        if (d.channels.sms) parts.push(d.channels.sms.ok ? 'SMS sent' : `SMS failed: ${d.channels.sms.error}`);
-        if (d.channels.email) parts.push(d.channels.email.ok ? 'Email sent' : `Email failed: ${d.channels.email.error}`);
-        const anyFail = (d.channels.sms && !d.channels.sms.ok) || (d.channels.email && !d.channels.email.ok);
-        alert((anyFail ? 'Send had issues: ' : 'Sent: ') + parts.join(' / '));
+        if (d.channels.sms)
+          parts.push(
+            d.channels.sms.ok
+              ? "SMS sent"
+              : `SMS failed: ${d.channels.sms.error}`,
+          );
+        if (d.channels.email)
+          parts.push(
+            d.channels.email.ok
+              ? "Email sent"
+              : `Email failed: ${d.channels.email.error}`,
+          );
+        const anyFail =
+          (d.channels.sms && !d.channels.sms.ok) ||
+          (d.channels.email && !d.channels.email.ok);
+        alert((anyFail ? "Send had issues: " : "Sent: ") + parts.join(" / "));
       } else {
         alert(`Estimate sent via ${label}!`);
       }
-    } catch (e) { alert(e.message); }
+    } catch (e) {
+      alert(e.message);
+    }
     setSending(false);
   }
 
   function nextEstimate() {
     setForm((f) => ({
       ...f,
-      address: '', homeSqFt: '', stories: '1', lotSqFt: '', propertyType: 'Single Family',
-      hasPool: 'NO', hasPoolCage: 'NO', poolCageSize: 'MEDIUM', hasLargeDriveway: 'NO', nearWater: 'NO',
-      shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE',
-      urgency: 'ROUTINE', isAfterHours: 'NO', isRecurringCustomer: 'NO',
-      bedArea: '', palmCount: '', treeCount: '',
-      boracareSqft: '', preslabSqft: '',
-      customerId: '',
-      leadId: '',
-      customerName: '', customerPhone: '', customerEmail: '',
-      leadServiceInterest: '',
-      _boracareAuto: false, _preslabAuto: false,
+      address: "",
+      homeSqFt: "",
+      stories: "1",
+      lotSqFt: "",
+      propertyType: "Single Family",
+      hasPool: "NO",
+      hasPoolCage: "NO",
+      poolCageSize: "MEDIUM",
+      hasLargeDriveway: "NO",
+      nearWater: "NO",
+      shrubDensity: "MODERATE",
+      treeDensity: "MODERATE",
+      landscapeComplexity: "MODERATE",
+      urgency: "ROUTINE",
+      isAfterHours: "NO",
+      isRecurringCustomer: "NO",
+      bedArea: "",
+      palmCount: "",
+      treeCount: "",
+      boracareSqft: "",
+      preslabSqft: "",
+      customerId: "",
+      leadId: "",
+      customerName: "",
+      customerPhone: "",
+      customerEmail: "",
+      leadServiceInterest: "",
+      _boracareAuto: false,
+      _preslabAuto: false,
     }));
     setEstimate(null);
     setSavedId(null);
     setShowSendForm(false);
-    setLookupStatus({ type: '', msg: '' });
+    setLookupStatus({ type: "", msg: "" });
     setEnrichedProfile(null);
     setExistingCustomerMatch(null);
-    setSatelliteStatus({ type: '', msg: '' });
+    setSatelliteStatus({ type: "", msg: "" });
     setSatelliteData(null);
-    setCustomerSearch('');
+    setCustomerSearch("");
     setCustomers([]);
   }
 
   async function saveAndSend(method) {
     if (generating || saving || sending) return;
-    if (!estimate) { alert('Click "Generate Estimate" first.'); return; }
+    if (!estimate) {
+      alert('Click "Generate Estimate" first.');
+      return;
+    }
     if (form.scheduleSend) {
-      if (!form.scheduledAt) { alert('Pick a send time.'); return; }
+      if (!form.scheduledAt) {
+        alert("Pick a send time.");
+        return;
+      }
       const when = new Date(form.scheduledAt);
       if (isNaN(when.getTime()) || when <= new Date()) {
-        alert('Send time must be a valid future date/time.');
+        alert("Send time must be a valid future date/time.");
         return;
       }
     }
-    const id = savedId || await doSave();
+    const id = savedId || (await doSave());
     if (id) await doSend(id, method);
   }
 
@@ -1168,131 +1652,203 @@ export default function EstimateToolViewV2({
   // ═══════════════════════════════════════════════════════════════
   return (
     <FormCtx.Provider value={formCtx}>
-      <div className="max-w-[1440px] mx-auto px-4 md:px-7 pb-7 waves-roboto-scope" style={{ fontFamily: ROBOTO }}>
+      {" "}
+      <div
+        className="max-w-[1440px] mx-auto px-4 md:px-7 pb-7 waves-roboto-scope"
+        style={{ fontFamily: ROBOTO }}
+      >
+        {" "}
         <style>{`
           .waves-roboto-scope,
           .waves-roboto-scope * {
             font-family: ${ROBOTO} !important;
           }
-        `}</style>
+        `}</style>{" "}
         <div className="grid gap-7 grid-cols-1 lg:grid-cols-[440px_1fr]">
           {/* ═══ LEFT COLUMN: FORM ═══ */}
           <div className="space-y-4">
             {/* Customer Lookup */}
             <div>
-              <PanelTitle>Customer Lookup</PanelTitle>
+              {" "}
+              <PanelTitle>Customer Lookup</PanelTitle>{" "}
               <FieldV2 label="Search customers">
+                {" "}
                 <input
                   type="text"
                   value={customerSearch}
                   onChange={(e) => setCustomerSearch(e.target.value)}
                   placeholder="Name, phone, email, or address..."
                   className={INPUT_CLS}
-                />
+                />{" "}
               </FieldV2>
               {customers.length > 0 && (
                 <div className="mb-3 border-hairline border-zinc-300 rounded-xs bg-white max-h-72 overflow-y-auto">
                   {customers.slice(0, 8).map((c) => {
-                    const name = `${c.firstName || ''} ${c.lastName || ''}`.trim() || '(no name)';
+                    const name =
+                      `${c.firstName || ""} ${c.lastName || ""}`.trim() ||
+                      "(no name)";
                     return (
                       <button
                         key={c.id}
                         type="button"
                         onClick={() => {
-                          const hasActivePlan = c.tier && c.tier !== 'null' && c.monthlyRate > 0;
+                          const hasActivePlan =
+                            c.tier && c.tier !== "null" && c.monthlyRate > 0;
                           setForm((f) => ({
                             ...f,
-                            customerId: c.id || '',
+                            customerId: c.id || "",
                             address: c.address || f.address,
                             customerName: name,
-                            customerPhone: c.phone || f.customerPhone || '',
-                            customerEmail: c.email || f.customerEmail || '',
-                            isRecurringCustomer: hasActivePlan ? 'YES' : f.isRecurringCustomer,
+                            customerPhone: c.phone || f.customerPhone || "",
+                            customerEmail: c.email || f.customerEmail || "",
+                            isRecurringCustomer: hasActivePlan
+                              ? "YES"
+                              : f.isRecurringCustomer,
                           }));
                           setExistingCustomerMatch(c);
-                          setCustomerSearch('');
+                          setCustomerSearch("");
                           setCustomers([]);
                         }}
                         className="w-full text-left px-3 py-2 border-b-hairline border-zinc-200 last:border-b-0 hover:bg-zinc-50 cursor-pointer"
                       >
-                        <div className="text-14 text-zinc-900 font-medium">{name}</div>
+                        {" "}
+                        <div className="text-14 text-zinc-900 font-medium">
+                          {name}
+                        </div>{" "}
                         <div className="text-12 text-ink-secondary">
-                          {c.address || 'no address on file'}
-                          {c.phone ? ` · ${c.phone}` : ''}
-                        </div>
+                          {c.address || "no address on file"}
+                          {c.phone ? ` · ${c.phone}` : ""}
+                        </div>{" "}
                       </button>
                     );
                   })}
                 </div>
               )}
             </div>
-
             {/* Property Lookup */}
             <div>
-              <PanelTitle>Property Lookup</PanelTitle>
+              {" "}
+              <PanelTitle>Property Lookup</PanelTitle>{" "}
               <FieldV2 label="Address">
+                {" "}
                 <input
                   ref={addressRef}
                   type="text"
                   value={form.address}
-                  onChange={(e) => set('address', e.target.value)}
+                  onChange={(e) => set("address", e.target.value)}
                   placeholder="Start typing an address..."
                   className={INPUT_CLS}
-                />
+                />{" "}
               </FieldV2>
               {form.leadServiceInterest && (
                 <div className="mb-3 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
-                  Lead interest: <strong>{form.leadServiceInterest}</strong>
+                  Lead interest:{" "}
+                  <strong>{form.leadServiceInterest}</strong>{" "}
                 </div>
               )}
-              <StatusLine status={lookupStatus} />
+              <StatusLine status={lookupStatus} />{" "}
               <div className="grid grid-cols-2 gap-2 mb-2">
-                <Button onClick={doLookup} variant="primary" size="md">Property Lookup</Button>
+                {" "}
+                <Button onClick={doLookup} variant="primary" size="md">
+                  Property Lookup
+                </Button>{" "}
                 <Button
                   variant="secondary"
                   size="md"
                   onClick={() => {
                     setForm((f) => ({
-                      ...f, address: '', homeSqFt: '', lotSqFt: '', stories: '1', propertyType: 'Single Family',
-                      hasPool: 'NO', hasPoolCage: 'NO', poolCageSize: 'MEDIUM', hasLargeDriveway: 'NO',
-                      shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE',
-                      nearWater: 'NO', bedArea: '', palmCount: '', treeCount: '',
+                      ...f,
+                      address: "",
+                      homeSqFt: "",
+                      lotSqFt: "",
+                      stories: "1",
+                      propertyType: "Single Family",
+                      hasPool: "NO",
+                      hasPoolCage: "NO",
+                      poolCageSize: "MEDIUM",
+                      hasLargeDriveway: "NO",
+                      shrubDensity: "MODERATE",
+                      treeDensity: "MODERATE",
+                      landscapeComplexity: "MODERATE",
+                      nearWater: "NO",
+                      bedArea: "",
+                      palmCount: "",
+                      treeCount: "",
                     }));
-                    setLookupStatus({ type: '', msg: '' });
-                    setSatelliteStatus({ type: '', msg: '' });
+                    setLookupStatus({ type: "", msg: "" });
+                    setSatelliteStatus({ type: "", msg: "" });
                     setSatelliteData(null);
                     setEstimate(null);
                   }}
                 >
                   Clear All
-                </Button>
-              </div>
+                </Button>{" "}
+              </div>{" "}
               <StatusLine status={satelliteStatus} />
               {enrichedProfile?.propertyDataQuality && (
                 <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs">
+                  {" "}
                   <div className="flex items-center justify-between gap-3 mb-1">
-                    <div className="text-11 font-semibold uppercase tracking-label text-ink-secondary">Property Data Quality</div>
-                    <div className={`text-11 font-semibold uppercase tracking-label ${
-                      enrichedProfile.propertyDataQuality.level === 'high' ? 'text-emerald-700' :
-                        enrichedProfile.propertyDataQuality.level === 'medium' ? 'text-amber-700' : 'text-alert-fg'
-                    }`}>
-                      {enrichedProfile.propertyDataQuality.level || 'unknown'} · {enrichedProfile.propertyDataQuality.score || 0}/100
-                    </div>
-                  </div>
+                    {" "}
+                    <div className="text-11 font-semibold uppercase tracking-label text-ink-secondary">
+                      Property Data Quality
+                    </div>{" "}
+                    <div
+                      className={`text-11 font-semibold uppercase tracking-label ${
+                        enrichedProfile.propertyDataQuality.level === "high"
+                          ? "text-emerald-700"
+                          : enrichedProfile.propertyDataQuality.level ===
+                              "medium"
+                            ? "text-amber-700"
+                            : "text-alert-fg"
+                      }`}
+                    >
+                      {enrichedProfile.propertyDataQuality.level || "unknown"} ·{" "}
+                      {enrichedProfile.propertyDataQuality.score || 0}/100
+                    </div>{" "}
+                  </div>{" "}
                   <div className="text-12 text-ink-secondary">
-                    {(enrichedProfile.propertyProviders || []).join(' + ') || 'No provider'} · {(enrichedProfile.propertyDataQuality.sourceTypes || []).join(', ') || 'no source type'} · {enrichedProfile.propertyDataQuality.verifiedCriticalFields || 0}/{enrichedProfile.propertyDataQuality.totalCriticalFields || 4} critical fields verified
+                    {(enrichedProfile.propertyProviders || []).join(" + ") ||
+                      "No provider"}{" "}
+                    ·{" "}
+                    {(
+                      enrichedProfile.propertyDataQuality.sourceTypes || []
+                    ).join(", ") || "no source type"}{" "}
+                    ·{" "}
+                    {enrichedProfile.propertyDataQuality
+                      .verifiedCriticalFields || 0}
+                    /
+                    {enrichedProfile.propertyDataQuality.totalCriticalFields ||
+                      4}{" "}
+                    critical fields verified
                   </div>
                   {enrichedProfile.fieldEvidence && (
                     <div className="mt-2 grid grid-cols-2 gap-1">
-                      {['squareFootage', 'lotSize', 'stories', 'propertyType'].map((field) => {
+                      {[
+                        "squareFootage",
+                        "lotSize",
+                        "stories",
+                        "propertyType",
+                      ].map((field) => {
                         const item = enrichedProfile.fieldEvidence[field];
                         if (!item) return null;
                         return (
-                          <div key={field} className="text-11 text-ink-tertiary truncate">
-                            <span className={item.fieldVerify ? 'text-alert-fg font-medium' : 'text-emerald-700 font-medium'}>
-                              {item.fieldVerify ? 'Verify' : 'Trusted'}
-                            </span>
-                            {' '}{field.replace(/([A-Z])/g, ' $1').toLowerCase()}: {item.sourceLabel || item.sourceType || 'source'}
+                          <div
+                            key={field}
+                            className="text-11 text-ink-tertiary truncate"
+                          >
+                            {" "}
+                            <span
+                              className={
+                                item.fieldVerify
+                                  ? "text-alert-fg font-medium"
+                                  : "text-emerald-700 font-medium"
+                              }
+                            >
+                              {item.fieldVerify ? "Verify" : "Trusted"}
+                            </span>{" "}
+                            {field.replace(/([A-Z])/g, " $1").toLowerCase()}:{" "}
+                            {item.sourceLabel || item.sourceType || "source"}
                           </div>
                         );
                       })}
@@ -1304,200 +1860,464 @@ export default function EstimateToolViewV2({
                 <div className="mb-2.5 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs">
                   {enrichedProfile.fieldVerifyFlags.map((flag, i) => (
                     <div key={i} className="text-12 text-alert-fg">
-                      ⚠ {typeof flag === 'string' ? flag.replace(/_/g, ' ') : (flag.field || flag.name || '').replace(/_/g, ' ')}
-                      {flag.reason ? ` — ${flag.reason}` : ''}
+                      {typeof flag === "string"
+                        ? flag.replace(/_/g, " ")
+                        : (flag.field || flag.name || "").replace(/_/g, " ")}
+                      {flag.reason ? ` — ${flag.reason}` : ""}
                     </div>
                   ))}
                 </div>
               )}
               {existingCustomerMatch && (
                 <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
+                  {" "}
                   <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900 mr-1.5 align-middle" />
-                  Existing customer: <strong>{existingCustomerMatch.firstName} {existingCustomerMatch.lastName}</strong>
-                  {existingCustomerMatch.tier && existingCustomerMatch.tier !== 'null' ? ' · Recurring plan' : ' · No active plan'}
-                  {existingCustomerMatch.tier && existingCustomerMatch.tier !== 'null' && existingCustomerMatch.monthlyRate > 0 ? ' · 15% loyalty discount applied' : ''}
+                  Existing customer:{" "}
+                  <strong>
+                    {existingCustomerMatch.firstName}{" "}
+                    {existingCustomerMatch.lastName}
+                  </strong>
+                  {existingCustomerMatch.tier &&
+                  existingCustomerMatch.tier !== "null"
+                    ? " · Recurring plan"
+                    : " · No active plan"}
+                  {existingCustomerMatch.tier &&
+                  existingCustomerMatch.tier !== "null" &&
+                  existingCustomerMatch.monthlyRate > 0
+                    ? " · 15% loyalty discount applied"
+                    : ""}
                 </div>
               )}
-              {satelliteData && (satelliteData.imageUrl || satelliteData.closeUrl) && (
-                <div className="mb-3">
-                  <div className="grid grid-cols-5 gap-1 mb-2">
-                    {satelliteData.microCloseUrl && (
+              {satelliteData &&
+                (satelliteData.imageUrl || satelliteData.closeUrl) && (
+                  <div className="mb-3">
+                    {" "}
+                    <div className="grid grid-cols-5 gap-1 mb-2">
+                      {satelliteData.microCloseUrl && (
+                        <div>
+                          {" "}
+                          <img
+                            src={satelliteData.microCloseUrl}
+                            alt="Micro close"
+                            className="w-full rounded-xs border border-zinc-900 aspect-square object-cover"
+                          />{" "}
+                          <div className="text-11 text-zinc-900 text-center mt-0.5 font-medium uppercase tracking-label">
+                            Micro
+                          </div>{" "}
+                        </div>
+                      )}
+                      {satelliteData.ultraCloseUrl && (
+                        <div>
+                          {" "}
+                          <img
+                            src={satelliteData.ultraCloseUrl}
+                            alt="Ultra close"
+                            className="w-full rounded-xs border border-zinc-900 aspect-square object-cover"
+                          />{" "}
+                          <div className="text-11 text-zinc-900 text-center mt-0.5 font-medium uppercase tracking-label">
+                            Ultra
+                          </div>{" "}
+                        </div>
+                      )}
+                      {satelliteData.superCloseUrl && (
+                        <div>
+                          {" "}
+                          <img
+                            src={satelliteData.superCloseUrl}
+                            alt="Super close"
+                            className="w-full rounded-xs border-hairline border-zinc-300 aspect-square object-cover"
+                          />{" "}
+                          <div className="text-11 text-ink-tertiary text-center mt-0.5 uppercase tracking-label">
+                            Detail
+                          </div>{" "}
+                        </div>
+                      )}
                       <div>
-                        <img src={satelliteData.microCloseUrl} alt="Micro close" className="w-full rounded-xs border border-zinc-900 aspect-square object-cover" />
-                        <div className="text-11 text-zinc-900 text-center mt-0.5 font-medium uppercase tracking-label">Micro</div>
+                        {" "}
+                        <img
+                          src={satelliteData.closeUrl || satelliteData.imageUrl}
+                          alt="Close view"
+                          className="w-full rounded-xs border-hairline border-zinc-300 aspect-square object-cover"
+                        />{" "}
+                        <div className="text-11 text-ink-tertiary text-center mt-0.5 uppercase tracking-label">
+                          Property
+                        </div>{" "}
                       </div>
-                    )}
-                    {satelliteData.ultraCloseUrl && (
-                      <div>
-                        <img src={satelliteData.ultraCloseUrl} alt="Ultra close" className="w-full rounded-xs border border-zinc-900 aspect-square object-cover" />
-                        <div className="text-11 text-zinc-900 text-center mt-0.5 font-medium uppercase tracking-label">Ultra</div>
-                      </div>
-                    )}
-                    {satelliteData.superCloseUrl && (
-                      <div>
-                        <img src={satelliteData.superCloseUrl} alt="Super close" className="w-full rounded-xs border-hairline border-zinc-300 aspect-square object-cover" />
-                        <div className="text-11 text-ink-tertiary text-center mt-0.5 uppercase tracking-label">Detail</div>
-                      </div>
-                    )}
-                    <div>
-                      <img src={satelliteData.closeUrl || satelliteData.imageUrl} alt="Close view" className="w-full rounded-xs border-hairline border-zinc-300 aspect-square object-cover" />
-                      <div className="text-11 text-ink-tertiary text-center mt-0.5 uppercase tracking-label">Property</div>
+                      {satelliteData.wideUrl && (
+                        <div>
+                          {" "}
+                          <img
+                            src={satelliteData.wideUrl}
+                            alt="Area view"
+                            className="w-full rounded-xs border-hairline border-zinc-300 aspect-square object-cover"
+                          />{" "}
+                          <div className="text-11 text-ink-tertiary text-center mt-0.5 uppercase tracking-label">
+                            Area
+                          </div>{" "}
+                        </div>
+                      )}
                     </div>
-                    {satelliteData.wideUrl && (
-                      <div>
-                        <img src={satelliteData.wideUrl} alt="Area view" className="w-full rounded-xs border-hairline border-zinc-300 aspect-square object-cover" />
-                        <div className="text-11 text-ink-tertiary text-center mt-0.5 uppercase tracking-label">Area</div>
+                    {satelliteData.aiSources && (
+                      <div className="text-11 text-ink-secondary mb-1">
+                        AI Analysis: {satelliteData.aiSources.join(" + ")}{" "}
+                        {satelliteData.aiSources.length > 1
+                          ? "(multi-model)"
+                          : ""}
+                      </div>
+                    )}
+                    {satelliteData.fieldVerify?.length > 0 && (
+                      <div className="text-12 text-alert-fg font-medium px-3 py-1.5 bg-alert-bg rounded-xs">
+                        Field verify:{" "}
+                        {satelliteData.fieldVerify
+                          .map((f) =>
+                            typeof f === "string"
+                              ? f.replace(/_/g, " ")
+                              : f.field || "",
+                          )
+                          .join(", ")}
+                      </div>
+                    )}
+                    {satelliteData.notes && (
+                      <div className="text-11 text-ink-tertiary mt-1 italic">
+                        {satelliteData.notes}
                       </div>
                     )}
                   </div>
-                  {satelliteData.aiSources && (
-                    <div className="text-11 text-ink-secondary mb-1">
-                      AI Analysis: {satelliteData.aiSources.join(' + ')} {satelliteData.aiSources.length > 1 ? '(multi-model)' : ''}
-                    </div>
-                  )}
-                  {satelliteData.fieldVerify?.length > 0 && (
-                    <div className="text-12 text-alert-fg font-medium px-3 py-1.5 bg-alert-bg rounded-xs">
-                      Field verify: {satelliteData.fieldVerify.map((f) => typeof f === 'string' ? f.replace(/_/g, ' ') : (f.field || '')).join(', ')}
-                    </div>
-                  )}
-                  {satelliteData.notes && (
-                    <div className="text-11 text-ink-tertiary mt-1 italic">{satelliteData.notes}</div>
-                  )}
-                </div>
-              )}
+                )}
             </div>
-
             {/* Property Data */}
             <div>
-              <PanelTitle>Property Data</PanelTitle>
+              {" "}
+              <PanelTitle>Property Data</PanelTitle>{" "}
               <FieldV2 label="Property Type">
-                <SelectV2 k="propertyType" options={[
-                  { value: 'Single Family', label: 'Single Family ($0)' },
-                  { value: 'Townhome', label: 'Townhome — End Unit (-$8)' },
-                  { value: 'Townhome Interior', label: 'Townhome — Interior Unit (-$12)' },
-                  { value: 'Duplex', label: 'Duplex (-$10)' },
-                  { value: 'Condo', label: 'Condo — Ground Floor (-$18)' },
-                  { value: 'Condo Upper', label: 'Condo — Upper Floor (-$22)' },
-                  { value: 'Commercial', label: 'Commercial' },
-                ]} />
-              </FieldV2>
+                {" "}
+                <SelectV2
+                  k="propertyType"
+                  options={[
+                    { value: "Single Family", label: "Single Family ($0)" },
+                    { value: "Townhome", label: "Townhome — End Unit (-$8)" },
+                    {
+                      value: "Townhome Interior",
+                      label: "Townhome — Interior Unit (-$12)",
+                    },
+                    { value: "Duplex", label: "Duplex (-$10)" },
+                    { value: "Condo", label: "Condo — Ground Floor (-$18)" },
+                    {
+                      value: "Condo Upper",
+                      label: "Condo — Upper Floor (-$22)",
+                    },
+                    { value: "Commercial", label: "Commercial" },
+                  ]}
+                />{" "}
+              </FieldV2>{" "}
               <div className="grid grid-cols-2 gap-3">
-                <FieldV2 label="Home Sq Ft"><InputV2 k="homeSqFt" type="number" placeholder="2000" /></FieldV2>
+                {" "}
+                <FieldV2 label="Home Sq Ft">
+                  <InputV2 k="homeSqFt" type="number" placeholder="2000" />
+                </FieldV2>{" "}
                 <FieldV2 label="Stories">
+                  {" "}
                   <InputV2 k="stories" type="number" min="1" max="4" />
-                  {enrichedProfile?.storiesSource === 'default' && (
+                  {enrichedProfile?.storiesSource === "default" && (
                     <div className="mt-1 text-11 text-alert-fg">
-                      ⚠ Verify stories — no data source confirmed a floor count. Defaulted to 1; a 2-story home priced here would under-charge.
+                      Verify stories — no data source confirmed a floor count.
+                      Defaulted to 1; a 2-story home priced here would
+                      under-charge.
                     </div>
                   )}
-                </FieldV2>
-              </div>
-              <FieldV2 label="Lot Sq Ft"><InputV2 k="lotSqFt" type="number" placeholder="8000" /></FieldV2>
+                </FieldV2>{" "}
+              </div>{" "}
+              <FieldV2 label="Lot Sq Ft">
+                <InputV2 k="lotSqFt" type="number" placeholder="8000" />
+              </FieldV2>
               {form.svcTs && (
                 <>
+                  {" "}
                   <div className="grid grid-cols-2 gap-3">
-                    <FieldV2 label="Bed Area (sq ft)"><InputV2 k="bedArea" type="number" placeholder="Auto-estimate" /></FieldV2>
-                    <FieldV2 label="Palm Count"><InputV2 k="palmCount" type="number" placeholder="Auto" /></FieldV2>
-                  </div>
-                  <FieldV2 label="Tree Count"><InputV2 k="treeCount" type="number" placeholder="Auto" /></FieldV2>
+                    {" "}
+                    <FieldV2 label="Bed Area (sq ft)">
+                      <InputV2
+                        k="bedArea"
+                        type="number"
+                        placeholder="Auto-estimate"
+                      />
+                    </FieldV2>{" "}
+                    <FieldV2 label="Palm Count">
+                      <InputV2 k="palmCount" type="number" placeholder="Auto" />
+                    </FieldV2>{" "}
+                  </div>{" "}
+                  <FieldV2 label="Tree Count">
+                    <InputV2 k="treeCount" type="number" placeholder="Auto" />
+                  </FieldV2>{" "}
                 </>
               )}
             </div>
-
             {/* Property Features */}
             <div>
-              <PanelTitle>Property Features</PanelTitle>
+              {" "}
+              <PanelTitle>Property Features</PanelTitle>{" "}
               <div className="grid grid-cols-3 gap-3">
-                <FieldV2 label="Pool"><SelectV2 k="hasPool" options={[{ value: 'NO', label: 'No' }, { value: 'YES', label: 'Yes' }]} /></FieldV2>
-                <FieldV2 label="Pool Cage"><SelectV2 k="hasPoolCage" options={[{ value: 'NO', label: 'No' }, { value: 'YES', label: 'Yes' }]} /></FieldV2>
-                <FieldV2 label="Large Driveway"><SelectV2 k="hasLargeDriveway" options={[{ value: 'NO', label: 'No' }, { value: 'YES', label: 'Yes' }]} /></FieldV2>
+                {" "}
+                <FieldV2 label="Pool">
+                  <SelectV2
+                    k="hasPool"
+                    options={[
+                      { value: "NO", label: "No" },
+                      { value: "YES", label: "Yes" },
+                    ]}
+                  />
+                </FieldV2>{" "}
+                <FieldV2 label="Pool Cage">
+                  <SelectV2
+                    k="hasPoolCage"
+                    options={[
+                      { value: "NO", label: "No" },
+                      { value: "YES", label: "Yes" },
+                    ]}
+                  />
+                </FieldV2>{" "}
+                <FieldV2 label="Large Driveway">
+                  <SelectV2
+                    k="hasLargeDriveway"
+                    options={[
+                      { value: "NO", label: "No" },
+                      { value: "YES", label: "Yes" },
+                    ]}
+                  />
+                </FieldV2>{" "}
               </div>
-              {form.hasPoolCage === 'YES' && (
+              {form.hasPoolCage === "YES" && (
                 <FieldV2 label="Pool Cage Size">
-                  <SelectV2 k="poolCageSize" options={[
-                    { value: 'SMALL', label: 'Small (+$5)' },
-                    { value: 'MEDIUM', label: 'Medium (+$8)' },
-                    { value: 'LARGE', label: 'Large (+$12)' },
-                    { value: 'OVERSIZED', label: 'Oversized (+$18)' },
-                  ]} />
+                  {" "}
+                  <SelectV2
+                    k="poolCageSize"
+                    options={[
+                      { value: "SMALL", label: "Small (+$5)" },
+                      { value: "MEDIUM", label: "Medium (+$8)" },
+                      { value: "LARGE", label: "Large (+$12)" },
+                      { value: "OVERSIZED", label: "Oversized (+$18)" },
+                    ]}
+                  />{" "}
                 </FieldV2>
               )}
               <div className="grid grid-cols-3 gap-3">
-                <FieldV2 label="Shrub Density"><SelectV2 k="shrubDensity" options={[{ value: 'LIGHT', label: 'Light' }, { value: 'MODERATE', label: 'Moderate' }, { value: 'HEAVY', label: 'Heavy' }]} /></FieldV2>
-                <FieldV2 label="Tree Density"><SelectV2 k="treeDensity" options={[{ value: 'LIGHT', label: 'Light' }, { value: 'MODERATE', label: 'Moderate' }, { value: 'HEAVY', label: 'Heavy' }]} /></FieldV2>
-                <FieldV2 label="Complexity"><SelectV2 k="landscapeComplexity" options={[{ value: 'SIMPLE', label: 'Simple' }, { value: 'MODERATE', label: 'Moderate' }, { value: 'COMPLEX', label: 'Complex' }]} /></FieldV2>
-              </div>
+                {" "}
+                <FieldV2 label="Shrub Density">
+                  <SelectV2
+                    k="shrubDensity"
+                    options={[
+                      { value: "LIGHT", label: "Light" },
+                      { value: "MODERATE", label: "Moderate" },
+                      { value: "HEAVY", label: "Heavy" },
+                    ]}
+                  />
+                </FieldV2>{" "}
+                <FieldV2 label="Tree Density">
+                  <SelectV2
+                    k="treeDensity"
+                    options={[
+                      { value: "LIGHT", label: "Light" },
+                      { value: "MODERATE", label: "Moderate" },
+                      { value: "HEAVY", label: "Heavy" },
+                    ]}
+                  />
+                </FieldV2>{" "}
+                <FieldV2 label="Complexity">
+                  <SelectV2
+                    k="landscapeComplexity"
+                    options={[
+                      { value: "SIMPLE", label: "Simple" },
+                      { value: "MODERATE", label: "Moderate" },
+                      { value: "COMPLEX", label: "Complex" },
+                    ]}
+                  />
+                </FieldV2>{" "}
+              </div>{" "}
               <div className="grid grid-cols-2 gap-3">
-                <FieldV2 label="Near Water"><SelectV2 k="nearWater" options={[{ value: 'NO', label: 'No' }, { value: 'YES', label: 'Yes' }]} /></FieldV2>
-                <FieldV2 label="Urgency"><SelectV2 k="urgency" options={[{ value: 'ROUTINE', label: 'Routine' }, { value: 'SOON', label: 'Soon (same/next day)' }, { value: 'URGENT', label: 'Urgent (within 12 hrs)' }]} /></FieldV2>
-              </div>
+                {" "}
+                <FieldV2 label="Near Water">
+                  <SelectV2
+                    k="nearWater"
+                    options={[
+                      { value: "NO", label: "No" },
+                      { value: "YES", label: "Yes" },
+                    ]}
+                  />
+                </FieldV2>{" "}
+                <FieldV2 label="Urgency">
+                  <SelectV2
+                    k="urgency"
+                    options={[
+                      { value: "ROUTINE", label: "Routine" },
+                      { value: "SOON", label: "Soon (same/next day)" },
+                      { value: "URGENT", label: "Urgent (within 12 hrs)" },
+                    ]}
+                  />
+                </FieldV2>{" "}
+              </div>{" "}
               <div className="grid grid-cols-2 gap-3">
-                <FieldV2 label="After Hours"><SelectV2 k="isAfterHours" options={[{ value: 'NO', label: 'No — business hours' }, { value: 'YES', label: 'Yes — evenings/weekends/holidays' }]} /></FieldV2>
-                <FieldV2 label="Recurring Customer"><SelectV2 k="isRecurringCustomer" options={[{ value: 'NO', label: 'No — new customer' }, { value: 'YES', label: 'Yes — 15% off one-time' }]} /></FieldV2>
-              </div>
+                {" "}
+                <FieldV2 label="After Hours">
+                  <SelectV2
+                    k="isAfterHours"
+                    options={[
+                      { value: "NO", label: "No — business hours" },
+                      {
+                        value: "YES",
+                        label: "Yes — evenings/weekends/holidays",
+                      },
+                    ]}
+                  />
+                </FieldV2>{" "}
+                <FieldV2 label="Recurring Customer">
+                  <SelectV2
+                    k="isRecurringCustomer"
+                    options={[
+                      { value: "NO", label: "No — new customer" },
+                      { value: "YES", label: "Yes — 15% off one-time" },
+                    ]}
+                  />
+                </FieldV2>{" "}
+              </div>{" "}
             </div>
-
             {/* Services */}
             <div>
-              <PanelTitle>Services to Quote</PanelTitle>
-
-              <SubGroupLabel>Recurring Programs</SubGroupLabel>
+              {" "}
+              <PanelTitle>Services to Quote</PanelTitle>{" "}
+              <SubGroupLabel>Recurring Programs</SubGroupLabel>{" "}
               <CheckboxV2 k="svcLawn" label="Lawn Care" />
               {form.svcLawn && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  {" "}
                   <FieldV2 label="Grass Type / Track" className="mb-0">
-                    <SelectV2 k="grassType" options={[
-                      { value: 'st_augustine', label: 'St. Augustine' },
-                      { value: 'bermuda', label: 'Bermuda' },
-                      { value: 'zoysia', label: 'Zoysia' },
-                      { value: 'bahia', label: 'Bahia' },
-                    ]} />
-                  </FieldV2>
+                    {" "}
+                    <SelectV2
+                      k="grassType"
+                      options={[
+                        { value: "st_augustine", label: "St. Augustine" },
+                        { value: "bermuda", label: "Bermuda" },
+                        { value: "zoysia", label: "Zoysia" },
+                        { value: "bahia", label: "Bahia" },
+                      ]}
+                    />{" "}
+                  </FieldV2>{" "}
                 </div>
               )}
               <CheckboxV2 k="svcPest" label="Pest Control" />
               {form.svcPest && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  {" "}
                   <div className="grid grid-cols-2 gap-3">
-                    <FieldV2 label="Frequency"><SelectV2 k="pestFreq" options={[{ value: '4', label: 'Quarterly (4x/yr)' }, { value: '6', label: 'Bi-Monthly (6x/yr)' }, { value: '12', label: 'Monthly (12x/yr)' }]} /></FieldV2>
-                    <FieldV2 label="Cockroach Modifier"><SelectV2 k="roachModifier" options={[{ value: 'NONE', label: 'None' }, { value: 'REGULAR', label: 'Regular initial knockdown' }, { value: 'GERMAN', label: 'German initial knockdown' }]} /></FieldV2>
-                  </div>
+                    {" "}
+                    <FieldV2 label="Frequency">
+                      <SelectV2
+                        k="pestFreq"
+                        options={[
+                          { value: "4", label: "Quarterly (4x/yr)" },
+                          { value: "6", label: "Bi-Monthly (6x/yr)" },
+                          { value: "12", label: "Monthly (12x/yr)" },
+                        ]}
+                      />
+                    </FieldV2>{" "}
+                    <FieldV2 label="Cockroach Modifier">
+                      <SelectV2
+                        k="roachModifier"
+                        options={[
+                          { value: "NONE", label: "None" },
+                          {
+                            value: "REGULAR",
+                            label: "Regular initial knockdown",
+                          },
+                          {
+                            value: "GERMAN",
+                            label: "German initial knockdown",
+                          },
+                        ]}
+                      />
+                    </FieldV2>{" "}
+                  </div>{" "}
                 </div>
               )}
-              <CheckboxV2 k="svcTs" label="Tree & Shrub" />
-              <CheckboxV2 k="svcInjection" label="Palm Injection" />
+              <CheckboxV2 k="svcTs" label="Tree & Shrub" />{" "}
+              <CheckboxV2 k="svcInjection" label="Palm Injection" />{" "}
               <CheckboxV2 k="svcMosquito" label="Mosquito Program" />
               {(form.svcMosquito || form.svcOnetimeMosquito) && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
-                  <div className="text-13 font-semibold text-zinc-900 mb-2">Mosquito Estimate</div>
-                  <div className={`grid ${form.svcMosquito ? 'grid-cols-3' : 'grid-cols-2'} gap-3`}>
+                  {" "}
+                  <div className="text-13 font-semibold text-zinc-900 mb-2">
+                    Mosquito Estimate
+                  </div>{" "}
+                  <div
+                    className={`grid ${form.svcMosquito ? "grid-cols-3" : "grid-cols-2"} gap-3`}
+                  >
                     {form.svcMosquito && (
                       <FieldV2 label="Program">
-                        <SelectV2 k="mosquitoProgram" options={[
-                          { value: 'monthly', label: 'Monthly Essential Barrier' },
-                          { value: 'seasonal', label: 'Seasonal Essential Barrier' },
-                          { value: 'residual_monthly', label: 'Monthly Precision Barrier' },
-                          { value: 'residual_seasonal', label: 'Seasonal Precision Barrier' },
-                        ]} />
+                        {" "}
+                        <SelectV2
+                          k="mosquitoProgram"
+                          options={[
+                            {
+                              value: "monthly",
+                              label: "Monthly Essential Barrier",
+                            },
+                            {
+                              value: "seasonal",
+                              label: "Seasonal Essential Barrier",
+                            },
+                            {
+                              value: "residual_monthly",
+                              label: "Monthly Precision Barrier",
+                            },
+                            {
+                              value: "residual_seasonal",
+                              label: "Seasonal Precision Barrier",
+                            },
+                          ]}
+                        />{" "}
                       </FieldV2>
                     )}
                     <FieldV2 label="Mosquito Stations">
-                      <InputV2 k="mosquitoStationCount" type="number" min="0" placeholder="0" />
-                    </FieldV2>
+                      {" "}
+                      <InputV2
+                        k="mosquitoStationCount"
+                        type="number"
+                        min="0"
+                        placeholder="0"
+                      />{" "}
+                    </FieldV2>{" "}
                     <FieldV2 label="Bti Dunk Tablets">
-                      <InputV2 k="mosquitoDunkCount" type="number" min="0" placeholder="0" />
-                    </FieldV2>
+                      {" "}
+                      <InputV2
+                        k="mosquitoDunkCount"
+                        type="number"
+                        min="0"
+                        placeholder="0"
+                      />{" "}
+                    </FieldV2>{" "}
                   </div>
                   {form.svcMosquito && (
                     <div className="grid grid-cols-2 gap-3 mt-3 text-11 text-ink-secondary">
+                      {" "}
                       <div className="bg-white border-hairline border-zinc-200 rounded-xs p-3">
-                        <div className="text-12 font-semibold text-zinc-900 mb-1">Essential Barrier</div>
-                        Bifenthrin adulticide with pyriproxyfen + novaluron IGR support. Best fit for normal mosquito pressure, routine foliage resting sites, and budget-sensitive recurring service.
-                      </div>
+                        {" "}
+                        <div className="text-12 font-semibold text-zinc-900 mb-1">
+                          Essential Barrier
+                        </div>
+                        Bifenthrin adulticide with pyriproxyfen + novaluron IGR
+                        support. Best fit for normal mosquito pressure, routine
+                        foliage resting sites, and budget-sensitive recurring
+                        service.
+                      </div>{" "}
                       <div className="bg-white border-hairline border-zinc-200 rounded-xs p-3">
-                        <div className="text-12 font-semibold text-zinc-900 mb-1">Precision Barrier</div>
-                        Gamma-cyhalothrin adulticide with the same IGR support. Better fit for heavy vegetation, pool cages, water adjacency, and customers who need a stronger residual barrier.
-                      </div>
+                        {" "}
+                        <div className="text-12 font-semibold text-zinc-900 mb-1">
+                          Precision Barrier
+                        </div>
+                        Gamma-cyhalothrin adulticide with the same IGR support.
+                        Better fit for heavy vegetation, pool cages, water
+                        adjacency, and customers who need a stronger residual
+                        barrier.
+                      </div>{" "}
                     </div>
                   )}
                   <div className="mt-3 flex flex-wrap items-center gap-2 text-11 text-ink-secondary">
@@ -1507,7 +2327,7 @@ export default function EstimateToolViewV2({
                         variant="secondary"
                         size="sm"
                         className="h-7 px-2 text-11"
-                        onClick={() => applyMosquitoCustomerChoice('one_time')}
+                        onClick={() => applyMosquitoCustomerChoice("one_time")}
                       >
                         Offer one-time mosquito option
                       </Button>
@@ -1518,238 +2338,432 @@ export default function EstimateToolViewV2({
                         variant="secondary"
                         size="sm"
                         className="h-7 px-2 text-11"
-                        onClick={() => applyMosquitoCustomerChoice('recurring')}
+                        onClick={() => applyMosquitoCustomerChoice("recurring")}
                       >
                         Offer recurring mosquito option
                       </Button>
                     )}
-                    {form.svcMosquito && form.svcOnetimeMosquito && !form.showOneTimeOption && (
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        size="sm"
-                        className="h-7 px-2 text-11"
-                        onClick={() => applyMosquitoCustomerChoice('both')}
-                      >
-                        Enable customer choice
-                      </Button>
-                    )}
-                    {form.svcMosquito && form.svcOnetimeMosquito && form.showOneTimeOption && (
-                      <span>Customer will see recurring and one-time mosquito options.</span>
-                    )}
+                    {form.svcMosquito &&
+                      form.svcOnetimeMosquito &&
+                      !form.showOneTimeOption && (
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          className="h-7 px-2 text-11"
+                          onClick={() => applyMosquitoCustomerChoice("both")}
+                        >
+                          Enable customer choice
+                        </Button>
+                      )}
+                    {form.svcMosquito &&
+                      form.svcOnetimeMosquito &&
+                      form.showOneTimeOption && (
+                        <span>
+                          Customer will see recurring and one-time mosquito
+                          options.
+                        </span>
+                      )}
                   </div>
                   {(form.svcMosquito || form.svcOnetimeMosquito) && (
                     <div className="mt-3 bg-white border-hairline border-zinc-200 rounded-xs p-3">
+                      {" "}
                       <div className="flex items-center justify-between gap-3 mb-2">
-                        <div className="text-12 font-semibold text-zinc-900">Mosquito Protocol</div>
-                        <Badge variant="neutral" className="text-10">Estimate reference</Badge>
-                      </div>
+                        {" "}
+                        <div className="text-12 font-semibold text-zinc-900">
+                          Mosquito Protocol
+                        </div>{" "}
+                        <Badge variant="neutral" className="text-10">
+                          Estimate reference
+                        </Badge>{" "}
+                      </div>{" "}
                       <div className="grid gap-2">
                         {MOSQUITO_PROTOCOL_STEPS.map((step, index) => (
-                          <div key={step} className="flex gap-2 text-11 leading-snug text-ink-secondary">
+                          <div
+                            key={step}
+                            className="flex gap-2 text-11 leading-snug text-ink-secondary"
+                          >
+                            {" "}
                             <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-zinc-300 text-10 font-semibold text-zinc-700">
                               {index + 1}
-                            </span>
-                            <span>{step}</span>
+                            </span>{" "}
+                            <span>{step}</span>{" "}
                           </div>
                         ))}
-                      </div>
+                      </div>{" "}
                     </div>
                   )}
                   {mosquitoRecommendations.length > 0 && (
                     <div className="mt-3 bg-zinc-50 border-hairline border-zinc-300 rounded-xs p-3">
-                      <div className="text-12 font-semibold text-zinc-900 mb-2">Field Recommendations</div>
+                      {" "}
+                      <div className="text-12 font-semibold text-zinc-900 mb-2">
+                        Field Recommendations
+                      </div>{" "}
                       <div className="grid gap-2">
                         {mosquitoRecommendations.map((recommendation) => (
-                          <div key={recommendation.key} className="flex items-start justify-between gap-3 rounded-xs bg-white border-hairline border-zinc-200 p-2.5">
+                          <div
+                            key={recommendation.key}
+                            className="flex items-start justify-between gap-3 rounded-xs bg-white border-hairline border-zinc-200 p-2.5"
+                          >
+                            {" "}
                             <div>
-                              <div className="text-12 font-semibold text-zinc-900">{recommendation.label}</div>
-                              <div className="text-11 text-ink-secondary leading-snug">{recommendation.detail}</div>
-                            </div>
+                              {" "}
+                              <div className="text-12 font-semibold text-zinc-900">
+                                {recommendation.label}
+                              </div>{" "}
+                              <div className="text-11 text-ink-secondary leading-snug">
+                                {recommendation.detail}
+                              </div>{" "}
+                            </div>{" "}
                             <Button
                               type="button"
                               variant="secondary"
                               size="sm"
                               className="h-7 shrink-0 px-2 text-11"
-                              onClick={() => applyMosquitoRecommendation(recommendation)}
+                              onClick={() =>
+                                applyMosquitoRecommendation(recommendation)
+                              }
                             >
                               Apply
-                            </Button>
+                            </Button>{" "}
                           </div>
                         ))}
-                      </div>
+                      </div>{" "}
                     </div>
                   )}
                 </div>
               )}
-              <CheckboxV2 k="svcTermiteBait" label="Termite Bait Stations" />
+              <CheckboxV2 k="svcTermiteBait" label="Termite Bait Stations" />{" "}
               <CheckboxV2 k="svcRodentBait" label="Rodent Bait Stations" />
-
               {livePreview.recurringCount > 0 && (
                 <div className="mt-3 mb-1.5 px-3 py-2 rounded-xs bg-zinc-50 border-hairline border-zinc-300 text-12 text-zinc-900">
-                  {livePreview.recurringCount} service{livePreview.recurringCount > 1 ? 's' : ''} selected →{' '}
+                  {livePreview.recurringCount} service
+                  {livePreview.recurringCount > 1 ? "s" : ""} selected →{" "}
                   <strong>{livePreview.tier.name}</strong>
-                  {livePreview.tier.discount > 0 ? ` (${Math.round(livePreview.tier.discount * 100)}% bundle discount)` : ' (no bundle discount yet)'}
+                  {livePreview.tier.discount > 0
+                    ? ` (${Math.round(livePreview.tier.discount * 100)}% bundle discount)`
+                    : " (no bundle discount yet)"}
                 </div>
               )}
-
-              <SubGroupLabel>One-Time Services</SubGroupLabel>
-
-              <SubGroupLabel className="mt-3">Lawn</SubGroupLabel>
+              <SubGroupLabel>One-Time Services</SubGroupLabel>{" "}
+              <SubGroupLabel className="mt-3">Lawn</SubGroupLabel>{" "}
               <CheckboxV2 k="svcOnetimeLawn" label="Lawn Treatment" />
               {form.svcOnetimeLawn && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  {" "}
                   <FieldV2 label="Type" className="mb-0">
-                    <SelectV2 k="otLawnType" options={[{ value: 'FERT', label: 'Fertilization (base)' }, { value: 'WEED', label: 'Weed Control (+15%)' }, { value: 'PEST', label: 'Lawn Pest (+30%)' }, { value: 'FUNGICIDE', label: 'Fungicide (+45%)' }]} />
-                  </FieldV2>
+                    {" "}
+                    <SelectV2
+                      k="otLawnType"
+                      options={[
+                        { value: "FERT", label: "Fertilization (base)" },
+                        { value: "WEED", label: "Weed Control (+15%)" },
+                        { value: "PEST", label: "Lawn Pest (+30%)" },
+                        { value: "FUNGICIDE", label: "Fungicide (+45%)" },
+                      ]}
+                    />{" "}
+                  </FieldV2>{" "}
                 </div>
               )}
               <CheckboxV2 k="svcPlugging" label="Lawn Plugging" />
               {form.svcPlugging && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  {" "}
                   <div className="grid grid-cols-2 gap-3">
-                    <FieldV2 label="Plug Area (sq ft)"><InputV2 k="plugArea" type="number" placeholder="e.g. 1000" /></FieldV2>
-                    <FieldV2 label="Spacing"><SelectV2 k="plugSpacing" options={[{ value: '12', label: '12" Economy' }, { value: '9', label: '9" Standard' }, { value: '6', label: '6" Premium' }]} /></FieldV2>
-                  </div>
+                    {" "}
+                    <FieldV2 label="Plug Area (sq ft)">
+                      <InputV2
+                        k="plugArea"
+                        type="number"
+                        placeholder="e.g. 1000"
+                      />
+                    </FieldV2>{" "}
+                    <FieldV2 label="Spacing">
+                      <SelectV2
+                        k="plugSpacing"
+                        options={[
+                          { value: "12", label: '12" Economy' },
+                          { value: "9", label: '9" Standard' },
+                          { value: "6", label: '6" Premium' },
+                        ]}
+                      />
+                    </FieldV2>{" "}
+                  </div>{" "}
                 </div>
               )}
-              <CheckboxV2 k="svcTopdress" label="Top Dressing" />
-              <CheckboxV2 k="svcDethatch" label="Dethatching" />
-
-              <SubGroupLabel className="mt-3">Termite</SubGroupLabel>
-              <CheckboxV2 k="svcTrenching" label="Termite Trenching" />
+              <CheckboxV2 k="svcTopdress" label="Top Dressing" />{" "}
+              <CheckboxV2 k="svcDethatch" label="Dethatching" />{" "}
+              <SubGroupLabel className="mt-3">Termite</SubGroupLabel>{" "}
+              <CheckboxV2 k="svcTrenching" label="Termite Trenching" />{" "}
               <CheckboxV2 k="svcBoracare" label="Termite Attic Remediation" />
               {form.svcBoracare && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
-                  <FieldV2 label="Attic Sq Ft (auto-estimated from home/stories)" className="mb-0">
-                    <InputV2 k="boracareSqft" type="number" placeholder="Auto from AI property search" />
-                  </FieldV2>
+                  {" "}
+                  <FieldV2
+                    label="Attic Sq Ft (auto-estimated from home/stories)"
+                    className="mb-0"
+                  >
+                    {" "}
+                    <InputV2
+                      k="boracareSqft"
+                      type="number"
+                      placeholder="Auto from AI property search"
+                    />{" "}
+                  </FieldV2>{" "}
                 </div>
               )}
               <CheckboxV2 k="svcPreslab" label="Pre-Slab Termite Treatment" />
               {form.svcPreslab && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  {" "}
                   <div className="grid grid-cols-2 gap-3">
-                    <FieldV2 label="Slab Sq Ft"><InputV2 k="preslabSqft" type="number" placeholder="From footprint" /></FieldV2>
-                    <FieldV2 label="Warranty"><SelectV2 k="preslabWarranty" options={[{ value: 'BASIC', label: 'Basic 1-yr (included)' }, { value: 'EXTENDED', label: 'Extended 5-yr (+$200)' }]} /></FieldV2>
-                  </div>
-                  <FieldV2 label="Builder Volume"><SelectV2 k="preslabVolume" options={[{ value: 'NONE', label: 'No discount' }, { value: '5', label: '5+ homes (-10%)' }, { value: '10', label: '10+ homes (-15%)' }]} /></FieldV2>
+                    {" "}
+                    <FieldV2 label="Slab Sq Ft">
+                      <InputV2
+                        k="preslabSqft"
+                        type="number"
+                        placeholder="From footprint"
+                      />
+                    </FieldV2>{" "}
+                    <FieldV2 label="Warranty">
+                      <SelectV2
+                        k="preslabWarranty"
+                        options={[
+                          { value: "BASIC", label: "Basic 1-yr (included)" },
+                          { value: "EXTENDED", label: "Extended 5-yr (+$200)" },
+                        ]}
+                      />
+                    </FieldV2>{" "}
+                  </div>{" "}
+                  <FieldV2 label="Builder Volume">
+                    <SelectV2
+                      k="preslabVolume"
+                      options={[
+                        { value: "NONE", label: "No discount" },
+                        { value: "5", label: "5+ homes (-10%)" },
+                        { value: "10", label: "10+ homes (-15%)" },
+                      ]}
+                    />
+                  </FieldV2>{" "}
                 </div>
               )}
               <CheckboxV2 k="svcFoam" label="Termite Foam Treatment" />
               {form.svcFoam && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  {" "}
                   <FieldV2 label="Drill Points" className="mb-0">
-                    <SelectV2 k="foamPoints" options={[{ value: '5', label: '1-5 Spot' }, { value: '10', label: '6-10 Moderate' }, { value: '15', label: '11-15 Extensive' }, { value: '20', label: '15+ Full Perimeter' }]} />
-                  </FieldV2>
+                    {" "}
+                    <SelectV2
+                      k="foamPoints"
+                      options={[
+                        { value: "5", label: "1-5 Spot" },
+                        { value: "10", label: "6-10 Moderate" },
+                        { value: "15", label: "11-15 Extensive" },
+                        { value: "20", label: "15+ Full Perimeter" },
+                      ]}
+                    />{" "}
+                  </FieldV2>{" "}
                 </div>
               )}
-
-              <SubGroupLabel className="mt-3">Pest</SubGroupLabel>
-              <CheckboxV2 k="svcOnetimePest" label="Pest Treatment" />
-              <CheckboxV2 k="svcOnetimeMosquito" label="Mosquito Treatment" />
-              <CheckboxV2 k="svcFlea" label="Flea Treatment" />
+              <SubGroupLabel className="mt-3">Pest</SubGroupLabel>{" "}
+              <CheckboxV2 k="svcOnetimePest" label="Pest Treatment" />{" "}
+              <CheckboxV2 k="svcOnetimeMosquito" label="Mosquito Treatment" />{" "}
+              <CheckboxV2 k="svcFlea" label="Flea Treatment" />{" "}
               <CheckboxV2 k="svcRoach" label="Cockroach Treatment" />
               {form.svcRoach && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  {" "}
                   <FieldV2 label="Type" className="mb-0">
-                    <SelectV2 k="roachType" options={[{ value: 'REGULAR', label: 'Regular (American/Smoky Brown)' }, { value: 'GERMAN', label: 'German (3-visit)' }]} />
-                  </FieldV2>
+                    {" "}
+                    <SelectV2
+                      k="roachType"
+                      options={[
+                        {
+                          value: "REGULAR",
+                          label: "Regular (American/Smoky Brown)",
+                        },
+                        { value: "GERMAN", label: "German (3-visit)" },
+                      ]}
+                    />{" "}
+                  </FieldV2>{" "}
                 </div>
               )}
-              <CheckboxV2 k="svcWasp" label="Wasp/Bee/Stinging Insect" />
+              <CheckboxV2 k="svcWasp" label="Wasp/Bee/Stinging Insect" />{" "}
               <CheckboxV2 k="svcBedbug" label="Bed Bug Treatment" />
               {form.svcBedbug && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  {" "}
                   <div className="grid grid-cols-2 gap-3">
-                    <FieldV2 label="Rooms"><InputV2 k="bedbugRooms" type="number" min="1" max="10" /></FieldV2>
-                    <FieldV2 label="Method"><SelectV2 k="bedbugMethod" options={[{ value: 'BOTH', label: 'Quote Both' }, { value: 'CHEMICAL', label: 'Chemical Only' }, { value: 'HEAT', label: 'Heat Only' }]} /></FieldV2>
-                  </div>
+                    {" "}
+                    <FieldV2 label="Rooms">
+                      <InputV2 k="bedbugRooms" type="number" min="1" max="10" />
+                    </FieldV2>{" "}
+                    <FieldV2 label="Method">
+                      <SelectV2
+                        k="bedbugMethod"
+                        options={[
+                          { value: "BOTH", label: "Quote Both" },
+                          { value: "CHEMICAL", label: "Chemical Only" },
+                          { value: "HEAT", label: "Heat Only" },
+                        ]}
+                      />
+                    </FieldV2>{" "}
+                  </div>{" "}
                 </div>
               )}
-
-              <SubGroupLabel className="mt-3">Rodent</SubGroupLabel>
-              <CheckboxV2 k="svcRodentTrap" label="Rodent Trapping" />
+              <SubGroupLabel className="mt-3">Rodent</SubGroupLabel>{" "}
+              <CheckboxV2 k="svcRodentTrap" label="Rodent Trapping" />{" "}
               <CheckboxV2 k="svcRodentSanitation" label="Rodent Sanitation" />
               {form.svcRodentSanitation && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  {" "}
                   <div className="grid grid-cols-2 gap-3">
-                    <FieldV2 label="Tier"><SelectV2 k="sanitationTier" options={[{ value: 'light', label: 'Light' }, { value: 'standard', label: 'Standard' }, { value: 'heavy', label: 'Heavy' }]} /></FieldV2>
-                    <FieldV2 label="Access"><SelectV2 k="sanitationAccess" options={[{ value: 'normal', label: 'Normal' }, { value: 'crawlspace', label: 'Crawlspace' }, { value: 'tight', label: 'Tight' }]} /></FieldV2>
-                    <FieldV2 label="Affected Sq Ft"><InputV2 k="sanitationArea" type="number" min="0" placeholder="Auto from footprint" /></FieldV2>
-                    <FieldV2 label="Debris Cu Ft"><InputV2 k="sanitationDebris" type="number" min="0" /></FieldV2>
-                  </div>
+                    {" "}
+                    <FieldV2 label="Tier">
+                      <SelectV2
+                        k="sanitationTier"
+                        options={[
+                          { value: "light", label: "Light" },
+                          { value: "standard", label: "Standard" },
+                          { value: "heavy", label: "Heavy" },
+                        ]}
+                      />
+                    </FieldV2>{" "}
+                    <FieldV2 label="Access">
+                      <SelectV2
+                        k="sanitationAccess"
+                        options={[
+                          { value: "normal", label: "Normal" },
+                          { value: "crawlspace", label: "Crawlspace" },
+                          { value: "tight", label: "Tight" },
+                        ]}
+                      />
+                    </FieldV2>{" "}
+                    <FieldV2 label="Affected Sq Ft">
+                      <InputV2
+                        k="sanitationArea"
+                        type="number"
+                        min="0"
+                        placeholder="Auto from footprint"
+                      />
+                    </FieldV2>{" "}
+                    <FieldV2 label="Debris Cu Ft">
+                      <InputV2 k="sanitationDebris" type="number" min="0" />
+                    </FieldV2>{" "}
+                  </div>{" "}
                 </div>
               )}
               <CheckboxV2 k="svcExclusion" label="Rodent Exclusion" />
               {form.svcExclusion && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  {" "}
                   <div className="grid grid-cols-3 gap-3">
-                    <FieldV2 label="Simple Seals"><InputV2 k="exclSimple" type="number" min="0" /></FieldV2>
-                    <FieldV2 label="Moderate"><InputV2 k="exclModerate" type="number" min="0" /></FieldV2>
-                    <FieldV2 label="Advanced/Roof"><InputV2 k="exclAdvanced" type="number" min="0" /></FieldV2>
-                  </div>
-                  <FieldV2 label="Waive Inspection ($85)?"><SelectV2 k="exclWaive" options={[{ value: 'NO', label: 'No — charge $85' }, { value: 'YES', label: 'Yes — booking work' }]} /></FieldV2>
+                    {" "}
+                    <FieldV2 label="Simple Seals">
+                      <InputV2 k="exclSimple" type="number" min="0" />
+                    </FieldV2>{" "}
+                    <FieldV2 label="Moderate">
+                      <InputV2 k="exclModerate" type="number" min="0" />
+                    </FieldV2>{" "}
+                    <FieldV2 label="Advanced/Roof">
+                      <InputV2 k="exclAdvanced" type="number" min="0" />
+                    </FieldV2>{" "}
+                  </div>{" "}
+                  <FieldV2 label="Waive Inspection ($85)?">
+                    <SelectV2
+                      k="exclWaive"
+                      options={[
+                        { value: "NO", label: "No — charge $85" },
+                        { value: "YES", label: "Yes — booking work" },
+                      ]}
+                    />
+                  </FieldV2>{" "}
                 </div>
               )}
             </div>
-
             {/* Manual Discount */}
             <div>
-              <PanelTitle>Manual Discount (optional)</PanelTitle>
+              {" "}
+              <PanelTitle>Manual Discount (optional)</PanelTitle>{" "}
               <FieldV2 label="Preset">
+                {" "}
                 <select
-                  value={form.manualDiscountPreset || ''}
+                  value={form.manualDiscountPreset || ""}
                   onChange={(e) => applyDiscountPreset(e.target.value)}
-                  className={cn(INPUT_CLS, 'cursor-pointer appearance-none pr-8')}
+                  className={cn(
+                    INPUT_CLS,
+                    "cursor-pointer appearance-none pr-8",
+                  )}
                 >
+                  {" "}
                   <option value="">— None —</option>
                   {discountPresets.map((d) => {
-                    const amt = d.discount_type === 'percentage'
-                      ? `${Number(d.amount).toFixed(0)}%`
-                      : `$${Number(d.amount).toFixed(2)}`;
+                    const amt =
+                      d.discount_type === "percentage"
+                        ? `${Number(d.amount).toFixed(0)}%`
+                        : `$${Number(d.amount).toFixed(2)}`;
                     return (
                       <option key={d.id} value={d.discount_key}>
                         {d.name} — {amt}
                       </option>
                     );
                   })}
-                  <option value="__custom__">Custom…</option>
-                </select>
+                  <option value="__custom__">Custom…</option>{" "}
+                </select>{" "}
               </FieldV2>
-
-              {form.manualDiscountPreset && form.manualDiscountPreset !== '__custom__' && (() => {
-                const d = discountPresets.find((x) => x.discount_key === form.manualDiscountPreset);
-                return d?.description ? (
-                  <div className="text-11 text-ink-secondary -mt-1 mb-3">{d.description}</div>
-                ) : null;
-              })()}
-
+              {form.manualDiscountPreset &&
+                form.manualDiscountPreset !== "__custom__" &&
+                (() => {
+                  const d = discountPresets.find(
+                    (x) => x.discount_key === form.manualDiscountPreset,
+                  );
+                  return d?.description ? (
+                    <div className="text-11 text-ink-secondary -mt-1 mb-3">
+                      {d.description}
+                    </div>
+                  ) : null;
+                })()}
               <div className="grid grid-cols-2 gap-2">
+                {" "}
                 <FieldV2 label="Type">
-                  <SelectV2 k="manualDiscountType" options={[
-                    { value: 'NONE', label: 'None' },
-                    { value: 'PERCENT', label: 'Percent %' },
-                    { value: 'FIXED', label: 'Dollar $' },
-                  ]} />
-                </FieldV2>
+                  {" "}
+                  <SelectV2
+                    k="manualDiscountType"
+                    options={[
+                      { value: "NONE", label: "None" },
+                      { value: "PERCENT", label: "Percent %" },
+                      { value: "FIXED", label: "Dollar $" },
+                    ]}
+                  />{" "}
+                </FieldV2>{" "}
                 <FieldV2 label="Amount">
-                  <InputV2 k="manualDiscountValue" type="number" min="0" placeholder="0" />
-                </FieldV2>
+                  {" "}
+                  <InputV2
+                    k="manualDiscountValue"
+                    type="number"
+                    min="0"
+                    placeholder="0"
+                  />{" "}
+                </FieldV2>{" "}
                 <div className="col-span-2">
+                  {" "}
                   <FieldV2 label="Label (shown on estimate)">
-                    <InputV2 k="manualDiscountLabel" placeholder="e.g. Military, Referral" />
-                  </FieldV2>
-                </div>
-              </div>
-
+                    {" "}
+                    <InputV2
+                      k="manualDiscountLabel"
+                      placeholder="e.g. Military, Referral"
+                    />{" "}
+                  </FieldV2>{" "}
+                </div>{" "}
+              </div>{" "}
               <div className="text-11 text-ink-tertiary mt-2">
-                Applies after bundle discount. Re-click Generate Estimate to recalculate.
-              </div>
+                Applies after bundle discount. Re-click Generate Estimate to
+                recalculate.
+              </div>{" "}
             </div>
-
             {/* Action buttons */}
             <div className="grid grid-cols-2 gap-3">
+              {" "}
               <Button
                 onClick={() => doGenerate()}
                 disabled={generateBusy}
@@ -1757,109 +2771,148 @@ export default function EstimateToolViewV2({
                 size="md"
                 className="h-12 text-14"
               >
-                {generating ? 'Generating…' : 'Generate Estimate'}
-              </Button>
+                {generating ? "Generating…" : "Generate Estimate"}
+              </Button>{" "}
               <Button
                 variant="secondary"
                 size="md"
                 className="h-12 text-14"
                 disabled={generateBusy}
                 onClick={async () => {
-                  if (estimate || await doGenerate()) {
+                  if (estimate || (await doGenerate())) {
                     setShowSendForm(true);
                   }
                 }}
               >
-                {generating ? 'Generating…' : 'Send Estimate'}
-              </Button>
+                {generating ? "Generating…" : "Send Estimate"}
+              </Button>{" "}
             </div>
-
             {/* Send form */}
             {showSendForm && (
               <Card className="p-5 border-zinc-900">
-                <PanelTitle>Send Estimate</PanelTitle>
+                {" "}
+                <PanelTitle>Send Estimate</PanelTitle>{" "}
                 <FieldV2 label="Customer Phone Number">
+                  {" "}
                   <input
                     type="tel"
-                    value={form.customerPhone || ''}
+                    value={form.customerPhone || ""}
                     onChange={async (e) => {
-                      let raw = e.target.value.replace(/\D/g, '');
-                      if (raw.length === 11 && raw.startsWith('1')) raw = raw.slice(1);
+                      let raw = e.target.value.replace(/\D/g, "");
+                      if (raw.length === 11 && raw.startsWith("1"))
+                        raw = raw.slice(1);
                       const digits = raw.slice(0, 10);
-                      set('customerPhone', digits);
+                      set("customerPhone", digits);
                       if (digits.length >= 7) {
                         try {
-                          const r = await fetch(`/api/admin/customers?search=${encodeURIComponent(digits)}&limit=1`, { headers: authHeaders });
+                          const r = await fetch(
+                            `/api/admin/customers?search=${encodeURIComponent(digits)}&limit=1`,
+                            { headers: authHeaders },
+                          );
                           if (r.ok) {
                             const d = await r.json();
                             const c = (d.customers || d)?.[0];
                             if (c) {
-                              set('customerName', `${c.firstName} ${c.lastName}`);
-                              set('customerEmail', c.email || '');
+                              set(
+                                "customerName",
+                                `${c.firstName} ${c.lastName}`,
+                              );
+                              set("customerEmail", c.email || "");
                             }
                           }
-                        } catch { /* ignore */ }
+                        } catch {
+                          /* ignore */
+                        }
                       }
                     }}
                     placeholder="9415551234"
-                    className={cn(INPUT_CLS, 'h-12 text-18 tracking-wider')}
-                  />
+                    className={cn(INPUT_CLS, "h-12 text-18 tracking-wider")}
+                  />{" "}
                 </FieldV2>
                 {form.customerName && (
                   <div className="text-12 text-zinc-900 mb-3 px-3 py-2 bg-zinc-50 rounded-xs border-hairline border-zinc-300">
-                    Found: <strong>{form.customerName}</strong>{form.customerEmail ? ` · ${form.customerEmail}` : ''}
+                    Found: <strong>{form.customerName}</strong>
+                    {form.customerEmail ? ` · ${form.customerEmail}` : ""}
                   </div>
                 )}
                 {!form.customerName && form.customerPhone?.length >= 7 && (
                   <div className="mb-3 grid grid-cols-2 gap-2">
+                    {" "}
                     <FieldV2 label="Name">
-                      <input type="text" value={form.customerName || ''} onChange={(e) => set('customerName', e.target.value)} placeholder="Full name" className={INPUT_CLS} />
-                    </FieldV2>
+                      {" "}
+                      <input
+                        type="text"
+                        value={form.customerName || ""}
+                        onChange={(e) => set("customerName", e.target.value)}
+                        placeholder="Full name"
+                        className={INPUT_CLS}
+                      />{" "}
+                    </FieldV2>{" "}
                     <FieldV2 label="Email">
-                      <input type="email" value={form.customerEmail || ''} onChange={(e) => set('customerEmail', e.target.value)} placeholder="email@example.com" className={INPUT_CLS} />
-                    </FieldV2>
+                      {" "}
+                      <input
+                        type="email"
+                        value={form.customerEmail || ""}
+                        onChange={(e) => set("customerEmail", e.target.value)}
+                        placeholder="email@example.com"
+                        className={INPUT_CLS}
+                      />{" "}
+                    </FieldV2>{" "}
                   </div>
                 )}
                 <div className="mb-3 p-3 border-hairline border-zinc-300 rounded-xs bg-zinc-50">
+                  {" "}
                   <div className="text-11 font-medium text-zinc-900 mb-2 uppercase tracking-label">
                     Customer options
-                  </div>
+                  </div>{" "}
                   <label className="flex items-start gap-2 cursor-pointer text-12 text-zinc-900 select-none mb-2">
+                    {" "}
                     <input
                       type="checkbox"
                       checked={form.showOneTimeOption || false}
-                      onChange={(e) => setCustomerChoiceOption(e.target.checked)}
+                      onChange={(e) =>
+                        setCustomerChoiceOption(e.target.checked)
+                      }
                       className="accent-zinc-900 mt-0.5"
-                    />
+                    />{" "}
                     <span>
-                      <span className="font-medium">Offer one-time option</span>
+                      {" "}
+                      <span className="font-medium">
+                        Offer one-time option
+                      </span>{" "}
                       <span className="block text-11 text-ink-secondary">
-                        Customer sees a Recurring / One-time toggle and can select either. Mosquito adds the matching option automatically.
-                      </span>
-                    </span>
-                  </label>
+                        Customer sees a Recurring / One-time toggle and can
+                        select either. Mosquito adds the matching option
+                        automatically.
+                      </span>{" "}
+                    </span>{" "}
+                  </label>{" "}
                   <label className="flex items-start gap-2 cursor-pointer text-12 text-zinc-900 select-none">
+                    {" "}
                     <input
                       type="checkbox"
                       checked={form.billByInvoice || false}
-                      onChange={(e) => set('billByInvoice', e.target.checked)}
+                      onChange={(e) => set("billByInvoice", e.target.checked)}
                       className="accent-zinc-900 mt-0.5"
-                    />
+                    />{" "}
                     <span>
-                      <span className="font-medium">Bill by invoice</span>
+                      {" "}
+                      <span className="font-medium">Bill by invoice</span>{" "}
                       <span className="block text-11 text-ink-secondary">
-                        Skip onboarding / payment up front — create an invoice due immediately when the customer accepts.
-                      </span>
-                    </span>
-                  </label>
-                </div>
-
+                        Skip onboarding / payment up front — create an invoice
+                        due immediately when the customer accepts.
+                      </span>{" "}
+                    </span>{" "}
+                  </label>{" "}
+                </div>{" "}
                 <div className="flex items-center gap-2 mb-2 flex-wrap">
+                  {" "}
                   <label className="flex items-center gap-2 cursor-pointer text-12 text-ink-secondary select-none">
+                    {" "}
                     <input
                       type="checkbox"
                       checked={form.scheduleSend || false}
-                      onChange={(e) => set('scheduleSend', e.target.checked)}
+                      onChange={(e) => set("scheduleSend", e.target.checked)}
                       className="accent-zinc-900"
                     />
                     Schedule for later
@@ -1867,167 +2920,277 @@ export default function EstimateToolViewV2({
                   {form.scheduleSend && (
                     <input
                       type="datetime-local"
-                      value={form.scheduledAt || ''}
-                      onChange={(e) => set('scheduledAt', e.target.value)}
-                      className={cn(INPUT_CLS, 'w-auto h-8 text-12 px-2')}
+                      value={form.scheduledAt || ""}
+                      onChange={(e) => set("scheduledAt", e.target.value)}
+                      className={cn(INPUT_CLS, "w-auto h-8 text-12 px-2")}
                     />
                   )}
                 </div>
                 {form.scheduleSend && !form.scheduledAt && (
                   <div className="text-11 text-ink-secondary mb-2">
-                    Quick:{' '}
+                    Quick:{" "}
                     <button
                       onClick={() => {
                         const tomorrow = new Date();
                         tomorrow.setDate(tomorrow.getDate() + 1);
                         tomorrow.setHours(8, 0, 0, 0);
-                        set('scheduledAt', formatDatetimeLocal(tomorrow));
+                        set("scheduledAt", formatDatetimeLocal(tomorrow));
                       }}
                       className="underline font-medium u-focus-ring"
                     >
                       Tomorrow 8:00 AM
-                    </button>
+                    </button>{" "}
                   </div>
                 )}
-
                 <div className="flex flex-col gap-2">
+                  {" "}
                   <div className="grid grid-cols-3 gap-2">
+                    {" "}
                     <Button
-                      variant="secondary" size="md"
+                      variant="secondary"
+                      size="md"
                       onClick={async () => {
-                        if (!form.customerPhone) { alert('Enter a phone number.'); return; }
-                        await saveAndSend('sms');
+                        if (!form.customerPhone) {
+                          alert("Enter a phone number.");
+                          return;
+                        }
+                        await saveAndSend("sms");
                       }}
                       disabled={sendBusy}
                     >
-                      {sendBusy ? '…' : form.scheduleSend ? 'Schedule SMS' : 'SMS Only'}
-                    </Button>
+                      {sendBusy
+                        ? "…"
+                        : form.scheduleSend
+                          ? "Schedule SMS"
+                          : "SMS Only"}
+                    </Button>{" "}
                     <Button
-                      variant="secondary" size="md"
+                      variant="secondary"
+                      size="md"
                       onClick={async () => {
-                        if (!form.customerEmail) { alert('Enter an email.'); return; }
-                        await saveAndSend('email');
+                        if (!form.customerEmail) {
+                          alert("Enter an email.");
+                          return;
+                        }
+                        await saveAndSend("email");
                       }}
                       disabled={sendBusy}
                     >
-                      {sendBusy ? '…' : form.scheduleSend ? 'Schedule Email' : 'Email Only'}
-                    </Button>
+                      {sendBusy
+                        ? "…"
+                        : form.scheduleSend
+                          ? "Schedule Email"
+                          : "Email Only"}
+                    </Button>{" "}
                     <Button
-                      variant="primary" size="md"
+                      variant="primary"
+                      size="md"
                       onClick={async () => {
-                        if (!form.customerPhone && !form.customerEmail) { alert('Enter phone or email.'); return; }
-                        await saveAndSend('both');
+                        if (!form.customerPhone && !form.customerEmail) {
+                          alert("Enter phone or email.");
+                          return;
+                        }
+                        await saveAndSend("both");
                       }}
                       disabled={sendBusy}
                     >
-                      {sendBusy ? '…' : form.scheduleSend ? 'Schedule Both' : 'Both'}
-                    </Button>
-                  </div>
-                  <Button variant="ghost" size="md" onClick={() => setShowSendForm(false)}>Cancel</Button>
-                </div>
+                      {sendBusy
+                        ? "…"
+                        : form.scheduleSend
+                          ? "Schedule Both"
+                          : "Both"}
+                    </Button>{" "}
+                  </div>{" "}
+                  <Button
+                    variant="ghost"
+                    size="md"
+                    onClick={() => setShowSendForm(false)}
+                  >
+                    Cancel
+                  </Button>{" "}
+                </div>{" "}
               </Card>
             )}
 
             {savedId && (
-              <div className="text-12 text-ink-secondary">Saved — ID #{savedId}.</div>
+              <div className="text-12 text-ink-secondary">
+                Saved — ID #{savedId}.
+              </div>
             )}
           </div>
-
           {/* ═══ RIGHT COLUMN: RESULTS ═══ */}
           <div>
             {!estimate ? (
               <Card className="p-10 text-center">
+                {" "}
                 <div
                   className="text-zinc-900 mb-3"
                   style={{
                     fontFamily: ROBOTO,
                     fontSize: 12,
                     fontWeight: 500,
-                    letterSpacing: '0.02em',
+                    letterSpacing: "0.02em",
                   }}
                 >
-                  {!livePreview.anySelected ? 'Select Services to Get Started' : 'Ready to Generate'}
-                </div>
+                  {!livePreview.anySelected
+                    ? "Select Services to Get Started"
+                    : "Ready to Generate"}
+                </div>{" "}
                 <div className="text-14 text-ink-secondary mb-4">
                   {!livePreview.anySelected
-                    ? 'Select at least one service to see pricing'
+                    ? "Select at least one service to see pricing"
                     : `${livePreview.recurringCount} recurring + ${livePreview.onetimeCount} one-time selected — click Generate Estimate`}
                 </div>
                 {enrichedProfile && (
                   <div className="text-left px-4 py-3 bg-zinc-50 rounded-sm border-hairline border-zinc-200 mt-3 text-13 text-ink-secondary leading-relaxed">
-                    <div className="text-11 font-medium text-zinc-900 uppercase tracking-label mb-1.5">Property Loaded</div>
-                    <div>{form.address}</div>
+                    {" "}
+                    <div className="text-11 font-medium text-zinc-900 uppercase tracking-label mb-1.5">
+                      Property Loaded
+                    </div>{" "}
+                    <div>{form.address}</div>{" "}
                     <div>
-                      {(Number(form.homeSqFt) || 0).toLocaleString()} sf home ·{' '}
-                      {(Number(form.lotSqFt) || 0).toLocaleString()} sf lot · {form.stories || 1} story
+                      {(Number(form.homeSqFt) || 0).toLocaleString()} sf home ·{" "}
+                      {(Number(form.lotSqFt) || 0).toLocaleString()} sf lot ·{" "}
+                      {form.stories || 1} story
                     </div>
-                    {form.hasPool === 'YES' && <div>Pool: Yes{form.hasPoolCage === 'YES' ? ' (caged)' : ''}</div>}
+                    {form.hasPool === "YES" && (
+                      <div>
+                        Pool: Yes{form.hasPoolCage === "YES" ? " (caged)" : ""}
+                      </div>
+                    )}
                     <div>
-                      Shrubs: {form.shrubDensity} · Trees: {form.treeDensity} · Complexity: {form.landscapeComplexity}
-                    </div>
+                      Shrubs: {form.shrubDensity} · Trees: {form.treeDensity} ·
+                      Complexity: {form.landscapeComplexity}
+                    </div>{" "}
                   </div>
                 )}
               </Card>
             ) : (
-              <EstimateErrorBoundary key={JSON.stringify(estimate).slice(0, 100)}>
+              <EstimateErrorBoundary
+                key={JSON.stringify(estimate).slice(0, 100)}
+              >
+                {" "}
                 <Card className="p-5">
+                  {" "}
                   <div className="flex justify-end gap-2 mb-2">
-                    <Button variant="secondary" size="sm" onClick={nextEstimate}>Next Estimate (keep services)</Button>
-                    <Button variant="ghost" size="sm" onClick={() => { setEstimate(null); setSavedId(null); setShowSendForm(false); }}>New Estimate</Button>
-                  </div>
+                    {" "}
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={nextEstimate}
+                    >
+                      Next Estimate (keep services)
+                    </Button>{" "}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        setEstimate(null);
+                        setSavedId(null);
+                        setShowSendForm(false);
+                      }}
+                    >
+                      New Estimate
+                    </Button>{" "}
+                  </div>{" "}
                   <div className="max-h-[calc(100vh-120px)] overflow-y-auto pr-2">
                     {/* Summary Card */}
-                    {(E.recurring.serviceCount > 0 || E.oneTime.total > 0 || E.recurring.palmInjectionMo > 0 || E.recurring.rodentBaitMo > 0) && (
+                    {(E.recurring.serviceCount > 0 ||
+                      E.oneTime.total > 0 ||
+                      E.recurring.palmInjectionMo > 0 ||
+                      E.recurring.rodentBaitMo > 0) && (
                       <>
+                        {" "}
                         <div className="bg-zinc-50 border-hairline border-zinc-900 rounded-sm p-6 mb-6 text-center">
+                          {" "}
                           <div className="text-28 font-medium text-zinc-900 u-nums">
-                            {fmt(E.recurring.grandTotal || (E.recurring.monthlyTotal + (E.recurring.rodentBaitMo || 0) + (E.recurring.palmInjectionMo || 0)))}/mo
-                          </div>
+                            {fmt(
+                              E.recurring.grandTotal ||
+                                E.recurring.monthlyTotal +
+                                  (E.recurring.rodentBaitMo || 0) +
+                                  (E.recurring.palmInjectionMo || 0),
+                            )}
+                            /mo
+                          </div>{" "}
                           <div className="text-12 text-ink-secondary mt-1">
-                            Recurring monthly{E.recurring.savings > 0 ? ' (bundle pricing)' : ''}
-                            {E.manualDiscount && E.manualDiscount.amount > 0 ? ' + manual discount' : ''}
-                          </div>
+                            Recurring monthly
+                            {E.recurring.savings > 0 ? " (bundle pricing)" : ""}
+                            {E.manualDiscount && E.manualDiscount.amount > 0
+                              ? " + manual discount"
+                              : ""}
+                          </div>{" "}
                           <div className="flex justify-center gap-10 mt-3 flex-wrap">
                             {E.oneTime.total > 0 && (
                               <div className="text-center">
-                                <div className="text-18 font-medium text-zinc-900 u-nums">{fmtInt(E.oneTime.total)}</div>
+                                {" "}
+                                <div className="text-18 font-medium text-zinc-900 u-nums">
+                                  {fmtInt(E.oneTime.total)}
+                                </div>{" "}
                                 <div className="text-11 text-ink-secondary uppercase tracking-label">
-                                  {E.oneTime.tmInstall > 0 ? `One-Time (incl ${fmtInt(E.oneTime.tmInstall)} install)` : 'Recurring Membership'}
-                                </div>
+                                  {E.oneTime.tmInstall > 0
+                                    ? `One-Time (incl ${fmtInt(E.oneTime.tmInstall)} install)`
+                                    : "Recurring Membership"}
+                                </div>{" "}
                               </div>
                             )}
                             <div className="text-center">
-                              <div className="text-18 font-medium text-zinc-900 u-nums">{fmt(E.totals.year1)}</div>
-                              <div className="text-11 text-ink-secondary uppercase tracking-label">Year 1 Total</div>
+                              {" "}
+                              <div className="text-18 font-medium text-zinc-900 u-nums">
+                                {fmt(E.totals.year1)}
+                              </div>{" "}
+                              <div className="text-11 text-ink-secondary uppercase tracking-label">
+                                Year 1 Total
+                              </div>{" "}
                             </div>
                             {E.recurring.savings > 0 && (
                               <div className="text-center">
-                                <div className="text-18 font-medium text-zinc-900 u-nums">-{fmt(E.recurring.savings)}</div>
-                                <div className="text-11 text-ink-secondary uppercase tracking-label">Bundle Savings/yr</div>
+                                {" "}
+                                <div className="text-18 font-medium text-zinc-900 u-nums">
+                                  -{fmt(E.recurring.savings)}
+                                </div>{" "}
+                                <div className="text-11 text-ink-secondary uppercase tracking-label">
+                                  Bundle Savings/yr
+                                </div>{" "}
                               </div>
                             )}
-                          </div>
+                          </div>{" "}
                         </div>
-
                         {/* Recommendation */}
-                        {E.recurring.serviceCount >= 2 && (() => {
-                          const parts = [];
-                          if (R.lawn) parts.push('Lawn Care');
-                          if (R.pest) parts.push(R.pest.label + ' Pest');
-                          if (R.mq) { const ri = E.results.mqMeta?.ri ?? 1; parts.push(R.mq[ri].n + ' Mosquito'); }
-                          if (R.tmBait) parts.push('Trelona Premier');
-                          if (parts.length < 2) return null;
-                          return (
-                            <div className="bg-zinc-50 border-hairline border-zinc-300 rounded-sm px-4 py-3 mb-5 text-13 text-ink-secondary">
-                              <strong className="text-zinc-900">Recommended:</strong>{' '}
-                              {parts.join(' + ')} for comprehensive coverage at {fmt(E.recurring.monthlyTotal)}/mo recurring.
-                            </div>
-                          );
-                        })()}
-
+                        {E.recurring.serviceCount >= 2 &&
+                          (() => {
+                            const parts = [];
+                            if (R.lawn) parts.push("Lawn Care");
+                            if (R.pest) parts.push(R.pest.label + " Pest");
+                            if (R.mq) {
+                              const ri = E.results.mqMeta?.ri ?? 1;
+                              parts.push(R.mq[ri].n + " Mosquito");
+                            }
+                            if (R.tmBait) parts.push("Trelona Premier");
+                            if (parts.length < 2) return null;
+                            return (
+                              <div className="bg-zinc-50 border-hairline border-zinc-300 rounded-sm px-4 py-3 mb-5 text-13 text-ink-secondary">
+                                {" "}
+                                <strong className="text-zinc-900">
+                                  Recommended:
+                                </strong>{" "}
+                                {parts.join(" + ")} for comprehensive coverage
+                                at {fmt(E.recurring.monthlyTotal)}/mo recurring.
+                              </div>
+                            );
+                          })()}
                         {E.fieldVerify?.length > 0 && (
                           <div className="bg-alert-bg border-hairline border-alert-fg rounded-sm px-4 py-3 mb-5 text-13 text-alert-fg">
-                            <strong>Field Verify:</strong> {E.fieldVerify.map((f) => typeof f === 'string' ? f : (f.field || f.name || JSON.stringify(f))).join(', ')} — estimated from satellite data, tech should confirm on-site.
+                            {" "}
+                            <strong>Field Verify:</strong>
+                            {E.fieldVerify
+                              .map((f) =>
+                                typeof f === "string"
+                                  ? f
+                                  : f.field || f.name || JSON.stringify(f),
+                              )
+                              .join(", ")}{" "}
+                            — estimated from satellite data, tech should confirm
+                            on-site.
                           </div>
                         )}
                       </>
@@ -2035,64 +3198,164 @@ export default function EstimateToolViewV2({
 
                     {/* Property Summary */}
                     <div className="mb-6">
-                      <SectionTitle>Property Summary</SectionTitle>
+                      {" "}
+                      <SectionTitle>Property Summary</SectionTitle>{" "}
                       <div className="text-13 text-ink-secondary leading-relaxed">
-                        <strong className="text-zinc-900">{E.property?.type || E.property?.propertyType || 'Residential'}</strong> — {(E.property?.homeSqFt || 0).toLocaleString()} sf / {(E.property?.lotSqFt || 0).toLocaleString()} sf lot / {E.property?.stories || 1} story<br />
-                        Footprint: <strong>{(E.property?.footprint || 0).toLocaleString()} sf</strong> | Pool: {E.property?.pool === 'YES' || E.property?.pool === true ? 'Yes' : 'No'}{E.property?.poolCage === 'YES' || E.property?.poolCage === true ? ` (caged${E.property?.poolCageSize ? `: ${String(E.property.poolCageSize).toLowerCase()}` : ''})` : ''} | Driveway: {E.property?.largeDriveway === 'YES' || E.property?.largeDriveway === true ? 'Large' : 'Normal'}<br />
-                        Shrubs: {E.property?.shrubDensity || E.property?.shrubs || '--'} | Trees: {E.property?.treeDensity || E.property?.trees || '--'} | Complexity: {E.property?.landscapeComplexity || E.property?.complexity || '--'} | Water: {E.property?.nearWater && E.property.nearWater !== 'NONE' ? E.property.nearWater.replace(/_/g, ' ') : 'No'}
-                        {E.property?.yearBuilt && <><br />Built: {E.property.yearBuilt} | {E.property?.constructionMaterial} | {E.property?.foundationType} foundation | {E.property?.roofType} roof</>}
-                        {E.property?.estimatedValue && (
+                        {" "}
+                        <strong className="text-zinc-900">
+                          {E.property?.type ||
+                            E.property?.propertyType ||
+                            "Residential"}
+                        </strong>
+                        — {(E.property?.homeSqFt || 0).toLocaleString()} sf /{" "}
+                        {(E.property?.lotSqFt || 0).toLocaleString()} sf lot /{" "}
+                        {E.property?.stories || 1} story
+                        <br />
+                        Footprint:{" "}
+                        <strong>
+                          {(E.property?.footprint || 0).toLocaleString()} sf
+                        </strong>
+                        | Pool:{" "}
+                        {E.property?.pool === "YES" || E.property?.pool === true
+                          ? "Yes"
+                          : "No"}
+                        {E.property?.poolCage === "YES" ||
+                        E.property?.poolCage === true
+                          ? ` (caged${E.property?.poolCageSize ? `: ${String(E.property.poolCageSize).toLowerCase()}` : ""})`
+                          : ""}{" "}
+                        | Driveway:{" "}
+                        {E.property?.largeDriveway === "YES" ||
+                        E.property?.largeDriveway === true
+                          ? "Large"
+                          : "Normal"}
+                        <br />
+                        Shrubs:{" "}
+                        {E.property?.shrubDensity ||
+                          E.property?.shrubs ||
+                          "--"}{" "}
+                        | Trees:{" "}
+                        {E.property?.treeDensity || E.property?.trees || "--"} |
+                        Complexity:{" "}
+                        {E.property?.landscapeComplexity ||
+                          E.property?.complexity ||
+                          "--"}{" "}
+                        | Water:{" "}
+                        {E.property?.nearWater &&
+                        E.property.nearWater !== "NONE"
+                          ? E.property.nearWater.replace(/_/g, " ")
+                          : "No"}
+                        {E.property?.yearBuilt && (
                           <>
-                            <br />Estimated value: <strong className="text-zinc-900">${Math.round(E.property.estimatedValue).toLocaleString()}</strong>
-                            {E.property.estimatedValueLow && E.property.estimatedValueHigh ? <> (${Math.round(E.property.estimatedValueLow).toLocaleString()}–${Math.round(E.property.estimatedValueHigh).toLocaleString()})</> : null}
+                            <br />
+                            Built: {E.property.yearBuilt} |{" "}
+                            {E.property?.constructionMaterial} |{" "}
+                            {E.property?.foundationType} foundation |{" "}
+                            {E.property?.roofType} roof
                           </>
                         )}
-                        {E.property?.serviceZone && <Tag>Zone {E.property.serviceZone}</Tag>}
-                        {E.urgency?.label && <><br /><Tag>{E.urgency.label}</Tag></>}
-                        {E.recurringCustomer && <Tag>Recurring -15% one-time</Tag>}
-                      </div>
+                        {E.property?.estimatedValue && (
+                          <>
+                            {" "}
+                            <br />
+                            Estimated value:{" "}
+                            <strong className="text-zinc-900">
+                              $
+                              {Math.round(
+                                E.property.estimatedValue,
+                              ).toLocaleString()}
+                            </strong>
+                            {E.property.estimatedValueLow &&
+                            E.property.estimatedValueHigh ? (
+                              <>
+                                ($
+                                {Math.round(
+                                  E.property.estimatedValueLow,
+                                ).toLocaleString()}
+                                –$
+                                {Math.round(
+                                  E.property.estimatedValueHigh,
+                                ).toLocaleString()}
+                                )
+                              </>
+                            ) : null}
+                          </>
+                        )}
+                        {E.property?.serviceZone && (
+                          <Tag>Zone {E.property.serviceZone}</Tag>
+                        )}
+                        {E.urgency?.label && (
+                          <>
+                            <br />
+                            <Tag>{E.urgency.label}</Tag>
+                          </>
+                        )}
+                        {E.recurringCustomer && (
+                          <Tag>Recurring -15% one-time</Tag>
+                        )}
+                      </div>{" "}
                     </div>
-
                     {/* Pricing Modifiers */}
                     {E.modifiers?.length > 0 && (
                       <div className="mb-6">
-                        <SectionTitle>Pricing Modifiers</SectionTitle>
+                        {" "}
+                        <SectionTitle>Pricing Modifiers</SectionTitle>{" "}
                         <div className="flex flex-col gap-1">
                           {E.modifiers.map((m, i) => (
                             <div
                               key={i}
                               className={cn(
-                                'flex items-center gap-2 px-3 py-1.5 rounded-xs border-hairline',
-                                m.type === 'up' ? 'border-zinc-300 bg-white' : m.type === 'down' ? 'border-zinc-300 bg-zinc-50' : 'border-zinc-200 bg-white',
+                                "flex items-center gap-2 px-3 py-1.5 rounded-xs border-hairline",
+                                m.type === "up"
+                                  ? "border-zinc-300 bg-white"
+                                  : m.type === "down"
+                                    ? "border-zinc-300 bg-zinc-50"
+                                    : "border-zinc-200 bg-white",
                               )}
                             >
+                              {" "}
                               <span className="text-11 text-ink-tertiary flex-shrink-0 w-3 text-center">
-                                {m.type === 'up' ? '▲' : m.type === 'down' ? '▼' : '·'}
-                              </span>
-                              <span className="text-12 text-ink-secondary flex-1">{m.label}</span>
+                                {m.type === "up"
+                                  ? "▲"
+                                  : m.type === "down"
+                                    ? "▼"
+                                    : "·"}
+                              </span>{" "}
+                              <span className="text-12 text-ink-secondary flex-1">
+                                {m.label}
+                              </span>{" "}
                               <span className="text-11 font-medium text-zinc-900 u-nums">
-                                {m.impact != null ? (m.impact >= 0 ? '+$' + m.impact : '-$' + Math.abs(m.impact)) : '$0'}
-                              </span>
+                                {m.impact != null
+                                  ? m.impact >= 0
+                                    ? "+$" + m.impact
+                                    : "-$" + Math.abs(m.impact)
+                                  : "$0"}
+                              </span>{" "}
                             </div>
                           ))}
-                        </div>
+                        </div>{" "}
                       </div>
                     )}
 
-                    <PestProductionDiagnosticsPanel diagnostics={E.productionDiagnostics} />
-
+                    <PestProductionDiagnosticsPanel
+                      diagnostics={E.productionDiagnostics}
+                    />
                     {/* Recurring Programs */}
                     {E.hasRecurring && (
                       <>
+                        {" "}
                         <GroupHeader>Recurring Programs</GroupHeader>
-
                         {R.lawn && (
                           <div className="mb-6">
+                            {" "}
                             <SectionTitle>
                               Lawn Care
-                              <Tag>{R.lawnMeta?.lsf?.toLocaleString()} sf turf</Tag>
-                              {R.lawnMeta?.grassName && <Tag>{R.lawnMeta.grassName}</Tag>}
-                            </SectionTitle>
+                              <Tag>
+                                {R.lawnMeta?.lsf?.toLocaleString()} sf turf
+                              </Tag>
+                              {R.lawnMeta?.grassName && (
+                                <Tag>{R.lawnMeta.grassName}</Tag>
+                              )}
+                            </SectionTitle>{" "}
                             <TierGridV2>
                               {R.lawn.map((t, i) => (
                                 <TierRowV2
@@ -2102,17 +3365,22 @@ export default function EstimateToolViewV2({
                                   price={`${fmt(t.mo)}/mo`}
                                   recommended={t.recommended}
                                   dimmed={t.dimmed}
-                                  selected={String(t.v) === String(form.lawnFreq)}
-                                  onSelect={() => { set('lawnFreq', String(t.v)); doGenerate({ lawnFreq: t.v }); }}
+                                  selected={
+                                    String(t.v) === String(form.lawnFreq)
+                                  }
+                                  onSelect={() => {
+                                    set("lawnFreq", String(t.v));
+                                    doGenerate({ lawnFreq: t.v });
+                                  }}
                                 />
                               ))}
-                            </TierGridV2>
+                            </TierGridV2>{" "}
                           </div>
                         )}
-
                         {R.pestTiers && (
                           <div className="mb-6">
-                            <SectionTitle>Pest Control</SectionTitle>
+                            {" "}
+                            <SectionTitle>Pest Control</SectionTitle>{" "}
                             <TierGridV2>
                               {R.pestTiers.map((t, i) => (
                                 <TierRowV2
@@ -2122,78 +3390,140 @@ export default function EstimateToolViewV2({
                                   price={`${fmt(t.mo)}/mo`}
                                   recommended={t.recommended}
                                   dimmed={t.dimmed}
-                                  selected={String(t.apps) === String(form.pestFreq)}
-                                  onSelect={() => { set('pestFreq', String(t.apps)); doGenerate({ pestFreq: t.apps }); }}
+                                  selected={
+                                    String(t.apps) === String(form.pestFreq)
+                                  }
+                                  onSelect={() => {
+                                    set("pestFreq", String(t.apps));
+                                    doGenerate({ pestFreq: t.apps });
+                                  }}
                                 />
                               ))}
                             </TierGridV2>
                             {R.pestInitialRoachPrice > 0 && (
                               <div className="text-11 text-ink-secondary mt-1">
-                                {R.pestRoachMod === 'GERMAN' ? 'German' : 'Native'} roach initial is added as a one-time knockdown, not a recurring per-visit premium.
+                                {R.pestRoachMod === "GERMAN"
+                                  ? "German"
+                                  : "Native"}{" "}
+                                roach initial is added as a one-time knockdown,
+                                not a recurring per-visit premium.
                               </div>
                             )}
                           </div>
                         )}
-
                         {R.ts && (
                           <div className="mb-6">
+                            {" "}
                             <SectionTitle>
                               Tree &amp; Shrub
-                              <Tag>{R.tsMeta?.eb} sf beds | {R.tsMeta?.et} trees</Tag>
-                              {R.tsMeta?.bedAreaIsEstimated && <FieldVerifyTag>FIELD VERIFY</FieldVerifyTag>}
-                            </SectionTitle>
+                              <Tag>
+                                {R.tsMeta?.eb} sf beds | {R.tsMeta?.et} trees
+                              </Tag>
+                              {R.tsMeta?.bedAreaIsEstimated && (
+                                <FieldVerifyTag>FIELD VERIFY</FieldVerifyTag>
+                              )}
+                            </SectionTitle>{" "}
                             <TierGridV2>
                               {R.ts.map((t, i) => (
-                                <TierRowV2 key={i} name={t.name} detail={`${fmt(t.pa)}/app x ${t.v}`} price={`${fmt(t.mo)}/mo`} recommended={t.recommended} dimmed={t.dimmed} />
+                                <TierRowV2
+                                  key={i}
+                                  name={t.name}
+                                  detail={`${fmt(t.pa)}/app x ${t.v}`}
+                                  price={`${fmt(t.mo)}/mo`}
+                                  recommended={t.recommended}
+                                  dimmed={t.dimmed}
+                                />
                               ))}
-                            </TierGridV2>
+                            </TierGridV2>{" "}
                           </div>
                         )}
-
                         {R.injection && (
                           <div className="mb-6">
+                            {" "}
                             <SectionTitle>
-                              Palm Injection <Tag>{R.injection.palms} palms</Tag>
-                            </SectionTitle>
+                              Palm Injection{" "}
+                              <Tag>{R.injection.palms} palms</Tag>{" "}
+                            </SectionTitle>{" "}
                             <TierGridV2>
-                              <TierRowV2 name="Arborjet" detail={`${R.injection.palms} palms x $55 x 2/yr`} price={`${fmt(R.injection.mo)}/mo`} recommended />
-                            </TierGridV2>
+                              {" "}
+                              <TierRowV2
+                                name="Arborjet"
+                                detail={`${R.injection.palms} palms x $55 x 2/yr`}
+                                price={`${fmt(R.injection.mo)}/mo`}
+                                recommended
+                              />{" "}
+                            </TierGridV2>{" "}
                           </div>
                         )}
-
                         {R.mq && (
                           <div className="mb-6">
+                            {" "}
                             <SectionTitle>
-                              Mosquito <Tag>Pressure {R.mqMeta?.pr}x</Tag>
-                            </SectionTitle>
+                              Mosquito <Tag>Pressure {R.mqMeta?.pr}x</Tag>{" "}
+                            </SectionTitle>{" "}
                             <TierGridV2>
                               {R.mq.map((t, i) => (
-                                <TierRowV2 key={i} name={t.n} detail={`$${t.pv}/visit x ${t.v}`} price={`${fmt(t.mo)}/mo`} recommended={t.recommended} dimmed={t.dimmed} />
+                                <TierRowV2
+                                  key={i}
+                                  name={t.n}
+                                  detail={`$${t.pv}/visit x ${t.v}`}
+                                  price={`${fmt(t.mo)}/mo`}
+                                  recommended={t.recommended}
+                                  dimmed={t.dimmed}
+                                />
                               ))}
-                            </TierGridV2>
+                            </TierGridV2>{" "}
                           </div>
                         )}
-
                         {R.tmBait && (
                           <div className="mb-6">
+                            {" "}
                             <SectionTitle>
-                              Termite Bait <Tag>{R.tmBait.sta} sta | {R.tmBait.perim} ft</Tag>
-                            </SectionTitle>
+                              Termite Bait{" "}
+                              <Tag>
+                                {R.tmBait.sta} sta | {R.tmBait.perim} ft
+                              </Tag>{" "}
+                            </SectionTitle>{" "}
                             <TierGridV2>
-                              <TierRowV2 name="Advance" detail={`${fmtInt(R.tmBait.ai)} install | Basic $35 | Premier $65/mo`} price="$35-65" dimmed />
-                              <TierRowV2 name="Trelona" detail={`${fmtInt(R.tmBait.ti)} install | Basic $35 | Premier $65/mo`} price="$35-65" recommended />
-                            </TierGridV2>
-                            <div className="text-11 text-ink-secondary mt-1">Install cost is a one-time setup fee, not a recurring charge</div>
+                              {" "}
+                              <TierRowV2
+                                name="Advance"
+                                detail={`${fmtInt(R.tmBait.ai)} install | Basic $35 | Premier $65/mo`}
+                                price="$35-65"
+                                dimmed
+                              />{" "}
+                              <TierRowV2
+                                name="Trelona"
+                                detail={`${fmtInt(R.tmBait.ti)} install | Basic $35 | Premier $65/mo`}
+                                price="$35-65"
+                                recommended
+                              />{" "}
+                            </TierGridV2>{" "}
+                            <div className="text-11 text-ink-secondary mt-1">
+                              Install cost is a one-time setup fee, not a
+                              recurring charge
+                            </div>{" "}
                           </div>
                         )}
-
                         {R.rodBaitMo && (
                           <div className="mb-6">
-                            <SectionTitle>Rodent Bait Stations</SectionTitle>
+                            {" "}
+                            <SectionTitle>
+                              Rodent Bait Stations
+                            </SectionTitle>{" "}
                             <TierGridV2>
-                              <TierRowV2 name="Monthly" detail={`${R.rodBaitSize} property`} price={`$${R.rodBaitMo}/mo`} recommended />
-                            </TierGridV2>
-                            <div className="text-11 text-ink-secondary mt-1">Not included in bundle discount — priced separately</div>
+                              {" "}
+                              <TierRowV2
+                                name="Monthly"
+                                detail={`${R.rodBaitSize} property`}
+                                price={`$${R.rodBaitMo}/mo`}
+                                recommended
+                              />{" "}
+                            </TierGridV2>{" "}
+                            <div className="text-11 text-ink-secondary mt-1">
+                              Not included in bundle discount — priced
+                              separately
+                            </div>{" "}
                           </div>
                         )}
                       </>
@@ -2202,90 +3532,224 @@ export default function EstimateToolViewV2({
                     {/* One-Time Services */}
                     {E.hasOneTime && (
                       <>
+                        {" "}
                         <GroupHeader>One-Time Services</GroupHeader>
                         {E.oneTime.items.map((item, i) => {
-                          if (item.name === 'Top Dressing' && R.tdTiers) {
+                          if (item.name === "Top Dressing" && R.tdTiers) {
                             return (
                               <div key={i} className="mb-6">
-                                <SectionTitle>Top Dressing{E.isRecurringCustomer && <DiscBadge>-15%</DiscBadge>}</SectionTitle>
-                                <TierGridV2>
-                                  {R.tdTiers.map((t, j) => <TierRowV2 key={j} name={t.name} detail={t.detail} price={fmtInt(t.price)} />)}
-                                </TierGridV2>
-                              </div>
-                            );
-                          }
-                          if (item.name === 'Trenching' && R.trench) {
-                            return (
-                              <div key={i} className="mb-6">
-                                <SectionTitle>Trenching{E.isRecurringCustomer && <DiscBadge>-15%</DiscBadge>}</SectionTitle>
-                                <TierGridV2>
-                                  <TierRowV2 name="Treatment" detail={item.detail} price={fmtInt(item.price)} />
-                                  <TierRowV2 name="Renewal" detail="Annual warranty" price="$325/yr" dimmed />
-                                </TierGridV2>
-                                <div className="text-12 text-ink-secondary italic mt-1">Best scheduled before rainy season (Apr-May)</div>
-                              </div>
-                            );
-                          }
-                          if (item.name === 'Bora-Care') {
-                            return (
-                              <div key={i} className="mb-6">
+                                {" "}
                                 <SectionTitle>
-                                  Bora-Care Attic{E.isRecurringCustomer && <DiscBadge>-15%</DiscBadge>}
-                                  {item.atticIsEstimated && <FieldVerifyTag>FIELD VERIFY ATTIC</FieldVerifyTag>}
-                                </SectionTitle>
+                                  Top Dressing
+                                  {E.isRecurringCustomer && (
+                                    <DiscBadge>-15%</DiscBadge>
+                                  )}
+                                </SectionTitle>{" "}
                                 <TierGridV2>
-                                  <TierRowV2 name="Treatment" detail={item.detail} price={fmtInt(item.price)} />
-                                </TierGridV2>
-                                <div className="text-12 text-ink-secondary italic mt-1">Best time: Oct-Mar (cooler attic temps)</div>
+                                  {R.tdTiers.map((t, j) => (
+                                    <TierRowV2
+                                      key={j}
+                                      name={t.name}
+                                      detail={t.detail}
+                                      price={fmtInt(t.price)}
+                                    />
+                                  ))}
+                                </TierGridV2>{" "}
                               </div>
                             );
                           }
-                          if (item.name === 'Pre-Slab') {
+                          if (item.name === "Trenching" && R.trench) {
                             return (
                               <div key={i} className="mb-6">
-                                <SectionTitle>Pre-Slab Termidor{E.isRecurringCustomer && <DiscBadge>-15%</DiscBadge>}</SectionTitle>
+                                {" "}
+                                <SectionTitle>
+                                  Trenching
+                                  {E.isRecurringCustomer && (
+                                    <DiscBadge>-15%</DiscBadge>
+                                  )}
+                                </SectionTitle>{" "}
                                 <TierGridV2>
-                                  <TierRowV2 name="Treatment" detail={item.detail} price={fmtInt(item.basePrice || item.price)} />
-                                  {item.warrAdd > 0 && <TierRowV2 name="5yr Warranty" detail="Extended transferable" price="+$200" />}
-                                </TierGridV2>
-                                {!item.warrAdd && <div className="text-11 text-ink-secondary mt-1">Includes 1-yr builder warranty | $225/yr renewal after</div>}
+                                  {" "}
+                                  <TierRowV2
+                                    name="Treatment"
+                                    detail={item.detail}
+                                    price={fmtInt(item.price)}
+                                  />{" "}
+                                  <TierRowV2
+                                    name="Renewal"
+                                    detail="Annual warranty"
+                                    price="$325/yr"
+                                    dimmed
+                                  />{" "}
+                                </TierGridV2>{" "}
+                                <div className="text-12 text-ink-secondary italic mt-1">
+                                  Best scheduled before rainy season (Apr-May)
+                                </div>{" "}
                               </div>
                             );
                           }
-                          if (item.name === 'Foam Drill') {
+                          if (item.name === "Bora-Care") {
                             return (
                               <div key={i} className="mb-6">
-                                <SectionTitle>Foam Drill{E.isRecurringCustomer && <DiscBadge>-15%</DiscBadge>}</SectionTitle>
+                                {" "}
+                                <SectionTitle>
+                                  Bora-Care Attic
+                                  {E.isRecurringCustomer && (
+                                    <DiscBadge>-15%</DiscBadge>
+                                  )}
+                                  {item.atticIsEstimated && (
+                                    <FieldVerifyTag>
+                                      FIELD VERIFY ATTIC
+                                    </FieldVerifyTag>
+                                  )}
+                                </SectionTitle>{" "}
                                 <TierGridV2>
-                                  <TierRowV2 name={item.tierName} detail={item.detail} price={fmtInt(item.price)} />
-                                </TierGridV2>
-                                <div className="text-11 text-ink-secondary mt-1">For localized drywood, wall voids, door/window frames</div>
+                                  {" "}
+                                  <TierRowV2
+                                    name="Treatment"
+                                    detail={item.detail}
+                                    price={fmtInt(item.price)}
+                                  />{" "}
+                                </TierGridV2>{" "}
+                                <div className="text-12 text-ink-secondary italic mt-1">
+                                  Best time: Oct-Mar (cooler attic temps)
+                                </div>{" "}
                               </div>
                             );
                           }
-                          if (item.name === 'Plugging') {
+                          if (item.name === "Pre-Slab") {
                             return (
                               <div key={i} className="mb-6">
-                                <SectionTitle>Plugging{E.isRecurringCustomer && <DiscBadge>-15%</DiscBadge>}</SectionTitle>
+                                {" "}
+                                <SectionTitle>
+                                  Pre-Slab Termidor
+                                  {E.isRecurringCustomer && (
+                                    <DiscBadge>-15%</DiscBadge>
+                                  )}
+                                </SectionTitle>{" "}
                                 <TierGridV2>
-                                  <TierRowV2 name={item.spacing} detail={item.detail} price={fmtInt(item.price)} />
+                                  {" "}
+                                  <TierRowV2
+                                    name="Treatment"
+                                    detail={item.detail}
+                                    price={fmtInt(item.basePrice || item.price)}
+                                  />
+                                  {item.warrAdd > 0 && (
+                                    <TierRowV2
+                                      name="5yr Warranty"
+                                      detail="Extended transferable"
+                                      price="+$200"
+                                    />
+                                  )}
                                 </TierGridV2>
-                                {item.warn6 && <div className="text-11 text-ink-secondary mt-1">Sod may be more cost-effective at 6"</div>}
+                                {!item.warrAdd && (
+                                  <div className="text-11 text-ink-secondary mt-1">
+                                    Includes 1-yr builder warranty | $225/yr
+                                    renewal after
+                                  </div>
+                                )}
                               </div>
                             );
                           }
-                          const nameMap = { 'OT Pest': 'One-Time Pest', 'OT Mosquito': 'One-Time Mosquito', 'German Roach': 'German Roach Initial', 'German Roach Initial': 'German Roach Initial', 'Native Roach Initial': 'Native Roach Initial', 'Initial German Roach Knockdown': 'Initial German Roach Knockdown', 'Initial Native Roach Knockdown': 'Initial Native Roach Knockdown' };
-                          const displayName = item.lawnType ? `One-Time Lawn (${item.lawnType})` : (nameMap[item.name] || item.name);
+                          if (item.name === "Foam Drill") {
+                            return (
+                              <div key={i} className="mb-6">
+                                {" "}
+                                <SectionTitle>
+                                  Foam Drill
+                                  {E.isRecurringCustomer && (
+                                    <DiscBadge>-15%</DiscBadge>
+                                  )}
+                                </SectionTitle>{" "}
+                                <TierGridV2>
+                                  {" "}
+                                  <TierRowV2
+                                    name={item.tierName}
+                                    detail={item.detail}
+                                    price={fmtInt(item.price)}
+                                  />{" "}
+                                </TierGridV2>{" "}
+                                <div className="text-11 text-ink-secondary mt-1">
+                                  For localized drywood, wall voids, door/window
+                                  frames
+                                </div>{" "}
+                              </div>
+                            );
+                          }
+                          if (item.name === "Plugging") {
+                            return (
+                              <div key={i} className="mb-6">
+                                {" "}
+                                <SectionTitle>
+                                  Plugging
+                                  {E.isRecurringCustomer && (
+                                    <DiscBadge>-15%</DiscBadge>
+                                  )}
+                                </SectionTitle>{" "}
+                                <TierGridV2>
+                                  {" "}
+                                  <TierRowV2
+                                    name={item.spacing}
+                                    detail={item.detail}
+                                    price={fmtInt(item.price)}
+                                  />{" "}
+                                </TierGridV2>
+                                {item.warn6 && (
+                                  <div className="text-11 text-ink-secondary mt-1">
+                                    Sod may be more cost-effective at 6"
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          }
+                          const nameMap = {
+                            "OT Pest": "One-Time Pest",
+                            "OT Mosquito": "One-Time Mosquito",
+                            "German Roach": "German Roach Initial",
+                            "German Roach Initial": "German Roach Initial",
+                            "Native Roach Initial": "Native Roach Initial",
+                            "Initial German Roach Knockdown":
+                              "Initial German Roach Knockdown",
+                            "Initial Native Roach Knockdown":
+                              "Initial Native Roach Knockdown",
+                          };
+                          const displayName = item.lawnType
+                            ? `One-Time Lawn (${item.lawnType})`
+                            : nameMap[item.name] || item.name;
                           return (
                             <div key={i} className="mb-6">
-                              <SectionTitle>{displayName}{E.isRecurringCustomer && !item.noRecurringDiscount && <DiscBadge>-15%</DiscBadge>}</SectionTitle>
+                              {" "}
+                              <SectionTitle>
+                                {displayName}
+                                {E.isRecurringCustomer &&
+                                  !item.noRecurringDiscount && (
+                                    <DiscBadge>-15%</DiscBadge>
+                                  )}
+                              </SectionTitle>{" "}
                               <TierGridV2>
+                                {" "}
                                 <TierRowV2
-                                  name={item.lawnType || (item.name === 'OT Pest' ? 'Full Spray' : item.name === 'OT Mosquito' ? 'Event Spray' : item.service === 'pest_initial_roach' || item.name === 'German Roach' || item.name === 'German Roach Initial' || item.name === 'Native Roach Initial' ? 'Initial' : item.name === 'Trapping' ? 'Trapping' : 'Standalone')}
+                                  name={
+                                    item.lawnType ||
+                                    (item.name === "OT Pest"
+                                      ? "Full Spray"
+                                      : item.name === "OT Mosquito"
+                                        ? "Event Spray"
+                                        : item.service ===
+                                              "pest_initial_roach" ||
+                                            item.name === "German Roach" ||
+                                            item.name ===
+                                              "German Roach Initial" ||
+                                            item.name === "Native Roach Initial"
+                                          ? "Initial"
+                                          : item.name === "Trapping"
+                                            ? "Trapping"
+                                            : "Standalone")
+                                  }
                                   detail={item.detail}
                                   price={fmtInt(item.price)}
-                                />
-                              </TierGridV2>
+                                />{" "}
+                              </TierGridV2>{" "}
                             </div>
                           );
                         })}
@@ -2295,134 +3759,266 @@ export default function EstimateToolViewV2({
                     {/* Specialty Pest */}
                     {E.specItems && E.specItems.length > 0 && (
                       <>
-                        <GroupHeader>Specialty Pest</GroupHeader>
+                        {" "}
+                        <GroupHeader>Specialty Pest</GroupHeader>{" "}
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-6">
                           {E.specItems.map((s, i) => (
-                            <div key={i} className="bg-white border-hairline border-zinc-200 rounded-sm p-4">
-                              <div className="text-11 font-medium text-ink-secondary uppercase tracking-label mb-1">{s.name}</div>
-                              <div className="text-18 font-medium text-zinc-900 u-nums">{s.onProg ? '$0 — Included' : fmtInt(s.price)}</div>
-                              <div className="text-12 text-ink-secondary mt-1">{s.det}</div>
+                            <div
+                              key={i}
+                              className="bg-white border-hairline border-zinc-200 rounded-sm p-4"
+                            >
+                              {" "}
+                              <div className="text-11 font-medium text-ink-secondary uppercase tracking-label mb-1">
+                                {s.name}
+                              </div>{" "}
+                              <div className="text-18 font-medium text-zinc-900 u-nums">
+                                {s.onProg ? "$0 — Included" : fmtInt(s.price)}
+                              </div>{" "}
+                              <div className="text-12 text-ink-secondary mt-1">
+                                {s.det}
+                              </div>{" "}
                             </div>
                           ))}
-                        </div>
+                        </div>{" "}
                       </>
                     )}
 
                     {/* Bundle + Totals */}
-                    {(E.recurring.serviceCount > 0 || E.oneTime.total > 0 || E.recurring.rodentBaitMo > 0 || E.recurring.palmInjectionMo > 0) && (
+                    {(E.recurring.serviceCount > 0 ||
+                      E.oneTime.total > 0 ||
+                      E.recurring.rodentBaitMo > 0 ||
+                      E.recurring.palmInjectionMo > 0) && (
                       <>
+                        {" "}
                         <div className="h-px bg-zinc-200 my-4" />
-
                         {E.recurring.serviceCount > 0 && (
                           <div className="bg-zinc-50 border-hairline border-zinc-300 rounded-sm p-5 mb-6">
-                            <div className="text-18 font-medium text-zinc-900">{E.recurring.serviceCount}-service bundle</div>
+                            {" "}
+                            <div className="text-18 font-medium text-zinc-900">
+                              {E.recurring.serviceCount}-service bundle
+                            </div>{" "}
                             <div className="text-13 text-ink-secondary mt-0.5">
-                              {E.recurring.serviceCount} recurring service{E.recurring.serviceCount > 1 ? 's' : ''} — {Math.round(E.recurring.discount * 100)}% bundle discount
+                              {E.recurring.serviceCount} recurring service
+                              {E.recurring.serviceCount > 1 ? "s" : ""} —{" "}
+                              {Math.round(E.recurring.discount * 100)}% bundle
+                              discount
                             </div>
                             {E.recurring.savings > 0 && (
                               <div className="text-zinc-900 text-14 font-medium mt-1">
-                                Bundling saves <span className="u-nums">{fmt(E.recurring.savings)}</span>/year
+                                Bundling saves{" "}
+                                <span className="u-nums">
+                                  {fmt(E.recurring.savings)}
+                                </span>
+                                /year
                               </div>
                             )}
                             <div className="grid grid-cols-[1fr_auto] gap-y-1 gap-x-4 text-13 mt-3 p-3 bg-white rounded-xs border-hairline border-zinc-200">
                               {E.recurring.services.map((s, i) => (
                                 <React.Fragment key={i}>
+                                  {" "}
                                   <div className="text-ink-secondary">
+                                    {" "}
                                     <div>{s.displayName || s.name}</div>
-                                    {s.detail && <div className="text-11 text-ink-tertiary leading-snug mt-0.5">{s.detail}</div>}
-                                  </div>
-                                  <div className="text-zinc-900 text-right u-nums">{fmt(s.mo)}/mo</div>
+                                    {s.detail && (
+                                      <div className="text-11 text-ink-tertiary leading-snug mt-0.5">
+                                        {s.detail}
+                                      </div>
+                                    )}
+                                  </div>{" "}
+                                  <div className="text-zinc-900 text-right u-nums">
+                                    {fmt(s.mo)}/mo
+                                  </div>{" "}
                                 </React.Fragment>
                               ))}
-                              <div className="font-medium text-zinc-900 border-t border-hairline border-zinc-200 pt-1 mt-1">Total before discount</div>
-                              <div className="font-medium border-t border-hairline border-zinc-200 pt-1 mt-1 text-right text-zinc-900 u-nums">{fmt(Math.round(E.recurring.annualBeforeDiscount / 12 * 100) / 100)}/mo</div>
+                              <div className="font-medium text-zinc-900 border-t border-hairline border-zinc-200 pt-1 mt-1">
+                                Total before discount
+                              </div>{" "}
+                              <div className="font-medium border-t border-hairline border-zinc-200 pt-1 mt-1 text-right text-zinc-900 u-nums">
+                                {fmt(
+                                  Math.round(
+                                    (E.recurring.annualBeforeDiscount / 12) *
+                                      100,
+                                  ) / 100,
+                                )}
+                                /mo
+                              </div>
                               {E.recurring.discount > 0 && (
                                 <>
-                                  <div className="text-ink-secondary">{E.recurring.waveGuardTier} discount (-{Math.round(E.recurring.discount * 100)}%)</div>
-                                  <div className="text-zinc-900 text-right u-nums">-{fmt(Math.round(E.recurring.savings / 12 * 100) / 100)}/mo</div>
+                                  {" "}
+                                  <div className="text-ink-secondary">
+                                    {E.recurring.waveGuardTier} discount (-
+                                    {Math.round(E.recurring.discount * 100)}%)
+                                  </div>{" "}
+                                  <div className="text-zinc-900 text-right u-nums">
+                                    -
+                                    {fmt(
+                                      Math.round(
+                                        (E.recurring.savings / 12) * 100,
+                                      ) / 100,
+                                    )}
+                                    /mo
+                                  </div>{" "}
                                 </>
                               )}
-                              <div className="font-medium text-zinc-900">Your monthly rate</div>
-                              <div className="font-medium text-zinc-900 text-right u-nums">{fmt(E.recurring.monthlyTotal)}/mo</div>
-                            </div>
+                              <div className="font-medium text-zinc-900">
+                                Your monthly rate
+                              </div>{" "}
+                              <div className="font-medium text-zinc-900 text-right u-nums">
+                                {fmt(E.recurring.monthlyTotal)}/mo
+                              </div>{" "}
+                            </div>{" "}
                           </div>
                         )}
-
                         {/* Grand totals */}
                         <div className="bg-white border-hairline border-zinc-900 rounded-sm p-5">
                           {E.recurring.serviceCount > 0 && (
                             <div className="flex justify-between items-center py-1.5 text-14">
-                              <span className="text-ink-secondary">Recurring (after bundle)</span>
-                              <span className="font-medium text-zinc-900 u-nums">{fmt(E.recurring.annualAfterDiscount)}/yr ({fmt(E.recurring.monthlyTotal)}/mo)</span>
+                              {" "}
+                              <span className="text-ink-secondary">
+                                Recurring (after bundle)
+                              </span>{" "}
+                              <span className="font-medium text-zinc-900 u-nums">
+                                {fmt(E.recurring.annualAfterDiscount)}/yr (
+                                {fmt(E.recurring.monthlyTotal)}/mo)
+                              </span>{" "}
                             </div>
                           )}
                           {E.recurring.rodentBaitMo > 0 && (
                             <div className="flex justify-between items-center py-1.5 text-14">
-                              <span className="text-ink-secondary">Rodent bait (separate)</span>
-                              <span className="font-medium text-zinc-900 u-nums">{fmtInt(E.recurring.rodentBaitMo * 12)}/yr (${E.recurring.rodentBaitMo}/mo)</span>
+                              {" "}
+                              <span className="text-ink-secondary">
+                                Rodent bait (separate)
+                              </span>{" "}
+                              <span className="font-medium text-zinc-900 u-nums">
+                                {fmtInt(E.recurring.rodentBaitMo * 12)}/yr ($
+                                {E.recurring.rodentBaitMo}/mo)
+                              </span>{" "}
                             </div>
                           )}
                           {E.recurring.palmInjectionMo > 0 && (
                             <div className="flex justify-between items-center py-1.5 text-14">
-                              <span className="text-ink-secondary">Palm injection (separate)</span>
-                              <span className="font-medium text-zinc-900 u-nums">{fmtInt(E.recurring.palmInjectionAnn || E.recurring.palmInjectionMo * 12)}/yr ({fmt(E.recurring.palmInjectionMo)}/mo)</span>
+                              {" "}
+                              <span className="text-ink-secondary">
+                                Palm injection (separate)
+                              </span>{" "}
+                              <span className="font-medium text-zinc-900 u-nums">
+                                {fmtInt(
+                                  E.recurring.palmInjectionAnn ||
+                                    E.recurring.palmInjectionMo * 12,
+                                )}
+                                /yr ({fmt(E.recurring.palmInjectionMo)}/mo)
+                              </span>{" "}
                             </div>
                           )}
                           {E.manualDiscount && E.manualDiscount.amount > 0 && (
                             <div className="flex justify-between items-center py-1.5 text-14">
+                              {" "}
                               <span className="text-ink-secondary">
-                                {E.manualDiscount.label || (E.manualDiscount.type === 'PERCENT' ? `Discount (${E.manualDiscount.value}%)` : `Discount`)}
-                              </span>
-                              <span className="font-medium text-zinc-900 u-nums">-{fmt(E.manualDiscount.amount)}/yr</span>
+                                {E.manualDiscount.label ||
+                                  (E.manualDiscount.type === "PERCENT"
+                                    ? `Discount (${E.manualDiscount.value}%)`
+                                    : `Discount`)}
+                              </span>{" "}
+                              <span className="font-medium text-zinc-900 u-nums">
+                                -{fmt(E.manualDiscount.amount)}/yr
+                              </span>{" "}
                             </div>
                           )}
                           {E.oneTime.tmInstall > 0 && (
                             <div className="flex justify-between items-center py-1.5 text-14">
-                              <span className="text-ink-secondary">Termite bait install (Trelona)</span>
-                              <span className="font-medium text-zinc-900 u-nums">{fmtInt(E.oneTime.tmInstall)}</span>
+                              {" "}
+                              <span className="text-ink-secondary">
+                                Termite bait install (Trelona)
+                              </span>{" "}
+                              <span className="font-medium text-zinc-900 u-nums">
+                                {fmtInt(E.oneTime.tmInstall)}
+                              </span>{" "}
                             </div>
                           )}
                           {E.oneTime.otSubtotal > 0 && (
                             <>
+                              {" "}
                               <div className="flex justify-between items-center py-2 text-14 border-t border-hairline border-zinc-200 mt-1.5">
-                                <span className="font-medium text-zinc-900">One-Time Services</span>
-                                <span className="font-medium text-zinc-900 u-nums">{fmtInt(E.oneTime.otSubtotal)}</span>
+                                {" "}
+                                <span className="font-medium text-zinc-900">
+                                  One-Time Services
+                                </span>{" "}
+                                <span className="font-medium text-zinc-900 u-nums">
+                                  {fmtInt(E.oneTime.otSubtotal)}
+                                </span>{" "}
                               </div>
                               {E.oneTime.items.map((item, i) => (
-                                <div key={i} className="flex justify-between items-start gap-3 py-0.5 pl-4 text-13 text-ink-secondary">
+                                <div
+                                  key={i}
+                                  className="flex justify-between items-start gap-3 py-0.5 pl-4 text-13 text-ink-secondary"
+                                >
+                                  {" "}
                                   <span>
-                                    <span>{item.name}{item.waivedWithPrepay ? <span className="text-11 text-ink-tertiary ml-1">waived with annual prepay</span> : ''}</span>
-                                    {item.detail && <span className="block text-11 text-ink-tertiary leading-snug mt-0.5">{item.detail}</span>}
-                                  </span>
-                                  <span className="text-13 u-nums">{fmtInt(item.price)}</span>
+                                    {" "}
+                                    <span>
+                                      {item.name}
+                                      {item.waivedWithPrepay ? (
+                                        <span className="text-11 text-ink-tertiary ml-1">
+                                          waived with annual prepay
+                                        </span>
+                                      ) : (
+                                        ""
+                                      )}
+                                    </span>
+                                    {item.detail && (
+                                      <span className="block text-11 text-ink-tertiary leading-snug mt-0.5">
+                                        {item.detail}
+                                      </span>
+                                    )}
+                                  </span>{" "}
+                                  <span className="text-13 u-nums">
+                                    {fmtInt(item.price)}
+                                  </span>{" "}
                                 </div>
                               ))}
                               {E.oneTime.specItems.map((s, i) => (
-                                <div key={`sp-${i}`} className="flex justify-between items-center py-0.5 pl-4 text-13 text-ink-secondary">
-                                  <span>{s.name}</span>
-                                  <span className="text-13 u-nums">{fmtInt(s.price)}</span>
+                                <div
+                                  key={`sp-${i}`}
+                                  className="flex justify-between items-center py-0.5 pl-4 text-13 text-ink-secondary"
+                                >
+                                  {" "}
+                                  <span>{s.name}</span>{" "}
+                                  <span className="text-13 u-nums">
+                                    {fmtInt(s.price)}
+                                  </span>{" "}
                                 </div>
                               ))}
                             </>
                           )}
                           <div className="flex justify-between items-center py-3 text-18 font-medium border-t-2 border-zinc-900 mt-2">
-                            <span className="text-zinc-900">Year 1 Total</span>
-                            <span className="font-medium text-zinc-900 u-nums">{fmt(E.totals.year1)}</span>
-                          </div>
+                            {" "}
+                            <span className="text-zinc-900">
+                              Year 1 Total
+                            </span>{" "}
+                            <span className="font-medium text-zinc-900 u-nums">
+                              {fmt(E.totals.year1)}
+                            </span>{" "}
+                          </div>{" "}
                           <div className="flex justify-between items-center py-1.5 text-14">
-                            <span className="text-ink-secondary">Year 2+ Annual</span>
-                            <span className="font-medium text-zinc-900 u-nums">{fmt(E.totals.year2)}/yr ({fmt(E.totals.year2mo)}/mo)</span>
-                          </div>
-                        </div>
+                            {" "}
+                            <span className="text-ink-secondary">
+                              Year 2+ Annual
+                            </span>{" "}
+                            <span className="font-medium text-zinc-900 u-nums">
+                              {fmt(E.totals.year2)}/yr ({fmt(E.totals.year2mo)}
+                              /mo)
+                            </span>{" "}
+                          </div>{" "}
+                        </div>{" "}
                       </>
                     )}
-                  </div>
-                </Card>
+                  </div>{" "}
+                </Card>{" "}
               </EstimateErrorBoundary>
             )}
-          </div>
-        </div>
-      </div>
+          </div>{" "}
+        </div>{" "}
+      </div>{" "}
     </FormCtx.Provider>
   );
 }

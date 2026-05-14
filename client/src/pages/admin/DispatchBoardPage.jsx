@@ -1,5 +1,5 @@
 /**
- * <DispatchBoardPage> — the new "Board" tab content. Owns nothing
+ * <DispatchBoardPage>— the new "Board" tab content. Owns nothing
  * directly; delegates state to useDispatchBoard() and rendering to
  * the dispatch component family.
  *
@@ -24,22 +24,22 @@
  *
  * Tier 1 V2 styling.
  */
-import React, { useCallback, useState } from 'react';
-import { useDispatchBoard } from '../../hooks/useDispatchBoard';
-import DispatchBoardLayout from '../../components/dispatch/DispatchBoardLayout';
-import TechRosterPane from '../../components/dispatch/TechRosterPane';
-import DispatchMap from '../../components/dispatch/DispatchMap';
-import ActionQueuePane from '../../components/dispatch/ActionQueuePane';
-import JobDrawer from '../../components/dispatch/JobDrawer';
-import TechDrawer from '../../components/dispatch/TechDrawer';
+import React, { useCallback, useState } from "react";
+import { useDispatchBoard } from "../../hooks/useDispatchBoard";
+import DispatchBoardLayout from "../../components/dispatch/DispatchBoardLayout";
+import TechRosterPane from "../../components/dispatch/TechRosterPane";
+import DispatchMap from "../../components/dispatch/DispatchMap";
+import ActionQueuePane from "../../components/dispatch/ActionQueuePane";
+import JobDrawer from "../../components/dispatch/JobDrawer";
+import TechDrawer from "../../components/dispatch/TechDrawer";
 
-const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 function adminAuthHeaders() {
-  const token = localStorage.getItem('waves_admin_token');
+  const token = localStorage.getItem("waves_admin_token");
   return token
-    ? { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
-    : { 'Content-Type': 'application/json' };
+    ? { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+    : { "Content-Type": "application/json" };
 }
 
 export default function DispatchBoardPage() {
@@ -55,26 +55,26 @@ export default function DispatchBoardPage() {
     error,
   } = useDispatchBoard();
 
-  // Stable callback so memoized <TechCard> doesn't see a new prop on
+  // Stable callback so memoized <TechCard>doesn't see a new prop on
   // every parent render.
   const handleSelectTech = useCallback(
     (id) => setSelectedTechId((cur) => (cur === id ? null : id)),
-    [setSelectedTechId]
+    [setSelectedTechId],
   );
 
   const handleSelectJob = useCallback(
     (id) => setSelectedJobId(id),
-    [setSelectedJobId]
+    [setSelectedJobId],
   );
 
   const handleCloseJob = useCallback(
     () => setSelectedJobId(null),
-    [setSelectedJobId]
+    [setSelectedJobId],
   );
 
   const handleCloseTech = useCallback(
     () => setSelectedTechId(null),
-    [setSelectedTechId]
+    [setSelectedTechId],
   );
 
   // ---- Drag-to-reassign ----
@@ -106,33 +106,36 @@ export default function DispatchBoardPage() {
   // emits dispatch:job_update on success — so the local board AND
   // every other dispatcher's board re-color the pin. We don't
   // optimistically mutate jobs[] here because the broadcast handles it.
-  const handleJobDropOnTech = useCallback(async (jobId, techId) => {
-    if (!jobId || !techId) return;
-    try {
-      const res = await fetch(
-        `${API_BASE}/admin/dispatch/jobs/${jobId}/assign`,
-        {
-          method: 'PUT',
-          headers: adminAuthHeaders(),
-          body: JSON.stringify({ technicianId: techId }),
+  const handleJobDropOnTech = useCallback(
+    async (jobId, techId) => {
+      if (!jobId || !techId) return;
+      try {
+        const res = await fetch(
+          `${API_BASE}/admin/dispatch/jobs/${jobId}/assign`,
+          {
+            method: "PUT",
+            headers: adminAuthHeaders(),
+            body: JSON.stringify({ technicianId: techId }),
+          },
+        );
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.error || `HTTP ${res.status}`);
         }
-      );
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.error || `HTTP ${res.status}`);
+        // If the drawer is open on the same job we just reassigned,
+        // bump its refetch signal so it re-pulls the enriched job
+        // detail and shows the new assignee. The board pin re-colors
+        // via dispatch:job_update broadcast (PR #322), but the drawer
+        // owns its own /jobs/:id state and isn't on that broadcast.
+        if (jobId === selectedJobId) {
+          setDrawerRefetchSignal((c) => c + 1);
+        }
+      } catch (err) {
+        setAssignError(err.message || "Reassignment failed");
       }
-      // If the drawer is open on the same job we just reassigned,
-      // bump its refetch signal so it re-pulls the enriched job
-      // detail and shows the new assignee. The board pin re-colors
-      // via dispatch:job_update broadcast (PR #322), but the drawer
-      // owns its own /jobs/:id state and isn't on that broadcast.
-      if (jobId === selectedJobId) {
-        setDrawerRefetchSignal((c) => c + 1);
-      }
-    } catch (err) {
-      setAssignError(err.message || 'Reassignment failed');
-    }
-  }, [selectedJobId]);
+    },
+    [selectedJobId],
+  );
 
   if (loading) {
     return (
@@ -184,13 +187,13 @@ export default function DispatchBoardPage() {
           />
         }
         right={<ActionQueuePane />}
-      />
+      />{" "}
       <JobDrawer
         jobId={selectedJobId}
         onClose={handleCloseJob}
         refetchSignal={drawerRefetchSignal}
-      />
-      <TechDrawer techId={selectedTechId} onClose={handleCloseTech} />
+      />{" "}
+      <TechDrawer techId={selectedTechId} onClose={handleCloseTech} />{" "}
     </>
   );
 }
