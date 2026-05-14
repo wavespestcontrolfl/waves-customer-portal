@@ -148,9 +148,20 @@ router.post('/reconcile', async (req, res, next) => {
         payment_date: etDateString(),
         stripe_charge_id: stripeChargeId || null,
         processor: stripeChargeId ? 'stripe' : null,
+        metadata: JSON.stringify({
+          invoice_id: invoiceId,
+          source: 'admin_payment_reconcile',
+        }),
       });
     } catch (e) {
       logger.warn(`[reconcile] payments ledger insert skipped: ${e.message}`);
+    }
+
+    try {
+      const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+      await AnnualPrepayRenewals.syncTermForInvoicePayment({ id: invoiceId, status: 'paid', paid_at: new Date() });
+    } catch (e) {
+      logger.warn(`[reconcile] annual prepay activation skipped: ${e.message}`);
     }
 
     logger.info(`[reconcile] invoice ${invoice.invoice_number} marked paid via ${collectedVia}${stripeChargeId ? ` (${stripeChargeId})` : ''}`);

@@ -138,6 +138,7 @@ const EstimateConverter = {
     //    first date — they'll be done on one visit. Pick a date where a tech
     //    is already working the zone (falls back safely if we can't resolve).
     let scheduledCount = 0;
+    let termStartDate = null;
     const existingFromReservation = await db('scheduled_services')
       .where({ source_estimate_id: estimateId })
       .count('id as count')
@@ -149,8 +150,14 @@ const EstimateConverter = {
         `[estimate-converter] Skipping auto-schedule for estimate ${estimateId} — ` +
         `reservation path already created ${existingFromReservation.count} scheduled_services row(s)`
       );
+      const reservedStart = await db('scheduled_services')
+        .where({ source_estimate_id: estimateId })
+        .orderBy('scheduled_date', 'asc')
+        .first('scheduled_date');
+      termStartDate = reservedStart?.scheduled_date || null;
     } else {
       const firstServiceDate = await pickFirstServiceDate(customer, estimateId);
+      termStartDate = firstServiceDate;
 
       for (const svc of recurringServices) {
         const serviceName = svc.name || svc.serviceName || svc.service_name || 'Service';
@@ -205,6 +212,21 @@ const EstimateConverter = {
           });
           draftInvoiceId = inv?.id || null;
           draftInvoiceAmount = annualAmount;
+
+          try {
+            const AnnualPrepayRenewals = require('./annual-prepay-renewals');
+            await AnnualPrepayRenewals.createTermForAnnualPrepay({
+              customerId,
+              sourceEstimateId: estimateId,
+              prepayInvoiceId: draftInvoiceId,
+              planLabel: `WaveGuard ${tier || 'Bronze'} Annual Prepay`,
+              monthlyRate,
+              prepayAmount: annualAmount,
+              termStart: termStartDate || null,
+            });
+          } catch (termErr) {
+            logger.error(`[estimate-converter] Annual prepay term creation failed for estimate ${estimateId}: ${termErr.message}`);
+          }
         } else {
           const inv = await InvoiceService.create({
             customerId,

@@ -583,10 +583,12 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
     try {
       const paidInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first();
       if (paidInvoice) {
-        await require('../services/invoice-followups').stopOnPayment(paidInvoice.id);
+        await require('../services/invoice-followups').stopOnPayment(paidInvoice.id)
+          .catch((e) => logger.error(`[invoice-followups] stopOnPayment failed: ${e.message}`));
+        await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(paidInvoice);
       }
     } catch (e) {
-      logger.error(`[invoice-followups] stopOnPayment failed: ${e.message}`);
+      logger.error(`[stripe-webhook] annual prepay activation failed: ${e.message}`);
     }
   }
   // Awaited inline so the side effect runs inside the same processing
@@ -958,6 +960,13 @@ async function handleChargeRefunded(charge) {
   // Fire-and-forget health rescore after refund
   try {
     const payment = await db('payments').where({ stripe_charge_id: chargeId }).first();
+    if (isFullRefund && payment) {
+      try {
+        await require('../services/annual-prepay-renewals').syncTermForRefundedPayment(payment);
+      } catch (err) {
+        logger.warn(`[stripe-webhook] annual prepay refund sync skipped for charge ${chargeId}: ${err.message}`);
+      }
+    }
     if (payment?.customer_id) {
       const customerHealth = require('../services/customer-health');
       customerHealth.scoreCustomer(payment.customer_id).catch(err => {

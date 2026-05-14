@@ -1333,6 +1333,11 @@ const InvoiceService = {
     assertInvoiceVoidable(current.status);
     if (current.status === 'void') return current;
     const [invoice] = await db('invoices').where({ id }).update({ status: 'void', updated_at: new Date() }).returning('*');
+    try {
+      await require('./annual-prepay-renewals').syncTermForInvoicePayment(invoice);
+    } catch (err) {
+      logger.warn(`[invoice] annual prepay sync skipped after void ${invoice.invoice_number}: ${err.message}`);
+    }
     logger.info(`[invoice] Voided: ${invoice.invoice_number}`);
     return invoice;
   },

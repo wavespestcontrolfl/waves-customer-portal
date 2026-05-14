@@ -92,6 +92,9 @@ function timeAgo(dateStr) {
 
 function fmtDate(d) {
   if (!d) return '—';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(d))) {
+    return new Date(`${d}T12:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  }
   return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
@@ -1133,6 +1136,8 @@ export default function Customer360ProfileV2({ customerId, onClose, onSelectCust
   const payments = data.payments || [];
   const scheduled = data.scheduled || [];
   const accountProperties = data.accountProperties || [];
+  const annualPrepayTerms = data.annualPrepayTerms || [];
+  const activeAnnualPrepayTerm = annualPrepayTerms.find((t) => ['active', 'renewal_pending'].includes(t.status)) || annualPrepayTerms[0] || null;
 
   const balanceOwed = invoices.filter(i => i.status !== 'paid')
     .reduce((s, i) => s + parseFloat(i.amount_due || 0) - parseFloat(i.amount_paid || 0), 0);
@@ -1153,6 +1158,7 @@ export default function Customer360ProfileV2({ customerId, onClose, onSelectCust
   if (prefs.neighborhood_gate_code) alerts.push({ alert: false, label: 'GATE', text: `Neighborhood gate: ${prefs.neighborhood_gate_code}` });
   if (balanceOwed > 0) alerts.push({ alert: true, label: '$', text: `Overdue balance: ${fmtCurrency(balanceOwed)}` });
   if (expiringCard) alerts.push({ alert: true, label: 'CARD', text: `Card ending ${expiringCard.last_four} expiring ${expiringCard.exp_month}/${expiringCard.exp_year}` });
+  if (activeAnnualPrepayTerm?.status === 'renewal_pending') alerts.push({ alert: true, label: 'PREPAY', text: `Annual prepay renewal due ${fmtDate(activeAnnualPrepayTerm.termEnd)}` });
   if (prefs.chemical_sensitivities) alerts.push({ alert: false, label: 'CHEM', text: `Chemical sensitivity: ${prefs.chemical_sensitivities}` });
   if (prefs.special_instructions) alerts.push({ alert: false, label: 'NOTE', text: prefs.special_instructions });
 
@@ -1605,6 +1611,22 @@ export default function Customer360ProfileV2({ customerId, onClose, onSelectCust
                 {lastPayment && (
                   <div className="text-12 text-ink-secondary mb-3">
                     Last payment: {fmtCurrency(lastPayment.amount)} on {fmtDate(lastPayment.payment_date)}
+                  </div>
+                )}
+                {activeAnnualPrepayTerm && (
+                  <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-3">
+                    <div className="text-12 font-medium text-zinc-900">
+                      {activeAnnualPrepayTerm.planLabel || 'Annual Prepay'}
+                    </div>
+                    <div className="text-11 text-ink-secondary mt-0.5">
+                      Term ends {fmtDate(activeAnnualPrepayTerm.termEnd)}
+                      {activeAnnualPrepayTerm.lastScheduledServiceDate ? ` · last scheduled ${fmtDate(activeAnnualPrepayTerm.lastScheduledServiceDate)}` : ''}
+                    </div>
+                    {activeAnnualPrepayTerm.renewalDecision && (
+                      <div className="text-11 text-ink-secondary mt-0.5">
+                        Decision: {activeAnnualPrepayTerm.renewalDecision.replace('_', ' ')}
+                      </div>
+                    )}
                   </div>
                 )}
                 <SectionTitle>Recent Invoices</SectionTitle>
