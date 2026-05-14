@@ -14,6 +14,10 @@ const { isEnabled } = require('../config/feature-gates');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { normalizeLeadAddress } = require('../utils/address-normalizer');
+const {
+  blockIfAutomatedEstimateDuplicate,
+  withAutomatedEstimatePhoneLock,
+} = require('../services/estimate-automation-duplicates');
 
 function notifyTwilioFailure(payload) {
   void alertTwilioFailure(payload).catch((alertErr) => {
@@ -456,22 +460,29 @@ router.post('/', async (req, res) => {
     // Create estimate/quote record so it appears in Pipeline → Quotes tab
     try {
       const serviceInterest = body.service_interest || body['What Can We Help You With'] || findField(body, /service|help|pest|lawn/i) || '';
-      const crypto = require('crypto');
-      const estimateToken = crypto.randomBytes(16).toString('hex');
+      await withAutomatedEstimatePhoneLock(phoneFormatted, async (trx) => {
+        const duplicateBlock = await blockIfAutomatedEstimateDuplicate(phoneFormatted, { database: trx });
 
-      await db('estimates').insert({
-        customer_id: customer.id,
-        customer_name: `${firstName} ${lastName}`,
-        customer_phone: phoneFormatted,
-        customer_email: email || null,
-        address: fullAddress || '',
-        status: 'draft',
-        source: 'lead_webhook',
-        service_interest: serviceInterest || null,
-        lead_source: leadSource.source,
-        lead_source_detail: leadSource.detail,
-        token: estimateToken,
-        notes: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}.`,
+        if (duplicateBlock) {
+          logger.info(`[lead-webhook] Estimate creation blocked by duplicate estimate ${duplicateBlock.existingEstimateId} for customer ${customer.id}`);
+        } else {
+          const crypto = require('crypto');
+          const estimateToken = crypto.randomBytes(16).toString('hex');
+          await trx('estimates').insert({
+            customer_id: customer.id,
+            customer_name: `${firstName} ${lastName}`,
+            customer_phone: phoneFormatted,
+            customer_email: email || null,
+            address: fullAddress || '',
+            status: 'draft',
+            source: 'lead_webhook',
+            service_interest: serviceInterest || null,
+            lead_source: leadSource.source,
+            lead_source_detail: leadSource.detail,
+            token: estimateToken,
+            notes: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}.`,
+          });
+        }
       });
     } catch (estErr) {
       logger.error(`Lead estimate creation failed: ${estErr.message}`);

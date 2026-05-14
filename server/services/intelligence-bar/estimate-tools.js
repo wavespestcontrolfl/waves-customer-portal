@@ -14,6 +14,10 @@ const logger = require('../logger');
 const { generateEstimate } = require('../pricing-engine');
 const { shortenOrPassthrough } = require('../short-url');
 const { validateEstimateDeliveryOptions } = require('../estimate-delivery-options');
+const {
+  blockIfAutomatedEstimateDuplicate,
+  withAutomatedEstimatePhoneLock,
+} = require('../estimate-automation-duplicates');
 const { performPropertyLookup } = require('../../routes/property-lookup-v2');
 
 const ESTIMATE_TOOLS = [
@@ -450,24 +454,47 @@ async function createPendingEstimate(input) {
         .join(' + ')
     : null;
 
-  const [estimate] = await db('estimates').insert({
-    estimate_data: JSON.stringify({ engineInputs, engineResult, agentDraft: true }),
-    address,
-    customer_name: customerName,
-    customer_phone: customerPhone || null,
-    customer_email: customerEmail || null,
-    monthly_total: monthly,
-    annual_total: annual,
-    onetime_total: onetime,
-    waveguard_tier: tier,
-    token,
-    expires_at: expiresAt,
-    notes,
-    status: 'draft',
-    source: 'ai_agent',
-    service_interest: serviceInterest,
-    category: 'RESIDENTIAL',
-  }).returning(['id', 'token']);
+  const creationResult = await withAutomatedEstimatePhoneLock(customerPhone, async (trx) => {
+    const duplicateBlock = await blockIfAutomatedEstimateDuplicate(customerPhone, { database: trx });
+    if (duplicateBlock) return { duplicateBlock };
+
+    const [estimate] = await trx('estimates').insert({
+      estimate_data: JSON.stringify({ engineInputs, engineResult, agentDraft: true }),
+      address,
+      customer_name: customerName,
+      customer_phone: customerPhone || null,
+      customer_email: customerEmail || null,
+      monthly_total: monthly,
+      annual_total: annual,
+      onetime_total: onetime,
+      waveguard_tier: tier,
+      token,
+      expires_at: expiresAt,
+      notes,
+      status: 'draft',
+      source: 'ai_agent',
+      service_interest: serviceInterest,
+      category: 'RESIDENTIAL',
+    }).returning(['id', 'token']);
+
+    return { estimate };
+  });
+
+  if (creationResult.duplicateBlock) {
+    const { duplicateBlock } = creationResult;
+    logger.info(`[intelligence-bar:estimates] Agent draft blocked by duplicate estimate ${duplicateBlock.existingEstimateId}`);
+    return {
+      success: false,
+      blocked: true,
+      reason: duplicateBlock.reason,
+      existing_estimate_id: duplicateBlock.existingEstimateId,
+      existing_status: duplicateBlock.existingStatus,
+      existing_source: duplicateBlock.existingSource,
+      note_for_admin: duplicateBlock.message,
+    };
+  }
+
+  const { estimate } = creationResult;
 
   logger.info(`[intelligence-bar:estimates] Agent created draft ${estimate.id} for ${customerName}`);
 

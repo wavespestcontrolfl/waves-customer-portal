@@ -6,6 +6,10 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
+const {
+  blockIfAutomatedEstimateDuplicate,
+  withAutomatedEstimatePhoneLock,
+} = require('./estimate-automation-duplicates');
 
 async function executeLeadTool(toolName, input) {
   switch (toolName) {
@@ -417,21 +421,42 @@ async function executeLeadTool(toolName, input) {
       const customer = await db('customers').where('id', input.customer_id).first();
       const crypto = require('crypto');
 
-      const [estimate] = await db('estimates').insert({
-        customer_id: input.customer_id,
-        customer_name: customer ? `${customer.first_name} ${customer.last_name}` : 'Unknown',
-        customer_phone: customer?.phone,
-        customer_email: customer?.email,
-        address: input.address || customer?.address_line1 || '',
-        status: 'draft',
-        source: 'lead_agent',
-        service_interest: input.service_interest,
-        notes: `${input.urgency ? `Urgency: ${input.urgency}. ` : ''}${input.notes || ''}`,
-        token: crypto.randomBytes(16).toString('hex'),
-      }).returning('*');
+      const result = await withAutomatedEstimatePhoneLock(customer?.phone, async (trx) => {
+        const duplicateBlock = await blockIfAutomatedEstimateDuplicate(customer?.phone, { database: trx });
+        if (duplicateBlock) {
+          logger.info(`[lead-agent] Estimate flag blocked by duplicate estimate ${duplicateBlock.existingEstimateId} for customer ${input.customer_id}`);
+          return {
+            blocked: true,
+            reason: duplicateBlock.reason,
+            message: duplicateBlock.message,
+            estimateId: duplicateBlock.existingEstimateId,
+            status: duplicateBlock.existingStatus,
+            source: duplicateBlock.existingSource,
+          };
+        }
 
-      logger.info(`[lead-agent] Flagged for estimate: ${input.service_interest} for ${customer?.first_name}`);
-      return { flagged: true, estimateId: estimate.id };
+        const [estimate] = await trx('estimates').insert({
+          customer_id: input.customer_id,
+          customer_name: customer ? `${customer.first_name} ${customer.last_name}` : 'Unknown',
+          customer_phone: customer?.phone,
+          customer_email: customer?.email,
+          address: input.address || customer?.address_line1 || '',
+          status: 'draft',
+          source: 'lead_agent',
+          service_interest: input.service_interest,
+          notes: `${input.urgency ? `Urgency: ${input.urgency}. ` : ''}${input.notes || ''}`,
+          token: crypto.randomBytes(16).toString('hex'),
+        }).returning('*');
+
+        return { estimate };
+      });
+
+      if (result.blocked) {
+        return { flagged: false, ...result };
+      }
+
+      logger.info(`[lead-agent] Flagged for estimate: ${input.service_interest} for customer ${input.customer_id}`);
+      return { flagged: true, estimateId: result.estimate.id };
     }
 
     case 'save_lead_response_report': {
