@@ -4,8 +4,8 @@ const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { logAutopay } = require('../services/autopay-log');
 const {
-  CONSENT_TEXT,
   CONSENT_VERSION,
+  getConsentText,
   ESIGN_DISCLOSURE,
   buildAutopayContractSnapshot,
   contractExpiresAt,
@@ -127,7 +127,7 @@ router.post('/customer/:customerId/autopay-authorization', async (req, res, next
         cancellation_deadline: cancellationDeadline,
         auto_renewal_notice_required: !!(renewalDate && cancellationDeadline),
         consent_text_version: CONSENT_VERSION,
-        consent_text_snapshot: CONSENT_TEXT,
+        consent_text_snapshot: getConsentText(paymentMethod?.method_type),
         contract_text_snapshot: contractText,
         esign_disclosure_snapshot: ESIGN_DISCLOSURE,
         share_token_hash: tokenHash,

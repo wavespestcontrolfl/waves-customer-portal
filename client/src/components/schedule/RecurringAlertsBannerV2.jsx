@@ -2,7 +2,7 @@
 // Monochrome V2 of RecurringAlertsBanner. Strict 1:1 on data and behavior:
 //   - GET  /admin/schedule/recurring-alerts  (fetch list)
 //   - POST /admin/schedule/recurring-alerts/:id/action { action, count: 4 }
-//   - same 3 actions: extend (+4 visits), convert_ongoing, let_lapse
+//   - recurring plan actions plus annual-prepay renewal decisions
 // Visual changes: banner uses alert-bg/alert-fg (these ARE alerts requiring
 // action); warning emoji dropped; action buttons flatten to zinc+alert pattern.
 import { useState, useEffect, useCallback } from 'react';
@@ -57,6 +57,8 @@ export default function RecurringAlertsBannerV2() {
   };
 
   if (!alerts.length) return null;
+  const annualCount = alerts.filter((a) => a.source === 'annual_prepay').length;
+  const recurringCount = alerts.length - annualCount;
 
   return (
     <div className="bg-alert-bg border-hairline border-alert-fg/30 rounded-sm p-3 mb-3">
@@ -66,10 +68,17 @@ export default function RecurringAlertsBannerV2() {
         className="w-full flex items-center justify-between u-focus-ring"
       >
         <span className="text-13 font-medium text-alert-fg">
-          {alerts.length} recurring plan{alerts.length === 1 ? '' : 's'} ending soon
+          {alerts.length} renewal touchpoint{alerts.length === 1 ? '' : 's'} due
         </span>
         <span className="u-label text-alert-fg">{expanded ? 'Hide' : 'Review'}</span>
       </button>
+      {(annualCount > 0 || recurringCount > 0) && (
+        <div className="mt-1 text-11 text-alert-fg/80">
+          {recurringCount > 0 ? `${recurringCount} recurring plan${recurringCount === 1 ? '' : 's'}` : ''}
+          {recurringCount > 0 && annualCount > 0 ? ' · ' : ''}
+          {annualCount > 0 ? `${annualCount} annual prepay` : ''}
+        </div>
+      )}
 
       {expanded && (
         <div className="mt-3 flex flex-col gap-2">
@@ -81,34 +90,55 @@ export default function RecurringAlertsBannerV2() {
               <div className="flex-1 min-w-[200px]">
                 <div className="text-13 font-medium text-ink-primary">{a.customerName || 'Customer'}</div>
                 <div className="text-11 text-ink-secondary mt-0.5">
-                  {a.serviceType} · {a.pattern} · last visit {a.lastVisitDate || '—'} · {a.remainingVisits ?? 0} pending
+                  {a.source === 'annual_prepay'
+                    ? `${a.serviceType} · term ends ${a.termEnd || '—'} · last scheduled ${a.lastVisitDate || '—'}`
+                    : `${a.serviceType} · ${a.pattern} · last visit ${a.lastVisitDate || '—'} · ${a.remainingVisits ?? 0} pending`}
                 </div>
               </div>
-              <div className="flex gap-2">
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={busyId === a.id}
-                  onClick={() => act(a, 'extend')}
-                >
-                  +4 visits
-                </Button>
-                <Button
-                  size="sm"
-                  variant="primary"
-                  disabled={busyId === a.id}
-                  onClick={() => act(a, 'convert_ongoing')}
-                >
-                  Convert to ongoing
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={busyId === a.id}
-                  onClick={() => act(a, 'let_lapse')}
-                >
-                  Let lapse
-                </Button>
+              <div className="flex flex-wrap justify-end gap-2">
+                {a.source === 'annual_prepay' ? (
+                  <>
+                    <Button size="sm" variant="secondary" disabled={busyId === a.id} onClick={() => act(a, 'contacted')}>
+                      Contacted
+                    </Button>
+                    <Button size="sm" variant="primary" disabled={busyId === a.id} onClick={() => act(a, 'renew')}>
+                      Renew
+                    </Button>
+                    <Button size="sm" variant="secondary" disabled={busyId === a.id} onClick={() => act(a, 'switch_plan')}>
+                      Switch
+                    </Button>
+                    <Button size="sm" variant="ghost" disabled={busyId === a.id} onClick={() => act(a, 'cancel')}>
+                      Cancel
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={busyId === a.id}
+                      onClick={() => act(a, 'extend')}
+                    >
+                      +4 visits
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={busyId === a.id}
+                      onClick={() => act(a, 'convert_ongoing')}
+                    >
+                      Convert to ongoing
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={busyId === a.id}
+                      onClick={() => act(a, 'let_lapse')}
+                    >
+                      Let lapse
+                    </Button>
+                  </>
+                )}
               </div>
             </div>
           ))}

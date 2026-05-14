@@ -82,6 +82,17 @@ const TRIGGER_REGISTRY = {
       link: p.invoiceId ? `/admin/invoices/${p.invoiceId}` : '/admin/revenue',
     }),
   },
+  payment_refunded: {
+    label: 'Refund issued',
+    category: 'payment',
+    priority: 'normal',
+    group: 'Payments',
+    build: (p) => ({
+      title: p.isFullRefund ? 'Full refund issued' : 'Partial refund issued',
+      body: `$${Number(p.amount || 0).toFixed(2)} — ${p.customerName || 'customer'}`,
+      link: p.invoiceId ? `/admin/invoices/${p.invoiceId}` : '/admin/revenue',
+    }),
+  },
   appointment_cancelled: {
     label: 'Appointment cancelled',
     category: 'schedule',

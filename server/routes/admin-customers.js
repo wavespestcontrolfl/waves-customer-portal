@@ -11,6 +11,12 @@ const PhotoService = require('../services/photos');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+function dateOnlyForApi(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).split('T')[0].slice(0, 10);
+}
+
 const CUSTOMER_STAGES = [
   'new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up',
   'negotiating', 'won', 'active_customer', 'at_risk', 'churned', 'lost', 'dormant',
@@ -907,7 +913,25 @@ router.get('/:id', async (req, res, next) => {
     if (!c) return res.status(404).json({ error: 'Customer not found' });
 
     const currentYear = Number(etDateString().slice(0, 4));
-    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties] = await Promise.all([
+    const annualPrepayTermsPromise = db.schema.hasTable('annual_prepay_terms')
+      .then((exists) => exists
+        ? db('annual_prepay_terms as apt')
+          .leftJoin('invoices as inv', 'apt.prepay_invoice_id', 'inv.id')
+          .leftJoin('scheduled_services as ss', 'apt.last_scheduled_service_id', 'ss.id')
+          .where('apt.customer_id', c.id)
+          .select(
+            'apt.*',
+            'inv.invoice_number as prepay_invoice_number',
+            'inv.status as prepay_invoice_status',
+            'inv.total as prepay_invoice_total',
+            'ss.service_type as last_scheduled_service_type',
+          )
+          .orderBy('apt.term_end', 'desc')
+          .limit(5)
+        : [])
+      .catch(e => { logger.warn(`[customers:${c.id}] annual_prepay_terms: ${e.message}`); return []; });
+
+    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms] = await Promise.all([
       db('customer_tags').where({ customer_id: c.id }).select('tag'),
       db('customer_interactions').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(30),
       db('property_preferences').where({ customer_id: c.id }).first(),
@@ -999,6 +1023,7 @@ router.get('/:id', async (req, res, next) => {
         )
         .catch(e => { logger.warn(`[customers:${c.id}] property_nutrient_ledger_summary: ${e.message}`); return null; }),
       accountPropertySummary(c.account_id, c.id).catch(e => { logger.warn(`[customers:${c.id}] account_properties: ${e.message}`); return []; }),
+      annualPrepayTermsPromise,
     ]);
 
     // The invoices table stores the billed amount as `total`; the frontend reads
@@ -1128,6 +1153,34 @@ router.get('/:id', async (req, res, next) => {
         cardBrand: contract.card_brand,
         lastFour: contract.last_four || contract.bank_last_four,
         bankName: contract.bank_name,
+      })),
+      annualPrepayTerms: (annualPrepayTerms || []).map((term) => ({
+        id: term.id,
+        customerId: term.customer_id,
+        sourceEstimateId: term.source_estimate_id,
+        prepayInvoiceId: term.prepay_invoice_id,
+        prepayInvoiceNumber: term.prepay_invoice_number,
+        prepayInvoiceStatus: term.prepay_invoice_status,
+        prepayInvoiceTotal: term.prepay_invoice_total != null ? Number(term.prepay_invoice_total) : null,
+        planLabel: term.plan_label,
+        monthlyRate: term.monthly_rate != null ? Number(term.monthly_rate) : null,
+        prepayAmount: term.prepay_amount != null ? Number(term.prepay_amount) : null,
+        termStart: dateOnlyForApi(term.term_start),
+        termEnd: dateOnlyForApi(term.term_end),
+        status: term.status,
+        lastScheduledServiceId: term.last_scheduled_service_id,
+        lastScheduledServiceDate: dateOnlyForApi(term.last_scheduled_service_date),
+        lastScheduledServiceType: term.last_scheduled_service_type,
+        notice30SentAt: term.notice_30_sent_at,
+        notice15SentAt: term.notice_15_sent_at,
+        notice7SentAt: term.notice_7_sent_at,
+        renewalContactedAt: term.renewal_contacted_at,
+        renewalContactedBy: term.renewal_contacted_by,
+        renewalDecision: term.renewal_decision,
+        renewalDecisionAt: term.renewal_decision_at,
+        renewalNotes: term.renewal_notes,
+        createdAt: term.created_at,
+        updatedAt: term.updated_at,
       })),
       photos: signedPhotos,
       notificationPrefs: notificationPrefs || null,

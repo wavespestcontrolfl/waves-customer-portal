@@ -134,6 +134,7 @@ router.post('/cards', async (req, res, next) => {
         paymentMethodId: card.id,
         stripePaymentMethodId: paymentMethodId,
         source: 'portal_add_card',
+        methodType: card.method_type || 'card',
         ip: req.ip,
         userAgent: req.get('user-agent') || null,
       });

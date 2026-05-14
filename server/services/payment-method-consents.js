@@ -12,15 +12,21 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { CONSENT_TEXT, CONSENT_VERSION } = require('./payment-method-consent-text');
+const { CONSENT_VERSION, getConsentText } = require('./payment-method-consent-text');
 
 const VALID_SOURCES = new Set(['pay_page', 'onboarding', 'portal_add_card', 'admin_tap_to_pay', 'contract_signing', 'backfill']);
 
+// methodType selects which authorization copy to snapshot. Omitted/
+// unknown values default to the card variant via getConsentText().
+// Card and ACH consents diverge in content (NACHA/Reg E adds ACH-specific
+// requirements) so snapshotting the wrong variant would mis-record what
+// the customer actually saw.
 async function recordConsent({
   customerId,
   paymentMethodId = null,
   stripePaymentMethodId,
   source,
+  methodType = 'card',
   ip = null,
   userAgent = null,
 }) {
@@ -28,18 +34,20 @@ async function recordConsent({
   if (!stripePaymentMethodId) throw new Error('recordConsent: stripePaymentMethodId required');
   if (!VALID_SOURCES.has(source)) throw new Error(`recordConsent: invalid source "${source}"`);
 
+  const consentText = getConsentText(methodType);
+
   const [row] = await db('payment_method_consents').insert({
     customer_id: customerId,
     payment_method_id: paymentMethodId,
     stripe_payment_method_id: stripePaymentMethodId,
     source,
     consent_text_version: CONSENT_VERSION,
-    consent_text_snapshot: CONSENT_TEXT,
+    consent_text_snapshot: consentText,
     ip,
     user_agent: userAgent,
   }).returning('*');
 
-  logger.info(`[consent] Recorded ${source} consent for customer ${customerId}, pm ${stripePaymentMethodId} (${CONSENT_VERSION})`);
+  logger.info(`[consent] Recorded ${source} consent for customer ${customerId}, pm ${stripePaymentMethodId} (${CONSENT_VERSION}, methodType=${methodType})`);
   return row;
 }
 

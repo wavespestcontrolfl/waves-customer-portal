@@ -189,12 +189,25 @@ export default function ReceiptPage() {
 
   // ── ?fresh=1 animation — fires ONCE on first mount, then strips the param
   // from the URL so cmd-R refresh doesn't re-trigger the badge animation.
+  // ?consent_failed=1 surfaces a banner when the save-payment-method
+  // authorization couldn't be recorded on the server (the payment itself
+  // still succeeded). Stripped the same way so reloads don't re-show it.
   const [showFreshBadge, setShowFreshBadge] = useState(false);
+  const [consentFailed, setConsentFailed] = useState(false);
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
+    let mutated = false;
     if (params.get('fresh') === '1') {
       setShowFreshBadge(true);
       params.delete('fresh');
+      mutated = true;
+    }
+    if (params.get('consent_failed') === '1') {
+      setConsentFailed(true);
+      params.delete('consent_failed');
+      mutated = true;
+    }
+    if (mutated) {
       const qs = params.toString();
       const nextUrl = window.location.pathname + (qs ? `?${qs}` : '');
       window.history.replaceState(null, '', nextUrl);
@@ -345,6 +358,30 @@ export default function ReceiptPage() {
               {processing
                 ? `Thanks, ${customer.firstName || 'there'} - your bank payment is processing.`
                 : `Thanks, ${customer.firstName || 'there'} - a receipt is on its way to you.`}
+            </div>
+          </div>
+        )}
+
+        {consentFailed && (
+          <div className="waves-no-print" style={{
+            marginBottom: 16,
+            padding: 14,
+            borderRadius: 8,
+            background: 'rgba(200,16,46,0.06)',
+            border: '1px solid rgba(200,16,46,0.28)',
+            color: 'var(--text)',
+            fontSize: 14,
+            lineHeight: 1.5,
+            display: 'flex',
+            gap: 10,
+            alignItems: 'flex-start',
+          }}>
+            <Icon name="warning" size={17} strokeWidth={2} style={{ color: 'var(--danger)', marginTop: 1, flexShrink: 0 }} />
+            <div>
+              <div style={{ fontWeight: 850, color: 'var(--danger)', marginBottom: 3 }}>Save-on-file authorization not recorded</div>
+              <div style={{ color: 'var(--text-muted)' }}>
+                Your payment went through, but we couldn't record your authorization to save this payment method on file. Waves will reach out to confirm before any future charge. Questions: call (941) 318-7612.
+              </div>
             </div>
           </div>
         )}

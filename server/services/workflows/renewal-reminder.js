@@ -9,13 +9,25 @@ class RenewalReminder {
    * at 30, 15, and 7 days out. Skips if already sent within 35 days.
    */
   async checkAndSend() {
+    let annualPrepaySent = 0;
+    let annualPrepay = null;
+    try {
+      annualPrepay = require('../annual-prepay-renewals');
+      if (annualPrepay.checkAndSend) {
+        const result = await annualPrepay.checkAndSend();
+        annualPrepaySent = Number(result?.sent || 0);
+      }
+    } catch (err) {
+      logger.error(`Annual prepay renewal reminder failed: ${err.message}`);
+    }
+
     const renewalFields = [
       { column: 'termite_renewal_date', label: 'Termite Bond Renewal' },
       { column: 'mosquito_season_start', label: 'Mosquito Season' },
       { column: 'waveguard_renewal_date', label: 'WaveGuard Plan Renewal' },
     ];
 
-    let totalSent = 0;
+    let totalSent = annualPrepaySent;
 
     for (const field of renewalFields) {
       for (const daysOut of [30, 15, 7]) {
@@ -31,6 +43,14 @@ class RenewalReminder {
 
         for (const customer of customers) {
           try {
+            if (
+              field.column === 'waveguard_renewal_date'
+              && annualPrepay?.hasAnnualPrepayRenewal
+              && await annualPrepay.hasAnnualPrepayRenewal(customer.id, dateStr)
+            ) {
+              continue;
+            }
+
             // Check cooldown — skip if renewal SMS sent in last 35 days
             const recent = await db('sms_log')
               .where({ customer_id: customer.id, message_type: 'renewal' })

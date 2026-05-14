@@ -242,6 +242,26 @@ const StripeService = {
   },
 
   // =========================================================================
+  // RESOLVE PAYMENT METHOD TYPE (via Stripe)
+  // =========================================================================
+
+  /**
+   * Retrieve a PaymentIntent with optional Stripe `expand` keys.
+   * Returns null if Stripe isn't configured. Throws on Stripe errors so
+   * callers can decide whether to fail closed or degrade.
+   *
+   * Used by routes that need server-verified PaymentIntent facts (e.g.
+   * consent snapshotting on the public /pay endpoint) where trusting
+   * client-supplied fields would defeat the audit trail.
+   */
+  async retrievePaymentIntent(paymentIntentId, options = {}) {
+    if (!paymentIntentId) return null;
+    const stripe = getStripe();
+    if (!stripe) return null;
+    return stripe.paymentIntents.retrieve(paymentIntentId, options);
+  },
+
+  // =========================================================================
   // REMOVE CARD
   // =========================================================================
 
@@ -700,6 +720,15 @@ const StripeService = {
       } catch (err) {
         logger.error(`[invoice-followups] stopOnPayment failed for card-on-file invoice ${invoiceId}: ${err.message}`);
       }
+      try {
+        await require('./annual-prepay-renewals').syncTermForInvoicePayment({
+          id: invoiceId,
+          status: 'paid',
+          paid_at: new Date().toISOString(),
+        });
+      } catch (err) {
+        logger.error(`[annual-prepay] activation failed for card-on-file invoice ${invoiceId}: ${err.message}`);
+      }
 
       setImmediate(async () => {
         try {
@@ -793,6 +822,14 @@ const StripeService = {
           refund_status: refund.status,
           stripe_refund_id: refund.id,
         });
+
+      if (isFullRefund) {
+        try {
+          await require('./annual-prepay-renewals').syncTermForRefundedPayment(payment);
+        } catch (syncErr) {
+          logger.error(`[annual-prepay] refund sync failed for payment ${paymentId}: ${syncErr.message}`);
+        }
+      }
 
       const updated = await db('payments').where({ id: paymentId }).first();
       logger.info(`[stripe] Refund processed: $${refundAmountDollars} for payment ${paymentId}, refund ${refund.id}`);
@@ -1351,6 +1388,15 @@ const StripeService = {
           await require('./invoice-followups').stopOnPayment(invoiceId);
         } catch (e) {
           logger.error(`[invoice-followups] stopOnPayment (stripe confirm) failed: ${e.message}`);
+        }
+        try {
+          await require('./annual-prepay-renewals').syncTermForInvoicePayment({
+            id: invoiceId,
+            status: 'paid',
+            paid_at: new Date().toISOString(),
+          });
+        } catch (e) {
+          logger.error(`[annual-prepay] activation failed for invoice ${invoiceId}: ${e.message}`);
         }
       }
 

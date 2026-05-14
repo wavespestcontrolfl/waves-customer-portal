@@ -276,6 +276,17 @@ class GoogleBusinessService {
             totalNew++;
             totalSynced++;
 
+            // Fire bell + push for every new review (positive and negative)
+            try {
+              const { triggerNotification } = require('./notification-triggers');
+              await triggerNotification(rating >= 4 ? 'review_received' : 'low_review', {
+                stars: rating, author: reviewerName,
+                text: (reviewText || '').slice(0, 120),
+              });
+            } catch (tnErr) {
+              logger.error(`[gbp] triggerNotification review failed: ${tnErr.message}`);
+            }
+
             if (rating <= 2) {
               await db('activity_log').insert({
                 action: 'review_received',

@@ -749,6 +749,13 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
       logger.warn(`[admin-invoices:record-payment] stopOnPayment failed: ${err.message}`);
     }
 
+    try {
+      const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+      await AnnualPrepayRenewals.syncTermForInvoicePayment(updatedInvoice);
+    } catch (err) {
+      logger.warn(`[admin-invoices:record-payment] annual prepay activation failed: ${err.message}`);
+    }
+
     await db('activity_log').insert({
       customer_id: updatedInvoice.customer_id,
       action: 'invoice_payment_recorded',
