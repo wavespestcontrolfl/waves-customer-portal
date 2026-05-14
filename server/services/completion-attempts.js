@@ -145,6 +145,38 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
     };
   }
 
+  // Global snapshot-bypass guard. Without this check, the per-state
+  // (same-key / failed) snapshot guards below only cover the same-
+  // idempotency-key retry path. A panel reload generates a FRESH key
+  // — falling through every same-key guard and landing here. Without
+  // this check the fresh-key INSERT would succeed, the route would
+  // re-resolve against a possibly-newer protocol_template, and the
+  // original snapshot (written by an earlier failed attempt under a
+  // different key) would be orphaned. Audit invariant breaks.
+  //
+  // Any prior non-succeeded attempt for this service that already
+  // persisted a snapshot owns the resume — no fresh attempt may take
+  // its place. PR #2's resume handler will key off this row's
+  // attemptId and resolved_completion_snapshot.
+  const priorSnapshotAttempt = await knex('service_completion_attempts')
+    .where({ service_id: serviceId })
+    .whereNot('status', 'succeeded')
+    .whereNotNull('snapshot_written_at')
+    .orderBy('updated_at', 'desc')
+    .first();
+  if (priorSnapshotAttempt) {
+    return {
+      action: 'conflict',
+      status: 409,
+      payload: {
+        error: 'Service has a prior non-succeeded completion attempt with a persisted resolved snapshot; snapshot resume will be wired in PR #2.',
+        code: 'completion_snapshot_resume_not_yet_supported',
+        attemptId: priorSnapshotAttempt.id,
+        snapshotHash: priorSnapshotAttempt.resolved_completion_snapshot_hash || null,
+      },
+    };
+  }
+
   try {
     const [row] = await knex('service_completion_attempts').insert({
       service_id: serviceId,
@@ -195,6 +227,11 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
             },
           };
         }
+
+        // (Snapshot-bearing stale rows are caught earlier by the
+        // global priorSnapshotAttempt check before INSERT is even
+        // attempted. By the time we reach this catch block,
+        // stalePending.snapshot_written_at is guaranteed NULL.)
 
         const [reclaimed] = await knex('service_completion_attempts')
           .where({ id: stalePending.id, status: 'pending' })
@@ -268,6 +305,10 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
         };
       }
 
+      // (Snapshot-bearing same-key rows are caught by the global
+      // priorSnapshotAttempt check before the INSERT is attempted,
+      // so existing.snapshot_written_at is guaranteed NULL here.)
+
       const staleCutoff = new Date(Date.now() - STALE_PENDING_MS);
       if (new Date(existing.updated_at) < staleCutoff) {
         const completedRecord = await knex('service_records')
@@ -324,6 +365,9 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
           },
         };
       }
+      // (Snapshot-bearing failed rows are caught by the global
+      // priorSnapshotAttempt check before INSERT is attempted, so
+      // existing.snapshot_written_at is guaranteed NULL here.)
       const [row] = await knex('service_completion_attempts')
         .where({ id: existing.id, status: 'failed' })
         .update({
@@ -398,10 +442,88 @@ async function markCompletionAttemptSideEffectsPending(attempt, { record, respon
   });
 }
 
+// Stable hash for a resolved completion snapshot. Used by the preview
+// → submit handshake: the client receives the hash on the preview
+// endpoint and sends it back as expectedSnapshotHash. If the resolver
+// produces a different hash at submit time (active protocol template
+// changed between preview and submit), the route returns 409
+// completion_preview_stale so the tech reopens the modal and reviews
+// the updated protocol.
+function hashResolvedSnapshot(snapshot) {
+  return crypto.createHash('sha256')
+    .update(JSON.stringify(sortObjectKeys(snapshot)))
+    .digest('hex');
+}
+
+// Persist the resolver's output on the completion attempt row before
+// any service_record is created. Mandatory for one-tap completions
+// (CHECK constraint enforces completion_source='one_tap_completion'
+// requires protocol_template_id + version). On replay/resume, the
+// route reads this snapshot back rather than re-running the resolver
+// — that's the whole point of snapshot ownership living here.
+async function storeResolvedSnapshot(
+  attempt,
+  { snapshot, snapshotHash, completionSource, protocolTemplateId, protocolTemplateVersion },
+  knex = db
+) {
+  if (!attempt?.id) throw new Error('storeResolvedSnapshot requires a claimed attempt');
+  if (!snapshot) throw new Error('storeResolvedSnapshot requires a snapshot');
+  if (!completionSource) throw new Error('storeResolvedSnapshot requires completion_source');
+
+  // Always compute the hash from the snapshot. If a caller supplied a
+  // hash, verify it matches and throw on mismatch — never store an
+  // unverified hash. A route accidentally forwarding the client's
+  // expectedSnapshotHash next to a server-resolved snapshot would
+  // weaken the preview-stale guard and the audit trail (the persisted
+  // hash would no longer hash to the persisted snapshot).
+  const computedHash = hashResolvedSnapshot(snapshot);
+  if (snapshotHash && snapshotHash !== computedHash) {
+    const err = new Error('storeResolvedSnapshot supplied snapshotHash does not match hash(snapshot)');
+    err.code = 'snapshot_hash_mismatch';
+    throw err;
+  }
+  if (completionSource === 'one_tap_completion' && (!protocolTemplateId || !protocolTemplateVersion)) {
+    throw new Error('storeResolvedSnapshot one_tap_completion requires protocol_template_id and version');
+  }
+
+  // Guard: only write the snapshot once, and only on a pre-record
+  // attempt. A resume path or a stale caller hitting an attempt that
+  // has already moved to side_effects_running/succeeded — or whose
+  // snapshot was already persisted on an earlier attempt — must not
+  // overwrite the original. The "first resolved snapshot is the
+  // replay/audit source" invariant depends on this WHERE clause.
+  // status='pending' AND snapshot_written_at IS NULL AND
+  // service_record_id IS NULL together describe the only state where
+  // a fresh snapshot write is legal. We assert .returning row count
+  // to throw if a concurrent caller beat us.
+  const updated = await knex('service_completion_attempts')
+    .where({ id: attempt.id, status: 'pending' })
+    .whereNull('snapshot_written_at')
+    .whereNull('service_record_id')
+    .update({
+      resolved_completion_snapshot: JSON.stringify(snapshot),
+      resolved_completion_snapshot_hash: computedHash,
+      completion_source: completionSource,
+      protocol_template_id: protocolTemplateId || null,
+      protocol_template_version: protocolTemplateVersion || null,
+      snapshot_written_at: new Date(),
+      updated_at: new Date(),
+    })
+    .returning('id');
+  if (!updated || updated.length === 0) {
+    const err = new Error('storeResolvedSnapshot found no eligible pre-record attempt row (already resolved, resumed, or progressed past pending)');
+    err.code = 'snapshot_write_not_eligible';
+    throw err;
+  }
+  return { snapshotHash: computedHash };
+}
+
 module.exports = {
   claimCompletionAttempt,
   hashCompletionRequest,
+  hashResolvedSnapshot,
   markCompletionAttemptFailed,
   markCompletionAttemptSucceeded,
   markCompletionAttemptSideEffectsPending,
+  storeResolvedSnapshot,
 };
