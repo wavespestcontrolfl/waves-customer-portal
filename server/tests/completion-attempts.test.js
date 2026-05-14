@@ -32,6 +32,14 @@ function makeKnex(ops) {
         op.whereIn = { col, values };
         return chain;
       }),
+      whereNot: jest.fn((col, value) => {
+        op.whereNot = { col, value };
+        return chain;
+      }),
+      whereNotNull: jest.fn((col) => {
+        op.whereNotNull = (op.whereNotNull || []).concat(col);
+        return chain;
+      }),
       andWhere: jest.fn((...args) => {
         op.andWhereArgs = args;
         return chain;
@@ -59,6 +67,11 @@ function makeKnex(ops) {
 const noPriorSuccess = () => ({ first: undefined });
 const noResumableCompletion = () => ({ first: undefined });
 const noCompletedRecord = () => ({ first: undefined });
+// Round-9 global snapshot-bypass guard: every code path that reaches
+// the INSERT (fresh attempt) flow first checks for a prior non-
+// succeeded attempt with snapshot_written_at. This shorthand stands
+// for "no prior snapshot attempt exists."
+const noPriorSnapshotAttempt = () => ({ first: undefined });
 
 describe('completion attempts', () => {
   test('first request claims and proceeds', async () => {
@@ -67,6 +80,7 @@ describe('completion attempts', () => {
       noPriorSuccess(),
       noResumableCompletion(),
       noCompletedRecord(),
+      noPriorSnapshotAttempt(),
       { returning: [row] },
     ]);
 
@@ -77,7 +91,7 @@ describe('completion attempts', () => {
     }, knex);
 
     expect(result).toEqual({ action: 'proceed', attempt: row });
-    expect(knex.calls[3].op.insertPayload).toMatchObject({
+    expect(knex.calls[4].op.insertPayload).toMatchObject({
       service_id: 'svc-1',
       idempotency_key: 'key-1',
       status: 'pending',
@@ -90,6 +104,7 @@ describe('completion attempts', () => {
       noPriorSuccess(),
       noResumableCompletion(),
       noCompletedRecord(),
+      noPriorSnapshotAttempt(),
       { insertError: uniqueViolation() },
       { first: { id: 'attempt-1', status: 'pending', updated_at: new Date() } },
     ]);
@@ -118,6 +133,7 @@ describe('completion attempts', () => {
       noPriorSuccess(),
       noResumableCompletion(),
       noCompletedRecord(),
+      noPriorSnapshotAttempt(),
       { insertError: uniqueViolation() },
       { first: stale },
       { first: undefined },
@@ -131,10 +147,10 @@ describe('completion attempts', () => {
     }, knex);
 
     expect(result).toEqual({ action: 'proceed', attempt: reclaimed });
-    expect(knex.calls[5].table).toBe('service_records');
-    expect(knex.calls[6].op.whereCriteria).toEqual({ id: 'attempt-1', status: 'pending' });
-    expect(knex.calls[6].op.andWhereArgs[0]).toBe('updated_at');
-    expect(knex.calls[6].op.updatePayload.request_hash).toBe('hash-1');
+    expect(knex.calls[6].table).toBe('service_records');
+    expect(knex.calls[7].op.whereCriteria).toEqual({ id: 'attempt-1', status: 'pending' });
+    expect(knex.calls[7].op.andWhereArgs[0]).toBe('updated_at');
+    expect(knex.calls[7].op.updatePayload.request_hash).toBe('hash-1');
   });
 
   test('same key after success replays stored response (upfront fast path)', async () => {
@@ -194,6 +210,7 @@ describe('completion attempts', () => {
       noPriorSuccess(),
       noResumableCompletion(),
       noCompletedRecord(),
+      noPriorSnapshotAttempt(),
       { insertError: uniqueViolation() },
       { first: { id: 'attempt-1', status: 'failed', error: 'transient' } },
       { returning: [retried] },
@@ -206,8 +223,8 @@ describe('completion attempts', () => {
     }, knex);
 
     expect(result).toEqual({ action: 'proceed', attempt: retried });
-    expect(knex.calls[5].op.whereCriteria).toEqual({ id: 'attempt-1', status: 'failed' });
-    expect(knex.calls[5].op.updatePayload).toMatchObject({
+    expect(knex.calls[6].op.whereCriteria).toEqual({ id: 'attempt-1', status: 'failed' });
+    expect(knex.calls[6].op.updatePayload).toMatchObject({
       status: 'pending',
       request_hash: 'hash-2',
       response: null,
@@ -220,6 +237,7 @@ describe('completion attempts', () => {
       noPriorSuccess(),
       noResumableCompletion(),
       noCompletedRecord(),
+      noPriorSnapshotAttempt(),
       { insertError: uniqueViolation() },
       { first: { id: 'attempt-1', status: 'failed', request_hash: 'hash-1' } },
       { returning: [] },
@@ -266,6 +284,7 @@ describe('completion attempts', () => {
       noPriorSuccess(),
       noResumableCompletion(),
       noCompletedRecord(),
+      noPriorSnapshotAttempt(),
       { insertError: uniqueViolation() },
       { first: { id: 'attempt-1', status: 'failed', request_hash: 'hash-old' } },
     ]);
@@ -309,6 +328,7 @@ describe('completion attempts', () => {
       noPriorSuccess(),
       noResumableCompletion(),
       noCompletedRecord(),
+      noPriorSnapshotAttempt(),
       { insertError: uniqueViolation() },
       { first: undefined },     // no same-key match
       { first: undefined },     // no stale pending → no reclaim path
@@ -342,6 +362,7 @@ describe('completion attempts', () => {
       noPriorSuccess(),
       noResumableCompletion(),
       noCompletedRecord(),
+      noPriorSnapshotAttempt(),
       { insertError: uniqueViolation() },   // first insert hits partial index
       { first: undefined },                 // no same-key match
       { first: stale },                     // stale pending found
@@ -358,59 +379,25 @@ describe('completion attempts', () => {
 
     expect(result).toEqual({ action: 'proceed', attempt: newRow });
     // Reclaim UPDATE was scoped to the stale row + status='pending' guard.
-    expect(knex.calls[7].op.whereCriteria).toEqual({ id: 'orphan-1', status: 'pending' });
-    expect(knex.calls[7].op.updatePayload.status).toBe('failed');
+    expect(knex.calls[8].op.whereCriteria).toEqual({ id: 'orphan-1', status: 'pending' });
+    expect(knex.calls[8].op.updatePayload.status).toBe('failed');
   });
 
-  test('same-key pending + persisted snapshot returns 409 until PR #2 wires resume handler', async () => {
-    // The audit-correct behavior is to resume side-effects from the
-    // persisted snapshot. PR #1 doesn't have a caller that knows how
-    // to do that, so the contract is "return 409 with a stable code"
-    // until PR #2 swaps in the resume_from_snapshot action + route
-    // handler in lockstep. This is unreachable in PR #1's runtime
-    // (no path writes the snapshot) — the test documents future
-    // contract.
-    const pendingWithSnapshot = {
-      id: 'attempt-1',
-      idempotency_key: 'key-1',
+  test('any service with a prior non-succeeded attempt + persisted snapshot returns 409 (rounds 5/6/7/8/9 — single global guard)', async () => {
+    // Round-9's global guard at step 4 (after priorSuccess /
+    // resumable / completedRecord, before INSERT) catches every
+    // snapshot-bearing recovery case in one place:
+    //   - same-key pending with snapshot
+    //   - same-key failed with snapshot
+    //   - different-key reclaim (round-5 case)
+    //   - fresh-key bypass after failed-with-snapshot (round-9 case)
+    // The guard doesn't branch on key match or staleness, just on the
+    // existence of any non-succeeded snapshot-bearing row for this
+    // service.
+    const priorSnapshotRow = {
+      id: 'orphan-1',
+      idempotency_key: 'old-key',
       status: 'pending',
-      request_hash: 'hash-1',
-      updated_at: new Date(Date.now() - 12 * 60 * 1000),
-      snapshot_written_at: new Date(Date.now() - 12 * 60 * 1000),
-      resolved_completion_snapshot_hash: 'snap-hash-abc',
-    };
-    const knex = makeKnex([
-      noPriorSuccess(),
-      noResumableCompletion(),
-      noCompletedRecord(),
-      { insertError: uniqueViolation() },
-      { first: pendingWithSnapshot },
-    ]);
-
-    const result = await claimCompletionAttempt({
-      serviceId: 'svc-1',
-      idempotencyKey: 'key-1',
-      requestHash: 'hash-1',
-    }, knex);
-
-    expect(result.action).toBe('conflict');
-    expect(result.status).toBe(409);
-    expect(result.payload.code).toBe('completion_snapshot_resume_not_yet_supported');
-    expect(result.payload.attemptId).toBe('attempt-1');
-    expect(result.payload.snapshotHash).toBe('snap-hash-abc');
-    // No UPDATE attempted — snapshot row untouched.
-    expect(knex.calls).toHaveLength(5);
-  });
-
-  test('failed-with-snapshot retry returns 409 until PR #2 wires resume handler', async () => {
-    // Same reasoning as the pending+snapshot test above. The original
-    // attempt failed after writing the snapshot; resume is the audit-
-    // correct path but the caller doesn't handle that action yet.
-    const failedWithSnapshot = {
-      id: 'attempt-1',
-      idempotency_key: 'key-1',
-      status: 'failed',
-      request_hash: 'hash-1',
       snapshot_written_at: new Date(Date.now() - 60 * 1000),
       resolved_completion_snapshot_hash: 'snap-hash-abc',
     };
@@ -418,65 +405,60 @@ describe('completion attempts', () => {
       noPriorSuccess(),
       noResumableCompletion(),
       noCompletedRecord(),
-      { insertError: uniqueViolation() },
-      { first: failedWithSnapshot },
+      { first: priorSnapshotRow },
     ]);
 
     const result = await claimCompletionAttempt({
       serviceId: 'svc-1',
-      idempotencyKey: 'key-1',
+      idempotencyKey: 'fresh-key-from-panel-reload',
       requestHash: 'hash-1',
     }, knex);
 
     expect(result.action).toBe('conflict');
     expect(result.status).toBe(409);
     expect(result.payload.code).toBe('completion_snapshot_resume_not_yet_supported');
-    expect(result.payload.attemptId).toBe('attempt-1');
+    expect(result.payload.attemptId).toBe('orphan-1');
     expect(result.payload.snapshotHash).toBe('snap-hash-abc');
-    // Failed-retry path is short-circuited — no status flip attempted.
-    expect(knex.calls).toHaveLength(5);
+    expect(knex.calls).toHaveLength(4);
+    // Guard scoped correctly: same service, not succeeded, snapshot bytes present.
+    expect(knex.calls[3].op.whereCriteria).toEqual({ service_id: 'svc-1' });
+    expect(knex.calls[3].op.whereNot).toEqual({ col: 'status', value: 'succeeded' });
+    expect(knex.calls[3].op.whereNotNull).toEqual(['snapshot_written_at']);
   });
 
-  test('different key refuses to reclaim a stale pending with a persisted snapshot (codex P1 round 5)', async () => {
-    // The stale attempt has already written its resolved snapshot —
-    // that snapshot is the audit source. Marking it failed and
-    // starting a fresh attempt would discard the tech's attestation
-    // and re-run the resolver against a possibly-newer protocol.
-    // Different-key reclaim must refuse; original key is the only
-    // legitimate resume path.
-    const staleWithSnapshot = {
-      id: 'orphan-1',
-      idempotency_key: 'old-key',
-      status: 'pending',
-      updated_at: new Date(Date.now() - 12 * 60 * 1000),
-      snapshot_written_at: new Date(Date.now() - 11 * 60 * 1000),
-      resolved_completion_snapshot_hash: 'abc123',
+  test('fresh idempotency key after a failed-with-snapshot attempt is blocked (codex P1 round 9)', async () => {
+    // Original attempt under key K1 wrote snapshot, then failed.
+    // markCompletionAttemptFailed left the snapshot intact. Panel
+    // reload generates fresh key K2. Without the global guard, K2's
+    // claim would slip past every same-key check and start fresh,
+    // orphaning K1's snapshot.
+    const failedK1WithSnapshot = {
+      id: 'attempt-k1',
+      idempotency_key: 'k1',
+      status: 'failed',
+      snapshot_written_at: new Date(Date.now() - 5 * 60 * 1000),
+      resolved_completion_snapshot_hash: 'k1-snap',
     };
-
     const knex = makeKnex([
       noPriorSuccess(),
       noResumableCompletion(),
       noCompletedRecord(),
-      { insertError: uniqueViolation() },     // first insert hits partial index
-      { first: undefined },                   // no same-key match
-      { first: staleWithSnapshot },           // stale pending WITH snapshot found
-      { first: undefined },                   // service_records: no completed record
+      { first: failedK1WithSnapshot },
     ]);
 
     const result = await claimCompletionAttempt({
       serviceId: 'svc-1',
-      idempotencyKey: 'fresh-key',
-      requestHash: 'hash-1',
+      idempotencyKey: 'k2-fresh-after-reload',
+      requestHash: 'hash-different-from-k1',
     }, knex);
 
     expect(result.action).toBe('conflict');
     expect(result.status).toBe(409);
-    expect(result.payload.code).toBe('completion_snapshot_persisted_stale');
-    expect(result.payload.attemptId).toBe('orphan-1');
-    expect(result.payload.snapshotHash).toBe('abc123');
-    // No update / re-insert attempted — the snapshot row is untouched.
-    expect(knex.calls).toHaveLength(7);
+    expect(result.payload.code).toBe('completion_snapshot_resume_not_yet_supported');
+    expect(result.payload.attemptId).toBe('attempt-k1');
+    expect(knex.calls).toHaveLength(4);
   });
+
 
   test('different key falls through to 409 when reclaim race is lost', async () => {
     const stale = {
@@ -490,6 +472,7 @@ describe('completion attempts', () => {
       noPriorSuccess(),
       noResumableCompletion(),
       noCompletedRecord(),
+      noPriorSnapshotAttempt(),
       { insertError: uniqueViolation() },
       { first: undefined },             // no same-key match
       { first: stale },                 // stale pending found

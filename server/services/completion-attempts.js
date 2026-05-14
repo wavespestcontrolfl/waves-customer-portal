@@ -145,6 +145,38 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
     };
   }
 
+  // Global snapshot-bypass guard. Without this check, the per-state
+  // (same-key / failed) snapshot guards below only cover the same-
+  // idempotency-key retry path. A panel reload generates a FRESH key
+  // — falling through every same-key guard and landing here. Without
+  // this check the fresh-key INSERT would succeed, the route would
+  // re-resolve against a possibly-newer protocol_template, and the
+  // original snapshot (written by an earlier failed attempt under a
+  // different key) would be orphaned. Audit invariant breaks.
+  //
+  // Any prior non-succeeded attempt for this service that already
+  // persisted a snapshot owns the resume — no fresh attempt may take
+  // its place. PR #2's resume handler will key off this row's
+  // attemptId and resolved_completion_snapshot.
+  const priorSnapshotAttempt = await knex('service_completion_attempts')
+    .where({ service_id: serviceId })
+    .whereNot('status', 'succeeded')
+    .whereNotNull('snapshot_written_at')
+    .orderBy('updated_at', 'desc')
+    .first();
+  if (priorSnapshotAttempt) {
+    return {
+      action: 'conflict',
+      status: 409,
+      payload: {
+        error: 'Service has a prior non-succeeded completion attempt with a persisted resolved snapshot; snapshot resume will be wired in PR #2.',
+        code: 'completion_snapshot_resume_not_yet_supported',
+        attemptId: priorSnapshotAttempt.id,
+        snapshotHash: priorSnapshotAttempt.resolved_completion_snapshot_hash || null,
+      },
+    };
+  }
+
   try {
     const [row] = await knex('service_completion_attempts').insert({
       service_id: serviceId,
@@ -196,28 +228,10 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
           };
         }
 
-        // If the stale attempt has already persisted a resolved
-        // snapshot, that snapshot is the audit source — marking the
-        // attempt failed and starting a fresh one would discard the
-        // tech's original attestation and re-run the resolver against
-        // a possibly-newer active protocol_template. Refuse the
-        // different-key reclaim and surface the state. The same-key
-        // path below preserves the snapshot row intact, so the only
-        // way to resume legitimately is to retry under the original
-        // idempotency key (typically requires admin intervention since
-        // panel reloads generate fresh keys).
-        if (stalePending.snapshot_written_at) {
-          return {
-            action: 'conflict',
-            status: 409,
-            payload: {
-              error: 'Completion has a persisted resolved snapshot from an earlier attempt. Retry under the original idempotency key or contact support.',
-              code: 'completion_snapshot_persisted_stale',
-              attemptId: stalePending.id,
-              snapshotHash: stalePending.resolved_completion_snapshot_hash || null,
-            },
-          };
-        }
+        // (Snapshot-bearing stale rows are caught earlier by the
+        // global priorSnapshotAttempt check before INSERT is even
+        // attempted. By the time we reach this catch block,
+        // stalePending.snapshot_written_at is guaranteed NULL.)
 
         const [reclaimed] = await knex('service_completion_attempts')
           .where({ id: stalePending.id, status: 'pending' })
@@ -291,34 +305,9 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
         };
       }
 
-      // Same-key retry where the resolver already persisted a snapshot
-      // under this key. The audit-correct recovery here is "resume the
-      // side-effects portion from resolved_completion_snapshot" — but
-      // no caller in PR #1 knows how to read that snapshot and build
-      // a service_record from it. Surfacing a resume_from_snapshot
-      // action that callers don't handle would let the route fall
-      // through to the fresh-completion path and defeat the snapshot
-      // invariant. Until PR #2 wires the route handler + the
-      // storeResolvedSnapshot caller path together, return 409 with a
-      // stable code instead. PR #2 will swap this 409 for the proper
-      // resume action.
-      //
-      // In PR #1's runtime this branch is unreachable: no path writes
-      // resolved_completion_snapshot, so existing.snapshot_written_at
-      // is always NULL on a same-key retry. The guard ships as
-      // documentation of the future contract.
-      if (existing.snapshot_written_at) {
-        return {
-          action: 'conflict',
-          status: 409,
-          payload: {
-            error: 'Completion attempt has a persisted resolved snapshot; snapshot resume will be wired in PR #2.',
-            code: 'completion_snapshot_resume_not_yet_supported',
-            attemptId: existing.id,
-            snapshotHash: existing.resolved_completion_snapshot_hash || null,
-          },
-        };
-      }
+      // (Snapshot-bearing same-key rows are caught by the global
+      // priorSnapshotAttempt check before the INSERT is attempted,
+      // so existing.snapshot_written_at is guaranteed NULL here.)
 
       const staleCutoff = new Date(Date.now() - STALE_PENDING_MS);
       if (new Date(existing.updated_at) < staleCutoff) {
@@ -376,29 +365,9 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
           },
         };
       }
-      // Failed-with-snapshot: the original attempt wrote a snapshot
-      // (audit truth) and THEN failed during service_record creation.
-      // The audit-correct recovery is to resume the side-effects from
-      // the persisted snapshot — but again, no caller in PR #1 knows
-      // how to do that. Falling through to the failed-retry reset
-      // would also be wrong: storeResolvedSnapshot's pending-only
-      // guard (round-2) would reject the re-resolution, leaving the
-      // retry stuck. Until PR #2 wires the resume handler, return 409.
-      //
-      // In PR #1's runtime this branch is unreachable for the same
-      // reason as the same-key branch above (no snapshot writer).
-      if (existing.snapshot_written_at) {
-        return {
-          action: 'conflict',
-          status: 409,
-          payload: {
-            error: 'Completion attempt failed after persisting a resolved snapshot; snapshot resume will be wired in PR #2.',
-            code: 'completion_snapshot_resume_not_yet_supported',
-            attemptId: existing.id,
-            snapshotHash: existing.resolved_completion_snapshot_hash || null,
-          },
-        };
-      }
+      // (Snapshot-bearing failed rows are caught by the global
+      // priorSnapshotAttempt check before INSERT is attempted, so
+      // existing.snapshot_written_at is guaranteed NULL here.)
       const [row] = await knex('service_completion_attempts')
         .where({ id: existing.id, status: 'failed' })
         .update({
