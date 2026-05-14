@@ -246,10 +246,23 @@ exports.up = async function (knex) {
       old_parent_status text;
       new_parent_status text;
     BEGIN
+      -- IMPORTANT: parent status reads use FOR NO KEY UPDATE to lock
+      -- the parent row for the duration of the trigger's transaction.
+      -- Without the lock, a child INSERT under a draft parent + a
+      -- concurrent draft→active UPDATE on the parent could interleave
+      -- under READ COMMITTED:
+      --   T1: BEGIN; INSERT child; trigger SELECT status='draft' → allow
+      --   T2: BEGIN; UPDATE parent SET status='active'; COMMIT
+      --   T1: COMMIT  ← active template now has post-activation content
+      -- FOR NO KEY UPDATE serializes against the parent UPDATE without
+      -- blocking concurrent reads of unrelated columns. T1 waits for
+      -- T2 to commit, re-reads status='active', and rejects.
+
       IF (TG_OP = 'INSERT') THEN
         SELECT status INTO new_parent_status
         FROM protocol_templates
-        WHERE id = NEW.protocol_template_id;
+        WHERE id = NEW.protocol_template_id
+        FOR NO KEY UPDATE;
         IF new_parent_status IN ('active', 'retired') THEN
           RAISE EXCEPTION
             'INSERT on % blocked: parent protocol_template % is %.',
@@ -266,7 +279,8 @@ exports.up = async function (knex) {
         END IF;
         SELECT status INTO old_parent_status
         FROM protocol_templates
-        WHERE id = OLD.protocol_template_id;
+        WHERE id = OLD.protocol_template_id
+        FOR NO KEY UPDATE;
         IF old_parent_status IN ('active', 'retired') THEN
           RAISE EXCEPTION
             'UPDATE on % blocked: parent protocol_template % is %.',
@@ -278,7 +292,8 @@ exports.up = async function (knex) {
       IF (TG_OP = 'DELETE') THEN
         SELECT status INTO old_parent_status
         FROM protocol_templates
-        WHERE id = OLD.protocol_template_id;
+        WHERE id = OLD.protocol_template_id
+        FOR NO KEY UPDATE;
         IF old_parent_status IN ('active', 'retired') THEN
           RAISE EXCEPTION
             'DELETE on % blocked: parent protocol_template % is %.',

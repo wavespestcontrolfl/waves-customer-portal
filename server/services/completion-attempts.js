@@ -291,6 +291,20 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
         };
       }
 
+      // Same-key retry where the resolver already persisted a snapshot
+      // under this key — the original attempt crashed between snapshot
+      // write and service_record creation. The snapshot is the audit
+      // truth; the right behavior is to resume the side-effects portion
+      // using that snapshot, NOT to bounce through the resolver again.
+      // Otherwise storeResolvedSnapshot's pending-only guard (round-2)
+      // would reject the retry with snapshot_write_not_eligible, leaving
+      // a legitimate recovery stuck. Resume regardless of staleness —
+      // a fresh same-key retry milliseconds after the original deserves
+      // the same resume path as one 12 minutes later.
+      if (existing.snapshot_written_at) {
+        return { action: 'resume_from_snapshot', attempt: existing };
+      }
+
       const staleCutoff = new Date(Date.now() - STALE_PENDING_MS);
       if (new Date(existing.updated_at) < staleCutoff) {
         const completedRecord = await knex('service_records')

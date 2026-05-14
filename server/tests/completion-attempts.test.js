@@ -362,6 +362,68 @@ describe('completion attempts', () => {
     expect(knex.calls[7].op.updatePayload.status).toBe('failed');
   });
 
+  test('same-key retry with persisted snapshot returns resume_from_snapshot (codex P1 round 6)', async () => {
+    // The original same-key attempt crashed between snapshot write
+    // and service_record creation. A legitimate retry under that same
+    // key must resume from the snapshot, not bounce through the
+    // resolver (storeResolvedSnapshot's pending-only guard would
+    // reject the second write).
+    const pendingWithSnapshot = {
+      id: 'attempt-1',
+      idempotency_key: 'key-1',
+      status: 'pending',
+      request_hash: 'hash-1',
+      snapshot_written_at: new Date(Date.now() - 30 * 1000),
+      resolved_completion_snapshot_hash: 'snap-hash-abc',
+    };
+    const knex = makeKnex([
+      noPriorSuccess(),
+      noResumableCompletion(),
+      noCompletedRecord(),
+      { insertError: uniqueViolation() },
+      { first: pendingWithSnapshot },
+    ]);
+
+    const result = await claimCompletionAttempt({
+      serviceId: 'svc-1',
+      idempotencyKey: 'key-1',
+      requestHash: 'hash-1',
+    }, knex);
+
+    expect(result.action).toBe('resume_from_snapshot');
+    expect(result.attempt).toBe(pendingWithSnapshot);
+    // No UPDATE attempted — the snapshot row is untouched.
+    expect(knex.calls).toHaveLength(5);
+  });
+
+  test('same-key retry with snapshot fires resume_from_snapshot regardless of staleness', async () => {
+    // Snapshot presence beats the stale-cutoff check — a fresh retry
+    // under the same key with a snapshot resumes immediately.
+    const freshPendingWithSnapshot = {
+      id: 'attempt-1',
+      idempotency_key: 'key-1',
+      status: 'pending',
+      request_hash: 'hash-1',
+      updated_at: new Date(),
+      snapshot_written_at: new Date(),
+    };
+    const knex = makeKnex([
+      noPriorSuccess(),
+      noResumableCompletion(),
+      noCompletedRecord(),
+      { insertError: uniqueViolation() },
+      { first: freshPendingWithSnapshot },
+    ]);
+
+    const result = await claimCompletionAttempt({
+      serviceId: 'svc-1',
+      idempotencyKey: 'key-1',
+      requestHash: 'hash-1',
+    }, knex);
+
+    expect(result.action).toBe('resume_from_snapshot');
+  });
+
   test('different key refuses to reclaim a stale pending with a persisted snapshot (codex P1 round 5)', async () => {
     // The stale attempt has already written its resolved snapshot —
     // that snapshot is the audit source. Marking it failed and
