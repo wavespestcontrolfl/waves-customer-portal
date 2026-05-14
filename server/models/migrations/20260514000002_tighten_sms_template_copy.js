@@ -1,0 +1,781 @@
+/**
+ * Tighten Waves SMS template copy across the admin SMS Templates table.
+ *
+ * Goals:
+ * - Keep every operational template key intact.
+ * - Preserve the placeholders each sender depends on.
+ * - Remove repeated assistance filler in favor of shorter, consistent replies.
+ * - Keep customer-facing copy warm, direct, and visibly from Waves.
+ */
+
+const TEMPLATES = [
+  // automations
+  {
+    template_key: 'auto_new_recurring',
+    name: 'New Recurring Customer',
+    category: 'automations',
+    body: 'Hello {first_name}! Welcome to Waves. We just emailed your welcome guide for a safer, pest-free home.\n\nQuestions or requests? Reply here.',
+    variables: ['first_name'],
+    sort_order: 40,
+  },
+  {
+    template_key: 'auto_lawn_service',
+    name: 'Lawn Care Onboarding',
+    category: 'automations',
+    body: 'Hello {first_name}! Welcome to Waves lawn care. We just emailed your welcome guide with tips for the best results.\n\nQuestions or requests? Reply here.',
+    variables: ['first_name'],
+    sort_order: 41,
+  },
+  {
+    template_key: 'auto_new_appointment',
+    name: 'New First-Time Appointment',
+    category: 'automations',
+    body: 'Hello {first_name}! We just emailed what to expect for your first Waves service.\n\nQuestions or requests? Reply here.',
+    variables: ['first_name'],
+    sort_order: 42,
+  },
+  {
+    template_key: 'auto_bed_bug',
+    name: 'Bed Bug Treatment',
+    category: 'automations',
+    body: "Hello {first_name}! Let's get your home bed bug-free. We emailed your Waves treatment guide; please review it before service so we can get the best results.\n\nQuestions or requests? Reply here.",
+    variables: ['first_name'],
+    sort_order: 43,
+  },
+  {
+    template_key: 'auto_cockroach',
+    name: 'Cockroach Control',
+    category: 'automations',
+    body: "Hello {first_name}! Let's get your home cockroach-free. We emailed your Waves treatment guide; please review it before service so we can get the best results.\n\nQuestions or requests? Reply here.",
+    variables: ['first_name'],
+    sort_order: 44,
+  },
+  {
+    template_key: 'auto_new_lead',
+    name: 'New Lead',
+    category: 'automations',
+    body: 'Hello {first_name}! Thanks for your interest in Waves Pest Control. We just emailed more info about our services.\n\nQuestions or requests? Reply here.',
+    variables: ['first_name'],
+    sort_order: 45,
+  },
+  {
+    template_key: 'auto_service_renewal',
+    name: 'Service Renewal Reminder',
+    category: 'automations',
+    body: 'Hello {first_name}! Your Waves service is coming up for renewal. We emailed the details - take a look when you can.\n\nQuestions or requests? Reply here.',
+    variables: ['first_name'],
+    sort_order: 46,
+  },
+
+  // billing
+  {
+    template_key: 'invoice_sent',
+    name: 'Invoice Sent (hardcoded)',
+    category: 'billing',
+    body: 'Hello {first_name}! Your invoice for {service_type} completed on {service_date} is ready: {pay_url}\n\nQuestions or requests? Reply here.',
+    variables: ['first_name', 'service_type', 'service_date', 'pay_url'],
+    sort_order: 10,
+  },
+  {
+    template_key: 'payment_failed',
+    name: 'Payment Failed',
+    category: 'billing',
+    body: 'Hello {first_name}! Your payment for {service_type} completed on {service_date} did not go through. Please update your payment method or pay here: {pay_url}\n\nQuestions or requests? Reply here.',
+    variables: ['first_name', 'service_type', 'service_date', 'pay_url'],
+    sort_order: 11,
+  },
+  {
+    template_key: 'late_payment_7d',
+    name: 'Late Payment — 7 Day (hardcoded)',
+    category: 'billing',
+    body: 'Hello {first_name}! Your Waves invoice for {invoice_title}{service_date_clause} is 7 days overdue. Please pay here: {pay_url}\n\nQuestions or requests? Reply here.',
+    variables: ['first_name', 'invoice_title', 'service_date_clause', 'pay_url'],
+    sort_order: 12,
+  },
+  {
+    template_key: 'late_payment_14d',
+    name: 'Late Payment — 14 Day (hardcoded)',
+    category: 'billing',
+    body: 'Hello {first_name}! Your Waves invoice for {invoice_title}{service_date_clause} is 14 days overdue. Please pay as soon as possible: {pay_url}\n\nQuestions or requests? Reply here.',
+    variables: ['first_name', 'invoice_title', 'service_date_clause', 'pay_url'],
+    sort_order: 13,
+  },
+  {
+    template_key: 'late_payment_30d',
+    name: 'Late Payment — 30 Day (hardcoded)',
+    category: 'billing',
+    body: 'Hello {first_name}! Final reminder: your Waves invoice for {invoice_title}{service_date_clause} is 30 days overdue. Please pay now: {pay_url}\n\nNeed a payment plan? Reply here.',
+    variables: ['first_name', 'invoice_title', 'service_date_clause', 'pay_url'],
+    sort_order: 14,
+  },
+  {
+    template_key: 'late_payment_60d',
+    name: 'Late Payment — 60 Day (hardcoded)',
+    category: 'billing',
+    body: 'Hello {first_name}! Your Waves invoice for {invoice_title}{service_date_clause} is 60 days overdue. Please pay or contact us today to avoid further action: {pay_url}\n\nQuestions or requests? Reply here.',
+    variables: ['first_name', 'invoice_title', 'service_date_clause', 'pay_url'],
+    sort_order: 15,
+  },
+  {
+    template_key: 'late_payment_90d',
+    name: 'Late Payment — 90 Day (hardcoded)',
+    category: 'billing',
+    body: 'Hello {first_name}! Final notice: your Waves invoice for {invoice_title}{service_date_clause} is 90 days overdue and may be sent to collections. Please pay today: {pay_url}\n\nQuestions or requests? Reply here.',
+    variables: ['first_name', 'invoice_title', 'service_date_clause', 'pay_url'],
+    sort_order: 16,
+  },
+  {
+    template_key: 'invoice_receipt',
+    name: 'Payment Receipt (hardcoded)',
+    category: 'billing',
+    body: 'Hello {first_name}! Payment received - thank you. Invoice {invoice_number}: ${amount}{card_line}. Receipt: {receipt_url}\n\nQuestions or requests? Reply here.',
+    variables: ['first_name', 'invoice_number', 'amount', 'card_line', 'receipt_url'],
+    sort_order: 17,
+  },
+  {
+    template_key: 'billing_reminder',
+    name: 'Billing Reminder (WaveGuard Monthly) (hardcoded)',
+    category: 'billing',
+    body: 'Hello {first_name}! Your {waveguard_tier} WaveGuard monthly charge of ${amount} will be processed on {charge_date}.\n\nManage your payment method in the customer portal or call (941) 318-7612.',
+    variables: ['first_name', 'waveguard_tier', 'amount', 'charge_date'],
+    sort_order: 18,
+  },
+  {
+    template_key: 'invoice_followup_3day',
+    name: 'Invoice — 3-Day Friendly Nudge (hardcoded)',
+    category: 'billing',
+    body: "Hello {first_name}! Your {invoice_title} invoice still has an open balance of ${amount}. Pay securely here: {pay_url}\n\nIf something looks off, reply and we'll sort it.",
+    variables: ['first_name', 'invoice_title', 'amount', 'pay_url'],
+    sort_order: 19,
+  },
+  {
+    template_key: 'autopay_charge_success',
+    name: 'Autopay — Charge Success',
+    category: 'billing',
+    body: 'Hello {first_name}! Your WaveGuard monthly payment of ${amount} was processed. Thank you!{receipt_line}',
+    variables: ['first_name', 'amount', 'receipt_line'],
+    sort_order: 20,
+  },
+  {
+    template_key: 'invoice_followup_7day',
+    name: 'Invoice Follow-Up — 7 Day (hardcoded)',
+    category: 'billing',
+    body: 'Hello {first_name}! Quick reminder: your Waves invoice for {invoice_title}{service_date_clause} is still open. Pay here: {pay_url}\n\nQuestions or requests? Reply here.',
+    variables: ['first_name', 'invoice_title', 'service_date_clause', 'pay_url'],
+    sort_order: 21,
+  },
+  {
+    template_key: 'invoice_followup_14day',
+    name: 'Invoice Follow-Up — 14 Day (hardcoded)',
+    category: 'billing',
+    body: 'Hello {first_name}! Checking in on your Waves invoice for {invoice_title}{service_date_clause}. Please pay when you can: {pay_url}\n\nNeed help? Reply here.',
+    variables: ['first_name', 'invoice_title', 'service_date_clause', 'pay_url'],
+    sort_order: 22,
+  },
+  {
+    template_key: 'autopay_charge_failed',
+    name: 'Autopay — First Failure',
+    category: 'billing',
+    body: "Hello {first_name}! Your WaveGuard monthly payment of ${amount} could not be processed. We'll retry in a few days. Update your card here: {update_card_url}\n\nQuestions or requests? Reply here or call (941) 318-7612.",
+    variables: ['first_name', 'amount', 'update_card_url'],
+    sort_order: 23,
+  },
+  {
+    template_key: 'autopay_retry_success',
+    name: 'Autopay — Retry Success',
+    category: 'billing',
+    body: 'Hello {first_name}! Your payment of ${amount} went through. Thank you for being a Waves customer!{receipt_line}',
+    variables: ['first_name', 'amount', 'receipt_line'],
+    sort_order: 24,
+  },
+  {
+    template_key: 'invoice_followup_30day',
+    name: 'Invoice Follow-Up — 30 Day (hardcoded)',
+    category: 'billing',
+    body: 'Hello {first_name}! Final notice on your Waves invoice for {invoice_title}{service_date_clause}. Please pay now to keep the account in good standing: {pay_url}\n\nNeed a payment plan? Reply here.',
+    variables: ['first_name', 'invoice_title', 'service_date_clause', 'pay_url'],
+    sort_order: 25,
+  },
+  {
+    template_key: 'autopay_retry_failed',
+    name: 'Autopay — Retry Failed',
+    category: 'billing',
+    body: "Hello {first_name}! Your payment of ${amount} still did not go through. We'll try again in a few days, or you can update your card here: {update_card_url}\n\nQuestions or requests? Reply here or call (941) 318-7612.",
+    variables: ['first_name', 'amount', 'update_card_url'],
+    sort_order: 26,
+  },
+  {
+    template_key: 'autopay_retry_final_failed',
+    name: 'Autopay — Final Failure (all retries exhausted)',
+    category: 'billing',
+    body: "Hello {first_name}! After several attempts we still could not process your payment of ${amount}. Please update your card to keep service active: {update_card_url}\n\nQuestions or requests? Reply here or call (941) 318-7612.",
+    variables: ['first_name', 'amount', 'update_card_url'],
+    sort_order: 27,
+  },
+  {
+    template_key: 'autopay_pre_charge',
+    name: 'Autopay - Pre-Charge Reminder',
+    category: 'billing',
+    body: 'Hello {first_name}! Your WaveGuard auto-pay will process on {charge_date}.\n\nNeed to update your card or pause? Visit portal.wavespestcontrol.com or reply here.',
+    variables: ['first_name', 'charge_date'],
+    sort_order: 36,
+  },
+  {
+    template_key: 'autopay_card_expired',
+    name: 'Autopay - Card Expired',
+    category: 'billing',
+    body: 'Hello {first_name}! Your {card_brand} card ending in {last_four} expired {exp_date}. Please update it in the portal to keep auto-pay active: portal.wavespestcontrol.com\n\nQuestions or requests? Reply here.',
+    variables: ['first_name', 'card_brand', 'last_four', 'exp_date'],
+    sort_order: 37,
+  },
+  {
+    template_key: 'autopay_card_expiring',
+    name: 'Autopay - Card Expiring Soon',
+    category: 'billing',
+    body: 'Hello {first_name}! Your {card_brand} card ending in {last_four} expires {exp_date}. Please update it in the portal to avoid auto-pay disruption: portal.wavespestcontrol.com\n\nQuestions or requests? Reply here.',
+    variables: ['first_name', 'card_brand', 'last_four', 'exp_date'],
+    sort_order: 38,
+  },
+  {
+    template_key: 'payment_method_expiry',
+    name: 'Payment Method Expiry Notice',
+    category: 'billing',
+    body: 'Hello {first_name}! Your {card_brand} card ending in {last_four} expires {exp_date}. Update your payment method to avoid service interruption: portal.wavespestcontrol.com\n\nQuestions or requests? Reply here.',
+    variables: ['first_name', 'card_brand', 'last_four', 'exp_date'],
+    sort_order: 39,
+  },
+  {
+    template_key: 'autopay_authorization_request',
+    name: 'Autopay - Authorization Request',
+    category: 'billing',
+    body: 'Hello {first_name}! Waves needs your electronic authorization before keeping a payment method on file for future service payments.\n\nReview and sign: {contract_url}\n\nQuestions or requests? Reply here.',
+    variables: ['first_name', 'contract_url'],
+    sort_order: 40,
+    is_active: false,
+  },
+  {
+    template_key: 'autopay_authorization_cancelled',
+    name: 'Autopay - Authorization Cancelled',
+    category: 'billing',
+    body: 'Hello {first_name}! Your Waves auto-pay authorization was cancelled as of {cancelled_date}. Future charges will not run automatically.\n\nYou can still pay invoices here: {portal_url}\n\nQuestions or requests? Reply here.',
+    variables: ['first_name', 'cancelled_date', 'portal_url'],
+    sort_order: 41,
+    is_active: false,
+  },
+
+  // estimates
+  {
+    template_key: 'estimate_sent',
+    name: 'Estimate Sent',
+    category: 'estimates',
+    body: 'Hello {first_name}! Your Waves estimate is ready: {estimate_url}\n\nQuestions or requests? Reply here.',
+    variables: ['first_name', 'estimate_url'],
+    sort_order: 20,
+  },
+  {
+    template_key: 'lead_auto_reply_biz',
+    name: 'Lead Auto-Reply (Business Hours)',
+    category: 'estimates',
+    body: "Hello {first_name}! Thanks for reaching out to Waves!\n\nWhat are you interested in: Pest Control, Lawn Care, or a One-Time Service?\n\nReply and we'll get you a quote.",
+    variables: ['first_name'],
+    sort_order: 21,
+  },
+  {
+    template_key: 'estimate_followup_unviewed',
+    name: 'Estimate Follow-Up — Unviewed (24h) (hardcoded)',
+    category: 'estimates',
+    body: 'Hello {first_name}! Just making sure you saw your Waves estimate: {estimate_url}\n\nQuestions or requests? Reply here.',
+    variables: ['first_name', 'estimate_url'],
+    sort_order: 22,
+  },
+  {
+    template_key: 'lead_auto_reply_after_hours',
+    name: 'Lead Auto-Reply (After Hours)',
+    category: 'estimates',
+    body: "Hello {first_name}! Thanks for reaching out to Waves!\n\nWhat are you interested in: Pest Control, Lawn Care, or a One-Time Service?\n\nWe'll follow up first thing in the morning with a custom quote.",
+    variables: ['first_name'],
+    sort_order: 23,
+    is_active: false,
+  },
+  {
+    template_key: 'estimate_accepted_onetime',
+    name: 'Estimate Accepted — One-Time Booking',
+    category: 'estimates',
+    body: 'Hello {first_name}! Thanks for booking your {service_label} with Waves. Choose a time here: {booking_url}\n\nQuestions or requests? Reply here.',
+    variables: ['first_name', 'service_label', 'booking_url'],
+    sort_order: 24,
+  },
+  {
+    template_key: 'estimate_followup_viewed',
+    name: 'Estimate Follow-Up — Viewed Not Accepted (48h) (hardcoded)',
+    category: 'estimates',
+    body: "Hello {first_name}! Saw you opened your Waves estimate. Any questions we can answer? {estimate_url}\n\nReply here and we'll help.",
+    variables: ['first_name', 'estimate_url'],
+    sort_order: 25,
+  },
+  {
+    template_key: 'lead_service_pest',
+    name: 'Lead Reply — Pest Control Selected',
+    category: 'estimates',
+    body: "Great, {first_name}. We're putting together your pest control quote now.",
+    variables: ['first_name'],
+    sort_order: 26,
+  },
+  {
+    template_key: 'lead_service_lawn',
+    name: 'Lead Reply — Lawn Care Selected',
+    category: 'estimates',
+    body: "Great, {first_name}. We're putting together your lawn care quote now.",
+    variables: ['first_name'],
+    sort_order: 27,
+  },
+  {
+    template_key: 'estimate_followup_final',
+    name: 'Estimate Follow-Up — Final Nudge (5d) (hardcoded)',
+    category: 'estimates',
+    body: 'Hello {first_name}! One last check-in. Your Waves estimate is still available: {estimate_url}\n\nNo pressure - reply here if you have questions.',
+    variables: ['first_name', 'estimate_url'],
+    sort_order: 28,
+  },
+  {
+    template_key: 'estimate_followup_expiring',
+    name: 'Estimate Follow-Up — Expiring (hardcoded)',
+    category: 'estimates',
+    body: "Hello {first_name}! Heads up: your Waves estimate expires on {expires_at}. {estimate_url}\n\nReply here if you'd like to move forward.",
+    variables: ['first_name', 'estimate_url', 'expires_at'],
+    sort_order: 29,
+  },
+  {
+    template_key: 'lead_service_one_time',
+    name: 'Lead Reply — One-Time Service Selected',
+    category: 'estimates',
+    body: "Got it, {first_name}. Send the service address and a quick note on what needs attention, and we'll put a quote together.",
+    variables: ['first_name'],
+    sort_order: 30,
+  },
+  {
+    template_key: 'lead_address_needed',
+    name: 'Lead Reply — Still Need Address',
+    category: 'estimates',
+    body: 'Just need the service address to finish your quote, {first_name}.',
+    variables: ['first_name'],
+    sort_order: 31,
+  },
+  {
+    template_key: 'estimate_accepted_customer',
+    name: 'Estimate Accepted — Customer Onboarding Link',
+    category: 'estimates',
+    body: "Hello {first_name}! Welcome to Waves. Complete your setup here: {onboarding_url}\n\nOnce you're done, we'll get your first service on the schedule. Questions or requests? Reply here.",
+    variables: ['first_name', 'onboarding_url'],
+    sort_order: 32,
+  },
+  {
+    template_key: 'estimate_accepted_office',
+    name: 'Estimate Accepted — Office Notification',
+    category: 'estimates',
+    body: 'Estimate accepted: {customer_name} at {address}. {waveguard_tier} WaveGuard ${monthly_total}/mo. Onboarding link sent.',
+    variables: ['customer_name', 'address', 'waveguard_tier', 'monthly_total'],
+    sort_order: 33,
+  },
+
+  // internal
+  {
+    template_key: 'admin_new_lead',
+    name: 'New Lead Alert',
+    category: 'internal',
+    body: 'New lead: {name} | {phone} | {address} | {source}',
+    variables: ['name', 'phone', 'address', 'source'],
+    sort_order: 60,
+    is_internal: true,
+  },
+
+  // referrals
+  {
+    template_key: 'referral_nudge',
+    name: 'Referral Nudge (hardcoded)',
+    category: 'referrals',
+    body: 'Hello {first_name}! Share your Waves referral link. They get $25 off, you get $25: {referral_link}',
+    variables: ['first_name', 'referral_link'],
+    sort_order: 31,
+  },
+
+  // retention
+  {
+    template_key: 'churn_save_step1',
+    name: 'Churn Save — Step 1',
+    category: 'retention',
+    body: 'Hello {first_name}! Adam from Waves here. Checking in - is there anything we can do better? Reply here.',
+    variables: ['first_name'],
+    sort_order: 40,
+  },
+  {
+    template_key: 'health_check_in',
+    name: 'Health — Check In',
+    category: 'retention',
+    body: 'Hello {first_name}! Adam from Waves here. Is everything going well with your service? Reply if you need anything.',
+    variables: ['first_name'],
+    sort_order: 41,
+  },
+  {
+    template_key: 'health_retention_offer',
+    name: 'Health — Retention Offer',
+    category: 'retention',
+    body: 'Hello {first_name}! Adam from Waves. We value your business and want to make sure service is working for you. Open to a quick call?',
+    variables: ['first_name'],
+    sort_order: 42,
+  },
+  {
+    template_key: 'health_rebook',
+    name: 'Health — Rebook',
+    category: 'retention',
+    body: "Hello {first_name}! It's been a while since your last Waves service. Reply here and we'll help get you back on the schedule.",
+    variables: ['first_name'],
+    sort_order: 43,
+  },
+  {
+    template_key: 'health_payment_reminder',
+    name: 'Health — Payment Reminder',
+    category: 'retention',
+    body: 'Hello {first_name}! Waves here. We noticed a billing issue on your account. Reply here or call us when you can so we can get it sorted.',
+    variables: ['first_name'],
+    sort_order: 44,
+  },
+  {
+    template_key: 'health_apology',
+    name: 'Health — Apology / Feedback',
+    category: 'retention',
+    body: "Hello {first_name}! Adam from Waves here. I want to make sure you're fully satisfied with your service. Mind if I give you a quick call for feedback?",
+    variables: ['first_name'],
+    sort_order: 45,
+  },
+  {
+    template_key: 'health_welcome_followup',
+    name: 'Health — Welcome Follow-Up',
+    category: 'retention',
+    body: 'Hello {first_name}! Adam from Waves here. Following up on your service - did everything meet your expectations? Reply if you need anything.',
+    variables: ['first_name'],
+    sort_order: 46,
+  },
+  {
+    template_key: 'waveguard_upsell',
+    name: 'WaveGuard Plan Recommendation',
+    category: 'retention',
+    body: 'Hello {first_name}! Based on your recent services, {tier_label} WaveGuard may be a better fit with unlimited coverage and predictable billing.\n\nReply INFO to learn more.',
+    variables: ['first_name', 'tier_label'],
+    sort_order: 47,
+  },
+  {
+    template_key: 'renewal_reminder',
+    name: 'Renewal Reminder (hardcoded)',
+    category: 'retention',
+    body: 'Hello {first_name}! Your {renewal_label} {urgency}.\n\nReply RENEW or call us to keep coverage active. Questions or requests? Reply here.',
+    variables: ['first_name', 'renewal_label', 'urgency'],
+    sort_order: 48,
+  },
+  {
+    template_key: 'auto_renewal_30_60_day_notice',
+    name: 'Auto-Renewal Notice - 30-60 Day',
+    category: 'retention',
+    body: 'Hello {first_name}! Your {service_name} agreement is set to renew on {renewal_date}.\n\nReview renewal details and cancellation options: {contract_url}\n\nNeed changes before {cancellation_deadline}? Reply here or call (941) 318-7612.',
+    variables: ['first_name', 'service_name', 'renewal_date', 'contract_url', 'cancellation_deadline'],
+    sort_order: 49,
+    is_active: false,
+  },
+  {
+    template_key: 'annual_prepay_renewal_reminder',
+    name: 'Annual Prepay Renewal Reminder',
+    category: 'retention',
+    body: 'Hello {first_name}! Your annual prepaid Waves plan renews on {term_end}.{last_service_sentence}\n\nReply RENEW, LAPSE, or CHANGE and our team will help.',
+    variables: ['first_name', 'term_end', 'last_service_sentence'],
+    sort_order: 50,
+  },
+  {
+    template_key: 'seasonal_alert',
+    name: 'Seasonal Alert / Tip (hardcoded)',
+    category: 'retention',
+    body: 'Hello {first_name}! {tip}\n\nQuestions or requests? Reply here or call (941) 318-7612.',
+    variables: ['first_name', 'tip'],
+    sort_order: 51,
+  },
+  {
+    template_key: 'seasonal_reactivation',
+    name: 'Seasonal Reactivation (hardcoded)',
+    category: 'retention',
+    body: "Hello {first_name}! {hook_text}. We'd love to get you back on the schedule{address_clause}. Reply YES or call {call_number} to book. - Waves",
+    variables: ['first_name', 'hook_text', 'address_clause', 'call_number'],
+    sort_order: 52,
+  },
+
+  // reviews
+  {
+    template_key: 'review_request',
+    name: 'Review Request (hardcoded)',
+    category: 'reviews',
+    body: "Hello {first_name}! How was your Waves service? We'd love your feedback: {review_url}\n\nQuestions or requests? Reply here.",
+    variables: ['first_name', 'review_url'],
+    sort_order: 30,
+  },
+  {
+    template_key: 'review_request_followup',
+    name: 'Review Request — 48h Non-Responder',
+    category: 'reviews',
+    body: 'No pressure, {first_name}. If you have a minute, your review helps other SWFL families find a pest company they can trust: {google_review_url}',
+    variables: ['first_name', 'google_review_url'],
+    sort_order: 31,
+  },
+
+  // sales
+  {
+    template_key: 'estimate_auto_renewed',
+    name: 'Estimate — Auto-Renewed',
+    category: 'sales',
+    body: 'Hello {first_name}! Your Waves estimate was about to expire, so we extended it a few more days. Take another look here: {estimate_url}\n\nQuestions or requests? Reply here or call (941) 318-7612.',
+    variables: ['first_name', 'estimate_url'],
+    sort_order: 30,
+  },
+
+  // service
+  {
+    template_key: 'onboarding_welcome',
+    name: 'Onboarding Welcome (hardcoded)',
+    category: 'service',
+    body: 'Welcome to Waves, {first_name}. Your first {service_type} is {service_date}{tech_clause}. Portal: portal.wavespestcontrol.com',
+    variables: ['first_name', 'service_type', 'service_date', 'tech_clause'],
+    sort_order: 0,
+  },
+  {
+    template_key: 'appointment_confirmation',
+    name: 'Appointment Confirmation',
+    category: 'service',
+    body: 'Hello {first_name}! Your {service_type} with Waves is confirmed for {date} at {time}.\n\nQuestions or need to reschedule? Reply here.',
+    variables: ['first_name', 'service_type', 'date', 'time'],
+    sort_order: 1,
+  },
+  {
+    template_key: 'reminder_72h',
+    name: '72-Hour Reminder',
+    category: 'service',
+    body: 'Hello {first_name}! Reminder: your {service_type} with Waves is scheduled for {day} at {time}. Your technician will arrive within a two-hour window of the start time.\n\nNeed to reschedule? Visit portal.wavespestcontrol.com or reply here.',
+    variables: ['first_name', 'service_type', 'day', 'time'],
+    sort_order: 2,
+  },
+  {
+    template_key: 'tech_en_route',
+    name: 'Tech En Route (hardcoded)',
+    category: 'service',
+    body: 'Hello {first_name}! {tech_name} is on the way.\n\n{eta_line}{track_clause}Questions or requests? Reply here. Reply STOP to opt out.',
+    variables: ['first_name', 'tech_name', 'eta_line', 'track_clause'],
+    sort_order: 3,
+  },
+  {
+    template_key: 'tech_arrived',
+    name: 'Tech Arrived (hardcoded)',
+    category: 'service',
+    body: 'Hello {first_name}! {tech_name} has arrived and is servicing your property.\n\nQuestions or requests? Reply here. Reply STOP to opt out.',
+    variables: ['first_name', 'tech_name'],
+    sort_order: 4,
+  },
+  {
+    template_key: 'reminder_24h',
+    name: '24-Hour Reminder',
+    category: 'service',
+    body: 'Hello {first_name}! Reminder: your {service_type} with Waves is tomorrow at {time}. Your technician will arrive within a two-hour window and text when 15 minutes out.\n\nQuestions or need to reschedule? Reply here.',
+    variables: ['first_name', 'service_type', 'time'],
+    sort_order: 5,
+  },
+  {
+    template_key: 'service_complete_with_invoice',
+    name: 'Service Complete + Invoice',
+    category: 'service',
+    body: "Hello {first_name}! Your {service_type} service report is ready: {portal_url}\n\nInvoice for today's visit: {pay_url}\n\nQuestions or requests? Reply here.",
+    variables: ['first_name', 'service_type', 'portal_url', 'pay_url'],
+    sort_order: 6,
+  },
+  {
+    template_key: 'service_complete',
+    name: 'Service Complete (hardcoded)',
+    category: 'service',
+    body: 'Hello {first_name}! Your service report is ready: portal.wavespestcontrol.com\n\nQuestions or requests? Reply here.',
+    variables: ['first_name'],
+    sort_order: 7,
+  },
+  {
+    template_key: 'service_complete_prepaid',
+    name: 'Service Complete + Paid',
+    category: 'service',
+    body: 'Hello {first_name}! Thanks for your payment today. Your {service_type} service report is ready: {portal_url}\n\nQuestions or requests? Reply here.',
+    variables: ['first_name', 'service_type', 'portal_url'],
+    sort_order: 8,
+  },
+  {
+    template_key: 'appointment_call_confirmed',
+    name: 'Appointment Confirmed (Call)',
+    category: 'service',
+    body: 'Hello {first_name}! Your {service_type} with Waves is confirmed for {date} at {time}.\n\nQuestions or requests? Reply here.',
+    variables: ['first_name', 'service_type', 'date', 'time'],
+    sort_order: 9,
+  },
+  {
+    template_key: 'service_reminder_legacy',
+    name: 'Service Reminder (Legacy 24h) (hardcoded)',
+    category: 'service',
+    body: 'Hello {first_name}! Your {service_type} is scheduled for tomorrow {time_window}.\n\nTechnician: {tech_name}\n\nPlease unlock gates and secure pets. Reply CONFIRM, or call (941) 318-7612 to reschedule.',
+    variables: ['first_name', 'service_type', 'time_window', 'tech_name'],
+    sort_order: 10,
+  },
+  {
+    template_key: 'appointment_rescheduled',
+    name: 'Appointment Rescheduled',
+    category: 'service',
+    body: 'Hello {first_name}! Your {service_type} with Waves has been rescheduled to {day}, {date} at {time}.\n\nNeed to change it again? Visit portal.wavespestcontrol.com or reply here.',
+    variables: ['first_name', 'service_type', 'day', 'date', 'time'],
+    sort_order: 11,
+  },
+  {
+    template_key: 'appointment_cancelled',
+    name: 'Appointment Cancelled',
+    category: 'service',
+    body: "Hello {first_name}! Your {service_type} with Waves scheduled for {day}, {date} has been cancelled.\n\nWant to reschedule? Reply here and we'll get you back on the calendar.",
+    variables: ['first_name', 'service_type', 'day', 'date'],
+    sort_order: 12,
+  },
+  {
+    template_key: 'missed_call',
+    name: 'Missed Call Follow-Up',
+    category: 'service',
+    body: 'Hello {first_name}! Waves here. Sorry we missed your call. How can we help?',
+    variables: ['first_name'],
+    sort_order: 13,
+  },
+  {
+    template_key: 'reschedule_options_weather',
+    name: 'Reschedule Options - Weather (hardcoded)',
+    category: 'service',
+    body: 'Hello {first_name}! Weather means your {service_type} on {original_date} needs to move.\n\nOptions:\n1. {option_1}\n2. {option_2}\n\nReply 1 or 2, or suggest another day.',
+    variables: ['first_name', 'service_type', 'original_date', 'option_1', 'option_2'],
+    sort_order: 14,
+  },
+  {
+    template_key: 'reschedule_options_access',
+    name: 'Reschedule Options - Access Issue (hardcoded)',
+    category: 'service',
+    body: 'Hello {first_name}! We stopped by for your {service_type}, but {access_issue}. We can come back:\n\n1. {option_1}\n2. {option_2}\n\nReply 1 or 2.',
+    variables: ['first_name', 'service_type', 'access_issue', 'option_1', 'option_2'],
+    sort_order: 15,
+  },
+  {
+    template_key: 'reschedule_options_general',
+    name: 'Reschedule Options - General (hardcoded)',
+    category: 'service',
+    body: 'Hello {first_name}! Your {service_type} on {original_date} needs to be rescheduled.{reason_text}\n\n1. {option_1}\n2. {option_2}\n\nReply 1 or 2.',
+    variables: ['first_name', 'service_type', 'original_date', 'reason_text', 'option_1', 'option_2'],
+    sort_order: 16,
+  },
+  {
+    template_key: 'reschedule_confirmed_sms_reply',
+    name: 'Reschedule Confirmed - SMS Reply (hardcoded)',
+    category: 'service',
+    body: "Confirmed. Your service is rescheduled for {date}, {time}.\n\nWe'll remind you the day before.",
+    variables: ['date', 'time'],
+    sort_order: 17,
+  },
+  {
+    template_key: 'reschedule_call_requested',
+    name: 'Reschedule - Call Requested Reply (hardcoded)',
+    category: 'service',
+    body: "No problem. We'll give you a call shortly.",
+    variables: [],
+    sort_order: 18,
+  },
+  {
+    template_key: 'self_booking_confirmation',
+    name: 'Self-Booking Confirmation (hardcoded)',
+    category: 'service',
+    body: 'Hello {first_name}! Your Waves appointment is confirmed for {date}, {time} at {address}. Confirmation: {confirmation_code}.\n\nNeed to change it? Reply RESCHEDULE.',
+    variables: ['first_name', 'date', 'time', 'address', 'confirmation_code'],
+    sort_order: 19,
+  },
+  {
+    template_key: 'appointment_series_cancelled',
+    name: 'Appointment Series Cancelled',
+    category: 'service',
+    body: "Hello {first_name}! Your Waves {scope} for {service_type} has been cancelled.\n\nWant to reschedule? Reply here and we'll get you back on the calendar.",
+    variables: ['first_name', 'scope', 'service_type'],
+    sort_order: 20,
+  },
+  {
+    template_key: 'onboarding_followup_24h',
+    name: 'Onboarding Follow-Up - 24h',
+    category: 'service',
+    body: 'Hello {first_name}! Thanks again for choosing Waves. Complete your setup here so we can get you on the schedule: {onboarding_url}\n\nQuestions or requests? Reply here.',
+    variables: ['first_name', 'onboarding_url'],
+    sort_order: 21,
+  },
+  {
+    template_key: 'onboarding_followup_72h',
+    name: 'Onboarding Follow-Up - 72h',
+    category: 'service',
+    body: "Hello {first_name}! Still here when you're ready. Finish your Waves setup and we'll confirm your first service: {onboarding_url}\n\nQuestions or requests? Reply here.",
+    variables: ['first_name', 'onboarding_url'],
+    sort_order: 22,
+  },
+  {
+    template_key: 'onboarding_followup_expiring',
+    name: 'Onboarding Follow-Up - Expiring',
+    category: 'service',
+    body: 'Hello {first_name}! Heads up: your Waves onboarding link expires on {expires_at}. Lock in your WaveGuard {waveguard_tier} plan and first service here: {onboarding_url}\n\nQuestions or requests? Reply here.',
+    variables: ['first_name', 'onboarding_url', 'expires_at', 'waveguard_tier'],
+    sort_order: 23,
+  },
+];
+
+exports.TEMPLATES = TEMPLATES;
+
+function tableRow(cols, template, now) {
+  const row = {
+    template_key: template.template_key,
+    name: template.name,
+    category: template.category,
+    body: template.body,
+    variables: JSON.stringify(template.variables),
+    sort_order: template.sort_order,
+  };
+
+  if (cols.is_active && template.is_active !== undefined) row.is_active = template.is_active;
+  if (cols.is_internal && template.is_internal !== undefined) row.is_internal = template.is_internal;
+  if (cols.updated_at) row.updated_at = now;
+
+  return row;
+}
+
+exports.up = async function up(knex) {
+  if (!(await knex.schema.hasTable('sms_templates'))) return;
+
+  const cols = await knex('sms_templates').columnInfo();
+  const now = new Date();
+
+  for (const template of TEMPLATES) {
+    const row = tableRow(cols, template, now);
+    const existing = await knex('sms_templates')
+      .where({ template_key: template.template_key })
+      .first();
+
+    if (existing) {
+      await knex('sms_templates')
+        .where({ template_key: template.template_key })
+        .update(row);
+      continue;
+    }
+
+    await knex('sms_templates').insert({
+      ...row,
+      ...(cols.is_active && template.is_active === undefined ? { is_active: true } : {}),
+      ...(cols.is_internal && template.is_internal === undefined ? { is_internal: false } : {}),
+      ...(cols.created_at ? { created_at: now } : {}),
+    });
+  }
+};
+
+exports.down = async function down() {
+  // Copy-only migration. Rolling back would restore more verbose messages.
+};
