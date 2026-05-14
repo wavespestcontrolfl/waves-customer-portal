@@ -150,8 +150,8 @@ async function findAvailableSlots(opts) {
         })
         .map(s => ({
           id: s.id,
-          lat: s.cust_lat || s.svc_lat,
-          lng: s.cust_lng || s.svc_lng,
+          lat: s.svc_lat || s.cust_lat,
+          lng: s.svc_lng || s.cust_lng,
           startMin: timeToMinutes(s.window_start) || dayOpen,
           endMin: timeToMinutes(s.window_end) || (timeToMinutes(s.window_start) || dayOpen) + (s.estimated_duration_minutes || DEFAULT_SERVICE_MIN),
           customer: `${s.first_name || ''} ${s.last_name || ''}`.trim() || 'Unknown',

@@ -88,6 +88,7 @@
    !important is required because every nav link and many inline-styled
    elements set their own font-family via the style attribute, which
    beats class-based rules in the cascade. */
+.admin-shell-v2,
 .admin-shell-v2 * {
   font-family: "Roboto", system-ui, sans-serif !important;
 }

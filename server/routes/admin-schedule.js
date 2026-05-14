@@ -356,6 +356,8 @@ function copyAddonDiscountFields(target, source, cols) {
 function httpError(status, message) {
   const err = new Error(message);
   err.status = status;
+  err.statusCode = status;
+  err.isOperational = true;
   return err;
 }
 

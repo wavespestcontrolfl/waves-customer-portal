@@ -19,21 +19,81 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
-const { etDateString } = require('../utils/datetime-et');
+const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../services/geocoder');
+const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-async function geocodeAddress(address) {
-  const key = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
-  if (!key) throw new Error('No Google Maps API key configured');
-  const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${key}`;
-  const resp = await fetch(url);
-  const data = await resp.json();
-  if (data.status !== 'OK' || !data.results?.length) {
-    throw new Error(`Geocode failed: ${data.status}`);
+function httpError(status, message) {
+  const err = new Error(message);
+  err.status = status;
+  err.statusCode = status;
+  err.isOperational = true;
+  return err;
+}
+
+function finiteNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function isYmd(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))) return false;
+  const parsed = parseETDateTime(`${value}T12:00`);
+  return Number.isFinite(parsed.getTime()) && etDateString(parsed) === value;
+}
+
+async function resolveFindTimeTarget({ customerId, address, lat, lng }) {
+  let targetLat = finiteNumber(lat);
+  let targetLng = finiteNumber(lng);
+  let source = targetLat != null && targetLng != null ? 'request_coordinates' : null;
+  let customer = null;
+  let targetAddress = address || null;
+
+  if (customerId && (targetLat == null || targetLng == null)) {
+    customer = await db('customers')
+      .where({ id: customerId })
+      .first('id', 'latitude', 'longitude', 'address_line1', 'city', 'state', 'zip', 'profile_label');
+    if (!customer) throw httpError(404, 'Customer not found');
+    targetAddress = targetAddress || buildAddress(customer);
+    const customerLat = finiteNumber(customer.latitude);
+    const customerLng = finiteNumber(customer.longitude);
+    if (customerLat != null && customerLng != null) {
+      targetLat = customerLat;
+      targetLng = customerLng;
+      source = 'customer_geocode';
+    } else {
+      const geocoded = await ensureCustomerGeocoded(customerId);
+      if (geocoded) {
+        targetLat = geocoded.lat;
+        targetLng = geocoded.lng;
+        source = 'customer_geocoded_now';
+      }
+    }
   }
-  const loc = data.results[0].geometry.location;
-  return { lat: loc.lat, lng: loc.lng };
+
+  if ((targetLat == null || targetLng == null) && targetAddress) {
+    const geocoded = await geocodeAddress(targetAddress);
+    if (geocoded) {
+      targetLat = geocoded.lat;
+      targetLng = geocoded.lng;
+      source = 'address_geocoded_now';
+    }
+  }
+
+  if (targetLat == null || targetLng == null) {
+    throw httpError(400, 'Best-times search needs a service address with geocoded latitude/longitude');
+  }
+
+  return {
+    lat: targetLat,
+    lng: targetLng,
+    address: targetAddress,
+    source,
+    customerId: customer?.id || customerId || null,
+    profileLabel: customer?.profile_label || null,
+  };
 }
 
 router.post('/', async (req, res) => {
@@ -44,65 +104,33 @@ router.post('/', async (req, res) => {
       technicianId, topN,
     } = req.body || {};
 
-    let resolvedLat = lat != null ? parseFloat(lat) : null;
-    let resolvedLng = lng != null ? parseFloat(lng) : null;
-    let resolvedFrom = 'provided';
-
-    if ((!resolvedLat || !resolvedLng) && customerId) {
-      const c = await db('customers').where('id', customerId)
-        .select('lat', 'lng', 'address_line1', 'city', 'state', 'zip').first();
-      if (c?.lat && c?.lng) {
-        resolvedLat = parseFloat(c.lat);
-        resolvedLng = parseFloat(c.lng);
-        resolvedFrom = 'customer_record';
-      } else if (c) {
-        // Fall back to geocoding the customer's address
-        const addr = [c.address_line1, c.city, c.state, c.zip].filter(Boolean).join(', ');
-        if (addr) {
-          const geo = await geocodeAddress(addr);
-          resolvedLat = geo.lat; resolvedLng = geo.lng;
-          resolvedFrom = 'geocoded_customer_address';
-          // Backfill onto the customer record for next time
-          await db('customers').where('id', customerId).update({ lat: resolvedLat, lng: resolvedLng });
-        }
-      }
-    }
-
-    if ((!resolvedLat || !resolvedLng) && address) {
-      const geo = await geocodeAddress(address);
-      resolvedLat = geo.lat; resolvedLng = geo.lng;
-      resolvedFrom = 'geocoded_address';
-    }
-
-    if (!resolvedLat || !resolvedLng) {
-      return res.status(400).json({ error: 'Could not resolve lat/lng from customerId, address, or lat/lng params' });
-    }
-
     const today = etDateString();
-    const weekOut = (() => {
-      const d = new Date(); d.setDate(d.getDate() + 7);
-      return d.toISOString().split('T')[0];
-    })();
+    const from = dateFrom || today;
+    if (!isYmd(from) || (dateTo && !isYmd(dateTo))) {
+      throw httpError(400, 'dateFrom/dateTo must be valid YYYY-MM-DD dates');
+    }
+    const to = dateTo || etDateString(addETDays(parseETDateTime(`${from}T12:00`), 7));
+    if (to < from) throw httpError(400, 'dateTo must be on or after dateFrom');
+
+    const target = await resolveFindTimeTarget({ customerId, address, lat, lng });
 
     const result = await findAvailableSlots({
-      lat: resolvedLat,
-      lng: resolvedLng,
-      durationMinutes: durationMinutes ? parseInt(durationMinutes) : 60,
-      dateFrom: dateFrom || today,
-      dateTo: dateTo || weekOut,
+      lat: target.lat,
+      lng: target.lng,
+      durationMinutes: Math.max(15, parseInt(durationMinutes, 10) || 60),
+      dateFrom: from,
+      dateTo: to,
       technicianId: technicianId || undefined,
-      topN: topN ? parseInt(topN) : 10,
+      topN: Math.min(Math.max(parseInt(topN, 10) || 10, 1), 25),
     });
 
     res.json({
       ...result,
-      resolved_from: resolvedFrom,
-      lat: resolvedLat,
-      lng: resolvedLng,
+      target,
     });
   } catch (err) {
     logger.error('[find-time] failed:', err);
-    res.status(500).json({ error: err.message });
+    res.status(err.statusCode || err.status || 500).json({ error: err.message || 'Find-time search failed' });
   }
 });
 
