@@ -5020,11 +5020,15 @@ function LearnTab({ customer }) {
     flexShrink: 0,
   };
   const alertColors = { urgent: B.red, seasonal: B.orange, info: B.wavesBlue };
-  const postLimit = compact ? 3 : 4;
-  const allWavesPosts = [...blogPosts, ...newsletterPosts]
+  const blogLimit = compact ? 3 : 4;
+  const sortedBlogPosts = [...blogPosts]
     .sort((a, b) => new Date(b.pubDate || 0) - new Date(a.pubDate || 0));
-  const wavesPosts = showAllPosts ? allWavesPosts : allWavesPosts.slice(0, postLimit);
-  const hasMorePosts = allWavesPosts.length > postLimit;
+  const sortedNewsletterPosts = [...newsletterPosts]
+    .sort((a, b) => new Date(b.pubDate || 0) - new Date(a.pubDate || 0));
+  const visibleBlogPosts = showAllPosts ? sortedBlogPosts : sortedBlogPosts.slice(0, blogLimit);
+  const hasMoreBlogPosts = sortedBlogPosts.length > blogLimit;
+  const allWavesPosts = [...sortedBlogPosts, ...sortedNewsletterPosts]
+    .sort((a, b) => new Date(b.pubDate || 0) - new Date(a.pubDate || 0));
   const allContent = [...allWavesPosts, ...expertPosts, ...localNews]
     .sort((a, b) => new Date(b.pubDate || 0) - new Date(a.pubDate || 0));
   const latestContent = allContent[0];
@@ -5150,7 +5154,7 @@ function LearnTab({ customer }) {
           marginTop: 22,
         }}>
           {[
-            { label: 'Waves Articles', value: allWavesPosts.length, sub: 'Blog and newsletter' },
+            { label: 'Blog Posts', value: sortedBlogPosts.length, sub: 'wavespestcontrol.com' },
             { label: 'Expert Sources', value: expertPosts.length, sub: 'UF/IFAS and references' },
             { label: 'FAQ Answers', value: totalFaqQuestions, sub: 'Service and lawn topics' },
             {
@@ -5264,28 +5268,34 @@ function LearnTab({ customer }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={iconTile}><Icon name="waves" size={18} strokeWidth={2} /></span>
             <div>
-              <div style={sectionTitle}>From Waves</div>
-              <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{allWavesPosts.length} article{allWavesPosts.length === 1 ? '' : 's'} and newsletter issue{allWavesPosts.length === 1 ? '' : 's'}</div>
+              <div style={sectionTitle}>Waves Pest Control Blog</div>
+              <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{sortedBlogPosts.length} article{sortedBlogPosts.length === 1 ? '' : 's'} from wavespestcontrol.com</div>
             </div>
           </div>
-          {hasMorePosts && (
-            <button type="button" onClick={() => setShowAllPosts(v => !v)} style={secondaryButton}>
-              {showAllPosts ? 'Show less' : `View all (${allWavesPosts.length})`}
-            </button>
-          )}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <a href="https://wavespestcontrol.com/blog/" target="_blank" rel="noopener noreferrer" style={{ ...secondaryButton, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+              <Icon name="arrowRight" size={14} strokeWidth={2} />
+              Visit Blog
+            </a>
+            {hasMoreBlogPosts && (
+              <button type="button" onClick={() => setShowAllPosts(v => !v)} style={secondaryButton}>
+                {showAllPosts ? 'Show less' : `View all (${sortedBlogPosts.length})`}
+              </button>
+            )}
+          </div>
         </div>
 
-        {wavesPosts.length > 0 ? (
+        {visibleBlogPosts.length > 0 ? (
           <div style={{
             display: 'grid',
-            gridTemplateColumns: compact || wavesPosts.length < 2 ? '1fr' : 'minmax(0, 1.15fr) minmax(280px, 0.85fr)',
+            gridTemplateColumns: compact || visibleBlogPosts.length < 2 ? '1fr' : 'minmax(0, 1.15fr) minmax(280px, 0.85fr)',
             gap: 10,
           }}>
-            <ContentCard post={wavesPosts[0]} large compact={compact} />
-            {wavesPosts.length > 1 && (
+            <ContentCard post={visibleBlogPosts[0]} large compact={compact} />
+            {visibleBlogPosts.length > 1 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {wavesPosts.slice(1).map((p, i) => (
-                  <ContentCard key={`waves-${i}`} post={p} compact={compact} />
+                {visibleBlogPosts.slice(1).map((p, i) => (
+                  <ContentCard key={`waves-blog-${i}`} post={p} compact={compact} />
                 ))}
               </div>
             )}
@@ -5293,8 +5303,8 @@ function LearnTab({ customer }) {
         ) : (
           <PortalInlineState
             icon="waves"
-            title="No Waves articles loaded"
-            message="New Waves articles and newsletter issues will appear here."
+            title="No blog articles loaded"
+            message="Latest Waves Pest Control blog articles from wavespestcontrol.com will appear here."
           />
         )}
 
@@ -5313,6 +5323,8 @@ function LearnTab({ customer }) {
           />
         </div>
       </section>
+
+      {renderFeedSection('Waves Newsletter', 'newspaper', sortedNewsletterPosts, 'Waves newsletter issues will appear here.')}
 
       <div style={{
         display: 'grid',
@@ -5486,11 +5498,12 @@ const SERVICE_CATALOG = [
 ];
 
 const ADD_ONS = [
-  { id: 'palm_injection', name: 'Arborjet Palm Injection', icon: 'palm', price: 35, unit: '/palm', min: '$75/visit minimum', desc: 'Trunk-injected nutrients and pest protection for coconut, queen, and royal palms' },
-  { id: 'top_dressing', name: 'Top Dressing / Dethatching', icon: 'palm', price: 150, unit: '/service', min: 'Seasonal (fall recommended)', desc: 'Sand top-dressing to improve soil structure + mechanical dethatching when thatch exceeds 0.5"' },
-  { id: 'fire_ant', name: 'Fire Ant Treatment', icon: 'flame', price: 40, unit: '/treatment', min: 'As needed', desc: 'Broadcast granular bait + individual mound drench for aggressive colonies' },
-  { id: 'rodent', name: 'Rodent Bait Stations', icon: 'mouse', price: 30, unit: '/month', min: 'Monthly monitoring', desc: 'Tamper-resistant exterior bait stations, monthly monitoring and reporting' },
-  { id: 'wdo_inspection', name: 'WDO Inspection', icon: 'clipboard', price: 250, unit: '', min: 'Real estate transaction?', desc: 'Wood-destroying organism inspection report for real estate closings. FL Form 13645 compliant. Includes full attic, crawl space, and exterior assessment.' },
+  { id: 'lawn_health_boost', name: 'Lawn Health Boost', icon: 'sprout', price: 75, unit: '/visit', min: 'Targeted turf recovery follow-up', desc: 'Focused weed, fungus, chinch bug, or turf-stress visit with notes added to your lawn profile.' },
+  { id: 'fungicide_protection', name: 'Fungicide Protection', icon: 'shield', price: 65, unit: '/visit', min: 'High-humidity months', desc: 'Preventive or corrective fungicide application for brown patch, dollar spot, and seasonal lawn disease pressure.' },
+  { id: 'mosquito_event_spray', name: 'Mosquito Event Spray', icon: 'bug', price: 75, unit: '/event', min: 'Before outdoor gatherings', desc: 'Extra mosquito barrier treatment timed before pool days, parties, and holiday weekends.' },
+  { id: 'mosquito_source_reduction', name: 'Mosquito Source Reduction', icon: 'droplet', price: 45, unit: '/visit', min: 'Breeding-site inspection', desc: 'Drainage, container, and shaded-area inspection with larvicide treatment where appropriate.' },
+  { id: 'tree_shrub', name: 'Tree & Shrub Care', icon: 'tree', price: 50, unit: '/month', min: 'Ornamentals, hedges, and palms', desc: 'Seasonal insect, disease, and nutrition care for landscape plants around the home.' },
+  { id: 'palm_injection', name: 'Palm Injection', icon: 'palm', price: 35, unit: '/palm', min: '$75/visit minimum', desc: 'Trunk-injected nutrients and pest protection for coconut, queen, and royal palms.' },
 ];
 
 const TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum'];
@@ -5533,7 +5546,9 @@ const HIDDEN_BADGE_TYPES = ['portal_regular', 'document_downloader', 'doc_downlo
 function MyPlanTab({ customer }) {
   const [expandedService, setExpandedService] = useState(null);
   const [expandedAddon, setExpandedAddon] = useState(null);
+  const [hoveredCalendarItem, setHoveredCalendarItem] = useState(null);
   const [nextService, setNextService] = useState(null);
+  const [upcomingServices, setUpcomingServices] = useState([]);
   const [serviceHistory, setServiceHistory] = useState([]);
   const [addonRequested, setAddonRequested] = useState({});
   const [addonSubmitting, setAddonSubmitting] = useState({});
@@ -5554,6 +5569,7 @@ function MyPlanTab({ customer }) {
 
   useEffect(() => {
     api.getNextService().then(d => setNextService(d.next || null)).catch(console.error);
+    api.getSchedule(365).then(d => setUpcomingServices(d.upcoming || [])).catch(console.error);
     api.getServices({ limit: 50 }).then(d => {
       if (d.services) setServiceHistory(d.services);
     }).catch(console.error);
@@ -5613,19 +5629,22 @@ function MyPlanTab({ customer }) {
   const currentMonth = now.getMonth();
   const currentYear = now.getFullYear();
 
+  const serviceMatches = (svcId, service = {}) => {
+    const svcType = (service.serviceType || service.service_type || service.type || '').toLowerCase();
+    return (
+      (svcId === 'pest_control' && (svcType.includes('pest') || svcType.includes('general'))) ||
+      (svcId === 'lawn_care' && (svcType.includes('lawn') || svcType.includes('fertiliz') || svcType.includes('turf'))) ||
+      (svcId === 'mosquito' && svcType.includes('mosquito')) ||
+      (svcId === 'tree_shrub' && (svcType.includes('tree') || svcType.includes('shrub') || svcType.includes('palm'))) ||
+      (svcId === 'termite' && svcType.includes('termite'))
+    );
+  };
+
   // Determine completed months from service history
   const getCompletedMonths = (svcId) => {
     const completed = new Set();
     serviceHistory.forEach(s => {
-      const svcType = (s.serviceType || s.type || '').toLowerCase();
-      const matchesService = (
-        (svcId === 'pest_control' && (svcType.includes('pest') || svcType.includes('general'))) ||
-        (svcId === 'lawn_care' && (svcType.includes('lawn') || svcType.includes('fertiliz'))) ||
-        (svcId === 'mosquito' && svcType.includes('mosquito')) ||
-        (svcId === 'tree_shrub' && (svcType.includes('tree') || svcType.includes('shrub'))) ||
-        (svcId === 'termite' && svcType.includes('termite'))
-      );
-      if (matchesService && s.date) {
+      if (serviceMatches(svcId, s) && s.date) {
         const d = parseDate(s.date);
         if (d.getFullYear() === currentYear) {
           completed.add(d.getMonth());
@@ -5633,6 +5652,88 @@ function MyPlanTab({ customer }) {
       }
     });
     return completed;
+  };
+
+  const calendarDate = (date) => {
+    const d = parseDate(date);
+    if (isNaN(d)) return 'Date pending';
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  };
+
+  const clockLabel = (value) => {
+    if (!value) return '';
+    const raw = String(value);
+    const timeMatch = raw.match(/^(\d{1,2}):(\d{2})/);
+    if (timeMatch) {
+      const d = new Date();
+      d.setHours(Number(timeMatch[1]), Number(timeMatch[2]), 0, 0);
+      return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    }
+    const d = new Date(raw);
+    if (isNaN(d)) return '';
+    return d.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
+  };
+
+  const calendarTime = (event = {}) => {
+    const windowStart = clockLabel(event.windowStart || event.window_start);
+    const windowEnd = clockLabel(event.windowEnd || event.window_end);
+    if (windowStart && windowEnd) return `${windowStart} - ${windowEnd}`;
+    if (windowStart) return windowStart;
+
+    const checkIn = clockLabel(event.checkInTime || event.check_in_time);
+    const checkOut = clockLabel(event.checkOutTime || event.check_out_time);
+    if (checkIn && checkOut) return `${checkIn} - ${checkOut}`;
+    if (checkIn) return checkIn;
+
+    return event.source === 'completed' ? 'Completed visit' : 'Scheduling soon';
+  };
+
+  const getCalendarEventsForMonth = (svcId, monthIndex) => {
+    const completedEvents = serviceHistory
+      .filter(s => serviceMatches(svcId, s) && s.date)
+      .filter(s => {
+        const d = parseDate(s.date);
+        return d.getFullYear() === currentYear && d.getMonth() === monthIndex;
+      })
+      .map(s => ({ ...s, source: 'completed' }));
+
+    const scheduledEvents = upcomingServices
+      .filter(s => serviceMatches(svcId, s) && s.date)
+      .filter(s => {
+        const d = parseDate(s.date);
+        return d.getFullYear() === currentYear && d.getMonth() === monthIndex;
+      })
+      .map(s => ({ ...s, source: 'scheduled' }));
+
+    if (nextService?.date && serviceMatches(svcId, nextService)) {
+      const d = parseDate(nextService.date);
+      const alreadyIncluded = scheduledEvents.some(s => s.id === nextService.id);
+      if (!alreadyIncluded && d.getFullYear() === currentYear && d.getMonth() === monthIndex) {
+        scheduledEvents.push({ ...nextService, source: 'scheduled' });
+      }
+    }
+
+    return [...completedEvents, ...scheduledEvents]
+      .sort((a, b) => parseDate(a.date) - parseDate(b.date));
+  };
+
+  const getCalendarDetail = (svc, monthIndex, statusLabel) => {
+    const events = getCalendarEventsForMonth(svc.id, monthIndex);
+    const event = events[0];
+    if (!event) {
+      return {
+        date: `${MONTH_LABELS[monthIndex]} ${currentYear}`,
+        time: statusLabel === 'Completed' ? 'Completed visit' : 'Scheduling soon',
+        type: svc.name,
+        status: statusLabel,
+      };
+    }
+    return {
+      date: calendarDate(event.date),
+      time: calendarTime(event),
+      type: event.serviceType || event.service_type || event.type || svc.name,
+      status: event.source === 'completed' ? 'Completed' : event.status || statusLabel,
+    };
   };
 
   // Included service IDs for filtering add-ons
@@ -6113,18 +6214,27 @@ function MyPlanTab({ customer }) {
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, minmax(0, 1fr))', gap: 3 }}>
                       {MONTH_LABELS.map((month, mi) => {
-                        const isScheduled = scheduleMonths.includes(mi);
+                        const hasActualEvent = getCalendarEventsForMonth(svc.id, mi).length > 0;
+                        const isScheduled = hasActualEvent || scheduleMonths.includes(mi);
                         const isCompleted = completedMonths.has(mi);
                         const isCurrentMonth = mi === currentMonth;
                         const isOverdue = isScheduled && !isCompleted && mi < currentMonth;
                         const fill = isCompleted ? B.green : isOverdue ? B.orange : isCurrentMonth && isScheduled ? B.wavesBlue : isScheduled ? '#CBD5E1' : 'transparent';
                         const border = isScheduled ? fill : '#E1E7EF';
-                        const title = isScheduled
-                          ? `${month}: ${isCompleted ? 'Completed' : isOverdue ? 'Pending or missed' : isCurrentMonth ? 'This month' : 'Scheduled'}`
-                          : `${month}: No service`;
+                        const statusLabel = isCompleted ? 'Completed' : isOverdue ? 'Pending or missed' : isCurrentMonth && isScheduled ? 'This month' : isScheduled ? 'Scheduled' : 'No service';
+                        const detail = isScheduled ? getCalendarDetail(svc, mi, statusLabel) : null;
+                        const tooltipKey = `${svc.id}-${mi}`;
                         return (
-                          <div key={month} title={title} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3 }}>
-                            <div style={{
+                          <div key={month} style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, minWidth: 0 }}>
+                            <button
+                              type="button"
+                              disabled={!isScheduled}
+                              onMouseEnter={() => isScheduled && setHoveredCalendarItem(tooltipKey)}
+                              onMouseLeave={() => setHoveredCalendarItem(null)}
+                              onFocus={() => isScheduled && setHoveredCalendarItem(tooltipKey)}
+                              onBlur={() => setHoveredCalendarItem(null)}
+                              aria-label={isScheduled ? `${svc.name} on ${detail.date}, ${detail.time}` : `${svc.name}: no ${month} service`}
+                              style={{
                               width: 12,
                               height: 12,
                               borderRadius: 999,
@@ -6132,7 +6242,35 @@ function MyPlanTab({ customer }) {
                               border: `1px solid ${border}`,
                               opacity: isScheduled ? 1 : 0.45,
                               boxShadow: isCurrentMonth && isScheduled ? `0 0 0 3px ${B.wavesBlue}18` : 'none',
-                            }} />
+                              padding: 0,
+                              cursor: isScheduled ? 'pointer' : 'default',
+                            }}
+                            />
+                            {isScheduled && hoveredCalendarItem === tooltipKey && (
+                              <div role="tooltip" style={{
+                                position: 'absolute',
+                                zIndex: 30,
+                                bottom: 'calc(100% + 8px)',
+                                left: mi > 8 ? 'auto' : '50%',
+                                right: mi > 8 ? 0 : 'auto',
+                                transform: mi > 8 ? 'none' : 'translateX(-50%)',
+                                width: 190,
+                                padding: 10,
+                                borderRadius: 8,
+                                background: B.blueDeeper,
+                                color: '#fff',
+                                boxShadow: '0 12px 30px rgba(15,23,42,0.22)',
+                                textAlign: 'left',
+                                pointerEvents: 'none',
+                              }}>
+                                <div style={{ fontSize: 12, fontWeight: 850, lineHeight: 1.25 }}>{detail.type}</div>
+                                <div style={{ marginTop: 6, display: 'grid', gap: 3, fontSize: 12, color: 'rgba(255,255,255,0.86)', lineHeight: 1.35 }}>
+                                  <span>Date: {detail.date}</span>
+                                  <span>Time: {detail.time}</span>
+                                  <span>Status: {detail.status}</span>
+                                </div>
+                              </div>
+                            )}
                             <div style={{ fontSize: 9, color: muted }}>{month[0]}</div>
                           </div>
                         );
@@ -7759,11 +7897,8 @@ function DocumentsTab({ customer, onSwitchTab }) {
     );
   }
 
-  // Documents tab is scoped to legal / agreement / insurance paperwork.
-  // Per-visit service reports live under Visits → Completed (already linked
-  // next to the visit they document); they were removed from here to avoid
-  // the same report appearing in two places.
   const categories = [
+    { id: 'service_reports', keys: ['service_report'], label: 'Service Reports', icon: 'clipboard', empty: 'Quarterly Pest Control and other completed visit reports will appear here after service.' },
     { id: 'wdo', keys: ['wdo_inspection'], label: 'Real Estate', icon: 'clipboard', empty: 'No WDO or real estate reports on file.' },
     { id: 'agreements', keys: ['service_agreement'], label: 'Agreements', icon: 'shield', empty: 'Your service agreement will appear here after enrollment.' },
     { id: 'insurance', keys: ['insurance_cert'], label: 'Insurance', icon: 'document', empty: 'Insurance certificates will be uploaded by Waves.' },
@@ -7776,9 +7911,18 @@ function DocumentsTab({ customer, onSwitchTab }) {
     ...categories.map(c => ({ value: c.id, label: c.label })),
   ];
 
+  const documentDate = (docOrDate) => {
+    const isDoc = docOrDate && typeof docOrDate === 'object';
+    const raw = isDoc ? (docOrDate.serviceDate || docOrDate.createdAt) : docOrDate;
+    if (!raw) return new Date(NaN);
+    return typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw)
+      ? parseDate(raw)
+      : new Date(raw);
+  };
+
   const docsForCategory = (category) => category.keys
     .flatMap(key => (docs[key] || []).map(doc => ({ ...doc, categoryId: category.id, categoryLabel: category.label })))
-    .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+    .sort((a, b) => documentDate(b) - documentDate(a));
 
   const filteredCategories = categories
     .filter(c => typeFilter === 'all' || c.id === typeFilter)
@@ -7809,14 +7953,14 @@ function DocumentsTab({ customer, onSwitchTab }) {
     return { label: `Valid through ${exp.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`, color: B.green, bg: `${B.green}20` };
   };
 
-  const formatDate = (date) => {
-    const d = new Date(date);
+  const formatDate = (docOrDate) => {
+    const d = documentDate(docOrDate);
     if (isNaN(d)) return 'Date unavailable';
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   };
 
-  const relativeTime = (date) => {
-    const d = new Date(date);
+  const relativeTime = (docOrDate) => {
+    const d = documentDate(docOrDate);
     const diff = Math.floor((Date.now() - d) / (1000 * 60 * 60 * 24));
     if (diff === 0) return 'Today';
     if (diff === 1) return 'Yesterday';
@@ -7836,8 +7980,8 @@ function DocumentsTab({ customer, onSwitchTab }) {
   // tab actually renders, so the number matches what the customer sees.
   const thisYear = new Date().getFullYear();
   const visibleDocs = categories.flatMap(c => docsForCategory(c));
-  const visibleDocsByDate = [...visibleDocs].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
-  const ytdDocs = visibleDocs.filter(d => new Date(d.createdAt).getFullYear() === thisYear);
+  const visibleDocsByDate = [...visibleDocs].sort((a, b) => documentDate(b) - documentDate(a));
+  const ytdDocs = visibleDocs.filter(d => documentDate(d).getFullYear() === thisYear);
   const expiringDocs = visibleDocs.filter(d => {
     if (!d.expirationDate) return false;
     const days = Math.ceil((new Date(d.expirationDate + 'T12:00:00') - new Date()) / 86400000);
@@ -7892,7 +8036,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
               Documents
             </h1>
             <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
-              Agreements, real estate reports, insurance certificates, and compliance paperwork.
+              Service reports, agreements, real estate reports, insurance certificates, and compliance paperwork.
             </div>
           </div>
           <div style={{
@@ -7910,7 +8054,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
               {currentTotal}
             </div>
             <div style={{ marginTop: 2, fontSize: 12, color: muted }}>
-              {totalDocs > currentTotal ? `${totalDocs} total including visit reports` : 'Customer paperwork'}
+              {totalDocs > currentTotal ? `${totalDocs} total on file` : 'Customer documents'}
             </div>
           </div>
         </div>
@@ -7923,9 +8067,9 @@ function DocumentsTab({ customer, onSwitchTab }) {
         }}>
           {[
             { label: `${thisYear} added`, value: ytdDocs.length, sub: `${ytdDocs.length === 1 ? 'document' : 'documents'} this year` },
-            { label: 'Real estate', value: docsForCategory(categories[0]).length, sub: 'WDO and inspection reports' },
+            { label: 'Service reports', value: docsForCategory(categories[0]).length, sub: 'After completed visits' },
             { label: 'Expiring soon', value: expiringDocs.length, sub: expiringDocs.length ? 'Within 60 days' : 'Nothing due soon' },
-            { label: 'Latest', value: latestDoc ? formatDate(latestDoc.createdAt) : 'None', sub: latestDoc?.title || 'No paperwork yet' },
+            { label: 'Latest', value: latestDoc ? formatDate(latestDoc) : 'None', sub: latestDoc?.title || 'No paperwork yet' },
           ].map((item) => (
             <div key={item.label} style={{
               border: '1px solid #E1E7EF',
@@ -8015,6 +8159,44 @@ function DocumentsTab({ customer, onSwitchTab }) {
             Showing {resultCount} matching document{resultCount === 1 ? '' : 's'}.
           </div>
         )}
+      </section>
+
+      <section style={{
+        ...card,
+        padding: 18,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 14,
+        flexWrap: 'wrap',
+        background: '#EEF6FF',
+        borderColor: '#CDEAFE',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+          <span style={{
+            width: 38,
+            height: 38,
+            borderRadius: 8,
+            background: '#fff',
+            color: B.blueDeeper,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flexShrink: 0,
+          }}>
+            <Icon name="clipboard" size={18} strokeWidth={2} />
+          </span>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Looking for a recent service report?</div>
+            <div style={{ fontSize: 12, color: muted, marginTop: 2, lineHeight: 1.45 }}>
+              Quarterly Pest Control reports appear here after a completed visit and under Visits, Completed.
+            </div>
+          </div>
+        </div>
+        <button type="button" onClick={() => onSwitchTab?.('services')} style={secondaryButton}>
+          <Icon name="calendar" size={15} strokeWidth={2} style={{ marginRight: 6 }} />
+          Open Completed Visits
+        </button>
       </section>
 
       {/* Document Categories */}
@@ -8193,10 +8375,11 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
               const share = shareStatus[doc.id];
               const isWdo = doc.documentType === 'wdo_inspection';
               const isInsurance = doc.documentType === 'insurance_cert';
+              const isServiceReport = doc.documentType === 'service_report';
               const canOpen = !!(doc.viewUrl || doc.isProjectReport);
               const meta = [
-                formatDate(doc.createdAt),
-                relativeTime(doc.createdAt),
+                formatDate(doc),
+                relativeTime(doc),
                 doc.fileSizeBytes ? formatSize(doc.fileSizeBytes) : null,
                 doc.isAutoGenerated ? 'Generated by Waves' : null,
               ].filter(Boolean);
@@ -8219,7 +8402,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
                       alignItems: 'center',
                       justifyContent: 'center',
                     }}>
-                      <Icon name={isWdo ? 'clipboard' : isInsurance ? 'shield' : 'document'} size={18} strokeWidth={2} />
+                      <Icon name={isWdo || isServiceReport ? 'clipboard' : isInsurance ? 'shield' : 'document'} size={18} strokeWidth={2} />
                     </span>
 
                     <div style={{ flex: 1, minWidth: 0 }}>
@@ -9183,6 +9366,13 @@ const TAB_TITLES = {
   learn: 'Learn and Stay Informed',
 };
 
+const PORTAL_FOOTER_LOCATIONS = [
+  { label: 'Lakewood Ranch', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Lakewood%20Ranch&query_place_id=ChIJVbBOKGYyTCgRVFz8_lu61Mw' },
+  { label: 'Parrish', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Parrish&query_place_id=ChIJM32aQRIlw4gRr7goqhbAVpw' },
+  { label: 'Sarasota', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Sarasota&query_place_id=ChIJeT_63_Y5w4gRGTNLozgSmdw' },
+  { label: 'Venice', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Venice&query_place_id=ChIJ81vmrblZw4gRREDmlDUpq0E' },
+];
+
 // The sub-tabs on Visits surface their own IDs, so "Visits" stays lit
 // whether the customer is on Upcoming or Completed.
 function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
@@ -9687,11 +9877,13 @@ export default function PortalPage() {
           border: `1px solid ${isActive ? PORTAL_SHELL.softBorder : 'transparent'}`,
           borderRadius: 8,
           minHeight: 40,
-          padding: '8px 11px',
+          padding: '8px 8px',
           display: 'inline-flex',
           alignItems: 'center',
+          justifyContent: 'center',
           gap: 6,
-          flex: '0 0 auto',
+          flex: '1 0 auto',
+          minWidth: 'max-content',
           background: isActive ? PORTAL_SHELL.surface : 'transparent',
           color: isActive ? PORTAL_SHELL.text : PORTAL_SHELL.muted,
           fontFamily: FONTS.heading,
@@ -9702,7 +9894,7 @@ export default function PortalPage() {
         }}
       >
         <Icon name={tab.icon} size={15} strokeWidth={isActive ? 2.1 : 1.75} />
-        {tab.label}
+        <span style={{ whiteSpace: 'nowrap' }}>{tab.label}</span>
       </button>
     );
   };
@@ -9780,24 +9972,21 @@ export default function PortalPage() {
         backdropFilter: 'blur(16px)',
         borderBottom: `1px solid ${PORTAL_SHELL.border}`,
         boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
-        padding: '10px max(16px, calc((100vw - 1120px) / 2 + 16px))',
+        padding: '10px max(16px, calc((100vw - 1440px) / 2 + 16px))',
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         gap: 12,
         position: 'sticky', top: 0, zIndex: 100,
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '0 0 auto' }}>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 34, width: 'auto', display: 'block' }} />
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading }}>Customer Portal</div>
-            <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 1, maxWidth: isMobileShell ? 150 : 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {activePropertyAddress || 'Waves Pest Control'}
-            </div>
+            <div style={{ fontSize: 15, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading, lineHeight: 1.2 }}>Customer Portal</div>
           </div>
         </div>
         {!isMobileShell && (
           <nav aria-label="Customer portal" style={{
-            flex: 1, minWidth: 0, margin: '0 18px',
-            display: 'flex', alignItems: 'center', justifyContent: 'flex-start',
+            flex: 1, minWidth: 0, margin: '0 10px',
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
             gap: 3, overflowX: 'auto', scrollbarWidth: 'none',
             background: PORTAL_SHELL.page,
             border: `1px solid ${PORTAL_SHELL.border}`,
@@ -10146,8 +10335,19 @@ export default function PortalPage() {
         gap: 12,
         flexWrap: 'wrap',
       }}>
-        <span>Waves Pest Control</span>
-        <span>Lakewood Ranch · Sarasota · Venice</span>
+        <a href="https://wavespestcontrol.com/" target="_blank" rel="noopener noreferrer" style={{ color: B.blueDeeper, fontWeight: 850, textDecoration: 'none' }}>
+          Waves Pest Control
+        </a>
+        <span style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+          {PORTAL_FOOTER_LOCATIONS.map((location, index) => (
+            <span key={location.label} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              {index > 0 && <span aria-hidden="true">·</span>}
+              <a href={location.href} target="_blank" rel="noopener noreferrer" style={{ color: B.grayMid, textDecoration: 'none', fontWeight: 800 }}>
+                {location.label}
+              </a>
+            </span>
+          ))}
+        </span>
       </footer>
 
       {/* Bottom nav — primary destinations pinned as icons, rest behind "More". */}
