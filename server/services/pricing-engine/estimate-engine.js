@@ -48,6 +48,12 @@ function generateEstimate(input) {
     stories: input.stories,
     lotSqFt: input.lotSqFt,
     lawnSqFt: input.lawnSqFt,
+    measuredTurfSf: input.measuredTurfSf,
+    estimatedTurfSf: input.estimatedTurfSf,
+    imperviousSurfacePercent: input.imperviousSurfacePercent,
+    imperviosSurfacePercent: input.imperviosSurfacePercent,
+    estimatedBedAreaSf: input.estimatedBedAreaSf,
+    estimatedBedAreaPercent: input.estimatedBedAreaPercent,
     bedArea: input.bedArea,
     propertyType: input.propertyType,
     features: input.features || {},
@@ -66,6 +72,8 @@ function generateEstimate(input) {
     fenceType: input.fenceType,
     outbuildingCount: input.outbuildingCount,
     attachedGarage: input.attachedGarage,
+    maintenanceCondition: input.maintenanceCondition,
+    overallPestPressure: input.overallPestPressure,
   });
 
   // ── 2. Derive property-driven pricing modifiers (v2 port) ─
@@ -118,7 +126,14 @@ function generateEstimate(input) {
     const result = priceLawnCare(property, {
       track: services.lawn.track || 'st_augustine',
       tier: services.lawn.tier || 'enhanced',
+      lawnFreq: services.lawn.lawnFreq || input.lawnFreq,
       shadeClassification: services.lawn.shadeClassification || 'FULL_SUN',
+      useLawnCostFloor: services.lawn.useLawnCostFloor ?? input.useLawnCostFloor ?? false,
+      targetLawnGrossMargin: services.lawn.targetLawnGrossMargin ?? input.targetLawnGrossMargin,
+      routeDriveMinutes: services.lawn.routeDriveMinutes ?? input.routeDriveMinutes,
+      lawnMaterialCostPerK: services.lawn.lawnMaterialCostPerK ?? input.lawnMaterialCostPerK,
+      lawnLaborMinutesBase: services.lawn.lawnLaborMinutesBase ?? input.lawnLaborMinutesBase,
+      lawnLaborMinutesPerK: services.lawn.lawnLaborMinutesPerK ?? input.lawnLaborMinutesPerK,
     });
     // Lawn brackets are zone-agnostic in v2's calcLawn (pricing-engine-v2.js:557+);
     // dropping the zone mult here preserves parity so Session 11a's engine swap
@@ -217,7 +232,9 @@ function generateEstimate(input) {
       urgency: services.oneTimeLawn.urgency || 'NONE',
       afterHours: services.oneTimeLawn.afterHours || false,
       isRecurringCustomer,
-      hasRecurringLawn: !!services.lawn,
+      track: services.oneTimeLawn.track || services.lawn?.track || 'st_augustine',
+      tier: services.oneTimeLawn.tier || services.lawn?.tier || 'enhanced',
+      lawnFreq: services.oneTimeLawn.lawnFreq || services.lawn?.lawnFreq || input.lawnFreq,
     });
     lineItems.push(result);
   }
@@ -480,6 +497,15 @@ function generateEstimate(input) {
 
   // ── 7. Validate margins ────────────────────────────────────
   const marginWarnings = validateEstimateDiscounts(lineItems, waveGuardTier);
+  const notes = [];
+  const lawnLine = lineItems.find(i => i.service === 'lawn_care');
+  if (lawnLine?.customQuoteFlag) {
+    notes.push({
+      type: 'LAWN_CUSTOM_QUOTE',
+      text: 'Turf area exceeds 20,000 sq ft. Pricing was extrapolated and requires field verification/custom quote.',
+      priority: 'HIGH',
+    });
+  }
 
   // ── 8. Build estimate output ───────────────────────────────
   return {
@@ -526,6 +552,7 @@ function generateEstimate(input) {
 
     // Warnings
     marginWarnings,
+    fieldVerify: Array.from(new Set(property.turfFlags || [])),
 
     // Property-driven modifiers & structural notes (v2 port)
     modifiers,
@@ -534,7 +561,7 @@ function generateEstimate(input) {
     // Metadata
     generatedAt: new Date().toISOString(),
     pricingVersion: 'v4.2',
-    notes: [],
+    notes,
   };
 }
 

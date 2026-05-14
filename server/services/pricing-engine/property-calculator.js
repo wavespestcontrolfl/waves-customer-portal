@@ -9,6 +9,16 @@ function calculateFootprint(homeSqFt, stories) {
   return Math.round(homeSqFt / Math.max(1, stories));
 }
 
+function toPositiveNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function toNonNegativeNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
 function estimateHardscape(lotSqFt, propertyType, features = {}) {
   const type = propertyType || 'single_family';
   let fn = HARDSCAPE.single_family;
@@ -47,6 +57,87 @@ function estimateLawnSqFt(lotSqFt, footprint, hardscape, features = {}) {
   return Math.round(outdoorArea * turfFactor);
 }
 
+function computeTurfArea(input, fallback = {}) {
+  const measured = toPositiveNumber(input.measuredTurfSf);
+  if (measured > 0) {
+    return {
+      turfSf: measured,
+      turfEstimated: false,
+      turfConfidence: 'HIGH',
+      turfBasis: 'measuredTurfSf',
+      turfFlags: [],
+    };
+  }
+
+  const lawnSqFt = toPositiveNumber(input.lawnSqFt);
+  if (lawnSqFt > 0) {
+    return {
+      turfSf: lawnSqFt,
+      turfEstimated: false,
+      turfConfidence: 'HIGH',
+      turfBasis: 'lawnSqFt',
+      turfFlags: [],
+    };
+  }
+
+  const estimated = toPositiveNumber(input.estimatedTurfSf);
+  if (estimated > 0) {
+    return {
+      turfSf: estimated,
+      turfEstimated: true,
+      turfConfidence: 'MEDIUM',
+      turfBasis: 'estimatedTurfSf',
+      turfFlags: [],
+    };
+  }
+
+  const lotSqFt = toPositiveNumber(input.lotSqFt);
+  if (lotSqFt <= 0) {
+    return {
+      turfSf: 0,
+      turfEstimated: true,
+      turfConfidence: 'LOW',
+      turfBasis: 'lotFallback',
+      turfFlags: ['FIELD_VERIFY_TURF_SQFT'],
+    };
+  }
+
+  const hasLotBasedTurfFields =
+    input.imperviousSurfacePercent !== undefined ||
+    input.imperviosSurfacePercent !== undefined ||
+    input.estimatedBedAreaSf !== undefined ||
+    input.estimatedBedAreaPercent !== undefined;
+
+  if (!hasLotBasedTurfFields && toPositiveNumber(fallback.turfSf) > 0) {
+    return {
+      turfSf: fallback.turfSf,
+      turfEstimated: true,
+      turfConfidence: 'LOW',
+      turfBasis: 'legacyHardscapeEstimate',
+      turfFlags: ['FIELD_VERIFY_TURF_SQFT'],
+    };
+  }
+
+  const rawImperviousPct = input.imperviousSurfacePercent ?? input.imperviosSurfacePercent ?? 20;
+  const imperviousPct = toNonNegativeNumber(rawImperviousPct, 20);
+  const imperviousFraction = Math.min(1, Math.max(0, imperviousPct / 100));
+  const turfOpenArea = Math.max(0, Math.round(lotSqFt * (1 - imperviousFraction)));
+  const bedPercent = toNonNegativeNumber(input.estimatedBedAreaPercent, 0);
+  const explicitBedArea = toPositiveNumber(input.estimatedBedAreaSf) || toPositiveNumber(input.bedArea);
+  const bedArea = bedPercent > 0
+    ? Math.max(0, Math.round(turfOpenArea * (bedPercent / 100)))
+    : (explicitBedArea || Math.round(turfOpenArea * 0.15));
+
+  return {
+    turfSf: Math.max(0, Math.round(turfOpenArea - bedArea)),
+    turfEstimated: true,
+    turfConfidence: 'LOW',
+    turfBasis: 'lotFallback',
+    turfOpenArea,
+    turfFlags: ['FIELD_VERIFY_TURF_SQFT'],
+  };
+}
+
 function estimateBedArea(lotSqFt, shrubDensity = 'moderate', complexity = 'standard') {
   const density = BED_DENSITY[shrubDensity] || BED_DENSITY.moderate;
   let pct = density.basePct;
@@ -70,15 +161,24 @@ function getLotCategory(lotSqFt) {
 function calculatePropertyProfile(input) {
   const footprint = calculateFootprint(input.homeSqFt, input.stories || 1);
   const hardscape = estimateHardscape(input.lotSqFt, input.propertyType, input.features || {});
-  const bedRatio = input.bedArea ? input.bedArea / input.lotSqFt : 0;
+  const explicitBedArea = input.bedArea || input.estimatedBedAreaSf || 0;
+  const bedRatio = explicitBedArea ? explicitBedArea / input.lotSqFt : 0;
   const features = { ...(input.features || {}), bedRatio };
-  const lawnSqFt = input.lawnSqFt || estimateLawnSqFt(input.lotSqFt, footprint, hardscape, features);
-  const bedArea = input.bedArea || estimateBedArea(input.lotSqFt, (input.features || {}).shrubs, (input.features || {}).complexity);
+  const legacyLawnEstimate = estimateLawnSqFt(input.lotSqFt, footprint, hardscape, features);
+  const turfArea = computeTurfArea(input, { turfSf: legacyLawnEstimate });
+  const lawnSqFt = turfArea.turfSf;
+  const bedArea = explicitBedArea || estimateBedArea(input.lotSqFt, (input.features || {}).shrubs, (input.features || {}).complexity);
   const perimeter = calculatePerimeter(footprint, (input.features || {}).complexity);
   const lotCategory = getLotCategory(input.lotSqFt);
 
   return {
-    footprint, hardscape, lawnSqFt, bedArea, perimeter, lotCategory,
+    footprint, hardscape, lawnSqFt, turfSf: lawnSqFt,
+    turfEstimated: turfArea.turfEstimated,
+    turfConfidence: turfArea.turfConfidence,
+    turfBasis: turfArea.turfBasis,
+    turfOpenArea: turfArea.turfOpenArea,
+    turfFlags: turfArea.turfFlags,
+    bedArea, perimeter, lotCategory,
     complexityScore: calculateComplexityScore(features),
     homeSqFt: input.homeSqFt,
     lotSqFt: input.lotSqFt,
@@ -100,11 +200,14 @@ function calculatePropertyProfile(input) {
     fenceType: input.fenceType || null,
     outbuildingCount: input.outbuildingCount || 0,
     attachedGarage: !!input.attachedGarage,
+    maintenanceCondition: input.maintenanceCondition || null,
+    overallPestPressure: input.overallPestPressure || null,
   };
 }
 
 module.exports = {
   calculateFootprint, estimateHardscape, calculateComplexityScore,
-  estimateLawnSqFt, estimateBedArea, calculatePerimeter,
+  estimateLawnSqFt, computeTurfArea, toNonNegativeNumber,
+  estimateBedArea, calculatePerimeter,
   getLotCategory, calculatePropertyProfile,
 };
