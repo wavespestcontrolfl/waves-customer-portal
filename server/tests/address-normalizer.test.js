@@ -1,0 +1,155 @@
+const { normalizeLeadAddress, parseRawAddress } = require('../utils/address-normalizer');
+
+describe('address normalizer', () => {
+  test('splits the malformed Bill Waterman Parrish address into street/city/state/zip', () => {
+    expect(normalizeLeadAddress({ raw: '17394 whiskey creek trail PArrish FL 34219' })).toMatchObject({
+      raw: '17394 whiskey creek trail PArrish FL 34219',
+      line1: '17394 Whiskey Creek Trail',
+      city: 'Parrish',
+      state: 'FL',
+      zip: '34219',
+      fullAddress: '17394 Whiskey Creek Trail, Parrish, FL 34219',
+    });
+  });
+
+  test('keeps a Google formatted address split cleanly', () => {
+    expect(normalizeLeadAddress({ raw: '17394 Whiskey Crk Trl, Parrish, FL 34219, USA' })).toMatchObject({
+      line1: '17394 Whiskey Crk Trl',
+      city: 'Parrish',
+      state: 'FL',
+      zip: '34219',
+      fullAddress: '17394 Whiskey Crk Trl, Parrish, FL 34219',
+    });
+  });
+
+  test('prefers structured Google address components over raw typed text', () => {
+    expect(normalizeLeadAddress({
+      raw: '17394 whiskey creek trail PArrish FL 34219',
+      components: {
+        line1: '17394 Whiskey Crk Trl',
+        city: 'Parrish',
+        state: 'FL',
+        zip: '34219',
+        placeId: 'place_123',
+      },
+    })).toMatchObject({
+      line1: '17394 Whiskey Crk Trl',
+      city: 'Parrish',
+      state: 'FL',
+      zip: '34219',
+      placeId: 'place_123',
+      fullAddress: '17394 Whiskey Crk Trl, Parrish, FL 34219',
+    });
+  });
+
+  test('does not treat a street suffix as a state when no state is present', () => {
+    expect(normalizeLeadAddress({ raw: '123 Main St Parrish' })).toMatchObject({
+      line1: '123 Main St',
+      city: 'Parrish',
+      state: 'FL',
+      zip: '',
+      fullAddress: '123 Main St, Parrish, FL',
+    });
+  });
+
+  test('does not create a display address from the default state alone', () => {
+    expect(normalizeLeadAddress({ raw: '' })).toMatchObject({
+      line1: '',
+      city: '',
+      state: 'FL',
+      zip: '',
+      fullAddress: '',
+    });
+  });
+
+  test('raw parser leaves state empty unless an explicit Florida token is present', () => {
+    expect(parseRawAddress('123 Main St Parrish')).toMatchObject({
+      line1: '123 Main St',
+      city: 'Parrish',
+      state: '',
+      zip: '',
+    });
+  });
+
+  test('normalizes full state names to DB-safe two-letter codes', () => {
+    expect(normalizeLeadAddress({
+      line1: '123 Main St',
+      city: 'Atlanta',
+      state: 'Georgia',
+      zip: '30301',
+    })).toMatchObject({
+      line1: '123 Main St',
+      city: 'Atlanta',
+      state: 'GA',
+      zip: '30301',
+      fullAddress: '123 Main St, Atlanta, GA 30301',
+    });
+  });
+
+  test('does not rewrite raw non-Florida states to Florida', () => {
+    expect(normalizeLeadAddress({ raw: '123 Main St, Atlanta, GA 30301' })).toMatchObject({
+      line1: '123 Main St',
+      city: 'Atlanta',
+      state: 'GA',
+      zip: '30301',
+      fullAddress: '123 Main St, Atlanta, GA 30301',
+    });
+  });
+
+  test('does not inflate a bare street fragment with the default state', () => {
+    expect(normalizeLeadAddress({ raw: '1' })).toMatchObject({
+      line1: '1',
+      city: '',
+      state: 'FL',
+      zip: '',
+      fullAddress: '1',
+    });
+  });
+
+  test('does not strip state-name street tokens from typed addresses', () => {
+    expect(normalizeLeadAddress({ raw: '123 Georgia Ave Sarasota FL 34236' })).toMatchObject({
+      line1: '123 Georgia Ave',
+      city: 'Sarasota',
+      state: 'FL',
+      zip: '34236',
+      fullAddress: '123 Georgia Ave, Sarasota, FL 34236',
+    });
+    expect(normalizeLeadAddress({ raw: '123 Florida Ave Sarasota 34236' })).toMatchObject({
+      line1: '123 Florida Ave',
+      city: 'Sarasota',
+      state: 'FL',
+      zip: '34236',
+      fullAddress: '123 Florida Ave, Sarasota, FL 34236',
+    });
+  });
+
+  test('keeps St city prefixes out of the street line', () => {
+    expect(normalizeLeadAddress({ raw: '123 Main St St Petersburg FL 33701' })).toMatchObject({
+      line1: '123 Main St',
+      city: 'St Petersburg',
+      state: 'FL',
+      zip: '33701',
+      fullAddress: '123 Main St, St Petersburg, FL 33701',
+    });
+  });
+
+  test('keeps apartment text with the street for typed addresses', () => {
+    expect(normalizeLeadAddress({ raw: '123 Main St Apt 4 Sarasota FL 34236' })).toMatchObject({
+      line1: '123 Main St Apt 4',
+      city: 'Sarasota',
+      state: 'FL',
+      zip: '34236',
+      fullAddress: '123 Main St Apt 4, Sarasota, FL 34236',
+    });
+  });
+
+  test('keeps apartment text with the street for comma-separated addresses', () => {
+    expect(normalizeLeadAddress({ raw: '123 Main St, Apt 4, Sarasota, FL 34236' })).toMatchObject({
+      line1: '123 Main St Apt 4',
+      city: 'Sarasota',
+      state: 'FL',
+      zip: '34236',
+      fullAddress: '123 Main St Apt 4, Sarasota, FL 34236',
+    });
+  });
+});

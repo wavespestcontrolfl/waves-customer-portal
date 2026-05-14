@@ -1,0 +1,266 @@
+const STREET_SUFFIXES = new Set([
+  'aly', 'alley', 'ave', 'avenue', 'blvd', 'boulevard', 'cir', 'circle',
+  'ct', 'court', 'cv', 'cove', 'dr', 'drive', 'gln', 'glen', 'hwy',
+  'highway', 'ln', 'lane', 'loop', 'pkwy', 'parkway', 'pl', 'place',
+  'rd', 'road', 'run', 'st', 'street', 'ter', 'terrace', 'trl', 'trail',
+  'way',
+]);
+
+const DIRECTIONALS = new Set(['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']);
+const CITY_PREFIX_TOKENS = new Set(['st']);
+const UNIT_DESIGNATORS = new Set([
+  'apt', 'apartment', 'bldg', 'building', 'fl', 'floor', 'lot', 'spc',
+  'space', 'ste', 'suite', 'unit',
+]);
+const US_STATE_ABBREVIATIONS = {
+  alabama: 'AL',
+  alaska: 'AK',
+  arizona: 'AZ',
+  arkansas: 'AR',
+  california: 'CA',
+  colorado: 'CO',
+  connecticut: 'CT',
+  delaware: 'DE',
+  florida: 'FL',
+  georgia: 'GA',
+  hawaii: 'HI',
+  idaho: 'ID',
+  illinois: 'IL',
+  indiana: 'IN',
+  iowa: 'IA',
+  kansas: 'KS',
+  kentucky: 'KY',
+  louisiana: 'LA',
+  maine: 'ME',
+  maryland: 'MD',
+  massachusetts: 'MA',
+  michigan: 'MI',
+  minnesota: 'MN',
+  mississippi: 'MS',
+  missouri: 'MO',
+  montana: 'MT',
+  nebraska: 'NE',
+  nevada: 'NV',
+  'new hampshire': 'NH',
+  'new jersey': 'NJ',
+  'new mexico': 'NM',
+  'new york': 'NY',
+  'north carolina': 'NC',
+  'north dakota': 'ND',
+  ohio: 'OH',
+  oklahoma: 'OK',
+  oregon: 'OR',
+  pennsylvania: 'PA',
+  'rhode island': 'RI',
+  'south carolina': 'SC',
+  'south dakota': 'SD',
+  tennessee: 'TN',
+  texas: 'TX',
+  utah: 'UT',
+  vermont: 'VT',
+  virginia: 'VA',
+  washington: 'WA',
+  'west virginia': 'WV',
+  wisconsin: 'WI',
+  wyoming: 'WY',
+};
+const US_STATE_CODES = new Set(Object.values(US_STATE_ABBREVIATIONS));
+const STATE_TOKENS = [
+  ...Object.keys(US_STATE_ABBREVIATIONS),
+  ...US_STATE_CODES,
+].sort((a, b) => b.length - a.length);
+
+function cleanString(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function parseJsonMaybe(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function titleToken(token) {
+  if (!token) return token;
+  const bare = token.replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+  if (DIRECTIONALS.has(bare)) return token.toUpperCase();
+  if (/^\d+(st|nd|rd|th)$/i.test(token)) return token.toUpperCase();
+  return token
+    .toLowerCase()
+    .replace(/(^|[-'])([a-z])/g, (_, prefix, c) => `${prefix}${c.toUpperCase()}`);
+}
+
+function titleCaseWords(value) {
+  return cleanString(value)
+    .split(' ')
+    .filter(Boolean)
+    .map(titleToken)
+    .join(' ');
+}
+
+function normalizeState(value) {
+  const state = cleanString(value).replace(/[.,]/g, '').toUpperCase();
+  if (!state) return '';
+  if (US_STATE_CODES.has(state)) return state;
+  return US_STATE_ABBREVIATIONS[state.toLowerCase()] || '';
+}
+
+function findState(value) {
+  const text = cleanString(value).replace(/[.,]/g, ' ');
+  if (!text) return { raw: '', state: '' };
+  for (const token of STATE_TOKENS) {
+    const match = text.match(new RegExp(`\\b${escapeRegExp(token)}\\b`, 'i'));
+    if (match) return { raw: match[0], state: normalizeState(token) };
+  }
+  return { raw: '', state: '' };
+}
+
+function findTrailingState(value) {
+  const text = cleanString(value).replace(/[.,]\s*$/, '');
+  if (!text) return { raw: '', state: '' };
+  for (const token of STATE_TOKENS) {
+    const match = text.match(new RegExp(`(?:^|\\s)(${escapeRegExp(token)})$`, 'i'));
+    if (match) return { raw: match[1], state: normalizeState(token) };
+  }
+  return { raw: '', state: '' };
+}
+
+function removeState(value, stateMatch) {
+  if (!stateMatch?.raw) return value;
+  return String(value).replace(new RegExp(`\\b${escapeRegExp(stateMatch.raw)}\\b`, 'i'), '');
+}
+
+function normalizeZip(value) {
+  const matches = cleanString(value).match(/\b\d{5}(?:-\d{4})?\b/g);
+  return matches?.length ? matches[matches.length - 1] : '';
+}
+
+function splitStreetAndCity(value) {
+  const tokens = cleanString(value).split(' ').filter(Boolean);
+  if (tokens.length < 2) return { line1: value, city: '' };
+
+  const suffixIndices = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i].replace(/[.,]/g, '').toLowerCase();
+    if (STREET_SUFFIXES.has(token)) {
+      suffixIndices.push(i);
+    }
+  }
+  let suffixIndex = suffixIndices[suffixIndices.length - 1] ?? -1;
+  const selectedSuffix = tokens[suffixIndex]?.replace(/[.,]/g, '').toLowerCase();
+  if (CITY_PREFIX_TOKENS.has(selectedSuffix) && suffixIndices.length > 1) {
+    suffixIndex = suffixIndices[suffixIndices.length - 2];
+  }
+
+  if (suffixIndex >= 0 && suffixIndex < tokens.length - 1) {
+    const tail = tokens.slice(suffixIndex + 1);
+    const rawFirstTailToken = tail[0].replace(/[.,]/g, '').toLowerCase();
+    const firstTailToken = rawFirstTailToken.replace(/^#/, '');
+    const unitTokenCount = rawFirstTailToken.startsWith('#') && rawFirstTailToken.length > 1 ? 1 : 2;
+    if ((rawFirstTailToken.startsWith('#') || UNIT_DESIGNATORS.has(firstTailToken)) && tail.length >= unitTokenCount) {
+      const cityIndex = suffixIndex + 1 + unitTokenCount;
+      return {
+        line1: tokens.slice(0, cityIndex).join(' '),
+        city: tokens.slice(cityIndex).join(' '),
+      };
+    }
+
+    return {
+      line1: tokens.slice(0, suffixIndex + 1).join(' '),
+      city: tail.join(' '),
+    };
+  }
+
+  return { line1: value, city: '' };
+}
+
+function parseRawAddress(raw) {
+  const cleaned = cleanString(raw).replace(/\s*,\s*/g, ', ');
+  if (!cleaned) return {};
+
+  const withoutCountry = cleaned.replace(/,\s*(USA|United States)$/i, '').trim();
+  const parts = withoutCountry.split(',').map(p => cleanString(p)).filter(Boolean);
+  let line1 = '';
+  let city = '';
+  let state = '';
+  let zip = '';
+
+  if (parts.length >= 3) {
+    const rawPossibleUnit = parts[1].split(' ')[0].replace(/[.,]/g, '').toLowerCase();
+    const possibleUnit = rawPossibleUnit.replace(/^#/, '');
+    const hasUnitPart = rawPossibleUnit.startsWith('#') || UNIT_DESIGNATORS.has(possibleUnit);
+    line1 = hasUnitPart ? `${parts[0]} ${parts[1]}` : parts[0];
+    city = hasUnitPart ? parts[2] : parts[1];
+    const stateZip = parts.slice(hasUnitPart ? 3 : 2).join(' ');
+    zip = normalizeZip(stateZip);
+    state = findState(stateZip).state;
+  } else if (parts.length === 2) {
+    line1 = parts[0];
+    const tail = parts[1];
+    zip = normalizeZip(tail);
+    const stateMatch = findState(tail);
+    state = stateMatch.state;
+    let cityTail = zip ? tail.replace(zip, '') : tail;
+    cityTail = removeState(cityTail, stateMatch);
+    city = cleanString(cityTail.replace(/,/g, ''));
+  } else {
+    let remainder = withoutCountry;
+    zip = normalizeZip(remainder);
+    if (zip) remainder = cleanString(remainder.replace(zip, ''));
+    const stateMatch = findTrailingState(remainder);
+    if (stateMatch.state) {
+      state = stateMatch.state;
+      remainder = cleanString(removeState(remainder, stateMatch));
+    }
+    const split = splitStreetAndCity(remainder);
+    line1 = split.line1;
+    city = split.city;
+  }
+
+  return {
+    line1: titleCaseWords(line1),
+    city: titleCaseWords(city),
+    state: state || '',
+    zip,
+  };
+}
+
+function normalizeLeadAddress(input = {}) {
+  const components = parseJsonMaybe(input.components || input.addressComponents || input.address_components) || {};
+  const raw = cleanString(input.raw || input.address || components.formatted);
+  const parsed = parseRawAddress(raw);
+
+  const line1 = titleCaseWords(input.line1 || input.addressLine1 || input.address_line1 || components.line1 || parsed.line1);
+  const city = titleCaseWords(input.city || components.city || parsed.city);
+  const state = normalizeState(input.state || components.state || parsed.state || 'FL') || 'FL';
+  const zip = normalizeZip(input.zip || components.zip || parsed.zip);
+  const placeId = cleanString(input.placeId || input.googlePlaceId || input.google_place_id || components.placeId);
+
+  const stateZip = (city || zip)
+    ? [state, zip].filter(Boolean).join(' ')
+    : '';
+  const fullAddress = [line1, city, stateZip].filter(Boolean).join(', ');
+
+  return {
+    raw,
+    line1,
+    city,
+    state,
+    zip,
+    placeId,
+    fullAddress,
+  };
+}
+
+module.exports = {
+  normalizeLeadAddress,
+  parseRawAddress,
+};
