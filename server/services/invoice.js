@@ -1,36 +1,42 @@
-const crypto = require('crypto');
-const db = require('../models/db');
-const logger = require('./logger');
-const TaxCalculator = require('./tax-calculator');
-const DiscountEngine = require('./discount-engine');
-const { etDateString, addETDays } = require('../utils/datetime-et');
-const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
+const crypto = require("crypto");
+const db = require("../models/db");
+const logger = require("./logger");
+const TaxCalculator = require("./tax-calculator");
+const DiscountEngine = require("./discount-engine");
+const { etDateString, addETDays } = require("../utils/datetime-et");
+const { shortenOrPassthrough, invoiceShortCodePrefix } = require("./short-url");
 
 // ══════════════════════════════════════════════════════════════
 // HELPERS
 // ══════════════════════════════════════════════════════════════
-const SEND_CLAIMABLE_STATUSES = ['draft', 'scheduled', 'sent', 'viewed', 'overdue'];
-const SEND_FINALIZABLE_STATUSES = [...SEND_CLAIMABLE_STATUSES, 'sending'];
+const SEND_CLAIMABLE_STATUSES = [
+  "draft",
+  "scheduled",
+  "sent",
+  "viewed",
+  "overdue",
+];
+const SEND_FINALIZABLE_STATUSES = [...SEND_CLAIMABLE_STATUSES, "sending"];
 
 function generateToken() {
   // 32 random bytes → 64 hex chars. Unguessable. Legacy short tokens still resolve via DB lookup.
-  return crypto.randomBytes(32).toString('hex');
+  return crypto.randomBytes(32).toString("hex");
 }
 
 async function nextInvoiceNumber() {
   const year = new Date().getFullYear();
   const prefix = `WPC-${year}-`;
-  const last = await db('invoices')
-    .where('invoice_number', 'like', `${prefix}%`)
-    .orderBy('invoice_number', 'desc')
+  const last = await db("invoices")
+    .where("invoice_number", "like", `${prefix}%`)
+    .orderBy("invoice_number", "desc")
     .first();
   if (!last) return `${prefix}0001`;
-  const num = parseInt(last.invoice_number.replace(prefix, '')) + 1;
-  return `${prefix}${String(num).padStart(4, '0')}`;
+  const num = parseInt(last.invoice_number.replace(prefix, "")) + 1;
+  return `${prefix}${String(num).padStart(4, "0")}`;
 }
 
 function normalizeInvoiceLineItems(lineItems = []) {
-  return lineItems.map(item => {
+  return lineItems.map((item) => {
     const quantity = Number(item.quantity) || 1;
     const unitPrice = Number(item.unit_price) || 0;
     return {
@@ -47,7 +53,7 @@ function roundMoney(value) {
 }
 
 function hasNumericValue(value) {
-  if (value === null || value === undefined || value === '') return false;
+  if (value === null || value === undefined || value === "") return false;
   return Number.isFinite(Number(value));
 }
 
@@ -59,24 +65,33 @@ function firstPositiveNumber(...values) {
   return 0;
 }
 
-function isStoredDiscountLineItem(item, trustedSources = new Set(['scheduled_service'])) {
-  return trustedSources.has(item?.stored_discount_source) && hasNumericValue(item?.discount_dollars);
+function isStoredDiscountLineItem(
+  item,
+  trustedSources = new Set(["scheduled_service"]),
+) {
+  return (
+    trustedSources.has(item?.stored_discount_source) &&
+    hasNumericValue(item?.discount_dollars)
+  );
 }
 
 function resolveStoredDiscountLineItem(item, row) {
-  const dollars = Math.max(0, roundMoney(
-    hasNumericValue(item.discount_dollars)
-      ? item.discount_dollars
-      : Math.abs(Number(item.amount) || 0)
-  ));
+  const dollars = Math.max(
+    0,
+    roundMoney(
+      hasNumericValue(item.discount_dollars)
+        ? item.discount_dollars
+        : Math.abs(Number(item.amount) || 0),
+    ),
+  );
   item.quantity = 1;
   item.unit_price = -dollars;
   item.amount = -dollars;
   return {
     id: row?.id || item.discount_id || null,
     row: row || null,
-    name: item.description || row?.name || 'Stored discount',
-    discount_type: item.discount_type || row?.discount_type || 'fixed_amount',
+    name: item.description || row?.name || "Stored discount",
+    discount_type: item.discount_type || row?.discount_type || "fixed_amount",
     amount: hasNumericValue(item.discount_amount)
       ? roundMoney(item.discount_amount)
       : roundMoney(hasNumericValue(row?.amount) ? row.amount : dollars),
@@ -84,7 +99,7 @@ function resolveStoredDiscountLineItem(item, row) {
   };
 }
 
-const WAVEGUARD_TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum'];
+const WAVEGUARD_TIER_ORDER = ["Bronze", "Silver", "Gold", "Platinum"];
 
 function assertDiscountEligibleForCustomer(discount, customer) {
   if (!discount) return;
@@ -93,14 +108,18 @@ function assertDiscountEligibleForCustomer(discount, customer) {
   const customerTier = customer?.waveguard_tier;
   if (discount.is_waveguard_tier_discount) {
     if (customerTier !== requiredTier) {
-      throw new Error('Selected WaveGuard tier discount is not available for this customer');
+      throw new Error(
+        "Selected WaveGuard tier discount is not available for this customer",
+      );
     }
     return;
   }
   const requiredIdx = WAVEGUARD_TIER_ORDER.indexOf(requiredTier);
   const customerIdx = WAVEGUARD_TIER_ORDER.indexOf(customerTier);
   if (requiredIdx >= 0 && customerIdx < requiredIdx) {
-    throw new Error('Selected discount is not available for this customer tier');
+    throw new Error(
+      "Selected discount is not available for this customer tier",
+    );
   }
 }
 
@@ -108,32 +127,38 @@ function resolveLineItemDiscount(row, item, parentAmount) {
   let amount = Number(row.amount) || 0;
   let dollars = 0;
   const itemDollars = Math.abs(Number(item.amount) || 0);
-  const isCustomPercentage = row.discount_type === 'variable_percentage'
-    || (row.discount_type === 'percentage' && (row.discount_key === 'custom_percent' || !(amount > 0)));
-  const isCustomAmount = row.discount_type === 'variable_amount'
-    || (row.discount_type === 'fixed_amount' && (row.discount_key === 'custom_dollar' || !(amount > 0)));
+  const isCustomPercentage =
+    row.discount_type === "variable_percentage" ||
+    (row.discount_type === "percentage" &&
+      (row.discount_key === "custom_percent" || !(amount > 0)));
+  const isCustomAmount =
+    row.discount_type === "variable_amount" ||
+    (row.discount_type === "fixed_amount" &&
+      (row.discount_key === "custom_dollar" || !(amount > 0)));
 
   if (isCustomPercentage) {
     amount = firstPositiveNumber(
       item.custom_discount_percentage,
       item.discount_percentage,
-      row.amount
+      row.amount,
     );
     dollars = roundMoney(parentAmount * (amount / 100));
-    if (row.max_discount_dollars) dollars = Math.min(dollars, Number(row.max_discount_dollars));
-  } else if (row.discount_type === 'percentage') {
+    if (row.max_discount_dollars)
+      dollars = Math.min(dollars, Number(row.max_discount_dollars));
+  } else if (row.discount_type === "percentage") {
     dollars = roundMoney(parentAmount * (amount / 100));
-    if (row.max_discount_dollars) dollars = Math.min(dollars, Number(row.max_discount_dollars));
+    if (row.max_discount_dollars)
+      dollars = Math.min(dollars, Number(row.max_discount_dollars));
   } else if (isCustomAmount) {
     amount = firstPositiveNumber(
       item.custom_discount_amount,
       item.discount_amount,
-      row.amount
+      row.amount,
     );
     dollars = amount;
-  } else if (row.discount_type === 'fixed_amount') {
+  } else if (row.discount_type === "fixed_amount") {
     dollars = amount;
-  } else if (row.discount_type === 'free_service') {
+  } else if (row.discount_type === "free_service") {
     amount = parentAmount;
     dollars = parentAmount;
   }
@@ -145,8 +170,8 @@ function resolveLineItemDiscount(row, item, parentAmount) {
 async function loadInvoiceDiscountRows(ids = []) {
   const uniqueIds = [...new Set((ids || []).filter(Boolean).map(String))];
   if (!uniqueIds.length) return [];
-  return db('discounts')
-    .whereIn('id', uniqueIds)
+  return db("discounts")
+    .whereIn("id", uniqueIds)
     .where({ is_active: true, show_in_invoices: true });
 }
 
@@ -161,70 +186,101 @@ function buildDiscountLineItem({
   if (!hasNumericValue(discountDollars)) return null;
   const dollars = roundMoney(discountDollars);
   if (!(dollars > 0)) return null;
-  const scope = parentClientId || 'appointment';
+  const scope = parentClientId || "appointment";
   return {
-    client_id: `discount_${discountId || 'custom'}_${scope}`,
-    _kind: 'discount',
+    client_id: `discount_${discountId || "custom"}_${scope}`,
+    _kind: "discount",
     discount_id: discountId || null,
     discount_for: parentClientId || null,
-    description: discountName || 'Line item discount',
+    description: discountName || "Line item discount",
     quantity: 1,
     unit_price: -dollars,
     amount: -dollars,
-    discount_amount: discountAmount != null ? Number(discountAmount) : undefined,
+    discount_amount:
+      discountAmount != null ? Number(discountAmount) : undefined,
     discount_type: discountType || undefined,
     discount_dollars: dollars,
     use_stored_discount: true,
-    stored_discount_source: 'scheduled_service',
+    stored_discount_source: "scheduled_service",
   };
 }
 
-async function buildScheduledServiceInvoiceLines(scheduledServiceId, {
-  fallbackAmount = 0,
-  fallbackDescription = 'Service visit',
-  extraLineItems = [],
-} = {}) {
+async function buildScheduledServiceInvoiceLines(
+  scheduledServiceId,
+  {
+    fallbackAmount = 0,
+    fallbackDescription = "Service visit",
+    extraLineItems = [],
+  } = {},
+) {
   if (!scheduledServiceId) {
     return {
-      lineItems: Number(fallbackAmount) > 0 ? [{
-        description: fallbackDescription,
-        quantity: 1,
-        unit_price: Number(fallbackAmount),
-        amount: Number(fallbackAmount),
-        category: fallbackDescription,
-      }] : [],
+      lineItems:
+        Number(fallbackAmount) > 0
+          ? [
+              {
+                description: fallbackDescription,
+                quantity: 1,
+                unit_price: Number(fallbackAmount),
+                amount: Number(fallbackAmount),
+                category: fallbackDescription,
+              },
+            ]
+          : [],
       discountIds: [],
     };
   }
 
-  const scheduled = await db('scheduled_services').where({ id: scheduledServiceId }).first().catch(() => null);
+  const scheduled = await db("scheduled_services")
+    .where({ id: scheduledServiceId })
+    .first()
+    .catch(() => null);
   if (!scheduled) {
     return {
-      lineItems: Number(fallbackAmount) > 0 ? [{
-        description: fallbackDescription,
-        quantity: 1,
-        unit_price: Number(fallbackAmount),
-        amount: Number(fallbackAmount),
-        category: fallbackDescription,
-      }] : [],
+      lineItems:
+        Number(fallbackAmount) > 0
+          ? [
+              {
+                description: fallbackDescription,
+                quantity: 1,
+                unit_price: Number(fallbackAmount),
+                amount: Number(fallbackAmount),
+                category: fallbackDescription,
+              },
+            ]
+          : [],
       discountIds: [],
     };
   }
 
-  const addons = await db('scheduled_service_addons')
+  const addons = await db("scheduled_service_addons")
     .where({ scheduled_service_id: scheduledServiceId })
-    .orderBy('created_at', 'asc')
+    .orderBy("created_at", "asc")
     .catch(() => []);
   const primaryBaseKnown = hasNumericValue(scheduled.primary_line_price);
-  const appointmentGrossKnown = primaryBaseKnown && addons.every(addon => hasNumericValue(addon.base_price));
+  const appointmentGrossKnown =
+    primaryBaseKnown &&
+    addons.every((addon) => hasNumericValue(addon.base_price));
 
-  const addonBaseTotal = addons.reduce((sum, addon) => (
-    sum + firstPositiveNumber(addon.base_price, addon.estimated_price)
-  ), 0);
-  const scheduledAmount = firstPositiveNumber(fallbackAmount, scheduled.estimated_price);
+  const addonBaseTotal = addons.reduce(
+    (sum, addon) =>
+      sum + firstPositiveNumber(addon.base_price, addon.estimated_price),
+    0,
+  );
+  const scheduledAmount = firstPositiveNumber(
+    fallbackAmount,
+    scheduled.estimated_price,
+  );
   const primaryBase = primaryBaseKnown
     ? Math.max(0, roundMoney(scheduled.primary_line_price))
-    : Math.max(0, roundMoney(addonBaseTotal > 0 ? scheduledAmount - addonBaseTotal : scheduledAmount));
+    : Math.max(
+        0,
+        roundMoney(
+          addonBaseTotal > 0
+            ? scheduledAmount - addonBaseTotal
+            : scheduledAmount,
+        ),
+      );
 
   const lineItems = [];
   const discountIds = [];
@@ -260,7 +316,7 @@ async function buildScheduledServiceInvoiceLines(scheduledServiceId, {
     const clientId = `scheduled_${scheduledServiceId}_addon_${addon.id || lineItems.length}`;
     lineItems.push({
       client_id: clientId,
-      description: addon.service_name || 'Service add-on',
+      description: addon.service_name || "Service add-on",
       quantity: 1,
       unit_price: roundMoney(addonBase),
       amount: roundMoney(addonBase),
@@ -293,23 +349,25 @@ async function buildScheduledServiceInvoiceLines(scheduledServiceId, {
   const storedNetAmount = hasNumericValue(scheduled.estimated_price)
     ? roundMoney(scheduled.estimated_price)
     : roundMoney(fallbackAmount);
-  const replayNetAmount = roundMoney(lineItems.reduce((sum, item) => sum + (Number(item.amount) || 0), 0));
+  const replayNetAmount = roundMoney(
+    lineItems.reduce((sum, item) => sum + (Number(item.amount) || 0), 0),
+  );
   if (hasNumericValue(storedNetAmount) && replayNetAmount > storedNetAmount) {
     const adjustment = roundMoney(replayNetAmount - storedNetAmount);
     lineItems.push({
       client_id: `discount_scheduled_price_${scheduledServiceId}`,
-      _kind: 'discount',
+      _kind: "discount",
       discount_id: null,
       discount_for: null,
-      description: 'Scheduled price adjustment',
+      description: "Scheduled price adjustment",
       quantity: 1,
       unit_price: -adjustment,
       amount: -adjustment,
-      discount_type: 'fixed_amount',
+      discount_type: "fixed_amount",
       discount_amount: adjustment,
       discount_dollars: adjustment,
       use_stored_discount: true,
-      stored_discount_source: 'scheduled_service',
+      stored_discount_source: "scheduled_service",
     });
   }
 
@@ -319,39 +377,66 @@ async function buildScheduledServiceInvoiceLines(scheduledServiceId, {
   };
 }
 
-async function calculateUpdateFinancials({ lineItems, customer, invoice, taxRate }) {
+async function calculateUpdateFinancials({
+  lineItems,
+  customer,
+  invoice,
+  taxRate,
+}) {
   const items = normalizeInvoiceLineItems(lineItems);
-  const subtotal = Math.round(items.reduce((sum, item) => {
-    const amount = Number(item.amount ?? ((Number(item.quantity) || 1) * (Number(item.unit_price) || 0)));
-    return amount > 0 ? sum + amount : sum;
-  }, 0) * 100) / 100;
+  const subtotal =
+    Math.round(
+      items.reduce((sum, item) => {
+        const amount = Number(
+          item.amount ??
+            (Number(item.quantity) || 1) * (Number(item.unit_price) || 0),
+        );
+        return amount > 0 ? sum + amount : sum;
+      }, 0) * 100,
+    ) / 100;
   const serviceLineByClientId = new Map(
     items
-      .filter(item => Number(item.amount) > 0 && item.client_id)
-      .map(item => [String(item.client_id), item])
+      .filter((item) => Number(item.amount) > 0 && item.client_id)
+      .map((item) => [String(item.client_id), item]),
   );
 
   const lineItemDiscountIds = items
-    .filter(item => Number(item.amount) < 0 && item.discount_id)
-    .map(item => item.discount_id);
-  const lineItemDiscountRows = await loadInvoiceDiscountRows(lineItemDiscountIds);
-  const trustedStoredDiscountIds = new Set(items
-    .filter(item => Number(item.amount) < 0 && item.discount_id && isStoredDiscountLineItem(item))
-    .map(item => String(item.discount_id)));
+    .filter((item) => Number(item.amount) < 0 && item.discount_id)
+    .map((item) => item.discount_id);
+  const lineItemDiscountRows =
+    await loadInvoiceDiscountRows(lineItemDiscountIds);
+  const trustedStoredDiscountIds = new Set(
+    items
+      .filter(
+        (item) =>
+          Number(item.amount) < 0 &&
+          item.discount_id &&
+          isStoredDiscountLineItem(item),
+      )
+      .map((item) => String(item.discount_id)),
+  );
   lineItemDiscountRows.forEach((row) => {
-    if (!trustedStoredDiscountIds.has(String(row.id))) assertDiscountEligibleForCustomer(row, customer);
+    if (!trustedStoredDiscountIds.has(String(row.id)))
+      assertDiscountEligibleForCustomer(row, customer);
   });
-  const lineItemDiscountRowById = new Map(lineItemDiscountRows.map(row => [String(row.id), row]));
+  const lineItemDiscountRowById = new Map(
+    lineItemDiscountRows.map((row) => [String(row.id), row]),
+  );
   const lineItemDiscountAmount = items
-    .filter(item => Number(item.amount) < 0)
+    .filter((item) => Number(item.amount) < 0)
     .reduce((sum, item) => {
-      const row = item.discount_id ? lineItemDiscountRowById.get(String(item.discount_id)) : null;
+      const row = item.discount_id
+        ? lineItemDiscountRowById.get(String(item.discount_id))
+        : null;
       if (isStoredDiscountLineItem(item)) {
         return sum + resolveStoredDiscountLineItem(item, row).dollars;
       }
-      const parent = item.discount_for ? serviceLineByClientId.get(String(item.discount_for)) : null;
+      const parent = item.discount_for
+        ? serviceLineByClientId.get(String(item.discount_for))
+        : null;
       if (!row || !parent) {
-        if (item.discount_id || item.discount_for) throw new Error('Invalid line-item discount');
+        if (item.discount_id || item.discount_for)
+          throw new Error("Invalid line-item discount");
         return sum + Math.round(Math.abs(Number(item.amount) || 0) * 100) / 100;
       }
 
@@ -363,25 +448,31 @@ async function calculateUpdateFinancials({ lineItems, customer, invoice, taxRate
       return sum + dollars;
     }, 0);
 
-  const discountAmount = Math.min(subtotal, Math.round(lineItemDiscountAmount * 100) / 100);
+  const discountAmount = Math.min(
+    subtotal,
+    Math.round(lineItemDiscountAmount * 100) / 100,
+  );
   const afterDiscount = subtotal - discountAmount;
-  const isCommercial = customer?.property_type === 'commercial' || customer?.property_type === 'business';
+  const isCommercial =
+    customer?.property_type === "commercial" ||
+    customer?.property_type === "business";
   let rate = 0;
   let taxAmount = 0;
   if (isCommercial) {
-    const defaultRate = invoice?.tax_rate != null ? Number(invoice.tax_rate) : 0.07;
+    const defaultRate =
+      invoice?.tax_rate != null ? Number(invoice.tax_rate) : 0.07;
     rate = taxRate !== undefined ? Number(taxRate) : defaultRate;
     taxAmount = Math.round(afterDiscount * rate * 100) / 100;
   }
   const labelParts = [
-    lineItemDiscountAmount > 0 ? 'Line-item discounts' : null,
+    lineItemDiscountAmount > 0 ? "Line-item discounts" : null,
   ].filter(Boolean);
 
   return {
     line_items: JSON.stringify(items),
     subtotal,
     discount_amount: discountAmount,
-    discount_label: labelParts.length ? labelParts.join(' + ') : null,
+    discount_label: labelParts.length ? labelParts.join(" + ") : null,
     tax_rate: rate,
     tax_amount: taxAmount,
     total: Math.round((afterDiscount + taxAmount) * 100) / 100,
@@ -391,19 +482,24 @@ async function calculateUpdateFinancials({ lineItems, customer, invoice, taxRate
 const {
   INVOICE_UPDATE_ALLOWED_FIELDS,
   assertInvoiceVoidable,
-} = require('./invoice-helpers');
+} = require("./invoice-helpers");
 
 function invoiceNotSendableError(invoice) {
-  if (!invoice) return new Error('Invoice not found');
-  if (invoice.status === 'sending') return new Error('Invoice send already in progress');
-  if (invoice.status === 'paid') return new Error('Cannot send a paid invoice');
-  if (invoice.status === 'processing') return new Error('Cannot send an invoice while payment is processing');
-  if (invoice.status === 'void') return new Error('Cannot send a voided invoice');
-  return new Error(`Invoice is not sendable (status: ${invoice.status || 'unknown'})`);
+  if (!invoice) return new Error("Invoice not found");
+  if (invoice.status === "sending")
+    return new Error("Invoice send already in progress");
+  if (invoice.status === "paid") return new Error("Cannot send a paid invoice");
+  if (invoice.status === "processing")
+    return new Error("Cannot send an invoice while payment is processing");
+  if (invoice.status === "void")
+    return new Error("Cannot send a voided invoice");
+  return new Error(
+    `Invoice is not sendable (status: ${invoice.status || "unknown"})`,
+  );
 }
 
 async function claimInvoiceForSend(invoiceId, { allowClaimed = false } = {}) {
-  const current = await db('invoices').where({ id: invoiceId }).first();
+  const current = await db("invoices").where({ id: invoiceId }).first();
   if (!current) throw invoiceNotSendableError(current);
 
   if (allowClaimed) {
@@ -417,12 +513,12 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false } = {}) {
     throw invoiceNotSendableError(current);
   }
 
-  const [invoice] = await db('invoices')
+  const [invoice] = await db("invoices")
     .where({ id: invoiceId, status: current.status })
-    .update({ status: 'sending', updated_at: new Date() })
-    .returning('*');
+    .update({ status: "sending", updated_at: new Date() })
+    .returning("*");
   if (!invoice) {
-    const latest = await db('invoices').where({ id: invoiceId }).first();
+    const latest = await db("invoices").where({ id: invoiceId }).first();
     throw invoiceNotSendableError(latest);
   }
   return { invoice, previousStatus: current.status, claimed: true };
@@ -430,17 +526,20 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false } = {}) {
 
 async function restoreSendClaim(invoiceId, previousStatus, claimed) {
   if (!claimed || !previousStatus) return;
-  await db('invoices')
-    .where({ id: invoiceId, status: 'sending' })
+  await db("invoices")
+    .where({ id: invoiceId, status: "sending" })
     .update({ status: previousStatus, updated_at: new Date() })
-    .catch((err) => logger.warn(`[invoice] Could not restore send claim for ${invoiceId}: ${err.message}`));
+    .catch((err) =>
+      logger.warn(
+        `[invoice] Could not restore send claim for ${invoiceId}: ${err.message}`,
+      ),
+    );
 }
 
 // ══════════════════════════════════════════════════════════════
 // INVOICE SERVICE
 // ══════════════════════════════════════════════════════════════
 const InvoiceService = {
-
   async buildLineItemsForScheduledService(scheduledServiceId, options = {}) {
     return buildScheduledServiceInvoiceLines(scheduledServiceId, options);
   },
@@ -462,33 +561,44 @@ const InvoiceService = {
     serviceDate,
     trustedStoredDiscountSources = [],
   }) {
-    const customer = await db('customers').where({ id: customerId }).first();
-    if (!customer) throw new Error('Customer not found');
+    const customer = await db("customers").where({ id: customerId }).first();
+    if (!customer) throw new Error("Customer not found");
     const trustedStoredSources = new Set(trustedStoredDiscountSources);
 
     // Pull service record context if linked
     let serviceData = serviceDate ? { service_date: serviceDate } : {};
     if (serviceRecordId) {
-      const sr = await db('service_records')
-        .where({ 'service_records.id': serviceRecordId })
-        .andWhere({ 'service_records.customer_id': customerId })
-        .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
-        .select('service_records.*', 'technicians.name as tech_name')
+      const sr = await db("service_records")
+        .where({ "service_records.id": serviceRecordId })
+        .andWhere({ "service_records.customer_id": customerId })
+        .leftJoin(
+          "technicians",
+          "service_records.technician_id",
+          "technicians.id",
+        )
+        .select("service_records.*", "technicians.name as tech_name")
         .first();
 
       if (!sr) {
-        throw new Error('Service record not found for customer');
+        throw new Error("Service record not found for customer");
       }
 
       if (sr) {
-        const products = await db('service_products')
+        const products = await db("service_products")
           .where({ service_record_id: serviceRecordId })
-          .select('product_name', 'product_category', 'active_ingredient', 'application_rate', 'rate_unit', 'notes');
+          .select(
+            "product_name",
+            "product_category",
+            "active_ingredient",
+            "application_rate",
+            "rate_unit",
+            "notes",
+          );
 
-        const photos = await db('service_photos')
+        const photos = await db("service_photos")
           .where({ service_record_id: serviceRecordId })
-          .orderBy('sort_order', 'asc')
-          .select('photo_type', 's3_url', 'caption');
+          .orderBy("sort_order", "asc")
+          .select("photo_type", "s3_url", "caption");
 
         const invoiceServiceDate = serviceDate || sr.service_date;
         serviceData = {
@@ -504,17 +614,23 @@ const InvoiceService = {
 
         // Auto-generate title from service type if not provided
         if (!title) {
-          const dateForTitle = typeof invoiceServiceDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(invoiceServiceDate)
-            ? new Date(`${invoiceServiceDate}T12:00:00`)
-            : new Date(invoiceServiceDate);
-          const dateStr = dateForTitle.toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'America/New_York' });
+          const dateForTitle =
+            typeof invoiceServiceDate === "string" &&
+            /^\d{4}-\d{2}-\d{2}$/.test(invoiceServiceDate)
+              ? new Date(`${invoiceServiceDate}T12:00:00`)
+              : new Date(invoiceServiceDate);
+          const dateStr = dateForTitle.toLocaleDateString("en-US", {
+            month: "long",
+            year: "numeric",
+            timeZone: "America/New_York",
+          });
           title = `${sr.service_type} — ${dateStr}`;
         }
       }
     }
 
     // Calculate financials
-    const items = (lineItems || []).map(item => {
+    const items = (lineItems || []).map((item) => {
       const quantity = Number(item.quantity) || 1;
       const unitPrice = Number(item.unit_price) || 0;
       return {
@@ -525,64 +641,92 @@ const InvoiceService = {
       };
     });
     const serviceSubtotal = items.reduce((sum, item) => {
-      const amount = Number(item.amount ?? ((Number(item.quantity) || 1) * (Number(item.unit_price) || 0)));
+      const amount = Number(
+        item.amount ??
+          (Number(item.quantity) || 1) * (Number(item.unit_price) || 0),
+      );
       return amount > 0 ? sum + amount : sum;
     }, 0);
     const subtotal = Math.round(serviceSubtotal * 100) / 100;
     const serviceLineByClientId = new Map(
       items
-        .filter(item => Number(item.amount) > 0 && item.client_id)
-        .map(item => [String(item.client_id), item])
+        .filter((item) => Number(item.amount) > 0 && item.client_id)
+        .map((item) => [String(item.client_id), item]),
     );
 
     // Manually-selected discounts from the invoice form. Mirrors discount-engine math
     // so the stored total matches what the admin previewed. WaveGuard tier rows are
     // valid choices here, but customer tier never applies a hidden discount.
-    const manualDiscountRows = Array.isArray(discountIds) && discountIds.length
-      ? await loadInvoiceDiscountRows(discountIds)
-      : [];
-    manualDiscountRows.forEach(row => assertDiscountEligibleForCustomer(row, customer));
-    const manualDiscounts = manualDiscountRows.map(d => {
+    const manualDiscountRows =
+      Array.isArray(discountIds) && discountIds.length
+        ? await loadInvoiceDiscountRows(discountIds)
+        : [];
+    manualDiscountRows.forEach((row) =>
+      assertDiscountEligibleForCustomer(row, customer),
+    );
+    const manualDiscounts = manualDiscountRows.map((d) => {
       const amt = Number(d.amount) || 0;
       let dollars = 0;
-      if (d.discount_type === 'percentage' || d.discount_type === 'variable_percentage') {
+      if (
+        d.discount_type === "percentage" ||
+        d.discount_type === "variable_percentage"
+      ) {
         dollars = Math.round(subtotal * (amt / 100) * 100) / 100;
-        if (d.max_discount_dollars) dollars = Math.min(dollars, Number(d.max_discount_dollars));
-      } else if (d.discount_type === 'fixed_amount' || d.discount_type === 'variable_amount') {
+        if (d.max_discount_dollars)
+          dollars = Math.min(dollars, Number(d.max_discount_dollars));
+      } else if (
+        d.discount_type === "fixed_amount" ||
+        d.discount_type === "variable_amount"
+      ) {
         dollars = amt;
-      } else if (d.discount_type === 'free_service') {
+      } else if (d.discount_type === "free_service") {
         dollars = subtotal;
       }
       return { row: d, dollars: Math.round(dollars * 100) / 100 };
     });
     const lineItemDiscountIds = items
-      .filter(item => Number(item.amount) < 0 && item.discount_id)
-      .map(item => item.discount_id);
-    const lineItemDiscountRows = await loadInvoiceDiscountRows(lineItemDiscountIds);
-    const trustedStoredDiscountIds = new Set(items
-      .filter(item => Number(item.amount) < 0 && item.discount_id && isStoredDiscountLineItem(item, trustedStoredSources))
-      .map(item => String(item.discount_id)));
+      .filter((item) => Number(item.amount) < 0 && item.discount_id)
+      .map((item) => item.discount_id);
+    const lineItemDiscountRows =
+      await loadInvoiceDiscountRows(lineItemDiscountIds);
+    const trustedStoredDiscountIds = new Set(
+      items
+        .filter(
+          (item) =>
+            Number(item.amount) < 0 &&
+            item.discount_id &&
+            isStoredDiscountLineItem(item, trustedStoredSources),
+        )
+        .map((item) => String(item.discount_id)),
+    );
     lineItemDiscountRows.forEach((row) => {
-      if (!trustedStoredDiscountIds.has(String(row.id))) assertDiscountEligibleForCustomer(row, customer);
+      if (!trustedStoredDiscountIds.has(String(row.id)))
+        assertDiscountEligibleForCustomer(row, customer);
     });
-    const lineItemDiscountRowById = new Map(lineItemDiscountRows.map(row => [String(row.id), row]));
+    const lineItemDiscountRowById = new Map(
+      lineItemDiscountRows.map((row) => [String(row.id), row]),
+    );
     const lineItemDiscounts = items
-      .filter(item => Number(item.amount) < 0)
-      .map(item => {
-        const row = item.discount_id ? lineItemDiscountRowById.get(String(item.discount_id)) : null;
+      .filter((item) => Number(item.amount) < 0)
+      .map((item) => {
+        const row = item.discount_id
+          ? lineItemDiscountRowById.get(String(item.discount_id))
+          : null;
         if (isStoredDiscountLineItem(item, trustedStoredSources)) {
           return resolveStoredDiscountLineItem(item, row);
         }
-        const parent = item.discount_for ? serviceLineByClientId.get(String(item.discount_for)) : null;
+        const parent = item.discount_for
+          ? serviceLineByClientId.get(String(item.discount_for))
+          : null;
         if (!row || !parent) {
           if (item.discount_id || item.discount_for) {
-            throw new Error('Invalid line-item discount');
+            throw new Error("Invalid line-item discount");
           }
           return {
             id: null,
             row: null,
-            name: item.description || 'Line item discount',
-            discount_type: 'fixed_amount',
+            name: item.description || "Line item discount",
+            discount_type: "fixed_amount",
             amount: Math.round(Math.abs(Number(item.amount) || 0) * 100) / 100,
             dollars: Math.round(Math.abs(Number(item.amount) || 0) * 100) / 100,
           };
@@ -602,9 +746,13 @@ const InvoiceService = {
           dollars,
         };
       });
-    const lineItemDiscountAmount = lineItemDiscounts.reduce((sum, item) => sum + item.dollars, 0);
-    const manualDiscountAmount = manualDiscounts.reduce((s, m) => s + m.dollars, 0)
-      + lineItemDiscounts.reduce((s, m) => s + m.dollars, 0);
+    const lineItemDiscountAmount = lineItemDiscounts.reduce(
+      (sum, item) => sum + item.dollars,
+      0,
+    );
+    const manualDiscountAmount =
+      manualDiscounts.reduce((s, m) => s + m.dollars, 0) +
+      lineItemDiscounts.reduce((s, m) => s + m.dollars, 0);
 
     // Cap combined discount at subtotal so total never goes negative. When the
     // sum exceeds subtotal, scale each component proportionally so per-discount
@@ -617,11 +765,11 @@ const InvoiceService = {
     let discountAmount = uncappedDiscount;
     if (uncappedDiscount > subtotal && uncappedDiscount > 0) {
       const factor = subtotal / uncappedDiscount;
-      scaledManualDiscounts = manualDiscounts.map(m => ({
+      scaledManualDiscounts = manualDiscounts.map((m) => ({
         ...m,
         dollars: Math.round(m.dollars * factor * 100) / 100,
       }));
-      scaledLineItemDiscounts = lineItemDiscounts.map(m => ({
+      scaledLineItemDiscounts = lineItemDiscounts.map((m) => ({
         ...m,
         dollars: Math.round(m.dollars * factor * 100) / 100,
       }));
@@ -630,24 +778,32 @@ const InvoiceService = {
       // so a -0.01 adjustment can't drive a near-zero row negative and then
       // decrement discounts.total_discount_given via .increment() in
       // DiscountEngine.recordInvoiceDiscounts.
-      const scaledSum = Math.round(
-        (
-          scaledManualDiscounts.reduce((s, m) => s + m.dollars, 0)
-          + scaledLineItemDiscounts.reduce((s, m) => s + m.dollars, 0)
-        ) * 100
-      ) / 100;
+      const scaledSum =
+        Math.round(
+          (scaledManualDiscounts.reduce((s, m) => s + m.dollars, 0) +
+            scaledLineItemDiscounts.reduce((s, m) => s + m.dollars, 0)) *
+            100,
+        ) / 100;
       const remainder = Math.round((subtotal - scaledSum) * 100) / 100;
       if (remainder !== 0) {
         let targetIdx = -1;
-        let targetGroup = 'manual';
+        let targetGroup = "manual";
         let targetDollars = 0;
         scaledManualDiscounts.forEach((m, i) => {
-          if (m.dollars > targetDollars) { targetIdx = i; targetGroup = 'manual'; targetDollars = m.dollars; }
+          if (m.dollars > targetDollars) {
+            targetIdx = i;
+            targetGroup = "manual";
+            targetDollars = m.dollars;
+          }
         });
         scaledLineItemDiscounts.forEach((m, i) => {
-          if (m.dollars > targetDollars) { targetIdx = i; targetGroup = 'line'; targetDollars = m.dollars; }
+          if (m.dollars > targetDollars) {
+            targetIdx = i;
+            targetGroup = "line";
+            targetDollars = m.dollars;
+          }
         });
-        if (targetIdx !== -1 && targetGroup === 'manual') {
+        if (targetIdx !== -1 && targetGroup === "manual") {
           const m = scaledManualDiscounts[targetIdx];
           scaledManualDiscounts[targetIdx] = {
             ...m,
@@ -665,10 +821,10 @@ const InvoiceService = {
     }
 
     const labelParts = [
-      ...manualDiscounts.map(m => m.row.name),
-      lineItemDiscountAmount > 0 ? 'Line-item discounts' : null,
+      ...manualDiscounts.map((m) => m.row.name),
+      lineItemDiscountAmount > 0 ? "Line-item discounts" : null,
     ].filter(Boolean);
-    const discountLabel = labelParts.length ? labelParts.join(' + ') : null;
+    const discountLabel = labelParts.length ? labelParts.join(" + ") : null;
 
     const afterDiscount = subtotal - discountAmount;
 
@@ -677,7 +833,9 @@ const InvoiceService = {
     // policy, so we force rate + amount to zero regardless of what the
     // caller passed. This is the single source of truth; display surfaces
     // (pay page, receipt page, PDF) can rely on stored tax_amount == 0.
-    const isCommercial = customer.property_type === 'commercial' || customer.property_type === 'business';
+    const isCommercial =
+      customer.property_type === "commercial" ||
+      customer.property_type === "business";
     let rate, taxAmount;
     if (!isCommercial) {
       rate = 0;
@@ -687,11 +845,17 @@ const InvoiceService = {
       taxAmount = Math.round(afterDiscount * rate * 100) / 100;
     } else {
       try {
-        const taxResult = await TaxCalculator.calculateTax(customerId, serviceData.service_type || title, afterDiscount);
+        const taxResult = await TaxCalculator.calculateTax(
+          customerId,
+          serviceData.service_type || title,
+          afterDiscount,
+        );
         rate = taxResult.rate;
         taxAmount = taxResult.amount;
       } catch (err) {
-        logger.warn(`[invoice] TaxCalculator failed, falling back to legacy logic: ${err.message}`);
+        logger.warn(
+          `[invoice] TaxCalculator failed, falling back to legacy logic: ${err.message}`,
+        );
         rate = 0.07;
         taxAmount = Math.round(afterDiscount * rate * 100) / 100;
       }
@@ -704,36 +868,45 @@ const InvoiceService = {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       invoiceNumber = await nextInvoiceNumber();
       try {
-        [invoice] = await db('invoices').insert({
-          token,
-          invoice_number: invoiceNumber,
-          customer_id: customerId,
-          title,
-          line_items: JSON.stringify(items),
-          subtotal,
-          discount_amount: discountAmount,
-          discount_label: discountLabel,
-          tax_rate: rate,
-          tax_amount: taxAmount,
-          total,
-          notes: notes || null,
-          due_date: dueDate || etDateString(addETDays(new Date(), 30)),
-          status: 'draft',
-          ...(scheduledServiceId ? { scheduled_service_id: scheduledServiceId } : {}),
-          ...serviceData,
-        }).returning('*');
+        [invoice] = await db("invoices")
+          .insert({
+            token,
+            invoice_number: invoiceNumber,
+            customer_id: customerId,
+            title,
+            line_items: JSON.stringify(items),
+            subtotal,
+            discount_amount: discountAmount,
+            discount_label: discountLabel,
+            tax_rate: rate,
+            tax_amount: taxAmount,
+            total,
+            notes: notes || null,
+            due_date: dueDate || etDateString(addETDays(new Date(), 30)),
+            status: "draft",
+            ...(scheduledServiceId
+              ? { scheduled_service_id: scheduledServiceId }
+              : {}),
+            ...serviceData,
+          })
+          .returning("*");
         break;
       } catch (err) {
-        const uniqueInvoiceNumberCollision = err.code === '23505'
-          && `${err.constraint || ''} ${err.detail || ''}`.includes('invoice_number');
+        const uniqueInvoiceNumberCollision =
+          err.code === "23505" &&
+          `${err.constraint || ""} ${err.detail || ""}`.includes(
+            "invoice_number",
+          );
         if (uniqueInvoiceNumberCollision) {
-          logger.warn(`[invoice] Invoice number collision on ${invoiceNumber}; retrying`);
+          logger.warn(
+            `[invoice] Invoice number collision on ${invoiceNumber}; retrying`,
+          );
           continue;
         }
         throw err;
       }
     }
-    if (!invoice) throw new Error('Could not allocate invoice number');
+    if (!invoice) throw new Error("Could not allocate invoice number");
 
     // Record applied discounts in invoice_discounts table
     try {
@@ -757,13 +930,21 @@ const InvoiceService = {
         });
       }
       if (auditRows.length > 0) {
-        await DiscountEngine.recordInvoiceDiscounts(invoice.id, auditRows, 'system');
+        await DiscountEngine.recordInvoiceDiscounts(
+          invoice.id,
+          auditRows,
+          "system",
+        );
       }
     } catch (err) {
-      logger.warn(`[invoice] Could not record invoice_discounts: ${err.message}`);
+      logger.warn(
+        `[invoice] Could not record invoice_discounts: ${err.message}`,
+      );
     }
 
-    logger.info(`[invoice] Created ${invoiceNumber} for customer ${customerId}: $${total}`);
+    logger.info(
+      `[invoice] Created ${invoiceNumber} for customer ${customerId}: $${total}`,
+    );
     return invoice;
   },
 
@@ -771,26 +952,35 @@ const InvoiceService = {
    * Create an invoice directly from a service record + simple amount.
    * Convenience method for post-service flow.
    */
-  async createFromService(serviceRecordId, { amount, description, taxRate, useScheduledReplay = false }) {
-    const sr = await db('service_records').where({ id: serviceRecordId }).first();
-    if (!sr) throw new Error('Service record not found');
+  async createFromService(
+    serviceRecordId,
+    { amount, description, taxRate, useScheduledReplay = false },
+  ) {
+    const sr = await db("service_records")
+      .where({ id: serviceRecordId })
+      .first();
+    if (!sr) throw new Error("Service record not found");
 
-    const hasExplicitAmount = amount !== undefined && amount !== null && Number(amount) > 0;
-    const scheduledInvoice = (useScheduledReplay || !hasExplicitAmount) && sr.scheduled_service_id
-      ? await buildScheduledServiceInvoiceLines(sr.scheduled_service_id, {
-          fallbackAmount: amount,
-          fallbackDescription: description || sr.service_type,
-        })
-      : null;
+    const hasExplicitAmount =
+      amount !== undefined && amount !== null && Number(amount) > 0;
+    const scheduledInvoice =
+      (useScheduledReplay || !hasExplicitAmount) && sr.scheduled_service_id
+        ? await buildScheduledServiceInvoiceLines(sr.scheduled_service_id, {
+            fallbackAmount: amount,
+            fallbackDescription: description || sr.service_type,
+          })
+        : null;
     const lineItems = scheduledInvoice?.lineItems?.length
       ? scheduledInvoice.lineItems
-      : [{
-          description: description || sr.service_type,
-          quantity: 1,
-          unit_price: amount,
-          amount,
-          category: sr.service_type,
-        }];
+      : [
+          {
+            description: description || sr.service_type,
+            quantity: 1,
+            unit_price: amount,
+            amount,
+            category: sr.service_type,
+          },
+        ];
 
     return this.create({
       customerId: sr.customer_id,
@@ -799,7 +989,9 @@ const InvoiceService = {
       lineItems,
       discountIds: scheduledInvoice?.discountIds || undefined,
       taxRate,
-      trustedStoredDiscountSources: scheduledInvoice ? ['scheduled_service'] : [],
+      trustedStoredDiscountSources: scheduledInvoice
+        ? ["scheduled_service"]
+        : [],
     });
   },
 
@@ -808,29 +1000,49 @@ const InvoiceService = {
    * Also records view and updates status.
    */
   async getByToken(token) {
-    const invoice = await db('invoices').where({ token }).first();
+    const invoice = await db("invoices").where({ token }).first();
     if (!invoice) return null;
 
     // Record view
     const updates = { view_count: (invoice.view_count || 0) + 1 };
     if (!invoice.viewed_at) updates.viewed_at = new Date();
-    if (invoice.status === 'sent') updates.status = 'viewed';
-    await db('invoices').where({ id: invoice.id }).update(updates);
+    if (invoice.status === "sent") updates.status = "viewed";
+    await db("invoices").where({ id: invoice.id }).update(updates);
 
     // Enrich with customer info
-    const customer = await db('customers')
+    const customer = await db("customers")
       .where({ id: invoice.customer_id })
-      .select('first_name', 'last_name', 'email', 'phone', 'address_line1',
-        'city', 'state', 'zip', 'waveguard_tier', 'property_sqft', 'property_type')
+      .select(
+        "first_name",
+        "last_name",
+        "email",
+        "phone",
+        "address_line1",
+        "city",
+        "state",
+        "zip",
+        "waveguard_tier",
+        "property_sqft",
+        "property_type",
+      )
       .first();
 
     return {
       ...invoice,
       ...updates,
       customer,
-      line_items: typeof invoice.line_items === 'string' ? JSON.parse(invoice.line_items) : invoice.line_items,
-      products_applied: typeof invoice.products_applied === 'string' ? JSON.parse(invoice.products_applied) : (invoice.products_applied || []),
-      service_photos: typeof invoice.service_photos === 'string' ? JSON.parse(invoice.service_photos) : (invoice.service_photos || []),
+      line_items:
+        typeof invoice.line_items === "string"
+          ? JSON.parse(invoice.line_items)
+          : invoice.line_items,
+      products_applied:
+        typeof invoice.products_applied === "string"
+          ? JSON.parse(invoice.products_applied)
+          : invoice.products_applied || [],
+      service_photos:
+        typeof invoice.service_photos === "string"
+          ? JSON.parse(invoice.service_photos)
+          : invoice.service_photos || [],
     };
   },
 
@@ -841,48 +1053,60 @@ const InvoiceService = {
     const claim = await claimInvoiceForSend(invoiceId, { allowClaimed });
     const { invoice, previousStatus, claimed } = claim;
 
-    const customer = await db('customers').where({ id: invoice.customer_id }).first();
+    const customer = await db("customers")
+      .where({ id: invoice.customer_id })
+      .first();
     if (!customer?.phone) {
       await restoreSendClaim(invoiceId, previousStatus, claimed);
-      throw new Error('Customer has no phone number');
+      throw new Error("Customer has no phone number");
     }
 
-    const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
+    const domain =
+      process.env.CLIENT_URL || "https://portal.wavespestcontrol.com";
     const longPayUrl = `${domain}/pay/${invoice.token}`;
     const payUrl = await shortenOrPassthrough(longPayUrl, {
-      kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: customer.id,
+      kind: "invoice",
+      entityType: "invoices",
+      entityId: invoice.id,
+      customerId: customer.id,
       codePrefix: invoiceShortCodePrefix(invoice),
     });
 
-    const techName = invoice.tech_name || 'Our team';
-    const serviceType = invoice.service_type || invoice.title || 'your service';
+    const techName = invoice.tech_name || "Our team";
+    const serviceType = invoice.service_type || invoice.title || "your service";
 
-    let formattedDate = '';
+    let formattedDate = "";
     if (invoice.service_date) {
       try {
         // Knex returns DATE as a Date object (UTC midnight). Avoid the broken
         // `date + 'T12:00:00'` string concat and always format in ET.
-        const d = invoice.service_date instanceof Date
-          ? invoice.service_date
-          : new Date(invoice.service_date + 'T12:00:00');
+        const d =
+          invoice.service_date instanceof Date
+            ? invoice.service_date
+            : new Date(invoice.service_date + "T12:00:00");
         if (!isNaN(d.getTime())) {
-          formattedDate = d.toLocaleDateString('en-US', {
-            weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
-            timeZone: 'America/New_York',
+          formattedDate = d.toLocaleDateString("en-US", {
+            weekday: "long",
+            month: "long",
+            day: "numeric",
+            year: "numeric",
+            timeZone: "America/New_York",
           });
         }
-      } catch { formattedDate = ''; }
+      } catch {
+        formattedDate = "";
+      }
     }
 
     // Body comes from the editable invoice_sent template. If the row is
     // missing/disabled, we skip the SMS rather than falling back to inline copy.
     let body = null;
     try {
-      const templates = require('../routes/admin-sms-templates');
-      body = await templates.getTemplate('invoice_sent', {
-        first_name: customer.first_name || '',
+      const templates = require("../routes/admin-sms-templates");
+      body = await templates.getTemplate("invoice_sent", {
+        first_name: customer.first_name || "",
         service_type: serviceType,
-        service_date: formattedDate || 'today',
+        service_date: formattedDate || "today",
         pay_url: payUrl,
       });
     } catch (err) {
@@ -890,9 +1114,15 @@ const InvoiceService = {
     }
 
     if (!body) {
-      logger.warn(`[invoice] invoice_sent template missing/disabled — skipping SMS for invoice ${invoiceId}`);
+      logger.warn(
+        `[invoice] invoice_sent template missing/disabled — skipping SMS for invoice ${invoiceId}`,
+      );
       await restoreSendClaim(invoiceId, previousStatus, claimed);
-      return { sent: false, reason: 'template-missing', code: 'INVOICE_SENT_TEMPLATE_MISSING' };
+      return {
+        sent: false,
+        reason: "template-missing",
+        code: "INVOICE_SENT_TEMPLATE_MISSING",
+      };
     }
 
     try {
@@ -904,25 +1134,29 @@ const InvoiceService = {
       // Payment-link SMS bodies legitimately contain a tap-to-pay URL
       // but never an exact dollar amount in the SMS itself — the URL
       // points to the pay page where the amount is shown.
-      const { sendCustomerMessage } = require('./messaging/send-customer-message');
+      const {
+        sendCustomerMessage,
+      } = require("./messaging/send-customer-message");
       const sendResult = await sendCustomerMessage({
         to: customer.phone,
         body,
-        channel: 'sms',
-        audience: 'customer',
-        purpose: 'payment_link',
+        channel: "sms",
+        audience: "customer",
+        purpose: "payment_link",
         customerId: customer.id,
         invoiceId,
-        entryPoint: 'invoice_send_via_sms',
+        entryPoint: "invoice_send_via_sms",
         // Preserve the legacy messageType so the admin-sms-templates
         // 'invoice' template kill switch (invoice → invoice_sent) still
         // applies. If ops disables the invoice template to halt broken
         // billing texts, this flow needs to stop too.
-        metadata: { original_message_type: 'invoice' },
+        metadata: { original_message_type: "invoice" },
       });
 
       if (!sendResult.sent) {
-        logger.warn(`[invoice] payment-link SMS BLOCKED for invoice ${invoiceId}: ${sendResult.code} — ${sendResult.reason}`);
+        logger.warn(
+          `[invoice] payment-link SMS BLOCKED for invoice ${invoiceId}: ${sendResult.code} — ${sendResult.reason}`,
+        );
         // Don't mark the invoice as sent if the wrapper blocked us.
         // The follow-up cron + admin can retry once the underlying
         // condition (consent, opt-out, etc.) is resolved.
@@ -932,11 +1166,13 @@ const InvoiceService = {
         throw err;
       }
 
-      await db('invoices')
+      await db("invoices")
         .where({ id: invoiceId })
-        .whereIn('status', SEND_FINALIZABLE_STATUSES)
+        .whereIn("status", SEND_FINALIZABLE_STATUSES)
         .update({
-          status: db.raw("CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END"),
+          status: db.raw(
+            "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
+          ),
           sent_at: new Date(),
           sms_sent_at: new Date(),
           scheduled_send_at: null,
@@ -948,40 +1184,63 @@ const InvoiceService = {
 
       // Kick off the per-invoice automated follow-up sequence (Day 0/3/7/14/30)
       try {
-        await require('./invoice-followups').scheduleForInvoice(invoiceId);
+        await require("./invoice-followups").scheduleForInvoice(invoiceId);
       } catch (e) {
-        logger.error(`[invoice-followups] scheduleForInvoice failed: ${e.message}`);
+        logger.error(
+          `[invoice-followups] scheduleForInvoice failed: ${e.message}`,
+        );
       }
 
       // Log
-      await db('activity_log').insert({
-        customer_id: customer.id,
-        action: 'invoice_sent',
-        description: `Invoice ${invoice.invoice_number} sent via SMS: $${invoice.total}`,
-        metadata: JSON.stringify({ invoiceId, payUrl }),
-      }).catch(() => {});
+      await db("activity_log")
+        .insert({
+          customer_id: customer.id,
+          action: "invoice_sent",
+          description: `Invoice ${invoice.invoice_number} sent via SMS: $${invoice.total}`,
+          metadata: JSON.stringify({ invoiceId, payUrl }),
+        })
+        .catch(() => {});
 
-      logger.info(`[invoice] SMS sent for ${invoice.invoice_number} to ${customer.phone}`);
+      logger.info(
+        `[invoice] SMS sent for ${invoice.invoice_number} (customerId=${customer.id})`,
+      );
       return { sent: true, payUrl };
     } catch (err) {
       await restoreSendClaim(invoiceId, previousStatus, claimed);
-      logger.error(`[invoice] SMS failed for ${invoice.invoice_number}: ${err.message}`);
+      logger.error(
+        `[invoice] SMS failed for ${invoice.invoice_number}: ${err.message}`,
+      );
       throw err;
     }
   },
 
-  async sendViaSMSAndEmail(invoiceId, { requestReview = false, reviewDelayMinutes = null, allowClaimed = false } = {}) {
+  async sendViaSMSAndEmail(
+    invoiceId,
+    {
+      requestReview = false,
+      reviewDelayMinutes = null,
+      allowClaimed = false,
+    } = {},
+  ) {
     const claim = await claimInvoiceForSend(invoiceId, { allowClaimed });
     const { previousStatus, claimed } = claim;
-    const { sendInvoiceEmail } = require('./invoice-email');
+    const { sendInvoiceEmail } = require("./invoice-email");
     const sms = { ok: false };
     const email = { ok: false };
 
     try {
-      await this.sendViaSMS(invoiceId, { allowClaimed: true });
-      sms.ok = true;
+      const smsResult = await this.sendViaSMS(invoiceId, {
+        allowClaimed: true,
+      });
+      if (smsResult?.sent) {
+        sms.ok = true;
+      } else {
+        sms.error = smsResult?.reason || smsResult?.code || "SMS not sent";
+        if (smsResult?.code) sms.code = smsResult.code;
+      }
     } catch (err) {
       sms.error = err.message;
+      if (err.code) sms.code = err.code;
     }
 
     try {
@@ -994,28 +1253,35 @@ const InvoiceService = {
 
     if (requestReview && (sms.ok || email.ok)) {
       try {
-        const ReviewService = require('./review-request');
-        const inv = await db('invoices').where({ id: invoiceId }).select('customer_id', 'service_record_id').first();
+        const ReviewService = require("./review-request");
+        const inv = await db("invoices")
+          .where({ id: invoiceId })
+          .select("customer_id", "service_record_id")
+          .first();
         if (inv) {
           await ReviewService.create({
             customerId: inv.customer_id,
             serviceRecordId: inv.service_record_id || null,
-            triggeredBy: 'auto',
+            triggeredBy: "auto",
             delayMinutes: reviewDelayMinutes,
           });
         }
       } catch (err) {
-        logger.error(`[invoice] Review request schedule failed: ${err.message}`);
+        logger.error(
+          `[invoice] Review request schedule failed: ${err.message}`,
+        );
       }
     }
 
     const ok = sms.ok || email.ok;
     if (ok) {
-      await db('invoices')
+      await db("invoices")
         .where({ id: invoiceId })
-        .whereIn('status', SEND_FINALIZABLE_STATUSES)
+        .whereIn("status", SEND_FINALIZABLE_STATUSES)
         .update({
-          status: db.raw("CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END"),
+          status: db.raw(
+            "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
+          ),
           sent_at: new Date(),
           scheduled_send_at: null,
           scheduled_send_error: null,
@@ -1030,34 +1296,52 @@ const InvoiceService = {
   },
 
   async processScheduledSends({ limit = 25 } = {}) {
-    await db('invoices')
-      .where({ status: 'sending' })
-      .where('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"))
+    await db("invoices")
+      .where({ status: "sending" })
+      .where("updated_at", "<", db.raw("NOW() - INTERVAL '10 minutes'"))
       .update({
-        status: 'scheduled',
-        scheduled_send_error: 'Recovered from stale sending claim',
+        status: "scheduled",
+        scheduled_send_error: "Recovered from stale sending claim",
         updated_at: new Date(),
       });
 
-    const due = await db('invoices')
-      .where({ status: 'scheduled' })
-      .whereNotNull('scheduled_send_at')
-      .where('scheduled_send_at', '<=', new Date())
-      .where(q => q.whereNull('scheduled_send_attempts').orWhere('scheduled_send_attempts', '<', 5))
-      .orderBy('scheduled_send_at', 'asc')
+    const due = await db("invoices")
+      .where({ status: "scheduled" })
+      .whereNotNull("scheduled_send_at")
+      .where("scheduled_send_at", "<=", new Date())
+      .where((q) =>
+        q
+          .whereNull("scheduled_send_attempts")
+          .orWhere("scheduled_send_attempts", "<", 5),
+      )
+      .orderBy("scheduled_send_at", "asc")
       .limit(limit)
-      .select('id', 'invoice_number', 'scheduled_send_attempts', 'scheduled_request_review', 'scheduled_review_delay_minutes');
+      .select(
+        "id",
+        "invoice_number",
+        "scheduled_send_attempts",
+        "scheduled_request_review",
+        "scheduled_review_delay_minutes",
+      );
 
     let sent = 0;
     let failed = 0;
     for (const inv of due) {
-      const [claimed] = await db('invoices')
-        .where({ id: inv.id, status: 'scheduled' })
-        .whereNotNull('scheduled_send_at')
-        .where('scheduled_send_at', '<=', new Date())
-        .where(q => q.whereNull('scheduled_send_attempts').orWhere('scheduled_send_attempts', '<', 5))
-        .update({ status: 'sending', updated_at: new Date() })
-        .returning(['id', 'scheduled_request_review', 'scheduled_review_delay_minutes']);
+      const [claimed] = await db("invoices")
+        .where({ id: inv.id, status: "scheduled" })
+        .whereNotNull("scheduled_send_at")
+        .where("scheduled_send_at", "<=", new Date())
+        .where((q) =>
+          q
+            .whereNull("scheduled_send_attempts")
+            .orWhere("scheduled_send_attempts", "<", 5),
+        )
+        .update({ status: "sending", updated_at: new Date() })
+        .returning([
+          "id",
+          "scheduled_request_review",
+          "scheduled_review_delay_minutes",
+        ]);
       if (!claimed) continue;
 
       const result = await this.sendViaSMSAndEmail(claimed.id, {
@@ -1071,16 +1355,24 @@ const InvoiceService = {
       }
 
       failed += 1;
-      const error = [result.sms?.error && `sms: ${result.sms.error}`, result.email?.error && `email: ${result.email.error}`]
-        .filter(Boolean)
-        .join(' | ') || 'send failed';
-      await db('invoices').where({ id: inv.id }).update({
-        status: 'scheduled',
-        scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
-        scheduled_send_error: error,
-        updated_at: new Date(),
-      });
-      logger.error(`[invoice] Scheduled send failed for ${inv.invoice_number}: ${error}`);
+      const error =
+        [
+          result.sms?.error && `sms: ${result.sms.error}`,
+          result.email?.error && `email: ${result.email.error}`,
+        ]
+          .filter(Boolean)
+          .join(" | ") || "send failed";
+      await db("invoices")
+        .where({ id: inv.id })
+        .update({
+          status: "scheduled",
+          scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
+          scheduled_send_error: error,
+          updated_at: new Date(),
+        });
+      logger.error(
+        `[invoice] Scheduled send failed for ${inv.invoice_number}: ${error}`,
+      );
     }
     return { sent, failed };
   },
@@ -1099,39 +1391,57 @@ const InvoiceService = {
    * .catch() with loud error logging.
    */
   async sendReceipt(invoiceId, { force = false, recordActivity = true } = {}) {
-    const invoice = await db('invoices').where({ id: invoiceId }).first();
-    if (!invoice || invoice.status !== 'paid') return { sent: false, reason: 'not-paid' };
+    const invoice = await db("invoices").where({ id: invoiceId }).first();
+    if (!invoice || invoice.status !== "paid")
+      return { sent: false, reason: "not-paid" };
 
     if (invoice.receipt_sent_at && !force) {
-      logger.info(`[invoice] Receipt already sent for ${invoice.invoice_number} — skipping`);
-      return { sent: false, reason: 'already-sent' };
+      logger.info(
+        `[invoice] Receipt already sent for ${invoice.invoice_number} — skipping`,
+      );
+      return { sent: false, reason: "already-sent" };
     }
 
-    const customer = await db('customers').where({ id: invoice.customer_id }).first();
-    if (!customer?.phone) return { sent: false, reason: 'no-phone' };
+    const customer = await db("customers")
+      .where({ id: invoice.customer_id })
+      .first();
+    if (!customer?.phone) return { sent: false, reason: "no-phone" };
 
-    const domain = process.env.PORTAL_DOMAIN || 'https://portal.wavespestcontrol.com';
-    const longReceiptUrl = invoice.token ? `${domain}/pay/${invoice.token}` : '';
+    const domain =
+      process.env.PORTAL_DOMAIN || "https://portal.wavespestcontrol.com";
+    const longReceiptUrl = invoice.token
+      ? `${domain}/pay/${invoice.token}`
+      : "";
     const receiptUrl = longReceiptUrl
       ? await shortenOrPassthrough(longReceiptUrl, {
-          kind: 'receipt', entityType: 'invoices', entityId: invoice.id, customerId: customer.id,
+          kind: "receipt",
+          entityType: "invoices",
+          entityId: invoice.id,
+          customerId: customer.id,
           codePrefix: invoiceShortCodePrefix(invoice),
         })
-      : '';
+      : "";
 
     // Template body has a {card_line} placeholder that renders as e.g.
     // " (Visa ending 4242)" when card metadata is present, or empty otherwise.
     const cardBrand = invoice.card_brand;
     const cardLast4 = invoice.card_last_four;
-    const cardLine = cardBrand && cardLast4 ? ` (${cardBrand.charAt(0).toUpperCase() + cardBrand.slice(1)} ending ${cardLast4})` : '';
+    const cardLine =
+      cardBrand && cardLast4
+        ? ` (${cardBrand.charAt(0).toUpperCase() + cardBrand.slice(1)} ending ${cardLast4})`
+        : "";
+    const receiptAmount = Number.parseFloat(invoice.total || 0);
+    const amount = Number.isFinite(receiptAmount)
+      ? receiptAmount.toFixed(2)
+      : "0.00";
 
     let body = null;
     try {
-      const templates = require('../routes/admin-sms-templates');
-      body = await templates.getTemplate('invoice_receipt', {
-        first_name: customer.first_name || '',
+      const templates = require("../routes/admin-sms-templates");
+      body = await templates.getTemplate("invoice_receipt", {
+        first_name: customer.first_name || "",
         invoice_number: invoice.invoice_number,
-        amount: 'your payment',
+        amount,
         card_line: cardLine,
         receipt_url: receiptUrl,
       });
@@ -1139,24 +1449,30 @@ const InvoiceService = {
       logger.warn(`[invoice] Receipt template lookup failed: ${err.message}`);
     }
     if (!body) {
-      logger.warn(`[invoice] invoice_receipt template missing/disabled — skipping receipt for ${invoice.invoice_number}`);
-      return { sent: false, reason: 'template-missing' };
+      logger.warn(
+        `[invoice] invoice_receipt template missing/disabled — skipping receipt for ${invoice.invoice_number}`,
+      );
+      return { sent: false, reason: "template-missing" };
     }
 
-    const { sendCustomerMessage } = require('./messaging/send-customer-message');
+    const {
+      sendCustomerMessage,
+    } = require("./messaging/send-customer-message");
     const sendResult = await sendCustomerMessage({
       to: customer.phone,
       body,
-      channel: 'sms',
-      audience: 'customer',
-      purpose: 'payment_receipt',
+      channel: "sms",
+      audience: "customer",
+      purpose: "payment_receipt",
       customerId: customer.id,
       invoiceId,
-      entryPoint: 'invoice_receipt_sms',
-      metadata: { original_message_type: 'receipt' },
+      entryPoint: "invoice_receipt_sms",
+      metadata: { original_message_type: "receipt" },
     });
     if (sendResult.blocked || sendResult.sent === false) {
-      const err = new Error(`receipt SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+      const err = new Error(
+        `receipt SMS blocked: ${sendResult.code || sendResult.reason || "unknown"}`,
+      );
       err.code = sendResult.code;
       err.reason = sendResult.reason;
       throw err;
@@ -1164,17 +1480,28 @@ const InvoiceService = {
     logger.info(`[invoice] Receipt SMS sent for ${invoice.invoice_number}`);
 
     if (!invoice.receipt_sent_at) {
-      await db('invoices').where({ id: invoiceId }).update({
-        receipt_sent_at: db.fn.now(),
-      }).catch((err) => logger.error(`[invoice] receipt_sent_at stamp failed for ${invoice.invoice_number}: ${err.message}`));
+      await db("invoices")
+        .where({ id: invoiceId })
+        .update({
+          receipt_sent_at: db.fn.now(),
+        })
+        .catch((err) =>
+          logger.error(
+            `[invoice] receipt_sent_at stamp failed for ${invoice.invoice_number}: ${err.message}`,
+          ),
+        );
     }
 
     if (recordActivity) {
-      await db('activity_log').insert({
-        customer_id: invoice.customer_id,
-        action: 'invoice_receipt_sent',
-        description: `Receipt sent for invoice ${invoice.invoice_number} (sms)`,
-      }).catch((err) => logger.warn(`[invoice] activity_log insert failed: ${err.message}`));
+      await db("activity_log")
+        .insert({
+          customer_id: invoice.customer_id,
+          action: "invoice_receipt_sent",
+          description: `Receipt sent for invoice ${invoice.invoice_number} (sms)`,
+        })
+        .catch((err) =>
+          logger.warn(`[invoice] activity_log insert failed: ${err.message}`),
+        );
     }
 
     return { sent: true };
@@ -1183,10 +1510,21 @@ const InvoiceService = {
   // ── Admin CRUD ──
 
   async getById(id) {
-    const invoice = await db('invoices').where({ id }).first();
+    const invoice = await db("invoices").where({ id }).first();
     if (!invoice) return null;
-    const customer = await db('customers').where({ id: invoice.customer_id })
-      .select('first_name', 'last_name', 'phone', 'email', 'waveguard_tier', 'address_line1', 'city', 'state', 'zip')
+    const customer = await db("customers")
+      .where({ id: invoice.customer_id })
+      .select(
+        "first_name",
+        "last_name",
+        "phone",
+        "email",
+        "waveguard_tier",
+        "address_line1",
+        "city",
+        "state",
+        "zip",
+      )
       .first();
     return { ...invoice, customer };
   },
@@ -1196,95 +1534,139 @@ const InvoiceService = {
     customerId,
     limit = 50,
     offset = 0,
-    archived = 'hide',
+    archived = "hide",
     search,
     from,
     to,
-    sort = 'newest',
+    sort = "newest",
   } = {}) {
     const today = etDateString();
     const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
     const safeOffset = Math.max(parseInt(offset, 10) || 0, 0);
-    const dateColumn = 'COALESCE(invoices.service_date, invoices.created_at::date)';
+    const dateColumn =
+      "COALESCE(invoices.service_date, invoices.created_at::date)";
     const invoiceDate = db.raw(dateColumn);
-    const validDate = (value) => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
-    const normalizedStatus = String(status || '').trim().toLowerCase();
-    const directStatuses = new Set(['draft', 'scheduled', 'sending', 'sent', 'viewed', 'paid', 'processing', 'void', 'refunded', 'canceled', 'cancelled']);
+    const validDate = (value) =>
+      typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+    const normalizedStatus = String(status || "")
+      .trim()
+      .toLowerCase();
+    const directStatuses = new Set([
+      "draft",
+      "scheduled",
+      "sending",
+      "sent",
+      "viewed",
+      "paid",
+      "processing",
+      "void",
+      "refunded",
+      "canceled",
+      "cancelled",
+    ]);
 
     // archived semantics:
     //   'hide' (default) — WHERE archived_at IS NULL
     //   'only'            — WHERE archived_at IS NOT NULL
     //   'all'             — no filter
     const applyFilters = (q) => {
-      if (archived === 'only') q.whereNotNull('invoices.archived_at');
-      else if (archived !== 'all') q.whereNull('invoices.archived_at');
+      if (archived === "only") q.whereNotNull("invoices.archived_at");
+      else if (archived !== "all") q.whereNull("invoices.archived_at");
 
-      if (customerId) q.where('invoices.customer_id', customerId);
+      if (customerId) q.where("invoices.customer_id", customerId);
 
-      if (normalizedStatus === 'overdue') {
-        q.whereNotIn('invoices.status', ['paid', 'void', 'processing'])
-          .andWhere(function () {
-            this.where('invoices.status', 'overdue')
-              .orWhere('invoices.due_date', '<', today);
-          });
-      } else if (normalizedStatus === 'unpaid') {
-        q.whereNotIn('invoices.status', ['paid', 'void', 'processing']);
-      } else if (normalizedStatus === 'needs_receipt') {
-        q.where('invoices.status', 'paid').whereNull('invoices.receipt_sent_at');
+      if (normalizedStatus === "overdue") {
+        q.whereNotIn("invoices.status", [
+          "paid",
+          "void",
+          "processing",
+        ]).andWhere(function () {
+          this.where("invoices.status", "overdue").orWhere(
+            "invoices.due_date",
+            "<",
+            today,
+          );
+        });
+      } else if (normalizedStatus === "unpaid") {
+        q.whereNotIn("invoices.status", ["paid", "void", "processing"]);
+      } else if (normalizedStatus === "needs_receipt") {
+        q.where("invoices.status", "paid").whereNull(
+          "invoices.receipt_sent_at",
+        );
       } else if (directStatuses.has(normalizedStatus)) {
-        q.where('invoices.status', normalizedStatus);
+        q.where("invoices.status", normalizedStatus);
       }
 
-      if (validDate(from)) q.where(invoiceDate, '>=', from);
-      if (validDate(to)) q.where(invoiceDate, '<=', to);
+      if (validDate(from)) q.where(invoiceDate, ">=", from);
+      if (validDate(to)) q.where(invoiceDate, "<=", to);
 
-      const term = String(search || '').trim();
+      const term = String(search || "").trim();
       if (term) {
         const like = `%${term}%`;
         q.andWhere(function () {
-          this.whereRaw('invoices.invoice_number ILIKE ?', [like])
-            .orWhereRaw('COALESCE(invoices.title, \'\') ILIKE ?', [like])
-            .orWhereRaw('COALESCE(customers.first_name, \'\') ILIKE ?', [like])
-            .orWhereRaw('COALESCE(customers.last_name, \'\') ILIKE ?', [like])
-            .orWhereRaw('COALESCE(customers.phone, \'\') ILIKE ?', [like])
-            .orWhereRaw('COALESCE(customers.email, \'\') ILIKE ?', [like])
-            .orWhereRaw("CONCAT_WS(' ', customers.first_name, customers.last_name) ILIKE ?", [like]);
+          this.whereRaw("invoices.invoice_number ILIKE ?", [like])
+            .orWhereRaw("COALESCE(invoices.title, '') ILIKE ?", [like])
+            .orWhereRaw("COALESCE(customers.first_name, '') ILIKE ?", [like])
+            .orWhereRaw("COALESCE(customers.last_name, '') ILIKE ?", [like])
+            .orWhereRaw("COALESCE(customers.phone, '') ILIKE ?", [like])
+            .orWhereRaw("COALESCE(customers.email, '') ILIKE ?", [like])
+            .orWhereRaw(
+              "CONCAT_WS(' ', customers.first_name, customers.last_name) ILIKE ?",
+              [like],
+            );
         });
       }
 
       return q;
     };
 
-    const query = applyFilters(db('invoices').leftJoin('customers', 'invoices.customer_id', 'customers.id'))
-      .select(
-        'invoices.*',
-        'customers.first_name',
-        'customers.last_name',
-        'customers.phone',
-        'customers.email',
-        'customers.waveguard_tier',
-        db.raw(`(
+    const query = applyFilters(
+      db("invoices").leftJoin(
+        "customers",
+        "invoices.customer_id",
+        "customers.id",
+      ),
+    ).select(
+      "invoices.*",
+      "customers.first_name",
+      "customers.last_name",
+      "customers.phone",
+      "customers.email",
+      "customers.waveguard_tier",
+      db.raw(`(
           SELECT json_build_object('brand', card_brand, 'last_four', last_four)
           FROM payment_methods
           WHERE customer_id = invoices.customer_id AND is_default = true
           LIMIT 1
-        ) AS card_on_file`)
-      );
+        ) AS card_on_file`),
+    );
 
-    if (sort === 'oldest') {
-      query.orderByRaw(`${dateColumn} ASC NULLS LAST`).orderBy('invoices.created_at', 'asc');
-    } else if (sort === 'amount_high') {
-      query.orderBy('invoices.total', 'desc').orderByRaw(`${dateColumn} DESC NULLS LAST`);
-    } else if (sort === 'amount_low') {
-      query.orderBy('invoices.total', 'asc').orderByRaw(`${dateColumn} DESC NULLS LAST`);
+    if (sort === "oldest") {
+      query
+        .orderByRaw(`${dateColumn} ASC NULLS LAST`)
+        .orderBy("invoices.created_at", "asc");
+    } else if (sort === "amount_high") {
+      query
+        .orderBy("invoices.total", "desc")
+        .orderByRaw(`${dateColumn} DESC NULLS LAST`);
+    } else if (sort === "amount_low") {
+      query
+        .orderBy("invoices.total", "asc")
+        .orderByRaw(`${dateColumn} DESC NULLS LAST`);
     } else {
-      query.orderByRaw(`${dateColumn} DESC NULLS LAST`).orderBy('invoices.created_at', 'desc');
+      query
+        .orderByRaw(`${dateColumn} DESC NULLS LAST`)
+        .orderBy("invoices.created_at", "desc");
     }
 
     const invoices = await query.limit(safeLimit).offset(safeOffset);
     const [{ count }] = await applyFilters(
-      db('invoices').leftJoin('customers', 'invoices.customer_id', 'customers.id')
-    ).countDistinct('invoices.id as count');
+      db("invoices").leftJoin(
+        "customers",
+        "invoices.customer_id",
+        "customers.id",
+      ),
+    ).countDistinct("invoices.id as count");
 
     return { invoices, total: parseInt(count, 10) };
   },
@@ -1300,7 +1682,8 @@ const InvoiceService = {
     const data = { updated_at: new Date() };
     for (const key of allowed) {
       if (updates[key] !== undefined) {
-        data[key] = key === 'line_items' ? JSON.stringify(updates[key]) : updates[key];
+        data[key] =
+          key === "line_items" ? JSON.stringify(updates[key]) : updates[key];
       }
     }
 
@@ -1309,18 +1692,26 @@ const InvoiceService = {
     // discount rows are scoped to their parent line item, and residential
     // tax is always forced to zero.
     if (updates.line_items) {
-      const invoice = await db('invoices').where({ id }).first();
+      const invoice = await db("invoices").where({ id }).first();
       if (!invoice) return null;
-      const customer = await db('customers').where({ id: invoice.customer_id }).first();
-      Object.assign(data, await calculateUpdateFinancials({
-        lineItems: updates.line_items,
-        customer,
-        invoice,
-        taxRate: updates.tax_rate,
-      }));
+      const customer = await db("customers")
+        .where({ id: invoice.customer_id })
+        .first();
+      Object.assign(
+        data,
+        await calculateUpdateFinancials({
+          lineItems: updates.line_items,
+          customer,
+          invoice,
+          taxRate: updates.tax_rate,
+        }),
+      );
     }
 
-    const [invoice] = await db('invoices').where({ id }).update(data).returning('*');
+    const [invoice] = await db("invoices")
+      .where({ id })
+      .update(data)
+      .returning("*");
     return invoice;
   },
 
@@ -1331,15 +1722,22 @@ const InvoiceService = {
     // — the right path is a refund via StripeService.refund. ACH in
     // flight is also off-limits; assertInvoiceVoidable encodes the
     // transition matrix so the unit tests can verify it without DB.
-    const current = await db('invoices').where({ id }).first();
-    if (!current) throw new Error('Invoice not found');
+    const current = await db("invoices").where({ id }).first();
+    if (!current) throw new Error("Invoice not found");
     assertInvoiceVoidable(current.status);
-    if (current.status === 'void') return current;
-    const [invoice] = await db('invoices').where({ id }).update({ status: 'void', updated_at: new Date() }).returning('*');
+    if (current.status === "void") return current;
+    const [invoice] = await db("invoices")
+      .where({ id })
+      .update({ status: "void", updated_at: new Date() })
+      .returning("*");
     try {
-      await require('./annual-prepay-renewals').syncTermForInvoicePayment(invoice);
+      await require("./annual-prepay-renewals").syncTermForInvoicePayment(
+        invoice,
+      );
     } catch (err) {
-      logger.warn(`[invoice] annual prepay sync skipped after void ${invoice.invoice_number}: ${err.message}`);
+      logger.warn(
+        `[invoice] annual prepay sync skipped after void ${invoice.invoice_number}: ${err.message}`,
+      );
     }
     logger.info(`[invoice] Voided: ${invoice.invoice_number}`);
     return invoice;
@@ -1347,14 +1745,25 @@ const InvoiceService = {
 
   async getStats() {
     const today = etDateString();
-    const [totals] = await db('invoices').select(
-      db.raw("COUNT(*) as total"),
-      db.raw("COUNT(*) FILTER (WHERE status = 'paid') as paid"),
-      db.raw("COUNT(*) FILTER (WHERE status NOT IN ('paid', 'void', 'processing')) as outstanding"),
-      db.raw("COUNT(*) FILTER (WHERE status NOT IN ('paid', 'void', 'processing') AND (status = 'overdue' OR due_date < ?)) as overdue", [today]),
-      db.raw("COALESCE(SUM(total) FILTER (WHERE status = 'paid'), 0) as total_collected"),
-      db.raw("COALESCE(SUM(total) FILTER (WHERE status NOT IN ('paid', 'void', 'processing')), 0) as total_outstanding"),
-    ).whereNull('archived_at');
+    const [totals] = await db("invoices")
+      .select(
+        db.raw("COUNT(*) as total"),
+        db.raw("COUNT(*) FILTER (WHERE status = 'paid') as paid"),
+        db.raw(
+          "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'void', 'processing')) as outstanding",
+        ),
+        db.raw(
+          "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'void', 'processing') AND (status = 'overdue' OR due_date < ?)) as overdue",
+          [today],
+        ),
+        db.raw(
+          "COALESCE(SUM(total) FILTER (WHERE status = 'paid'), 0) as total_collected",
+        ),
+        db.raw(
+          "COALESCE(SUM(total) FILTER (WHERE status NOT IN ('paid', 'void', 'processing')), 0) as total_outstanding",
+        ),
+      )
+      .whereNull("archived_at");
     return {
       total: parseInt(totals.total),
       paid: parseInt(totals.paid),

@@ -2044,7 +2044,6 @@ router.put('/:token/accept', async (req, res, next) => {
     if (customerId && billByInvoice) {
       try {
         const InvoiceService = require('../services/invoice');
-        const { sendInvoiceEmail } = require('../services/invoice-email');
 
         let title; let lineItems; let notes;
         if (treatAsOneTime) {
@@ -2079,20 +2078,18 @@ router.put('/:token/accept', async (req, res, next) => {
           invoiceId = inv?.id || null;
           if (invoiceId) {
             try {
-              const smsResult = await InvoiceService.sendViaSMS(invoiceId);
-              if (smsResult?.sent) {
+              const delivery = await InvoiceService.sendViaSMSAndEmail(invoiceId);
+              if (delivery?.ok) {
                 invoiceLinkDelivered = true;
               } else {
-                logger.error(`[estimate-accept] Invoice SMS not sent: ${smsResult?.code || smsResult?.reason || 'unknown'}`);
+                const errors = [
+                  delivery?.sms?.error && `sms: ${delivery.sms.error}`,
+                  delivery?.email?.error && `email: ${delivery.email.error}`,
+                ].filter(Boolean).join(' | ');
+                logger.error(`[estimate-accept] Invoice delivery failed: ${errors || 'unknown error'}`);
               }
             }
-            catch (smsErr) { logger.error(`[estimate-accept] Invoice SMS failed: ${smsErr.message}`); }
-            try {
-              const emailResult = await sendInvoiceEmail(invoiceId);
-              if (emailResult?.ok) invoiceLinkDelivered = true;
-              else logger.error(`[estimate-accept] Invoice email failed: ${emailResult?.error || 'unknown error'}`);
-            }
-            catch (emailErr) { logger.error(`[estimate-accept] Invoice email failed: ${emailErr.message}`); }
+            catch (deliveryErr) { logger.error(`[estimate-accept] Invoice delivery failed: ${deliveryErr.message}`); }
             invoiceMode = true;
             logger.info(`[estimate-accept] Invoice-mode invoice ${invoiceId} created for estimate ${estimate.id} — $${invoiceAmount}; delivery=${invoiceLinkDelivered ? 'sent' : 'failed'}`);
           }
