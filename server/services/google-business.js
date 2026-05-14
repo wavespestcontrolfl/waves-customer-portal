@@ -33,6 +33,25 @@ const LOCATION_ENV_KEYS = {
   'venice': 'VENICE',
 };
 
+// Google's My Business v4 endpoints normally return JSON, but when the OAuth
+// client lives in a project where the API isn't enabled — or hits a redirect
+// chain — they sometimes return 2xx with an HTML body. Parsing that as JSON
+// produces an opaque SyntaxError that bubbles up to the user as "Unexpected
+// token '<'". Read as text first, only JSON.parse when the body looks like
+// JSON, and surface the raw status + a truncated body on anything else.
+async function readJsonOrThrow(res, label) {
+  const text = await res.text();
+  const ct = (res.headers.get('content-type') || '').toLowerCase();
+  if (!res.ok) {
+    throw new Error(`${label} ${res.status}: ${text.slice(0, 500)}`);
+  }
+  if (!ct.includes('application/json') && !text.trimStart().startsWith('{') && !text.trimStart().startsWith('[')) {
+    throw new Error(`${label} returned non-JSON response (status ${res.status}, content-type ${ct || 'unknown'}): ${text.slice(0, 500)}`);
+  }
+  try { return JSON.parse(text); }
+  catch (e) { throw new Error(`${label} returned malformed JSON (status ${res.status}): ${e.message}`); }
+}
+
 class GoogleBusinessService {
   constructor() {
     // Check if any location has credentials
@@ -100,11 +119,7 @@ class GoogleBusinessService {
     const headers = await this._getHeaders(locationId);
     const url = `https://mybusiness.googleapis.com/v4/${locationResourceName}/reviews?pageSize=${pageSize}`;
     const res = await fetch(url, { headers });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`GBP API ${res.status}: ${text}`);
-    }
-    const data = await res.json();
+    const data = await readJsonOrThrow(res, 'GBP getReviews');
     return data.reviews || [];
   }
 
@@ -134,8 +149,7 @@ class GoogleBusinessService {
     const headers = await this._getHeaders(locationId);
     const url = `https://mybusiness.googleapis.com/v4/${reviewResourceName}/reply`;
     const res = await fetch(url, { method: 'PUT', headers, body: JSON.stringify({ comment: replyText }) });
-    if (!res.ok) throw new Error(`Reply failed: ${res.status}`);
-    return res.json();
+    return readJsonOrThrow(res, 'GBP replyToReview');
   }
 
   async deleteReply(reviewResourceName, locationId) {
@@ -149,7 +163,10 @@ class GoogleBusinessService {
     const headers = await this._getHeaders(locationId);
     const url = `https://mybusiness.googleapis.com/v4/${reviewResourceName}/reply`;
     const res = await fetch(url, { method: 'DELETE', headers });
-    if (!res.ok) throw new Error(`Delete reply failed: ${res.status}`);
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`GBP deleteReply ${res.status}: ${text.slice(0, 500)}`);
+    }
     return true;
   }
 
@@ -160,8 +177,7 @@ class GoogleBusinessService {
     const headers = await this._getHeaders(locationId);
     const url = `https://mybusiness.googleapis.com/v4/${locationResourceName}`;
     const res = await fetch(url, { headers });
-    if (!res.ok) throw new Error(`Location fetch failed: ${res.status}`);
-    return res.json();
+    return readJsonOrThrow(res, 'GBP getLocationDetails');
   }
 
   // =========================================================================
@@ -174,8 +190,7 @@ class GoogleBusinessService {
     if (callToAction) body.callToAction = callToAction;
     if (mediaUrl) body.media = [{ mediaFormat: 'PHOTO', sourceUrl: mediaUrl }];
     const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
-    if (!res.ok) throw new Error(`Post failed: ${res.status}`);
-    return res.json();
+    return readJsonOrThrow(res, 'GBP createPost');
   }
 
   // =========================================================================
