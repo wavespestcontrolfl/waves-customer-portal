@@ -196,6 +196,29 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
           };
         }
 
+        // If the stale attempt has already persisted a resolved
+        // snapshot, that snapshot is the audit source — marking the
+        // attempt failed and starting a fresh one would discard the
+        // tech's original attestation and re-run the resolver against
+        // a possibly-newer active protocol_template. Refuse the
+        // different-key reclaim and surface the state. The same-key
+        // path below preserves the snapshot row intact, so the only
+        // way to resume legitimately is to retry under the original
+        // idempotency key (typically requires admin intervention since
+        // panel reloads generate fresh keys).
+        if (stalePending.snapshot_written_at) {
+          return {
+            action: 'conflict',
+            status: 409,
+            payload: {
+              error: 'Completion has a persisted resolved snapshot from an earlier attempt. Retry under the original idempotency key or contact support.',
+              code: 'completion_snapshot_persisted_stale',
+              attemptId: stalePending.id,
+              snapshotHash: stalePending.resolved_completion_snapshot_hash || null,
+            },
+          };
+        }
+
         const [reclaimed] = await knex('service_completion_attempts')
           .where({ id: stalePending.id, status: 'pending' })
           .update({

@@ -362,6 +362,47 @@ describe('completion attempts', () => {
     expect(knex.calls[7].op.updatePayload.status).toBe('failed');
   });
 
+  test('different key refuses to reclaim a stale pending with a persisted snapshot (codex P1 round 5)', async () => {
+    // The stale attempt has already written its resolved snapshot —
+    // that snapshot is the audit source. Marking it failed and
+    // starting a fresh attempt would discard the tech's attestation
+    // and re-run the resolver against a possibly-newer protocol.
+    // Different-key reclaim must refuse; original key is the only
+    // legitimate resume path.
+    const staleWithSnapshot = {
+      id: 'orphan-1',
+      idempotency_key: 'old-key',
+      status: 'pending',
+      updated_at: new Date(Date.now() - 12 * 60 * 1000),
+      snapshot_written_at: new Date(Date.now() - 11 * 60 * 1000),
+      resolved_completion_snapshot_hash: 'abc123',
+    };
+
+    const knex = makeKnex([
+      noPriorSuccess(),
+      noResumableCompletion(),
+      noCompletedRecord(),
+      { insertError: uniqueViolation() },     // first insert hits partial index
+      { first: undefined },                   // no same-key match
+      { first: staleWithSnapshot },           // stale pending WITH snapshot found
+      { first: undefined },                   // service_records: no completed record
+    ]);
+
+    const result = await claimCompletionAttempt({
+      serviceId: 'svc-1',
+      idempotencyKey: 'fresh-key',
+      requestHash: 'hash-1',
+    }, knex);
+
+    expect(result.action).toBe('conflict');
+    expect(result.status).toBe(409);
+    expect(result.payload.code).toBe('completion_snapshot_persisted_stale');
+    expect(result.payload.attemptId).toBe('orphan-1');
+    expect(result.payload.snapshotHash).toBe('abc123');
+    // No update / re-insert attempted — the snapshot row is untouched.
+    expect(knex.calls).toHaveLength(7);
+  });
+
   test('different key falls through to 409 when reclaim race is lost', async () => {
     const stale = {
       id: 'orphan-1',
