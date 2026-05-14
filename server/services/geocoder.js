@@ -36,7 +36,7 @@ async function geocodeAddress(address) {
       memo.set(address, result);
       return result;
     }
-    logger.warn(`[geocoder] Geocoding failed for "${address}": ${data.status}`);
+    logger.warn(`[geocoder] Geocoding failed: ${data.status}`);
     // Only memoize ZERO_RESULTS — Google saying "this address truly
     // doesn't exist" is a permanent answer worth caching. Transient
     // codes (OVER_QUERY_LIMIT / REQUEST_DENIED / INVALID_REQUEST /

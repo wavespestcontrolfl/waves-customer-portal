@@ -47,7 +47,17 @@ function adminFetch(path, options = {}) {
       ...options.headers,
     },
     ...options,
-  }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
+  }).then(async r => {
+    if (!r.ok) {
+      let message = `HTTP ${r.status}`;
+      try {
+        const body = await r.json();
+        if (body?.error) message = body.error;
+      } catch { /* keep status fallback */ }
+      throw new Error(message);
+    }
+    return r.json();
+  });
 }
 
 const TIER_COLORS = { Platinum: '#E5E4E2', Gold: '#FDD835', Silver: '#90CAF9', Bronze: '#CD7F32', 'One-Time': '#0A7EC2' };
@@ -97,6 +107,51 @@ const MONTH_CHIPS = [
 const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 16, fontFamily: 'inherit', fontWeight: 400, outline: 'none', boxSizing: 'border-box', minHeight: 44, colorScheme: 'light' };
 const labelStyle = { fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 500, display: 'block', marginBottom: 4 };
 const sectionStyle = { background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}`, marginBottom: 12 };
+const ROBOTO_STACK = "'Roboto', Arial, sans-serif";
+const WAVEGUARD_TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum'];
+
+function inferServiceCadence(service) {
+  const name = String(typeof service === 'string' ? service : service?.name || '').toLowerCase();
+  const frequency = String(typeof service === 'object' ? service?.frequency || '' : '').toLowerCase();
+  const billingType = String(typeof service === 'object' ? service?.billing_type || '' : '')
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
+  const visitsPerYear = Number(typeof service === 'object' ? service?.visits_per_year : null);
+  if (billingType && billingType !== 'recurring') return { cadence: 'one_time', intervalDays: 30 };
+  if (/\bevery[_\s-]*6[_\s-]*weeks?\b/.test(frequency)) return { cadence: 'custom', intervalDays: 42 };
+  if (['bimonthly', 'bi_monthly', 'every_2_months'].includes(frequency)) return { cadence: 'bimonthly', intervalDays: 30 };
+  if (['quarterly', 'every_3_months'].includes(frequency)) return { cadence: 'quarterly', intervalDays: 30 };
+  if (['triannual', 'every_4_months'].includes(frequency)) return { cadence: 'triannual', intervalDays: 30 };
+  if (['semiannual', 'semi_annual', 'biannual', 'every_6_months'].includes(frequency)) return { cadence: 'semiannual', intervalDays: 30 };
+  if (['annual', 'yearly', 'every_12_months'].includes(frequency)) return { cadence: 'annual', intervalDays: 30 };
+  if (frequency === 'monthly') return { cadence: 'monthly', intervalDays: 30 };
+  if (billingType === 'recurring') {
+    if (visitsPerYear === 12) return { cadence: 'monthly', intervalDays: 30 };
+    if (visitsPerYear === 6) return { cadence: 'bimonthly', intervalDays: 30 };
+    if (visitsPerYear === 4) return { cadence: 'quarterly', intervalDays: 30 };
+    if (visitsPerYear === 3) return { cadence: 'triannual', intervalDays: 30 };
+    if (visitsPerYear === 2) return { cadence: 'semiannual', intervalDays: 30 };
+    if (visitsPerYear === 1) return { cadence: 'annual', intervalDays: 30 };
+  }
+  if (/\bevery\s*6\s*weeks?\b/.test(name)) return { cadence: 'custom', intervalDays: 42 };
+  if (/\bbi[-\s]?monthly\b|\bevery\s*2\s*months?\b/.test(name)) return { cadence: 'bimonthly', intervalDays: 30 };
+  if (/\bquarterly\b|\bevery\s*3\s*months?\b/.test(name)) return { cadence: 'quarterly', intervalDays: 30 };
+  if (/\btri[-\s]?annual\b|\bevery\s*4\s*months?\b/.test(name)) return { cadence: 'triannual', intervalDays: 30 };
+  if (/\bsemi[-\s]?annual\b|\bevery\s*6\s*months?\b/.test(name)) return { cadence: 'semiannual', intervalDays: 30 };
+  if (/\bannual\b|\byearly\b|\bevery\s*12\s*months?\b/.test(name)) return { cadence: 'annual', intervalDays: 30 };
+  if (/\bmonthly\b/.test(name)) return { cadence: 'monthly', intervalDays: 30 };
+  return { cadence: 'one_time', intervalDays: 30 };
+}
+
+function discountAvailableForCustomer(discount, customer) {
+  const requiredTier = discount?.requires_waveguard_tier || '';
+  if (!requiredTier) return !discount?.is_waveguard_tier_discount;
+  const customerTier = customer?.tier || customer?.waveguard_tier || '';
+  if (discount?.is_waveguard_tier_discount) return customerTier === requiredTier;
+  const requiredIdx = WAVEGUARD_TIER_ORDER.indexOf(requiredTier);
+  const customerIdx = WAVEGUARD_TIER_ORDER.indexOf(customerTier);
+  return requiredIdx < 0 || customerIdx >= requiredIdx;
+}
 
 function nthWeekdayOfMonth(year, month, nth, weekday) {
   const first = new Date(year, month, 1, 12, 0, 0);
@@ -196,6 +251,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           id: s.id,
           name: s.name,
           category: s.category,
+          billing_type: s.billing_type,
+          frequency: s.frequency,
+          visits_per_year: s.visits_per_year,
           duration: s.default_duration_minutes,
           priceMin: s.price_range_min ?? s.base_price,
           priceMax: s.price_range_max ?? s.base_price,
@@ -239,10 +297,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // recurring cadence group on this appointment, matching the prior
   // single-form-level count semantics.
   const [recurringCount, setRecurringCount] = useState('');
-  const [discountType, setDiscountType] = useState('');
-  const [discountAmount, setDiscountAmount] = useState('');
   const [discountPresets, setDiscountPresets] = useState([]);
-  const [discountPresetId, setDiscountPresetId] = useState('');
   const [lineDiscountQueries, setLineDiscountQueries] = useState({});
   const [lineDiscountOpenIdx, setLineDiscountOpenIdx] = useState(null);
 
@@ -250,9 +305,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     return discountPresets.filter((d) => (
       d.is_active
       && d.show_in_invoices
+      && discountAvailableForCustomer(d, selectedCustomer)
     ));
-  }, [discountPresets]);
-  const appointmentDiscountPresets = lineDiscountPresets;
+  }, [discountPresets, selectedCustomer]);
 
   // Notes & Confirm state
   const [customerNotes, setCustomerNotes] = useState('');
@@ -295,14 +350,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   };
   const addServiceFromCatalog = (svc) => {
     const defaultPrice = svc.priceMin || svc.base_price || '';
+    const inferred = inferServiceCadence(svc);
     setServices((arr) => [
       ...arr,
       {
         ...svc,
         lineId: `svc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         price: defaultPrice ? String(defaultPrice) : '',
-        cadence: 'one_time',
-        intervalDays: 30,
+        cadence: inferred.cadence,
+        intervalDays: inferred.intervalDays,
         nth: 3,        // default "3rd"
         weekday: 3,    // default "Wednesday"
         boosterMonths: [],
@@ -415,16 +471,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     })();
   }, []);
 
-  const applyDiscountPreset = (id) => {
-    setDiscountPresetId(id);
-    if (!id) { setDiscountType(''); setDiscountAmount(''); return; }
-    if (id === 'custom') return;
-    const d = appointmentDiscountPresets.find(x => String(x.id) === String(id));
-    if (!d) return;
-    setDiscountType(d.discount_type);
-    setDiscountAmount(String(d.amount ?? ''));
-  };
-
   // Customer search. Tracks loading so the dropdown can show "Searching…"
   // and "No matches" states — without them, a slow network or zero-hit
   // query looks identical to a broken search (no UI ever appears) and
@@ -484,22 +530,26 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       const dur = totalDuration || 60;
       const today = new Date();
       const from = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-      const endD = new Date(today); endD.setDate(endD.getDate() + 7);
+      const searchFrom = apptDate && apptDate > from ? apptDate : from;
+      const endD = new Date(searchFrom + 'T12:00:00'); endD.setDate(endD.getDate() + 7);
       const to = `${endD.getFullYear()}-${String(endD.getMonth() + 1).padStart(2, '0')}-${String(endD.getDate()).padStart(2, '0')}`;
       const r = await adminFetch('/admin/schedule/find-time', {
         method: 'POST',
         body: JSON.stringify({
           customerId: selectedCustomer.id,
+          serviceType: selectedService.name,
+          serviceId: selectedService.id || undefined,
           durationMinutes: dur,
-          dateFrom: from,
+          dateFrom: searchFrom,
           dateTo: to,
+          technicianId: techMode === 'choose' && techId ? techId : undefined,
           topN: 8,
         }),
       });
       setTimeSlots(r.slots || []);
     } catch (e) {
       setSlotError(e.message || 'Failed to find times');
-      setTimeSlots([]);
+      setTimeSlots(null);
     }
     setFindingTimes(false);
   };
@@ -574,12 +624,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // a retry click skips the keys that landed so we don't double-book the
   // customer. Reset on successful close.
   const createdGroupKeysRef = useRef(new Set());
-  // For one-time discounts (fixed_amount / free_service) we send the
-  // discount on the FIRST POSTed group only. Persist across retries so a
-  // transient failure between groups can't re-send the discount on the
-  // next attempt's first not-yet-created group. Reset on successful close.
-  const discountConsumedRef = useRef(false);
-
   // Recurring preview — for each cadence group, produce up to 4 future
   // dates Virginia will land on. Honors skip-weekends shift so what's
   // shown matches what gets saved. Renders below the Visits input.
@@ -643,12 +687,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const groups = groupServicesByCadence(services);
     const results = [];
     let firstError = null;
-    // Discount semantics across cadence groups:
-    //   - percentage: rides every group (each visit gets the same % off).
-    //   - fixed_amount / free_service: must apply ONCE across the booking,
-    //     otherwise mixed-cadence ($50 off applied to monthly AND quarterly)
-    //     would multiply the discount.
-    const discountAppliesToAll = discountType === 'percentage' || discountType === 'variable_percentage';
     for (const group of groups) {
       const key = groupKey(group);
       // Skip groups already created in a prior attempt of this submit
@@ -741,19 +779,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 return arr.length > 0 ? arr : undefined;
               })()
             : undefined,
-          discountType: (discountType && (discountAppliesToAll || !discountConsumedRef.current)) ? discountType : undefined,
-          discountId: (discountType && discountPresetId && discountPresetId !== 'custom' && (discountAppliesToAll || !discountConsumedRef.current))
-            ? discountPresetId
-            : undefined,
-          discountAmount: (discountType && discountAmount !== '' && (discountAppliesToAll || !discountConsumedRef.current))
-            ? Number(discountAmount)
-            : undefined,
           createInvoice: true,
           sendConfirmation: sendSms,
         };
         const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
         createdGroupKeysRef.current.add(key);
-        if (discountType && !discountAppliesToAll) discountConsumedRef.current = true;
         results.push(r);
       } catch (e) {
         firstError = { label: groupLabel(group), message: e.message };
@@ -778,7 +808,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setToast(message);
     setTimeout(() => {
       createdGroupKeysRef.current = new Set();
-      discountConsumedRef.current = false;
       onCreated?.({ id: results[0]?.id, scheduledDate: apptDate });
     }, 1200);
   };
@@ -788,6 +817,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     background: isMobile ? D.bg : 'rgba(0,0,0,0.3)',
     display: 'flex', alignItems: isMobile ? 'stretch' : 'center', justifyContent: 'center',
     overflow: 'auto', padding: isMobile ? 0 : 20,
+    fontFamily: ROBOTO_STACK,
   };
 
   const modalStyle = {
@@ -795,9 +825,36 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     maxHeight: isMobile ? '100%' : '90vh', overflow: 'auto',
     borderRadius: isMobile ? 0 : 16, padding: isMobile ? 0 : 24,
     border: isMobile ? 'none' : `1px solid ${D.border}`,
+    fontFamily: ROBOTO_STACK,
   };
 
   const canSubmit = !!selectedCustomer && !!selectedService && !saving;
+  const serviceLineColumns = isMobile
+    ? 'minmax(0, 1fr) 112px'
+    : 'minmax(260px, 1fr) 132px 170px 36px';
+  const serviceLineGrid = (isDiscount = false) => ({
+    display: 'grid',
+    gridTemplateColumns: serviceLineColumns,
+    gap: 8,
+    alignItems: 'start',
+    padding: isDiscount ? '8px 0 8px 18px' : '12px 0',
+    borderTop: `1px solid ${D.border}`,
+    background: isDiscount ? '#F0FDF4' : 'transparent',
+    borderRadius: isDiscount ? 8 : 0,
+  });
+  const serviceFieldLabel = (label, align = 'left') => (
+    <div style={{
+      fontSize: 11,
+      color: D.muted,
+      textTransform: 'uppercase',
+      letterSpacing: 0.6,
+      marginBottom: 5,
+      textAlign: align,
+      fontWeight: 500,
+    }}>
+      {label}
+    </div>
+  );
 
   return (
     <div style={overlayStyle} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
@@ -856,7 +913,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             <button onClick={onClose} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 22, cursor: 'pointer', minWidth: 48, minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
           </div>
         )}
-        <div style={{ padding: isMobile ? '0 16px 24px' : 0 }}>
+        <div style={{ padding: isMobile ? '0 16px calc(96px + env(safe-area-inset-bottom))' : 0 }}>
 
         {/* Toast */}
         {toast && <div style={{ background: '#FFFFFF', border: `1px solid ${D.border}`, borderRadius: 6, padding: '10px 14px', marginBottom: 12, color: D.text, fontSize: 13, fontWeight: 500 }}>{toast}</div>}
@@ -970,53 +1027,80 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           )}
         </div>
 
-        {/* Section 2: Services — stack of line items. The first row is the
-            primary service (drives serviceType + service_id on the parent
-            appointment); rows beyond that persist as scheduled_service_addons
-            so a single visit can carry e.g. quarterly pest + rodent stations. */}
+        {/* Section 2: Services — invoice-style line items. Service rows
+            remain appointment-aware (cadence, boosters, duration), while
+            discounts render as their own negative line under the service. */}
         <div style={sectionStyle}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 10, flexWrap: 'wrap' }}>
             <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B' }}>
               Services {services.length > 1 ? <span style={{ fontWeight: 400, color: D.muted, fontSize: 12 }}>({services.length})</span> : null}
             </div>
             {services.length > 0 && subtotal > 0 && (
-              <div style={{ fontSize: 13, fontWeight: 600, color: '#18181B' }}>
-                Total: ${netSubtotal.toFixed(2)}
+              <div style={{ fontSize: 13, fontWeight: 600, color: '#18181B', textAlign: 'right' }}>
+                <div>Total: ${netSubtotal.toFixed(2)}</div>
+                {lineDiscountTotal > 0 && (
+                  <div style={{ fontSize: 11, fontWeight: 500, color: D.muted }}>
+                    Discounts: -${lineDiscountTotal.toFixed(2)}
+                  </div>
+                )}
               </div>
             )}
           </div>
 
-          {/* Existing service line items */}
+          {services.length > 0 && !isMobile && (
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: serviceLineColumns,
+              gap: 8,
+              padding: '0 0 8px',
+              borderBottom: `1px solid ${D.border}`,
+              color: D.muted,
+              fontSize: 11,
+              textTransform: 'uppercase',
+              letterSpacing: 0.6,
+            }}>
+              <div>Item</div>
+              <div>Rate</div>
+              <div>Repeats</div>
+              <div />
+            </div>
+          )}
+
           {services.map((svc, idx) => (
-            <div key={`line-${idx}-${svc.id || svc.name}`} style={{ background: '#FFFFFF', borderRadius: 10, padding: 12, border: `1px solid #E4E4E7`, marginBottom: 8 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 600, color: '#18181B', fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{svc.name}</div>
-                  {idx === 0 && services.length > 1 && (
-                    <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 2 }}>Primary</div>
+            <div key={`line-${idx}-${svc.lineId || svc.id || svc.name}`}>
+              <div style={serviceLineGrid(false)}>
+                <div style={{ minWidth: 0 }}>
+                  {isMobile && serviceFieldLabel(idx === 0 ? 'Primary service' : 'Additional service')}
+                  <div style={{
+                    ...inputStyle,
+                    minHeight: 44,
+                    display: 'flex',
+                    alignItems: 'center',
+                    background: '#FFFFFF',
+                    overflow: 'hidden',
+                  }}>
+                    <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{svc.name}</span>
+                  </div>
+                  {!isMobile && idx === 0 && services.length > 1 && (
+                    <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 4 }}>Primary</div>
                   )}
                 </div>
-                <button
-                  onClick={() => removeServiceAt(idx)}
-                  aria-label="Remove service"
-                  style={{ background: 'none', border: 'none', color: D.muted, cursor: 'pointer', fontSize: 16, minWidth: 44, minHeight: 44, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                >✕</button>
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: svc.cadence === 'custom' ? '1fr 1fr 100px' : '1fr 1fr', gap: 8 }}>
-                <div>
-                  <label style={labelStyle}>Price</label>
-                  <div style={{ position: 'relative' }}>
-                    <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: D.muted, fontSize: 14 }}>$</span>
-                    <input
-                      type="number"
-                      value={svc.price ?? ''}
-                      onChange={(e) => updateServicePrice(idx, e.target.value)}
-                      style={{ ...inputStyle, paddingLeft: 28 }}
-                    />
-                  </div>
+
+                <div style={{ position: 'relative' }}>
+                  {isMobile && serviceFieldLabel('Rate')}
+                  <span style={{ position: 'absolute', left: 10, top: isMobile ? 43 : 22, transform: 'translateY(-50%)', color: D.muted, fontSize: isMobile ? 16 : 13 }}>$</span>
+                  <input
+                    type="number"
+                    value={svc.price ?? ''}
+                    onChange={(e) => updateServicePrice(idx, e.target.value)}
+                    placeholder="0.00"
+                    step="0.01"
+                    style={{ ...inputStyle, paddingLeft: 24 }}
+                  />
                 </div>
-                <div>
-                  <label style={labelStyle}>Repeats</label>
+
+                <div style={{ gridColumn: isMobile ? '1 / -1' : undefined }}>
+                  {isMobile && serviceFieldLabel('Repeats')}
                   <select
                     value={svc.cadence || 'one_time'}
                     onChange={(e) => updateServiceCadence(idx, e.target.value)}
@@ -1027,42 +1111,95 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     ))}
                   </select>
                 </div>
+
+                <button
+                  onClick={() => removeServiceAt(idx)}
+                  aria-label="Remove line item"
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: D.red,
+                    cursor: 'pointer',
+                    fontSize: 18,
+                    padding: isMobile ? '8px 12px' : '6px 4px',
+                    minHeight: 44,
+                    minWidth: 44,
+                    gridColumn: isMobile ? '2' : undefined,
+                    gridRow: isMobile ? '3' : undefined,
+                  }}
+                >x</button>
+
                 {svc.cadence === 'custom' && (
-                  <div>
-                    <label style={labelStyle}>Days</label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={365}
-                      value={svc.intervalDays ?? 30}
-                      onChange={(e) => updateServiceInterval(idx, e.target.value)}
-                      style={inputStyle}
-                    />
+                  <div style={{ gridColumn: '1 / -1', display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '140px', gap: 8 }}>
+                    <div>
+                      {serviceFieldLabel('Days')}
+                      <input
+                        type="number"
+                        min={1}
+                        max={365}
+                        value={svc.intervalDays ?? 30}
+                        onChange={(e) => updateServiceInterval(idx, e.target.value)}
+                        style={inputStyle}
+                      />
+                    </div>
                   </div>
                 )}
-              </div>
-              <div style={{ marginTop: 8, position: 'relative' }}>
-                <label style={labelStyle}>Line Discount</label>
-                {svc.lineDiscount ? (
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, background: '#F4F4F5', border: `1px solid ${D.border}`, borderRadius: 6, padding: '9px 10px', minHeight: 42 }}>
-                    <div style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: D.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {svc.lineDiscount.name} — {formatDiscountLabel(svc.lineDiscount)}
-                      </div>
-                      {lineDiscountAmount(svc) > 0 && (
-                        <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-                          -${lineDiscountAmount(svc).toFixed(2)} on this service
-                        </div>
-                      )}
+
+                {svc.cadence === 'monthly_nth_weekday' && (
+                  <div style={{ gridColumn: '1 / -1', display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : '140px 180px', gap: 8 }}>
+                    <div>
+                      {serviceFieldLabel('Nth')}
+                      <select
+                        value={svc.nth ?? 3}
+                        onChange={(e) => updateServiceNth(idx, parseInt(e.target.value))}
+                        style={inputStyle}
+                      >
+                        {NTH_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => clearLineDiscount(idx)}
-                      style={{ background: 'none', border: 'none', color: D.muted, cursor: 'pointer', fontSize: 13, minHeight: 34, minWidth: 52 }}
-                    >Remove</button>
+                    <div>
+                      {serviceFieldLabel('Weekday')}
+                      <select
+                        value={svc.weekday ?? 3}
+                        onChange={(e) => updateServiceWeekday(idx, parseInt(e.target.value))}
+                        style={inputStyle}
+                      >
+                        {WEEKDAY_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    </div>
                   </div>
-                ) : (
-                  <>
+                )}
+
+                {svc.cadence && svc.cadence !== 'one_time' && (
+                  <div style={{ gridColumn: '1 / -1' }}>
+                    {serviceFieldLabel('Booster months (optional)')}
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                      {MONTH_CHIPS.map((m) => {
+                        const on = (svc.boosterMonths || []).includes(m.value);
+                        return (
+                          <button
+                            key={m.value}
+                            type="button"
+                            onClick={() => toggleBoosterMonth(idx, m.value)}
+                            aria-label={`Booster month ${m.value}`}
+                            style={{
+                              width: 32, height: 32, borderRadius: 6, fontSize: 12,
+                              fontWeight: 600, cursor: 'pointer',
+                              background: on ? D.teal : 'transparent',
+                              color: on ? '#fff' : D.muted,
+                              border: `1px solid ${on ? D.teal : D.border}`,
+                              padding: 0,
+                            }}
+                          >{m.label}</button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {!svc.lineDiscount && (
+                  <div style={{ gridColumn: '1 / -1', position: 'relative', padding: '0 0 2px' }}>
+                    {serviceFieldLabel('Discount')}
                     <input
                       value={lineDiscountQueries[svc.lineId || idx] || ''}
                       onChange={(e) => {
@@ -1071,9 +1208,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                       }}
                       onFocus={() => { if (lineDiscountPresets.length > 0) setLineDiscountOpenIdx(idx); }}
                       onBlur={() => setTimeout(() => setLineDiscountOpenIdx((current) => (current === idx ? null : current)), 150)}
-                      placeholder={lineDiscountPresets.length === 0 ? 'No invoice discounts are available' : 'Search discounts for this service...'}
+                      placeholder={lineDiscountPresets.length === 0 ? 'No invoice discounts are available' : `Search discounts${svc.name ? ` for ${svc.name}` : ''}...`}
                       disabled={lineDiscountPresets.length === 0}
-                      style={{ ...inputStyle, fontSize: 13, minHeight: 42, opacity: lineDiscountPresets.length === 0 ? 0.65 : 1 }}
+                      style={{ ...inputStyle, fontSize: isMobile ? 15 : 12, minHeight: isMobile ? 42 : 36, padding: isMobile ? '10px 12px' : '8px 10px', opacity: lineDiscountPresets.length === 0 ? 0.65 : 1 }}
                     />
                     {lineDiscountOpenIdx === idx && (
                       <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, zIndex: 18, maxHeight: 220, overflow: 'auto', marginTop: 4, boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }}>
@@ -1086,71 +1223,36 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                             style={{ padding: '10px 12px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 13, display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}
                           >
                             <span style={{ color: D.text, fontWeight: 600, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</span>
-                            <span style={{ color: D.muted, fontSize: 12, whiteSpace: 'nowrap' }}>{formatDiscountLabel(d)}</span>
+                            <span style={{ color: D.text, fontFamily: ROBOTO_STACK, fontSize: 12, whiteSpace: 'nowrap' }}>{formatDiscountLabel(d)}</span>
                           </div>
                         ))}
                       </div>
                     )}
-                  </>
+                  </div>
                 )}
               </div>
-              {lineBaseAmount(svc) > 0 && lineDiscountAmount(svc) > 0 && (
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8, fontSize: 12, color: D.muted }}>
-                  <span>Line total</span>
-                  <span>
-                    <span style={{ textDecoration: 'line-through', marginRight: 6 }}>${lineBaseAmount(svc).toFixed(2)}</span>
-                    <strong style={{ color: D.text }}>${lineNetAmount(svc).toFixed(2)}</strong>
-                  </span>
-                </div>
-              )}
-              {svc.cadence === 'monthly_nth_weekday' && (
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
-                  <div>
-                    <label style={labelStyle}>Nth</label>
-                    <select
-                      value={svc.nth ?? 3}
-                      onChange={(e) => updateServiceNth(idx, parseInt(e.target.value))}
-                      style={inputStyle}
-                    >
-                      {NTH_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                    </select>
+
+              {svc.lineDiscount && (
+                <div style={serviceLineGrid(true)}>
+                  <div style={{ minWidth: 0, gridColumn: isMobile ? '1 / -1' : undefined }}>
+                    {isMobile && serviceFieldLabel('Discount')}
+                    <div style={{ fontSize: 13, fontWeight: 600, color: D.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {svc.lineDiscount.name} ({svc.name})
+                    </div>
+                    <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+                      {formatDiscountLabel(svc.lineDiscount)}
+                    </div>
                   </div>
-                  <div>
-                    <label style={labelStyle}>Weekday</label>
-                    <select
-                      value={svc.weekday ?? 3}
-                      onChange={(e) => updateServiceWeekday(idx, parseInt(e.target.value))}
-                      style={inputStyle}
-                    >
-                      {WEEKDAY_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                    </select>
+                  <div style={{ fontFamily: ROBOTO_STACK, fontSize: 13, fontWeight: 600, color: D.text, textAlign: isMobile ? 'left' : 'right', whiteSpace: 'nowrap' }}>
+                    -${lineDiscountAmount(svc).toFixed(2)}
                   </div>
-                </div>
-              )}
-              {svc.cadence && svc.cadence !== 'one_time' && (
-                <div style={{ marginTop: 10 }}>
-                  <label style={labelStyle}>Booster months (optional)</label>
-                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                    {MONTH_CHIPS.map((m) => {
-                      const on = (svc.boosterMonths || []).includes(m.value);
-                      return (
-                        <button
-                          key={m.value}
-                          type="button"
-                          onClick={() => toggleBoosterMonth(idx, m.value)}
-                          aria-label={`Booster month ${m.value}`}
-                          style={{
-                            width: 32, height: 32, borderRadius: 6, fontSize: 12,
-                            fontWeight: 600, cursor: 'pointer',
-                            background: on ? D.teal : 'transparent',
-                            color: on ? '#fff' : D.muted,
-                            border: `1px solid ${on ? D.teal : D.border}`,
-                            padding: 0,
-                          }}
-                        >{m.label}</button>
-                      );
-                    })}
-                  </div>
+                  <div />
+                  <button
+                    type="button"
+                    onClick={() => clearLineDiscount(idx)}
+                    aria-label="Remove discount"
+                    style={{ background: 'none', border: 'none', color: D.red, cursor: 'pointer', fontSize: 18, padding: isMobile ? '8px 12px' : '6px 4px', minHeight: 44, minWidth: 44 }}
+                  >x</button>
                 </div>
               )}
             </div>
@@ -1158,12 +1260,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
           {/* Search box — shown initially (no services yet) or when adding another */}
           {(services.length === 0 || addingService) && (
-            <div>
+            <div style={{ borderTop: services.length > 0 ? `1px solid ${D.border}` : 'none', paddingTop: services.length > 0 ? 12 : 0 }}>
               <input
                 type="text"
                 value={serviceSearch}
                 onChange={(e) => setServiceSearch(e.target.value)}
-                placeholder={services.length === 0 ? 'Search by service name...' : 'Search to add another service...'}
+                placeholder={services.length === 0 ? 'Search services' : 'Search to add service'}
                 style={inputStyle}
                 autoFocus={addingService}
                 // See customer-search input for the iOS autofill rationale.
@@ -1184,7 +1286,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                       className="waves-sq-row"
                       style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
                     >
-                      <span style={{ flex: 1, fontWeight: 500 }}>{svc.name}</span>
+                      <span style={{ flex: 1, fontWeight: 600, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{svc.name}</span>
+                      {(svc.base_price != null || svc.priceMin != null) && (
+                        <span style={{ color: D.text, fontFamily: ROBOTO_STACK, fontSize: 12, whiteSpace: 'nowrap' }}>
+                          ${Number(svc.base_price ?? svc.priceMin).toFixed(2)}
+                        </span>
+                      )}
                     </div>
                   ))}
                   {!serviceLoading && serviceResults.length === 0 && (
@@ -1214,12 +1321,22 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               type="button"
               onClick={() => setAddingService(true)}
               style={{
-                width: '100%', padding: '10px 12px', background: 'transparent',
-                border: `1px dashed ${D.border}`, borderRadius: 8, color: D.text,
-                fontSize: 13, fontWeight: 500, cursor: 'pointer', minHeight: 44,
-                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                padding: isMobile ? '12px 14px' : '8px 12px',
+                background: 'transparent',
+                border: 'none',
+                color: D.text,
+                fontSize: isMobile ? 14 : 12,
+                fontWeight: 600,
+                cursor: 'pointer',
+                minHeight: 44,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 6,
+                textTransform: 'uppercase',
+                letterSpacing: 0.4,
               }}
-            >+ Add another service</button>
+            >+ Add service</button>
           )}
 
           {/* Visit count — applies to every recurring cadence group on
@@ -1387,33 +1504,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           )}
         </div>
 
-        {/* Section 3.5: Discount — applies to both one-time and recurring.
-            Lives in its own section so the discount picker is always
-            visible, regardless of the Recurring toggle above. */}
-        <div style={sectionStyle}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B', marginBottom: 10 }}>Discount</div>
-          <label style={labelStyle}>Discount (optional)</label>
-          <select
-            value={discountPresetId}
-            onChange={(e) => applyDiscountPreset(e.target.value)}
-            style={inputStyle}
-          >
-            <option value="">No discount</option>
-            {appointmentDiscountPresets.map((d) => {
-              const amt = d.discount_type === 'free_service'
-                ? 'Free'
-                : d.discount_type === 'percentage' || d.discount_type === 'variable_percentage'
-                  ? `${Number(d.amount).toFixed(d.amount % 1 ? 2 : 0)}%`
-                  : `$${Number(d.amount).toFixed(2)}`;
-              return (
-                <option key={d.id} value={d.id}>
-                  {d.name} — {amt}
-                </option>
-              );
-            })}
-          </select>
-        </div>
-
         {/* Section 3b: Technician — its own section below Recurring */}
         <div style={sectionStyle}>
           <div style={{ fontSize: 14, fontWeight: 600, color: '#18181B', marginBottom: 10 }}>Technician</div>
@@ -1462,6 +1552,40 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             </button>
           )}
         </div>
+        {isMobile && (
+          <div style={{
+            position: 'fixed',
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: 20,
+            padding: '10px 16px calc(10px + env(safe-area-inset-bottom))',
+            background: 'rgba(250,250,250,0.96)',
+            borderTop: `1px solid ${D.border}`,
+            boxShadow: '0 -8px 20px rgba(0,0,0,0.06)',
+            fontFamily: ROBOTO_STACK,
+          }}>
+            <button
+              type="button"
+              disabled={!canSubmit}
+              onClick={handleSubmit}
+              style={{
+                width: '100%',
+                minHeight: 52,
+                border: 'none',
+                borderRadius: 8,
+                background: canSubmit ? D.text : '#E4E4E7',
+                color: canSubmit ? D.white : '#A1A1AA',
+                fontSize: 15,
+                fontWeight: 600,
+                cursor: canSubmit ? 'pointer' : 'default',
+                fontFamily: ROBOTO_STACK,
+              }}
+            >
+              {saving ? 'Scheduling...' : 'Schedule appointment'}
+            </button>
+          </div>
+        )}
         </div>
       </div>
     </div>
