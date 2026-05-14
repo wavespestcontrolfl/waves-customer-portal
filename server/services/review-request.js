@@ -143,6 +143,15 @@ function calculateReviewSendTime(completedAt, serviceType) {
   return nextDayAtHour(completedAt, MORNING);
 }
 
+async function retryReviewRequestAfterTemplateMiss(requestId) {
+  const retryAt = new Date(Date.now() + 5 * 60 * 1000);
+  await db("review_requests").where({ id: requestId }).update({
+    status: "pending",
+    scheduled_for: retryAt,
+  });
+  return retryAt;
+}
+
 // ══════════════════════════════════════════════════════════════
 const ReviewService = {
   /**
@@ -272,7 +281,7 @@ const ReviewService = {
     const techName = request.tech_name || "Our team";
 
     // Body sourced from sms_templates.review_request. If the row is
-    // missing/disabled, skip the send rather than fall back to inline copy.
+    // missing/disabled, requeue instead of falling back to inline copy.
     let body = null;
     try {
       const tpl = require("../routes/admin-sms-templates");
@@ -285,11 +294,9 @@ const ReviewService = {
       /* template lookup failed → null */
     }
     if (!body) {
-      await db("review_requests").where({ id: requestId }).update({
-        status: "suppressed",
-      });
+      const retryAt = await retryReviewRequestAfterTemplateMiss(requestId);
       logger.info(
-        `[review] review_request template missing/disabled — skipping requestId=${requestId}`,
+        `[review] review_request template missing/disabled — requestId=${requestId} requeued for ${retryAt.toISOString()}`,
       );
       return;
     }

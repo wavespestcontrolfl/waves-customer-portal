@@ -1202,7 +1202,7 @@ const InvoiceService = {
         .catch(() => {});
 
       logger.info(
-        `[invoice] SMS sent for ${invoice.invoice_number} to ${customer.phone}`,
+        `[invoice] SMS sent for ${invoice.invoice_number} (customerId=${customer.id})`,
       );
       return { sent: true, payUrl };
     } catch (err) {
