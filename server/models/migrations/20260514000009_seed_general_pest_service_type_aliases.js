@@ -50,6 +50,7 @@ const SERVICE_TYPE_ALIASES = [
   'Monthly Pest Control Service',
   'Bi-Monthly Pest Control Service',
   'Quarterly Pest Control Service',
+  'Semiannual Pest Control Service',
   // Bare cadence + Pest Control (legacy)
   'Monthly Pest Control',
   'Bi-Monthly Pest Control',
