@@ -27,6 +27,10 @@ const TwilioService = require('./twilio');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { classifyServiceIntent } = require('./sms-service-intent');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const {
+  blockIfAutomatedEstimateDuplicate,
+  withAutomatedEstimatePhoneLock,
+} = require('./estimate-automation-duplicates');
 
 const ADAM_NOTIFY_PHONE = '+19415993489';
 
@@ -150,23 +154,39 @@ async function createOrUpdateDraftEstimate(customer, interest) {
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + 7);
 
-  const [estimate] = await db('estimates').insert({
-    customer_id: customer.id,
-    customer_name: customerName,
-    customer_phone: customer.phone,
-    customer_email: customer.email || null,
-    address: customer.address_line1 || '',
-    status: 'draft',
-    source: 'sms_intake',
-    service_interest: serviceLabel,
-    lead_source: customer.lead_source || null,
-    lead_source_detail: customer.lead_source_detail || null,
-    token,
-    expires_at: expiresAt,
-    notes: `Auto-created from SMS intake. Customer selected: ${serviceLabel}. Pricing TBD.`,
-  }).returning('*');
+  const result = await withAutomatedEstimatePhoneLock(customer.phone, async (trx) => {
+    const duplicateBlock = await blockIfAutomatedEstimateDuplicate(customer.phone, { database: trx });
+    if (duplicateBlock) {
+      logger.info(`[lead-intake] Draft creation blocked by duplicate estimate ${duplicateBlock.existingEstimateId} for customer ${customer.id}`);
+      return {
+        automationBlockedDuplicate: true,
+        existingEstimateId: duplicateBlock.existingEstimateId,
+        status: duplicateBlock.existingStatus,
+        source: duplicateBlock.existingSource,
+        message: duplicateBlock.message,
+      };
+    }
 
-  return estimate;
+    const [estimate] = await trx('estimates').insert({
+      customer_id: customer.id,
+      customer_name: customerName,
+      customer_phone: customer.phone,
+      customer_email: customer.email || null,
+      address: customer.address_line1 || '',
+      status: 'draft',
+      source: 'sms_intake',
+      service_interest: serviceLabel,
+      lead_source: customer.lead_source || null,
+      lead_source_detail: customer.lead_source_detail || null,
+      token,
+      expires_at: expiresAt,
+      notes: `Auto-created from SMS intake. Customer selected: ${serviceLabel}. Pricing TBD.`,
+    }).returning('*');
+
+    return estimate;
+  });
+
+  return result;
 }
 
 async function notifyAdam(customer, interest, estimate) {
@@ -176,7 +196,9 @@ async function notifyAdam(customer, interest, estimate) {
   const portalUrl = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
   const estimateUrl = estimate ? `${portalUrl}/admin/estimates` : portalUrl;
 
-  const message = `🟢 New SMS lead ready to price!\n${name}\n📞 ${customer.phone}\n📍 ${address}\nService: ${serviceLabel}\nEstimate: ${estimateUrl}`;
+  const message = estimate?.automationBlockedDuplicate
+    ? `🟡 Duplicate estimate blocked by automation\n${name}\n📞 ${customer.phone}\n📍 ${address}\nService: ${serviceLabel}\nExisting estimate: ${estimate.existingEstimateId}\nCreate a new estimate manually in Waves admin if needed.`
+    : `🟢 New SMS lead ready to price!\n${name}\n📞 ${customer.phone}\n📍 ${address}\nService: ${serviceLabel}\nEstimate: ${estimateUrl}`;
 
   try {
     await TwilioService.sendSMS(ADAM_NOTIFY_PHONE, message, { messageType: 'internal_alert' });
@@ -213,7 +235,11 @@ async function handleIntakeReply(customer, body) {
         lead_intake_status: 'estimate_drafted',
       });
       await notifyAdam(customer, cls.interest, estimate);
-      logger.info(`[lead-intake] Drafted estimate for ${customer.first_name} (${cls.interest}) — classifier=${cls.method}`);
+      if (estimate?.automationBlockedDuplicate) {
+        logger.info(`[lead-intake] Duplicate estimate blocked for customer ${customer.id} (${cls.interest}) — classifier=${cls.method}`);
+      } else {
+        logger.info(`[lead-intake] Drafted estimate for customer ${customer.id} (${cls.interest}) — classifier=${cls.method}`);
+      }
       return { handled: true, next: 'estimate_drafted' };
     }
 
@@ -249,7 +275,11 @@ async function handleIntakeReply(customer, body) {
       updated_at: new Date(),
     });
     await notifyAdam(customer, interest, estimate);
-    logger.info(`[lead-intake] Drafted estimate for ${customer.first_name} (${interest}) after address capture`);
+    if (estimate?.automationBlockedDuplicate) {
+      logger.info(`[lead-intake] Duplicate estimate blocked for customer ${customer.id} (${interest}) after address capture`);
+    } else {
+      logger.info(`[lead-intake] Drafted estimate for customer ${customer.id} (${interest}) after address capture`);
+    }
     return { handled: true, next: 'estimate_drafted' };
   }
 

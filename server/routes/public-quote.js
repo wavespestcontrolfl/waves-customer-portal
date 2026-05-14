@@ -13,6 +13,10 @@ const { resolveLeadSource } = require('../services/lead-source-resolver');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { normalizeLeadAddress } = require('../utils/address-normalizer');
+const {
+  blockIfAutomatedEstimateDuplicate,
+  withAutomatedEstimatePhoneLock,
+} = require('../services/estimate-automation-duplicates');
 
 const WAVES_ADMIN_PHONE = '+19413187612';
 const PORTAL_BASE_URL = 'https://portal.wavespestcontrol.com';
@@ -321,7 +325,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       if (existingEst) {
         await db('estimates').where({ id: existingEst.id }).update({ ...estFields, updated_at: new Date() });
       } else {
-        await db('estimates').insert({ ...estFields, status: 'draft', source: 'quote_wizard' });
+        await withAutomatedEstimatePhoneLock(normalizedPhone || phone, async (trx) => {
+          const duplicateBlock = await blockIfAutomatedEstimateDuplicate(normalizedPhone || phone, { database: trx });
+          if (duplicateBlock) {
+            logger.info(`[public-quote] Estimate mirror blocked by duplicate estimate ${duplicateBlock.existingEstimateId} for lead ${lead.id}`);
+          } else {
+            await trx('estimates').insert({ ...estFields, status: 'draft', source: 'quote_wizard' });
+          }
+        });
       }
     } catch (e) {
       logger.error(`[public-quote] Estimate upsert failed: ${e.message}`);

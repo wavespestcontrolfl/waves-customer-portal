@@ -29,6 +29,10 @@ const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString } = require('../utils/datetime-et');
+const {
+  blockIfAutomatedEstimateDuplicate,
+  withAutomatedEstimatePhoneLock,
+} = require('./estimate-automation-duplicates');
 
 function twilioClient() {
   if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return null;
@@ -814,45 +818,58 @@ const CallRecordingProcessor = {
           logger.info(`[call-proc] Skipping estimate enqueue — draft ${recentDraft.id} exists for ${customerId ? `customer ${customerId}` : 'caller phone'}`);
           estimateQueueResult = { skipped: true, existingEstimateId: recentDraft.id };
         } else {
-          const customerName = [extracted.first_name, extracted.last_name].filter(Boolean).map(capitalizeName).join(' ') || null;
-          const shortId = crypto.randomBytes(4).toString('hex');
-          const nameSlug = (customerName || 'customer').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-          const token = `${nameSlug}-${shortId}`;
-          const expiresAt = new Date();
-          expiresAt.setDate(expiresAt.getDate() + 7);
+          await withAutomatedEstimatePhoneLock(phone, async (trx) => {
+            const duplicateBlock = await blockIfAutomatedEstimateDuplicate(phone, { database: trx });
+            if (duplicateBlock) {
+              logger.info(`[call-proc] Estimate enqueue blocked by duplicate estimate ${duplicateBlock.existingEstimateId} for call ${callSid}`);
+              estimateQueueResult = {
+                skipped: true,
+                reason: duplicateBlock.reason,
+                existingEstimateId: duplicateBlock.existingEstimateId,
+              };
+              return;
+            }
 
-          const isPriority = extracted.lead_quality === 'hot' || extracted.sentiment === 'frustrated';
-          const urgency = extracted.lead_quality === 'hot' ? 3 : extracted.lead_quality === 'warm' ? 2 : 1;
+            const customerName = [extracted.first_name, extracted.last_name].filter(Boolean).map(capitalizeName).join(' ') || null;
+            const shortId = crypto.randomBytes(4).toString('hex');
+            const nameSlug = (customerName || 'customer').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+            const token = `${nameSlug}-${shortId}`;
+            const expiresAt = new Date();
+            expiresAt.setDate(expiresAt.getDate() + 7);
 
-          const [est] = await db('estimates').insert({
-            customer_id: customerId || null,
-            status: 'draft',
-            source: 'call_recording',
-            service_interest: extracted.matched_service || extracted.requested_service || null,
-            is_priority: isPriority,
-            urgency,
-            customer_name: customerName,
-            customer_phone: phone || null,
-            customer_email: extracted.email || null,
-            address: extracted.address_line1 || null,
-            token,
-            expires_at: expiresAt,
-            notes: extracted.call_summary || null,
-            estimate_data: JSON.stringify({
-              callSid: call.twilio_call_sid,
-              leadId: leadId || null,
-              requested_service: extracted.requested_service,
-              matched_service: extracted.matched_service,
-              pain_points: extracted.pain_points,
-              sentiment: extracted.sentiment,
-              lead_quality: extracted.lead_quality,
-              city: extracted.city,
-              zip: extracted.zip,
-            }),
-          }).returning('*');
+            const isPriority = extracted.lead_quality === 'hot' || extracted.sentiment === 'frustrated';
+            const urgency = extracted.lead_quality === 'hot' ? 3 : extracted.lead_quality === 'warm' ? 2 : 1;
 
-          logger.info(`[call-proc] Queued draft estimate ${est.id} (${extracted.matched_service || 'unspecified service'}) for ${customerId ? `customer ${customerId}` : 'caller phone'}`);
-          estimateQueueResult = { created: true, estimateId: est.id, token };
+            const [est] = await trx('estimates').insert({
+              customer_id: customerId || null,
+              status: 'draft',
+              source: 'call_recording',
+              service_interest: extracted.matched_service || extracted.requested_service || null,
+              is_priority: isPriority,
+              urgency,
+              customer_name: customerName,
+              customer_phone: phone || null,
+              customer_email: extracted.email || null,
+              address: extracted.address_line1 || null,
+              token,
+              expires_at: expiresAt,
+              notes: extracted.call_summary || null,
+              estimate_data: JSON.stringify({
+                callSid: call.twilio_call_sid,
+                leadId: leadId || null,
+                requested_service: extracted.requested_service,
+                matched_service: extracted.matched_service,
+                pain_points: extracted.pain_points,
+                sentiment: extracted.sentiment,
+                lead_quality: extracted.lead_quality,
+                city: extracted.city,
+                zip: extracted.zip,
+              }),
+            }).returning('*');
+
+            logger.info(`[call-proc] Queued draft estimate ${est.id} (${extracted.matched_service || 'unspecified service'}) for ${customerId ? `customer ${customerId}` : 'caller phone'}`);
+            estimateQueueResult = { created: true, estimateId: est.id, token };
+          });
         }
       } catch (err) {
         logger.error(`[call-proc] Estimate enqueue failed (non-blocking): ${err.message}`);
