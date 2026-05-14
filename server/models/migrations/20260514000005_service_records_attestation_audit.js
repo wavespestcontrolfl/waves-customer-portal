@@ -96,7 +96,12 @@ exports.up = async function (knex) {
 
   // Detailed_form must NOT carry attestation/template fields — those
   // mean "I performed the listed standard protocol," which a custom
-  // submission did not.
+  // submission did not. protocol_name is included: a detailed_form
+  // row that names a standard protocol would weaken the audit
+  // distinction this migration is supposed to enforce.
+  // (resolved_completion_snapshot is intentionally allowed on
+  // detailed_form rows — both source types use service_records as the
+  // long-term audit copy of the resolved bundle.)
   await knex.raw(`
     ALTER TABLE service_records
     ADD CONSTRAINT service_records_detailed_form_no_attestation
@@ -106,6 +111,7 @@ exports.up = async function (knex) {
         protocol_defaults_used = false
         AND protocol_template_id IS NULL
         AND protocol_template_version IS NULL
+        AND protocol_name IS NULL
         AND tech_attestation_text IS NULL
         AND tech_attestation_version IS NULL
       )
