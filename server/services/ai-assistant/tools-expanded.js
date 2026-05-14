@@ -225,11 +225,12 @@ async function executeExpandedTool(toolName, input, contextCustomerId) {
       const invoice = await db('invoices').where('id', invoiceId).first();
 
       return {
-        sent: true,
+        sent: !!sendResult?.sent,
         invoiceNumber: invoice.invoice_number,
         amount: parseFloat(invoice.total),
-        payUrl: sendResult.payUrl,
+        payUrl: sendResult?.payUrl,
         status: invoice.status,
+        ...(!sendResult?.sent && { error: sendResult?.code || sendResult?.reason || 'send_failed' }),
       };
     }
 

@@ -103,10 +103,92 @@ const NEW_TEMPLATES = [
     variables: ['first_name', 'hook_text', 'address_clause', 'call_number'],
     sort_order: 51,
   },
+  // Re-seed invoice_followup_{7,14,30}day — deleted by migration
+  // 20260415000007 and never restored. The follow-up engine references
+  // these keys, and the inline fallback is gone in this PR.
+  {
+    template_key: 'invoice_followup_7day',
+    name: 'Invoice Follow-Up — 7 Day',
+    category: 'billing',
+    body: 'Hi {first_name}, just a friendly reminder from Waves — your invoice for {invoice_title}{service_date_clause} is still open. You can pay here: {pay_url}\n\nQuestions? Reply to this message. — Waves',
+    variables: ['first_name', 'invoice_title', 'service_date_clause', 'pay_url'],
+    sort_order: 20,
+  },
+  {
+    template_key: 'invoice_followup_14day',
+    name: 'Invoice Follow-Up — 14 Day',
+    category: 'billing',
+    body: "Hi {first_name}, checking in on your Waves invoice for {invoice_title}{service_date_clause} — we'd appreciate payment at your earliest convenience: {pay_url}\n\nReply if you need anything. — Waves",
+    variables: ['first_name', 'invoice_title', 'service_date_clause', 'pay_url'],
+    sort_order: 21,
+  },
+  {
+    template_key: 'invoice_followup_30day',
+    name: 'Invoice Follow-Up — 30 Day',
+    category: 'billing',
+    body: 'Hi {first_name}, this is a final notice on your Waves invoice for {invoice_title}{service_date_clause}. Please pay now to keep the account in good standing: {pay_url}\n\nReply to discuss a payment plan. — Waves',
+    variables: ['first_name', 'invoice_title', 'service_date_clause', 'pay_url'],
+    sort_order: 22,
+  },
+];
+
+// Bring late_payment_* and invoice_followup_3day bodies onto the
+// {service_date_clause} variable shape that the new call sites pass.
+// Existing rows seeded by 20260415000011 use {service_date}, which would
+// now leave an unresolved placeholder and silently null out every reminder.
+const BODY_REWRITES = [
+  {
+    template_key: 'late_payment_7d',
+    body: 'Hello {first_name}! This is a reminder from Waves. Your invoice for {invoice_title}{service_date_clause} is now 7 days overdue.\n\nPlease make your payment here: {pay_url}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!',
+    variables: ['first_name', 'invoice_title', 'service_date_clause', 'pay_url'],
+  },
+  {
+    template_key: 'late_payment_14d',
+    body: 'Hello {first_name}, this is a reminder from Waves. Your invoice for {invoice_title}{service_date_clause} is now 14 days overdue.\n\nPlease make your payment as soon as possible at: {pay_url}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!',
+    variables: ['first_name', 'invoice_title', 'service_date_clause', 'pay_url'],
+  },
+  {
+    template_key: 'late_payment_30d',
+    body: 'Hello {first_name}, this is a final reminder from Waves. Your invoice for {invoice_title}{service_date_clause} is now 30 days overdue.\n\nPlease make your payment immediately at: {pay_url}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!',
+    variables: ['first_name', 'invoice_title', 'service_date_clause', 'pay_url'],
+  },
+  {
+    template_key: 'late_payment_60d',
+    body: 'Hello {first_name}, this is an urgent notice from Waves. Your invoice for {invoice_title}{service_date_clause} is now 60 days overdue.\n\nPlease make payment or contact us immediately to avoid further action: {pay_url}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!',
+    variables: ['first_name', 'invoice_title', 'service_date_clause', 'pay_url'],
+  },
+  {
+    template_key: 'late_payment_90d',
+    body: 'Hello {first_name}, your invoice from Waves for {invoice_title}{service_date_clause} is now 90 days overdue.\n\nFinal notice: This account will be sent to collections if payment is not received today. Please pay now: {pay_url}\n\nQuestions or requests? Reply to this message.\nThank you for choosing Waves!',
+    variables: ['first_name', 'invoice_title', 'service_date_clause', 'pay_url'],
+  },
+  {
+    template_key: 'invoice_followup_3day',
+    body: "Hi {first_name}, still showing an open balance on your invoice for {invoice_title} — \${amount}. Secure pay link: {pay_url}\n\nIf something's off, just reply and we'll sort it. — Waves",
+    variables: ['first_name', 'invoice_title', 'amount', 'pay_url'],
+  },
 ];
 
 exports.up = async function (knex) {
-  if (!(await knex.schema.hasTable('sms_templates'))) return;
+  // Create the table on environments where the lazy ensureTable in
+  // server/routes/admin-sms-templates.js has never run (fresh DBs, preview
+  // envs). Without this, removing the inline fallbacks in the same PR would
+  // silently drop every customer SMS until someone visited the admin UI.
+  if (!(await knex.schema.hasTable('sms_templates'))) {
+    await knex.schema.createTable('sms_templates', (t) => {
+      t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
+      t.string('template_key', 80).unique().notNullable();
+      t.string('name', 200).notNullable();
+      t.string('category', 30).notNullable();
+      t.text('body').notNullable();
+      t.text('description');
+      t.jsonb('variables');
+      t.boolean('is_active').defaultTo(true);
+      t.boolean('is_internal').defaultTo(false);
+      t.integer('sort_order').defaultTo(100);
+      t.timestamps(true, true);
+    });
+  }
 
   // Insert any new templates that don't yet exist.
   for (const t of NEW_TEMPLATES) {
@@ -122,6 +204,19 @@ exports.up = async function (knex) {
       created_at: new Date(),
       updated_at: new Date(),
     });
+  }
+
+  // Rewrite bodies of templates whose previous variable shape no longer
+  // matches what the call sites pass. Without this, getTemplate() returns
+  // null on the unresolved {service_date} placeholder and every send is
+  // silently dropped. Idempotent: skip rows already on the new shape.
+  for (const r of BODY_REWRITES) {
+    const row = await knex('sms_templates').where({ template_key: r.template_key }).first();
+    if (!row) continue;
+    if (row.body === r.body) continue;
+    await knex('sms_templates')
+      .where({ template_key: r.template_key })
+      .update({ body: r.body, variables: JSON.stringify(r.variables), updated_at: new Date() });
   }
 
   // Switch tech_en_route to {track_clause} so legacy callers without a
