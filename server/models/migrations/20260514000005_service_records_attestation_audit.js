@@ -69,8 +69,14 @@ exports.up = async function (knex) {
     )
   `);
 
-  // One-tap records must carry the attestation + template reference.
-  // Detailed_form records carry neither. Mixed states are rejected.
+  // One-tap records must carry the attestation + template reference
+  // AND the durable resolved snapshot bytes themselves. The snapshot
+  // is the long-term audit record of what the tech actually attested
+  // to (products, areas, customer-interaction source, review routing);
+  // a one_tap row without it would still satisfy attestation/template
+  // checks but lose the structured evidence.
+  // Detailed_form records carry none of the attestation fields. Mixed
+  // states are rejected.
   await knex.raw(`
     ALTER TABLE service_records
     ADD CONSTRAINT service_records_one_tap_has_attestation
@@ -83,6 +89,7 @@ exports.up = async function (knex) {
         AND tech_attestation_text IS NOT NULL
         AND tech_attestation_version IS NOT NULL
         AND protocol_name IS NOT NULL
+        AND resolved_completion_snapshot IS NOT NULL
       )
     )
   `);

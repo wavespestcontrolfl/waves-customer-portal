@@ -442,15 +442,35 @@ async function storeResolvedSnapshot(
     throw new Error('storeResolvedSnapshot one_tap_completion requires protocol_template_id and version');
   }
 
-  await knex('service_completion_attempts').where({ id: attempt.id }).update({
-    resolved_completion_snapshot: JSON.stringify(snapshot),
-    resolved_completion_snapshot_hash: computedHash,
-    completion_source: completionSource,
-    protocol_template_id: protocolTemplateId || null,
-    protocol_template_version: protocolTemplateVersion || null,
-    snapshot_written_at: new Date(),
-    updated_at: new Date(),
-  });
+  // Guard: only write the snapshot once, and only on a pre-record
+  // attempt. A resume path or a stale caller hitting an attempt that
+  // has already moved to side_effects_running/succeeded — or whose
+  // snapshot was already persisted on an earlier attempt — must not
+  // overwrite the original. The "first resolved snapshot is the
+  // replay/audit source" invariant depends on this WHERE clause.
+  // status='pending' AND snapshot_written_at IS NULL AND
+  // service_record_id IS NULL together describe the only state where
+  // a fresh snapshot write is legal. We assert .returning row count
+  // to throw if a concurrent caller beat us.
+  const updated = await knex('service_completion_attempts')
+    .where({ id: attempt.id, status: 'pending' })
+    .whereNull('snapshot_written_at')
+    .whereNull('service_record_id')
+    .update({
+      resolved_completion_snapshot: JSON.stringify(snapshot),
+      resolved_completion_snapshot_hash: computedHash,
+      completion_source: completionSource,
+      protocol_template_id: protocolTemplateId || null,
+      protocol_template_version: protocolTemplateVersion || null,
+      snapshot_written_at: new Date(),
+      updated_at: new Date(),
+    })
+    .returning('id');
+  if (!updated || updated.length === 0) {
+    const err = new Error('storeResolvedSnapshot found no eligible pre-record attempt row (already resolved, resumed, or progressed past pending)');
+    err.code = 'snapshot_write_not_eligible';
+    throw err;
+  }
   return { snapshotHash: computedHash };
 }
 

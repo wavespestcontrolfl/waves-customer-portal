@@ -10,7 +10,9 @@ function makeKnex(ops) {
     calls.push({ table, op });
     const chain = {
       where: jest.fn((criteria) => { op.whereCriteria = criteria; return chain; }),
-      update: jest.fn(async (payload) => { op.updatePayload = payload; return op.updateReturn ?? 1; }),
+      whereNull: jest.fn((col) => { op.whereNull = (op.whereNull || []).concat(col); return chain; }),
+      update: jest.fn((payload) => { op.updatePayload = payload; return chain; }),
+      returning: jest.fn(async () => op.returning ?? [{ id: 'attempt-1' }]),
     };
     op.chain = chain;
     return chain;
@@ -47,14 +49,16 @@ describe('hashResolvedSnapshot', () => {
 });
 
 describe('storeResolvedSnapshot', () => {
-  test('writes snapshot, hash, source, template_id, version, and timestamp to the claimed attempt', async () => {
+  test('writes snapshot, hash, source, template_id, version, and timestamp to the claimed attempt (pending-only)', async () => {
     const knex = makeKnex([{}]);
     const attempt = { id: 'attempt-1' };
 
     const result = await storeResolvedSnapshot(attempt, VALID_ONE_TAP, knex);
 
     expect(result.snapshotHash).toBe(hashResolvedSnapshot(VALID_ONE_TAP.snapshot));
-    expect(knex.calls[0].op.whereCriteria).toEqual({ id: 'attempt-1' });
+    // WHERE clause must restrict to pre-record state — id + pending + no snapshot + no service_record_id.
+    expect(knex.calls[0].op.whereCriteria).toEqual({ id: 'attempt-1', status: 'pending' });
+    expect(knex.calls[0].op.whereNull).toEqual(['snapshot_written_at', 'service_record_id']);
     const payload = knex.calls[0].op.updatePayload;
     expect(payload.resolved_completion_snapshot).toBe(JSON.stringify(VALID_ONE_TAP.snapshot));
     expect(payload.resolved_completion_snapshot_hash).toBe(result.snapshotHash);
@@ -63,6 +67,17 @@ describe('storeResolvedSnapshot', () => {
     expect(payload.protocol_template_version).toBe(VALID_ONE_TAP.protocolTemplateVersion);
     expect(payload.snapshot_written_at).toBeInstanceOf(Date);
     expect(payload.updated_at).toBeInstanceOf(Date);
+  });
+
+  test('throws when zero rows updated — attempt already resolved/resumed (codex P1 #1 round 2)', async () => {
+    const knex = makeKnex([{ returning: [] }]);
+    await expect(storeResolvedSnapshot(
+      { id: 'attempt-1' },
+      VALID_ONE_TAP,
+      knex
+    )).rejects.toMatchObject({
+      code: 'snapshot_write_not_eligible',
+    });
   });
 
   test('accepts a caller-supplied snapshotHash when it matches hash(snapshot)', async () => {
