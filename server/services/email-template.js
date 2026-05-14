@@ -175,7 +175,7 @@ function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote } = {}) {
             ${unsubLine}<a href="https://wavespestcontrol.com" style="color:${MUTED};text-decoration:underline;">wavespestcontrol.com</a> · <a href="tel:+19412975749" style="color:${MUTED};text-decoration:none;">(941) 297-5749</a>
           </div>
           <div style="margin-top:6px;font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};text-align:center;">
-            Waves Pest Control, LLC · Bradenton, FL · FL License #JB351547
+            Waves Pest Control, LLC · 13649 Luxe Ave #110, Bradenton, FL 34211 · FL License #JB351547
           </div>
           ${footerNote ? `<div style="margin-top:8px;font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};text-align:center;">${footerNote}</div>` : ''}
         </td></tr>

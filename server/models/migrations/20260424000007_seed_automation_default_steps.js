@@ -13,15 +13,15 @@
 
 const BRAND_FOOTER = `
 <p>— The Waves Pest Control team</p>
-<p style="color:#71717A;font-size:12px;margin-top:16px;">Reply to this email anytime — it goes straight to our team.</p>
-<hr style="border:none;border-top:1px solid #E4E4E7;margin:24px 0 16px;">
-<p style="color:#71717A;font-size:11px;line-height:1.5;margin:0;">
-Waves Pest Control, LLC<br>
-13649 Luxe Ave #110, Bradenton, FL 34211<br>
-You're receiving this because you're a Waves customer or signed up for updates. <a href="{{unsubscribe_url}}" style="color:#71717A;text-decoration:underline;">Unsubscribe</a>.
-</p>`;
+<p style="color:#71717A;font-size:12px;margin-top:16px;">Reply to this email anytime — it goes straight to our team.</p>`;
 
-const LEGAL_TEXT_FOOTER = '\n\n--\nWaves Pest Control, LLC · 13649 Luxe Ave #110, Bradenton, FL 34211\nUnsubscribe: {{unsubscribe_url}}';
+// Text-mode CAN-SPAM § 7704(a)(5) footer. Plain-text bodies are not
+// wrapped by wrapNewsletter (HTML chrome is HTML-only), so the address
+// and unsubscribe link must be inlined here. The unsubscribe token
+// uses SendGrid's ASM substitution (resolved at send time when an
+// asm group is attached — both automation-runner and newsletter-sender
+// attach one).
+const LEGAL_TEXT_FOOTER = '\n\n--\nWaves Pest Control, LLC · 13649 Luxe Ave #110, Bradenton, FL 34211\nUnsubscribe: <%asm_group_unsubscribe_raw_url%>';
 
 const STEPS = [
   {
