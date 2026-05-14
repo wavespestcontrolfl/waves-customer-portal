@@ -816,17 +816,49 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     position: 'fixed', inset: 0, zIndex: 1000,
     background: isMobile ? D.bg : 'rgba(0,0,0,0.3)',
     display: 'flex', alignItems: isMobile ? 'stretch' : 'center', justifyContent: 'center',
-    overflow: 'auto', padding: isMobile ? 0 : 20,
+    overflow: isMobile ? 'hidden' : 'auto', padding: isMobile ? 0 : 20,
+    height: isMobile ? '100dvh' : undefined,
     fontFamily: ROBOTO_STACK,
   };
 
   const modalStyle = {
     background: D.bg, width: isMobile ? '100%' : 560, maxWidth: '100%',
-    maxHeight: isMobile ? '100%' : '90vh', overflow: 'auto',
+    height: isMobile ? '100dvh' : undefined,
+    maxHeight: isMobile ? '100dvh' : '90vh',
+    overflow: isMobile ? 'hidden' : 'auto',
     borderRadius: isMobile ? 0 : 16, padding: isMobile ? 0 : 24,
     border: isMobile ? 'none' : `1px solid ${D.border}`,
     fontFamily: ROBOTO_STACK,
+    display: isMobile ? 'flex' : undefined,
+    flexDirection: isMobile ? 'column' : undefined,
   };
+
+  const mobileContentStyle = isMobile
+    ? {
+        flex: '1 1 auto',
+        minHeight: 0,
+        overflowY: 'auto',
+        WebkitOverflowScrolling: 'touch',
+        paddingTop: 0,
+        paddingRight: 'calc(16px + env(safe-area-inset-right, 0px))',
+        paddingBottom: 16,
+        paddingLeft: 'calc(16px + env(safe-area-inset-left, 0px))',
+      }
+    : { padding: 0 };
+
+  const mobileActionBarStyle = {
+    flex: '0 0 auto',
+    zIndex: 20,
+    paddingTop: 10,
+    paddingRight: 'calc(16px + env(safe-area-inset-right, 0px))',
+    paddingBottom: 'calc(10px + env(safe-area-inset-bottom, 0px))',
+    paddingLeft: 'calc(16px + env(safe-area-inset-left, 0px))',
+    background: 'rgba(250,250,250,0.96)',
+    borderTop: `1px solid ${D.border}`,
+    boxShadow: '0 -8px 20px rgba(0,0,0,0.06)',
+    fontFamily: ROBOTO_STACK,
+  };
+  const mobileTopInset = 'max(8px, env(safe-area-inset-top, 0px))';
 
   const canSubmit = !!selectedCustomer && !!selectedService && !saving;
   const serviceLineColumns = isMobile
@@ -872,11 +904,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         {/* Header — IMG_3713 pattern on mobile: circular × left, centered title, Save pill right */}
         {isMobile ? (
           <div style={{
-            position: 'sticky', top: 0, zIndex: 10, background: D.bg,
-            height: 60, padding: '0 16px',
+            flex: '0 0 auto',
+            position: 'relative', zIndex: 10, background: D.bg,
+            height: `calc(60px + ${mobileTopInset})`,
+            paddingTop: mobileTopInset,
+            paddingRight: 'calc(16px + env(safe-area-inset-right, 0px))',
+            paddingLeft: 'calc(16px + env(safe-area-inset-left, 0px))',
+            boxSizing: 'border-box',
+            borderBottom: `1px solid ${D.border}`,
           }}>
             <div style={{ position: 'relative', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <h1 style={{ fontSize: 17, fontWeight: 700, color: '#18181B', margin: 0 }}>
+              <h1 style={{ fontSize: 17, fontWeight: 700, color: '#18181B', margin: 0, maxWidth: 'calc(100% - 148px)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 New Appointment
               </h1>
               <button
@@ -913,7 +951,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             <button onClick={onClose} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 22, cursor: 'pointer', minWidth: 48, minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
           </div>
         )}
-        <div style={{ padding: isMobile ? '0 16px calc(96px + env(safe-area-inset-bottom))' : 0 }}>
+        <div style={mobileContentStyle}>
 
         {/* Toast */}
         {toast && <div style={{ background: '#FFFFFF', border: `1px solid ${D.border}`, borderRadius: 6, padding: '10px 14px', marginBottom: 12, color: D.text, fontSize: 13, fontWeight: 500 }}>{toast}</div>}
@@ -1552,19 +1590,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             </button>
           )}
         </div>
+        </div>
         {isMobile && (
-          <div style={{
-            position: 'fixed',
-            left: 0,
-            right: 0,
-            bottom: 0,
-            zIndex: 20,
-            padding: '10px 16px calc(10px + env(safe-area-inset-bottom))',
-            background: 'rgba(250,250,250,0.96)',
-            borderTop: `1px solid ${D.border}`,
-            boxShadow: '0 -8px 20px rgba(0,0,0,0.06)',
-            fontFamily: ROBOTO_STACK,
-          }}>
+          <div style={mobileActionBarStyle}>
             <button
               type="button"
               disabled={!canSubmit}
@@ -1586,7 +1614,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             </button>
           </div>
         )}
-        </div>
       </div>
     </div>
   );
