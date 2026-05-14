@@ -616,14 +616,6 @@ const TEMPLATES = [
     sort_order: 9,
   },
   {
-    template_key: 'service_reminder_legacy',
-    name: 'Service Reminder (Legacy 24h) (hardcoded)',
-    category: 'service',
-    body: 'Hello {first_name}! Your {service_type} is scheduled for tomorrow {time_window}.\n\nTechnician: {tech_name}\n\nPlease unlock gates and secure pets. Reply CONFIRM, or call (941) 318-7612 to reschedule.',
-    variables: ['first_name', 'service_type', 'time_window', 'tech_name'],
-    sort_order: 10,
-  },
-  {
     template_key: 'appointment_rescheduled',
     name: 'Appointment Rescheduled',
     category: 'service',

@@ -41,6 +41,15 @@ function firstQuery(row) {
   };
 }
 
+function joinedFirstQuery(row) {
+  return {
+    where: jest.fn().mockReturnThis(),
+    leftJoin: jest.fn().mockReturnThis(),
+    select: jest.fn().mockReturnThis(),
+    first: jest.fn().mockResolvedValue(row),
+  };
+}
+
 describe("TwilioService.sendTechEnRoute", () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -137,5 +146,53 @@ describe("TwilioService.sendTechEnRoute", () => {
       "on the way",
     );
     expect(result.success).toBe(true);
+  });
+});
+
+describe("TwilioService.sendServiceReminder", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test("renders the standard 24-hour reminder template after legacy template deletion", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222" }),
+    ).mockReturnValueOnce(
+      joinedFirstQuery({
+        id: "svc-1",
+        service_type: "Pest Control",
+        window_start: "08:00:00",
+        window_end: "10:00:00",
+        tech_name: "Bryan",
+      }),
+    ).mockReturnValueOnce(
+      firstQuery({ service_reminder_24h: true, sms_enabled: true }),
+    );
+
+    smsTemplates.getTemplate.mockResolvedValue(
+      "Hello Sam! Reminder: your Pest Control with Waves is tomorrow at 8:00 AM.",
+    );
+    const sendSpy = jest
+      .spyOn(TwilioService, "sendSMS")
+      .mockResolvedValue({ success: true, sid: "SM123" });
+
+    const result = await TwilioService.sendServiceReminder("cust-1", "svc-1");
+
+    expect(smsTemplates.getTemplate).toHaveBeenCalledWith("reminder_24h", {
+      first_name: "Sam",
+      service_type: "Pest Control",
+      time: "8:00 AM",
+    });
+    expect(sendSpy).toHaveBeenCalledWith(
+      "+15551112222",
+      "Hello Sam! Reminder: your Pest Control with Waves is tomorrow at 8:00 AM.",
+      {
+        customerId: "cust-1",
+        messageType: "appointment_reminder",
+      },
+    );
+    expect(result.success).toBe(true);
+
+    sendSpy.mockRestore();
   });
 });
