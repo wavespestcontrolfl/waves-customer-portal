@@ -186,9 +186,41 @@ function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote } = {}) {
 </html>`;
 }
 
+/**
+ * CAN-SPAM § 7704(a)(5) legal footer for plain-text bodies. HTML bodies
+ * are wrapped by `wrapNewsletter()` whose chrome footer carries the
+ * full address + unsubscribe link; text bodies are sent raw, so they
+ * need an inline footer.
+ *
+ * The unsubscribe placeholder is SendGrid's ASM substitution token
+ * (`<%asm_group_unsubscribe_raw_url%>`) — substituted at send time
+ * whenever an asm group is attached. The Mailchimp-style
+ * `{{unsubscribe_url}}` token would only work for `sendBatch` and
+ * would render as literal text on `sendOne` (automation) sends.
+ */
+const LEGAL_TEXT_FOOTER = '\n\n--\nWaves Pest Control, LLC · 13649 Luxe Ave #110, Bradenton, FL 34211\nUnsubscribe: <%asm_group_unsubscribe_raw_url%>';
+
+/**
+ * Append the legal text footer to a plain-text body if it isn't already
+ * present. Use this at every commercial/promotional text send-site so
+ * compliance doesn't depend on each template author remembering to
+ * include the footer. Idempotent — the address string guard prevents
+ * double-appending if the body already carries the footer.
+ *
+ * Returns the input unchanged when text is empty/null/undefined — we
+ * don't want to materialize a "footer-only" body that has no actual
+ * message above it.
+ */
+function ensureLegalTextFooter(text) {
+  if (!text) return text;
+  if (text.includes('13649 Luxe Ave')) return text;
+  return text + LEGAL_TEXT_FOOTER;
+}
+
 module.exports = {
   wrapEmail,
   wrapNewsletter,
+  ensureLegalTextFooter,
   ctaButton,
   currency,
   formatDate,

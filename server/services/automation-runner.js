@@ -16,7 +16,7 @@
 const db = require('../models/db');
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
-const { wrapNewsletter } = require('./email-template');
+const { wrapNewsletter, ensureLegalTextFooter } = require('./email-template');
 
 function substitute(text, customer) {
   if (!text) return text;
@@ -151,7 +151,7 @@ async function sendStep(enrollmentId, { testRecipient } = {}) {
 
   const subject = substitute(step.subject || `(${template.name})`, personal);
   const rawHtml = substitute(step.html_body || '', personal);
-  const text = substitute(step.text_body || '', personal);
+  const text = ensureLegalTextFooter(substitute(step.text_body || '', personal));
 
   const asmGroupId = automationAsmGroupId(template);
   const fromEmail = normalizeAutomationFromEmail(step.from_email);
@@ -298,7 +298,7 @@ async function testSequence({ templateKey, toEmail }) {
         replyTo: step.reply_to,
         subject: `[TEST step ${step.step_order}] ${substitute(step.subject || template.name, fake)}`,
         html: substitute(step.html_body || '', fake) || undefined,
-        text: substitute(step.text_body || '', fake) || undefined,
+        text: ensureLegalTextFooter(substitute(step.text_body || '', fake)) || undefined,
         categories: ['automation_test', `template_${template.key}`],
         asmGroupId,
       });

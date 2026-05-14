@@ -15,14 +15,6 @@ const BRAND_FOOTER = `
 <p>— The Waves Pest Control team</p>
 <p style="color:#71717A;font-size:12px;margin-top:16px;">Reply to this email anytime — it goes straight to our team.</p>`;
 
-// Text-mode CAN-SPAM § 7704(a)(5) footer. Plain-text bodies are not
-// wrapped by wrapNewsletter (HTML chrome is HTML-only), so the address
-// and unsubscribe link must be inlined here. The unsubscribe token
-// uses SendGrid's ASM substitution (resolved at send time when an
-// asm group is attached — both automation-runner and newsletter-sender
-// attach one).
-const LEGAL_TEXT_FOOTER = '\n\n--\nWaves Pest Control, LLC · 13649 Luxe Ave #110, Bradenton, FL 34211\nUnsubscribe: <%asm_group_unsubscribe_raw_url%>';
-
 const STEPS = [
   {
     template_key: 'new_recurring',
@@ -39,7 +31,7 @@ const STEPS = [
 
 <p>Questions before the first visit? Just reply to this email.</p>
 ${BRAND_FOOTER}`,
-    text_body: 'Welcome aboard, {{first_name}}! Our tech will do a full perimeter inspection on the first visit, treat the exterior and entry points, and sweep cobwebs. You\'ll get a text reminder the day before each service. If you spot new activity between visits, reply to the text and we\'ll come back — no extra charge. — The Waves Pest Control team' + LEGAL_TEXT_FOOTER,
+    text_body: 'Welcome aboard, {{first_name}}! Our tech will do a full perimeter inspection on the first visit, treat the exterior and entry points, and sweep cobwebs. You\'ll get a text reminder the day before each service. If you spot new activity between visits, reply to the text and we\'ll come back — no extra charge. — The Waves Pest Control team',
   },
   {
     template_key: 'lawn_service',
@@ -60,7 +52,7 @@ ${BRAND_FOOTER}`,
 
 <p>Reply with any questions about your yard — we're happy to take a look at photos.</p>
 ${BRAND_FOOTER}`,
-    text_body: 'Welcome to the Waves lawn program, {{first_name}}! SWFL lawns are tough — sandy soil, heavy summer rain, nitrogen blackout June–Sept. Before the first visit: mow at 3.5–4", water deeply 1–2x per week early AM, and skip any store-bought weed & feed. We handle fertilization, weed control, and pest/fungus treatments on a seasonal schedule. Reply with photos if you have questions. — The Waves Pest Control team' + LEGAL_TEXT_FOOTER,
+    text_body: 'Welcome to the Waves lawn program, {{first_name}}! SWFL lawns are tough — sandy soil, heavy summer rain, nitrogen blackout June–Sept. Before the first visit: mow at 3.5–4", water deeply 1–2x per week early AM, and skip any store-bought weed & feed. We handle fertilization, weed control, and pest/fungus treatments on a seasonal schedule. Reply with photos if you have questions. — The Waves Pest Control team',
   },
   {
     template_key: 'new_appointment',
@@ -84,7 +76,7 @@ ${BRAND_FOOTER}`,
 
 <p>Questions? Reply here.</p>
 ${BRAND_FOOTER}`,
-    text_body: 'Hi {{first_name}} — thanks for booking with Waves. We\'ll text the day before and when our truck is on the way. Most visits take 30–60 minutes. Before we arrive: put pets inside, unlock side gates, and clear floors along walls for any interior work. After: wait ~1 hour before walking barefoot indoors or letting pets back in; exterior dries in ~30 minutes. — The Waves Pest Control team' + LEGAL_TEXT_FOOTER,
+    text_body: 'Hi {{first_name}} — thanks for booking with Waves. We\'ll text the day before and when our truck is on the way. Most visits take 30–60 minutes. Before we arrive: put pets inside, unlock side gates, and clear floors along walls for any interior work. After: wait ~1 hour before walking barefoot indoors or letting pets back in; exterior dries in ~30 minutes. — The Waves Pest Control team',
   },
   {
     template_key: 'bed_bug',
@@ -110,7 +102,7 @@ ${BRAND_FOOTER}`,
 
 <p>Reply to this email if anything on the list is unclear — we'd rather answer now than re-treat later.</p>
 ${BRAND_FOOTER}`,
-    text_body: 'Hi {{first_name}} — let\'s get your home bed bug-free. Before we arrive: strip bedding (hot wash + hot dry 30+ min), vacuum mattresses/box springs/baseboards and empty the vacuum outside, clear floor clutter, pull furniture 12–18" from walls, bag clean laundry until treatment is done. Day of: be out 3–4 hours, pets too. Follow-up visit in 14 days. — The Waves Pest Control team' + LEGAL_TEXT_FOOTER,
+    text_body: 'Hi {{first_name}} — let\'s get your home bed bug-free. Before we arrive: strip bedding (hot wash + hot dry 30+ min), vacuum mattresses/box springs/baseboards and empty the vacuum outside, clear floor clutter, pull furniture 12–18" from walls, bag clean laundry until treatment is done. Day of: be out 3–4 hours, pets too. Follow-up visit in 14 days. — The Waves Pest Control team',
   },
   {
     template_key: 'cockroach',
@@ -136,7 +128,7 @@ ${BRAND_FOOTER}`,
 
 <p>Questions? Reply here.</p>
 ${BRAND_FOOTER}`,
-    text_body: 'Hi {{first_name}} — let\'s clear out the roaches. Before we arrive: empty kitchen cabinets (especially under sink), pull fridge forward a foot, clear and wipe counters, bag dry pet food, take trash out morning of. Day of: be out of kitchen 2 hrs after treatment, pets too. DON\'T spray store-bought sprays between our visits — you\'ll scatter them. Follow-up in 10–14 days. Expect to still see a few for 2–3 weeks — that\'s the bait working. — The Waves Pest Control team' + LEGAL_TEXT_FOOTER,
+    text_body: 'Hi {{first_name}} — let\'s clear out the roaches. Before we arrive: empty kitchen cabinets (especially under sink), pull fridge forward a foot, clear and wipe counters, bag dry pet food, take trash out morning of. Day of: be out of kitchen 2 hrs after treatment, pets too. DON\'T spray store-bought sprays between our visits — you\'ll scatter them. Follow-up in 10–14 days. Expect to still see a few for 2–3 weeks — that\'s the bait working. — The Waves Pest Control team',
   },
   {
     template_key: 'new_lead',
@@ -155,7 +147,7 @@ ${BRAND_FOOTER}`,
 <h2>What's next</h2>
 <p>If you'd like a quote or a free inspection, just reply to this email with your address and a good time for us to swing by. Or give us a call at <a href="tel:+19412101983">(941) 210-1983</a>.</p>
 ${BRAND_FOOTER}`,
-    text_body: 'Hi {{first_name}} — thanks for your interest in Waves. We\'re a family-owned pest control + lawn care company in Bradenton, serving Manatee, Sarasota, and Charlotte counties. No commitment contracts. No door-step upsells. Free re-services between visits. Reply with your address and a good time and we\'ll swing by, or call (941) 210-1983. — The Waves Pest Control team' + LEGAL_TEXT_FOOTER,
+    text_body: 'Hi {{first_name}} — thanks for your interest in Waves. We\'re a family-owned pest control + lawn care company in Bradenton, serving Manatee, Sarasota, and Charlotte counties. No commitment contracts. No door-step upsells. Free re-services between visits. Reply with your address and a good time and we\'ll swing by, or call (941) 210-1983. — The Waves Pest Control team',
   },
   {
     template_key: 'cold_lead',
@@ -172,7 +164,7 @@ ${BRAND_FOOTER}`,
 
 <p>If now's not the right time, that's fine — we're not going anywhere. Reply here whenever you're ready, or just delete this email.</p>
 ${BRAND_FOOTER}`,
-    text_body: 'Hi {{first_name}} — no pressure, just checking in. If pests or lawn issues pick up: your original quote is still good, first month is flat-rate, no commitment, and we can usually fit you in within a few days across Manatee/Sarasota/Charlotte. Reply when you\'re ready, or delete this email. — The Waves Pest Control team' + LEGAL_TEXT_FOOTER,
+    text_body: 'Hi {{first_name}} — no pressure, just checking in. If pests or lawn issues pick up: your original quote is still good, first month is flat-rate, no commitment, and we can usually fit you in within a few days across Manatee/Sarasota/Charlotte. Reply when you\'re ready, or delete this email. — The Waves Pest Control team',
   },
   {
     template_key: 'service_renewal',
@@ -189,7 +181,7 @@ ${BRAND_FOOTER}`,
 
 <p>Thanks for trusting us with your home.</p>
 ${BRAND_FOOTER}`,
-    text_body: 'Hi {{first_name}} — your current service term with Waves is coming up. Nothing you need to do today. We\'ll continue on the same schedule at your current rate unless you tell us otherwise. To pause, change frequency, add services, or update billing/address, reply to this email or call (941) 210-1983. — The Waves Pest Control team' + LEGAL_TEXT_FOOTER,
+    text_body: 'Hi {{first_name}} — your current service term with Waves is coming up. Nothing you need to do today. We\'ll continue on the same schedule at your current rate unless you tell us otherwise. To pause, change frequency, add services, or update billing/address, reply to this email or call (941) 210-1983. — The Waves Pest Control team',
   },
   {
     template_key: 'pricing_update',
@@ -205,7 +197,7 @@ ${BRAND_FOOTER}`,
 
 <p>If you have questions, reply here and someone from the office will get back to you within a business day.</p>
 ${BRAND_FOOTER}`,
-    text_body: 'Hi {{first_name}} — short note: starting next service, your rate is adjusting for increased product + labor costs. We stay below national chain pricing for equivalent service. Same tech, same free re-service guarantee, same no-commitment policy — reply to cancel with no fee if it doesn\'t work. — The Waves Pest Control team' + LEGAL_TEXT_FOOTER,
+    text_body: 'Hi {{first_name}} — short note: starting next service, your rate is adjusting for increased product + labor costs. We stay below national chain pricing for equivalent service. Same tech, same free re-service guarantee, same no-commitment policy — reply to cancel with no fee if it doesn\'t work. — The Waves Pest Control team',
   },
   {
     template_key: 'payment_failed',
@@ -225,7 +217,7 @@ ${BRAND_FOOTER}`,
 
 <p>No service interruption right now, and no late fee. Just wanted you to know.</p>
 ${BRAND_FOOTER}`,
-    text_body: 'Hi {{first_name}} — your last Waves autopay didn\'t go through. Usually means expired card, bank flag, or a processor hiccup. Log into your portal to update your card, or reply and we\'ll send a secure payment link. We retry in 3 business days. No service interruption, no late fee. — The Waves Pest Control team' + LEGAL_TEXT_FOOTER,
+    text_body: 'Hi {{first_name}} — your last Waves autopay didn\'t go through. Usually means expired card, bank flag, or a processor hiccup. Log into your portal to update your card, or reply and we\'ll send a secure payment link. We retry in 3 business days. No service interruption, no late fee. — The Waves Pest Control team',
   },
   {
     template_key: 'referral_nudge',
@@ -242,7 +234,7 @@ ${BRAND_FOOTER}`,
 
 <p>Thanks for being on our route.</p>
 ${BRAND_FOOTER}`,
-    text_body: 'Hi {{first_name}}! If our last service was solid, we\'d love your help growing by word-of-mouth. Refer a neighbor — when they book their first service and mention your name, you both get $25 off. No cap. Forward this email, or reply with their name and we\'ll reach out (one contact, no spam). Thanks for being on our route. — The Waves Pest Control team' + LEGAL_TEXT_FOOTER,
+    text_body: 'Hi {{first_name}}! If our last service was solid, we\'d love your help growing by word-of-mouth. Refer a neighbor — when they book their first service and mention your name, you both get $25 off. No cap. Forward this email, or reply with their name and we\'ll reach out (one contact, no spam). Thanks for being on our route. — The Waves Pest Control team',
   },
   // Review thank-yous — one content, personalized by city in subject.
   ...['lwr', 'venice', 'sarasota', 'parrish'].map((slug) => {
@@ -258,7 +250,7 @@ ${BRAND_FOOTER}`,
 
 <p>If there's ever anything you need from us — extra service, a question about your yard, or just a recommendation on another local business — just reply here. We've got you.</p>
 ${BRAND_FOOTER}`,
-      text_body: `Hi {{first_name}} — thank you for your Google review this morning. It made our day. Small family-owned companies like ours live or die by word-of-mouth in ${cityDisplay}, so taking a minute to leave that review means more than you probably realize. If there\'s ever anything you need — extra service, a yard question, or a recommendation on another local business — reply here. — The Waves Pest Control team${LEGAL_TEXT_FOOTER}`,
+      text_body: `Hi {{first_name}} — thank you for your Google review this morning. It made our day. Small family-owned companies like ours live or die by word-of-mouth in ${cityDisplay}, so taking a minute to leave that review means more than you probably realize. If there\'s ever anything you need — extra service, a yard question, or a recommendation on another local business — reply here. — The Waves Pest Control team`,
     };
   }),
 ];

@@ -43,7 +43,7 @@ exports.up = async function (knex) {
 <p>If you've got a question that's not on that list, just reply to this email. It goes straight to our team in Bradenton — no call center, no ticket queue.</p>
 
 <p>— The Waves Pest Control team</p>`,
-    text_body: 'Hi {{first_name}} — thanks for considering Waves. No sales pitch, just a quick follow-up to make sure the estimate landed. A few common questions: you can start whenever (most folks pick 1–2 weeks out); no commitment contracts, pause/cancel anytime; free re-service between visits if you see activity; price is locked in for the quoted service. Reply with any questions — it goes straight to our team in Bradenton. — The Waves Pest Control team\n\n--\nWaves Pest Control, LLC · 13649 Luxe Ave #110, Bradenton, FL 34211\nUnsubscribe: <%asm_group_unsubscribe_raw_url%>',
+    text_body: 'Hi {{first_name}} — thanks for considering Waves. No sales pitch, just a quick follow-up to make sure the estimate landed. A few common questions: you can start whenever (most folks pick 1–2 weeks out); no commitment contracts, pause/cancel anytime; free re-service between visits if you see activity; price is locked in for the quoted service. Reply with any questions — it goes straight to our team in Bradenton. — The Waves Pest Control team',
     from_name: 'Waves Pest Control',
     from_email: 'automations@wavespestcontrol.com',
     reply_to: 'contact@wavespestcontrol.com',
