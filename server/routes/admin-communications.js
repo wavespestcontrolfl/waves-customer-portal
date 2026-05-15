@@ -12,6 +12,7 @@ const { normalizePhone } = require('../utils/phone');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { parseETDateTime } = require('../utils/datetime-et');
+const { purposeForScheduledMessageType } = require('../services/scheduler');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -480,10 +481,11 @@ router.post('/ai-auto-reply', async (req, res) => {
 
 // Marketing/retention purposes require a real stored consent record per
 // server/services/messaging/policy.js. This conversational-compose endpoint
-// is not a marketing send path — reject any messageType that would route
-// through purposeForScheduledMessageType to marketing/retention so a caller
-// can't manufacture consent by choosing a label.
-const MARKETING_MESSAGE_TYPE_RE = /(marketing|seasonal|promo|retention|renewal|\bsave\b)/i;
+// is not a marketing send path — reject any messageType whose scheduler
+// mapping resolves to marketing or retention. Reusing the scheduler's
+// mapper here (instead of a local regex) guarantees the route can't drift
+// from the cron's classification.
+const BLOCKED_SCHEDULED_PURPOSES = new Set(['marketing', 'retention']);
 
 // POST /api/admin/communications/schedule-sms — schedule SMS for later.
 // The /5min scheduled-sms cron in server/services/scheduler.js picks up rows
@@ -496,7 +498,7 @@ router.post('/schedule-sms', async (req, res, next) => {
     if (!to || !cleanBody || !scheduledFor) {
       return res.status(400).json({ error: 'to, body, scheduledFor required' });
     }
-    if (messageType && MARKETING_MESSAGE_TYPE_RE.test(messageType)) {
+    if (messageType && BLOCKED_SCHEDULED_PURPOSES.has(purposeForScheduledMessageType(messageType))) {
       return res.status(400).json({ error: 'marketing/retention sends are not allowed on this endpoint' });
     }
 

@@ -1366,4 +1366,4 @@ function initBankingSync() {
   logger.info('[stripe-banking] Twice-daily payout sync scheduled (8 AM / 8 PM ET)');
 }
 
-module.exports = { initScheduledJobs, initBankingSync };
+module.exports = { initScheduledJobs, initBankingSync, purposeForScheduledMessageType };

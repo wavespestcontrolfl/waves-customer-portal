@@ -711,14 +711,25 @@ function SmsTab() {
     if (!sendCustomAt) return { value: null, error: "Pick a date and time" };
     return { value: sendCustomAt, error: null };
   };
-  const formatScheduledForToast = (etNaive) =>
-    new Date(etNaive).toLocaleString("en-US", {
-      timeZone: "America/New_York",
+  // Format the ET-naive string for the confirmation toast without
+  // routing through `new Date(etNaive)`, which would interpret the
+  // wall-clock parts in the admin browser's timezone. Stuffing the ET
+  // parts into a UTC instant and formatting in UTC reproduces the
+  // intended ET wall-clock 1:1.
+  const formatScheduledForToast = (etNaive) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(etNaive);
+    if (!m) return etNaive;
+    const utc = new Date(
+      Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5])),
+    );
+    return utc.toLocaleString("en-US", {
+      timeZone: "UTC",
       month: "short",
       day: "numeric",
       hour: "numeric",
       minute: "2-digit",
     });
+  };
 
   const handleSend = async () => {
     if (!toNumber.trim() || (!msgBody.trim() && attachments.length === 0))
