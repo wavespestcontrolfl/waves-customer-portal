@@ -93,8 +93,7 @@ const VALID_VISIT_OUTCOMES = new Set([
 ]);
 
 function isWaveGuardLawnCompletion(svc) {
-  const serviceType = String(svc?.service_type || '').toLowerCase();
-  return !!svc?.cust_waveguard_tier && serviceType.includes('lawn');
+  return !!svc?.cust_waveguard_tier && detectServiceLine(svc?.service_type) === 'lawn';
 }
 
 function calibrationLockoutBlocks(plan) {

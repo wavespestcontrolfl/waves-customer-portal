@@ -77,6 +77,8 @@ describe('service report v1', () => {
     expect(detectServiceLine('Mice Control')).toBe('rodent');
     expect(detectServiceLine('Mole Service')).toBe('rodent');
     expect(detectServiceLine('Palm Tree Nutritional Treatment')).toBe('palm');
+    expect(detectServiceLine('Palmetto Roach Treatment')).toBe('pest');
+    expect(detectServiceLine('Initial Palmetto Knockdown')).toBe('pest');
     expect(detectServiceLine('Every 6 Weeks Tree & Shrub Care Service')).toBe('tree_shrub');
     expect(methodFromProduct({ product_category: 'bait' }, 'pest')).toBe('bait_placement');
     expect(methodFromProduct({ product_category: 'bait' }, 'rodent')).toBe('bait_placement');
@@ -132,6 +134,7 @@ describe('service report v1', () => {
     }, 'token-1', knex);
 
     expect(data.pdfUrl).toBeNull();
+    expect(data.serviceData).toBeUndefined();
     expect(data.zones.map((zone) => zone.label)).toEqual(['Perimeter']);
   });
 });

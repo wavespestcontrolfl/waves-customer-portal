@@ -120,7 +120,8 @@ const SERVICE_LINE_CONFIGS = {
 
 function detectServiceLine(serviceType) {
   const text = String(serviceType || '').toLowerCase();
-  if (text.includes('palm')) return 'palm';
+  if (/\bpalmetto\b/.test(text)) return 'pest';
+  if (/\bpalm(s)?\b/.test(text)) return 'palm';
 
   const directCategory = detectExistingServiceCategory ? detectExistingServiceCategory(serviceType) : null;
   if (directCategory === 'lawn') return 'lawn';

@@ -338,7 +338,6 @@ async function buildReportV1Data(service, token, knex = db) {
         moisture: service.soil_moisture,
       },
     },
-    serviceData,
   };
 }
 
