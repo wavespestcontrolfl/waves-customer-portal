@@ -546,6 +546,11 @@ function SmsTab() {
   // MMS attachments: [{ url, key, fileName, size, mimeType, previewUrl }, ...]
   const [attachments, setAttachments] = useState([]);
   const [uploading, setUploading] = useState(false);
+  // Delayed send: 'now' | 'tomorrow_8' | 'custom'. Mirrors invoice builder pattern.
+  // Scheduled rows land in sms_log with status='scheduled' and are picked up by
+  // the /5min cron in server/services/scheduler.js.
+  const [sendTiming, setSendTiming] = useState("now");
+  const [sendCustomAt, setSendCustomAt] = useState("");
   // Voice-to-text (Web Speech API) — populated below on first use.
   const [listening, setListening] = useState(false);
   const recognitionRef = useRef(null);
@@ -679,29 +684,89 @@ function SmsTab() {
     setTogglingAi(false);
   };
 
+  // Compute the scheduled-for Date for non-"now" timings, or null if "now".
+  // Returns { date, error } — date is null on validation failure.
+  const resolveScheduledFor = () => {
+    if (sendTiming === "now") return { date: null, error: null };
+    if (sendTiming === "tomorrow_8") {
+      const t = new Date();
+      t.setDate(t.getDate() + 1);
+      t.setHours(8, 0, 0, 0);
+      return { date: t, error: null };
+    }
+    if (!sendCustomAt) {
+      return { date: null, error: "Pick a date and time" };
+    }
+    const t = new Date(sendCustomAt);
+    if (Number.isNaN(t.getTime())) {
+      return { date: null, error: "Invalid date/time" };
+    }
+    if (t.getTime() <= Date.now() + 30 * 1000) {
+      return { date: null, error: "Pick a time at least a minute out" };
+    }
+    return { date: t, error: null };
+  };
+
   const handleSend = async () => {
     if (!toNumber.trim() || (!msgBody.trim() && attachments.length === 0))
       return;
+    const { date: scheduledAt, error: scheduleErr } = resolveScheduledFor();
+    if (scheduleErr) {
+      setSendResult({ ok: false, text: scheduleErr });
+      return;
+    }
+    if (scheduledAt && attachments.length > 0) {
+      setSendResult({
+        ok: false,
+        text: "Attachments aren't supported on scheduled sends yet — send now, or remove attachments.",
+      });
+      return;
+    }
     setSending(true);
     setSendResult(null);
     try {
-      await adminFetch("/admin/communications/sms", {
-        method: "POST",
-        body: JSON.stringify({
-          to: toNumber.trim(),
-          body: msgBody.trim(),
-          customerId: selectedCustomerId || undefined,
-          messageType: "manual",
-          fromNumber,
-          mediaUrls:
-            attachments.length > 0 ? attachments.map((a) => a.url) : undefined,
-          mediaAttachments:
-            attachments.length > 0
-              ? attachments.map(({ previewUrl, ...a }) => a)
-              : undefined,
-        }),
-      });
-      setSendResult({ ok: true, text: "Message sent." });
+      if (scheduledAt) {
+        await adminFetch("/admin/communications/schedule-sms", {
+          method: "POST",
+          body: JSON.stringify({
+            to: toNumber.trim(),
+            body: msgBody.trim(),
+            customerId: selectedCustomerId || undefined,
+            messageType: "manual",
+            fromNumber,
+            scheduledFor: scheduledAt.toISOString(),
+          }),
+        });
+        setSendResult({
+          ok: true,
+          text: `Scheduled for ${scheduledAt.toLocaleString("en-US", {
+            month: "short",
+            day: "numeric",
+            hour: "numeric",
+            minute: "2-digit",
+          })}.`,
+        });
+      } else {
+        await adminFetch("/admin/communications/sms", {
+          method: "POST",
+          body: JSON.stringify({
+            to: toNumber.trim(),
+            body: msgBody.trim(),
+            customerId: selectedCustomerId || undefined,
+            messageType: "manual",
+            fromNumber,
+            mediaUrls:
+              attachments.length > 0
+                ? attachments.map((a) => a.url)
+                : undefined,
+            mediaAttachments:
+              attachments.length > 0
+                ? attachments.map(({ previewUrl, ...a }) => a)
+                : undefined,
+          }),
+        });
+        setSendResult({ ok: true, text: "Message sent." });
+      }
       setToNumber("");
       setToSearch("");
       setSelectedCustomerId(null);
@@ -711,6 +776,8 @@ function SmsTab() {
         if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
       }
       setAttachments([]);
+      setSendTiming("now");
+      setSendCustomAt("");
       loadData();
     } catch (e) {
       setSendResult({ ok: false, text: `Failed: ${e.message}` });
@@ -1322,6 +1389,34 @@ function SmsTab() {
             e.target.value = "";
           }}
         />{" "}
+        <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">
+          Send
+        </label>{" "}
+        <select
+          value={sendTiming}
+          onChange={(e) => setSendTiming(e.target.value)}
+          className={cn(
+            "w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 min-h-[44px] md:min-h-0",
+            "focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900",
+            sendTiming === "custom" ? "mb-2" : "mb-3",
+          )}
+        >
+          {" "}
+          <option value="now">Immediately</option>{" "}
+          <option value="tomorrow_8">Tomorrow at 8 AM</option>{" "}
+          <option value="custom">Custom time…</option>{" "}
+        </select>
+        {sendTiming === "custom" && (
+          <input
+            type="datetime-local"
+            value={sendCustomAt}
+            onChange={(e) => setSendCustomAt(e.target.value)}
+            className={cn(
+              "w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 min-h-[44px] md:min-h-0 mb-3",
+              "focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900",
+            )}
+          />
+        )}
         <div className="flex gap-2 items-center">
           {/* Plus — attachment menu */}
           <div className="relative">
@@ -1390,7 +1485,15 @@ function SmsTab() {
               (!msgBody.trim() && attachments.length === 0)
             }
           >
-            {sending ? "Sending…" : uploading ? "Uploading…" : "Send"}
+            {sending
+              ? sendTiming === "now"
+                ? "Sending…"
+                : "Scheduling…"
+              : uploading
+                ? "Uploading…"
+                : sendTiming === "now"
+                  ? "Send"
+                  : "Schedule"}
           </Button>{" "}
           <Button
             variant="secondary"
