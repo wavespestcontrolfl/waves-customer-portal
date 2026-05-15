@@ -151,7 +151,7 @@ export default function KnowledgeBasePage() {
     <div style={{ maxWidth: 1300, margin: "0 auto" }}>
       {" "}
       <AdminCommandHeader
-        title="Claudeopedia"
+        title="Knowledge Base"
         icon={Brain}
         sections={tabs}
         activeKey={tab}

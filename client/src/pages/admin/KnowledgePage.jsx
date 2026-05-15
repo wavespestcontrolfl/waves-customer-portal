@@ -810,7 +810,7 @@ export default function KnowledgePage() {
       <div>
         {" "}
         <AdminCommandHeader
-          title="Knowledge Base"
+          title="Wiki"
           icon={BookOpen}
           action={{
             label: "All Articles",
@@ -837,7 +837,7 @@ export default function KnowledgePage() {
       {showQA && <QAModal onClose={() => setShowQA(false)} />}
 
       <AdminCommandHeader
-        title="Knowledge Base"
+        title="Wiki"
         icon={BookOpen}
         sections={TABS}
         activeKey={tab}

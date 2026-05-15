@@ -93,7 +93,7 @@ const NAV_SECTIONS = [
       {
         path: "/admin/communications",
         icon: MessageSquare,
-        label: "Communications",
+        label: "SMS/CALL",
       },
       { path: "/admin/reviews", icon: Star, label: "Reviews" },
       { path: "/admin/referrals", icon: Gift, label: "Referrals" },
@@ -122,8 +122,8 @@ const NAV_SECTIONS = [
   {
     section: "Intelligence",
     items: [
-      { path: "/admin/knowledge", icon: BookMarked, label: "Knowledge Base" },
-      { path: "/admin/kb", icon: Brain, label: "Claudeopedia" },
+      { path: "/admin/knowledge", icon: BookMarked, label: "Wiki" },
+      { path: "/admin/kb", icon: Brain, label: "Knowledge Base" },
     ],
   },
   {
