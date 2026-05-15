@@ -1355,7 +1355,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   }
   if (sel.has('MOSQUITO')) {
     services.mosquito = {
-      tier: o.mosquitoProgram || 'monthly',
+      tier: o.mosquitoProgram || 'monthly12',
       stationCount: o.mosquitoStationCount,
       dunkCount: o.mosquitoDunkCount,
     };

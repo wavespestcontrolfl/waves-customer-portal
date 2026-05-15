@@ -200,7 +200,7 @@ const estimate = generateEstimate({
     pest: { frequency: 'quarterly', version: 'v1' },
     lawn: { track: 'st_augustine', tier: 'enhanced' },
     treeShrub: { tier: 'enhanced', treeCount: 5 },
-    mosquito: { tier: 'monthly' },
+    mosquito: { tier: 'monthly12' },
   },
 });
 
@@ -245,7 +245,7 @@ const achEstimate = generateEstimate({
       pest: { frequency: 'quarterly', version: 'v1' },
       lawn: { track: 'st_augustine', tier: 'enhanced' },
       treeShrub: { tier: 'enhanced', treeCount: 5 },
-      mosquito: { tier: 'monthly' },
+      mosquito: { tier: 'monthly12' },
     },
   },
   paymentMethod: 'us_bank_account',

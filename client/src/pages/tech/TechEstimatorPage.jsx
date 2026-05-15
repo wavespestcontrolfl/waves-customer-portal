@@ -31,10 +31,8 @@ const PEST_FREQ = [
 ];
 
 const MOSQUITO_OPTS = [
-  { label: 'Seasonal Essential Barrier', monthly: 79 },
-  { label: 'Monthly Essential Barrier', monthly: 90 },
-  { label: 'Seasonal Precision Barrier', monthly: 95 },
-  { label: 'Monthly Precision Barrier', monthly: 120 },
+  { label: 'Seasonal Mosquito Program (9 visits)', monthly: 79 },
+  { label: 'Monthly Mosquito Program (12 visits)', monthly: 90 },
 ];
 
 const TS_OPTS = [

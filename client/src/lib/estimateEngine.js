@@ -169,6 +169,8 @@ export function calculateEstimate(inputs) {
     imperviousSurfacePercent: _imperviousSurfacePercent,
     imperviosSurfacePercent: _imperviosSurfacePercent,
     estimatedBedAreaPercent: _estimatedBedAreaPercent,
+    mosquitoStationCount: _mosquitoStationCount,
+    mosquitoDunkCount: _mosquitoDunkCount,
     otLawnType,
     exclSimple: exS,
     exclModerate: exM,
@@ -226,6 +228,8 @@ export function calculateEstimate(inputs) {
   const fmPts = Number(_foamPoints) || 5;
   const grassType = normalizeGrassType(_grassType);
   const lawnFreq = resolveLawnFreq(_lawnFreq);
+  const mosquitoStationCount = Math.max(0, Math.round(Number(_mosquitoStationCount) || 0));
+  const mosquitoDunkCount = Math.max(0, Math.round(Number(_mosquitoDunkCount) || 0));
 
   const LABOR = 35, DRIVE = 20;
   const footprint = homeSqFt > 0 ? Math.round(homeSqFt / stories) : 0;
@@ -696,20 +700,18 @@ export function calculateEstimate(inputs) {
     else if (sz === 'HALF') pr += 0.05;
     pr = Math.min(2.0, Math.round(pr * 100) / 100);
     const bp = {
-      SMALL: [105, 90, 135, 120],
-      QUARTER: [115, 100, 150, 135],
-      THIRD: [130, 115, 175, 155],
-      HALF: [155, 135, 210, 185],
-      ACRE: [195, 175, 265, 235],
+      SMALL: [105, 90],
+      QUARTER: [115, 100],
+      THIRD: [130, 115],
+      HALF: [155, 135],
+      ACRE: [195, 175],
     };
     const b = bp[sz] || bp.SMALL;
+    const ri = (pr >= 1.30 || nearWater || treeDensity === 'HEAVY') ? 1 : 0;
     const mt = [
-      { n: 'Seasonal Essential Barrier', pv: Math.round(b[0] * pr), v: 9 },
-      { n: 'Monthly Essential Barrier', pv: Math.round(b[1] * pr), v: 12 },
-      { n: 'Seasonal Precision Barrier', pv: Math.round(b[2] * pr), v: 9 },
-      { n: 'Monthly Precision Barrier', pv: Math.round(b[3] * pr), v: 12 },
+      { n: 'Seasonal Mosquito Program (9 visits)', pv: Math.round(b[0] * pr), v: 9, tier: 'seasonal9' },
+      { n: 'Monthly Mosquito Program (12 visits)', pv: Math.round(b[1] * pr), v: 12, tier: 'monthly12' },
     ];
-    const ri = 1;
     R.mq = [];
     R.mqMeta = { pr, sz, ri, treatableSqFt, grossLotCategory };
     mt.forEach((t, i) => {
@@ -760,7 +762,7 @@ export function calculateEstimate(inputs) {
     hasOT = true;
     const fpEff = footprint > 0 ? footprint : 2500;
     const bpp = R.pest ? R.pest.pa : Math.max(89, 117 + pestBaseAdjustment(fpEff));
-    const fp = Math.max(150, otP(Math.max(150, Math.round(bpp * 1.30))));
+    const fp = Math.max(199, otP(Math.max(199, Math.round(bpp * 1.75))));
     otItems.push({ name: 'OT Pest', price: fp, detail: indoor ? 'Interior + exterior' : 'Exterior (+ interior add-on)' });
   }
 
@@ -779,20 +781,27 @@ export function calculateEstimate(inputs) {
     if (otLawnType === 'WEED') { tm = 1.12; tl = 'Weed Control'; }
     else if (otLawnType === 'PEST') { tm = 1.30; tl = 'Lawn Pest'; }
     else if (otLawnType === 'FUNGICIDE') { tm = 1.38; tl = 'Fungicide'; }
-    const fp = otP(Math.max(115, Math.round(bl * tm)));
+    const fp = Math.max(115, otP(Math.max(115, Math.round(bl * tm))));
     otItems.push({ name: 'OT Lawn (' + tl + ')', price: fp, detail: 'Single visit', lawnType: tl });
   }
 
   /* ── One-Time Mosquito ───────────────────────────────────── */
   if (svcOnetimeMosquito && lotSqFt > 0) {
     hasOT = true;
-    let p = 200;
-    if (lotSqFt >= 43560) p = 350;
-    else if (lotSqFt >= 21780) p = 300;
-    else if (lotSqFt >= 14520) p = 275;
-    else if (lotSqFt >= 10890) p = 250;
-    const fp = otP(p);
-    otItems.push({ name: 'OT Mosquito', price: fp, detail: 'Rain re-spray guarantee' });
+    const treatableSqFt = Math.max(0, Math.round(lotSqFt - footprint - estimateHardscape()));
+    let p = 225;
+    if (treatableSqFt > 43560) p = 475 + Math.ceil((treatableSqFt - 43560) / 10000) * 75;
+    else if (treatableSqFt > 32000) p = 475;
+    else if (treatableSqFt > 24000) p = 425;
+    else if (treatableSqFt > 16000) p = 385;
+    else if (treatableSqFt > 11000) p = 325;
+    else if (treatableSqFt > 7500) p = 275;
+    const addOns = mosquitoStationCount * 75 + mosquitoDunkCount * 15;
+    const fp = Math.round((p + addOns) * rD);
+    const detailParts = [];
+    if (mosquitoStationCount > 0) detailParts.push(`${mosquitoStationCount} stations`);
+    if (mosquitoDunkCount > 0) detailParts.push(`${mosquitoDunkCount} Bti dunks`);
+    otItems.push({ name: 'OT Mosquito', price: fp, detail: detailParts.join(' + ') || 'Rain re-spray guarantee' });
   }
 
   /* ── Plugging ────────────────────────────────────────────── */
