@@ -244,6 +244,17 @@ function formatDatetimeLocal(date) {
   );
 }
 
+function parseNonNegativeInteger(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+function formatSqFt(value) {
+  const n = parseNonNegativeInteger(value);
+  return n === null ? "unknown" : `${n.toLocaleString()} sf`;
+}
+
 function InputV2({ k, type = "text", placeholder, min, max, className }) {
   const { form, set } = useContext(FormCtx);
   return (
@@ -551,7 +562,11 @@ export default function EstimateToolViewV2({
     ac.addListener("place_changed", () => {
       const p = ac.getPlace();
       if (p && p.formatted_address) {
-        setForm((f) => ({ ...f, address: p.formatted_address }));
+        setForm((f) => ({
+          ...f,
+          address: p.formatted_address,
+          measuredTurfSf: "",
+        }));
       }
     });
     autocompleteRef.current = ac;
@@ -586,6 +601,7 @@ export default function EstimateToolViewV2({
     treeCount: "",
     roachModifier: "NONE",
     lawnFreq: "9",
+    measuredTurfSf: "",
     pestFreq: "4",
     plugArea: "",
     plugSpacing: "12",
@@ -797,6 +813,7 @@ export default function EstimateToolViewV2({
     setForm((f) => ({
       ...f,
       [key]: val,
+      ...(key === "address" ? { measuredTurfSf: "" } : {}),
       ...(key === "poolCageSize" ? { _poolCageSizeEdited: true } : {}),
       ...(key === "stories" ? { _storiesEdited: true } : {}),
     }));
@@ -974,6 +991,7 @@ export default function EstimateToolViewV2({
       type: "loading",
       msg: "Running AI satellite analysis...",
     });
+    setForm((f) => ({ ...f, measuredTurfSf: "" }));
     try {
       const r = await fetch("/api/admin/estimator/property-lookup", {
         method: "POST",
@@ -1108,7 +1126,7 @@ export default function EstimateToolViewV2({
         const flags = ep.fieldVerifyFlags?.length || 0;
         setSatelliteStatus({
           type: "ok",
-          msg: `AI Analysis complete — Confidence: ${conf} (${ep.aiConfidence}%)${flags > 0 ? ` · ${flags} field(s) flagged` : ""}\nPest pressure: ${ep.overallPestPressure} · Water: ${ep.nearWater} · Turf: ${ep.estimatedTurfSf} sf`,
+          msg: `AI Analysis complete — Confidence: ${conf} (${ep.aiConfidence}%)${flags > 0 ? ` · ${flags} field(s) flagged` : ""}\nPest pressure: ${ep.overallPestPressure} · Water: ${ep.nearWater} · Turf: ${formatSqFt(ep.estimatedTurfSf)}`,
         });
       } else {
         setSatelliteStatus({
@@ -1137,6 +1155,7 @@ export default function EstimateToolViewV2({
       msg: "Analyzing satellite imagery with AI...",
     });
     setSatelliteData(null);
+    setForm((f) => ({ ...f, measuredTurfSf: "" }));
     try {
       const r = await fetch("/api/admin/lookup/satellite-ai", {
         method: "POST",
@@ -1269,11 +1288,16 @@ export default function EstimateToolViewV2({
         const n = parseInt(value, 10);
         return Number.isFinite(n) ? n : fallback;
       };
+      const optionalNumber = (value) => {
+        const n = parseInt(value, 10);
+        return Number.isFinite(n) && n >= 0 ? n : undefined;
+      };
       const baseProfile = enrichedProfile || {};
       const treeCount = manualNumber(
         form.treeCount,
         Number(baseProfile.treeCount || baseProfile.estimatedTreeCount) || 0,
       );
+      const measuredTurfSf = optionalNumber(form.measuredTurfSf);
       const profile = {
         ...baseProfile,
         homeSqFt: manualNumber(
@@ -1293,6 +1317,11 @@ export default function EstimateToolViewV2({
         estimatedTreeCount: treeCount,
         treeCount,
       };
+      if (measuredTurfSf !== undefined) {
+        profile.measuredTurfSf = measuredTurfSf;
+      } else {
+        delete profile.measuredTurfSf;
+      }
       if (profile.homeSqFt)
         profile.footprint = Math.round(
           profile.homeSqFt / (profile.stories || 1),
@@ -1597,6 +1626,7 @@ export default function EstimateToolViewV2({
       bedArea: "",
       palmCount: "",
       treeCount: "",
+      measuredTurfSf: "",
       boracareSqft: "",
       preslabSqft: "",
       customerId: "",
@@ -1643,6 +1673,49 @@ export default function EstimateToolViewV2({
 
   const E = estimate;
   const R = E?.results || {};
+  const aiTurfSqFt =
+    parseNonNegativeInteger(enrichedProfile?.estimatedTurfSf) ??
+    parseNonNegativeInteger(satelliteData?.estimatedTurfSf) ??
+    null;
+  const confirmedTurfSqFt = parseNonNegativeInteger(form.measuredTurfSf);
+  const effectiveTurfSqFt = confirmedTurfSqFt ?? aiTurfSqFt ?? 0;
+  const lotSqFtForTurf =
+    parseNonNegativeInteger(form.lotSqFt) ??
+    parseNonNegativeInteger(enrichedProfile?.lotSqFt) ??
+    0;
+  const turfSliderMax = Math.max(
+    20000,
+    Math.ceil(Math.max(lotSqFtForTurf, aiTurfSqFt || 0, confirmedTurfSqFt || 0, 5000) / 1000) * 1000,
+  );
+  const plugAreaSqFt = parseNonNegativeInteger(form.plugArea);
+  const pluggingUsesTurfFallback = !!form.svcPlugging && !(plugAreaSqFt > 0);
+  const hasTurfPricedSelection =
+    !!form.svcLawn ||
+    !!form.svcOnetimeLawn ||
+    !!form.svcTopdress ||
+    !!form.svcDethatch ||
+    pluggingUsesTurfFallback;
+  const needsTurfConfirmation =
+    hasTurfPricedSelection &&
+    confirmedTurfSqFt === null &&
+    aiTurfSqFt !== null &&
+    aiTurfSqFt > 20000;
+  const turfReviewReasons = [
+    aiTurfSqFt !== null && lotSqFtForTurf > 0 && aiTurfSqFt / lotSqFtForTurf >= 0.55
+      ? `AI turf is ${Math.round((aiTurfSqFt / lotSqFtForTurf) * 100)}% of lot`
+      : null,
+    Number(enrichedProfile?.aiConfidence) > 0 && Number(enrichedProfile?.aiConfidence) < 60
+      ? `AI confidence ${enrichedProfile.aiConfidence}%`
+      : null,
+    form.treeDensity === "HEAVY" ? "heavy tree canopy" : null,
+    form.nearWater === "YES" ? "water adjacency" : null,
+  ].filter(Boolean);
+  const showTurfReview =
+    hasTurfPricedSelection &&
+    confirmedTurfSqFt === null &&
+    aiTurfSqFt !== null &&
+    aiTurfSqFt >= 15000 &&
+    turfReviewReasons.length > 0;
   const formCtx = { form, set, toggle };
   const sendBusy = generating || saving || sending;
   const generateBusy = generating || saving || sending;
@@ -1698,6 +1771,7 @@ export default function EstimateToolViewV2({
                             ...f,
                             customerId: c.id || "",
                             address: c.address || f.address,
+                            measuredTurfSf: "",
                             customerName: name,
                             customerPhone: c.phone || f.customerPhone || "",
                             customerEmail: c.email || f.customerEmail || "",
@@ -1774,8 +1848,11 @@ export default function EstimateToolViewV2({
                       bedArea: "",
                       palmCount: "",
                       treeCount: "",
+                      measuredTurfSf: "",
                     }));
                     setLookupStatus({ type: "", msg: "" });
+                    setEnrichedProfile(null);
+                    setExistingCustomerMatch(null);
                     setSatelliteStatus({ type: "", msg: "" });
                     setSatelliteData(null);
                     setEstimate(null);
@@ -2201,6 +2278,77 @@ export default function EstimateToolViewV2({
                       ]}
                     />{" "}
                   </FieldV2>{" "}
+                </div>
+              )}
+              {hasTurfPricedSelection && (
+                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  {" "}
+                  <div className="flex items-center justify-between gap-3 mb-2">
+                    <div className="text-12 font-semibold text-zinc-900">
+                      Treatable Lawn Area
+                    </div>
+                    <Badge variant="neutral" className="text-10 u-nums">
+                      AI {formatSqFt(aiTurfSqFt)}
+                    </Badge>
+                  </div>
+                  <div className="grid grid-cols-[1fr_auto] gap-2 items-end">
+                    <FieldV2 label="Confirmed Sq Ft" className="mb-0">
+                      <input
+                        type="number"
+                        min="0"
+                        step="250"
+                        value={form.measuredTurfSf || ""}
+                        onChange={(e) => set("measuredTurfSf", e.target.value)}
+                        placeholder={aiTurfSqFt ? String(aiTurfSqFt) : "Measured turf"}
+                        className={INPUT_CLS}
+                      />
+                    </FieldV2>
+                    {confirmedTurfSqFt !== null && (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        className="h-10 px-3 text-11"
+                        onClick={() => set("measuredTurfSf", "")}
+                      >
+                        Clear
+                      </Button>
+                    )}
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max={turfSliderMax}
+                    step="250"
+                    value={effectiveTurfSqFt}
+                    onChange={(e) => set("measuredTurfSf", e.target.value)}
+                    className="mt-3 w-full accent-zinc-900"
+                  />
+                  <div className="mt-1 flex items-center justify-between text-11 text-ink-secondary">
+                    <span>0 sf</span>
+                    <span className="font-medium text-zinc-900 u-nums">
+                      {confirmedTurfSqFt !== null ? "Confirmed" : "Using AI"}:{" "}
+                      {formatSqFt(effectiveTurfSqFt)}
+                    </span>
+                    <span>{turfSliderMax.toLocaleString()} sf</span>
+                  </div>
+                  {needsTurfConfirmation && (
+                    <div className="mt-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-12 text-alert-fg">
+                      AI turf is over 20,000 sf. Confirm treatable lawn area
+                      before generating lawn pricing.
+                    </div>
+                  )}
+                  {!needsTurfConfirmation && showTurfReview && (
+                    <div className="mt-3 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
+                      Review turf estimate: {turfReviewReasons.join(", ")}.
+                    </div>
+                  )}
+                  {confirmedTurfSqFt !== null && confirmedTurfSqFt > 20000 && (
+                    <div className="mt-3 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
+                      Confirmed turf is over 20,000 sf and will be marked for
+                      custom quote review.
+                    </div>
+                  )}
                 </div>
               )}
               <CheckboxV2 k="svcPest" label="Pest Control" />

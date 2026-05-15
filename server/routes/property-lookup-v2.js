@@ -32,6 +32,10 @@ const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || 'gemini-2.5-flash
 
 // SWFL bounding box — reject addresses outside service area
 const SWFL_BOUNDS = { latMin: 26.3, latMax: 27.8, lngMin: -82.9, lngMax: -81.5 };
+const TURF_REVIEW_THRESHOLD_SQFT = 15000;
+const TURF_MANUAL_CONFIRMATION_SQFT = 20000;
+const TURF_HIGH_LOT_RATIO = 0.55;
+const TURF_PRICED_SERVICES = new Set(['LAWN', 'OT_LAWN', 'TOPDRESS', 'DETHATCH', 'PLUGGING']);
 
 // ─────────────────────────────────────────────
 // CORE LOOKUP — reusable by admin + public routes
@@ -794,6 +798,51 @@ function firstNonNegativeNumber(...values) {
   return undefined;
 }
 
+function selectedTurfPricedServices(selectedServices = []) {
+  return (selectedServices || [])
+    .map((service) => String(service || '').toUpperCase())
+    .filter((service) => TURF_PRICED_SERVICES.has(service));
+}
+
+function turfRiskReasons(source = {}) {
+  const reasons = [];
+  const lotSqFt = firstNonNegativeNumber(source.lotSqFt, source.lotSize);
+  const estimatedTurfSf = firstNonNegativeNumber(source.estimatedTurfSf, source.estimatedTurfSqFt);
+  const aiConfidence = firstNonNegativeNumber(source.aiConfidence, source.confidenceScore);
+  const treeDensity = String(source.treeDensity || '').toUpperCase();
+  const nearWater = String(source.nearWater || source.waterProximity || '').toUpperCase();
+  const shadeCoveragePercent = firstNonNegativeNumber(source.shadeCoveragePercent);
+
+  if (lotSqFt && estimatedTurfSf && estimatedTurfSf / lotSqFt >= TURF_HIGH_LOT_RATIO) {
+    reasons.push(`estimated turf is ${Math.round((estimatedTurfSf / lotSqFt) * 100)}% of lot`);
+  }
+  if (aiConfidence !== undefined && aiConfidence < 60) reasons.push(`AI confidence ${aiConfidence}%`);
+  if (treeDensity === 'HEAVY') reasons.push('heavy tree canopy');
+  if (shadeCoveragePercent !== undefined && shadeCoveragePercent >= 35) reasons.push(`${shadeCoveragePercent}% shade coverage`);
+  if (nearWater && nearWater !== 'NONE' && nearWater !== 'NO') reasons.push('water adjacency');
+  return reasons;
+}
+
+function needsTurfManualConfirmation(profile = {}, selectedServices = [], options = {}) {
+  const turfServices = selectedTurfPricedServices(selectedServices);
+  if (turfServices.length === 0) return null;
+  const manualTurfSf = firstNonNegativeNumber(profile.measuredTurfSf, profile.lawnSqFt);
+  if (manualTurfSf !== undefined) return null;
+  const plugArea = firstNonNegativeNumber(options.plugArea);
+  if (turfServices.length === 1 && turfServices[0] === 'PLUGGING' && plugArea > 0) return null;
+
+  const estimatedTurfSf = firstNonNegativeNumber(profile.estimatedTurfSf, profile.estimatedTurfSqFt);
+  if (estimatedTurfSf === undefined || estimatedTurfSf <= TURF_MANUAL_CONFIRMATION_SQFT) return null;
+
+  return {
+    field: 'measuredTurfSf',
+    threshold: TURF_MANUAL_CONFIRMATION_SQFT,
+    estimatedTurfSf,
+    reasons: turfRiskReasons(profile),
+    message: `AI estimated ${Math.round(estimatedTurfSf).toLocaleString()} sq ft of treatable turf. Confirm treatable lawn area before generating lawn pricing above ${TURF_MANUAL_CONFIRMATION_SQFT.toLocaleString()} sq ft.`,
+  };
+}
+
 function detectCategory(rc) {
   if (!rc) return 'RESIDENTIAL';
   const pt = (rc.propertyType || '').toLowerCase();
@@ -1175,6 +1224,20 @@ function buildFieldVerifyFlags(rc, ai) {
     });
   }
 
+  const estimatedTurfSf = firstNonNegativeNumber(ai?.estimatedTurfSf);
+  const turfReviewReasons = turfRiskReasons({
+    ...ai,
+    lotSqFt: rc?.lotSize,
+    aiConfidence: ai?.confidenceScore,
+  });
+  if (estimatedTurfSf >= TURF_REVIEW_THRESHOLD_SQFT && turfReviewReasons.length > 0) {
+    flags.push({
+      field: 'estimatedTurfSf',
+      reason: `AI turf estimate ${Math.round(estimatedTurfSf).toLocaleString()} sq ft needs review — ${turfReviewReasons.join(', ')}`,
+      priority: estimatedTurfSf > TURF_MANUAL_CONFIRMATION_SQFT ? 'HIGH' : 'MEDIUM',
+    });
+  }
+
   // Vegetation on structure
   if (ai?.vegetationOnStructure === 'SIGNIFICANT') {
     flags.push({
@@ -1457,6 +1520,14 @@ router.post('/calculate-estimate', async (req, res) => {
   try {
     const { profile, selectedServices, options } = req.body;
     if (!profile) return res.status(400).json({ error: 'Profile required' });
+    const turfConfirmation = needsTurfManualConfirmation(profile, selectedServices || [], options || {});
+    if (turfConfirmation) {
+      return res.status(400).json({
+        error: turfConfirmation.message,
+        code: 'TURF_CONFIRMATION_REQUIRED',
+        turfConfirmation,
+      });
+    }
 
     const pricingEngine = require('../services/pricing-engine');
     const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
@@ -1701,3 +1772,4 @@ module.exports = router;
 module.exports.performPropertyLookup = performPropertyLookup;
 module.exports.buildEnrichedProfile = buildEnrichedProfile;
 module.exports.translateV2CallToV1Input = translateV2CallToV1Input;
+module.exports.needsTurfManualConfirmation = needsTurfManualConfirmation;

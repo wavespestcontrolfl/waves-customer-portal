@@ -5,7 +5,7 @@ const {
   priceLawnCare,
   priceOneTimeLawn,
 } = require('../services/pricing-engine');
-const { buildEnrichedProfile } = require('../routes/property-lookup-v2');
+const { buildEnrichedProfile, needsTurfManualConfirmation } = require('../routes/property-lookup-v2');
 
 function baseInput(overrides = {}) {
   return {
@@ -78,6 +78,70 @@ describe('lawn pricing production follow-up', () => {
     expect(profile.imperviosSurfacePercent).toBe(0);
     expect(property.turfOpenArea).toBe(10000);
     expect(property.turfSf).toBe(9000);
+  });
+
+  test('large AI-only turf requires manual confirmation for turf-priced services', () => {
+    const profile = {
+      lotSqFt: 46609,
+      estimatedTurfSf: 28000,
+      aiConfidence: 52,
+      treeDensity: 'HEAVY',
+      nearWater: 'POND_ON_PROPERTY',
+    };
+
+    const required = needsTurfManualConfirmation(profile, ['LAWN']);
+    const pestOnly = needsTurfManualConfirmation(profile, ['PEST']);
+    const pluggingFallback = needsTurfManualConfirmation(profile, ['PLUGGING']);
+    const pluggingManualArea = needsTurfManualConfirmation(profile, ['PLUGGING'], { plugArea: 1000 });
+    const lawnWithPlugArea = needsTurfManualConfirmation(profile, ['LAWN', 'PLUGGING'], { plugArea: 1000 });
+    const confirmed = needsTurfManualConfirmation({ ...profile, measuredTurfSf: 15000 }, ['LAWN']);
+
+    expect(required).toMatchObject({
+      field: 'measuredTurfSf',
+      threshold: 20000,
+      estimatedTurfSf: 28000,
+    });
+    expect(required.reasons).toEqual(expect.arrayContaining([
+      'AI confidence 52%',
+      'heavy tree canopy',
+      'water adjacency',
+    ]));
+    expect(pestOnly).toBeNull();
+    expect(pluggingFallback).toMatchObject({
+      field: 'measuredTurfSf',
+      estimatedTurfSf: 28000,
+    });
+    expect(pluggingManualArea).toBeNull();
+    expect(lawnWithPlugArea).toMatchObject({
+      field: 'measuredTurfSf',
+      estimatedTurfSf: 28000,
+    });
+    expect(confirmed).toBeNull();
+  });
+
+  test('profile builder flags suspicious large turf estimates from obstructed imagery', () => {
+    const profile = buildEnrichedProfile(
+      {
+        formattedAddress: '21803 Deer Pointe Crossing',
+        propertyType: 'Single Family',
+        squareFootage: 2932,
+        lotSize: 46609,
+        stories: 1,
+      },
+      {
+        estimatedTurfSf: 28000,
+        confidenceScore: 52,
+        treeDensity: 'HEAVY',
+        nearWater: 'POND_ON_PROPERTY',
+      },
+      null,
+      null
+    );
+
+    expect(profile.fieldVerifyFlags).toContainEqual(expect.objectContaining({
+      field: 'estimatedTurfSf',
+      priority: 'HIGH',
+    }));
   });
 
   test('correct imperviousSurfacePercent overrides legacy typo and legacy typo still works', () => {
