@@ -1,7 +1,9 @@
 const express = require('express');
 const router = express.Router();
+const multer = require('multer');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const InvoiceService = require('../services/invoice');
+const InvoiceAttachments = require('../services/invoice-attachments');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
@@ -10,6 +12,88 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/sh
 const { assertInvoiceCollectible } = require('../services/invoice-helpers');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+function aggregateAttachmentMemoryStorage() {
+  return {
+    _handleFile(req, file, cb) {
+      const chunks = [];
+      let fileBytes = 0;
+      let done = false;
+
+      const fail = (err) => {
+        if (done) return;
+        done = true;
+        chunks.length = 0;
+        file.stream.resume();
+        cb(err);
+      };
+
+      file.stream.on('limit', () => {
+        fail(InvoiceAttachments.attachmentError('Invoice attachments cannot total more than 25 MB', 400));
+      });
+
+      file.stream.on('data', (chunk) => {
+        if (done) return;
+        const nextTotal = Number(req.invoiceAttachmentUploadBytes || 0) + chunk.length;
+        if (nextTotal > InvoiceAttachments.MAX_ATTACHMENT_TOTAL_BYTES) {
+          fail(InvoiceAttachments.attachmentError('Invoice attachments cannot total more than 25 MB', 400));
+          return;
+        }
+        req.invoiceAttachmentUploadBytes = nextTotal;
+        fileBytes += chunk.length;
+        chunks.push(chunk);
+      });
+
+      file.stream.on('error', fail);
+      file.stream.on('end', () => {
+        if (done) return;
+        done = true;
+        cb(null, {
+          buffer: Buffer.concat(chunks, fileBytes),
+          size: fileBytes,
+        });
+      });
+    },
+    _removeFile(_req, file, cb) {
+      delete file.buffer;
+      cb(null);
+    },
+  };
+}
+
+const attachmentUpload = multer({
+  storage: aggregateAttachmentMemoryStorage(),
+  limits: {
+    files: InvoiceAttachments.MAX_ATTACHMENT_COUNT,
+    fileSize: InvoiceAttachments.MAX_ATTACHMENT_TOTAL_BYTES,
+  },
+  fileFilter: (_req, file, cb) => {
+    if (!InvoiceAttachments.isAllowedDeclaredFile(file)) {
+      return cb(InvoiceAttachments.attachmentError(
+        'Supported attachment types are JPG, PNG, GIF, TIFF, BMP, and PDF',
+        400
+      ));
+    }
+    return cb(null, true);
+  },
+});
+
+function normalizeAttachmentUploadError(err, _req, _res, next) {
+  if (err?.code === 'LIMIT_FILE_SIZE') {
+    return next(InvoiceAttachments.attachmentError('Invoice attachments cannot total more than 25 MB', 400));
+  }
+  if (err?.code === 'LIMIT_FILE_COUNT' || err?.code === 'LIMIT_UNEXPECTED_FILE') {
+    return next(InvoiceAttachments.attachmentError(
+      `Invoices can have at most ${InvoiceAttachments.MAX_ATTACHMENT_COUNT} attachments`,
+      400
+    ));
+  }
+  if (err?.status && !err.statusCode) {
+    err.statusCode = err.status;
+    err.isOperational = true;
+  }
+  return next(err);
+}
 
 function parseReviewDelayMinutes(body = {}) {
   if (!body.requestReview) return null;
@@ -204,6 +288,58 @@ router.get('/:id', async (req, res, next) => {
     const invoice = await InvoiceService.getById(req.params.id);
     if (!invoice) return res.status(404).json({ error: 'Not found' });
     res.json(invoice);
+  } catch (err) { next(err); }
+});
+
+// GET /:id/attachments — list invoice-level files
+router.get('/:id/attachments', async (req, res, next) => {
+  try {
+    const invoice = await db('invoices').where({ id: req.params.id }).first('id');
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    const attachments = await InvoiceAttachments.list(req.params.id);
+    res.json({ attachments });
+  } catch (err) { next(err); }
+});
+
+// POST /:id/attachments — upload up to 10 files / 25 MB total per invoice
+router.post('/:id/attachments', requireAdmin, attachmentUpload.array('attachments', InvoiceAttachments.MAX_ATTACHMENT_COUNT), normalizeAttachmentUploadError, async (req, res, next) => {
+  try {
+    const invoice = await db('invoices').where({ id: req.params.id }).first();
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    const attachments = await InvoiceAttachments.upload(invoice, req.files || [], {
+      uploadedByTechId: req.technicianId || null,
+    });
+    await db('activity_log').insert({
+      customer_id: invoice.customer_id,
+      action: 'invoice_attachment_uploaded',
+      description: `Attached ${attachments.length} file${attachments.length === 1 ? '' : 's'} to invoice ${invoice.invoice_number}`,
+    }).catch((err) => logger.warn(`[admin-invoices] attachment activity_log insert failed: ${err.message}`));
+    res.status(201).json({ attachments });
+  } catch (err) { next(err); }
+});
+
+// GET /:id/attachments/:attachmentId/url — signed S3 URL for admin preview/download
+router.get('/:id/attachments/:attachmentId/url', async (req, res, next) => {
+  try {
+    const attachment = await InvoiceAttachments.getForInvoice(req.params.id, req.params.attachmentId);
+    if (!attachment) return res.status(404).json({ error: 'Attachment not found' });
+    const url = await InvoiceAttachments.signedViewUrl(attachment);
+    res.json({ url });
+  } catch (err) { next(err); }
+});
+
+// DELETE /:id/attachments/:attachmentId — remove invoice attachment
+router.delete('/:id/attachments/:attachmentId', requireAdmin, async (req, res, next) => {
+  try {
+    const invoice = await db('invoices').where({ id: req.params.id }).first();
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    const removed = await InvoiceAttachments.remove(req.params.id, req.params.attachmentId);
+    await db('activity_log').insert({
+      customer_id: invoice.customer_id,
+      action: 'invoice_attachment_deleted',
+      description: `Removed ${removed.file_name} from invoice ${invoice.invoice_number}`,
+    }).catch((err) => logger.warn(`[admin-invoices] attachment delete activity_log insert failed: ${err.message}`));
+    res.json({ ok: true });
   } catch (err) { next(err); }
 });
 

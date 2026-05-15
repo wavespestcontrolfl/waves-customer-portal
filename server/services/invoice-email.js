@@ -59,11 +59,20 @@ async function sendInvoiceEmail(invoiceId) {
     logger.error(`[invoice-email] PDF build failed for ${invoice.invoice_number}: ${err.message}`);
     return { ok: false, error: 'PDF generation failed' };
   }
+  const attachmentCountRow = await db('invoice_attachments')
+    .where({ invoice_id: invoice.id })
+    .count('* as count')
+    .first()
+    .catch(() => ({ count: 0 }));
+  const extraAttachmentCount = Number(attachmentCountRow?.count || 0);
 
   const first = customer.first_name || 'there';
   const svcType = invoice.service_type || 'your recent service';
   const heading = 'Your invoice from Waves';
-  const intro = `Hi ${first}, thank you for letting us take care of ${svcType}. Your invoice for ${currency(invoice.total)} is ready — the full breakdown is attached as a PDF, and you can pay online in a few taps.`;
+  const attachmentNote = extraAttachmentCount > 0
+    ? ` ${extraAttachmentCount} additional attachment${extraAttachmentCount === 1 ? ' is' : 's are'} available from the online invoice.`
+    : '';
+  const intro = `Hi ${first}, thank you for letting us take care of ${svcType}. Your invoice for ${currency(invoice.total)} is ready — the full breakdown is attached as a PDF, and you can pay online in a few taps.${attachmentNote}`;
   const lines = [
     ['Invoice', invoice.invoice_number],
     ['Service', invoice.service_type || '—'],
@@ -78,7 +87,9 @@ async function sendInvoiceEmail(invoiceId) {
     lines,
     ctaHref: payUrl,
     ctaLabel: `Pay ${currency(invoice.total)}`,
-    footerNote: 'Your PDF invoice is attached. Reply to this email or call (941) 318-7612 with any questions.',
+    footerNote: extraAttachmentCount > 0
+      ? 'Your PDF invoice is attached. Additional invoice attachments are available from the payment link. Reply to this email or call (941) 318-7612 with any questions.'
+      : 'Your PDF invoice is attached. Reply to this email or call (941) 318-7612 with any questions.',
   });
   const text = plainText([
     `Hi ${first},`,
@@ -91,6 +102,7 @@ async function sendInvoiceEmail(invoiceId) {
     `Amount due: ${currency(invoice.total)}`,
     '',
     `Pay online: ${payUrl}`,
+    extraAttachmentCount > 0 ? `${extraAttachmentCount} additional invoice attachment${extraAttachmentCount === 1 ? ' is' : 's are'} available from that link.` : null,
     '',
     'Questions? Reply to this email or call (941) 318-7612.',
     '— Waves Pest Control',

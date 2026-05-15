@@ -60,7 +60,15 @@
 // - alert-fg discipline: spec reserves red for overdue / failed /
 //   refund-error. Watch for decorative misuse.
 import { useState, useEffect, useCallback, useRef } from "react";
-import { FileText, ListChecks, Plus } from "lucide-react";
+import {
+  ExternalLink,
+  FileText,
+  ListChecks,
+  Paperclip,
+  Plus,
+  Trash2,
+  Upload,
+} from "lucide-react";
 import { launchTapToPay } from "../../lib/tapToPay";
 import { useFeatureFlag } from "../../hooks/useFeatureFlag";
 import { computeCardTotal } from "../../lib/cardSurcharge";
@@ -94,6 +102,30 @@ async function adminFetch(path, options = {}) {
       "Content-Type": "application/json",
     },
     ...options,
+  });
+  if (!r.ok) {
+    let message = `HTTP ${r.status}`;
+    try {
+      const data = await r.clone().json();
+      message = data.error || data.message || message;
+    } catch {
+      const text = await r.text().catch(() => "");
+      if (text) message = text;
+    }
+    const err = new Error(message);
+    err.status = r.status;
+    throw err;
+  }
+  return r.json();
+}
+
+async function adminUpload(path, formData) {
+  const r = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+    },
+    body: formData,
   });
   if (!r.ok) {
     let message = `HTTP ${r.status}`;
@@ -154,6 +186,75 @@ const sInput = (isMobile) => ({
   boxSizing: "border-box",
   minHeight: isMobile ? 44 : undefined,
 });
+
+const ATTACHMENT_MAX_COUNT = 10;
+const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+const ATTACHMENT_ACCEPT = ".jpg,.jpeg,.png,.gif,.tif,.tiff,.bmp,.pdf";
+const ATTACHMENT_ALLOWED_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/tiff",
+  "image/bmp",
+  "image/x-ms-bmp",
+  "application/pdf",
+]);
+const ATTACHMENT_ALLOWED_EXTENSIONS = new Set([
+  "jpg",
+  "jpeg",
+  "png",
+  "gif",
+  "tif",
+  "tiff",
+  "bmp",
+  "pdf",
+]);
+
+function fileExtension(name = "") {
+  const match = String(name).toLowerCase().match(/\.([a-z0-9]+)$/);
+  return match ? match[1] : "";
+}
+
+function isAllowedAttachmentFile(file) {
+  return (
+    ATTACHMENT_ALLOWED_TYPES.has(String(file.type || "").toLowerCase()) ||
+    ATTACHMENT_ALLOWED_EXTENSIONS.has(fileExtension(file.name))
+  );
+}
+
+function formatFileSize(bytes = 0) {
+  const value = Number(bytes) || 0;
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value >= 1024) return `${Math.round(value / 1024)} KB`;
+  return `${value} B`;
+}
+
+function attachmentTotalBytes(files = []) {
+  return files.reduce((sum, file) => sum + Number(file.size || file.file_size_bytes || file.fileSizeBytes || 0), 0);
+}
+
+function validateAttachmentFiles(existingFiles, incomingFiles) {
+  const next = [...existingFiles, ...incomingFiles];
+  if (next.length > ATTACHMENT_MAX_COUNT) {
+    return `Attach up to ${ATTACHMENT_MAX_COUNT} files`;
+  }
+  if (attachmentTotalBytes(next) > ATTACHMENT_MAX_BYTES) {
+    return "Attachments can total up to 25 MB";
+  }
+  const unsupported = incomingFiles.find((file) => !isAllowedAttachmentFile(file));
+  if (unsupported) {
+    return "Supported file types: JPG, PNG, GIF, TIFF, BMP, and PDF";
+  }
+  return null;
+}
+
+async function uploadInvoiceAttachments(invoiceId, files) {
+  if (!files.length) return [];
+  const fd = new FormData();
+  files.forEach((file) => fd.append("attachments", file));
+  const result = await adminUpload(`/admin/invoices/${invoiceId}/attachments`, fd);
+  return result.attachments || [];
+}
 
 const STATUS_COLORS = {
   draft: D.muted,
@@ -913,6 +1014,12 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                           )}
                         </div>{" "}
                         <InvoiceTimeline invoice={inv} />{" "}
+                        {/* Mounted only for the expanded row so attachment fetches stay lazy. */}
+                        <InvoiceAttachmentsPanel
+                          invoiceId={inv.id}
+                          showToast={showToast}
+                          isMobile={isMobile}
+                        />
                         <div
                           style={{ display: "flex", gap: 8, flexWrap: "wrap" }}
                         >
@@ -1374,6 +1481,257 @@ function InvoiceTimeline({ invoice }) {
           </div>
         ))}
       </div>{" "}
+    </div>
+  );
+}
+
+function InvoiceAttachmentsPanel({ invoiceId, showToast, isMobile }) {
+  const [attachments, setAttachments] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [uploading, setUploading] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
+  const fileRef = useRef(null);
+  const showToastRef = useRef(showToast);
+
+  useEffect(() => {
+    showToastRef.current = showToast;
+  }, [showToast]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await adminFetch(`/admin/invoices/${invoiceId}/attachments`);
+      setAttachments(data.attachments || []);
+    } catch (err) {
+      showToastRef.current(`Attachments failed to load: ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [invoiceId]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const handleFiles = async (event) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    if (!files.length || uploading) return;
+    const validation = validateAttachmentFiles(attachments, files);
+    if (validation) {
+      showToast(validation);
+      return;
+    }
+    setUploading(true);
+    try {
+      await uploadInvoiceAttachments(invoiceId, files);
+      showToast(`${files.length} attachment${files.length === 1 ? "" : "s"} uploaded`);
+      await load();
+    } catch (err) {
+      showToast(`Attachment upload failed: ${err.message}`);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const openAttachment = async (attachment) => {
+    try {
+      const data = await adminFetch(
+        `/admin/invoices/${invoiceId}/attachments/${attachment.id}/url`,
+      );
+      if (data.url) window.open(data.url, "_blank", "noopener,noreferrer");
+    } catch (err) {
+      showToast(`Attachment open failed: ${err.message}`);
+    }
+  };
+
+  const deleteAttachment = async (attachment) => {
+    if (!confirm(`Remove ${attachment.file_name}?`)) return;
+    setDeletingId(attachment.id);
+    try {
+      await adminFetch(
+        `/admin/invoices/${invoiceId}/attachments/${attachment.id}`,
+        { method: "DELETE" },
+      );
+      showToast("Attachment removed");
+      await load();
+    } catch (err) {
+      showToast(`Attachment delete failed: ${err.message}`);
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const totalBytes = attachmentTotalBytes(attachments);
+  const canAdd = attachments.length < ATTACHMENT_MAX_COUNT && totalBytes < ATTACHMENT_MAX_BYTES;
+
+  return (
+    <div
+      style={{
+        margin: "4px 0 16px",
+        paddingTop: 12,
+        borderTop: `1px solid ${D.border}`,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          gap: 10,
+          marginBottom: 10,
+          flexWrap: "wrap",
+        }}
+      >
+        <div style={{ minWidth: 0 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              fontSize: 11,
+              fontWeight: 700,
+              letterSpacing: "0.06em",
+              color: D.muted,
+              textTransform: "uppercase",
+              marginBottom: 4,
+            }}
+          >
+            <Paperclip size={13} strokeWidth={2.2} />
+            Attachments
+          </div>
+          <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.4 }}>
+            Attach up to 10 files totalling 25 MB. Supported file types: JPG,
+            PNG, GIF, TIFF, BMP, and PDF.
+          </div>
+        </div>
+        <input
+          ref={fileRef}
+          type="file"
+          multiple
+          accept={ATTACHMENT_ACCEPT}
+          onChange={handleFiles}
+          style={{ display: "none" }}
+        />
+        <button
+          type="button"
+          onClick={() => fileRef.current?.click()}
+          disabled={!canAdd || uploading}
+          style={{
+            ...sBtn(D.card, D.text, isMobile),
+            border: `1px solid ${D.border}`,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            opacity: !canAdd || uploading ? 0.55 : 1,
+          }}
+        >
+          <Upload size={14} strokeWidth={2.2} />
+          {uploading ? "Uploading..." : "Add files"}
+        </button>
+      </div>
+
+      {loading ? (
+        <div style={{ fontSize: 12, color: D.muted }}>Loading attachments...</div>
+      ) : attachments.length === 0 ? (
+        <div style={{ fontSize: 12, color: D.muted }}>No files attached.</div>
+      ) : (
+        <div style={{ display: "grid", gap: 8 }}>
+          {attachments.map((attachment) => (
+            <div
+              key={attachment.id}
+              style={{
+                display: "grid",
+                gridTemplateColumns: "minmax(0, 1fr) auto auto",
+                alignItems: "center",
+                gap: 8,
+                padding: "9px 10px",
+                border: `1px solid ${D.border}`,
+                borderRadius: 8,
+                background: D.card,
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => openAttachment(attachment)}
+                style={{
+                  minWidth: 0,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  border: "none",
+                  background: "transparent",
+                  color: D.heading,
+                  cursor: "pointer",
+                  padding: 0,
+                  textAlign: "left",
+                }}
+              >
+                <FileText size={15} strokeWidth={2.1} />
+                <span
+                  style={{
+                    minWidth: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    fontSize: 13,
+                    fontWeight: 600,
+                  }}
+                >
+                  {attachment.file_name}
+                </span>
+              </button>
+              <span style={{ fontSize: 12, color: D.muted, whiteSpace: "nowrap" }}>
+                {formatFileSize(attachment.file_size_bytes)}
+              </span>
+              <div style={{ display: "flex", gap: 4 }}>
+                <button
+                  type="button"
+                  onClick={() => openAttachment(attachment)}
+                  aria-label={`Open ${attachment.file_name}`}
+                  style={{
+                    border: "none",
+                    background: "transparent",
+                    color: D.muted,
+                    cursor: "pointer",
+                    width: 32,
+                    height: 32,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  <ExternalLink size={15} strokeWidth={2.2} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => deleteAttachment(attachment)}
+                  disabled={deletingId === attachment.id}
+                  aria-label={`Remove ${attachment.file_name}`}
+                  style={{
+                    border: "none",
+                    background: "transparent",
+                    color: D.red,
+                    cursor: deletingId === attachment.id ? "wait" : "pointer",
+                    width: 32,
+                    height: 32,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    opacity: deletingId === attachment.id ? 0.55 : 1,
+                  }}
+                >
+                  <Trash2 size={15} strokeWidth={2.2} />
+                </button>
+              </div>
+            </div>
+          ))}
+          <div style={{ fontSize: 11, color: D.muted }}>
+            {attachments.length}/{ATTACHMENT_MAX_COUNT} files · {formatFileSize(totalBytes)}
+            /25 MB
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1956,6 +2314,8 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const [discountSearchIdx, setDiscountSearchIdx] = useState(null);
   const [discountQueries, setDiscountQueries] = useState({});
   const [aiNotesLoading, setAiNotesLoading] = useState(false);
+  const [queuedAttachments, setQueuedAttachments] = useState([]);
+  const attachmentInputRef = useRef(null);
 
   // Load active, invoice-visible discounts once. Tier discounts are included here
   // for explicit line-level selection; customer tier never applies a hidden discount.
@@ -2316,6 +2676,22 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
     setAiNotesLoading(false);
   };
 
+  const handleQueuedAttachments = (event) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    if (!files.length) return;
+    const validation = validateAttachmentFiles(queuedAttachments, files);
+    if (validation) {
+      showToast(validation);
+      return;
+    }
+    setQueuedAttachments((prev) => [...prev, ...files]);
+  };
+
+  const removeQueuedAttachment = (idx) => {
+    setQueuedAttachments((prev) => prev.filter((_, i) => i !== idx));
+  };
+
   const handleCreate = async () => {
     if (!selectedCustomer) {
       showToast("Select a customer");
@@ -2369,6 +2745,19 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
         method: "POST",
         body: JSON.stringify(body),
       });
+
+      if (queuedAttachments.length > 0 && invoice.id) {
+        try {
+          await uploadInvoiceAttachments(invoice.id, queuedAttachments);
+        } catch (attachmentErr) {
+          showToast(
+            `Invoice created, but attachments failed: ${attachmentErr.message}`,
+          );
+          onCreated();
+          setSaving(false);
+          return;
+        }
+      }
 
       if (sendTiming === "now" && invoice.id) {
         await adminFetch(`/admin/invoices/${invoice.id}/send`, {
@@ -3031,6 +3420,107 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
           >
             + Add service
           </button>{" "}
+        </div>{" "}
+        <div style={panelStyle()}>
+          {sectionHeader("Attachments")}
+          <input
+            ref={attachmentInputRef}
+            type="file"
+            multiple
+            accept={ATTACHMENT_ACCEPT}
+            onChange={handleQueuedAttachments}
+            style={{ display: "none" }}
+          />
+          <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.45, marginBottom: 12 }}>
+            Attach up to 10 files totalling 25 MB. Supported file types: JPG,
+            PNG, GIF, TIFF, BMP, and PDF.
+          </div>
+          <button
+            type="button"
+            onClick={() => attachmentInputRef.current?.click()}
+            style={{
+              ...sBtn(D.card, D.text, isMobile),
+              border: `1px solid ${D.border}`,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            <Upload size={14} strokeWidth={2.2} />
+            Add files
+          </button>
+          {queuedAttachments.length > 0 ? (
+            <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
+              {queuedAttachments.map((file, idx) => (
+                <div
+                  key={`${file.name}-${file.size}-${idx}`}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "minmax(0, 1fr) auto auto",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "9px 10px",
+                    border: `1px solid ${D.border}`,
+                    borderRadius: 8,
+                    background: "#FAFAFA",
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      minWidth: 0,
+                    }}
+                  >
+                    <Paperclip size={15} strokeWidth={2.1} />
+                    <span
+                      style={{
+                        minWidth: 0,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        fontSize: 13,
+                        fontWeight: 600,
+                        color: D.heading,
+                      }}
+                    >
+                      {file.name}
+                    </span>
+                  </div>
+                  <span style={{ fontSize: 12, color: D.muted, whiteSpace: "nowrap" }}>
+                    {formatFileSize(file.size)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => removeQueuedAttachment(idx)}
+                    aria-label={`Remove ${file.name}`}
+                    style={{
+                      border: "none",
+                      background: "transparent",
+                      color: D.red,
+                      cursor: "pointer",
+                      width: 32,
+                      height: 32,
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    <Trash2 size={15} strokeWidth={2.2} />
+                  </button>
+                </div>
+              ))}
+              <div style={{ fontSize: 11, color: D.muted }}>
+                {queuedAttachments.length}/{ATTACHMENT_MAX_COUNT} files ·{" "}
+                {formatFileSize(attachmentTotalBytes(queuedAttachments))}/25 MB
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: D.muted, marginTop: 10 }}>
+              No files selected.
+            </div>
+          )}
         </div>{" "}
         <div style={panelStyle()}>
           {sectionHeader("Delivery")}
