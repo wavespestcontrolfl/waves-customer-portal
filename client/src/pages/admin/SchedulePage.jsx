@@ -285,9 +285,28 @@ function googleMapsUrl(address) {
 
 function detectServiceCategory(serviceType) {
   const s = (serviceType || "").toLowerCase();
-  if (s.includes("lawn")) return "lawn";
+  if (
+    s.includes("lawn") ||
+    s.includes("turf") ||
+    s.includes("grass") ||
+    s.includes("fertil") ||
+    s.includes("weed") ||
+    s.includes("dethatch") ||
+    s.includes("top dress") ||
+    s.includes("aerat") ||
+    s.includes("sod")
+  )
+    return "lawn";
   if (s.includes("mosquito")) return "mosquito";
   if (s.includes("termite")) return "termite";
+  if (
+    s.includes("rodent") ||
+    /\brat(s)?\b/.test(s) ||
+    /\bmouse\b/.test(s) ||
+    /\bmice\b/.test(s) ||
+    /\bmole\b/.test(s)
+  )
+    return "pest";
   return "pest";
 }
 
@@ -4440,6 +4459,13 @@ export function CompletionPanel({
   const [protocolActionMeta, setProtocolActionMeta] = useState(null);
   const [protocolActionError, setProtocolActionError] = useState("");
   const [protocolActionsLoading, setProtocolActionsLoading] = useState(false);
+  const [selectedProtocolActionLabels, setSelectedProtocolActionLabels] =
+    useState([]);
+  const [selectedObservationLabels, setSelectedObservationLabels] = useState(
+    [],
+  );
+  const [selectedRecommendationLabels, setSelectedRecommendationLabels] =
+    useState([]);
   const [officeApprovalReasonCode, setOfficeApprovalReasonCode] = useState("");
   const [officeApprovalNote, setOfficeApprovalNote] = useState("");
   const [nLimitApprovalReasonCode, setNLimitApprovalReasonCode] = useState("");
@@ -4901,6 +4927,9 @@ export function CompletionPanel({
       areasServiced.length ||
       customerInteraction ||
       customerConcern.trim() ||
+      selectedProtocolActionLabels.length ||
+      selectedObservationLabels.length ||
+      selectedRecommendationLabels.length ||
       nextVisitNote.trim() ||
       oneTimeRecapOnly ||
       tankLastProduct.trim() ||
@@ -4929,6 +4958,9 @@ export function CompletionPanel({
         areasServiced,
         customerInteraction,
         customerConcern,
+        selectedProtocolActionLabels,
+        selectedObservationLabels,
+        selectedRecommendationLabels,
         nextVisitNote,
         showNextVisitNote,
         equipmentSystemId,
@@ -4970,6 +5002,9 @@ export function CompletionPanel({
     areasServiced,
     customerInteraction,
     customerConcern,
+    selectedProtocolActionLabels,
+    selectedObservationLabels,
+    selectedRecommendationLabels,
     nextVisitNote,
     showNextVisitNote,
     equipmentSystemId,
@@ -5014,6 +5049,21 @@ export function CompletionPanel({
     );
     setCustomerInteraction(savedDraft.customerInteraction || "");
     setCustomerConcern(savedDraft.customerConcern || "");
+    setSelectedProtocolActionLabels(
+      Array.isArray(savedDraft.selectedProtocolActionLabels)
+        ? savedDraft.selectedProtocolActionLabels
+        : [],
+    );
+    setSelectedObservationLabels(
+      Array.isArray(savedDraft.selectedObservationLabels)
+        ? savedDraft.selectedObservationLabels
+        : [],
+    );
+    setSelectedRecommendationLabels(
+      Array.isArray(savedDraft.selectedRecommendationLabels)
+        ? savedDraft.selectedRecommendationLabels
+        : [],
+    );
     setNextVisitNote(savedDraft.nextVisitNote || "");
     setShowNextVisitNote(!!savedDraft.showNextVisitNote);
     setEquipmentSystemId(savedDraft.equipmentSystemId || "");
@@ -5151,10 +5201,27 @@ export function CompletionPanel({
     const line = `[${prefix}] ${text}`;
     setNotes((prev) => (prev.trim() ? prev.trimEnd() + "\n" + line : line));
   }
+  function appendUniqueLabel(setter, text) {
+    const label = String(text || "").trim();
+    if (!label) return;
+    setter((prev) =>
+      prev.some((item) => item.toLowerCase() === label.toLowerCase())
+        ? prev
+        : [...prev, label],
+    );
+  }
+  function labelsStillInNotes(labels) {
+    const currentNotes = notes.toLowerCase();
+    return (Array.isArray(labels) ? labels : []).filter((label) => {
+      const text = String(label || "").trim();
+      return text && currentNotes.includes(text.toLowerCase());
+    });
+  }
   function applyProtocolAction(action) {
     if (!action) return;
     const noteText =
       action.note || action.label || action.raw || "Completed protocol item";
+    appendUniqueLabel(setSelectedProtocolActionLabels, noteText);
     addChipNote(
       action.conditional ? "Protocol optional" : "Protocol",
       noteText,
@@ -5286,6 +5353,13 @@ export function CompletionPanel({
           service.id,
         );
       }
+      const reportProtocolActions = labelsStillInNotes(
+        selectedProtocolActionLabels,
+      );
+      const reportObservations = labelsStillInNotes(selectedObservationLabels);
+      const reportRecommendations = labelsStillInNotes(
+        selectedRecommendationLabels,
+      );
       const body = {
         idempotencyKey: completionIdempotencyKeyRef.current,
         technicianNotes: notes,
@@ -5338,6 +5412,9 @@ export function CompletionPanel({
         timeOnSite: elapsed,
         areasServiced,
         customerInteraction,
+        protocolActionsCompleted: reportProtocolActions,
+        observations: reportObservations,
+        recommendations: reportRecommendations,
         lawnAssessmentId,
       };
       if (customerInteraction === "concern" && customerConcern) {
@@ -5416,6 +5493,7 @@ export function CompletionPanel({
   function handleProtocolActionSelect(value) {
     if (!value) return;
     if (!protocolActions.length) {
+      appendUniqueLabel(setSelectedProtocolActionLabels, value);
       addChipNote("Action", value);
       return;
     }
@@ -5425,10 +5503,16 @@ export function CompletionPanel({
     if (option?.action) applyProtocolAction(option.action);
   }
   function handleObservationSelect(value) {
-    if (value) addChipNote("Found", value);
+    if (value) {
+      appendUniqueLabel(setSelectedObservationLabels, value);
+      addChipNote("Found", value);
+    }
   }
   function handleRecommendationSelect(value) {
-    if (value) addChipNote("Next", value);
+    if (value) {
+      appendUniqueLabel(setSelectedRecommendationLabels, value);
+      addChipNote("Next", value);
+    }
   }
   // ────────────────────────────────────────────────────────────────────
   // Mobile admin render — follows reference_waves_admin_ui_system.md

@@ -20,6 +20,8 @@ const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('.
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
+const { detectServiceLine, getServiceLineConfig } = require('../services/service-report/service-line-configs');
+const { computePressureIndex } = require('../services/service-report/pressure-index');
 const {
   recordTrackTransitionFailure,
   recordTrackTransitionResultFailure,
@@ -466,6 +468,44 @@ function parseJsonObject(value) {
     }
   }
   return {};
+}
+
+function normalizeCompletionTextArray(value, limit = 20) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const item of value) {
+    const text = String(item || '').trim().replace(/\s+/g, ' ').slice(0, 240);
+    if (!text) continue;
+    const key = text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function taggedCompletionNoteLines(notes, tags) {
+  const tagSet = new Set(tags.map((tag) => tag.toLowerCase()));
+  return String(notes || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .map((line) => {
+      const match = line.match(/^\[([^\]]+)\]\s*(.+)$/);
+      if (!match) return null;
+      return { tag: match[1].toLowerCase(), text: match[2].trim() };
+    })
+    .filter((entry) => entry && tagSet.has(entry.tag))
+    .map((entry) => entry.text);
+}
+
+function completionFindingSeverity(text) {
+  const lower = String(text || '').toLowerCase();
+  if (lower.includes('customer concern') || lower.includes('access issue')) return 'medium';
+  if (lower.includes('rodent') || lower.includes('fungus')) return 'medium';
+  if (lower.includes('standing water') || lower.includes('irrigation')) return 'low';
+  return 'low';
 }
 
 async function attachLawnAssessmentOutcomePhotoRefs(outcome, assessmentId) {
@@ -1054,6 +1094,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       nLimitApproval,
       managerApproval,
       tankCleanout,
+      protocolActionsCompleted,
+      observations,
+      recommendations,
       formResponses,
       formStartedAt,
       invoiceAlreadySent = false,
@@ -1097,6 +1140,26 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       .first();
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    const reportServiceLine = detectServiceLine(svc.service_type);
+    const reportConfig = getServiceLineConfig(reportServiceLine);
+    const reportProtocolActions = normalizeCompletionTextArray([
+      ...(Array.isArray(protocolActionsCompleted) ? protocolActionsCompleted : []),
+      ...taggedCompletionNoteLines(technicianNotes, ['protocol', 'protocol optional', 'action']),
+    ]);
+    const reportObservations = normalizeCompletionTextArray([
+      ...(Array.isArray(observations) ? observations : []),
+      ...taggedCompletionNoteLines(technicianNotes, ['found']),
+    ]);
+    const reportRecommendations = normalizeCompletionTextArray([
+      ...(Array.isArray(recommendations) ? recommendations : []),
+      ...taggedCompletionNoteLines(technicianNotes, ['next']),
+    ]);
+    const [serviceRecordCols, serviceProductCols, serviceFindingsAvailable] = await Promise.all([
+      db('service_records').columnInfo().catch(() => ({})),
+      db('service_products').columnInfo().catch(() => ({})),
+      db.schema.hasTable('service_findings').catch(() => false),
+    ]);
 
     const canLinkLawnAssessmentRecord = !isIncompleteVisit
       && await db.schema.hasColumn('lawn_assessments', 'service_record_id').catch(() => false);
@@ -1290,7 +1353,53 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             waveguardManagerApproval,
             waveguardTankCleanout,
             inventoryDeductions,
+            protocolActionsCompleted: reportProtocolActions,
+            observations: reportObservations,
+            recommendations: reportRecommendations,
           };
+          const serviceData = {
+            protocol: {
+              visitOutcome,
+              actions: reportProtocolActions,
+              observations: reportObservations,
+              recommendations: reportRecommendations,
+            },
+          };
+          const [priorVisitCountRow] = serviceRecordCols.visit_number
+            ? await trx('service_records')
+              .where({ customer_id: svc.customer_id, status: 'completed' })
+              .where(function sameServiceLine() {
+                this.where({ service_line: reportServiceLine })
+                  .orWhere(function legacyServiceType() {
+                    this.whereNull('service_line').where('service_type', svc.service_type);
+                  });
+              })
+              .count('* as count')
+            : [{ count: 0 }];
+          const recordInsert = {
+            scheduled_service_id: svc.id,
+            customer_id: svc.customer_id,
+            technician_id: svc.technician_id,
+            service_date: svc.scheduled_date,
+            service_type: svc.service_type,
+            status: isIncompleteVisit ? 'incomplete' : 'completed',
+            technician_notes: technicianNotes || '',
+            structured_notes: serializeJsonb(structuredNotes),
+            areas_serviced: serializeJsonb(completionAreas),
+            customer_interaction: customerInteraction || null,
+            soil_temp: soilTemp || null,
+            thatch_measurement: thatchMeasurement || null,
+            soil_ph: soilPh || null,
+            soil_moisture: soilMoisture || null,
+          };
+          if (serviceRecordCols.report_template_version) recordInsert.report_template_version = 'service_report_v1';
+          if (serviceRecordCols.service_line) recordInsert.service_line = reportServiceLine;
+          if (serviceRecordCols.service_tier) recordInsert.service_tier = svc.cust_waveguard_tier || null;
+          if (serviceRecordCols.visit_number) recordInsert.visit_number = Number(priorVisitCountRow?.count || 0) + 1;
+          if (serviceRecordCols.started_at) recordInsert.started_at = svc.actual_start_time || svc.check_in_time || null;
+          if (serviceRecordCols.ended_at) recordInsert.ended_at = trx.fn.now();
+          if (serviceRecordCols.service_data) recordInsert.service_data = serializeJsonb(serviceData);
+          if (serviceRecordCols.advisory) recordInsert.advisory = serializeJsonb(reportConfig.advisoryDefaults);
 
         // 1. service_record — the canonical "completion happened" audit.
         // scheduled_service_id is the FK back to the source row so
@@ -1298,17 +1407,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // record-from-service unambiguously. Codex P1 on PR #340 — the
         // old (customer_id, technician_id, service_date) soft-join
         // collided on same-day same-customer-same-tech double visits.
-        [record] = await trx('service_records').insert({
-          scheduled_service_id: svc.id,
-          customer_id: svc.customer_id, technician_id: svc.technician_id,
-          service_date: svc.scheduled_date, service_type: svc.service_type, status: isIncompleteVisit ? 'incomplete' : 'completed',
-          technician_notes: technicianNotes || '',
-          structured_notes: serializeJsonb(structuredNotes),
-          areas_serviced: serializeJsonb(completionAreas),
-          customer_interaction: customerInteraction || null,
-          soil_temp: soilTemp || null, thatch_measurement: thatchMeasurement || null,
-          soil_ph: soilPh || null, soil_moisture: soilMoisture || null,
-        }).returning('*');
+        [record] = await trx('service_records').insert(recordInsert).returning('*');
+
+        if (serviceFindingsAvailable && reportObservations.length) {
+          const findingRows = reportObservations.map((title) => ({
+            service_record_id: record.id,
+            category: title.toLowerCase().includes('concern') ? 'conducive_condition' : 'observation',
+            severity: completionFindingSeverity(title),
+            title,
+            detail: null,
+            recommendation: null,
+          }));
+          await trx('service_findings').insert(findingRows);
+        }
+        if (serviceFindingsAvailable && serviceRecordCols.pressure_index) {
+          const pressureIndex = await computePressureIndex(record.id, trx);
+          record.pressure_index = pressureIndex;
+          await trx('service_records').where({ id: record.id }).update({ pressure_index: pressureIndex });
+        }
 
         if (canLinkLawnAssessmentRecord) {
           const linkPayload = {
@@ -1405,7 +1521,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               err.isOperational = true; err.statusCode = 400;
               throw err;
             }
-            const [serviceProduct] = await trx('service_products').insert({
+            const serviceProductInsert = {
               service_record_id: record.id,
               product_name: product.name,
               product_category: product.category || p.category || null,
@@ -1415,7 +1531,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               rate_unit: p.rateUnit || null,
               total_amount: appliedAmount,
               amount_unit: appliedAmountUnit,
-            }).returning('*');
+            };
+            if (serviceProductCols.product_id) serviceProductInsert.product_id = product.id;
+            if (serviceProductCols.application_method) serviceProductInsert.application_method = p.applicationMethod || p.method || null;
+            if (serviceProductCols.application_area) serviceProductInsert.application_area = p.applicationArea || p.area || null;
+            if (serviceProductCols.epa_reg_number) serviceProductInsert.epa_reg_number = product.epa_reg_number || null;
+            if (serviceProductCols.zone_ids) serviceProductInsert.zone_ids = Array.isArray(p.zoneIds) ? p.zoneIds : [];
+            if (serviceProductCols.targets) serviceProductInsert.targets = Array.isArray(p.targets) ? p.targets : [];
+            if (serviceProductCols.area_value) {
+              const areaValue = p.areaValue != null && p.areaValue !== '' ? Number(p.areaValue) : null;
+              serviceProductInsert.area_value = Number.isFinite(areaValue) ? areaValue : null;
+            }
+            if (serviceProductCols.area_unit) serviceProductInsert.area_unit = p.areaUnit || null;
+            const [serviceProduct] = await trx('service_products').insert(serviceProductInsert).returning('*');
 
             await recordServiceProductNutrients(trx, {
               customerId: svc.customer_id,
@@ -1786,6 +1914,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // the raw Railway URL (CLIENT_URL is set to the Railway hostname on
     // prod for app-internal redirects). PORTAL_URL can override for dev.
     const portalUrl = process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com';
+    let reportUrl = portalUrl;
+    try {
+      const { ensureReportToken } = require('./reports-public');
+      const reportToken = await ensureReportToken(record.id);
+      if (reportToken) reportUrl = `${portalUrl}/report/${reportToken}`;
+    } catch (err) {
+      logger.error(`[dispatch] service report token mint failed: ${err.message}`);
+    }
     const toCents = (value) => Math.max(0, Math.round((Number(value) || 0) * 100));
     const centsToDollars = (cents) => (cents / 100).toFixed(2);
     const applyPrepaidCreditToInvoice = async (invoiceRow) => {
@@ -1944,21 +2080,26 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           && !alreadyPaid
           && !autopayCoversVisit;
         if (invoiceCreated && payUrl && allowCompletionInvoiceLink) {
-          const fallback = `Hello ${svc.first_name}! Your ${displayServiceType} service report is ready: ${portalUrl}\n\nInvoice for today's visit: ${payUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
-          const body = await renderTemplate('service_complete_with_invoice', {
+          const fallback = `Hello ${svc.first_name}! Your ${displayServiceType} service report is ready: ${reportUrl}\n\nInvoice for today's visit: ${payUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
+          let body = await renderTemplate('service_complete_with_invoice', {
             first_name: svc.first_name || '',
             service_type: displayServiceType,
-            portal_url: portalUrl,
+            portal_url: reportUrl,
             pay_url: payUrl,
           }, fallback);
+          if (!body.includes(reportUrl)) body = fallback;
           sentSmsType = 'service_complete_with_invoice';
           sentSmsBody = `${body}${reviewSuffix}`.trim();
           completionSmsWasTruncated = false;
         } else {
-          const fallback = `Hello ${svc.first_name}! Your service report is ready. View it here: ${portalUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
-          const body = await renderTemplate('service_complete', { first_name: svc.first_name || '' }, fallback);
+          const fallback = `Hello ${svc.first_name}! Your service report is ready. View it here: ${reportUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
+          let body = await renderTemplate('service_complete', {
+            first_name: svc.first_name || '',
+            portal_url: reportUrl,
+          }, fallback);
+          if (!body.includes(reportUrl)) body = fallback;
           sentSmsType = 'service_complete';
-          const concise = `Hello ${svc.first_name}! Report: ${portalUrl}\nReply with questions.`;
+          const concise = `Hello ${svc.first_name}! Report: ${reportUrl}\nReply with questions.`;
           ({ body: sentSmsBody, truncated: completionSmsWasTruncated } = withRecap(body, concise));
         }
         if (sentSmsBody) {
@@ -2107,6 +2248,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       invoiceTotal: invoice?.total != null ? Number(invoice.total) : null,
       invoiceToken: invoice?.token || null,
       invoiceStatus: invoice?.status || null,
+      reportUrl,
       invoicePaymentActionRequired,
       completionSmsStatus,
       completionSmsError: finalRecordNotes.completionSmsError || null,
