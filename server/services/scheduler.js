@@ -275,14 +275,15 @@ function initScheduledJobs() {
             customerId: msg.customer_id || undefined,
             identityTrustLevel: msg.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
             entryPoint: 'scheduled_sms_cron',
-            consentBasis: purpose === 'marketing' || purpose === 'retention' ? {
-              status: 'opted_in',
-              source: 'scheduled_sms',
-              capturedAt: msg.created_at || new Date().toISOString(),
-            } : undefined,
+            // NOTE: marketing/retention scheduled sends must arrive with a real
+            // stored consent record — we no longer manufacture opted_in here.
+            // Routes that queue marketing-grade types are responsible for
+            // gating against `messaging_consent`.
             metadata: {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
+              fromNumber: msg.from_phone || undefined,
+              adminUserId: msg.admin_user_id || undefined,
             },
           });
           if (smsResult.sent) {

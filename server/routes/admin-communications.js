@@ -477,6 +477,13 @@ router.post('/ai-auto-reply', async (req, res) => {
   } catch (err) { res.json({ enabled: false, error: err.message }); }
 });
 
+// Marketing/retention purposes require a real stored consent record per
+// server/services/messaging/policy.js. This conversational-compose endpoint
+// is not a marketing send path — reject any messageType that would route
+// through purposeForScheduledMessageType to marketing/retention so a caller
+// can't manufacture consent by choosing a label.
+const MARKETING_MESSAGE_TYPE_RE = /(marketing|seasonal|promo|retention|renewal|\bsave\b)/i;
+
 // POST /api/admin/communications/schedule-sms — schedule SMS for later.
 // The /5min scheduled-sms cron in server/services/scheduler.js picks up rows
 // where status='scheduled' AND scheduled_for <= now() and dispatches them
@@ -487,6 +494,9 @@ router.post('/schedule-sms', async (req, res, next) => {
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     if (!to || !cleanBody || !scheduledFor) {
       return res.status(400).json({ error: 'to, body, scheduledFor required' });
+    }
+    if (messageType && MARKETING_MESSAGE_TYPE_RE.test(messageType)) {
+      return res.status(400).json({ error: 'marketing/retention sends are not allowed on this endpoint' });
     }
 
     const sendAt = new Date(scheduledFor);
