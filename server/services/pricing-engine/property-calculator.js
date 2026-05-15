@@ -111,10 +111,11 @@ function computeTurfArea(input, fallback = {}) {
   }
 
   const hasLotBasedTurfFields =
-    input.imperviousSurfacePercent !== undefined ||
-    input.imperviosSurfacePercent !== undefined ||
-    input.estimatedBedAreaSf !== undefined ||
-    input.estimatedBedAreaPercent !== undefined;
+    hasNonNegativeNumber(input.imperviousSurfacePercent) ||
+    hasNonNegativeNumber(input.imperviosSurfacePercent) ||
+    hasNonNegativeNumber(input.bedArea) ||
+    hasNonNegativeNumber(input.estimatedBedAreaSf) ||
+    hasNonNegativeNumber(input.estimatedBedAreaPercent);
 
   const hasFallbackTurf =
     fallback.turfSf !== undefined &&
@@ -137,14 +138,14 @@ function computeTurfArea(input, fallback = {}) {
   const imperviousPct = toNonNegativeNumber(rawImperviousPct, 20);
   const imperviousFraction = Math.min(1, Math.max(0, imperviousPct / 100));
   const turfOpenArea = Math.max(0, Math.round(lotSqFt * (1 - imperviousFraction)));
-  const bedPercent = toNonNegativeNumber(input.estimatedBedAreaPercent, 0);
-  const hasEstimatedBedArea = hasNonNegativeNumber(input.estimatedBedAreaSf);
+  const hasEstimatedBedPercent = hasNonNegativeNumber(input.estimatedBedAreaPercent);
   const hasBedArea = hasNonNegativeNumber(input.bedArea);
-  const explicitBedArea = hasEstimatedBedArea
-    ? Number(input.estimatedBedAreaSf)
-    : (hasBedArea ? Number(input.bedArea) : null);
-  const bedArea = bedPercent > 0
-    ? Math.max(0, Math.round(turfOpenArea * (bedPercent / 100)))
+  const hasEstimatedBedArea = hasNonNegativeNumber(input.estimatedBedAreaSf);
+  const explicitBedArea = hasBedArea
+    ? Number(input.bedArea)
+    : (hasEstimatedBedArea ? Number(input.estimatedBedAreaSf) : null);
+  const bedArea = hasEstimatedBedPercent
+    ? Math.max(0, Math.round(turfOpenArea * (Number(input.estimatedBedAreaPercent) / 100)))
     : (explicitBedArea !== null ? explicitBedArea : Math.round(turfOpenArea * 0.15));
 
   return {

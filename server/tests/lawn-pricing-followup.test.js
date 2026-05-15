@@ -111,6 +111,35 @@ describe('lawn pricing production follow-up', () => {
     expect(property.bedArea).toBe(0);
   });
 
+  test('blank lot-derived turf fields fall back to legacy hardscape estimate', () => {
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: 9000,
+      lotSqFt: 9500,
+      estimatedTurfSf: '',
+      imperviousSurfacePercent: '',
+      imperviosSurfacePercent: null,
+      estimatedBedAreaSf: '',
+      estimatedBedAreaPercent: null,
+    }));
+
+    expect(property.turfBasis).toBe('legacyHardscapeEstimate');
+    expect(property.turfSf).toBe(0);
+  });
+
+  test('manual legacy bedArea takes precedence over estimated bed area in turf fallback', () => {
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: 0,
+      estimatedTurfSf: 0,
+      imperviousSurfacePercent: 20,
+      bedArea: 1000,
+      estimatedBedAreaSf: 4000,
+    }));
+
+    expect(property.bedArea).toBe(1000);
+    expect(property.turfOpenArea).toBe(8000);
+    expect(property.turfSf).toBe(7000);
+  });
+
   test('explicit zero measured turf overrides estimated turf', () => {
     const property = calculatePropertyProfile(baseInput({
       measuredTurfSf: 0,
