@@ -684,38 +684,51 @@ function SmsTab() {
     setTogglingAi(false);
   };
 
-  // Compute the scheduled-for Date for non-"now" timings, or null if "now".
-  // Returns { date, error } — date is null on validation failure.
-  const resolveScheduledFor = () => {
-    if (sendTiming === "now") return { date: null, error: null };
-    if (sendTiming === "tomorrow_8") {
-      const t = new Date();
-      t.setDate(t.getDate() + 1);
-      t.setHours(8, 0, 0, 0);
-      return { date: t, error: null };
-    }
-    if (!sendCustomAt) {
-      return { date: null, error: "Pick a date and time" };
-    }
-    const t = new Date(sendCustomAt);
-    if (Number.isNaN(t.getTime())) {
-      return { date: null, error: "Invalid date/time" };
-    }
-    if (t.getTime() <= Date.now() + 30 * 1000) {
-      return { date: null, error: "Pick a time at least a minute out" };
-    }
-    return { date: t, error: null };
+  // Compute the scheduled-for value as an ET-naive wall-clock string
+  // (YYYY-MM-DDTHH:MM) or null if "now". The server parses ET-naive strings
+  // via parseETDateTime() — emitting ISO/UTC here would lose the ET intent
+  // when the admin browser isn't on America/New_York. Mirrors the invoice
+  // builder's invoiceScheduledFor() pattern.
+  const etDateOnly = (date) => {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(date);
+    const get = (t) => parts.find((p) => p.type === t)?.value;
+    return `${get("year")}-${get("month")}-${get("day")}`;
   };
+  const resolveScheduledFor = () => {
+    if (sendTiming === "now") return { value: null, error: null };
+    if (sendTiming === "tomorrow_8") {
+      const [y, m, d] = etDateOnly(new Date()).split("-").map(Number);
+      // Build "tomorrow in ET" by adding 1 day at UTC noon (collision-free
+      // around DST boundaries), then re-format in ET.
+      const tomorrow = new Date(Date.UTC(y, m - 1, d + 1, 12, 0, 0));
+      return { value: `${etDateOnly(tomorrow)}T08:00`, error: null };
+    }
+    if (!sendCustomAt) return { value: null, error: "Pick a date and time" };
+    return { value: sendCustomAt, error: null };
+  };
+  const formatScheduledForToast = (etNaive) =>
+    new Date(etNaive).toLocaleString("en-US", {
+      timeZone: "America/New_York",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
 
   const handleSend = async () => {
     if (!toNumber.trim() || (!msgBody.trim() && attachments.length === 0))
       return;
-    const { date: scheduledAt, error: scheduleErr } = resolveScheduledFor();
+    const { value: scheduledFor, error: scheduleErr } = resolveScheduledFor();
     if (scheduleErr) {
       setSendResult({ ok: false, text: scheduleErr });
       return;
     }
-    if (scheduledAt && attachments.length > 0) {
+    if (scheduledFor && attachments.length > 0) {
       setSendResult({
         ok: false,
         text: "Attachments aren't supported on scheduled sends yet — send now, or remove attachments.",
@@ -725,7 +738,7 @@ function SmsTab() {
     setSending(true);
     setSendResult(null);
     try {
-      if (scheduledAt) {
+      if (scheduledFor) {
         await adminFetch("/admin/communications/schedule-sms", {
           method: "POST",
           body: JSON.stringify({
@@ -734,17 +747,12 @@ function SmsTab() {
             customerId: selectedCustomerId || undefined,
             messageType: "manual",
             fromNumber,
-            scheduledFor: scheduledAt.toISOString(),
+            scheduledFor,
           }),
         });
         setSendResult({
           ok: true,
-          text: `Scheduled for ${scheduledAt.toLocaleString("en-US", {
-            month: "short",
-            day: "numeric",
-            hour: "numeric",
-            minute: "2-digit",
-          })}.`,
+          text: `Scheduled for ${formatScheduledForToast(scheduledFor)}.`,
         });
       } else {
         await adminFetch("/admin/communications/sms", {
