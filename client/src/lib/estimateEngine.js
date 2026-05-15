@@ -80,6 +80,14 @@ function toNonNegativeNumber(value, fallback = 0) {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
+function hasNonNegativeNumber(value) {
+  return value !== undefined &&
+    value !== null &&
+    value !== '' &&
+    Number.isFinite(Number(value)) &&
+    Number(value) >= 0;
+}
+
 function normalizeGrassType(grassType) {
   const raw = String(grassType || '').trim();
   const compact = raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -260,8 +268,11 @@ export function calculateEstimate(inputs) {
   function estimateLegacyTurfArea() {
     let hardscapeEstimate = 800;
     const propertyTypeKey = String(propertyType || '').toLowerCase();
-    if (propertyTypeKey.includes('townhome') || propertyTypeKey.includes('duplex')) hardscapeEstimate = 400;
-    else if (propertyTypeKey.includes('condo')) hardscapeEstimate = 200;
+    if (propertyTypeKey.includes('town') || propertyTypeKey.includes('duplex')) {
+      hardscapeEstimate = 400 + Math.max(0, Math.round((lotSqFt - 7500) * 0.02));
+    } else if (propertyTypeKey.includes('condo')) {
+      hardscapeEstimate = 200 + Math.max(0, Math.round((lotSqFt - 7500) * 0.05));
+    }
     else if (propertyTypeKey.includes('commercial')) hardscapeEstimate = lotSqFt * 0.15;
     else {
       if (lotSqFt > 7500) hardscapeEstimate += (Math.min(lotSqFt, 15000) - 7500) * 0.03;
@@ -292,8 +303,8 @@ export function calculateEstimate(inputs) {
   }
 
   function computeTurfArea() {
-    const measured = toPositiveNumber(_measuredTurfSf);
-    if (measured > 0) {
+    if (hasNonNegativeNumber(_measuredTurfSf)) {
+      const measured = Number(_measuredTurfSf);
       return { turfSf: measured, turfEstimated: false, turfConfidence: 'HIGH', turfBasis: 'measuredTurfSf', turfFlags: [] };
     }
     const estimated = toPositiveNumber(_estimatedTurfSf);
