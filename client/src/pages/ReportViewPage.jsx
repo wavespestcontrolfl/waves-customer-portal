@@ -4,12 +4,18 @@ import { Download, MessageCircle, Printer, Share2 } from 'lucide-react';
 import { COLORS as B, FONTS } from '../theme-brand';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const SERVICE_REPORT_TIME_ZONE = 'America/New_York';
 
 function formatDate(value) {
   if (!value) return '';
-  const date = new Date(String(value).includes('T') ? value : `${value}T12:00:00`);
+  const raw = String(value);
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  const date = dateOnly
+    ? new Date(Date.UTC(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]), 12))
+    : new Date(raw);
   if (Number.isNaN(date.getTime())) return String(value);
   return date.toLocaleDateString('en-US', {
+    timeZone: SERVICE_REPORT_TIME_ZONE,
     weekday: 'long',
     month: 'long',
     day: 'numeric',
