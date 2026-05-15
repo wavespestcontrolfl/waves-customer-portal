@@ -1168,7 +1168,7 @@ function EstimatePipelineViewV2() {
   const [error, setError] = useState(null);
   const [customerPanelId, setCustomerPanelId] = useState(null);
   const [filter, setFilter] = useState("all");
-  const [dateRange, setDateRange] = useState("30d");
+  const [dateRange, setDateRange] = useState("all");
   const [followUpTarget, setFollowUpTarget] = useState(null);
   const [declineTarget, setDeclineTarget] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);

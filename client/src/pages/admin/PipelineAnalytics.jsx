@@ -8,6 +8,7 @@ const ROBOTO = "'Roboto', Arial, sans-serif";
 const DAY = 86400000;
 const HOUR = 3600000;
 const DATE_RANGES = [
+  { key: "all", label: "All" },
   { key: "7d", label: "7d" },
   { key: "30d", label: "30d" },
   { key: "90d", label: "90d" },
@@ -220,10 +221,10 @@ export default function PipelineAnalytics({
   estimates,
   onFilterChange,
   activeFilter,
-  dateRange = "30d",
+  dateRange = "all",
   onDateRangeChange,
 }) {
-  const selectedRange = dateRange || "30d";
+  const selectedRange = dateRange || "all";
   const metrics = useMemo(() => {
     const nowMs = Date.now();
     const inRange = estimates.filter((e) =>
@@ -521,6 +522,6 @@ PipelineAnalytics.propTypes = {
   estimates: PropTypes.array.isRequired,
   onFilterChange: PropTypes.func.isRequired,
   activeFilter: PropTypes.string,
-  dateRange: PropTypes.oneOf(["7d", "30d", "90d", "ytd"]),
+  dateRange: PropTypes.oneOf(["all", "7d", "30d", "90d", "ytd"]),
   onDateRangeChange: PropTypes.func,
 };

@@ -37,7 +37,7 @@ function renderAnalytics(props = {}) {
       estimates={props.estimates || []}
       activeFilter={props.activeFilter || "all"}
       onFilterChange={onFilterChange}
-      dateRange={props.dateRange || "30d"}
+      dateRange={props.dateRange || "all"}
       onDateRangeChange={onDateRangeChange}
     />,
   );
@@ -266,5 +266,20 @@ describe("PipelineAnalytics", () => {
 
     expect(screen.getAllByText("$100").length).toBeGreaterThan(0);
     expect(screen.queryByText("$300")).not.toBeInTheDocument();
+  });
+
+  it("includes older estimates in the all-time default range", () => {
+    renderAnalytics({
+      estimates: [
+        estimate({ id: "fresh", status: "sent", monthlyTotal: 100, createdAt: daysAgo(3) }),
+        estimate({ id: "old", status: "sent", monthlyTotal: 200, createdAt: daysAgo(45) }),
+      ],
+    });
+
+    expect(screen.getByRole("button", { name: "All" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByText("$300")).toBeInTheDocument();
   });
 });
