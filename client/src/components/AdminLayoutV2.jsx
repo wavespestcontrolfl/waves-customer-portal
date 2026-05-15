@@ -93,7 +93,7 @@ const NAV_SECTIONS = [
       {
         path: "/admin/communications",
         icon: MessageSquare,
-        label: "SMS/CALL",
+        label: "SMS/Call",
       },
       { path: "/admin/reviews", icon: Star, label: "Reviews" },
       { path: "/admin/referrals", icon: Gift, label: "Referrals" },
