@@ -108,12 +108,32 @@ const AgronomicWiki = {
       const customerId = sr.customer_id;
       const treatmentDate = sr.service_date;
 
-      // 2. Find the post-assessment — first confirmed assessment AFTER the treatment
-      const postAssessment = await db('lawn_assessments')
-        .where({ customer_id: customerId, confirmed_by_tech: true })
-        .where('service_date', '>=', treatmentDate)
-        .orderBy('service_date', 'asc')
-        .first();
+      // 2. Find the post-assessment. Prefer the assessment explicitly
+      // captured for this scheduled service/record, then fall back to
+      // the legacy date-based pairing.
+      let postAssessment = null;
+      if (sr.scheduled_service_id) {
+        postAssessment = await db('lawn_assessments')
+          .where({
+            customer_id: customerId,
+            confirmed_by_tech: true,
+            service_id: sr.scheduled_service_id,
+          })
+          .orderByRaw('confirmed_at DESC NULLS LAST')
+          .orderBy('created_at', 'desc')
+          .first();
+      }
+      if (!postAssessment) {
+        postAssessment = await db('lawn_assessments')
+          .where({ customer_id: customerId, confirmed_by_tech: true })
+          .where(function () {
+            this.where({ service_record_id: serviceRecordId })
+              .orWhere('service_date', '>=', treatmentDate);
+          })
+          .orderByRaw('CASE WHEN service_record_id = ? THEN 0 ELSE 1 END', [serviceRecordId])
+          .orderBy('service_date', 'asc')
+          .first();
+      }
 
       if (!postAssessment) {
         logger.info(`[agronomic-wiki] No post-assessment found for service_record ${serviceRecordId}`);
@@ -134,8 +154,8 @@ const AgronomicWiki = {
           .where({ service_record_id: serviceRecordId });
         productsApplied = products.map((p) => ({
           name: p.product_name,
-          rate: p.rate,
-          unit: p.unit,
+          rate: p.application_rate,
+          unit: p.rate_unit,
           method: p.application_method || null,
           area: p.application_area || null,
         }));

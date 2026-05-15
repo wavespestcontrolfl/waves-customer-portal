@@ -111,8 +111,8 @@ export default function LawnAssessmentPanel() {
   const [turfProfile, setTurfProfile] = useState(EMPTY_TURF_PROFILE);
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileSaving, setProfileSaving] = useState(false);
-  // Tech-confirmed scores. Initialized from result.displayScores when
-  // /assess returns; the tech can nudge any tile up/down before confirm.
+  // Tech-confirmed scores. Initialized from the server-adjusted /assess
+  // scores; the tech can nudge any tile up/down before confirm.
   // recordTechCalibration on the server uses the AI vs tech delta to
   // train its weighting, so this state is the input that makes the
   // calibration pipeline actually meaningful.
@@ -200,9 +200,10 @@ export default function LawnAssessmentPanel() {
         }),
       });
       setResult(r);
-      // Seed the tech-confirmed values from the AI scores so the review
-      // tiles start aligned. Tech adjusts only what they disagree with.
-      setTechScores(r.displayScores ? { ...r.displayScores } : null);
+      // Seed from the server's season-adjusted scores so the review
+      // tiles match what will be persisted if the tech makes no changes.
+      const initialScores = r.adjustedScores || r.displayScores;
+      setTechScores(initialScores ? { ...initialScores } : null);
       setStep("review");
     } catch (e) {
       alert("Analysis failed: " + e.message);
@@ -215,11 +216,9 @@ export default function LawnAssessmentPanel() {
     if (!result?.assessment?.id) return;
     setConfirming(true);
     try {
-      // Send the tech-confirmed scores. Falls back to the AI scores
-      // when the tech didn't change anything (techScores is just a
-      // copy of displayScores in that case, so calibration delta is
-      // zero — which is the correct signal that AI + tech agreed).
-      const adjustedScores = techScores || result.displayScores;
+      // Send the tech-confirmed scores. Falls back to the server-adjusted
+      // scores when the tech didn't change anything.
+      const adjustedScores = techScores || result.adjustedScores || result.displayScores;
       await adminFetch("/admin/lawn-assessment/confirm", {
         method: "POST",
         body: JSON.stringify({
@@ -730,7 +729,7 @@ export default function LawnAssessmentPanel() {
                 { key: "fungus_control", label: "Fungus Control" },
                 { key: "thatch_level", label: "Thatch Level" },
               ].map((m) => {
-                const aiVal = result.displayScores?.[m.key] || 0;
+                const aiVal = result.adjustedScores?.[m.key] ?? result.displayScores?.[m.key] ?? 0;
                 const techVal = techScores?.[m.key] ?? aiVal;
                 const flag = (result.divergenceFlags || []).find(
                   (f) => f.metric === m.key,

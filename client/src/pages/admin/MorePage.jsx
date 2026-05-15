@@ -13,7 +13,6 @@ import {
   Truck,
   Package,
   ClipboardCheck,
-  Leaf,
   Library,
   Brain,
   Receipt,
@@ -64,7 +63,6 @@ const SECTIONS = [
       { path: "/admin/fleet", icon: Truck, label: "Fleet" },
       { path: "/admin/inventory", icon: Package, label: "Inventory" },
       { path: "/admin/compliance", icon: ClipboardCheck, label: "Compliance" },
-      { path: "/admin/lawn-assessment", icon: Leaf, label: "Lawn Assessment" },
     ],
   },
   {

@@ -3941,6 +3941,485 @@ function CPChipGroup({ label, dot, chips, onPick }) {
   );
 }
 
+const LAWN_ASSESSMENT_METRICS = [
+  { key: "turf_density", label: "Density" },
+  { key: "weed_suppression", label: "Weeds" },
+  { key: "color_health", label: "Color" },
+  { key: "fungus_control", label: "Fungus" },
+  { key: "thatch_level", label: "Thatch" },
+];
+
+const LAWN_STRESS_FLAGS = [
+  { key: "drought_stress", label: "Dry / heat" },
+  { key: "shade_stress", label: "Shade" },
+  { key: "disease_suspicion", label: "Disease" },
+  { key: "recent_scalp", label: "Scalp" },
+  { key: "new_sod", label: "New sod" },
+];
+
+const EMPTY_LAWN_STRESS_FLAGS = Object.fromEntries(
+  LAWN_STRESS_FLAGS.map((flag) => [flag.key, false]),
+);
+
+function lawnScoreColor(value) {
+  const n = Number(value) || 0;
+  if (n >= 75) return D.green;
+  if (n >= 50) return D.amber;
+  return D.red;
+}
+
+function resizeLawnAssessmentImage(dataUrl, maxEdge = 1600, quality = 0.85) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const longEdge = Math.max(img.width, img.height);
+      if (longEdge <= maxEdge) return resolve(dataUrl);
+      const scale = maxEdge / longEdge;
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL("image/jpeg", quality));
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
+function readLawnAssessmentPhoto(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const resized = await resizeLawnAssessmentImage(reader.result);
+      resolve({
+        data: resized,
+        preview: resized,
+        name: file.name,
+        mimeType: resized.match(/data:([^;]+)/)?.[1] || file.type || "image/jpeg",
+      });
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function parseAssessmentScores(row = {}) {
+  return {
+    turf_density: row.turf_density ?? row.turfDensity ?? 0,
+    weed_suppression: row.weed_suppression ?? row.weedSuppression ?? 0,
+    color_health: row.color_health ?? row.colorHealth ?? 0,
+    fungus_control: row.fungus_control ?? row.fungusControl ?? 0,
+    thatch_level: row.thatch_level ?? row.thatchLevel ?? 0,
+  };
+}
+
+function parseStressFlags(value) {
+  if (!value) return EMPTY_LAWN_STRESS_FLAGS;
+  const parsed =
+    typeof value === "string"
+      ? (() => {
+          try {
+            return JSON.parse(value);
+          } catch {
+            return {};
+          }
+        })()
+      : value;
+  return { ...EMPTY_LAWN_STRESS_FLAGS, ...(parsed || {}) };
+}
+
+function LawnAssessmentCompletionBlock({ service, disabled, onConfirmed }) {
+  const [photos, setPhotos] = useState([]);
+  const [result, setResult] = useState(null);
+  const [techScores, setTechScores] = useState(null);
+  const [stressFlags, setStressFlags] = useState(EMPTY_LAWN_STRESS_FLAGS);
+  const [confirmedId, setConfirmedId] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [error, setError] = useState("");
+  const fileRef = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPhotos([]);
+    setResult(null);
+    setTechScores(null);
+    setStressFlags(EMPTY_LAWN_STRESS_FLAGS);
+    setConfirmedId(null);
+    setError("");
+    onConfirmed?.(null);
+    if (!service?.id) return () => { cancelled = true; };
+
+    setLoading(true);
+    adminFetch(`/admin/lawn-assessment/service/${service.id}`)
+      .then((data) => {
+        if (cancelled || !data?.assessment) return;
+        const assessment = data.assessment;
+        const scores = parseAssessmentScores(assessment);
+        setResult({
+          success: true,
+          assessment,
+          adjustedScores: scores,
+          displayScores: scores,
+          observations: assessment.observations || "",
+        });
+        setTechScores(scores);
+        setStressFlags(parseStressFlags(assessment.stress_flags));
+        if (assessment.confirmed_by_tech) {
+          setConfirmedId(assessment.id);
+          onConfirmed?.(assessment.id);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [service?.id]);
+
+  async function addPhotos(event) {
+    const files = Array.from(event.target.files || []);
+    const remaining = Math.max(0, 3 - photos.length);
+    if (!files.length || remaining === 0) return;
+    setError("");
+    try {
+      const nextPhotos = await Promise.all(
+        files.slice(0, remaining).map(readLawnAssessmentPhoto),
+      );
+      setPhotos((prev) => [...prev, ...nextPhotos].slice(0, 3));
+      setResult(null);
+      setTechScores(null);
+      setConfirmedId(null);
+      onConfirmed?.(null);
+    } catch (err) {
+      setError(err.message || "Photo read failed");
+    } finally {
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }
+
+  function adjustScore(key, delta) {
+    setTechScores((prev) => {
+      if (!prev) return prev;
+      const current = Number(prev[key]) || 0;
+      return { ...prev, [key]: Math.max(0, Math.min(100, current + delta)) };
+    });
+  }
+
+  async function analyze() {
+    if (!service?.customerId || photos.length === 0) return;
+    setAnalyzing(true);
+    setError("");
+    try {
+      const response = await adminFetch("/admin/lawn-assessment/assess", {
+        method: "POST",
+        body: JSON.stringify({
+          customerId: service.customerId,
+          serviceId: service.id,
+          photos: photos.map((photo) => ({
+            data: photo.data.split(",")[1],
+            mimeType: photo.mimeType || "image/jpeg",
+          })),
+        }),
+      });
+      if (response.success === false) {
+        setError(response.message || "Assessment failed. Retake photos and try again.");
+        return;
+      }
+      const scores = response.adjustedScores || response.displayScores || {};
+      setResult(response);
+      setTechScores({ ...scores });
+      setConfirmedId(null);
+      onConfirmed?.(null);
+    } catch (err) {
+      setError(err.message || "Assessment failed");
+    } finally {
+      setAnalyzing(false);
+    }
+  }
+
+  async function confirm() {
+    if (!result?.assessment?.id) return;
+    setConfirming(true);
+    setError("");
+    try {
+      const response = await adminFetch("/admin/lawn-assessment/confirm", {
+        method: "POST",
+        body: JSON.stringify({
+          assessmentId: result.assessment.id,
+          adjustedScores: techScores || result.adjustedScores || result.displayScores,
+          stress_flags: stressFlags,
+        }),
+      });
+      const assessmentId = response?.assessment?.id || result.assessment.id;
+      setConfirmedId(assessmentId);
+      onConfirmed?.(assessmentId);
+    } catch (err) {
+      setError(err.message || "Confirm failed");
+    } finally {
+      setConfirming(false);
+    }
+  }
+
+  const scoreSource = techScores || result?.adjustedScores || result?.displayScores || null;
+  const hasResult = !!result?.assessment?.id;
+  const confirmed = !!confirmedId;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.45 }}>
+        Capture turf photos for this lawn visit before closing the service.
+      </div>
+      {loading && (
+        <div style={{ fontSize: 12, color: D.muted }}>Checking existing assessment...</div>
+      )}
+      {!hasResult && (
+        <>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            multiple
+            onChange={addPhotos}
+            style={{ display: "none" }}
+          />
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <button
+              type="button"
+              onClick={() => fileRef.current?.click()}
+              disabled={disabled || photos.length >= 3 || analyzing}
+              style={{
+                height: 38,
+                padding: "0 14px",
+                borderRadius: 8,
+                border: `1px solid ${D.border}`,
+                background: D.white,
+                color: D.heading,
+                fontSize: 13,
+                fontWeight: 700,
+                cursor: disabled || photos.length >= 3 || analyzing ? "not-allowed" : "pointer",
+                opacity: disabled || photos.length >= 3 || analyzing ? 0.55 : 1,
+              }}
+            >
+              Add turf photos
+            </button>
+            <span style={{ fontSize: 12, color: D.muted }}>{photos.length}/3</span>
+          </div>
+          {photos.length > 0 && (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {photos.map((photo, index) => (
+                <div key={`${photo.name}-${index}`} style={{ position: "relative", width: 78, height: 78 }}>
+                  <img
+                    src={photo.preview}
+                    alt=""
+                    style={{
+                      width: 78,
+                      height: 78,
+                      objectFit: "cover",
+                      borderRadius: 8,
+                      border: `1px solid ${D.border}`,
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setPhotos((prev) => prev.filter((_, i) => i !== index))}
+                    aria-label="Remove assessment photo"
+                    style={{
+                      position: "absolute",
+                      top: -7,
+                      right: -7,
+                      width: 22,
+                      height: 22,
+                      borderRadius: "50%",
+                      border: "none",
+                      background: D.heading,
+                      color: "#fff",
+                      cursor: "pointer",
+                      lineHeight: 1,
+                    }}
+                  >
+                    x
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={analyze}
+            disabled={disabled || photos.length === 0 || analyzing}
+            style={{
+              height: 40,
+              borderRadius: 8,
+              border: "none",
+              background: D.green,
+              color: "#fff",
+              fontSize: 13,
+              fontWeight: 800,
+              cursor: disabled || photos.length === 0 || analyzing ? "not-allowed" : "pointer",
+              opacity: disabled || photos.length === 0 || analyzing ? 0.55 : 1,
+            }}
+          >
+            {analyzing ? "Analyzing..." : "Analyze lawn"}
+          </button>
+        </>
+      )}
+      {hasResult && (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 6 }}>
+            {LAWN_ASSESSMENT_METRICS.map((metric) => {
+              const value = Number(scoreSource?.[metric.key] || 0);
+              return (
+                <div
+                  key={metric.key}
+                  style={{
+                    border: `1px solid ${D.border}`,
+                    borderRadius: 8,
+                    padding: "8px 4px",
+                    textAlign: "center",
+                    background: D.white,
+                    minWidth: 0,
+                  }}
+                >
+                  <div style={{ fontSize: 15, fontWeight: 800, color: lawnScoreColor(value), lineHeight: 1.1 }}>
+                    {value}%
+                  </div>
+                  <div style={{ fontSize: 10, color: D.muted, marginTop: 3 }}>{metric.label}</div>
+                  {!confirmed && (
+                    <div style={{ display: "flex", justifyContent: "center", gap: 4, marginTop: 6 }}>
+                      <button type="button" onClick={() => adjustScore(metric.key, -5)} style={scoreButtonStyle}>
+                        -
+                      </button>
+                      <button type="button" onClick={() => adjustScore(metric.key, 5)} style={scoreButtonStyle}>
+                        +
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {!confirmed && (
+            <div>
+              <div style={{ fontSize: 11, color: D.muted, fontWeight: 700, marginBottom: 6 }}>
+                Stress flags
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {LAWN_STRESS_FLAGS.map((flag) => {
+                  const selected = !!stressFlags[flag.key];
+                  return (
+                    <button
+                      key={flag.key}
+                      type="button"
+                      onClick={() => setStressFlags((prev) => ({ ...prev, [flag.key]: !prev[flag.key] }))}
+                      style={{
+                        padding: "7px 10px",
+                        borderRadius: 999,
+                        border: `1px solid ${selected ? D.amber : D.border}`,
+                        background: selected ? `${D.amber}18` : D.white,
+                        color: selected ? D.amber : D.text,
+                        fontSize: 12,
+                        fontWeight: 700,
+                        cursor: "pointer",
+                      }}
+                    >
+                      {selected ? "Selected " : ""}
+                      {flag.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 8 }}>
+            {confirmed ? (
+              <div
+                style={{
+                  flex: 1,
+                  padding: "10px 12px",
+                  borderRadius: 8,
+                  background: `${D.green}14`,
+                  color: D.green,
+                  fontSize: 13,
+                  fontWeight: 800,
+                  textAlign: "center",
+                }}
+              >
+                Assessment confirmed
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={confirm}
+                disabled={disabled || confirming}
+                style={{
+                  flex: 1,
+                  height: 40,
+                  borderRadius: 8,
+                  border: "none",
+                  background: D.green,
+                  color: "#fff",
+                  fontSize: 13,
+                  fontWeight: 800,
+                  cursor: disabled || confirming ? "not-allowed" : "pointer",
+                  opacity: disabled || confirming ? 0.55 : 1,
+                }}
+              >
+                {confirming ? "Confirming..." : "Confirm assessment"}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setPhotos([]);
+                setResult(null);
+                setTechScores(null);
+                setConfirmedId(null);
+                setError("");
+                onConfirmed?.(null);
+              }}
+              disabled={disabled || analyzing || confirming}
+              style={{
+                height: 40,
+                padding: "0 14px",
+                borderRadius: 8,
+                border: `1px solid ${D.border}`,
+                background: D.white,
+                color: D.text,
+                fontSize: 13,
+                fontWeight: 700,
+                cursor: disabled || analyzing || confirming ? "not-allowed" : "pointer",
+                opacity: disabled || analyzing || confirming ? 0.55 : 1,
+              }}
+            >
+              Retake
+            </button>
+          </div>
+        </>
+      )}
+      {error && <div style={{ fontSize: 12, color: D.red, lineHeight: 1.45 }}>{error}</div>}
+    </div>
+  );
+}
+
+const scoreButtonStyle = {
+  width: 24,
+  height: 24,
+  borderRadius: 6,
+  border: `1px solid ${D.border}`,
+  background: D.white,
+  color: D.heading,
+  fontSize: 14,
+  fontWeight: 800,
+  lineHeight: 1,
+  cursor: "pointer",
+};
+
 export function CompletionPanel({
   service,
   products,
@@ -4005,6 +4484,8 @@ export function CompletionPanel({
   const [tankCleanoutCompleted, setTankCleanoutCompleted] = useState("");
   const [tankCleanoutMethod, setTankCleanoutMethod] = useState("");
   const [tankCleanoutNote, setTankCleanoutNote] = useState("");
+  const [lawnAssessmentId, setLawnAssessmentId] = useState(null);
+  const [lawnAssessmentRevision, setLawnAssessmentRevision] = useState(0);
   const [savedDraft, setSavedDraft] = useState(null);
   const [showDraftPrompt, setShowDraftPrompt] = useState(false);
   const photoInputRef = useRef(null);
@@ -4024,6 +4505,10 @@ export function CompletionPanel({
   })();
   const canApproveOfficeExceptions = currentAdminUser?.role === "admin";
   const serviceCategory = detectServiceCategory(service.serviceType);
+  const handleLawnAssessmentConfirmed = (assessmentId) => {
+    setLawnAssessmentId(assessmentId || null);
+    setLawnAssessmentRevision((v) => v + 1);
+  };
   const areaOptions = [
     ...(AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest),
     ...AREAS_BY_SERVICE.universal,
@@ -4408,7 +4893,13 @@ export function CompletionPanel({
     return () => {
       cancelled = true;
     };
-  }, [calibrationRequired, service.id, equipmentSystemId, calibrationId]);
+  }, [
+    calibrationRequired,
+    service.id,
+    equipmentSystemId,
+    calibrationId,
+    lawnAssessmentRevision,
+  ]);
 
   useEffect(() => {
     draftReadyRef.current = false;
@@ -4876,6 +5367,7 @@ export function CompletionPanel({
         timeOnSite: elapsed,
         areasServiced,
         customerInteraction,
+        lawnAssessmentId,
       };
       if (customerInteraction === "concern" && customerConcern) {
         body.customerConcernText = customerConcern;
@@ -5396,6 +5888,15 @@ export function CompletionPanel({
                   membership on the customer's report.
                 </div>{" "}
               </div>
+            )}
+            {isLawn && !quickComplete && (
+              <Field label="Lawn assessment">
+                <LawnAssessmentCompletionBlock
+                  service={service}
+                  disabled={isIncompleteVisit || submitting}
+                  onConfirmed={handleLawnAssessmentConfirmed}
+                />
+              </Field>
             )}
             {calibrationRequired && (
               <Field label="Equipment calibration">
@@ -6790,6 +7291,17 @@ export function CompletionPanel({
                   Discard
                 </button>{" "}
               </div>{" "}
+            </div>
+          )}
+          {isLawn && !quickComplete && (
+            <div style={{ marginBottom: 20 }}>
+              {" "}
+              <label style={labelStyle}>Lawn Assessment</label>{" "}
+              <LawnAssessmentCompletionBlock
+                service={service}
+                disabled={isIncompleteVisit || submitting}
+                onConfirmed={handleLawnAssessmentConfirmed}
+              />
             </div>
           )}
           {calibrationRequired && (
